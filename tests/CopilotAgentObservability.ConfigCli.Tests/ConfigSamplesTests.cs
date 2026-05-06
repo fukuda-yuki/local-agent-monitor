@@ -6,14 +6,14 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public class ConfigSamplesTests
 {
     [Fact]
-    public void CreateVsCodeSettingsJson_IncludesPhase0Settings()
+    public void CreateVsCodeSettingsJson_IncludesDefaultLangfuseSettings()
     {
         using var document = JsonDocument.Parse(ConfigSamples.CreateVsCodeSettingsJson());
         var root = document.RootElement;
 
         Assert.True(root.GetProperty("github.copilot.chat.otel.enabled").GetBoolean());
         Assert.Equal("otlp-http", root.GetProperty("github.copilot.chat.otel.exporterType").GetString());
-        Assert.Equal("https://localhost:21025", root.GetProperty("github.copilot.chat.otel.otlpEndpoint").GetString());
+        Assert.Equal("http://localhost:3000/api/public/otel", root.GetProperty("github.copilot.chat.otel.otlpEndpoint").GetString());
         Assert.True(root.GetProperty("github.copilot.chat.otel.captureContent").GetBoolean());
     }
 
@@ -42,13 +42,19 @@ public class ConfigSamplesTests
     }
 
     [Fact]
-    public void CreateVsCodePowerShellScript_IncludesPhase0EnvironmentVariables()
+    public void CreateVsCodePowerShellScript_IncludesDefaultLangfuseEnvironmentVariables()
     {
         var script = ConfigSamples.CreateVsCodePowerShellScript();
 
+        Assert.Contains("$publicKey = \"<public-key>\"", script);
+        Assert.Contains("$secretKey = \"<secret-key>\"", script);
+        Assert.Contains("[Text.Encoding]::ASCII.GetBytes(\"${publicKey}:${secretKey}\")", script);
         Assert.Contains("$env:COPILOT_OTEL_ENABLED=\"true\"", script);
-        Assert.Contains("$env:COPILOT_OTEL_ENDPOINT=\"https://localhost:21025\"", script);
+        Assert.Contains("$env:COPILOT_OTEL_ENDPOINT=\"http://localhost:3000/api/public/otel\"", script);
         Assert.Contains("$env:COPILOT_OTEL_CAPTURE_CONTENT=\"true\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_HEADERS=\"Authorization=Basic $auth,x-langfuse-ingestion-version=4\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=\"http://localhost:3000/api/public/otel/v1/traces\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_TRACES_HEADERS=\"Authorization=Basic $auth,x-langfuse-ingestion-version=4\"", script);
         Assert.Contains("user.id=example-user", script);
         Assert.Contains("user.email=user@example.com", script);
         Assert.Contains("team.id=platform", script);
@@ -103,12 +109,18 @@ public class ConfigSamplesTests
     }
 
     [Fact]
-    public void CreateCopilotCliPowerShellScript_IncludesPhase0EnvironmentVariables()
+    public void CreateCopilotCliPowerShellScript_IncludesDefaultLangfuseEnvironmentVariables()
     {
         var script = ConfigSamples.CreateCopilotCliPowerShellScript();
 
+        Assert.Contains("$publicKey = \"<public-key>\"", script);
+        Assert.Contains("$secretKey = \"<secret-key>\"", script);
+        Assert.Contains("[Text.Encoding]::ASCII.GetBytes(\"${publicKey}:${secretKey}\")", script);
         Assert.Contains("$env:COPILOT_OTEL_ENABLED=\"true\"", script);
-        Assert.Contains("$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"https://localhost:21025\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"http://localhost:3000/api/public/otel\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_HEADERS=\"Authorization=Basic $auth,x-langfuse-ingestion-version=4\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=\"http://localhost:3000/api/public/otel/v1/traces\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_TRACES_HEADERS=\"Authorization=Basic $auth,x-langfuse-ingestion-version=4\"", script);
         Assert.Contains("$env:OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=\"true\"", script);
         Assert.Contains("user.id=example-user", script);
         Assert.Contains("user.email=user@example.com", script);

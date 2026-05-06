@@ -14,6 +14,7 @@ public class CliApplicationTests
 
         Assert.Equal(0, exitCode);
         Assert.Contains("github.copilot.chat.otel.otlpEndpoint", output.ToString());
+        Assert.Contains("http://localhost:3000/api/public/otel", output.ToString());
         Assert.Equal(string.Empty, error.ToString());
     }
 
@@ -52,6 +53,8 @@ public class CliApplicationTests
         var exitCode = CliApplication.Run(["copilot-cli-env"], output, error);
 
         Assert.Equal(0, exitCode);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"http://localhost:3000/api/public/otel\"", output.ToString());
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_HEADERS=\"Authorization=Basic $auth,x-langfuse-ingestion-version=4\"", output.ToString());
         Assert.Contains("$env:OTEL_RESOURCE_ATTRIBUTES", output.ToString());
         Assert.Equal(string.Empty, error.ToString());
     }
@@ -94,7 +97,8 @@ public class CliApplicationTests
         var exitCode = CliApplication.Run(["vscode-env"], output, error);
 
         Assert.Equal(0, exitCode);
-        Assert.Contains("$env:COPILOT_OTEL_ENDPOINT", output.ToString());
+        Assert.Contains("$env:COPILOT_OTEL_ENDPOINT=\"http://localhost:3000/api/public/otel\"", output.ToString());
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_HEADERS=\"Authorization=Basic $auth,x-langfuse-ingestion-version=4\"", output.ToString());
         Assert.Contains("client.kind=vscode-copilot-chat", output.ToString());
         Assert.Equal(string.Empty, error.ToString());
     }

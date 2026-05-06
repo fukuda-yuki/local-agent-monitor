@@ -150,3 +150,9 @@ VS Code Agent Debug / Chat Debug View は、個別セッションの手動デバ
 - 同 CLI trace の resource attributes には `service.name=github-copilot`、`service.version=1.0.40`、`client.kind=copilot-cli`、`experiment.id=baseline` が含まれた。
 - 同 CLI trace では `invoke_agent`、`chat gpt-5.3-codex`、`view`、`report_intent` を確認し、prompt / response、tool span、token usage を確認した。
 - 合成 fixture 確認として、両 trace で `otel-synthetic-cli-check` と `Synthetic Fixture` を検出し、旧リポジトリ名、`docs/memo.json`、`current_file_content`、`recently_viewed_code_snippets` は 0 件だった。
+
+## 2026-05-05: Follow-up Config CLI 既定 endpoint の Phase 1 Langfuse 化
+- Follow-up task では、Config CLI の汎用コマンド `vscode-settings`、`vscode-env`、`copilot-cli-env` の既定 endpoint を Phase 1 Langfuse 直接送信用の `http://localhost:3000/api/public/otel` に切り替える判断を採用した。
+- 汎用 env コマンドは Langfuse Basic Auth header と trace-specific endpoint / headers も出力する。
+- `langfuse-*` コマンドは Langfuse 直接送信を明示するコマンドとして維持し、`collector-*` コマンドは Collector 経由送信用に `http://localhost:4318` と Langfuse header cleanup を維持する。
+- Phase 0 Aspire HTTP 用の新規コマンドは今回追加しない。

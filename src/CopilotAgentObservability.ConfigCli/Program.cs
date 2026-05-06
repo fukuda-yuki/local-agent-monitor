@@ -120,7 +120,7 @@ internal static class CliApplication
 
 internal static class ConfigSamples
 {
-    public const string DefaultOtlpEndpoint = "https://localhost:21025";
+    public const string DefaultOtlpEndpoint = LangfuseOtlpEndpoint;
     public const string LangfuseOtlpEndpoint = "http://localhost:3000/api/public/otel";
     public const string LangfuseOtlpTracesEndpoint = "http://localhost:3000/api/public/otel/v1/traces";
     public const string CollectorOtlpHttpEndpoint = "http://localhost:4318";
@@ -188,9 +188,13 @@ internal static class ConfigSamples
         var resourceAttributes = CreateResourceAttributes(VsCodeClientKind);
 
         var builder = new StringBuilder();
+        AppendLangfuseAuthPrelude(builder);
         builder.AppendLine("$env:COPILOT_OTEL_ENABLED=\"true\"");
         builder.AppendLine($"$env:COPILOT_OTEL_ENDPOINT=\"{DefaultOtlpEndpoint}\"");
         builder.AppendLine("$env:COPILOT_OTEL_CAPTURE_CONTENT=\"true\"");
+        builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_HEADERS=\"Authorization=Basic $auth,{LangfuseIngestionVersionHeader}\"");
+        builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=\"{LangfuseOtlpTracesEndpoint}\"");
+        builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_TRACES_HEADERS=\"Authorization=Basic $auth,{LangfuseIngestionVersionHeader}\"");
         builder.Append($"$env:OTEL_RESOURCE_ATTRIBUTES=\"{resourceAttributes}\"");
         return builder.ToString();
     }
@@ -229,8 +233,12 @@ internal static class ConfigSamples
         var resourceAttributes = CreateResourceAttributes(CopilotCliClientKind);
 
         var builder = new StringBuilder();
+        AppendLangfuseAuthPrelude(builder);
         builder.AppendLine("$env:COPILOT_OTEL_ENABLED=\"true\"");
         builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"{DefaultOtlpEndpoint}\"");
+        builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_HEADERS=\"Authorization=Basic $auth,{LangfuseIngestionVersionHeader}\"");
+        builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=\"{LangfuseOtlpTracesEndpoint}\"");
+        builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_TRACES_HEADERS=\"Authorization=Basic $auth,{LangfuseIngestionVersionHeader}\"");
         builder.AppendLine("$env:OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=\"true\"");
         builder.Append($"$env:OTEL_RESOURCE_ATTRIBUTES=\"{resourceAttributes}\"");
         return builder.ToString();
