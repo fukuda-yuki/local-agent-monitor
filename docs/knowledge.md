@@ -144,6 +144,7 @@ VS Code Agent Debug / Chat Debug View は、個別セッションの手動デバ
 - gitleaks CLI は `v8.30.1` 固定、Linux x64 tarball の SHA-256 checksum verification 後に実行する。
 - finding ありの場合は毎回新規 GitHub Issue を作成し、workflow は成功扱いにする。scan 失敗、checksum 不一致、Issue 作成失敗は workflow 失敗にする。
 - Issue には commit link、file、line、RuleID、Fingerprint を記載する。secret 値、match 文字列、secret の前後文脈、redacted report 全文は記載しない。
+- Issue 発行確認のため、ユーザー依頼により `tests/fixtures/gitleaks/intentional-finding.env` に synthetic GitHub token 形式の fake value を追加した。実 credential ではなく、確認後に削除する前提の一時 fixture とする。
 
 ## 2026-05-05: M9 Collector 経由送信の手動ライブ確認結果
 - Langfuse self-host は Docker Desktop 上で起動中で、`http://localhost:3000` が HTTP 200 を返した。
