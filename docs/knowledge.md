@@ -138,6 +138,13 @@ VS Code Agent Debug / Chat Debug View は、個別セッションの手動デバ
 - M9 では masking / redaction、TLS、SSO、共有環境運用、Resource Attributes の Collector 側自動付与、sampling は扱わない。
 - Collector 経由のライブ確認は、Langfuse 起動後に Collector を起動し、VS Code GitHub Copilot Chat / GitHub Copilot CLI の送信先を `http://localhost:4318` に向けて、Langfuse 上で trace、prompt / response、tool span、token usage、`client.kind`、`experiment.id` を確認する。
 
+## 2026-05-19: M10 週次 Gitleaks secret scan workflow
+- M10 は Langfuse / OTel 観測データの DLP ではなく、repository hygiene として git 履歴全体を gitleaks CLI で週次 scan する。
+- schedule は月曜 09:00 JST (`0 0 * * 1`) とし、`workflow_dispatch` も有効にする。
+- gitleaks CLI は `v8.30.1` 固定、Linux x64 tarball の SHA-256 checksum verification 後に実行する。
+- finding ありの場合は毎回新規 GitHub Issue を作成し、workflow は成功扱いにする。scan 失敗、checksum 不一致、Issue 作成失敗は workflow 失敗にする。
+- Issue には commit link、file、line、RuleID、Fingerprint を記載する。secret 値、match 文字列、secret の前後文脈、redacted report 全文は記載しない。
+
 ## 2026-05-05: M9 Collector 経由送信の手動ライブ確認結果
 - Langfuse self-host は Docker Desktop 上で起動中で、`http://localhost:3000` が HTTP 200 を返した。
 - Collector example は `otel/opentelemetry-collector-contrib:0.114.0` で起動し、host 側では `127.0.0.1:4317` と `127.0.0.1:4318` で listen した。
