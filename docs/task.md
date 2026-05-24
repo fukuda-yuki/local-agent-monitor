@@ -4,6 +4,7 @@
 詳細なチェックリスト、検証記録、作業メモ、レビュー記録は `docs/milestones/<milestone-slug>/` に置く。
 
 プロダクト仕様・実装判断の正は `docs/spec.md` である。
+ただし、`docs/requirements.md` を上位要件とし、`docs/spec.md` はその詳細仕様として扱う。
 GitHub Issue は既定の作業単位にしない。ユーザーが明示的に作成・参照を指示した場合だけ使う。
 
 ## 完了済み概要
@@ -24,8 +25,8 @@ M0-M10 の詳細な履歴は `docs/archive/review/` と `docs/knowledge/phase1-l
 
 | Milestone | 状態 | 詳細 |
 | --- | --- | --- |
-| M11: 研究計画書とのスコープ整合 | 未着手 | [`docs/milestones/M11-scope-alignment/task.md`](milestones/M11-scope-alignment/task.md) |
-| M12: 研究用 measurement schema 定義 | 未着手 | [`docs/milestones/M12-measurement-schema/task.md`](milestones/M12-measurement-schema/task.md) |
+| M11: 研究計画書とのスコープ整合 | 完了 | [`docs/milestones/M11-scope-alignment/task.md`](milestones/M11-scope-alignment/task.md) |
+| M12: 研究用 measurement schema 定義 | 完了 | [`docs/milestones/M12-measurement-schema/task.md`](milestones/M12-measurement-schema/task.md) |
 | M13: 模擬保守タスクセット定義 | 未着手 | [`docs/milestones/M13-maintenance-task-set/task.md`](milestones/M13-maintenance-task-set/task.md) |
 | M14: Langfuse export / API 調査 | 未着手 | [`docs/milestones/M14-langfuse-export/task.md`](milestones/M14-langfuse-export/task.md) |
 | M15: 集計 CLI / script MVP | 未着手 | [`docs/milestones/M15-aggregation-cli/task.md`](milestones/M15-aggregation-cli/task.md) |
@@ -40,6 +41,7 @@ M0-M10 の詳細な履歴は `docs/archive/review/` と `docs/knowledge/phase1-l
 ## Future Backlog
 
 M23 以降は M11-M22 完了後に別 milestone として切り出す。
+M23 以降候補も人間採否の提案・評価までを既定とし、自動採用、自動実装、repository 自動修正、patch / diff 生成、commit / push / pull request 作成、自動勝敗決定は含めない。
 
 - M23: failure taxonomy / anti-pattern 定義
 - M24: trace-to-diagnosis MVP

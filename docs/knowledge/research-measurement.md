@@ -1,12 +1,13 @@
 # Research Measurement Knowledge
 
 この文書は M11 以降の研究計測化と trace-driven improvement loop に関する再利用可能な調査結果と判断理由を記録する。
-仕様の正は `docs/spec.md` であり、この文書は source of truth ではない。
+`docs/requirements.md` を上位要件、`docs/spec.md` を詳細仕様の正とし、この文書は source of truth ではない。
 
 ## M11 以降の前提
 
 - M11 以降では、既存の M0-M10 を観測基盤として維持し、研究実施計画書に基づく計測・集計・評価支援へ進める。
-- 研究計測化では改善案の自動生成、自動実装、勝敗の自動決定は扱わない。
+- M11-M22 の研究計測化では改善案生成、自動実装、自動採用、勝敗の自動決定は扱わない。
+- 改善案生成・評価の小規模デモを検討する場合は、M23 以降の後続候補に分離する。
 - ユーザー確認により、ゼロベース化せず、既存の M0-M10 を Copilot OTel / Langfuse 観測基盤として継承する判断を採用した。
 - GitHub Issue は既定の作業単位にしない。ユーザーが明示した場合だけ作成・参照する。
 
@@ -25,7 +26,7 @@
 - M11-M22 はこの loop の前提であり、measurement schema、baseline 計測、rubric、variant 比較プロトコルを先に固める必要がある。
 - M23 以降の候補は、failure taxonomy / anti-pattern 定義、trace-to-diagnosis MVP、improvement proposal generator、proposal evaluator、human approval workflow。
 - 改善候補は `prompt`、`instruction`、`skill`、`tool schema`、`workflow`、`eval` のいずれかに分類する。
-- 自動 repository 修正、自動 commit、自動 push、自動 pull request、自動勝敗決定は引き続き既定スコープ外とする。
+- M23 以降でも改善候補は人間が採否する提案として扱い、自動採用、自動 repository 修正、自動 commit、自動 push、自動 pull request、自動勝敗決定は引き続き既定スコープ外とする。
 
 ## References
 
@@ -41,4 +42,3 @@
 - TextGrad: Automatic Differentiation via Text: https://arxiv.org/abs/2406.07496
 - GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning: https://arxiv.org/abs/2507.19457
 - TRAIL: Trace Reasoning and Agentic Issue Localization: https://arxiv.org/abs/2505.08638
-
