@@ -27,7 +27,7 @@ M0-M10 の詳細な履歴は `docs/archive/review/` と `docs/knowledge/phase1-l
 | --- | --- | --- |
 | M11: 研究計画書とのスコープ整合 | 完了 | [`docs/milestones/M11-scope-alignment/task.md`](milestones/M11-scope-alignment/task.md) |
 | M12: 研究用 measurement schema 定義 | 完了 | [`docs/milestones/M12-measurement-schema/task.md`](milestones/M12-measurement-schema/task.md) |
-| M13: 模擬保守タスクセット定義 | 未着手 | [`docs/milestones/M13-maintenance-task-set/task.md`](milestones/M13-maintenance-task-set/task.md) |
+| M13: 模擬保守タスクセット定義 | 完了 | [`docs/milestones/M13-maintenance-task-set/task.md`](milestones/M13-maintenance-task-set/task.md) |
 | M14: Langfuse export / API 調査 | 未着手 | [`docs/milestones/M14-langfuse-export/task.md`](milestones/M14-langfuse-export/task.md) |
 | M15: 集計 CLI / script MVP | 未着手 | [`docs/milestones/M15-aggregation-cli/task.md`](milestones/M15-aggregation-cli/task.md) |
 | M16: turn count / tool call count 算出ルール | 未着手 | [`docs/milestones/M16-counting-rules/task.md`](milestones/M16-counting-rules/task.md) |
