@@ -58,8 +58,13 @@ VS Code Agent Debug / Chat Debug View は、個別セッションを開発者が
 * VS Code GitHub Copilot Chat と GitHub Copilot CLI の挙動差分を確認できること
 * `experiment.id` 等により、baseline / variant / experiment ごとに trace を分類・確認できること
 * 将来的な改善施策の前提となる baseline trace を保存・参照できること
+* 研究計測用の trace 集計データを再現可能に作成できること
+* baseline / variant の比較に必要な token、turn count、tool call count、duration、error count、success status を確認できること
 
 個別セッションの手動デバッグは VS Code Agent Debug / Chat Debug View の役割とし、本基盤は継続的な trace 収集・保存・比較の検証基盤として扱う。
+
+M11 以降では、既存の OTel / Langfuse 観測基盤を前提に、研究実施計画書に基づく計測・集計・評価支援を扱う。
+ただし、改善案の自動生成、自動実装、勝敗の自動決定は引き続き本基盤の責務に含めない。
 
 ---
 
@@ -76,7 +81,7 @@ VS Code Agent Debug / Chat Debug View は、個別セッションを開発者が
 * 修正差分の自動生成
 * ローカルファイルの自動修正
 * commit / push / pull request 作成
-* 改善効果の合否判定
+* 改善効果の自動合否判定
 * 組織全体の Copilot 利用量把握
 * 利用者数、利用回数、日次アクティブユーザーの集計
 * 課金・コスト配賦
@@ -143,6 +148,9 @@ Claude Code は、本 PoC の直接収集対象ではなく、可観測性設計
 * VS Code Chat と CLI の挙動比較
 * baseline trace の確認
 * experiment / variant ごとの trace 絞り込み
+* 研究計測用 dataset への trace 集計
+* baseline / variant の比較表作成
+* 人間が評価可能な品質非劣化 rubric の管理
 
 ただし、これらは改善判断のための観測・分析であり、改善の実施や改善効果の保証は本基盤の責務ではない。
 
@@ -180,7 +188,7 @@ Claude Code は、本 PoC の直接収集対象ではなく、可観測性設計
 * patch / diff の自動生成
 * commit / push / pull request の自動作成
 * 改善施策の優先順位決定
-* 改善効果の合否判定
+* 改善効果の自動合否判定
 
 ### 6.3 PoC では最大収集を前提とする
 
@@ -448,6 +456,11 @@ $env:OTEL_RESOURCE_ATTRIBUTES="user.id=123456,user.email=user@example.com,team.i
 ```text
 repo.name
 workspace.name
+task.id
+task.run_index
+experiment.condition
+prompt.version
+repo.snapshot
 agent.variant
 skill.version
 mcp.profile
@@ -746,9 +759,9 @@ PoC では、`user.id` および `user.email` を必須属性として扱う。
 
 ## 14. PoC 成功条件
 
-PoC の成功条件は、OTel 収集の成功に限定する。
+Phase 1 PoC の成功条件は、OTel 収集の成功に限定する。
 
-改善効果の評価、改善案の生成、修正差分の生成、改善実施は PoC 成功条件に含めない。
+改善効果の評価、改善案の生成、修正差分の生成、改善実施は Phase 1 PoC 成功条件に含めない。
 個別セッションを VS Code Agent Debug / Chat Debug View で手動確認できることも、本 PoC の成功条件には含めない。
 
 ### 14.1 VS Code GitHub Copilot Chat の OTel 収集成功条件
@@ -811,6 +824,19 @@ PoC の成功条件は、OTel 収集の成功に限定する。
 * `user.id`、`user.email`、`team.id`、`department` により trace を分類できる
 * 取得される span attributes / events / metrics の一覧を確認できる
 * content capture により取得される prompt / response / tool arguments / tool results を確認できる
+
+### 14.4 研究計測フェーズの成功条件
+
+M11 以降の研究計測フェーズでは、以下を満たすことを成功条件とする。
+
+* 研究計測用 Resource Attributes と集計列が定義されている
+* 4 類型の模擬保守タスクを定義できる
+* Langfuse から trace / observation / usage / metadata を取得する方式が決まっている
+* 合成 fixture から研究用 CSV / JSON を生成できる
+* baseline の実行手順、記録様式、除外基準が定義されている
+* token、turn count、tool call count、duration、error count、success status を trace 単位で確認できる
+* 品質非劣化 rubric が人間の評価用に定義されている
+* variant / A-B 比較の計測プロトコルが定義されている
 
 ---
 

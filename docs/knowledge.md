@@ -11,6 +11,8 @@
 - Phase 1 の既定構成は Docker Desktop 上の Langfuse self-host Docker Compose とする。
 - Phase 1 では VS Code GitHub Copilot Chat / GitHub Copilot CLI から Langfuse OTLP HTTP endpoint へ直接送信し、OTel Collector は必須にしない。
 - Phase 1 では content capture を有効化するが、投入データは合成データまたは検証用データを基本にする。
+- M11 以降では、既存の M0-M10 を観測基盤として維持し、研究実施計画書に基づく計測・集計・評価支援へ進める。
+- 研究計測化では改善案の自動生成、自動実装、勝敗の自動決定は扱わない。
 
 ## 2026-05-04: VS Code Agent Debug 機能との役割分担と、独自デバッグ実装の非採用
 
@@ -164,3 +166,35 @@ VS Code Agent Debug / Chat Debug View は、個別セッションの手動デバ
 - 汎用 env コマンドは Langfuse Basic Auth header と trace-specific endpoint / headers も出力する。
 - `langfuse-*` コマンドは Langfuse 直接送信を明示するコマンドとして維持し、`collector-*` コマンドは Collector 経由送信用に `http://localhost:4318` と Langfuse header cleanup を維持する。
 - Phase 0 Aspire HTTP 用の新規コマンドは今回追加しない。
+
+## 2026-05-24: M11 以降の研究計測化 Issue 分割
+- ユーザー確認により、ゼロベース化せず、既存の M0-M10 を Copilot OTel / Langfuse 観測基盤として継承する判断を採用した。
+- GitHub Issues は実作業単位、`docs/task.md` は同期されるチェックリストとして扱う。
+- M11-M13 は研究計画書とのスコープ整合、measurement schema、模擬保守タスクセット定義を扱う。
+- M14-M16 は Langfuse export / API 調査、集計 CLI / script MVP、turn count / tool call count 算出ルールを扱う。
+- M17-M19 は baseline 実行手順、小規模 dry run、本計測を扱う。
+- M20-M22 は品質非劣化 rubric、variant / A-B 計測プロトコル、結果レポート雛形を扱う。
+- M10 follow-up の gitleaks fixture 削除と、共有環境・実データ検証の事前仕様化は Phase E / Backlog として独立 Issue にした。
+
+## 2026-05-24: エージェント改善案生成基盤の実現可能性調査
+- 実現可能性の判断は、エージェントが自律的に自分を直接修正する基盤ではなく、trace-driven agent improvement loop として作るなら現実的、というもの。
+- 推奨 loop は、trace / metrics / rubric の収集、failure taxonomy / anti-pattern 分類、改善候補生成、baseline / variant 評価、人間承認の順に進める。
+- M11-M22 はこの loop の前提であり、measurement schema、baseline 計測、rubric、variant 比較プロトコルを先に固める必要がある。
+- M23 以降の候補は、failure taxonomy / anti-pattern 定義、trace-to-diagnosis MVP、improvement proposal generator、proposal evaluator、human approval workflow。
+- 改善候補は `prompt`、`instruction`、`skill`、`tool schema`、`workflow`、`eval` のいずれかに分類する。
+- 自動 repository 修正、自動 commit、自動 push、自動 pull request、自動勝敗決定は引き続き既定スコープ外とする。
+- Issue #8 に scope コメント、Issue #17 に rubric / failure taxonomy コメント、Issue #18 に variant / A-B と自動改善研究コメントを追加した。
+
+参考文献・参考システム:
+- OpenTelemetry GenAI semantic conventions: https://opentelemetry.io/docs/specs/semconv/gen-ai/
+- Langfuse Scores / evaluation docs: https://langfuse.com/docs/evaluation/scores/overview
+- Langfuse Scores via API / SDK: https://langfuse.com/docs/evaluation/evaluation-methods/custom-scores
+- OpenInference: https://arize-ai.github.io/openinference/
+- Reflexion: Language Agents with Verbal Reinforcement Learning: https://arxiv.org/abs/2303.11366
+- Self-Refine: Iterative Refinement with Self-Feedback: https://arxiv.org/abs/2303.17651
+- DSPy: Compiling Declarative Language Model Calls into Self-Improving Pipelines: https://arxiv.org/abs/2310.03714
+- Automatic Prompt Optimization with Gradient Descent and Beam Search: https://arxiv.org/abs/2305.03495
+- Promptbreeder: Self-Referential Self-Improvement Via Prompt Evolution: https://arxiv.org/abs/2309.16797
+- TextGrad: Automatic Differentiation via Text: https://arxiv.org/abs/2406.07496
+- GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning: https://arxiv.org/abs/2507.19457
+- TRAIL: Trace Reasoning and Agentic Issue Localization: https://arxiv.org/abs/2505.08638
