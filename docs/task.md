@@ -32,7 +32,7 @@ M0-M10 の詳細な履歴は `docs/archive/review/` と `docs/knowledge/phase1-l
 | M15: 集計 CLI / script MVP | 完了 | [`docs/milestones/M15-aggregation-cli/task.md`](milestones/M15-aggregation-cli/task.md) |
 | M16: turn count / tool call count 算出ルール | 完了 | [`docs/milestones/M16-counting-rules/task.md`](milestones/M16-counting-rules/task.md) |
 | M17: baseline 実行手順と記録様式 | 完了 | [`docs/milestones/M17-baseline-protocol/task.md`](milestones/M17-baseline-protocol/task.md) |
-| M18: baseline 計測の小規模 dry run | 未着手 | [`docs/milestones/M18-baseline-dry-run/task.md`](milestones/M18-baseline-dry-run/task.md) |
+| M18: baseline 計測の小規模 dry run | 完了 | [`docs/milestones/M18-baseline-dry-run/task.md`](milestones/M18-baseline-dry-run/task.md) |
 | M19: baseline 本計測 | 未着手 | [`docs/milestones/M19-baseline-measurement/task.md`](milestones/M19-baseline-measurement/task.md) |
 | M20: 品質非劣化 rubric 定義 | 未着手 | [`docs/milestones/M20-quality-rubric/task.md`](milestones/M20-quality-rubric/task.md) |
 | M21: variant / A-B 計測プロトコル | 未着手 | [`docs/milestones/M21-variant-protocol/task.md`](milestones/M21-variant-protocol/task.md) |
