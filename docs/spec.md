@@ -843,6 +843,57 @@ M26 evaluator は deterministic rule のみを使用し、LLM 呼び出し、liv
 出力には実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を含めない。
 `ready-for-human-approval` は人間承認 workflow に渡せる pre-review 状態であり、proposal の採用、実装、優先順位、効果、勝敗を決めるものではない。
 
+### 5.16 M27 human approval workflow
+
+M27 では、M26 の proposal evaluation record を入力として、人間による承認・却下・保留の判断を記録する最小 CLI を追加する。
+M27 は人間判断の記録までを対象とし、改善案の自動採用、自動実装、repository 修正、patch / diff 生成、commit / push / pull request 作成、自動勝敗決定、改善効果判定は行わない。
+
+Config CLI に以下の 2 コマンドを追加する。
+
+```text
+config-cli record-human-decisions <evaluations.csv|evaluations.json> <decisions.csv|decisions.json> [--csv <output.csv>] [--json <output.json>]
+config-cli generate-decision-template <evaluations.csv|evaluations.json> [--csv <output.csv>] [--json <output.json>]
+```
+
+#### generate-decision-template
+
+M26 evaluation CSV / JSON を入力として、`proposal_evaluation_status` が `ready-for-human-approval` の evaluation record のみを対象に、空の human decision template を生成する。
+`needs-revision` と `blocked` の evaluation は template に含めない。
+入力 JSON は top-level array、または `{ "evaluations": [...] }` を許可する。
+入力 CSV は M26 evaluation 固定 header を要求する。
+
+#### record-human-decisions
+
+M26 evaluation CSV / JSON と、人間が記入した decision CSV / JSON の 2 ファイルを入力として、以下を検証し、validated 出力を生成する。
+
+- decision の `proposal_id` が evaluation に存在すること。
+- `human_decision` が `approved`、`rejected`、`deferred` のいずれかであること。
+- `approved` は `proposal_evaluation_status` が `ready-for-human-approval` の proposal にのみ許可する。`needs-revision` / `blocked` の proposal の `approved` は拒否する。
+- `rejected` と `deferred` は、任意の `proposal_evaluation_status` の proposal に許可する。
+- `decision_rationale` が空でないこと。
+- decision record に安全でない content（実 prompt / response content、credential、secret、Base64 header、実 user identity）が含まれないこと。
+- unknown column を拒否すること。
+
+入力 JSON は top-level array、または `{ "decisions": [...] }` を許可する。
+入力 CSV は human decision 固定 header を要求する。
+
+#### human decision record schema
+
+human decision record の固定列は以下とする。
+
+| 列 | 型 / 値域 | 用途 |
+| --- | --- | --- |
+| `proposal_id` | string（必須） | 対象 proposal の ID |
+| `human_decision` | `approved`、`rejected`、`deferred`（必須） | 人間の採否判断 |
+| `decision_rationale` | string（必須） | 判断理由の sanitized summary |
+| `approver_id` | string または null | 承認者の仮名または識別子。実名、実 email address は使用しない |
+| `approved_at` | ISO 8601 datetime string または null | 判断日時 |
+| `conditions_or_notes` | string または null | 条件付き承認の条件、保留理由、その他の補足 |
+
+M27 の record / template 生成は deterministic rule のみを使用し、LLM 呼び出し、live Langfuse 接続、実 trace content、外部サービス接続は行わない。
+出力には実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を含めない。
+`approved` は人間が proposal の方向性を承認した記録であり、改善の自動採用、自動実装、repository 修正、patch / diff 生成を意味しない。
+
 ## 6. セキュリティとデータ扱い
 
 Phase 1 はローカル限定 PoC とし、Langfuse に投入するデータは合成データまたは検証用データを基本とする。

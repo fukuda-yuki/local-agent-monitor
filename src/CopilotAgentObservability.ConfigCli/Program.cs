@@ -111,6 +111,12 @@ internal static class CliApplication
             case "evaluate-improvement-proposals":
                 return RunEvaluateImprovementProposals(args, output, error);
 
+            case "record-human-decisions":
+                return RunRecordHumanDecisions(args, output, error);
+
+            case "generate-decision-template":
+                return RunGenerateDecisionTemplate(args, output, error);
+
             default:
                 error.WriteLine($"error: unknown command '{args[0]}'.");
                 error.WriteLine(HelpText);
@@ -408,6 +414,153 @@ internal static class CliApplication
         }
     }
 
+    private static int RunRecordHumanDecisions(string[] args, TextWriter output, TextWriter error)
+    {
+        var parseResult = HumanDecisionRecordingOptions.Parse(args);
+        if (parseResult.Error is not null)
+        {
+            error.WriteLine($"error: {parseResult.Error}");
+            return 1;
+        }
+
+        try
+        {
+            if (!File.Exists(parseResult.Options!.EvaluationsPath))
+            {
+                error.WriteLine($"error: evaluations file not found: {parseResult.Options.EvaluationsPath}");
+                return 1;
+            }
+
+            if (!File.Exists(parseResult.Options.DecisionsPath))
+            {
+                error.WriteLine($"error: decisions file not found: {parseResult.Options.DecisionsPath}");
+                return 1;
+            }
+
+            var evaluations = ProposalEvaluationInputReader.Read(parseResult.Options.EvaluationsPath);
+            var decisions = HumanDecisionInputReader.Read(parseResult.Options.DecisionsPath);
+            var validationErrors = HumanDecisionValidator.Validate(decisions, evaluations);
+            foreach (var validationError in validationErrors)
+            {
+                error.WriteLine($"error: {validationError}");
+            }
+
+            if (validationErrors.Count > 0)
+            {
+                return 1;
+            }
+
+            var safetyErrors = HumanDecisionSafetyValidator.Validate(decisions);
+            foreach (var safetyError in safetyErrors)
+            {
+                error.WriteLine($"error: {safetyError}");
+            }
+
+            if (safetyErrors.Count > 0)
+            {
+                return 1;
+            }
+
+            if (parseResult.Options.CsvOutputPath is not null)
+            {
+                File.WriteAllText(parseResult.Options.CsvOutputPath, HumanDecisionOutputWriter.WriteCsv(decisions), Encoding.UTF8);
+            }
+
+            if (parseResult.Options.JsonOutputPath is not null)
+            {
+                File.WriteAllText(parseResult.Options.JsonOutputPath, HumanDecisionOutputWriter.WriteJson(decisions), Encoding.UTF8);
+            }
+
+            output.WriteLine($"Recorded {decisions.Count} human decision(s).");
+            return 0;
+        }
+        catch (FileNotFoundException exception)
+        {
+            error.WriteLine($"error: file not found: {exception.FileName}");
+            return 1;
+        }
+        catch (JsonException exception)
+        {
+            error.WriteLine($"error: input JSON is invalid: {exception.Message}");
+            return 1;
+        }
+        catch (InvalidDataException exception)
+        {
+            error.WriteLine($"error: {exception.Message}");
+            return 1;
+        }
+        catch (IOException exception)
+        {
+            error.WriteLine($"error: failed to read or write file: {exception.Message}");
+            return 1;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            error.WriteLine($"error: failed to access file: {exception.Message}");
+            return 1;
+        }
+    }
+
+    private static int RunGenerateDecisionTemplate(string[] args, TextWriter output, TextWriter error)
+    {
+        var parseResult = DecisionTemplateGenerationOptions.Parse(args);
+        if (parseResult.Error is not null)
+        {
+            error.WriteLine($"error: {parseResult.Error}");
+            return 1;
+        }
+
+        try
+        {
+            if (!File.Exists(parseResult.Options!.EvaluationsPath))
+            {
+                error.WriteLine($"error: evaluations file not found: {parseResult.Options.EvaluationsPath}");
+                return 1;
+            }
+
+            var evaluations = ProposalEvaluationInputReader.Read(parseResult.Options.EvaluationsPath);
+            var template = DecisionTemplateGenerator.Generate(evaluations);
+
+            if (parseResult.Options.CsvOutputPath is not null)
+            {
+                File.WriteAllText(parseResult.Options.CsvOutputPath, HumanDecisionOutputWriter.WriteCsv(template), Encoding.UTF8);
+            }
+
+            if (parseResult.Options.JsonOutputPath is not null)
+            {
+                File.WriteAllText(parseResult.Options.JsonOutputPath, HumanDecisionOutputWriter.WriteJson(template), Encoding.UTF8);
+            }
+
+            output.WriteLine($"Generated decision template with {template.Count} row(s).");
+            return 0;
+        }
+        catch (FileNotFoundException exception)
+        {
+            error.WriteLine($"error: file not found: {exception.FileName}");
+            return 1;
+        }
+        catch (JsonException exception)
+        {
+            error.WriteLine($"error: input JSON is invalid: {exception.Message}");
+            return 1;
+        }
+        catch (InvalidDataException exception)
+        {
+            error.WriteLine($"error: {exception.Message}");
+            return 1;
+        }
+        catch (IOException exception)
+        {
+            error.WriteLine($"error: failed to read or write file: {exception.Message}");
+            return 1;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            error.WriteLine($"error: failed to access file: {exception.Message}");
+            return 1;
+        }
+    }
+
     private const string HelpText = """
         Usage:
           config-cli vscode-settings
@@ -425,6 +578,8 @@ internal static class CliApplication
           config-cli validate-diagnoses <input.csv|input.json> [--csv <output.csv>] [--json <output.json>]
           config-cli generate-improvement-proposals <diagnoses.csv|diagnoses.json> [--csv <output.csv>] [--json <output.json>]
           config-cli evaluate-improvement-proposals <proposals.csv|proposals.json> [--csv <output.csv>] [--json <output.json>]
+          config-cli record-human-decisions <evaluations.csv|evaluations.json> <decisions.csv|decisions.json> [--csv <output.csv>] [--json <output.json>]
+          config-cli generate-decision-template <evaluations.csv|evaluations.json> [--csv <output.csv>] [--json <output.json>]
         """;
 }
 
@@ -679,6 +834,142 @@ internal sealed record ImprovementProposalEvaluationOptions(
 internal sealed record ImprovementProposalEvaluationOptionsParseResult(
     ImprovementProposalEvaluationOptions? Options,
     string? Error);
+
+internal sealed record HumanDecisionRecordingOptions(
+    string EvaluationsPath,
+    string DecisionsPath,
+    string? CsvOutputPath,
+    string? JsonOutputPath)
+{
+    public static HumanDecisionRecordingOptionsParseResult Parse(string[] args)
+    {
+        if (args.Length < 3)
+        {
+            return new HumanDecisionRecordingOptionsParseResult(null, "record-human-decisions requires an evaluations file and a decisions file.");
+        }
+
+        var evaluationsPath = args[1];
+        var decisionsPath = args[2];
+        string? csvOutputPath = null;
+        string? jsonOutputPath = null;
+
+        for (var index = 3; index < args.Length; index++)
+        {
+            switch (args[index])
+            {
+                case "--csv":
+                    if (index + 1 >= args.Length || IsOption(args[index + 1]))
+                    {
+                        return new HumanDecisionRecordingOptionsParseResult(null, "--csv requires an output file path.");
+                    }
+
+                    csvOutputPath = args[++index];
+                    break;
+
+                case "--json":
+                    if (index + 1 >= args.Length || IsOption(args[index + 1]))
+                    {
+                        return new HumanDecisionRecordingOptionsParseResult(null, "--json requires an output file path.");
+                    }
+
+                    jsonOutputPath = args[++index];
+                    break;
+
+                default:
+                    return new HumanDecisionRecordingOptionsParseResult(null, $"unknown record-human-decisions option '{args[index]}'.");
+            }
+        }
+
+        if (csvOutputPath is null && jsonOutputPath is null)
+        {
+            return new HumanDecisionRecordingOptionsParseResult(null, "record-human-decisions requires --csv, --json, or both.");
+        }
+
+        return new HumanDecisionRecordingOptionsParseResult(
+            new HumanDecisionRecordingOptions(evaluationsPath, decisionsPath, csvOutputPath, jsonOutputPath),
+            null);
+    }
+
+    private static bool IsOption(string value)
+    {
+        return value.StartsWith("--", StringComparison.Ordinal);
+    }
+}
+
+internal sealed record HumanDecisionRecordingOptionsParseResult(
+    HumanDecisionRecordingOptions? Options,
+    string? Error);
+
+internal sealed record DecisionTemplateGenerationOptions(
+    string EvaluationsPath,
+    string? CsvOutputPath,
+    string? JsonOutputPath)
+{
+    public static DecisionTemplateGenerationOptionsParseResult Parse(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            return new DecisionTemplateGenerationOptionsParseResult(null, "generate-decision-template requires an evaluations file path.");
+        }
+
+        var evaluationsPath = args[1];
+        string? csvOutputPath = null;
+        string? jsonOutputPath = null;
+
+        for (var index = 2; index < args.Length; index++)
+        {
+            switch (args[index])
+            {
+                case "--csv":
+                    if (index + 1 >= args.Length || IsOption(args[index + 1]))
+                    {
+                        return new DecisionTemplateGenerationOptionsParseResult(null, "--csv requires an output file path.");
+                    }
+
+                    csvOutputPath = args[++index];
+                    break;
+
+                case "--json":
+                    if (index + 1 >= args.Length || IsOption(args[index + 1]))
+                    {
+                        return new DecisionTemplateGenerationOptionsParseResult(null, "--json requires an output file path.");
+                    }
+
+                    jsonOutputPath = args[++index];
+                    break;
+
+                default:
+                    return new DecisionTemplateGenerationOptionsParseResult(null, $"unknown generate-decision-template option '{args[index]}'.");
+            }
+        }
+
+        if (csvOutputPath is null && jsonOutputPath is null)
+        {
+            return new DecisionTemplateGenerationOptionsParseResult(null, "generate-decision-template requires --csv, --json, or both.");
+        }
+
+        return new DecisionTemplateGenerationOptionsParseResult(
+            new DecisionTemplateGenerationOptions(evaluationsPath, csvOutputPath, jsonOutputPath),
+            null);
+    }
+
+    private static bool IsOption(string value)
+    {
+        return value.StartsWith("--", StringComparison.Ordinal);
+    }
+}
+
+internal sealed record DecisionTemplateGenerationOptionsParseResult(
+    DecisionTemplateGenerationOptions? Options,
+    string? Error);
+
+internal sealed record HumanDecisionRow(
+    [property: JsonPropertyName("proposal_id")] string ProposalId,
+    [property: JsonPropertyName("human_decision")] string HumanDecision,
+    [property: JsonPropertyName("decision_rationale")] string DecisionRationale,
+    [property: JsonPropertyName("approver_id")] string? ApproverId,
+    [property: JsonPropertyName("approved_at")] string? ApprovedAt,
+    [property: JsonPropertyName("conditions_or_notes")] string? ConditionsOrNotes);
 
 internal static class MeasurementAggregator
 {
@@ -2736,6 +3027,626 @@ internal static class ProposalEvaluationOutputWriter
         return value.Any(character => character is ',' or '"' or '\r' or '\n')
             ? $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
             : value;
+    }
+}
+
+internal static class ProposalEvaluationInputReader
+{
+    public static IReadOnlyList<ProposalEvaluationRow> Read(string inputPath)
+    {
+        return string.Equals(Path.GetExtension(inputPath), ".csv", StringComparison.OrdinalIgnoreCase)
+            ? ReadCsv(inputPath)
+            : ReadJson(inputPath);
+    }
+
+    private static IReadOnlyList<ProposalEvaluationRow> ReadJson(string inputPath)
+    {
+        using var stream = File.OpenRead(inputPath);
+        using var document = JsonDocument.Parse(stream);
+
+        JsonElement rowsElement;
+        if (document.RootElement.ValueKind == JsonValueKind.Array)
+        {
+            rowsElement = document.RootElement;
+        }
+        else if (document.RootElement.ValueKind == JsonValueKind.Object
+            && document.RootElement.TryGetProperty("evaluations", out var evaluationsElement)
+            && evaluationsElement.ValueKind == JsonValueKind.Array)
+        {
+            rowsElement = evaluationsElement;
+        }
+        else
+        {
+            throw new InvalidDataException("input JSON must be a top-level array or contain a top-level evaluations array.");
+        }
+
+        var rows = new List<ProposalEvaluationRow>();
+        foreach (var rowElement in rowsElement.EnumerateArray())
+        {
+            if (rowElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("each evaluation JSON item must be an object.");
+            }
+
+            rows.Add(CreateRow(rowElement));
+        }
+
+        return rows;
+    }
+
+    private static IReadOnlyList<ProposalEvaluationRow> ReadCsv(string inputPath)
+    {
+        var lines = File.ReadAllLines(inputPath);
+        if (lines.Length == 0)
+        {
+            throw new InvalidDataException("input CSV must contain a header row.");
+        }
+
+        var header = ParseCsvLine(lines[0]);
+        if (!header.SequenceEqual(ProposalEvaluationOutputWriter.Columns, StringComparer.Ordinal))
+        {
+            throw new InvalidDataException("input CSV header must exactly match the proposal evaluation columns.");
+        }
+
+        var rows = new List<ProposalEvaluationRow>();
+        for (var lineIndex = 1; lineIndex < lines.Length; lineIndex++)
+        {
+            if (string.IsNullOrWhiteSpace(lines[lineIndex]))
+            {
+                continue;
+            }
+
+            var values = ParseCsvLine(lines[lineIndex]);
+            if (values.Count != ProposalEvaluationOutputWriter.Columns.Length)
+            {
+                throw new InvalidDataException($"CSV row {lineIndex + 1} has {values.Count} column(s); expected {ProposalEvaluationOutputWriter.Columns.Length}.");
+            }
+
+            var row = ProposalEvaluationOutputWriter.Columns
+                .Zip(values, (column, value) => new { column, value })
+                .ToDictionary(pair => pair.column, pair => string.IsNullOrEmpty(pair.value) ? null : pair.value, StringComparer.Ordinal);
+            rows.Add(CreateRow(row));
+        }
+
+        return rows;
+    }
+
+    private static ProposalEvaluationRow CreateRow(JsonElement rowElement)
+    {
+        return new ProposalEvaluationRow(
+            ProposalId: ReadRequiredString(rowElement, "proposal_id"),
+            SourceDiagnosisIndex: ReadRequiredInt(rowElement, "source_diagnosis_index"),
+            TraceId: ReadString(rowElement, "trace_id"),
+            TaskId: ReadString(rowElement, "task_id"),
+            TaskCategory: ReadString(rowElement, "task_category"),
+            ClientKind: ReadString(rowElement, "client_kind"),
+            ComparisonId: ReadString(rowElement, "comparison_id"),
+            ExperimentId: ReadString(rowElement, "experiment_id"),
+            ExperimentCondition: ReadString(rowElement, "experiment_condition"),
+            PromptVersion: ReadString(rowElement, "prompt_version"),
+            AgentVariant: ReadString(rowElement, "agent_variant"),
+            TaskRunIndex: ReadInt(rowElement, "task_run_index"),
+            FailureCategoryId: ReadString(rowElement, "failure_category_id"),
+            AntiPatternId: ReadString(rowElement, "anti_pattern_id"),
+            Severity: ReadString(rowElement, "severity"),
+            ImprovementTarget: ReadString(rowElement, "improvement_target"),
+            ProposalTitle: ReadRequiredString(rowElement, "proposal_title"),
+            ProposalEvaluationStatus: ReadRequiredString(rowElement, "proposal_evaluation_status"),
+            EvaluatorFindings: ReadRequiredString(rowElement, "evaluator_findings"),
+            RequiredHumanChecks: ReadRequiredString(rowElement, "required_human_checks"),
+            EvaluatorNotes: ReadRequiredString(rowElement, "evaluator_notes"));
+    }
+
+    private static ProposalEvaluationRow CreateRow(IReadOnlyDictionary<string, string?> row)
+    {
+        return new ProposalEvaluationRow(
+            ProposalId: RequireCsvValue(row["proposal_id"], "proposal_id"),
+            SourceDiagnosisIndex: ReadRequiredCsvInt(row["source_diagnosis_index"], "source_diagnosis_index"),
+            TraceId: row["trace_id"],
+            TaskId: row["task_id"],
+            TaskCategory: row["task_category"],
+            ClientKind: row["client_kind"],
+            ComparisonId: row["comparison_id"],
+            ExperimentId: row["experiment_id"],
+            ExperimentCondition: row["experiment_condition"],
+            PromptVersion: row["prompt_version"],
+            AgentVariant: row["agent_variant"],
+            TaskRunIndex: ReadOptionalCsvInt(row["task_run_index"], "task_run_index"),
+            FailureCategoryId: row["failure_category_id"],
+            AntiPatternId: row["anti_pattern_id"],
+            Severity: row["severity"],
+            ImprovementTarget: row["improvement_target"],
+            ProposalTitle: RequireCsvValue(row["proposal_title"], "proposal_title"),
+            ProposalEvaluationStatus: RequireCsvValue(row["proposal_evaluation_status"], "proposal_evaluation_status"),
+            EvaluatorFindings: RequireCsvValue(row["evaluator_findings"], "evaluator_findings"),
+            RequiredHumanChecks: RequireCsvValue(row["required_human_checks"], "required_human_checks"),
+            EvaluatorNotes: RequireCsvValue(row["evaluator_notes"], "evaluator_notes"));
+    }
+
+    private static string? ReadString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property)
+            || property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        if (property.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException($"evaluation field '{propertyName}' must be a string or null.");
+        }
+
+        var value = property.GetString();
+        return string.IsNullOrEmpty(value) ? null : value;
+    }
+
+    private static string ReadRequiredString(JsonElement element, string propertyName)
+    {
+        return ReadString(element, propertyName)
+            ?? throw new InvalidDataException($"evaluation field '{propertyName}' is required.");
+    }
+
+    private static int? ReadInt(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property)
+            || property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        int? value = null;
+        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var numberValue))
+        {
+            value = numberValue;
+        }
+        else if (property.ValueKind == JsonValueKind.String && int.TryParse(property.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var stringValue))
+        {
+            value = stringValue;
+        }
+
+        if (!value.HasValue)
+        {
+            throw new InvalidDataException($"evaluation field '{propertyName}' must be an integer or null.");
+        }
+
+        return value;
+    }
+
+    private static int ReadRequiredInt(JsonElement element, string propertyName)
+    {
+        return ReadInt(element, propertyName)
+            ?? throw new InvalidDataException($"evaluation field '{propertyName}' is required.");
+    }
+
+    private static string RequireCsvValue(string? value, string columnName)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? throw new InvalidDataException($"evaluation field '{columnName}' is required.")
+            : value;
+    }
+
+    private static int ReadRequiredCsvInt(string? value, string columnName)
+    {
+        return ReadOptionalCsvInt(value, columnName)
+            ?? throw new InvalidDataException($"evaluation field '{columnName}' is required.");
+    }
+
+    private static int? ReadOptionalCsvInt(string? value, string columnName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+        {
+            throw new InvalidDataException($"evaluation field '{columnName}' must be an integer or blank.");
+        }
+
+        return parsed;
+    }
+
+    private static IReadOnlyList<string> ParseCsvLine(string line)
+    {
+        var values = new List<string>();
+        var builder = new StringBuilder();
+        var inQuotes = false;
+
+        for (var index = 0; index < line.Length; index++)
+        {
+            var character = line[index];
+            if (character == '"')
+            {
+                if (inQuotes && index + 1 < line.Length && line[index + 1] == '"')
+                {
+                    builder.Append('"');
+                    index++;
+                }
+                else
+                {
+                    inQuotes = !inQuotes;
+                }
+            }
+            else if (character == ',' && !inQuotes)
+            {
+                values.Add(builder.ToString());
+                builder.Clear();
+            }
+            else
+            {
+                builder.Append(character);
+            }
+        }
+
+        if (inQuotes)
+        {
+            throw new InvalidDataException("CSV row contains an unterminated quoted value.");
+        }
+
+        values.Add(builder.ToString());
+        return values;
+    }
+}
+
+internal static class HumanDecisionInputReader
+{
+    public static IReadOnlyList<HumanDecisionRow> Read(string inputPath)
+    {
+        return string.Equals(Path.GetExtension(inputPath), ".csv", StringComparison.OrdinalIgnoreCase)
+            ? ReadCsv(inputPath)
+            : ReadJson(inputPath);
+    }
+
+    private static IReadOnlyList<HumanDecisionRow> ReadJson(string inputPath)
+    {
+        using var stream = File.OpenRead(inputPath);
+        using var document = JsonDocument.Parse(stream);
+
+        JsonElement rowsElement;
+        if (document.RootElement.ValueKind == JsonValueKind.Array)
+        {
+            rowsElement = document.RootElement;
+        }
+        else if (document.RootElement.ValueKind == JsonValueKind.Object
+            && document.RootElement.TryGetProperty("decisions", out var decisionsElement)
+            && decisionsElement.ValueKind == JsonValueKind.Array)
+        {
+            rowsElement = decisionsElement;
+        }
+        else
+        {
+            throw new InvalidDataException("input JSON must be a top-level array or contain a top-level decisions array.");
+        }
+
+        var rows = new List<HumanDecisionRow>();
+        foreach (var rowElement in rowsElement.EnumerateArray())
+        {
+            if (rowElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("each decision JSON item must be an object.");
+            }
+
+            RejectUnexpectedColumns(rowElement.EnumerateObject().Select(property => property.Name));
+            rows.Add(CreateRow(rowElement));
+        }
+
+        return rows;
+    }
+
+    private static IReadOnlyList<HumanDecisionRow> ReadCsv(string inputPath)
+    {
+        var lines = File.ReadAllLines(inputPath);
+        if (lines.Length == 0)
+        {
+            throw new InvalidDataException("input CSV must contain a header row.");
+        }
+
+        var header = ParseCsvLine(lines[0]);
+        RejectUnexpectedColumns(header);
+        if (!header.SequenceEqual(HumanDecisionOutputWriter.Columns, StringComparer.Ordinal))
+        {
+            throw new InvalidDataException("input CSV header must exactly match the human decision columns.");
+        }
+
+        var rows = new List<HumanDecisionRow>();
+        for (var lineIndex = 1; lineIndex < lines.Length; lineIndex++)
+        {
+            if (string.IsNullOrWhiteSpace(lines[lineIndex]))
+            {
+                continue;
+            }
+
+            var values = ParseCsvLine(lines[lineIndex]);
+            if (values.Count != HumanDecisionOutputWriter.Columns.Length)
+            {
+                throw new InvalidDataException($"CSV row {lineIndex + 1} has {values.Count} column(s); expected {HumanDecisionOutputWriter.Columns.Length}.");
+            }
+
+            var row = HumanDecisionOutputWriter.Columns
+                .Zip(values, (column, value) => new { column, value })
+                .ToDictionary(pair => pair.column, pair => string.IsNullOrEmpty(pair.value) ? null : pair.value, StringComparer.Ordinal);
+            rows.Add(CreateRow(row));
+        }
+
+        return rows;
+    }
+
+    private static HumanDecisionRow CreateRow(JsonElement rowElement)
+    {
+        return new HumanDecisionRow(
+            ProposalId: ReadRequiredString(rowElement, "proposal_id"),
+            HumanDecision: ReadRequiredString(rowElement, "human_decision"),
+            DecisionRationale: ReadRequiredString(rowElement, "decision_rationale"),
+            ApproverId: ReadString(rowElement, "approver_id"),
+            ApprovedAt: ReadString(rowElement, "approved_at"),
+            ConditionsOrNotes: ReadString(rowElement, "conditions_or_notes"));
+    }
+
+    private static HumanDecisionRow CreateRow(IReadOnlyDictionary<string, string?> row)
+    {
+        return new HumanDecisionRow(
+            ProposalId: RequireCsvValue(row["proposal_id"], "proposal_id"),
+            HumanDecision: RequireCsvValue(row["human_decision"], "human_decision"),
+            DecisionRationale: RequireCsvValue(row["decision_rationale"], "decision_rationale"),
+            ApproverId: row["approver_id"],
+            ApprovedAt: row["approved_at"],
+            ConditionsOrNotes: row["conditions_or_notes"]);
+    }
+
+    private static void RejectUnexpectedColumns(IEnumerable<string> columns)
+    {
+        foreach (var column in columns)
+        {
+            if (!HumanDecisionOutputWriter.Columns.Contains(column, StringComparer.Ordinal))
+            {
+                throw new InvalidDataException($"unknown human decision column '{column}'.");
+            }
+        }
+    }
+
+    private static string? ReadString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property)
+            || property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        if (property.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException($"decision field '{propertyName}' must be a string or null.");
+        }
+
+        var value = property.GetString();
+        return string.IsNullOrEmpty(value) ? null : value;
+    }
+
+    private static string ReadRequiredString(JsonElement element, string propertyName)
+    {
+        return ReadString(element, propertyName)
+            ?? throw new InvalidDataException($"decision field '{propertyName}' is required.");
+    }
+
+    private static string RequireCsvValue(string? value, string columnName)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? throw new InvalidDataException($"decision field '{columnName}' is required.")
+            : value;
+    }
+
+    private static IReadOnlyList<string> ParseCsvLine(string line)
+    {
+        var values = new List<string>();
+        var builder = new StringBuilder();
+        var inQuotes = false;
+
+        for (var index = 0; index < line.Length; index++)
+        {
+            var character = line[index];
+            if (character == '"')
+            {
+                if (inQuotes && index + 1 < line.Length && line[index + 1] == '"')
+                {
+                    builder.Append('"');
+                    index++;
+                }
+                else
+                {
+                    inQuotes = !inQuotes;
+                }
+            }
+            else if (character == ',' && !inQuotes)
+            {
+                values.Add(builder.ToString());
+                builder.Clear();
+            }
+            else
+            {
+                builder.Append(character);
+            }
+        }
+
+        if (inQuotes)
+        {
+            throw new InvalidDataException("CSV row contains an unterminated quoted value.");
+        }
+
+        values.Add(builder.ToString());
+        return values;
+    }
+}
+
+internal static class HumanDecisionValidator
+{
+    private static readonly HashSet<string> ValidDecisions = new(StringComparer.Ordinal)
+    {
+        "approved",
+        "rejected",
+        "deferred",
+    };
+
+    public static IReadOnlyList<string> Validate(
+        IReadOnlyList<HumanDecisionRow> decisions,
+        IReadOnlyList<ProposalEvaluationRow> evaluations)
+    {
+        var errors = new List<string>();
+        var evaluationsByProposalId = evaluations
+            .ToDictionary(evaluation => evaluation.ProposalId, StringComparer.Ordinal);
+
+        for (var index = 0; index < decisions.Count; index++)
+        {
+            var decision = decisions[index];
+            var rowNumber = index + 1;
+
+            if (string.IsNullOrWhiteSpace(decision.ProposalId))
+            {
+                errors.Add($"row {rowNumber}: proposal_id is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(decision.HumanDecision))
+            {
+                errors.Add($"row {rowNumber}: human_decision is required.");
+            }
+            else if (!ValidDecisions.Contains(decision.HumanDecision))
+            {
+                errors.Add($"row {rowNumber}: human_decision '{decision.HumanDecision}' is not allowed. Must be 'approved', 'rejected', or 'deferred'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(decision.DecisionRationale))
+            {
+                errors.Add($"row {rowNumber}: decision_rationale is required.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(decision.ProposalId))
+            {
+                if (!evaluationsByProposalId.TryGetValue(decision.ProposalId, out var evaluation))
+                {
+                    errors.Add($"row {rowNumber}: proposal_id '{decision.ProposalId}' not found in evaluations.");
+                }
+                else if (string.Equals(decision.HumanDecision, "approved", StringComparison.Ordinal)
+                    && !string.Equals(evaluation.ProposalEvaluationStatus, "ready-for-human-approval", StringComparison.Ordinal))
+                {
+                    errors.Add($"row {rowNumber}: cannot approve proposal '{decision.ProposalId}' with evaluation status '{evaluation.ProposalEvaluationStatus}'. Only 'ready-for-human-approval' proposals can be approved.");
+                }
+            }
+        }
+
+        return errors;
+    }
+}
+
+internal static class HumanDecisionSafetyValidator
+{
+    public static IReadOnlyList<string> Validate(IReadOnlyList<HumanDecisionRow> rows)
+    {
+        var errors = new List<string>();
+        for (var index = 0; index < rows.Count; index++)
+        {
+            var row = rows[index];
+            var rowNumber = index + 1;
+            foreach (var field in GetStringFields(row))
+            {
+                if (!string.IsNullOrWhiteSpace(field.Value)
+                    && DiagnosisValidator.ContainsUnsafeMaterial(field.Value))
+                {
+                    errors.Add($"row {rowNumber}: decision field '{field.Name}' appears to contain raw content, credential, secret, token, or identity-bearing material.");
+                }
+            }
+        }
+
+        return errors;
+    }
+
+    private static IEnumerable<(string Name, string? Value)> GetStringFields(HumanDecisionRow row)
+    {
+        yield return ("proposal_id", row.ProposalId);
+        yield return ("human_decision", row.HumanDecision);
+        yield return ("decision_rationale", row.DecisionRationale);
+        yield return ("approver_id", row.ApproverId);
+        yield return ("approved_at", row.ApprovedAt);
+        yield return ("conditions_or_notes", row.ConditionsOrNotes);
+    }
+}
+
+internal static class HumanDecisionOutputWriter
+{
+    public static readonly string[] Columns =
+    [
+        "proposal_id",
+        "human_decision",
+        "decision_rationale",
+        "approver_id",
+        "approved_at",
+        "conditions_or_notes",
+    ];
+
+    public static string WriteJson(IReadOnlyList<HumanDecisionRow> rows)
+    {
+        return JsonSerializer.Serialize(rows, new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine;
+    }
+
+    public static string WriteCsv(IReadOnlyList<HumanDecisionRow> rows)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine(string.Join(',', Columns));
+
+        foreach (var row in rows)
+        {
+            builder.AppendLine(string.Join(',', Columns.Select(column => EscapeCsv(GetValue(row, column)))));
+        }
+
+        return builder.ToString();
+    }
+
+    private static string? GetValue(HumanDecisionRow row, string column)
+    {
+        return column switch
+        {
+            "proposal_id" => row.ProposalId,
+            "human_decision" => row.HumanDecision,
+            "decision_rationale" => row.DecisionRationale,
+            "approver_id" => row.ApproverId,
+            "approved_at" => row.ApprovedAt,
+            "conditions_or_notes" => row.ConditionsOrNotes,
+            _ => null,
+        };
+    }
+
+    private static string EscapeCsv(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        return value.Any(character => character is ',' or '"' or '\r' or '\n')
+            ? $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
+            : value;
+    }
+}
+
+internal static class DecisionTemplateGenerator
+{
+    public static IReadOnlyList<HumanDecisionRow> Generate(IReadOnlyList<ProposalEvaluationRow> evaluations)
+    {
+        var rows = new List<HumanDecisionRow>();
+        foreach (var evaluation in evaluations)
+        {
+            if (!string.Equals(evaluation.ProposalEvaluationStatus, "ready-for-human-approval", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            rows.Add(new HumanDecisionRow(
+                ProposalId: evaluation.ProposalId,
+                HumanDecision: string.Empty,
+                DecisionRationale: string.Empty,
+                ApproverId: null,
+                ApprovedAt: null,
+                ConditionsOrNotes: null));
+        }
+
+        return rows;
     }
 }
 
