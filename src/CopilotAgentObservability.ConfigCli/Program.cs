@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace CopilotAgentObservability.ConfigCli;
 
@@ -101,10 +102,82 @@ internal static class CliApplication
             case "aggregate-measurements":
                 return RunAggregateMeasurements(args, output, error);
 
+            case "validate-diagnoses":
+                return RunValidateDiagnoses(args, output, error);
+
             default:
                 error.WriteLine($"error: unknown command '{args[0]}'.");
                 error.WriteLine(HelpText);
                 return 1;
+        }
+    }
+
+    private static int RunValidateDiagnoses(string[] args, TextWriter output, TextWriter error)
+    {
+        var parseResult = DiagnosisValidationOptions.Parse(args);
+        if (parseResult.Error is not null)
+        {
+            error.WriteLine($"error: {parseResult.Error}");
+            return 1;
+        }
+
+        try
+        {
+            if (!File.Exists(parseResult.Options!.InputPath))
+            {
+                error.WriteLine($"error: input file not found: {parseResult.Options.InputPath}");
+                return 1;
+            }
+
+            var rows = DiagnosisInputReader.Read(parseResult.Options.InputPath);
+            var validationErrors = DiagnosisValidator.Validate(rows);
+            foreach (var validationError in validationErrors)
+            {
+                error.WriteLine($"error: {validationError}");
+            }
+
+            if (validationErrors.Count > 0)
+            {
+                return 1;
+            }
+
+            if (parseResult.Options.CsvOutputPath is not null)
+            {
+                File.WriteAllText(parseResult.Options.CsvOutputPath, DiagnosisOutputWriter.WriteCsv(rows), Encoding.UTF8);
+            }
+
+            if (parseResult.Options.JsonOutputPath is not null)
+            {
+                File.WriteAllText(parseResult.Options.JsonOutputPath, DiagnosisOutputWriter.WriteJson(rows), Encoding.UTF8);
+            }
+
+            output.WriteLine($"Validated {rows.Count} diagnosis record(s).");
+            return 0;
+        }
+        catch (FileNotFoundException)
+        {
+            error.WriteLine($"error: input file not found: {parseResult.Options!.InputPath}");
+            return 1;
+        }
+        catch (JsonException exception)
+        {
+            error.WriteLine($"error: input JSON is invalid: {exception.Message}");
+            return 1;
+        }
+        catch (InvalidDataException exception)
+        {
+            error.WriteLine($"error: {exception.Message}");
+            return 1;
+        }
+        catch (IOException exception)
+        {
+            error.WriteLine($"error: failed to read or write file: {exception.Message}");
+            return 1;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            error.WriteLine($"error: failed to access file: {exception.Message}");
+            return 1;
         }
     }
 
@@ -181,6 +254,7 @@ internal static class CliApplication
           config-cli collector-copilot-cli-env
           config-cli validate-resource-attributes <OTEL_RESOURCE_ATTRIBUTES>
           config-cli aggregate-measurements <input.json> [--csv <output.csv>] [--json <output.json>]
+          config-cli validate-diagnoses <input.csv|input.json> [--csv <output.csv>] [--json <output.json>]
         """;
 }
 
@@ -245,6 +319,69 @@ internal sealed record MeasurementAggregationOptions(
 
 internal sealed record MeasurementAggregationOptionsParseResult(
     MeasurementAggregationOptions? Options,
+    string? Error);
+
+internal sealed record DiagnosisValidationOptions(
+    string InputPath,
+    string? CsvOutputPath,
+    string? JsonOutputPath)
+{
+    public static DiagnosisValidationOptionsParseResult Parse(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            return new DiagnosisValidationOptionsParseResult(null, "validate-diagnoses requires an input CSV or JSON file path.");
+        }
+
+        var inputPath = args[1];
+        string? csvOutputPath = null;
+        string? jsonOutputPath = null;
+
+        for (var index = 2; index < args.Length; index++)
+        {
+            switch (args[index])
+            {
+                case "--csv":
+                    if (index + 1 >= args.Length || IsOption(args[index + 1]))
+                    {
+                        return new DiagnosisValidationOptionsParseResult(null, "--csv requires an output file path.");
+                    }
+
+                    csvOutputPath = args[++index];
+                    break;
+
+                case "--json":
+                    if (index + 1 >= args.Length || IsOption(args[index + 1]))
+                    {
+                        return new DiagnosisValidationOptionsParseResult(null, "--json requires an output file path.");
+                    }
+
+                    jsonOutputPath = args[++index];
+                    break;
+
+                default:
+                    return new DiagnosisValidationOptionsParseResult(null, $"unknown validate-diagnoses option '{args[index]}'.");
+            }
+        }
+
+        if (csvOutputPath is null && jsonOutputPath is null)
+        {
+            return new DiagnosisValidationOptionsParseResult(null, "validate-diagnoses requires --csv, --json, or both.");
+        }
+
+        return new DiagnosisValidationOptionsParseResult(
+            new DiagnosisValidationOptions(inputPath, csvOutputPath, jsonOutputPath),
+            null);
+    }
+
+    private static bool IsOption(string value)
+    {
+        return value.StartsWith("--", StringComparison.Ordinal);
+    }
+}
+
+internal sealed record DiagnosisValidationOptionsParseResult(
+    DiagnosisValidationOptions? Options,
     string? Error);
 
 internal static class MeasurementAggregator
@@ -804,6 +941,569 @@ internal static class MeasurementOutputWriter
             "unknown_spans_json" => row.UnknownSpansJson?.ToJsonString(),
             "unknown_attributes_json" => row.UnknownAttributesJson?.ToJsonString(),
             "aggregation_notes" => row.AggregationNotes,
+            _ => null,
+        };
+    }
+
+    private static string EscapeCsv(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        return value.Any(character => character is ',' or '"' or '\r' or '\n')
+            ? $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
+            : value;
+    }
+}
+
+internal sealed record DiagnosisRow(
+    [property: JsonPropertyName("trace_id")] string? TraceId,
+    [property: JsonPropertyName("task_id")] string? TaskId,
+    [property: JsonPropertyName("task_category")] string? TaskCategory,
+    [property: JsonPropertyName("client_kind")] string? ClientKind,
+    [property: JsonPropertyName("comparison_id")] string? ComparisonId,
+    [property: JsonPropertyName("experiment_id")] string? ExperimentId,
+    [property: JsonPropertyName("experiment_condition")] string? ExperimentCondition,
+    [property: JsonPropertyName("prompt_version")] string? PromptVersion,
+    [property: JsonPropertyName("agent_variant")] string? AgentVariant,
+    [property: JsonPropertyName("task_run_index")] int? TaskRunIndex,
+    [property: JsonPropertyName("failure_category_id")] string? FailureCategoryId,
+    [property: JsonPropertyName("anti_pattern_id")] string? AntiPatternId,
+    [property: JsonPropertyName("severity")] string? Severity,
+    [property: JsonPropertyName("evidence_summary")] string? EvidenceSummary,
+    [property: JsonPropertyName("recommended_improvement_target")] string? RecommendedImprovementTarget,
+    [property: JsonPropertyName("review_status")] string? ReviewStatus);
+
+internal static class DiagnosisInputReader
+{
+    public static IReadOnlyList<DiagnosisRow> Read(string inputPath)
+    {
+        return string.Equals(Path.GetExtension(inputPath), ".csv", StringComparison.OrdinalIgnoreCase)
+            ? ReadCsv(inputPath)
+            : ReadJson(inputPath);
+    }
+
+    private static IReadOnlyList<DiagnosisRow> ReadJson(string inputPath)
+    {
+        using var stream = File.OpenRead(inputPath);
+        using var document = JsonDocument.Parse(stream);
+
+        JsonElement rowsElement;
+        if (document.RootElement.ValueKind == JsonValueKind.Array)
+        {
+            rowsElement = document.RootElement;
+        }
+        else if (document.RootElement.ValueKind == JsonValueKind.Object
+            && document.RootElement.TryGetProperty("diagnoses", out var diagnosesElement)
+            && diagnosesElement.ValueKind == JsonValueKind.Array)
+        {
+            rowsElement = diagnosesElement;
+        }
+        else
+        {
+            throw new InvalidDataException("input JSON must be a top-level array or contain a top-level diagnoses array.");
+        }
+
+        var rows = new List<DiagnosisRow>();
+        foreach (var rowElement in rowsElement.EnumerateArray())
+        {
+            if (rowElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("each diagnosis JSON item must be an object.");
+            }
+
+            RejectUnexpectedColumns(rowElement.EnumerateObject().Select(property => property.Name));
+            rows.Add(CreateRow(rowElement));
+        }
+
+        return rows;
+    }
+
+    private static IReadOnlyList<DiagnosisRow> ReadCsv(string inputPath)
+    {
+        var lines = File.ReadAllLines(inputPath);
+        if (lines.Length == 0)
+        {
+            throw new InvalidDataException("input CSV must contain a header row.");
+        }
+
+        var header = ParseCsvLine(lines[0]);
+        RejectUnexpectedColumns(header);
+        if (!header.SequenceEqual(DiagnosisOutputWriter.Columns, StringComparer.Ordinal))
+        {
+            throw new InvalidDataException("input CSV header must exactly match the diagnosis record columns.");
+        }
+
+        var rows = new List<DiagnosisRow>();
+        for (var lineIndex = 1; lineIndex < lines.Length; lineIndex++)
+        {
+            if (string.IsNullOrWhiteSpace(lines[lineIndex]))
+            {
+                continue;
+            }
+
+            var values = ParseCsvLine(lines[lineIndex]);
+            if (values.Count != DiagnosisOutputWriter.Columns.Length)
+            {
+                throw new InvalidDataException($"CSV row {lineIndex + 1} has {values.Count} column(s); expected {DiagnosisOutputWriter.Columns.Length}.");
+            }
+
+            var row = DiagnosisOutputWriter.Columns
+                .Zip(values, (column, value) => new { column, value })
+                .ToDictionary(pair => pair.column, pair => string.IsNullOrEmpty(pair.value) ? null : pair.value, StringComparer.Ordinal);
+            rows.Add(CreateRow(row));
+        }
+
+        return rows;
+    }
+
+    private static DiagnosisRow CreateRow(JsonElement rowElement)
+    {
+        return new DiagnosisRow(
+            TraceId: ReadString(rowElement, "trace_id"),
+            TaskId: ReadString(rowElement, "task_id"),
+            TaskCategory: ReadString(rowElement, "task_category"),
+            ClientKind: ReadString(rowElement, "client_kind"),
+            ComparisonId: ReadString(rowElement, "comparison_id"),
+            ExperimentId: ReadString(rowElement, "experiment_id"),
+            ExperimentCondition: ReadString(rowElement, "experiment_condition"),
+            PromptVersion: ReadString(rowElement, "prompt_version"),
+            AgentVariant: ReadString(rowElement, "agent_variant"),
+            TaskRunIndex: ReadInt(rowElement, "task_run_index"),
+            FailureCategoryId: ReadString(rowElement, "failure_category_id"),
+            AntiPatternId: ReadString(rowElement, "anti_pattern_id"),
+            Severity: ReadString(rowElement, "severity"),
+            EvidenceSummary: ReadString(rowElement, "evidence_summary"),
+            RecommendedImprovementTarget: ReadString(rowElement, "recommended_improvement_target"),
+            ReviewStatus: ReadString(rowElement, "review_status"));
+    }
+
+    private static DiagnosisRow CreateRow(IReadOnlyDictionary<string, string?> row)
+    {
+        return new DiagnosisRow(
+            TraceId: row["trace_id"],
+            TaskId: row["task_id"],
+            TaskCategory: row["task_category"],
+            ClientKind: row["client_kind"],
+            ComparisonId: row["comparison_id"],
+            ExperimentId: row["experiment_id"],
+            ExperimentCondition: row["experiment_condition"],
+            PromptVersion: row["prompt_version"],
+            AgentVariant: row["agent_variant"],
+            TaskRunIndex: ReadOptionalInt(row["task_run_index"], "task_run_index"),
+            FailureCategoryId: row["failure_category_id"],
+            AntiPatternId: row["anti_pattern_id"],
+            Severity: row["severity"],
+            EvidenceSummary: row["evidence_summary"],
+            RecommendedImprovementTarget: row["recommended_improvement_target"],
+            ReviewStatus: row["review_status"]);
+    }
+
+    private static void RejectUnexpectedColumns(IEnumerable<string> columns)
+    {
+        foreach (var column in columns)
+        {
+            if (string.Equals(column, "failure_type", StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("failure_type is an M17 run exclusion field and must not be used as a diagnosis record column.");
+            }
+
+            if (!DiagnosisOutputWriter.Columns.Contains(column, StringComparer.Ordinal))
+            {
+                throw new InvalidDataException($"unknown diagnosis record column '{column}'.");
+            }
+        }
+    }
+
+    private static string? ReadString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property)
+            || property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        if (property.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException($"diagnosis field '{propertyName}' must be a string or null.");
+        }
+
+        var value = property.GetString();
+        return string.IsNullOrEmpty(value) ? null : value;
+    }
+
+    private static int? ReadInt(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property))
+        {
+            return null;
+        }
+
+        if (property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        int? value = null;
+        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var numberValue))
+        {
+            value = numberValue;
+        }
+        else if (property.ValueKind == JsonValueKind.String && int.TryParse(property.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var stringValue))
+        {
+            value = stringValue;
+        }
+
+        if (!value.HasValue)
+        {
+            throw new InvalidDataException($"diagnosis field '{propertyName}' must be an integer or null.");
+        }
+
+        return value;
+    }
+
+    private static int? ReadOptionalInt(string? value, string columnName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+        {
+            throw new InvalidDataException($"diagnosis field '{columnName}' must be an integer or blank.");
+        }
+
+        return parsed;
+    }
+
+    private static IReadOnlyList<string> ParseCsvLine(string line)
+    {
+        var values = new List<string>();
+        var builder = new StringBuilder();
+        var inQuotes = false;
+
+        for (var index = 0; index < line.Length; index++)
+        {
+            var character = line[index];
+            if (character == '"')
+            {
+                if (inQuotes && index + 1 < line.Length && line[index + 1] == '"')
+                {
+                    builder.Append('"');
+                    index++;
+                }
+                else
+                {
+                    inQuotes = !inQuotes;
+                }
+            }
+            else if (character == ',' && !inQuotes)
+            {
+                values.Add(builder.ToString());
+                builder.Clear();
+            }
+            else
+            {
+                builder.Append(character);
+            }
+        }
+
+        if (inQuotes)
+        {
+            throw new InvalidDataException("CSV row contains an unterminated quoted value.");
+        }
+
+        values.Add(builder.ToString());
+        return values;
+    }
+}
+
+internal static partial class DiagnosisValidator
+{
+    private static readonly HashSet<string> FailureCategoryIds = new(StringComparer.Ordinal)
+    {
+        "F-SPEC",
+        "F-SCOPE",
+        "F-DATA",
+        "F-MEASURE",
+        "F-TASK",
+        "F-RUBRIC",
+        "F-TRACE",
+        "F-TOOL",
+        "F-ERROR",
+        "F-COMM",
+        "F-COMPARISON",
+    };
+
+    private static readonly HashSet<string> AntiPatternIds = new(StringComparer.Ordinal)
+    {
+        "AP-SILENT-SPEC",
+        "AP-OVERREACH",
+        "AP-RAW-CONTENT",
+        "AP-SCHEMA-DRIFT",
+        "AP-RUBRIC-FLAT",
+        "AP-TRACE-SKIP",
+        "AP-TOOL-LOOP",
+        "AP-ERROR-BLIND",
+        "AP-UNCLEAR-SEVERITY",
+        "AP-AUTO-DECIDE",
+        "AP-CONFOUND",
+        "AP-REF-CONTRACT-DRIFT",
+        "AP-REF-OVER-ABSTRACTION",
+        "AP-BUG-CAUSE-FIX-CONFLATION",
+        "AP-BUG-MISSING-SYNTHETIC-REPRO",
+        "AP-TEST-NONDETERMINISTIC",
+        "AP-TEST-MISSING-EDGE-CLASS",
+        "AP-REVIEW-MISSED-SEEDED-VIOLATION",
+        "AP-REVIEW-PREFERENCE-OVER-SPEC",
+    };
+
+    private static readonly HashSet<string> Severities = new(StringComparer.Ordinal)
+    {
+        "blocking",
+        "major",
+        "minor",
+    };
+
+    private static readonly HashSet<string> ImprovementTargets = new(StringComparer.Ordinal)
+    {
+        "prompt",
+        "instruction",
+        "skill",
+        "tool schema",
+        "workflow",
+        "eval",
+    };
+
+    private static readonly HashSet<string> ReviewStatuses = new(StringComparer.Ordinal)
+    {
+        "needs-human-review",
+        "accepted-for-proposal",
+        "rejected",
+    };
+
+    private static readonly HashSet<string> TaskCategories = new(StringComparer.Ordinal)
+    {
+        "refactoring",
+        "bug-investigation",
+        "test-generation",
+        "code-review",
+    };
+
+    private static readonly HashSet<string> ClientKinds = new(StringComparer.Ordinal)
+    {
+        ConfigSamples.VsCodeClientKind,
+        ConfigSamples.CopilotCliClientKind,
+    };
+
+    public static IReadOnlyList<string> Validate(IReadOnlyList<DiagnosisRow> rows)
+    {
+        var errors = new List<string>();
+        for (var index = 0; index < rows.Count; index++)
+        {
+            var row = rows[index];
+            var rowNumber = index + 1;
+
+            Require(row.TraceId, "trace_id", rowNumber, errors);
+            Require(row.FailureCategoryId, "failure_category_id", rowNumber, errors);
+            Require(row.Severity, "severity", rowNumber, errors);
+            Require(row.EvidenceSummary, "evidence_summary", rowNumber, errors);
+            Require(row.RecommendedImprovementTarget, "recommended_improvement_target", rowNumber, errors);
+            Require(row.ReviewStatus, "review_status", rowNumber, errors);
+
+            ValidateAllowed(row.FailureCategoryId, FailureCategoryIds, "failure_category_id", rowNumber, errors);
+            ValidateAllowed(row.AntiPatternId, AntiPatternIds, "anti_pattern_id", rowNumber, errors, allowBlank: true);
+            ValidateAllowed(row.Severity, Severities, "severity", rowNumber, errors);
+            ValidateAllowed(row.RecommendedImprovementTarget, ImprovementTargets, "recommended_improvement_target", rowNumber, errors);
+            ValidateAllowed(row.ReviewStatus, ReviewStatuses, "review_status", rowNumber, errors);
+            ValidateAllowed(row.TaskCategory, TaskCategories, "task_category", rowNumber, errors, allowBlank: true);
+            ValidateAllowed(row.ClientKind, ClientKinds, "client_kind", rowNumber, errors, allowBlank: true);
+
+            if (row.EvidenceSummary is { } evidenceSummary && ContainsUnsafeEvidence(evidenceSummary))
+            {
+                errors.Add($"row {rowNumber}: evidence_summary appears to contain raw content, credential, secret, token, or identity-bearing material.");
+            }
+        }
+
+        return errors;
+    }
+
+    private static void Require(string? value, string column, int rowNumber, List<string> errors)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            errors.Add($"row {rowNumber}: {column} is required.");
+        }
+    }
+
+    private static void ValidateAllowed(string? value, HashSet<string> allowedValues, string column, int rowNumber, List<string> errors, bool allowBlank = false)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            if (!allowBlank)
+            {
+                return;
+            }
+
+            return;
+        }
+
+        if (!allowedValues.Contains(value))
+        {
+            errors.Add($"row {rowNumber}: {column} '{value}' is not allowed.");
+        }
+    }
+
+    private static bool ContainsUnsafeEvidence(string value)
+    {
+        var normalized = value.ToLowerInvariant();
+        if (normalized.Contains('\r', StringComparison.Ordinal) || normalized.Contains('\n', StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        string[] unsafePatterns =
+        [
+            "raw prompt",
+            "prompt content",
+            "raw response",
+            "response content",
+            "captured content",
+            "tool argument",
+            "tool arguments",
+            "tool.arguments",
+            "tool result",
+            "tool results",
+            "tool.results",
+            "credential",
+            "secret",
+            "password",
+            "authorization",
+            "api key",
+            "api.key",
+            "access token",
+            "refresh token",
+            "auth token",
+            "bearer ",
+            "ghp_",
+            "github_pat_",
+            "base64",
+            "otel_exporter_otlp_headers",
+            "x-langfuse",
+            "user.email",
+            "user.id",
+            "email=",
+        ];
+
+        return unsafePatterns.Any(pattern => normalized.Contains(pattern, StringComparison.Ordinal))
+            || BasicAuthPattern().IsMatch(value)
+            || ContainsStandaloneBase64Credential(value)
+            || EmailPattern().IsMatch(value);
+    }
+
+    private static bool ContainsStandaloneBase64Credential(string value)
+    {
+        foreach (Match match in Base64CandidatePattern().Matches(value))
+        {
+            var candidate = match.Value;
+            if (candidate.Length % 4 != 0)
+            {
+                continue;
+            }
+
+            try
+            {
+                var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(candidate));
+                if (decoded.Contains(':', StringComparison.Ordinal)
+                    || decoded.Contains("secret", StringComparison.OrdinalIgnoreCase)
+                    || decoded.Contains("key", StringComparison.OrdinalIgnoreCase)
+                    || decoded.Contains("token", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            catch (FormatException)
+            {
+                // Ignore non-Base64 candidates.
+            }
+        }
+
+        return false;
+    }
+
+    [GeneratedRegex("""(?i)\bbasic\s+[a-z0-9+/]+={0,2}\b""")]
+    private static partial Regex BasicAuthPattern();
+
+    [GeneratedRegex("""(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{16,}={0,2}(?![A-Za-z0-9+/=])""")]
+    private static partial Regex Base64CandidatePattern();
+
+    [GeneratedRegex("""(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b""")]
+    private static partial Regex EmailPattern();
+}
+
+internal static class DiagnosisOutputWriter
+{
+    public static readonly string[] Columns =
+    [
+        "trace_id",
+        "task_id",
+        "task_category",
+        "client_kind",
+        "comparison_id",
+        "experiment_id",
+        "experiment_condition",
+        "prompt_version",
+        "agent_variant",
+        "task_run_index",
+        "failure_category_id",
+        "anti_pattern_id",
+        "severity",
+        "evidence_summary",
+        "recommended_improvement_target",
+        "review_status",
+    ];
+
+    public static string WriteJson(IReadOnlyList<DiagnosisRow> rows)
+    {
+        return JsonSerializer.Serialize(rows, new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine;
+    }
+
+    public static string WriteCsv(IReadOnlyList<DiagnosisRow> rows)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine(string.Join(',', Columns));
+
+        foreach (var row in rows)
+        {
+            builder.AppendLine(string.Join(',', Columns.Select(column => EscapeCsv(GetValue(row, column)))));
+        }
+
+        return builder.ToString();
+    }
+
+    private static string? GetValue(DiagnosisRow row, string column)
+    {
+        return column switch
+        {
+            "trace_id" => row.TraceId,
+            "task_id" => row.TaskId,
+            "task_category" => row.TaskCategory,
+            "client_kind" => row.ClientKind,
+            "comparison_id" => row.ComparisonId,
+            "experiment_id" => row.ExperimentId,
+            "experiment_condition" => row.ExperimentCondition,
+            "prompt_version" => row.PromptVersion,
+            "agent_variant" => row.AgentVariant,
+            "task_run_index" => row.TaskRunIndex?.ToString(CultureInfo.InvariantCulture),
+            "failure_category_id" => row.FailureCategoryId,
+            "anti_pattern_id" => row.AntiPatternId,
+            "severity" => row.Severity,
+            "evidence_summary" => row.EvidenceSummary,
+            "recommended_improvement_target" => row.RecommendedImprovementTarget,
+            "review_status" => row.ReviewStatus,
             _ => null,
         };
     }

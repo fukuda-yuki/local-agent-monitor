@@ -692,6 +692,56 @@ M24 以降で diagnosis record を作る場合、1 行を 1 つの `(trace_id, f
 
 M24 trace-to-diagnosis MVP では、M17 `failure_type` と M23 `failure_category_id` を混同しないこと、`fail` だけでなく `needs-review` の改善材料も分類できること、M21 の比較条件混同を扱えること、`evidence_summary` に実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を含めないことを確認する。
 
+### 5.13 M24 trace-to-diagnosis MVP
+
+M24 では、M23 taxonomy を使って人間が分類した diagnosis record を検証・整形する最小 CLI を追加する。
+M24 は記録検証 MVP であり、trace からの自動診断、改善案生成、改善案評価、自動採用、自動 repository 修正、patch / diff 生成、commit / push / pull request 作成、自動勝敗決定は行わない。
+
+Config CLI に以下を追加する。
+
+```text
+config-cli validate-diagnoses <input.csv|input.json> [--csv <output.csv>] [--json <output.json>]
+```
+
+入力 JSON は top-level array、または `{ "diagnoses": [...] }` を許可する。
+入力 CSV は固定 header を要求する。
+出力 CSV / JSON は検証済み diagnosis record だけを出力する。
+
+diagnosis record は、1 行を 1 つの `(trace_id, failure_category_id, anti_pattern_id)` に対する分類記録として扱う。
+同じ trace に複数の failure category や anti-pattern がある場合は、複数行で記録する。
+
+固定列は以下とする。
+
+| 列 | 値 |
+| --- | --- |
+| `trace_id` | 対象 trace id |
+| `task_id` | M13 task id または空欄 |
+| `task_category` | `refactoring`、`bug-investigation`、`test-generation`、`code-review`、または空欄 |
+| `client_kind` | `vscode-copilot-chat`、`copilot-cli`、または空欄 |
+| `comparison_id` | M21 comparison id または空欄 |
+| `experiment_id` | M12 / M21 `experiment_id` または空欄 |
+| `experiment_condition` | M21 `experiment.condition` または空欄 |
+| `prompt_version` | M21 `prompt.version` または空欄 |
+| `agent_variant` | M21 `agent.variant` または空欄 |
+| `task_run_index` | M12 / M21 `task_run_index` または空欄 |
+| `failure_category_id` | M23 の `F-*` ID |
+| `anti_pattern_id` | M23 の cross-cutting または task-specific `AP-*` ID、または空欄 |
+| `severity` | `blocking`、`major`、`minor` |
+| `evidence_summary` | raw content を含まない短い根拠 |
+| `recommended_improvement_target` | `prompt`、`instruction`、`skill`、`tool schema`、`workflow`、`eval` |
+| `review_status` | `needs-human-review`、`accepted-for-proposal`、`rejected` |
+
+検証ルールは以下とする。
+
+- `failure_category_id` は M23 の failure category ID のみ許可する。
+- `anti_pattern_id` は M23 の anti-pattern ID、または空欄のみ許可する。
+- `severity`、`recommended_improvement_target`、`review_status` は上記の値域に固定する。
+- `task_category` と `client_kind` は M12 / M13 / M21 の既存値に合わせる。
+- `evidence_summary` は必須とし、raw prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を示す危険 pattern を含む場合はエラーにする。
+- M17 `failure_type` は run / trace 取得・除外理由であり、M24 diagnosis record の列として受け付けない。
+
+M24 の検証では synthetic fixture だけを使用し、live Langfuse 接続や実 trace content を必須にしない。
+
 ## 6. セキュリティとデータ扱い
 
 Phase 1 はローカル限定 PoC とし、Langfuse に投入するデータは合成データまたは検証用データを基本とする。

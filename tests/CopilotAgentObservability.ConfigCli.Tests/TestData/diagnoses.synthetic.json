@@ -1,0 +1,58 @@
+{
+  "diagnoses": [
+    {
+      "trace_id": "trace-diagnosis-001",
+      "task_id": "maint-bug-001",
+      "task_category": "bug-investigation",
+      "client_kind": "copilot-cli",
+      "comparison_id": "",
+      "experiment_id": "baseline",
+      "experiment_condition": "baseline",
+      "prompt_version": "v1",
+      "agent_variant": "baseline",
+      "task_run_index": 1,
+      "failure_category_id": "F-RUBRIC",
+      "anti_pattern_id": "AP-BUG-CAUSE-FIX-CONFLATION",
+      "severity": "major",
+      "evidence_summary": "Cause and remediation were not separated in the sanitized review note.",
+      "recommended_improvement_target": "eval",
+      "review_status": "needs-human-review"
+    },
+    {
+      "trace_id": "trace-diagnosis-001",
+      "task_id": "maint-bug-001",
+      "task_category": "bug-investigation",
+      "client_kind": "copilot-cli",
+      "comparison_id": "",
+      "experiment_id": "baseline",
+      "experiment_condition": "baseline",
+      "prompt_version": "v1",
+      "agent_variant": "baseline",
+      "task_run_index": 1,
+      "failure_category_id": "F-TRACE",
+      "anti_pattern_id": "",
+      "severity": "minor",
+      "evidence_summary": "Sanitized observation summary did not cite the checked span family.",
+      "recommended_improvement_target": "workflow",
+      "review_status": "accepted-for-proposal"
+    },
+    {
+      "trace_id": "trace-diagnosis-002",
+      "task_id": "maint-review-001",
+      "task_category": "code-review",
+      "client_kind": "vscode-copilot-chat",
+      "comparison_id": "cmp-001",
+      "experiment_id": "instructions-slim-v1-ab",
+      "experiment_condition": "variant",
+      "prompt_version": "v1",
+      "agent_variant": "instructions-slim-v1",
+      "task_run_index": 2,
+      "failure_category_id": "F-COMPARISON",
+      "anti_pattern_id": "AP-CONFOUND",
+      "severity": "blocking",
+      "evidence_summary": "Variant comparison note mixed run order and excluded count.",
+      "recommended_improvement_target": "workflow",
+      "review_status": "rejected"
+    }
+  ]
+}
