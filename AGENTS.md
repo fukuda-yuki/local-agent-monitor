@@ -167,7 +167,9 @@ Before finishing, update project documents when the task requires it:
 
 ## Git Rules
 
-Create a local commit only when requested or clearly necessary for the task, and only after validation and review are complete.
+Create local commits in small, coherent steps after validation and review are complete.
+Do not wait for an explicit user request when a completed, verified step can be committed cleanly.
+If the milestone is unclear or the change mixes unrelated concerns, ask before committing.
 
 Do not:
 
