@@ -621,6 +621,77 @@ M11-M22 の完了後、改善案生成基盤を検討する場合は、trace-dri
 M23 以降でも、自動採用、自動 repository 修正、自動 commit、自動 push、自動 pull request、自動勝敗決定は既定スコープ外とする。
 改善候補は、`prompt`、`instruction`、`skill`、`tool schema`、`workflow`、`eval` のいずれかに分類し、人間が採否できる提案として扱う。
 
+### 5.12 M23 failure taxonomy / anti-pattern
+
+M23 では、trace-driven improvement loop の入口として、trace / metrics / M20 rubric の確認結果から人間が失敗要因と agent anti-pattern を分類できる taxonomy を定義する。
+M23 は taxonomy 定義までを対象とし、trace-to-diagnosis 実装、改善候補生成、改善候補評価、改善採用、repository 修正は扱わない。
+
+failure category は以下の ID を初期値とする。
+
+| ID | 用途 |
+| --- | --- |
+| `F-SPEC` | 要件、仕様、milestone task との矛盾 |
+| `F-SCOPE` | 非スコープの自動実装、自動採用、repository 修正、実データ利用などの提案 |
+| `F-DATA` | secret、実 user identity、raw prompt / response content、tool result 本文などの保存または共有 |
+| `F-MEASURE` | M12 measurement schema の列、欠損値、正規化名、値域との不整合 |
+| `F-TASK` | M13 task category に必要な観点の欠落 |
+| `F-RUBRIC` | M20 rubric に基づく品質評価根拠の不足 |
+| `F-TRACE` | trace / observation / metrics に基づく根拠確認の不足 |
+| `F-TOOL` | 不要または重複した tool / workflow による非効率 |
+| `F-ERROR` | error、timeout、permission failure の未確認または無視 |
+| `F-COMM` | 重大度、根拠、残リスク、検証結果の報告不足 |
+| `F-COMPARISON` | `experiment.id`、`experiment.condition`、`prompt.version`、`agent.variant`、実行順序、valid / excluded N の混同 |
+
+agent anti-pattern は以下の ID を初期値とする。
+
+| ID | 用途 |
+| --- | --- |
+| `AP-SILENT-SPEC` | 仕様の選択肢や矛盾を説明せずに決める |
+| `AP-OVERREACH` | 求められていない実装、依存追加、workflow 変更、commit / PR を進める |
+| `AP-RAW-CONTENT` | trace content、prompt、tool result、secret、identity を記録様式へ残す |
+| `AP-SCHEMA-DRIFT` | M12 の列名、欠損値、値域を独自に変える |
+| `AP-RUBRIC-FLAT` | task 類型ごとの根拠なしに `pass` / `fail` だけを置く |
+| `AP-TRACE-SKIP` | 利用可能な trace / metrics を確認せずに診断する |
+| `AP-TOOL-LOOP` | 同じ探索や tool call を繰り返し、追加根拠が増えない |
+| `AP-ERROR-BLIND` | error、timeout、permission failure を結論から除外する |
+| `AP-UNCLEAR-SEVERITY` | 指摘の重大度、影響、確認方法を分けない |
+| `AP-AUTO-DECIDE` | variant の勝敗、改善採用、修正実行を自動決定のように表現する |
+| `AP-CONFOUND` | 比較条件、prompt version、agent variant、実行順序、除外数の違いを無視して比較する |
+
+M23 の failure category は、M17 の `failure_type` とは別用途である。
+M17 の `failure_type` は Copilot 実行失敗、Langfuse unavailable、trace missing、wrong attributes、real data risk などの run / trace 取得・除外理由を記録する。
+M23 の failure category は、取得済み trace や評価記録を人間が確認し、回答品質、診断可能性、比較プロトコル、改善対象を整理するために使う。
+
+M13 の task category ごとの代表的な anti-pattern は以下とする。
+
+| ID | Task category | Anti-pattern | 判定の目安 |
+| --- | --- | --- | --- |
+| `AP-REF-CONTRACT-DRIFT` | `refactoring` | behavior contract drift | 既存 CLI 出力 key、既定 endpoint、content capture 設定、Resource Attribute 名など外部仕様を変える |
+| `AP-REF-OVER-ABSTRACTION` | `refactoring` | over-abstraction | 単一用途の変更に不要な抽象化や依存を追加する |
+| `AP-BUG-CAUSE-FIX-CONFLATION` | `bug-investigation` | cause-fix conflation | 再現条件、原因、修正案、回帰確認を分けずに説明する |
+| `AP-BUG-MISSING-SYNTHETIC-REPRO` | `bug-investigation` | missing synthetic repro | 合成入力で期待値と実際値を示さず、実データや live Langfuse を必要条件にする |
+| `AP-TEST-NONDETERMINISTIC` | `test-generation` | nondeterministic test plan | 外部サービス、時刻、ファイルシステム、ネットワークに依存するテストだけを提案する |
+| `AP-TEST-MISSING-EDGE-CLASS` | `test-generation` | missing edge class | 正常系だけに偏り、境界値または異常系を欠く |
+| `AP-REVIEW-MISSED-SEEDED-VIOLATION` | `code-review` | missed seeded violation | 明確な仕様違反、テスト不足、保守リスクを見落とす |
+| `AP-REVIEW-PREFERENCE-OVER-SPEC` | `code-review` | preference over spec | 好みの指摘と仕様違反を混同する |
+
+severity は `blocking`、`major`、`minor` の 3 値とする。
+`blocking` は仕様違反、データ扱い違反、非スコープ逸脱、誤った結論につながるものに使用する。
+`major` は結論や比較の信頼性を大きく下げるが、追加確認や軽微な修正で回復できるものに使用する。
+`minor` は読みやすさ、記録粒度、補足根拠の不足に留まるものに使用する。
+
+改善候補を後続 milestone で作る場合は、対象を `prompt`、`instruction`、`skill`、`tool schema`、`workflow`、`eval` のいずれかに分類する。
+この分類は人間採否のための提案ラベルであり、repository の自動修正や自動採用を意味しない。
+
+M24 以降で diagnosis record を作る場合、1 行を 1 つの `(trace_id, failure_category_id, anti_pattern_id)` に対する分類記録として扱う。
+同じ trace に複数の failure category や anti-pattern がある場合は、複数行で記録する。
+列候補は `trace_id`、`task_id`、`task_category`、`client_kind`、`comparison_id`、`experiment_id`、`experiment_condition`、`prompt_version`、`agent_variant`、`task_run_index`、`failure_category_id`、`anti_pattern_id`、`severity`、`evidence_summary`、`recommended_improvement_target`、`review_status` とする。
+`anti_pattern_id` は cross-cutting または task-specific の `AP-*` ID、または空欄とする。
+`evidence_summary` には実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を含めない。
+`review_status` は `needs-human-review`、`accepted-for-proposal`、`rejected` のいずれかとし、改善候補の採用、実装、勝敗判定を自動化するものではない。
+
+M24 trace-to-diagnosis MVP では、M17 `failure_type` と M23 `failure_category_id` を混同しないこと、`fail` だけでなく `needs-review` の改善材料も分類できること、M21 の比較条件混同を扱えること、`evidence_summary` に実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を含めないことを確認する。
+
 ## 6. セキュリティとデータ扱い
 
 Phase 1 はローカル限定 PoC とし、Langfuse に投入するデータは合成データまたは検証用データを基本とする。
