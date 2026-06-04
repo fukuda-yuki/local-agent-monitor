@@ -49,3 +49,10 @@
 
 - Config CLI の汎用コマンド `vscode-settings`、`vscode-env`、`copilot-cli-env` の既定 endpoint は Phase 1 Langfuse 直接送信用の `http://localhost:3000/api/public/otel` に切り替えた。
 - `langfuse-*` コマンドは Langfuse 直接送信を明示するコマンドとして維持し、`collector-*` コマンドは Collector 経由送信用に `http://localhost:4318` と Langfuse header cleanup を維持する。
+
+## 利用者向け文書
+
+- 2026-06-04 に README を初回利用者向けの入口として再構成した。
+- `docs/getting-started.md` を追加し、利用前チェック、Langfuse 起動、Config CLI の設定サンプル出力、VS Code GitHub Copilot Chat / GitHub Copilot CLI の OTel 設定、Langfuse UI での確認、よくある失敗をまとめた。
+- README と getting started は、`docs/spec.md` の既定構成を説明する利用者向け文書であり、仕様の source of truth ではない。
+- 利用者向け文書では、実 credential、secret、Base64 化済み header、実 trace content、実 prompt / response content、実 user identity を保存しない。設定例は placeholder と synthetic / example identity のみにする。

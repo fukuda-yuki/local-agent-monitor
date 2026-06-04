@@ -271,7 +271,8 @@ docker compose -f infra\otel-collector\docker-compose.example.yml config
 - 初回利用者向けの手順はこの文書
 - 確定仕様や実装判断は [docs/spec.md](spec.md)
 - 上位要件は [docs/requirements.md](requirements.md)
-- milestone の作業記録は [docs/task.md](task.md) と `docs/milestones/<milestone-slug>/`
+- repository 全体の milestone index は [docs/task.md](task.md)
+- milestone ごとの作業記録は `docs/milestones/<milestone-slug>/`
 - milestone を跨ぐ知見は [docs/knowledge/](knowledge/)
 
 README やこの文書が [docs/spec.md](spec.md) と矛盾する場合は、仕様を先に確認してください。
