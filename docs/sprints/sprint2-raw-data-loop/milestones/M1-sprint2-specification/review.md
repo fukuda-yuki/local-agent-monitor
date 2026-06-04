@@ -111,3 +111,31 @@ decision draft は、raw OTLP file-based ingest、SQLite raw store、`ingest-raw
 
 - SQLite dependency、DB path、raw record schema、CLI interface はまだ正式仕様に反映していない。
 - `.gitignore` の更新は実装時に行う必要がある。
+
+## 2026-06-05: Sprint2 MVP requirements / spec 反映レビュー
+
+### レビュー範囲
+
+- `docs/requirements.md`
+- `docs/spec.md`
+- `docs/task.md`
+- `docs/sprints/sprint2-raw-data-loop/README.md`
+- `docs/sprints/sprint2-raw-data-loop/milestones/M1-sprint2-specification/task.md`
+
+### 指摘と対応
+
+- 指摘: M1 decision draft のままでは Sprint2 MVP を実装できない。
+  - 対応: raw OTLP file-based ingest、SQLite raw store、raw record schema、`ingest-raw` / `normalize-raw`、Langfuse 非依存 loop、data handling、diagnosis boundary を `docs/requirements.md` と `docs/spec.md` に反映した。
+- 指摘: Sprint2 README が候補表現のままだと、requirements / spec 反映後の状態とずれる。
+  - 対応: README を MVP 方針と成功条件の概要に更新し、正式判断は requirements / spec を優先する旨を残した。
+
+### 妥当性判断
+
+今回の変更は documentation-only であり、実装、public CLI 実体、依存関係は変更していない。
+Sprint2 MVP の実装前に必要な主要な product / interface / data handling 判断は source of truth に反映された。
+`data/` は既存 `.gitignore` で ignore 済みであるため、追加変更は不要と判断した。
+
+### 残リスク
+
+- Sprint2 の後続 milestone と task breakdown はまだ作成していない。
+- `ingest-raw` / `normalize-raw`、SQLite dependency、raw store schema は未実装である。

@@ -340,7 +340,7 @@ Grafana 系は初期 PoC の第一候補にはしない。
 * 長期メトリクス監視
 * アラート
 
-### 8.3 PostgreSQL の扱い
+### 8.3 raw store と PostgreSQL の扱い
 
 PostgreSQL は、生 OTel の主ストレージとしては扱わない。
 
@@ -351,9 +351,12 @@ PostgreSQL は、生 OTel の主ストレージとしては扱わない。
 * 実験条件の管理
 * マスキング済みデータの検索用テーブル
 
-Sprint2 では、Langfuse に依存しない raw JSON 保持基盤を検討する。
-この検討では、SQLite をローカル PoC の既定候補、PostgreSQL を共有環境・長期保持・検索性能が必要になった場合の将来候補として扱う。
-正式に生 OTel / raw JSON の主ストレージを採用する場合は、本節を更新してから実装する。
+Sprint2 MVP では、Langfuse に依存しない raw JSON / raw OTLP 保持基盤を扱う。
+Sprint2 MVP の既定入力は raw OTLP の file-based ingest とし、自前 HTTP receiver は含めない。
+raw store は SQLite をローカル PoC の既定とし、PostgreSQL は共有環境・長期保持・検索性能が必要になった場合の将来候補として扱う。
+Sprint2 MVP では、raw store から normalized dataset を生成し、既存 measurement schema と改善支援 CLI に接続する。
+`diagnose` は引き続き人間分類 diagnosis record の validation とし、trace から failure category / anti-pattern 候補を自動抽出する診断機能は Sprint2 MVP に含めない。
+trace からの自動診断は Sprint3 以降の後続候補として扱う。
 
 ---
 
