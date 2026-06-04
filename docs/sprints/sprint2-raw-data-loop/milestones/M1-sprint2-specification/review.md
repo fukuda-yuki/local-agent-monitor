@@ -89,3 +89,25 @@ Sprint3 は候補 sprint として記録しただけで、`docs/requirements.md`
 ### 残リスク
 
 Sprint3 の正式化は、Sprint2 の raw store / normalize 実装と M1 の requirements / spec 更新後に改めて判断する必要がある。
+
+## 2026-06-05: Sprint2 M1 decision draft レビュー
+
+### レビュー範囲
+
+- `docs/sprints/sprint2-raw-data-loop/milestones/M1-sprint2-specification/notes.md`
+
+### 観点
+
+- `questions.md` の未決事項に対するユーザー回答が decision draft として記録されていること。
+- `docs/requirements.md` と `docs/spec.md` に反映する前の正式仕様として誤読されないこと。
+- Sprint2 MVP に trace からの自動診断、自前 HTTP receiver、masking / redaction、README / getting-started 更新を先取りしていないこと。
+
+### 妥当性判断
+
+decision draft は、raw OTLP file-based ingest、SQLite raw store、`ingest-raw` / `normalize-raw`、既存 `aggregate-measurements` との責務分離、Langfuse なしの最小 loop を整理している。
+同時に、正式仕様として扱うには `docs/requirements.md` と `docs/spec.md` への反映が必要であることを明記している。
+
+### 残リスク
+
+- SQLite dependency、DB path、raw record schema、CLI interface はまだ正式仕様に反映していない。
+- `.gitignore` の更新は実装時に行う必要がある。
