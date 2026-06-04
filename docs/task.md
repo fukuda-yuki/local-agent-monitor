@@ -42,11 +42,12 @@ M0-M10 の詳細な履歴は `docs/archive/review/` と `docs/knowledge/phase1-l
 | M25: improvement proposal generator | 完了 | [`docs/milestones/M25-improvement-proposal-generator/task.md`](milestones/M25-improvement-proposal-generator/task.md) |
 | M26: proposal evaluator | 完了 | [`docs/milestones/M26-proposal-evaluator/task.md`](milestones/M26-proposal-evaluator/task.md) |
 | M27: human approval workflow | 完了 | [`docs/milestones/M27-human-approval-workflow/task.md`](milestones/M27-human-approval-workflow/task.md) |
+| M28: Aspire AppHost 再評価と AI 診断 workflow | 作業中 | [`docs/milestones/M28-aspire-ai-diagnostics/task.md`](milestones/M28-aspire-ai-diagnostics/task.md) |
 
 ## Future Backlog
 
-M28 以降は M27 完了後に別 milestone として切り出す。
-M28 以降候補も人間採否の提案・評価までを既定とし、自動採用、自動実装、repository 自動修正、patch / diff 生成、commit / push / pull request 作成、自動勝敗決定は含めない。
+M29 以降は M28 完了後に別 milestone として切り出す。
+M29 以降候補も人間採否の提案・評価までを既定とし、自動採用、自動実装、repository 自動修正、patch / diff 生成、commit / push / pull request 作成、自動勝敗決定は含めない。
 
 ## Follow-up
 

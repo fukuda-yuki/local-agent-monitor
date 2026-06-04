@@ -28,3 +28,12 @@
 - ユーザーの手動確認により、AppHost を `http` launch profile で起動し、VS Code settings の `github.copilot.chat.otel.otlpEndpoint` を `http://localhost:19164` に変更すると Dashboard に表示されることを確認した。
 - Phase 0 の主手順は `http` launch profile に変更した。
 
+## M28 AppHost 再評価
+
+- M28 (Issue #22) で、既存の空 AppHost を AI 協業向けのローカル診断エントリポイントとして再評価した。
+- AppHost は空のまま維持する。Config CLI、OTel Collector、Langfuse、ServiceDefaults、新規 Web アプリ、DB / Redis / Worker は追加しない。
+- Config CLI は補助 CLI であり、AppHost の常駐 resource として扱わない。既存の `dotnet run` 手順を維持する。
+- `aspire agent init --workspace-root . --non-interactive --nologo` を実行し、5 つの skill files が生成された。
+- `aspire` / `aspire-orchestration` / `aspire-monitoring` は維持し、`aspire-deployment` / `aspire-init` は本リポジトリの scope に合わないため削除した。
+- Aspire MCP server は AppHost が空のため現時点では情報露出がない。resource 追加時に再評価する。
+- Phase 1 Langfuse baseline を置き換えない方針を `docs/spec.md` § 9 に明記した。

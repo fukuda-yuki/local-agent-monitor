@@ -36,6 +36,7 @@ Before changing code, repository guidance, or project documents, inspect context
 5. `docs/knowledge/` only when shared prior findings or decisions may matter.
 
 For Phase 1 local Langfuse PoC work, always check `docs/requirements.md`, `docs/spec.md`, `docs/task.md`, and the relevant milestone task before deciding implementation details.
+For Aspire AppHost usage decisions, refer to `docs/spec.md` § 9 (Aspire AppHost の役割と使い分け).
 
 If these sources disagree, state the conflict before editing.
 
