@@ -1,9 +1,15 @@
-# Sprint2: Raw Data Loop Ideas
+# Sprint2: Raw Data Loop
 
-Sprint2 は、Sprint1 の Langfuse PoC を踏まえ、Langfuse に依存しない raw telemetry store と改善ループを検討するための idea-level メモである。
+Sprint2 は、Sprint1 の Langfuse PoC を踏まえ、Langfuse に依存しない raw telemetry store と改善ループを検討する sprint である。
 
-この文書は正式仕様ではない。
-実装 schema、migration、CLI interface、運用手順は Sprint2 実装時に `../../requirements.md` と `../../spec.md` へ反映してから確定する。
+現時点では M1 で正式仕様化を開始している。
+実装 schema、migration、CLI interface、運用手順は `../../requirements.md` と `../../spec.md` へ反映してから確定する。
+
+## Milestones
+
+| Milestone | 状態 | 概要 |
+| --- | --- | --- |
+| [M1: Sprint2 仕様化](milestones/M1-sprint2-specification/task.md) | 進行中 | raw store / normalize / Langfuse 非依存 loop の MVP 境界と未決事項を確定し、requirements / spec へ反映する |
 
 ## 目的
 
@@ -11,7 +17,7 @@ Langfuse 依存の PoC から、raw telemetry / normalized dataset / improvement
 
 Langfuse は raw data の source of truth ではなく、人間が trace を確認する dashboard / trace viewer として再構築する。
 
-## アクションアイテム
+## 検討候補
 
 ### 生 JSON 保持基盤
 
