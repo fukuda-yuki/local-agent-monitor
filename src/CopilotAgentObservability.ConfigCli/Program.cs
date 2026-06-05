@@ -163,6 +163,11 @@ internal static class CliApplication
             error.WriteLine($"error: input JSON is invalid: {exception.Message}");
             return 1;
         }
+        catch (SqliteException exception)
+        {
+            error.WriteLine($"error: failed to write raw store: {exception.Message}");
+            return 1;
+        }
         catch (IOException exception)
         {
             error.WriteLine($"error: failed to read or write file: {exception.Message}");
@@ -682,6 +687,11 @@ internal sealed record RawIngestOptions(
         }
 
         var inputPath = args[1];
+        if (IsOption(inputPath))
+        {
+            return new RawIngestOptionsParseResult(null, "ingest-raw requires a raw OTLP JSON file path.");
+        }
+
         string? databasePath = null;
 
         for (var index = 2; index < args.Length; index++)

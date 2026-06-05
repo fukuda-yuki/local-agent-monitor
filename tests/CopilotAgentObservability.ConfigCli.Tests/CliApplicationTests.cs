@@ -215,6 +215,18 @@ public class CliApplicationTests
     }
 
     [Fact]
+    public void Run_IngestRaw_ReturnsNonZeroWhenInputPositionContainsOption()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["ingest-raw", "--db", "raw-store.db"], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("ingest-raw requires a raw OTLP JSON file path", error.ToString());
+    }
+
+    [Fact]
     public void Run_IngestRaw_ReturnsNonZeroForMissingDbValue()
     {
         using var output = new StringWriter();
@@ -249,6 +261,7 @@ public class CliApplicationTests
 
         Assert.Equal(1, exitCode);
         Assert.Contains("input file not found", error.ToString());
+        Assert.False(File.Exists(tempDirectory.DatabasePath));
     }
 
     [Fact]
@@ -263,6 +276,21 @@ public class CliApplicationTests
 
         Assert.Equal(1, exitCode);
         Assert.Contains("input JSON is invalid", error.ToString());
+        Assert.False(File.Exists(tempDirectory.DatabasePath));
+    }
+
+    [Fact]
+    public void Run_IngestRaw_ReturnsNonZeroForInvalidRawStoreDatabase()
+    {
+        using var tempDirectory = new TempDirectory();
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        File.WriteAllText(tempDirectory.DatabasePath, "not a sqlite database");
+
+        var exitCode = CliApplication.Run(["ingest-raw", FixturePath(), "--db", tempDirectory.DatabasePath], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("failed to write raw store", error.ToString());
     }
 
     private static string FixturePath()

@@ -31,3 +31,6 @@
 
 - The first build attempt was run in parallel with `dotnet test`; build failed because ConfigCli `obj` output was locked by the other process. The serial build rerun passed.
 - `normalize-raw`, measurement schema conversion, span classification, and raw-store-to-loop wiring remain M4 / M5 scope.
+- Follow-up subagent review found three actionable gaps: `ingest-raw --db <db>` should be classified as missing input, missing/malformed input failures should assert no DB creation, and SQLite open/write failures should be deterministic CLI errors. These were accepted and fixed.
+- Follow-up subagent review also noted `resource_attributes_json` is a key/value projection and `trace_id` indexes the first non-empty trace id in an OTLP batch. These are accepted M3 limitations because `payload_json` preserves the full raw payload; M4 should avoid treating those projection fields as the complete raw OTLP batch.
+- Re-review after the follow-up fix found no remaining blocker / major / minor issues.
