@@ -169,4 +169,130 @@ public class CliApplicationTests
         Assert.Equal(1, exitCode);
         Assert.Contains("missing required resource attribute", error.ToString());
     }
+
+    [Fact]
+    public void Run_IngestRaw_StoresSyntheticRawOtlpPayload()
+    {
+        using var tempDirectory = new TempDirectory();
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["ingest-raw", FixturePath(), "--db", tempDirectory.DatabasePath], output, error);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Ingested 1 raw telemetry record", output.ToString());
+        Assert.Equal(string.Empty, error.ToString());
+
+        var record = Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath).ListRecords());
+        Assert.Equal(RawTelemetrySources.RawOtlp, record.Source);
+        Assert.Equal("11111111111111111111111111111111", record.TraceId);
+        Assert.Contains("\"client.kind\":\"copilot-cli\"", record.ResourceAttributesJson);
+        Assert.Equal(File.ReadAllText(FixturePath()), record.PayloadJson);
+    }
+
+    [Fact]
+    public void Run_IngestRaw_ReturnsNonZeroWithoutInput()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["ingest-raw"], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("ingest-raw requires a raw OTLP JSON file path", error.ToString());
+    }
+
+    [Fact]
+    public void Run_IngestRaw_ReturnsNonZeroWithoutDb()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["ingest-raw", FixturePath()], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("ingest-raw requires --db", error.ToString());
+    }
+
+    [Fact]
+    public void Run_IngestRaw_ReturnsNonZeroForMissingDbValue()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["ingest-raw", FixturePath(), "--db"], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("--db requires a raw store database path", error.ToString());
+    }
+
+    [Fact]
+    public void Run_IngestRaw_ReturnsNonZeroForUnknownOption()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["ingest-raw", FixturePath(), "--db", "raw-store.db", "--unexpected"], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("unknown ingest-raw option '--unexpected'", error.ToString());
+    }
+
+    [Fact]
+    public void Run_IngestRaw_ReturnsNonZeroForMissingInputFile()
+    {
+        using var tempDirectory = new TempDirectory();
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["ingest-raw", Path.Combine(tempDirectory.Path, "missing.json"), "--db", tempDirectory.DatabasePath], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("input file not found", error.ToString());
+    }
+
+    [Fact]
+    public void Run_IngestRaw_ReturnsNonZeroForMalformedJson()
+    {
+        using var tempDirectory = new TempDirectory();
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var inputPath = tempDirectory.WriteFile("malformed.json", "{");
+
+        var exitCode = CliApplication.Run(["ingest-raw", inputPath, "--db", tempDirectory.DatabasePath], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("input JSON is invalid", error.ToString());
+    }
+
+    private static string FixturePath()
+    {
+        return Path.Combine(AppContext.BaseDirectory, "TestData", "raw-otlp.synthetic.json");
+    }
+
+    private sealed class TempDirectory : IDisposable
+    {
+        public TempDirectory()
+        {
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"m3-cli-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(Path);
+            DatabasePath = System.IO.Path.Combine(Path, "raw-store.db");
+        }
+
+        public string Path { get; }
+
+        public string DatabasePath { get; }
+
+        public string WriteFile(string fileName, string content)
+        {
+            var path = System.IO.Path.Combine(Path, fileName);
+            File.WriteAllText(path, content);
+            return path;
+        }
+
+        public void Dispose()
+        {
+            Directory.Delete(Path, recursive: true);
+        }
+    }
 }
