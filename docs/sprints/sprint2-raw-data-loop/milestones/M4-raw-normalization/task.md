@@ -9,19 +9,19 @@ M4 は `normalize-raw` を扱う。
 
 ## 完了条件
 
-- [ ] `config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]` を追加する
-- [ ] raw store 入力と raw JSON file 入力の両方を扱う
-- [ ] 出力列は M12 measurement schema に従う
-- [ ] 欠損値は CSV では空欄、JSON では `null` にする
-- [ ] unknown span / attribute は破棄せず、既存 measurement schema の補助 JSON 方針に従う
-- [ ] token、duration、tool call count、error count は M15 / M16 の集計方針に従う
-- [ ] `aggregate-measurements` の Langfuse export 入力処理を変更しない
-- [ ] `MeasurementRow` と `MeasurementOutputWriter.Columns` を measurement schema の単一 source of truth として使い、`normalize-raw` 用に出力列を複製しない
-- [ ] synthetic raw OTLP fixture と temp SQLite DB で normalization tests を追加する
-- [ ] unknown attribute sanitizer は既存方針と共有し、content / credential / identity-bearing data が output に混入しないことを確認する
-- [ ] `dotnet build CopilotAgentObservability.slnx` を実行する
-- [ ] `dotnet test CopilotAgentObservability.slnx` を実行する
-- [ ] 必要なレビューを `review.md` に記録する
+- [x] `config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]` を追加する
+- [x] raw store 入力と raw JSON file 入力の両方を扱う
+- [x] 出力列は M12 measurement schema に従う
+- [x] 欠損値は CSV では空欄、JSON では `null` にする
+- [x] unknown span / attribute は破棄せず、既存 measurement schema の補助 JSON 方針に従う
+- [x] token、duration、tool call count、error count は M15 / M16 の集計方針に従う
+- [x] `aggregate-measurements` の Langfuse export 入力処理を変更しない
+- [x] `MeasurementRow` と `MeasurementOutputWriter.Columns` を measurement schema の単一 source of truth として使い、`normalize-raw` 用に出力列を複製しない
+- [x] synthetic raw OTLP fixture と temp SQLite DB で normalization tests を追加する
+- [x] unknown attribute sanitizer は既存方針と共有し、content / credential / identity-bearing data が output に混入しないことを確認する
+- [x] `dotnet build CopilotAgentObservability.slnx` を実行する
+- [x] `dotnet test CopilotAgentObservability.slnx` を実行する
+- [x] 必要なレビューを `review.md` に記録する
 
 ## タスク分解
 
@@ -33,4 +33,8 @@ M4 は `normalize-raw` を扱う。
 
 ## 検証記録
 
-- 未実施。
+- 2026-06-06: `normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]` を追加し、raw OTLP JSON file と SQLite raw store の両方から M12 measurement schema の CSV / JSON を生成できるようにした。
+- 2026-06-06: raw OTLP adapter は `aggregate-measurements` の Langfuse export 入力処理とは分離し、`MeasurementRow` と `MeasurementOutputWriter.Columns` を共有する構成にした。
+- 2026-06-06: synthetic raw OTLP fixture を拡張し、Resource Attributes、token fallback、duration、turn / tool / error count、unknown span、unknown Resource Attribute sanitizer を `RawNormalizationTests` で確認した。
+- 2026-06-06: `dotnet build CopilotAgentObservability.slnx` は warning 0 / error 0 で成功した。
+- 2026-06-06: `dotnet test CopilotAgentObservability.slnx` は 154 tests passed。

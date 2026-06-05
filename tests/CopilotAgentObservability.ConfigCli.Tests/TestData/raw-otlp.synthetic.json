@@ -38,6 +38,66 @@
             "value": {
               "stringValue": "baseline"
             }
+          },
+          {
+            "key": "task.id",
+            "value": {
+              "stringValue": "maint-bug-001"
+            }
+          },
+          {
+            "key": "task.category",
+            "value": {
+              "stringValue": "bug-investigation"
+            }
+          },
+          {
+            "key": "task.run_index",
+            "value": {
+              "intValue": "3"
+            }
+          },
+          {
+            "key": "experiment.condition",
+            "value": {
+              "stringValue": "baseline"
+            }
+          },
+          {
+            "key": "prompt.version",
+            "value": {
+              "stringValue": "v1"
+            }
+          },
+          {
+            "key": "agent.variant",
+            "value": {
+              "stringValue": "default"
+            }
+          },
+          {
+            "key": "repo.snapshot",
+            "value": {
+              "stringValue": "synthetic-dotnet-fixture-v1"
+            }
+          },
+          {
+            "key": "cli.wrapper.version",
+            "value": {
+              "stringValue": "synthetic-v2"
+            }
+          },
+          {
+            "key": "prompt.content",
+            "value": {
+              "stringValue": "synthetic prompt resource attribute should not leak"
+            }
+          },
+          {
+            "key": "authorization.token",
+            "value": {
+              "stringValue": "synthetic auth token should not leak"
+            }
           }
         ]
       },
@@ -50,15 +110,91 @@
             {
               "traceId": "11111111111111111111111111111111",
               "spanId": "2222222222222222",
-              "name": "synthetic.agent.invocation",
+              "name": "invoke_agent",
               "kind": 1,
               "startTimeUnixNano": "1710000000000000000",
-              "endTimeUnixNano": "1710000001000000000",
+              "endTimeUnixNano": "1710000003000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "11111111111111111111111111111111",
+              "spanId": "3333333333333333",
+              "name": "chat",
+              "kind": 1,
+              "startTimeUnixNano": "1710000000500000000",
+              "endTimeUnixNano": "1710000001500000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "10"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "5"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "11111111111111111111111111111111",
+              "spanId": "4444444444444444",
+              "name": "execute_tool shell",
+              "kind": 1,
+              "startTimeUnixNano": "1710000001500000000",
+              "endTimeUnixNano": "1710000002500000000",
+              "status": {
+                "code": 2
+              },
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "shell"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "name": "exception",
+                  "attributes": [
+                    {
+                      "key": "exception.type",
+                      "value": {
+                        "stringValue": "SyntheticException"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "traceId": "11111111111111111111111111111111",
+              "spanId": "5555555555555555",
+              "name": "copilot.experimental.span",
+              "kind": 1,
+              "startTimeUnixNano": "1710000002500000000",
+              "endTimeUnixNano": "1710000003000000000",
+              "attributes": [
+                {
+                  "key": "prompt.content",
+                  "value": {
+                    "stringValue": "synthetic unknown span prompt should not leak"
                   }
                 }
               ]
