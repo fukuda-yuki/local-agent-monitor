@@ -1,0 +1,71 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "user.id",
+            "value": {
+              "stringValue": "example-user"
+            }
+          },
+          {
+            "key": "user.email",
+            "value": {
+              "stringValue": "user@example.com"
+            }
+          },
+          {
+            "key": "team.id",
+            "value": {
+              "stringValue": "platform"
+            }
+          },
+          {
+            "key": "department",
+            "value": {
+              "stringValue": "engineering"
+            }
+          },
+          {
+            "key": "client.kind",
+            "value": {
+              "stringValue": "copilot-cli"
+            }
+          },
+          {
+            "key": "experiment.id",
+            "value": {
+              "stringValue": "baseline"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "synthetic.copilot"
+          },
+          "spans": [
+            {
+              "traceId": "11111111111111111111111111111111",
+              "spanId": "2222222222222222",
+              "name": "synthetic.agent.invocation",
+              "kind": 1,
+              "startTimeUnixNano": "1710000000000000000",
+              "endTimeUnixNano": "1710000001000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

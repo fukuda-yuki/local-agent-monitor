@@ -9,18 +9,18 @@ M2 は storage 基盤だけを扱う。
 
 ## 完了条件
 
-- [ ] SQLite raw store schema version 1 を実装する
-- [ ] 既定 DB path `data/raw-store.db` を CLI から扱える形で定義する
-- [ ] raw record の固定列を `id`、`source`、`trace_id`、`received_at`、`resource_attributes_json`、`payload_json`、`schema_version` に限定する
-- [ ] `trace_id`、`received_at`、`source` の index を作成する
-- [ ] schema version は `1` のみとし、migration tool を追加しない
-- [ ] schema creation は同じ temp DB に対して複数回実行しても成功する
-- [ ] `source` は `raw-otlp`、`collector-output`、`langfuse-export` の値域に限定する
-- [ ] synthetic raw OTLP fixture を追加し、実 prompt / response content、credential、secret、Base64 header、実 user identity を含めない
-- [ ] `received_at` は test から固定できる形にし、temp SQLite DB を使う deterministic tests を追加する
-- [ ] `dotnet build CopilotAgentObservability.slnx` を実行する
-- [ ] `dotnet test CopilotAgentObservability.slnx` を実行する
-- [ ] 必要なレビューを `review.md` に記録する
+- [x] SQLite raw store schema version 1 を実装する
+- [x] 既定 DB path `data/raw-store.db` を CLI から扱える形で定義する
+- [x] raw record の固定列を `id`、`source`、`trace_id`、`received_at`、`resource_attributes_json`、`payload_json`、`schema_version` に限定する
+- [x] `trace_id`、`received_at`、`source` の index を作成する
+- [x] schema version は `1` のみとし、migration tool を追加しない
+- [x] schema creation は同じ temp DB に対して複数回実行しても成功する
+- [x] `source` は `raw-otlp`、`collector-output`、`langfuse-export` の値域に限定する
+- [x] synthetic raw OTLP fixture を追加し、実 prompt / response content、credential、secret、Base64 header、実 user identity を含めない
+- [x] `received_at` は test から固定できる形にし、temp SQLite DB を使う deterministic tests を追加する
+- [x] `dotnet build CopilotAgentObservability.slnx` を実行する
+- [x] `dotnet test CopilotAgentObservability.slnx` を実行する
+- [x] 必要なレビューを `review.md` に記録する
 
 ## タスク分解
 
@@ -32,4 +32,9 @@ M2 は storage 基盤だけを扱う。
 
 ## 検証記録
 
-- 未実施。
+- `dotnet build CopilotAgentObservability.slnx`
+  - 成功。0 warnings / 0 errors。
+  - .NET preview SDK 使用メッセージ `NETSDK1057` は環境由来の informational message として表示された。
+- `dotnet test CopilotAgentObservability.slnx`
+  - 成功。128 tests passed。
+  - 初回 test では temp SQLite DB が Windows 上で connection pooling により削除時ロックされたため、raw store と test helper の SQLite connection string に `Pooling=false` を設定して再実行した。
