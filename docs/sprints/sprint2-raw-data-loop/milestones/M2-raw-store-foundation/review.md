@@ -43,3 +43,37 @@
 
 - raw OTLP payload からの `trace_id` / Resource Attributes 抽出は M3 の範囲であり、M2 では未実装。
 - raw store から measurement schema への normalization は M4 の範囲であり、M2 では未実装。
+
+## 2026-06-05 subagent review follow-up
+
+### レビュー構成
+
+- 仕様準拠 / M2 scope review: 指摘なし。
+- SQLite 実装 / test review: 実装バグ指摘なし。schema metadata と non-UTC `received_at` の追加 test は有用な coverage gap と判断。
+- data handling / dependency / documentation review: Low 指摘 1 件。
+
+### Main-Agent 評価と対応
+
+- Low: dependency 追加の lockfile 影響が記録されていない。
+  - 妥当性: 妥当。M2 task は SQLite dependency 追加時に lockfile 影響を明示するとしている。
+  - 対応: この review に、`Microsoft.Data.Sqlite` 追加理由と lockfile 影響を明記する。
+  - lockfile 影響: repository に committed lockfile はなく、dependency 追加による lockfile 変更は発生していない。
+  - 追加理由: `docs/spec.md` 5.17 が SQLite raw store を Sprint2 MVP の既定として定義しており、.NET 標準 library だけでは SQLite provider を利用できないため。
+- Coverage gap: schema test が fixed column / index 名中心で、SQLite constraints の SQL shape を直接確認していない。
+  - 妥当性: 妥当。M2 は schema foundation であり、constraint regression を捕捉する価値がある。
+  - 対応: `raw_records` の `CREATE TABLE` SQL から `AUTOINCREMENT`、source CHECK、payload NOT NULL、schema_version CHECK を確認する test を追加。
+- Coverage gap: non-UTC `received_at` の扱いが test されていない。
+  - 妥当性: 妥当。実装は UTC normalization を行うため、意図を test で固定する。
+  - 対応: non-UTC `DateTimeOffset` を insert し、UTC として read される test を追加。
+- Coverage gap: malformed `payload_json` / non-object `resource_attributes_json` の validation がない。
+  - 妥当性: M2 では非対応が妥当。raw store は raw payload 保持基盤であり、input validation は M3 `ingest-raw` の責務として扱う。
+  - 対応: 実装変更なし。
+- Robustness: `SqliteException` message text より error code assertion がよい。
+  - 妥当性: 妥当。
+  - 対応: source constraint test を SQLite constraint error code assertion に変更。
+
+### 再レビュー後の追加対応
+
+- Low: non-UTC `received_at` test が同一 instant の比較だけで、UTC offset 正規化を完全には固定できていない。
+  - 妥当性: 妥当。`DateTimeOffset` equality は offset が異なっても同一 instant なら等価になり得る。
+  - 対応: non-UTC `received_at` test に `record.ReceivedAt.Offset == TimeSpan.Zero` の assertion を追加。

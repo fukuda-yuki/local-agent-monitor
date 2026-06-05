@@ -51,6 +51,22 @@ public class RawTelemetryStoreTests
     }
 
     [Fact]
+    public void CreateSchema_CreatesExpectedSqliteConstraints()
+    {
+        using var tempDirectory = new TempDirectory();
+        var store = new RawTelemetryStore(tempDirectory.DatabasePath);
+
+        store.CreateSchema();
+
+        using var connection = OpenConnection(tempDirectory.DatabasePath);
+        var createSql = ReadCreateSql(connection, "raw_records");
+        Assert.Contains("id INTEGER PRIMARY KEY AUTOINCREMENT", createSql);
+        Assert.Contains("source TEXT NOT NULL CHECK (source IN ('raw-otlp', 'collector-output', 'langfuse-export'))", createSql);
+        Assert.Contains("payload_json TEXT NOT NULL", createSql);
+        Assert.Contains("schema_version INTEGER NOT NULL CHECK (schema_version = 1)", createSql);
+    }
+
+    [Fact]
     public void CreateSchema_CanRunMultipleTimesOnSameDatabase()
     {
         using var tempDirectory = new TempDirectory();
@@ -92,6 +108,27 @@ public class RawTelemetryStoreTests
     }
 
     [Fact]
+    public void Insert_NormalizesReceivedAtToUtc()
+    {
+        using var tempDirectory = new TempDirectory();
+        var store = new RawTelemetryStore(tempDirectory.DatabasePath);
+        var receivedAt = new DateTimeOffset(2026, 6, 5, 10, 2, 3, TimeSpan.FromHours(9));
+
+        store.CreateSchema();
+        store.Insert(new RawTelemetryRecord(
+            Id: null,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: "11111111111111111111111111111111",
+            ReceivedAt: receivedAt,
+            ResourceAttributesJson: null,
+            PayloadJson: "{}"));
+
+        var record = Assert.Single(store.ListRecords());
+        Assert.Equal(new DateTimeOffset(2026, 6, 5, 1, 2, 3, TimeSpan.Zero), record.ReceivedAt);
+        Assert.Equal(TimeSpan.Zero, record.ReceivedAt.Offset);
+    }
+
+    [Fact]
     public void Insert_AllowsNullableTraceIdAndResourceAttributes()
     {
         using var tempDirectory = new TempDirectory();
@@ -126,7 +163,7 @@ public class RawTelemetryStoreTests
             ReceivedAt: new DateTimeOffset(2026, 6, 5, 1, 2, 3, TimeSpan.Zero),
             ResourceAttributesJson: null,
             PayloadJson: "{}")));
-        Assert.Contains("CHECK constraint failed", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(19, exception.SqliteErrorCode);
     }
 
     private static string FixturePath()
@@ -180,6 +217,14 @@ public class RawTelemetryStoreTests
         command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $name;";
         command.Parameters.AddWithValue("$name", tableName);
         return Convert.ToInt32(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    private static string ReadCreateSql(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = $name;";
+        command.Parameters.AddWithValue("$name", tableName);
+        return (string)command.ExecuteScalar()!;
     }
 
     private sealed class TempDirectory : IDisposable
