@@ -1,6 +1,6 @@
 # 利用者向けガイド
 
-この文書は、`copilot-agent-observability` を使って GitHub Copilot Chat / GitHub Copilot CLI の OpenTelemetry データをローカル Langfuse に送信し、trace を確認するための入口です。
+この文書は、`copilot-agent-observability` を使って GitHub Copilot Chat / GitHub Copilot CLI の OpenTelemetry データをローカル Langfuse に送信して trace を確認し、saved raw OTLP JSON から Langfuse 非依存の raw data loop を試すための入口です。
 
 詳細仕様の正は [docs/spec.md](spec.md) です。この文書は、初めて使う人が準備と確認の流れを把握しやすくするためのガイドです。
 
@@ -19,6 +19,7 @@
 - duration
 - error
 - VS Code GitHub Copilot Chat と GitHub Copilot CLI の挙動差分
+- Langfuse が起動していない状態での raw store / normalized dataset / improvement workflow
 
 目的ではないもの:
 
@@ -31,7 +32,7 @@
 
 ## 全体像
 
-現在の既定構成は、ローカル PC 上で Langfuse self-host を Docker Desktop で起動し、VS Code GitHub Copilot Chat と GitHub Copilot CLI から OTLP HTTP で直接送信する構成です。
+Sprint1 baseline は、ローカル PC 上で Langfuse self-host を Docker Desktop で起動し、VS Code GitHub Copilot Chat と GitHub Copilot CLI から OTLP HTTP で直接送信する構成です。
 
 ```text
 VS Code GitHub Copilot Chat
@@ -52,6 +53,21 @@ Langfuse UI
 | Langfuse UI | `http://localhost:3000` |
 | Langfuse OTLP endpoint | `http://localhost:3000/api/public/otel` |
 | Langfuse OTLP traces endpoint | `http://localhost:3000/api/public/otel/v1/traces` |
+
+Sprint2 の raw data loop は、Langfuse が起動していなくても synthetic raw OTLP JSON から normalized dataset と改善支援 CLI を実行できる構成です。
+
+```text
+saved raw OTLP JSON
+  -> ingest-raw
+  -> data/raw-store.db
+  -> normalize-raw
+  -> validate-diagnoses
+  -> generate-improvement-proposals
+  -> evaluate-improvement-proposals
+  -> generate-decision-template / record-human-decisions
+```
+
+Langfuse UI は、同じ trace を人間が確認する optional dashboard / trace viewer として扱います。raw store と normalized dataset が Sprint2 loop の主入力です。
 
 ## 利用前チェック
 
@@ -101,6 +117,8 @@ Langfuse に保存され得るもの:
 - repository information
 
 ローカル PoC では、合成データまたは検証用データだけを使ってください。実データ、顧客データ、秘密情報、credential、secret、実 trace content は repository に保存しないでください。
+
+Sprint2 の raw data loop でも同じ方針です。raw payload には prompt、response、tool arguments / results、identity-bearing 属性が含まれ得るため、手順確認には synthetic raw OTLP JSON だけを使ってください。実 credential、secret、Base64 header、実 user identity、実 prompt / response content を含む raw payload は repository に保存しないでください。
 
 ## 1. Langfuse を起動する
 
@@ -236,7 +254,65 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- aggregate-measur
 
 出力は研究用 measurement schema に合わせた CSV / JSON です。実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を含めないでください。
 
-## 8. Collector 経由送信を試す場合
+## 8. Langfuse なしで raw data loop を試す場合
+
+この手順は synthetic fixture だけを使う確認用です。Langfuse、Copilot live 実行、実 trace content は不要です。
+
+作業用の出力先を作ります。
+
+```powershell
+New-Item -ItemType Directory -Force data | Out-Null
+New-Item -ItemType Directory -Force tmp\sprint2-loop | Out-Null
+```
+
+synthetic raw OTLP JSON を SQLite raw store に取り込みます。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- ingest-raw tests\CopilotAgentObservability.ConfigCli.Tests\TestData\raw-otlp.synthetic.json --db data\raw-store.db
+```
+
+raw store から normalized dataset を生成します。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw data\raw-store.db --csv tmp\sprint2-loop\measurements.csv --json tmp\sprint2-loop\measurements.json
+```
+
+synthetic diagnosis record を検証します。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- validate-diagnoses tests\CopilotAgentObservability.ConfigCli.Tests\TestData\m5-diagnoses.synthetic.json --json tmp\sprint2-loop\validated-diagnoses.json
+```
+
+改善提案、事前評価、人間判断 template を生成します。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-improvement-proposals tmp\sprint2-loop\validated-diagnoses.json --json tmp\sprint2-loop\proposals.json
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- evaluate-improvement-proposals tmp\sprint2-loop\proposals.json --json tmp\sprint2-loop\evaluations.json
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-decision-template tmp\sprint2-loop\evaluations.json --json tmp\sprint2-loop\decision-template.json
+```
+
+`record-human-decisions` は、人間が記入した decision JSON / CSV を検証して記録します。自動採用、自動実装、repository 修正、patch / diff 生成は行いません。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- record-human-decisions tmp\sprint2-loop\evaluations.json <decisions.json> --json tmp\sprint2-loop\human-decisions.json
+```
+
+`<decisions.json>` には synthetic または sanitized された decision record だけを指定してください。実名、実 email address、credential、secret、Base64 header、実 prompt / response content は入れないでください。
+
+## 9. local raw data を削除する場合
+
+Sprint2 の raw store 既定 path は `data/raw-store.db` です。`data/`、`tmp\sprint2-loop\`、手元に保存した raw payload file は local runtime data であり、repository に commit しません。
+
+不要になった local output を削除する例:
+
+```powershell
+Remove-Item data\raw-store.db -ErrorAction SilentlyContinue
+Remove-Item tmp\sprint2-loop -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+実データや秘密情報が混入した raw payload を扱ってしまった場合は、その file、生成された raw store、一時 CSV / JSON output を削除し、必要に応じてローカル Langfuse 側の対象 trace や volume も破棄してください。
+
+## 10. Collector 経由送信を試す場合
 
 通常は Langfuse 直接送信を使います。直接送信が不安定な場合や、後続の組織展開候補を試す場合だけ Collector 経由送信を使います。
 
@@ -262,6 +338,7 @@ docker compose -f infra\otel-collector\docker-compose.example.yml config
 | CLI だけ trace が出ない | `COPILOT_OTEL_ENABLED` と `OTEL_EXPORTER_OTLP_*` が同じ shell に設定されているか |
 | trace はあるが分類できない | `OTEL_RESOURCE_ATTRIBUTES` に `client.kind` と `experiment.id` が入っているか |
 | 実データが混入した | 対象 trace を削除するか、必要に応じてローカル Langfuse volume を破棄する |
+| raw data loop の出力を commit しそうになった | `data/raw-store.db`、`tmp\sprint2-loop\`、raw payload file を削除し、`git status --short` を確認する |
 
 ## どの文書を更新するか
 
@@ -273,6 +350,6 @@ docker compose -f infra\otel-collector\docker-compose.example.yml config
 - 上位要件は [docs/requirements.md](requirements.md)
 - repository 全体の sprint / roadmap index は [docs/task.md](task.md)
 - Sprint1 の完了済み作業記録は [docs/sprints/sprint1-langfuse-poc/](sprints/sprint1-langfuse-poc/)
-- Sprint2 の検討メモは [docs/sprints/sprint2-raw-data-loop/](sprints/sprint2-raw-data-loop/)
+- Sprint2 の完了済み raw data loop 資料は [docs/sprints/sprint2-raw-data-loop/](sprints/sprint2-raw-data-loop/)
 
 README やこの文書が [docs/spec.md](spec.md) と矛盾する場合は、仕様を先に確認してください。
