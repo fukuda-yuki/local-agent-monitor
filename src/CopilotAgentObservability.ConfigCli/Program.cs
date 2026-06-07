@@ -1538,7 +1538,7 @@ internal static class RawMeasurementNormalizer
     {
         var node = new JsonObject();
         AddStringNode(node, "id", span.SpanId);
-        AddStringNode(node, "name", span.Name);
+        AddSafeStringNode(node, "name", span.Name);
         AddStringNode(node, "kind", span.Kind);
         return node;
     }
@@ -1739,6 +1739,14 @@ internal static class RawMeasurementNormalizer
     private static void AddStringNode(JsonObject node, string propertyName, string? value)
     {
         if (value is not null)
+        {
+            node[propertyName] = value;
+        }
+    }
+
+    private static void AddSafeStringNode(JsonObject node, string propertyName, string? value)
+    {
+        if (value is not null && !MeasurementSanitizer.IsUnsafeStringValue(value))
         {
             node[propertyName] = value;
         }
@@ -2312,7 +2320,11 @@ internal static class MeasurementSanitizer
         {
             if (!MappedResourceAttributeKeys.Contains(property.Name) && !IsUnsafeKey(property.Name))
             {
-                unknownResourceAttributes[property.Name] = JsonNode.Parse(property.Value.GetRawText());
+                var value = JsonNode.Parse(property.Value.GetRawText());
+                if (TrySanitizeNode(value, out var sanitizedValue))
+                {
+                    unknownResourceAttributes[property.Name] = sanitizedValue;
+                }
             }
         }
 
@@ -2329,9 +2341,13 @@ internal static class MeasurementSanitizer
         {
             if (!MappedResourceAttributeKeys.Contains(property.Key) && !IsUnsafeKey(property.Key))
             {
-                unknownResourceAttributes[property.Key] = property.Value is null
+                var value = property.Value is null
                     ? null
                     : JsonNode.Parse(property.Value.ToJsonString());
+                if (TrySanitizeNode(value, out var sanitizedValue))
+                {
+                    unknownResourceAttributes[property.Key] = sanitizedValue;
+                }
             }
         }
 
@@ -2355,9 +2371,84 @@ internal static class MeasurementSanitizer
             || normalizedKey.Contains("authorization", StringComparison.Ordinal)
             || normalizedKey.Contains("api.key", StringComparison.Ordinal)
             || normalizedKey.Contains("token", StringComparison.Ordinal)
-            || string.Equals(normalizedKey, "user.id", StringComparison.Ordinal)
-            || string.Equals(normalizedKey, "user.email", StringComparison.Ordinal)
+            || normalizedKey.StartsWith("user.", StringComparison.Ordinal)
+            || normalizedKey.StartsWith("enduser.", StringComparison.Ordinal)
             || normalizedKey.EndsWith(".email", StringComparison.Ordinal);
+    }
+
+    public static bool IsUnsafeStringValue(string value)
+    {
+        return Regex.IsMatch(value, @"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", RegexOptions.IgnoreCase)
+            || value.Contains("Bearer ", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Basic ", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Authorization:", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("api_key", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("secret", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("password", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("prompt:", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TrySanitizeNode(JsonNode? value, out JsonNode? sanitizedValue)
+    {
+        sanitizedValue = null;
+        if (value is null)
+        {
+            return true;
+        }
+
+        if (value is JsonValue jsonValue)
+        {
+            if (jsonValue.TryGetValue<string>(out var stringValue)
+                && IsUnsafeStringValue(stringValue))
+            {
+                return false;
+            }
+
+            sanitizedValue = JsonNode.Parse(value.ToJsonString());
+            return true;
+        }
+
+        if (value is JsonObject jsonObject)
+        {
+            var sanitizedObject = new JsonObject();
+            foreach (var property in jsonObject)
+            {
+                if (IsUnsafeKey(property.Key))
+                {
+                    continue;
+                }
+
+                if (TrySanitizeNode(property.Value, out var sanitizedChild))
+                {
+                    sanitizedObject[property.Key] = sanitizedChild;
+                }
+            }
+
+            if (sanitizedObject.Count == 0)
+            {
+                return false;
+            }
+
+            sanitizedValue = sanitizedObject;
+            return true;
+        }
+
+        if (value is JsonArray jsonArray)
+        {
+            var sanitizedArray = new JsonArray();
+            foreach (var item in jsonArray)
+            {
+                if (TrySanitizeNode(item, out var sanitizedItem))
+                {
+                    sanitizedArray.Add(sanitizedItem);
+                }
+            }
+
+            sanitizedValue = sanitizedArray;
+            return true;
+        }
+
+        return false;
     }
 }
 

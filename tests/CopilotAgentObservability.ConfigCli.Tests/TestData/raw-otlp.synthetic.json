@@ -98,6 +98,45 @@
             "value": {
               "stringValue": "synthetic auth token should not leak"
             }
+          },
+          {
+            "key": "metadata",
+            "value": {
+              "kvlistValue": {
+                "values": [
+                  {
+                    "key": "safe.detail",
+                    "value": {
+                      "stringValue": "kept nested value"
+                    }
+                  },
+                  {
+                    "key": "authorization.token",
+                    "value": {
+                      "stringValue": "synthetic nested auth token should not leak"
+                    }
+                  },
+                  {
+                    "key": "user.email",
+                    "value": {
+                      "stringValue": "nested@example.com"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "key": "user.name",
+            "value": {
+              "stringValue": "Synthetic User"
+            }
+          },
+          {
+            "key": "enduser.id",
+            "value": {
+              "stringValue": "synthetic-end-user"
+            }
           }
         ]
       },
@@ -198,6 +237,14 @@
                   }
                 }
               ]
+            },
+            {
+              "traceId": "11111111111111111111111111111111",
+              "spanId": "6666666666666666",
+              "name": "prompt: synthetic unknown span name should not leak",
+              "kind": 1,
+              "startTimeUnixNano": "1710000002500000000",
+              "endTimeUnixNano": "1710000003000000000"
             }
           ]
         }

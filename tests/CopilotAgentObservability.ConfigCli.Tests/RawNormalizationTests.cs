@@ -63,51 +63,43 @@ public class RawNormalizationTests
         Assert.Equal(2, first.GetProperty("error_count").GetInt32());
         Assert.Equal("not-evaluated", first.GetProperty("success_status").GetString());
 
-        var unknownSpan = Assert.Single(first.GetProperty("unknown_spans_json").EnumerateArray());
-        Assert.Equal("5555555555555555", unknownSpan.GetProperty("id").GetString());
-        Assert.Equal("copilot.experimental.span", unknownSpan.GetProperty("name").GetString());
-        Assert.False(unknownSpan.TryGetProperty("attributes", out _));
+        var unknownSpans = first.GetProperty("unknown_spans_json").EnumerateArray().ToArray();
+        Assert.Equal(2, unknownSpans.Length);
+        Assert.Equal("5555555555555555", unknownSpans[0].GetProperty("id").GetString());
+        Assert.Equal("copilot.experimental.span", unknownSpans[0].GetProperty("name").GetString());
+        Assert.False(unknownSpans[0].TryGetProperty("attributes", out _));
+        Assert.Equal("6666666666666666", unknownSpans[1].GetProperty("id").GetString());
+        Assert.False(unknownSpans[1].TryGetProperty("name", out _));
 
         var unknownResourceAttributes = first.GetProperty("unknown_attributes_json").GetProperty("resourceAttributes");
+        Assert.Equal("platform", unknownResourceAttributes.GetProperty("team.id").GetString());
+        Assert.Equal("engineering", unknownResourceAttributes.GetProperty("department").GetString());
         Assert.Equal("synthetic-v2", unknownResourceAttributes.GetProperty("cli.wrapper.version").GetString());
+        Assert.Equal("kept nested value", unknownResourceAttributes.GetProperty("metadata").GetProperty("safe.detail").GetString());
         Assert.False(unknownResourceAttributes.TryGetProperty("user.id", out _));
         Assert.False(unknownResourceAttributes.TryGetProperty("user.email", out _));
+        Assert.False(unknownResourceAttributes.TryGetProperty("user.name", out _));
+        Assert.False(unknownResourceAttributes.TryGetProperty("enduser.id", out _));
         Assert.False(unknownResourceAttributes.TryGetProperty("prompt.content", out _));
         Assert.False(unknownResourceAttributes.TryGetProperty("authorization.token", out _));
+        Assert.False(unknownResourceAttributes.GetProperty("metadata").TryGetProperty("authorization.token", out _));
+        Assert.False(unknownResourceAttributes.GetProperty("metadata").TryGetProperty("user.email", out _));
         Assert.DoesNotContain("synthetic prompt resource attribute should not leak", jsonText);
         Assert.DoesNotContain("synthetic auth token should not leak", jsonText);
+        Assert.DoesNotContain("synthetic nested auth token should not leak", jsonText);
         Assert.DoesNotContain("synthetic unknown span prompt should not leak", jsonText);
+        Assert.DoesNotContain("synthetic unknown span name should not leak", jsonText);
         Assert.DoesNotContain("user@example.com", jsonText);
+        Assert.DoesNotContain("nested@example.com", jsonText);
+        Assert.DoesNotContain("Synthetic User", jsonText);
+        Assert.DoesNotContain("synthetic-end-user", jsonText);
     }
 
     [Fact]
     public void NormalizeRaw_WritesCsvWithFixedColumnsAndBlankMissingValues()
     {
         using var tempDirectory = new TempDirectory();
-        var inputPath = tempDirectory.WriteFile("minimal.json", """
-            {
-              "resourceSpans": [
-                {
-                  "resource": {
-                    "attributes": [
-                      { "key": "client.kind", "value": { "stringValue": "copilot-cli" } }
-                    ]
-                  },
-                  "scopeSpans": [
-                    {
-                      "spans": [
-                        {
-                          "traceId": "99999999999999999999999999999999",
-                          "spanId": "aaaaaaaaaaaaaaaa",
-                          "name": "invoke_agent"
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-            """);
+        var inputPath = tempDirectory.WriteFile("minimal.json", MinimalRawJson());
         var csvPath = Path.Combine(tempDirectory.Path, "measurements.csv");
 
         var exitCode = CliApplication.Run(
@@ -118,9 +110,58 @@ public class RawNormalizationTests
         Assert.Equal(0, exitCode);
 
         var lines = File.ReadAllLines(csvPath);
+        Assert.Equal(2, lines.Length);
         Assert.Equal(string.Join(',', MeasurementOutputWriter.Columns), lines[0]);
-        Assert.Contains("99999999999999999999999999999999,,copilot-cli", lines[1]);
-        Assert.Contains(",,,,,,,,,,0,0,,0,not-evaluated", lines[1]);
+        var values = ParseCsvLine(lines[1]);
+        Assert.Equal(MeasurementOutputWriter.Columns.Length, values.Count);
+        Assert.Equal("99999999999999999999999999999999", CsvValue(values, "trace_id"));
+        Assert.Equal(string.Empty, CsvValue(values, "experiment_id"));
+        Assert.Equal("copilot-cli", CsvValue(values, "client_kind"));
+        Assert.Equal(string.Empty, CsvValue(values, "task_id"));
+        Assert.Equal(string.Empty, CsvValue(values, "task_run_index"));
+        Assert.Equal("0", CsvValue(values, "turn_count"));
+        Assert.Equal("0", CsvValue(values, "tool_call_count"));
+        Assert.Equal(string.Empty, CsvValue(values, "duration_ms"));
+        Assert.Equal("0", CsvValue(values, "error_count"));
+        Assert.Equal("not-evaluated", CsvValue(values, "success_status"));
+        Assert.Equal(string.Empty, CsvValue(values, "unknown_spans_json"));
+        Assert.Equal(string.Empty, CsvValue(values, "unknown_attributes_json"));
+    }
+
+    [Fact]
+    public void NormalizeRaw_WritesJsonWithFixedSchemaAndNullMissingValues()
+    {
+        using var tempDirectory = new TempDirectory();
+        var inputPath = tempDirectory.WriteFile("minimal.json", MinimalRawJson());
+        var jsonPath = Path.Combine(tempDirectory.Path, "measurements.json");
+
+        var exitCode = CliApplication.Run(
+            ["normalize-raw", inputPath, "--json", jsonPath],
+            new StringWriter(),
+            new StringWriter());
+
+        Assert.Equal(0, exitCode);
+
+        using var document = JsonDocument.Parse(File.ReadAllText(jsonPath));
+        var row = Assert.Single(document.RootElement.EnumerateArray());
+        Assert.Equal(
+            MeasurementOutputWriter.Columns.Order(StringComparer.Ordinal),
+            row.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal));
+        foreach (var column in MeasurementOutputWriter.Columns)
+        {
+            Assert.True(row.TryGetProperty(column, out _), $"Expected JSON column '{column}'.");
+        }
+
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("experiment_id").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("task_id").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("task_run_index").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("input_tokens").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("duration_ms").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("unknown_spans_json").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("unknown_attributes_json").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("evaluator_id").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("evaluation_notes").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("evaluated_at").ValueKind);
     }
 
     [Fact]
@@ -147,6 +188,44 @@ public class RawNormalizationTests
         var row = Assert.Single(document.RootElement.EnumerateArray());
         Assert.Equal("11111111111111111111111111111111", row.GetProperty("trace_id").GetString());
         Assert.Equal(15, row.GetProperty("total_tokens").GetInt32());
+    }
+
+    [Fact]
+    public void NormalizeRaw_ReadsAllRawStoreRecordsUsingPayloadJson()
+    {
+        using var tempDirectory = new TempDirectory();
+        var store = new RawTelemetryStore(tempDirectory.DatabasePath);
+        store.CreateSchema();
+        store.Insert(new RawTelemetryRecord(
+            Id: null,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: "metadata-trace-should-not-be-used-1",
+            ReceivedAt: DateTimeOffset.UtcNow,
+            ResourceAttributesJson: """{"client.kind":"metadata-should-not-be-used"}""",
+            PayloadJson: MinimalRawJson("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "copilot-cli")));
+        store.Insert(new RawTelemetryRecord(
+            Id: null,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: "metadata-trace-should-not-be-used-2",
+            ReceivedAt: DateTimeOffset.UtcNow,
+            ResourceAttributesJson: """{"client.kind":"metadata-should-not-be-used"}""",
+            PayloadJson: MinimalRawJson("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "vscode-copilot-chat")));
+        var jsonPath = Path.Combine(tempDirectory.Path, "measurements.json");
+
+        var exitCode = CliApplication.Run(
+            ["normalize-raw", tempDirectory.DatabasePath, "--json", jsonPath],
+            new StringWriter(),
+            new StringWriter());
+
+        Assert.Equal(0, exitCode);
+
+        using var document = JsonDocument.Parse(File.ReadAllText(jsonPath));
+        var rows = document.RootElement.EnumerateArray().ToArray();
+        Assert.Equal(2, rows.Length);
+        Assert.Equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", rows[0].GetProperty("trace_id").GetString());
+        Assert.Equal("copilot-cli", rows[0].GetProperty("client_kind").GetString());
+        Assert.Equal("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", rows[1].GetProperty("trace_id").GetString());
+        Assert.Equal("vscode-copilot-chat", rows[1].GetProperty("client_kind").GetString());
     }
 
     [Fact]
@@ -246,6 +325,79 @@ public class RawNormalizationTests
     private static string FixturePath()
     {
         return Path.Combine(AppContext.BaseDirectory, "TestData", "raw-otlp.synthetic.json");
+    }
+
+    private static string MinimalRawJson(
+        string traceId = "99999999999999999999999999999999",
+        string clientKind = "copilot-cli")
+    {
+        return $$"""
+            {
+              "resourceSpans": [
+                {
+                  "resource": {
+                    "attributes": [
+                      { "key": "client.kind", "value": { "stringValue": "{{clientKind}}" } }
+                    ]
+                  },
+                  "scopeSpans": [
+                    {
+                      "spans": [
+                        {
+                          "traceId": "{{traceId}}",
+                          "spanId": "aaaaaaaaaaaaaaaa",
+                          "name": "invoke_agent"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """;
+    }
+
+    private static string CsvValue(IReadOnlyList<string> values, string column)
+    {
+        return values[Array.IndexOf(MeasurementOutputWriter.Columns, column)];
+    }
+
+    private static IReadOnlyList<string> ParseCsvLine(string line)
+    {
+        var values = new List<string>();
+        var builder = new System.Text.StringBuilder();
+        var inQuotes = false;
+
+        for (var index = 0; index < line.Length; index++)
+        {
+            var character = line[index];
+            if (character == '"')
+            {
+                if (inQuotes && index + 1 < line.Length && line[index + 1] == '"')
+                {
+                    builder.Append('"');
+                    index++;
+                }
+                else
+                {
+                    inQuotes = !inQuotes;
+                }
+
+                continue;
+            }
+
+            if (character == ',' && !inQuotes)
+            {
+                values.Add(builder.ToString());
+                builder.Clear();
+                continue;
+            }
+
+            builder.Append(character);
+        }
+
+        values.Add(builder.ToString());
+        return values;
     }
 
     private sealed class TempDirectory : IDisposable
