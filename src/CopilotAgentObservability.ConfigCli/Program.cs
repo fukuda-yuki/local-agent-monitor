@@ -647,6 +647,18 @@ internal static class CliApplication
             }
 
             var evaluations = ProposalEvaluationInputReader.Read(parseResult.Options.EvaluationsPath);
+            var safetyErrors = ProposalEvaluationSafetyValidator.Validate(evaluations);
+            if (safetyErrors.Count > 0)
+            {
+                error.WriteLine("error: input contains unsafe content:");
+                foreach (var validationError in safetyErrors)
+                {
+                    error.WriteLine($"  - {validationError}");
+                }
+
+                return 1;
+            }
+
             var template = DecisionTemplateGenerator.Generate(evaluations);
 
             if (parseResult.Options.CsvOutputPath is not null)
@@ -2387,9 +2399,13 @@ internal static class MeasurementSanitizer
             || normalizedKey.Contains("authorization", StringComparison.Ordinal)
             || normalizedKey.Contains("api.key", StringComparison.Ordinal)
             || normalizedKey.Contains("token", StringComparison.Ordinal)
+            || normalizedKey.Contains("userid", StringComparison.Ordinal)
+            || normalizedKey.Contains("user_id", StringComparison.Ordinal)
+            || normalizedKey.Contains("username", StringComparison.Ordinal)
             || normalizedKey.StartsWith("user.", StringComparison.Ordinal)
             || normalizedKey.StartsWith("enduser.", StringComparison.Ordinal)
-            || normalizedKey.EndsWith(".email", StringComparison.Ordinal);
+            || normalizedKey.EndsWith(".email", StringComparison.Ordinal)
+            || string.Equals(normalizedKey, "email", StringComparison.Ordinal);
     }
 
     public static bool IsUnsafeStringValue(string value)
@@ -2401,7 +2417,11 @@ internal static class MeasurementSanitizer
             || value.Contains("api_key", StringComparison.OrdinalIgnoreCase)
             || value.Contains("secret", StringComparison.OrdinalIgnoreCase)
             || value.Contains("password", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("prompt:", StringComparison.OrdinalIgnoreCase);
+            || value.Contains("prompt:", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("response:", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("content:", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("tool argument", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("tool result", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TrySanitizeNode(JsonNode? value, out JsonNode? sanitizedValue)

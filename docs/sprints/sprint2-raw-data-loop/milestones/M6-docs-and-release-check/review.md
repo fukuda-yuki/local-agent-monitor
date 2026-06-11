@@ -38,3 +38,29 @@
 - Live Copilot / live Langfuse collection was not rerun in M6 because this milestone documents and releases the synthetic Sprint2 loop, not Phase 1 live telemetry behavior.
 - Shared environment use, real data validation, retention, access control, masking / redaction, and user notice remain separate specification work before any non-local or non-synthetic validation.
 - Trace-driven automatic failure category / anti-pattern extraction remains a Sprint3 candidate and is not part of Sprint2 MVP.
+
+## 2026-06-11 Post-completion Sub-Agent Review Loop
+
+### Scope
+
+- Parallel read-only Sub-Agent review of Sprint2 M4, M5, and M6 after M4-M6 implementation.
+- Main-Agent disposition of findings, focused fixes, targeted and full validation, and re-review.
+
+### Findings and disposition
+
+- M4 sanitizer gap: accepted. Unknown auxiliary output did not cover additional identity-bearing key variants and content-marker unknown span names. Fixed in `MeasurementSanitizer` and covered by `RawNormalizationTests.NormalizeRaw_RemovesAdditionalIdentityAndContentMarkersFromAuxiliaryJson`.
+- M5 decision-template safety gap: accepted. Direct `generate-decision-template` input could copy unsafe evaluation fields into template output. Fixed by running `ProposalEvaluationSafetyValidator` before template generation and covered by `HumanApprovalWorkflowTests.GenerateDecisionTemplate_RejectsUnsafeEvaluationInput`.
+- Raw store same-`trace_id` cross-record merge: not adopted. This remains an unspecified behavior decision and is not treated as a Sprint2 M4-M6 bug.
+- M5 integrated CSV E2E leg: not adopted. Existing per-command CSV tests cover CSV behavior; M5's synthetic workflow proof remains JSON-based.
+- M6 docs/release-check review: no actionable mismatch found.
+
+### Re-review result
+
+- M4 focused Sub-Agent re-review accepted the sanitizer fix with no new actionable finding.
+- M5 focused Sub-Agent re-review accepted the decision-template safety fix with no new actionable finding.
+
+### Verification
+
+- Targeted `RawNormalizationTests` / `HumanApprovalWorkflowTests`: passed, 35 tests.
+- `dotnet build CopilotAgentObservability.slnx`: passed, warning 0 / error 0. NETSDK1057 appeared as the existing preview .NET SDK informational message.
+- `dotnet test CopilotAgentObservability.slnx`: passed, 161 tests.

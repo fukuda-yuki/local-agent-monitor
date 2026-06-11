@@ -29,3 +29,31 @@
 ## Residual Risk
 
 - M5 proves deterministic synthetic wiring only. It does not prove live Copilot emission shape, live Langfuse availability, or real data masking.
+
+## 2026-06-11 Follow-up Review
+
+Parallel read-only Sub-Agent review rechecked Sprint2 M5 after M5/M6 completion.
+
+Accepted finding:
+
+- `generate-decision-template` could be used directly with a hand-written or corrupted evaluation file and copy an unsafe `proposal_id` into the human decision template, because the command did not run `ProposalEvaluationSafetyValidator` before template generation. Main-Agent accepted this as a valid safety finding on a public command included in the M5 loop.
+
+Not adopted:
+
+- Adding an integrated CSV E2E leg was treated as a coverage suggestion, not a required M5 fix. Individual command tests already cover CSV behavior, and the M5 acceptance criterion is the synthetic workflow connection rather than every output format combination.
+
+Applied fix:
+
+- `generate-decision-template` now validates evaluation input with `ProposalEvaluationSafetyValidator` before generating or writing a template.
+- Added `HumanApprovalWorkflowTests.GenerateDecisionTemplate_RejectsUnsafeEvaluationInput`.
+
+Verification:
+
+- Targeted `RawNormalizationTests` / `HumanApprovalWorkflowTests`: passed, 35 tests.
+- `dotnet build CopilotAgentObservability.slnx`: passed, warning 0 / error 0. NETSDK1057 appeared as the existing preview .NET SDK informational message.
+- `dotnet test CopilotAgentObservability.slnx`: passed, 161 tests.
+
+Re-review result:
+
+- M5 Sub-Agent re-review found the decision-template safety finding resolved and no new actionable issue.
+- The validator applies to all evaluation rows, including non-ready rows that would not appear in the template. Main-Agent accepted this as a safe-side behavior consistent with the M27 requirement that output must not contain unsafe content.

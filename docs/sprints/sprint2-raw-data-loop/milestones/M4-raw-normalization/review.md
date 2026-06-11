@@ -54,3 +54,31 @@ Re-review result:
 
 - The raw store `resource_attributes_json` projection is not treated as the complete source of truth; normalization reads each record's `payload_json`.
 - M5 remains responsible for wiring the normalized dataset into the Langfuse-independent diagnosis / proposal / evaluation / human decision loop.
+
+## 2026-06-11 Follow-up Review
+
+Parallel read-only Sub-Agent review rechecked Sprint2 M4 after M5/M6 completion.
+
+Accepted finding:
+
+- Unknown auxiliary output still allowed additional identity-bearing key variants such as `user_id`, `userId`, `username`, and bare `email`, and additional content-marker unknown span names such as `response:`, `content:`, and `tool arguments:`. Main-Agent accepted this as a valid M4 data-handling finding.
+
+Not adopted:
+
+- Cross-record merge for the same `trace_id` in raw store input remains a specification decision, not an implementation bug. M4 currently groups spans by trace within each raw OTLP payload and normalizes each raw store record's `payload_json`. The existing M4 review already records that cross-record merge is not specified.
+
+Applied fix:
+
+- Extended `MeasurementSanitizer` to drop the additional identity-bearing key variants.
+- Extended unsafe string filtering so unknown span names with response, content, tool argument, or tool result markers are not copied to `unknown_spans_json`.
+- Added `RawNormalizationTests.NormalizeRaw_RemovesAdditionalIdentityAndContentMarkersFromAuxiliaryJson`.
+
+Verification:
+
+- Targeted `RawNormalizationTests` / `HumanApprovalWorkflowTests`: passed, 35 tests.
+- `dotnet build CopilotAgentObservability.slnx`: passed, warning 0 / error 0. NETSDK1057 appeared as the existing preview .NET SDK informational message.
+- `dotnet test CopilotAgentObservability.slnx`: passed, 161 tests.
+
+Re-review result:
+
+- M4 Sub-Agent re-review found the sanitizer finding resolved and no new actionable issue. A note that the test does not explicitly include `tool result:` was treated as non-blocking because the implementation covers `tool result`.

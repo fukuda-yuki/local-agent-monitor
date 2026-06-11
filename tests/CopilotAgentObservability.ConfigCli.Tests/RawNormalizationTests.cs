@@ -322,6 +322,43 @@ public class RawNormalizationTests
         Assert.Contains("unknown normalize-raw option '--yaml'", error.ToString());
     }
 
+    [Fact]
+    public void NormalizeRaw_RemovesAdditionalIdentityAndContentMarkersFromAuxiliaryJson()
+    {
+        using var tempDirectory = new TempDirectory();
+        var inputPath = tempDirectory.WriteFile("unsafe-auxiliary.json", UnsafeAuxiliaryRawJson());
+        var jsonPath = Path.Combine(tempDirectory.Path, "measurements.json");
+
+        var exitCode = CliApplication.Run(
+            ["normalize-raw", inputPath, "--json", jsonPath],
+            new StringWriter(),
+            new StringWriter());
+
+        Assert.Equal(0, exitCode);
+
+        var jsonText = File.ReadAllText(jsonPath);
+        using var document = JsonDocument.Parse(jsonText);
+        var row = Assert.Single(document.RootElement.EnumerateArray());
+        var unknownResourceAttributes = row.GetProperty("unknown_attributes_json").GetProperty("resourceAttributes");
+        Assert.Equal("safe value", unknownResourceAttributes.GetProperty("safe.detail").GetString());
+        Assert.False(unknownResourceAttributes.TryGetProperty("user_id", out _));
+        Assert.False(unknownResourceAttributes.TryGetProperty("userId", out _));
+        Assert.False(unknownResourceAttributes.TryGetProperty("username", out _));
+        Assert.False(unknownResourceAttributes.TryGetProperty("email", out _));
+        Assert.False(unknownResourceAttributes.TryGetProperty("metadata", out _));
+
+        var unknownSpans = row.GetProperty("unknown_spans_json").EnumerateArray().ToArray();
+        Assert.Equal(3, unknownSpans.Length);
+        Assert.All(unknownSpans, span => Assert.False(span.TryGetProperty("name", out _)));
+        Assert.DoesNotContain("response:", jsonText);
+        Assert.DoesNotContain("content:", jsonText);
+        Assert.DoesNotContain("tool arguments:", jsonText);
+        Assert.DoesNotContain("user@example.com", jsonText);
+        Assert.DoesNotContain("synthetic-user-id", jsonText);
+        Assert.DoesNotContain("syntheticUserId", jsonText);
+        Assert.DoesNotContain("synthetic-user-name", jsonText);
+    }
+
     private static string FixturePath()
     {
         return Path.Combine(AppContext.BaseDirectory, "TestData", "raw-otlp.synthetic.json");
@@ -347,6 +384,59 @@ public class RawNormalizationTests
                           "traceId": "{{traceId}}",
                           "spanId": "aaaaaaaaaaaaaaaa",
                           "name": "invoke_agent"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """;
+    }
+
+    private static string UnsafeAuxiliaryRawJson()
+    {
+        return """
+            {
+              "resourceSpans": [
+                {
+                  "resource": {
+                    "attributes": [
+                      { "key": "client.kind", "value": { "stringValue": "copilot-cli" } },
+                      { "key": "safe.detail", "value": { "stringValue": "safe value" } },
+                      { "key": "user_id", "value": { "stringValue": "synthetic-user-id" } },
+                      { "key": "userId", "value": { "stringValue": "syntheticUserId" } },
+                      { "key": "username", "value": { "stringValue": "synthetic-user-name" } },
+                      { "key": "email", "value": { "stringValue": "user@example.com" } },
+                      {
+                        "key": "metadata",
+                        "value": {
+                          "kvlistValue": {
+                            "values": [
+                              { "key": "user_id", "value": { "stringValue": "nested-synthetic-user-id" } }
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "scopeSpans": [
+                    {
+                      "spans": [
+                        {
+                          "traceId": "77777777777777777777777777777777",
+                          "spanId": "7777777777777771",
+                          "name": "response: synthetic response content should not leak"
+                        },
+                        {
+                          "traceId": "77777777777777777777777777777777",
+                          "spanId": "7777777777777772",
+                          "name": "content: synthetic content should not leak"
+                        },
+                        {
+                          "traceId": "77777777777777777777777777777777",
+                          "spanId": "7777777777777773",
+                          "name": "tool arguments: synthetic args should not leak"
                         }
                       ]
                     }

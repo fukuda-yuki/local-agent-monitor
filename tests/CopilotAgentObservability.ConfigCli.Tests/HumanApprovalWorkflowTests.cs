@@ -402,6 +402,28 @@ public class HumanApprovalWorkflowTests
     }
 
     [Fact]
+    public void GenerateDecisionTemplate_RejectsUnsafeEvaluationInput()
+    {
+        using var tempDirectory = new TempDirectory();
+        var inputPath = Path.Combine(tempDirectory.Path, "unsafe-evaluations.json");
+        var outputPath = Path.Combine(tempDirectory.Path, "template.json");
+        var evaluation = ValidReadyEvaluation();
+        evaluation["proposal_id"] = "proposal-user@example.com";
+        File.WriteAllText(inputPath, JsonSerializer.Serialize(new[] { evaluation }));
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(
+            ["generate-decision-template", inputPath, "--json", outputPath],
+            output,
+            error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("input contains unsafe content", error.ToString());
+        Assert.False(File.Exists(outputPath));
+    }
+
+    [Fact]
     public void GenerateDecisionTemplate_ReturnsNonZeroWithoutOutputOption()
     {
         using var error = new StringWriter();
