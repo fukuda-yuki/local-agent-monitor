@@ -53,7 +53,7 @@ internal static class DiagnosisInputReader
             throw new InvalidDataException("input CSV must contain a header row.");
         }
 
-        var header = ParseCsvLine(lines[0]);
+        var header = CsvLineParser.ParseLine(lines[0]);
         RejectUnexpectedColumns(header);
         if (!header.SequenceEqual(DiagnosisOutputWriter.Columns, StringComparer.Ordinal))
         {
@@ -68,7 +68,7 @@ internal static class DiagnosisInputReader
                 continue;
             }
 
-            var values = ParseCsvLine(lines[lineIndex]);
+            var values = CsvLineParser.ParseLine(lines[lineIndex]);
             if (values.Count != DiagnosisOutputWriter.Columns.Length)
             {
                 throw new InvalidDataException($"CSV row {lineIndex + 1} has {values.Count} column(s); expected {DiagnosisOutputWriter.Columns.Length}.");
@@ -203,46 +203,6 @@ internal static class DiagnosisInputReader
         return parsed;
     }
 
-    private static IReadOnlyList<string> ParseCsvLine(string line)
-    {
-        var values = new List<string>();
-        var builder = new StringBuilder();
-        var inQuotes = false;
-
-        for (var index = 0; index < line.Length; index++)
-        {
-            var character = line[index];
-            if (character == '"')
-            {
-                if (inQuotes && index + 1 < line.Length && line[index + 1] == '"')
-                {
-                    builder.Append('"');
-                    index++;
-                }
-                else
-                {
-                    inQuotes = !inQuotes;
-                }
-            }
-            else if (character == ',' && !inQuotes)
-            {
-                values.Add(builder.ToString());
-                builder.Clear();
-            }
-            else
-            {
-                builder.Append(character);
-            }
-        }
-
-        if (inQuotes)
-        {
-            throw new InvalidDataException("CSV row contains an unterminated quoted value.");
-        }
-
-        values.Add(builder.ToString());
-        return values;
-    }
 }
 
 internal static partial class DiagnosisValidator

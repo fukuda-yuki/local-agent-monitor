@@ -32,7 +32,7 @@ internal static class MeasurementOutputWriter
 
     public static string WriteJson(IReadOnlyList<MeasurementRow> rows)
     {
-        return JsonSerializer.Serialize(rows, new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine;
+        return JsonOutput.WriteIndented(rows);
     }
 
     public static string WriteCsv(IReadOnlyList<MeasurementRow> rows)
@@ -42,7 +42,7 @@ internal static class MeasurementOutputWriter
 
         foreach (var row in rows)
         {
-            builder.AppendLine(string.Join(',', Columns.Select(column => EscapeCsv(GetValue(row, column)))));
+            builder.AppendLine(string.Join(',', Columns.Select(column => CsvEscaper.Escape(GetValue(row, column)))));
         }
 
         return builder.ToString();
@@ -80,16 +80,5 @@ internal static class MeasurementOutputWriter
         };
     }
 
-    private static string EscapeCsv(string? value)
-    {
-        if (string.IsNullOrEmpty(value))
-        {
-            return string.Empty;
-        }
-
-        return value.Any(character => character is ',' or '"' or '\r' or '\n')
-            ? $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
-            : value;
-    }
 }
 
