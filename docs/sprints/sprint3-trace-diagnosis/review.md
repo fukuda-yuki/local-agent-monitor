@@ -74,7 +74,7 @@ Findings accepted:
 Resolution:
 
 - Restored Sprint3 as Content-aware Trace Diagnosis and Auto-decision Foundation.
-- Added M2-M5 milestones.
+- Added M2-M5 milestones. M6 was added later for collaborative real-trace E2E.
 - Added initial deterministic rule tables and sensitive bundle read contract to M1 command boundary.
 - Kept `auto-approved` in Sprint3 output states while keeping repository modification out of Sprint3.
 - Updated `requirements.md`, `spec.md`, and `task.md` to stop Sprint3 at auto-decision records, not repository modification.
@@ -96,3 +96,23 @@ Resolution:
 Validation:
 
 - `rg` found no remaining readiness-only scope statement or `auto-approved` removal instruction.
+
+## 2026-06-12: Claude review follow-up 2
+
+Findings accepted:
+
+- M24-M27 coexistence vs replacement was a blocking design decision, not something to discover after M3/M4 implementation.
+- `auto-approved` needed a Sprint3-local, verifiable exit that does not imply repository modification.
+- Content-aware rule patterns were not yet defined at deterministic matching level.
+- Sprint3 should include redacted real-trace E2E, not only synthetic fixtures.
+- Sensitive bundle expiry needed an operational deletion procedure even without an auto-delete command.
+- Diagnosis and improvement candidate schemas carried too many measurement context columns.
+
+Resolution:
+
+- M24-M27 are explicitly compatibility-maintained; Sprint3 is an upstream candidate pipeline and must define adapter / mapping in M2.
+- `next_action` for auto-approved is now `record-for-sprint4-planning`.
+- M2 blocks implementation until literal / regex / field predicate patterns are defined.
+- Added M6 collaborative real-trace E2E with agent/user work split and repository-safe evidence rules.
+- Documented manual deletion through `manifest.json` `delete_target_paths`; no Sprint3 auto-delete command is introduced.
+- Simplified candidate schemas to avoid carry-through metadata and use `trace_id` plus `source_record_ref` joins.

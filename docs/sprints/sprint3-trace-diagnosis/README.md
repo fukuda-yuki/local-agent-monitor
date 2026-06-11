@@ -26,17 +26,19 @@ Sprint3 ではこの境界を変更し、trace から deterministic に診断候
 - sensitive bundle の manifest / evidence schema、fragment 粒度、逆引き方法、期限情報を定義する。
 - diagnosis candidate から improvement proposal candidate を生成する。
 - deterministic rule による auto-decision record を生成する。
-- candidate pipeline から既存 M24-M27 human-review pipeline への接続方法を決める。
+- 既存 M24-M27 human-review pipeline は互換性維持対象として残し、Sprint3 candidate pipeline から既存 record へ渡す adapter / mapping contract を実装前に決める。
+- synthetic automated verification に加え、ユーザー協業による redacted real-trace E2E を実施し、GitHub Copilot CLI と GitHub Copilot Chat の candidate pipeline 入力互換性を確認する。
 
 ## Milestones
 
 | Milestone | 状態 | 内容 |
 | --- | --- | --- |
-| [M1: candidate schema and command boundary](milestones/M1-candidate-schema-and-command-boundary/task.md) | 完了 | command 名、入力、出力列、sensitive output 保存先、synthetic fixture 方針を sprint-local に確定した |
-| [M2: deterministic rule and evidence contract](milestones/M2-deterministic-rule-and-evidence-contract/task.md) | 未着手 | diagnosis rule id、decision rule id、content-aware pattern、sensitive bundle read contract を確定し、実装前の blocking question を潰す |
+| [M1: candidate schema and command boundary](milestones/M1-candidate-schema-and-command-boundary/task.md) | 完了 | command 名、入力、出力列、sensitive output 保存先、synthetic fixture 方針を sprint-local に定義した |
+| [M2: deterministic rule and evidence contract](milestones/M2-deterministic-rule-and-evidence-contract/task.md) | 未着手 | diagnosis rule id、decision rule id、content-aware pattern、M24-M27 接続方針、sensitive bundle read / manual delete contract を確定し、実装前の blocking question を潰す |
 | [M3: diagnosis candidate implementation](milestones/M3-diagnosis-candidate-implementation/task.md) | 未着手 | synthetic fixture で `generate-diagnosis-candidates` を実装し、metadata rule と content-aware rule の最小出力を検証する |
 | [M4: improvement and auto-decision implementation](milestones/M4-improvement-and-auto-decision-implementation/task.md) | 未着手 | `generate-improvement-candidates` と `generate-auto-decisions` を実装し、`auto-approved` / `needs-human-review` / `blocked` を出力する |
-| [M5: human-review pipeline connection](milestones/M5-human-review-pipeline-connection/task.md) | 未着手 | candidate から M24 diagnosis record または M25-M27 既存 record への変換を決め、未接続 pipeline を残さない |
+| [M5: human-review pipeline connection](milestones/M5-human-review-pipeline-connection/task.md) | 未着手 | M2 で決めた adapter / mapping contract を文書または code に反映し、未接続 pipeline を残さない |
+| [M6: collaborative real-trace E2E](milestones/M6-collaborative-real-trace-e2e/task.md) | 未着手 | GitHub Copilot CLI と GitHub Copilot Chat の redacted real-trace 入力で candidate pipeline を確認し、agent / user の作業分担と evidence を記録する |
 
 ## Non-scope for Sprint3
 
@@ -53,6 +55,8 @@ Sprint3 の sensitive local output は、ローカル検証用の一時成果物
 保存先は `tmp/` など git 管理外の場所を既定とする。
 bundle は schema version、作成日時、期限、削除対象 path、evidence index を持つ `manifest.json` と、candidate ごとの `evidence/*.json` で構成する。
 standard output から bundle content へは `evidence_ref` を通じて逆引きする。
+Sprint3 では sensitive bundle の自動削除 command は実装しない。
+期限切れ bundle を読む command は warning を出し、削除は `manifest.json` の `delete_target_paths` を確認したユーザーが手動で実施する。
 
 実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を含む出力は、command 名または option 名で sensitive output であることを明示する。
 repository に保存してよい文書・fixture・review record には、これらの sensitive content を含めない。
@@ -65,8 +69,10 @@ repository に保存してよい文書・fixture・review record には、これ
 | raw content 利用 | 明示 opt-in 時だけ許可する |
 | diagnosis 出力 | M24 diagnosis record とは別の candidate 専用 command / candidate 専用 schema を先に定義する |
 | auto decision | M27 human decision record とは別の auto-decision schema を先に定義する |
+| M24-M27 との関係 | 既存 command / schema は置換せず互換性維持対象とし、Sprint3 candidate output から既存 human-review record への adapter / mapping を実装前に確定する |
 | 自動改善実装 | Sprint3 では repository 修正せず、Sprint4 以降の候補にする |
-| テスト | synthetic fixture で automated verification を完結させる |
+| 自動テスト | synthetic fixture で deterministic behavior を検証する |
+| real-trace 検証 | GitHub Copilot CLI は agent が可能な範囲で実施し、GitHub Copilot Chat の prompt 送信などユーザー実施の方が低コストな作業はユーザー協業で行う。repository へ保存する evidence は redacted summary に限定する |
 
 M1 の詳細は [command-boundary.md](milestones/M1-candidate-schema-and-command-boundary/command-boundary.md) を参照する。
 
@@ -86,5 +92,4 @@ AppHost は空の resource graph であり、Sprint3 の primary execution path 
 
 ## Open Questions
 
-- M5 で candidate pipeline を M24 diagnosis record へ変換するか、M24-M27 の一部を Sprint3 schema に置き換えるか。
 - Sprint4 で repository file 自動修正を扱う場合、allowlist、dry-run、diff preview、rollback、test 実行、commit 境界をどう定義するか。

@@ -2,13 +2,13 @@
 
 ## 目的
 
-Sprint3 candidate pipeline を既存 M24-M27 human-review pipeline に接続する方法を決め、未接続の parallel pipeline を残さない。
+Sprint3 candidate pipeline を既存 M24-M27 human-review pipeline に接続する方法を、M2 で確定した adapter / mapping contract に従って文書または code に反映し、未接続の parallel pipeline を残さない。
 
 ## 完了条件
 
-- [ ] diagnosis candidate から M24 diagnosis record へ変換するか、M24-M27 の一部を Sprint3 schema で置き換えるかを決めている。
-- [ ] 変換する場合は、列 mapping、落とす列、保持する `evidence_ref`、human review status の扱いを定義している。
-- [ ] 置き換える場合は、既存 command の compatibility / obsolescence 判断を記録している。
+- [ ] M2 で決めた既存 M24-M27 互換性維持方針を維持している。
+- [ ] diagnosis candidate から M24 diagnosis record への列 mapping、落とす列、保持する `evidence_ref`、human review status の扱いを反映している。
+- [ ] 既存 command の compatibility note と、Sprint3 candidate pipeline が前段であることを記録している。
 - [ ] Sprint3 の完了条件に、candidate output が人間レビュー workflow で消費できることを含めている。
 - [ ] `docs/spec.md` と `docs/task.md` を確定結果に同期している。
 

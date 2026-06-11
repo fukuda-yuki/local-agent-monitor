@@ -29,7 +29,7 @@
 ## 2026-06-12: Claude review follow-up
 
 - Rejected the overcorrection that removed `auto-approved`; Sprint3 scope includes auto-decision records, including `auto-approved`, while still excluding repository modification.
-- Added M2-M5 milestones for rule/evidence contract, diagnosis candidate implementation, improvement/auto-decision implementation, and M24-M27 human-review pipeline connection.
+- Added M2-M5 milestones for rule/evidence contract, diagnosis candidate implementation, improvement/auto-decision implementation, and M24-M27 human-review pipeline connection. M6 was added later for collaborative real-trace E2E.
 - Added initial `rule_id` and `decision_rule_id` tables to M1 `command-boundary.md` as the basis for M2.
 - Added sensitive bundle read contract with manifest fields, evidence file fields, fragment granularity, reverse lookup by `evidence_ref`, and 7-day expiry metadata.
 - Synchronized `docs/requirements.md`, `docs/spec.md`, and `docs/task.md` so Sprint3 includes auto-decision records but still excludes repository modification.
@@ -41,3 +41,14 @@
 - Restored `auto-approved` as a Sprint3 `generate-auto-decisions` output state.
 - Kept repository file modification, patch / diff generation, commit, push, and pull request creation out of Sprint3.
 - Renamed M4 to improvement and auto-decision implementation.
+
+## 2026-06-12: Claude review follow-up 2
+
+- Accepted the concern that M24-M27 connection cannot wait until after M3/M4 implementation.
+- Kept M24-M27 as compatibility-maintained commands and schemas; Sprint3 does not replace them.
+- M2 now blocks implementation until the candidate-to-human-review adapter / mapping contract is defined.
+- Accepted the concern that `auto-approved` needs a Sprint3-local exit. It now means `record-for-sprint4-planning`, with no Sprint3 repository-modifying consumer command.
+- Accepted the concern that content-aware patterns were underspecified. M2 must define literal / regex / field predicate patterns before M3.
+- Added M6 collaborative real-trace E2E so Sprint3 validates redacted real Copilot trace input, with agent handling CLI work and user handling lower-cost VS Code Copilot Chat prompt operations.
+- Kept automatic sensitive bundle deletion out of scope per user direction, but documented manual deletion via `manifest.json` `delete_target_paths`.
+- Reduced candidate output schemas by removing measurement context carry-through columns and relying on `trace_id` plus `source_record_ref` joins.

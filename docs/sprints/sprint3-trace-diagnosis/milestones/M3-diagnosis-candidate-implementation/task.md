@@ -4,6 +4,8 @@
 
 M2 で確定した rule と sensitive bundle contract に従い、`generate-diagnosis-candidates` の最小実装を追加する。
 
+M3 は M2 の adapter / mapping contract、content-aware deterministic pattern、sensitive bundle manual deletion policy が確定するまで開始しない。
+
 ## 完了条件
 
 - [ ] normalized measurement CSV / JSON から diagnosis candidate を生成できる。
