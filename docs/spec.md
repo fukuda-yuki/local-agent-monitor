@@ -9,9 +9,9 @@ Sprint1: ローカル Langfuse PoC は完了済みである。
 Sprint2: raw telemetry store と Langfuse 非依存改善ループ MVP は完了済みである。
 Sprint2 MVP では raw OTLP の file-based ingest、SQLite raw store、raw store から normalized dataset への変換、既存改善支援 CLI への接続を扱った。
 
-現在の主作業は Sprint2.5: ConfigCli 保守性改善と redacted real-trace E2E 互換性確認である。
-Sprint2.5 では Sprint3 に進む前に、巨大化した Config CLI の責務分割、CSV / JSON 共通処理の集約、redacted input に限定した実 Copilot trace 由来データの最小 E2E 証跡を扱う。
-Sprint2.5 は新機能追加ではなく、既存 CLI contract を維持した保守性改善と互換性確認である。
+Sprint2.5: ConfigCli 保守性改善と redacted real-trace E2E 互換性確認は完了済みである。
+Sprint2.5 では Sprint3 に進む前に、巨大化した Config CLI の責務分割、CSV / JSON 共通処理の集約、redacted input に限定した実 Copilot trace 由来データの最小 E2E 証跡、regression review and closeout を扱った。
+Sprint2.5 は新機能追加ではなく、既存 CLI contract を維持した保守性改善と互換性確認であった。
 
 Sprint3: Trace Diagnosis は Sprint2.5 完了後の候補である。
 Sprint3 で trace からの自動診断を扱う場合は、Sprint2.5 の結果を踏まえて先に本書へ必要な仕様変更を反映する。
