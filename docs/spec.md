@@ -1102,15 +1102,14 @@ Aspire MCP 経由で logs / traces / environment を AI agent に公開する場
 ### 5.19 Sprint3 content-aware trace diagnosis and auto-decision foundation
 
 Sprint3 では、Sprint2 raw data loop と Sprint2.5 maintainability の成果を前提に、trace content を含む観測データから診断候補、改善候補、自動採用判断へ接続する基盤を定義する。
+Sprint3 は要件定義中であり、command contract、candidate schema、content evidence schema、auto-decision schema は sprint-local material で確定してから本書に反映する。
 
-Sprint3 は以下を対象とする。
+現時点で本書に確定する Sprint3 の対象は以下に限定する。
 
-- raw store または raw OTLP JSON から trace-driven diagnosis candidate を生成する。
-- normalized dataset から、trace id、task id、client kind、experiment、token、turn、tool call、duration、error などの安全な集計値を diagnosis candidate に接続する。
-- 明示 opt-in 時に、実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を content-aware evidence として sensitive local output に含める。
-- diagnosis candidate から improvement proposal candidate を生成する。
-- deterministic rule による auto-approval candidate を生成する。
-- auto-approval candidate は、後続の自動改善実装に渡せる判断 record として扱う。
+- trace-driven diagnosis candidate、improvement proposal candidate、auto-approval decision record を検討する。
+- raw store、raw OTLP JSON、normalized measurement CSV / JSON を入力候補として扱う。
+- 明示 opt-in 時に限り、実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を sensitive local output に含めることを許容する。
+- sensitive local output は repository に保存・commit しない。
 
 Sprint3 では以下を扱わない。
 
@@ -1123,68 +1122,7 @@ Sprint3 では以下を扱わない。
 
 実 repository 修正を伴う自動改善実装は Sprint4 以降の候補とする。
 Sprint4 以降で扱う場合は、対象ファイル allowlist、dry-run、diff preview、rollback、テスト実行、commit 境界、失敗時の停止条件を先に仕様化する。
-
-#### Sprint3 input
-
-Sprint3 の既定入力は以下とする。
-
-- Sprint2 の SQLite raw store。
-- Sprint2 の raw OTLP JSON file。
-- Sprint2 の normalized measurement CSV / JSON。
-- M24 diagnosis record、M25 improvement proposal record、M26 evaluation record、M27 human decision record。
-
-入力選択は command ごとに明示し、raw content を読む command は opt-in flag を必須とする。
-normalized dataset だけで判断できる rule は raw content を読まない。
-
-#### Sprint3 sensitive local output
-
-Sprint3 の sensitive local output は、ローカル検証用の一時成果物であり、repository に保存しない。
-保存先は `tmp/` など git 管理外の場所を既定とする。
-実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を含む出力は、command 名または option 名で sensitive output であることを明示する。
-
-repository に保存してよい文書・fixture・review record には、実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を含めない。
-自動テストは synthetic fixture を既定とし、実 content を含む fixture を repository に追加しない。
-
-#### Sprint3 diagnosis candidate
-
-diagnosis candidate は M24 diagnosis record に接続できる形を基本とする。
-ただし、自動生成された候補であることを表すため、少なくとも以下を記録する。
-
-- source trace id。
-- rule id。
-- confidence または deterministic match reason。
-- evidence reference。
-- content included flag。
-- required human checks。
-
-M24 diagnosis record に直接出力する場合、`review_status` は既定で `needs-human-review` とする。
-auto-approval rule を通過した場合だけ、別の auto-decision record に接続する。
-
-#### Sprint3 auto-decision
-
-Sprint3 の auto-decision は、改善候補を自動採用してよいかを判定する record である。
-Sprint3 の auto-decision は repository file の自動修正を実行しない。
-
-auto-decision は少なくとも以下を持つ。
-
-- decision id。
-- source proposal id。
-- decision status。
-- decision rule id。
-- confidence または deterministic match reason。
-- blocking risk checks。
-- sensitive content included flag。
-- implementation target。
-- next action。
-
-`decision status` の初期候補は、`auto-approved`、`needs-human-review`、`blocked` とする。
-`auto-approved` は Sprint4 以降の自動改善実装候補に渡せる状態を意味し、Sprint3 内で repository 修正を行うことを意味しない。
-
-#### Sprint3 validation
-
-Sprint3 の automated verification は synthetic fixture で完結させる。
-raw content を含む live Copilot trace は手動確認として分離する。
-手動確認を実施した場合は、sensitive local output の保存先、削除方法、content included flag、生成 command、確認項目、未確認項目を sprint-local note に記録する。
+実装着手に必要な未決事項、初期 command 分割、schema 候補、起動確認結果は `docs/sprints/sprint3-trace-diagnosis/` に記録する。
 
 ## 6. セキュリティとデータ扱い
 

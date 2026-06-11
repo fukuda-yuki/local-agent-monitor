@@ -21,3 +21,24 @@ Residual risk:
 
 - The command names, candidate schema, content evidence schema, and auto-decision schema still need to be finalized before implementation.
 - The Sprint4 repository modification safety model is intentionally unresolved.
+
+## 2026-06-12: source-of-truth follow-up review
+
+Finding addressed:
+
+- Concern: `docs/spec.md` contained Sprint3 candidate / auto-decision schema details while Sprint3 README still listed unresolved open questions.
+- Resolution: `docs/spec.md` was reduced to high-level confirmed scope and safety boundary. Candidate command and schema details remain sprint-local until finalized.
+
+Implementation-start decisions recorded:
+
+- Use a candidate-specific diagnosis command and candidate-specific schema before mapping to M24 diagnosis records.
+- Use a separate auto-decision schema instead of extending M27 human decision records.
+
+Validation:
+
+- `dotnet run --project src\CopilotAgentObservability.ConfigCli -- --help` succeeded.
+- `dotnet build CopilotAgentObservability.slnx` succeeded.
+- `aspire start --non-interactive --format Json` succeeded.
+- `aspire ps --format Json` showed the AppHost running.
+- `aspire describe --format Json` returned an empty resource graph.
+- `aspire stop --non-interactive` stopped the AppHost successfully.
