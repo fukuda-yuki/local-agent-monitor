@@ -2,7 +2,7 @@
 
 ## 目的
 
-Sprint3 の実装前に、diagnosis candidate、improvement proposal candidate、readiness decision の command 境界、入力、出力列、sensitive output 保存先、synthetic fixture 方針を sprint-local に確定する。
+Sprint3 の実装前に、diagnosis candidate、improvement proposal candidate、auto-decision の command 境界、入力、出力列、sensitive output 保存先、synthetic fixture 方針を sprint-local に確定する。
 
 M1 は documentation milestone であり、code behavior は変更しない。
 M1 の決定は、後続の M2 contract 確定後に `docs/spec.md` へ反映する候補として扱う。
@@ -10,7 +10,7 @@ M1 の決定は、後続の M2 contract 確定後に `docs/spec.md` へ反映す
 ## 完了条件
 
 - [x] candidate 専用 command を M24 / M25 / M27 の既存 command と分ける方針を明記している
-- [x] diagnosis candidate、improvement proposal candidate、readiness decision の command 名を決めている
+- [x] diagnosis candidate、improvement proposal candidate、auto-decision の command 名を決めている
 - [x] 各 command の入力と出力列を決めている
 - [x] sensitive output の既定保存先と repository 保存禁止を明記している
 - [x] synthetic fixture の方針を決めている

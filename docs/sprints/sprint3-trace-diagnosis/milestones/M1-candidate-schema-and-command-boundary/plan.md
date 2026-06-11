@@ -15,7 +15,8 @@ M2 以降の実装 agent は、以下の順で進める。
 4. M5 で candidate pipeline と M24-M27 human-review pipeline の接続を確定する。
 
 M3 の最小実装は `generate-diagnosis-candidates` の synthetic fixture 対応に限定できる。
-`generate-auto-decisions` は `needs-human-review` または `blocked` だけを出力し、`auto-approved` は Sprint3 で出力しない。
+`generate-auto-decisions` は `auto-approved`、`needs-human-review`、`blocked` を出力する。
+`auto-approved` は repository 修正を実行せず、後続の実装計画へ渡せる判断 record に留める。
 
 ## 検証方針
 
