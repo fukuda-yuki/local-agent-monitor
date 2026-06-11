@@ -26,6 +26,12 @@ Sprint3 ではこの境界を変更し、自動採用判断までを扱う。
 - deterministic rule による auto-approval candidate を生成する。
 - auto-approval candidate を、後続の自動改善実装に渡せる判断 record として扱う。
 
+## Milestones
+
+| Milestone | 状態 | 内容 |
+| --- | --- | --- |
+| [M1: candidate schema and command boundary](milestones/M1-candidate-schema-and-command-boundary/task.md) | 完了 | command 名、入力、出力列、sensitive output 保存先、synthetic fixture 方針を sprint-local に確定した |
+
 ## Non-scope for Sprint3
 
 - repository file の自動修正。
@@ -53,6 +59,8 @@ repository に保存してよい文書・fixture・review record には、これ
 | auto decision | M27 human decision record とは別の auto-decision 専用 schema を先に定義する |
 | 自動改善実装 | Sprint3 では repository 修正せず、Sprint4 以降の候補にする |
 | テスト | synthetic fixture で automated verification を完結させる |
+
+M1 の詳細は [command-boundary.md](milestones/M1-candidate-schema-and-command-boundary/command-boundary.md) を参照する。
 
 ## Startup Check
 

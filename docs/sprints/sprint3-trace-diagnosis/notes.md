@@ -16,3 +16,11 @@
 - Diagnosis candidate generation will use a candidate-specific command and candidate-specific schema first, then map into M24 records after review.
 - Auto-decision will use a separate schema rather than extending the existing M27 human decision record.
 - Startup checks passed for Config CLI help, solution build, Aspire AppHost start, and Aspire AppHost stop.
+
+## 2026-06-12: M1 candidate schema and command boundary
+
+- Created M1 as `candidate-schema-and-command-boundary`.
+- Selected three candidate commands: `generate-diagnosis-candidates`, `generate-improvement-candidates`, and `generate-auto-decisions`.
+- Defined output columns for diagnosis candidates, improvement candidates, and auto-decision records in M1 `command-boundary.md`.
+- Set sensitive output default path to `tmp/sprint3-sensitive/<run_id>/`.
+- Kept repository fixtures synthetic-only.

@@ -42,3 +42,19 @@ Validation:
 - `aspire ps --format Json` showed the AppHost running.
 - `aspire describe --format Json` returned an empty resource graph.
 - `aspire stop --non-interactive` stopped the AppHost successfully.
+
+## 2026-06-12: M1 review
+
+Finding:
+
+- M1 command and schema details are now sprint-local under `milestones/M1-candidate-schema-and-command-boundary/`.
+
+Decision summary:
+
+- Candidate generation uses dedicated commands and schemas before any M24 / M25 / M27 mapping.
+- Sensitive full content is stored only in opt-in local bundles under `tmp/sprint3-sensitive/<run_id>/`.
+- Automated verification remains synthetic-only.
+
+Residual risk:
+
+- M2 still needs deterministic rule ids and rule behavior.
