@@ -158,6 +158,7 @@ Findings:
 - The new `generate-improvement-candidates` and `generate-auto-decisions` commands use Sprint3 candidate schemas and do not modify existing M24-M27 human-review commands.
 - `auto-approved` exits only through `next_action=record-for-sprint4-planning`; no repository-modifying consumer, patch / diff generation, commit, push, or pull request behavior was added.
 - Sensitive bundle references are routed to `needs-human-review`, while scope-overreach patterns and unsupported implementation targets are blocked.
+- Review follow-up widened scope-overreach detection to include repository modification variants already covered by the older M26 evaluator, such as `modify repositories` and `make repository changes`.
 
 Residual risk:
 
@@ -167,5 +168,5 @@ Residual risk:
 Validation:
 
 - `dotnet build CopilotAgentObservability.slnx` succeeded.
-- `dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --no-build --filter FullyQualifiedName~ImprovementCandidatePipelineTests` succeeded with 11 tests passed.
-- `dotnet test CopilotAgentObservability.slnx` succeeded with 192 tests passed.
+- `dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --no-build --filter FullyQualifiedName~ImprovementCandidatePipelineTests` succeeded with 11 tests passed before review follow-up and remained covered after adding repository modification variants.
+- `dotnet test CopilotAgentObservability.slnx` succeeded with 194 tests passed after review follow-up.

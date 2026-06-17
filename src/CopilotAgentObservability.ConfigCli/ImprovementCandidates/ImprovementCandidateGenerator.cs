@@ -56,9 +56,42 @@ internal static class AutoDecisionGenerator
         "eval",
     };
 
-    private static readonly Regex ScopeOverreachPattern = new(
-        @"(?i)\b(repository file|modify files|edit files|apply patch|patch|diff|commit|push|pull request|pr|merge|auto-merge|winner|win/loss|automatic winner|auto decide experiment|live service|network endpoint|production data)\b",
-        RegexOptions.Compiled);
+    private static readonly string[] ScopeOverreachPhrases =
+    [
+        "repository file",
+        "repository changes",
+        "modify files",
+        "modify repository",
+        "modify repositories",
+        "edit files",
+        "edit repository",
+        "edit repositories",
+        "apply patch",
+        "create patch",
+        "generate patch",
+        "patch",
+        "apply diff",
+        "create diff",
+        "generate diff",
+        "diff",
+        "commit",
+        "push",
+        "pull request",
+        "create pr",
+        "open pr",
+        "submit pr",
+        "raise a pr",
+        "merge",
+        "auto-merge",
+        "auto merge",
+        "winner",
+        "win/loss",
+        "automatic winner",
+        "auto decide experiment",
+        "live service",
+        "network endpoint",
+        "production data",
+    ];
 
     public static IReadOnlyList<AutoDecisionRow> Generate(IReadOnlyList<ImprovementCandidateRow> candidates)
     {
@@ -181,6 +214,7 @@ internal static class AutoDecisionGenerator
             candidate.ProposalSummary,
             candidate.ProposedChangeKind,
             candidate.ImprovementTarget);
-        return ScopeOverreachPattern.IsMatch(text);
+        var normalized = text.ToLowerInvariant();
+        return ScopeOverreachPhrases.Any(phrase => normalized.Contains(phrase, StringComparison.Ordinal));
     }
 }

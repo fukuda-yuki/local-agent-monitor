@@ -107,6 +107,8 @@ public class ImprovementCandidatePipelineTests
     [Theory]
     [InlineData("Apply patch to improve the workflow.")]
     [InlineData("Generate a diff for the repository file.")]
+    [InlineData("Modify repositories with the suggested workflow.")]
+    [InlineData("Make repository changes for the improvement.")]
     [InlineData("Commit and push the approved proposal.")]
     [InlineData("Open a pull request for the improvement.")]
     [InlineData("Select the automatic winner for this experiment.")]
