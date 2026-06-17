@@ -194,6 +194,31 @@ public class DiagnosisCandidateGenerationTests
         Assert.Contains("DIAG-CONTENT-SENSITIVE-LEAK-V1", jsonText);
     }
 
+    [Theory]
+    [InlineData("safe.detail", "synthetic.user@example.com")]
+    [InlineData("safe.detail", "c2VjcmV0OnRva2Vu")]
+    public void GenerateDiagnosisCandidates_DetectsSensitiveTextAndBase64CredentialPredicates(string attributeKey, string attributeValue)
+    {
+        using var tempDirectory = new TempDirectory();
+        var measurementsPath = WriteMeasurements(tempDirectory.Path, "trace-sensitive");
+        var rawPath = WriteRawOtlpWithAttribute(tempDirectory.Path, "trace-sensitive", attributeKey, attributeValue);
+        var outputPath = Path.Combine(tempDirectory.Path, "candidates.json");
+
+        var exitCode = CliApplication.Run(
+            ["generate-diagnosis-candidates", measurementsPath, "--raw", rawPath, "--json", outputPath],
+            new StringWriter(),
+            new StringWriter());
+
+        Assert.Equal(0, exitCode);
+        var jsonText = File.ReadAllText(outputPath);
+        using var document = JsonDocument.Parse(jsonText);
+        var row = Assert.Single(document.RootElement.EnumerateArray());
+        Assert.Equal("DIAG-CONTENT-SENSITIVE-LEAK-V1", row.GetProperty("rule_id").GetString());
+        Assert.Equal("blocked", row.GetProperty("candidate_status").GetString());
+        Assert.False(row.GetProperty("content_included").GetBoolean());
+        Assert.DoesNotContain(attributeValue, jsonText);
+    }
+
     private static string WriteMeasurements(string directory, string traceId)
     {
         var path = Path.Combine(directory, "measurements.json");
@@ -255,6 +280,39 @@ public class DiagnosisCandidateGenerationTests
                             {
                               "key": "prompt.content",
                               "value": { "stringValue": "synthetic prompt content should stay in bundle only" }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+        return path;
+    }
+
+    private static string WriteRawOtlpWithAttribute(string directory, string traceId, string attributeKey, string attributeValue)
+    {
+        var path = Path.Combine(directory, "raw-sensitive.json");
+        File.WriteAllText(
+            path,
+            $$"""
+            {
+              "resourceSpans": [
+                {
+                  "scopeSpans": [
+                    {
+                      "spans": [
+                        {
+                          "traceId": "{{traceId}}",
+                          "spanId": "span-sensitive",
+                          "name": "chat",
+                          "attributes": [
+                            {
+                              "key": "{{attributeKey}}",
+                              "value": { "stringValue": "{{attributeValue}}" }
                             }
                           ]
                         }

@@ -141,4 +141,4 @@ Residual risk:
 Validation:
 
 - `dotnet build CopilotAgentObservability.slnx` succeeded.
-- `dotnet test CopilotAgentObservability.slnx` succeeded with 179 tests passed.
+- `dotnet test CopilotAgentObservability.slnx` succeeded with 181 tests passed.

@@ -70,4 +70,4 @@
 - Added raw OTLP and raw store evidence lookup for deterministic content-aware candidates.
 - Added opt-in sensitive bundle schema v1 generation with `manifest.json`, `evidence/*.json`, 7-day expiry metadata, source input hashes, and manual deletion paths.
 - Added synthetic xUnit coverage for JSON / CSV measurements, raw OTLP, raw store input, no-leak standard output, opt-in bundle shape, and option validation.
-- Validation passed on 2026-06-17: `dotnet build CopilotAgentObservability.slnx`; `dotnet test CopilotAgentObservability.slnx` with 179 tests passed.
+- Validation passed on 2026-06-17: `dotnet build CopilotAgentObservability.slnx`; `dotnet test CopilotAgentObservability.slnx` with 181 tests passed.
