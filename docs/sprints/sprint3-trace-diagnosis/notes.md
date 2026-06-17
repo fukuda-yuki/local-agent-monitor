@@ -62,3 +62,12 @@
 
 - Reviewed the promoted Sprint3 candidate pipeline spec against the M1 / M2 sprint-local contracts.
 - Fixed the auto-decision sensitive-content rule so it no longer references `DIAG-CONTENT-SENSITIVE-LEAK-V1`; that diagnosis rule produces `candidate_status=blocked` and does not flow into improvement candidates.
+
+## 2026-06-17: M3 diagnosis candidate implementation
+
+- Added `generate-diagnosis-candidates` as a candidate-specific Config CLI command without changing the existing M24-M27 human-review commands.
+- Implemented the five M2 diagnosis rules only: metric error count, metric tool loop, content error message, content sensitive leak, and missing trace context.
+- Added raw OTLP and raw store evidence lookup for deterministic content-aware candidates.
+- Added opt-in sensitive bundle schema v1 generation with `manifest.json`, `evidence/*.json`, 7-day expiry metadata, source input hashes, and manual deletion paths.
+- Added synthetic xUnit coverage for JSON / CSV measurements, raw OTLP, raw store input, no-leak standard output, opt-in bundle shape, and option validation.
+- Validation passed on 2026-06-17: `dotnet build CopilotAgentObservability.slnx`; `dotnet test CopilotAgentObservability.slnx` with 179 tests passed.

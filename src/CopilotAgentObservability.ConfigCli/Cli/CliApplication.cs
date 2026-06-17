@@ -96,6 +96,9 @@ internal static class CliApplication
             case "validate-diagnoses":
                 return RunValidateDiagnoses(args, output, error);
 
+            case "generate-diagnosis-candidates":
+                return RunGenerateDiagnosisCandidates(args, output, error);
+
             case "generate-improvement-proposals":
                 return RunGenerateImprovementProposals(args, output, error);
 
@@ -291,6 +294,85 @@ internal static class CliApplication
         catch (InvalidDataException exception)
         {
             error.WriteLine($"error: {exception.Message}");
+            return 1;
+        }
+        catch (IOException exception)
+        {
+            error.WriteLine($"error: failed to read or write file: {exception.Message}");
+            return 1;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            error.WriteLine($"error: failed to access file: {exception.Message}");
+            return 1;
+        }
+    }
+
+    private static int RunGenerateDiagnosisCandidates(string[] args, TextWriter output, TextWriter error)
+    {
+        var parseResult = DiagnosisCandidateOptions.Parse(args);
+        if (parseResult.Error is not null)
+        {
+            error.WriteLine($"error: {parseResult.Error}");
+            return 1;
+        }
+
+        try
+        {
+            if (!File.Exists(parseResult.Options!.MeasurementsPath))
+            {
+                error.WriteLine($"error: measurements file not found: {parseResult.Options.MeasurementsPath}");
+                return 1;
+            }
+
+            if (parseResult.Options.RawInputPath is not null && !File.Exists(parseResult.Options.RawInputPath))
+            {
+                error.WriteLine($"error: raw input file not found: {parseResult.Options.RawInputPath}");
+                return 1;
+            }
+
+            var measurements = DiagnosisCandidateMeasurementReader.Read(parseResult.Options.MeasurementsPath);
+            var rawEvidence = parseResult.Options.RawInputPath is null
+                ? null
+                : RawEvidenceReader.Read(parseResult.Options.RawInputPath);
+            var candidates = DiagnosisCandidateGenerator.Generate(
+                measurements,
+                rawEvidence,
+                parseResult.Options.IncludeSensitiveContent,
+                parseResult.Options.SensitiveOutputDir,
+                DateTimeOffset.UtcNow);
+
+            if (parseResult.Options.CsvOutputPath is not null)
+            {
+                File.WriteAllText(parseResult.Options.CsvOutputPath, DiagnosisCandidateOutputWriter.WriteCsv(candidates), Encoding.UTF8);
+            }
+
+            if (parseResult.Options.JsonOutputPath is not null)
+            {
+                File.WriteAllText(parseResult.Options.JsonOutputPath, DiagnosisCandidateOutputWriter.WriteJson(candidates), Encoding.UTF8);
+            }
+
+            output.WriteLine($"Generated {candidates.Count} diagnosis candidate record(s).");
+            return 0;
+        }
+        catch (FileNotFoundException exception)
+        {
+            error.WriteLine($"error: file not found: {exception.FileName}");
+            return 1;
+        }
+        catch (JsonException exception)
+        {
+            error.WriteLine($"error: input JSON is invalid: {exception.Message}");
+            return 1;
+        }
+        catch (InvalidDataException exception)
+        {
+            error.WriteLine($"error: {exception.Message}");
+            return 1;
+        }
+        catch (SqliteException exception)
+        {
+            error.WriteLine($"error: failed to read raw store: {exception.Message}");
             return 1;
         }
         catch (IOException exception)

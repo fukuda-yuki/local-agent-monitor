@@ -116,3 +116,29 @@ Resolution:
 - Added M6 collaborative real-trace E2E with agent/user work split and repository-safe evidence rules.
 - Documented manual deletion through `manifest.json` `delete_target_paths`; no Sprint3 auto-delete command is introduced.
 - Simplified candidate schemas to avoid carry-through metadata and use `trace_id` plus `source_record_ref` joins.
+
+## 2026-06-17: M3 implementation review
+
+Scope reviewed:
+
+- `src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/`
+- `src/CopilotAgentObservability.ConfigCli/Cli/`
+- `tests/CopilotAgentObservability.ConfigCli.Tests/DiagnosisCandidateGenerationTests.cs`
+- `docs/sprints/sprint3-trace-diagnosis/milestones/M3-diagnosis-candidate-implementation/task.md`
+
+Findings:
+
+- No blocking issues found in the M3 implementation review.
+- The new command is candidate-specific and does not modify M24-M27 diagnosis / proposal / human decision schemas.
+- Standard candidate CSV / JSON output uses sanitized summaries and refs; raw fragment values are written only to the opt-in sensitive bundle.
+- The implementation is intentionally limited to the five M2 `DIAG-*` rules; additional heuristic rules remain out of scope.
+
+Residual risk:
+
+- Content-aware detection is deterministic and intentionally shallow; redacted real-trace compatibility still needs M6 coverage.
+- Sensitive bundle expiry is metadata only; deletion remains a manual procedure through `manifest.json` `delete_target_paths`.
+
+Validation:
+
+- `dotnet build CopilotAgentObservability.slnx` succeeded.
+- `dotnet test CopilotAgentObservability.slnx` succeeded with 179 tests passed.
