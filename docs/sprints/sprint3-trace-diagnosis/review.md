@@ -163,10 +163,38 @@ Findings:
 Residual risk:
 
 - Scope-overreach detection is deterministic substring / regex matching and intentionally limited to the M2 rule inventory.
-- M5 adapter and M6 redacted real-trace E2E remain open follow-up milestones.
+- M6 redacted real-trace E2E remains an open follow-up milestone.
 
 Validation:
 
 - `dotnet build CopilotAgentObservability.slnx` succeeded.
 - `dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --no-build --filter FullyQualifiedName~ImprovementCandidatePipelineTests` succeeded with 11 tests passed before review follow-up and remained covered after adding repository modification variants.
 - `dotnet test CopilotAgentObservability.slnx` succeeded with 194 tests passed after review follow-up.
+
+## 2026-06-18: M5 implementation review
+
+Scope reviewed:
+
+- `src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/`
+- `src/CopilotAgentObservability.ConfigCli/Cli/`
+- `tests/CopilotAgentObservability.ConfigCli.Tests/DiagnosisCandidateAdapterTests.cs`
+- `docs/sprints/sprint3-trace-diagnosis/milestones/M5-human-review-pipeline-connection/task.md`
+
+Findings:
+
+- No blocking issues found in the M5 implementation review.
+- The new `adapt-diagnosis-candidates` command connects Sprint3 diagnosis candidates to the existing M24 diagnosis schema without modifying M24-M27 downstream commands.
+- Candidate statuses map to the M2-defined M24 review statuses, so `accepted-for-proposal` rows can flow into existing proposal generation while human-review and rejected rows remain explicit.
+- Blank candidate trace ids are mapped to `missing-trace-<diagnosis_candidate_id>` so metadata-missing candidates can still be validated as M24 diagnosis records.
+- The adapter does not copy `sensitive_bundle_path` or raw fragment values into M24 output. Measurement evidence refs included in summaries are reduced to basename plus row marker to avoid path-like false positives in the existing M24 safety validator.
+
+Residual risk:
+
+- Context join remains conservative: if multiple measurement rows share a trace id and `source_record_ref` does not identify one row, context columns are blank.
+- Redacted real-trace compatibility still needs M6 coverage.
+
+Validation:
+
+- `dotnet build CopilotAgentObservability.slnx` succeeded.
+- `dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --no-build --filter FullyQualifiedName~DiagnosisCandidateAdapterTests` succeeded with 5 tests passed.
+- `dotnet test CopilotAgentObservability.slnx` succeeded with 199 tests passed.

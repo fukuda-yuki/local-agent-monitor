@@ -1125,10 +1125,13 @@ config-cli generate-improvement-candidates <diagnosis-candidates.csv|diagnosis-c
 config-cli generate-auto-decisions <improvement-candidates.csv|improvement-candidates.json>
   [--csv <output.csv>]
   [--json <output.json>]
+
+config-cli adapt-diagnosis-candidates <diagnosis-candidates.csv|diagnosis-candidates.json> <measurements.csv|measurements.json>
+  [--csv <output.csv>]
+  [--json <output.json>]
 ```
 
-M5 では、diagnosis candidate CSV / JSON と normalized measurement CSV / JSON を入力に取り、既存 M24 `validate-diagnoses` が読める diagnosis record CSV / JSON を出力する adapter command を追加する。
-Adapter command 名は M5 実装時に既存 CLI 命名と整合させる。
+M5 では、diagnosis candidate CSV / JSON と normalized measurement CSV / JSON を入力に取り、既存 M24 `validate-diagnoses` が読める diagnosis record CSV / JSON を出力する `adapt-diagnosis-candidates` adapter command を追加する。
 M5 は文書上の手動 mapping だけで完了扱いにしない。
 
 #### Diagnosis candidate command
@@ -1255,8 +1258,9 @@ Standard output から bundle content への逆引きは、standard output の `
 
 #### M24-M27 adapter boundary
 
-M5 adapter command は diagnosis candidate を M24 diagnosis record に変換する。
+M5 `adapt-diagnosis-candidates` command は diagnosis candidate を M24 diagnosis record に変換する。
 Adapter は diagnosis candidate と normalized measurement を入力に取り、`trace_id` と `source_record_ref` で context を join する。
+candidate `trace_id` が空の場合は、既存 M24 validation の `trace_id` 必須制約を満たすため `missing-trace-<diagnosis_candidate_id>` を出力する。
 M24 の `evidence_summary` には sanitized な `rule_id` と `evidence_ref` を含めてよいが、`sensitive_bundle_path` や raw fragment value は含めない。
 
 `candidate_status` から M24 `review_status` への mapping は以下とする。

@@ -38,7 +38,7 @@ Sprint3 ではこの境界を変更し、trace から deterministic に診断候
 | [M2: deterministic rule and evidence contract](milestones/M2-deterministic-rule-and-evidence-contract/task.md) | 完了 | diagnosis rule id、decision rule id、content-aware pattern、M24-M27 接続方針、sensitive bundle read / manual delete contract を確定し、実装前の blocking question を潰した |
 | [M3: diagnosis candidate implementation](milestones/M3-diagnosis-candidate-implementation/task.md) | 完了 | synthetic fixture で `generate-diagnosis-candidates` を実装し、metadata rule と content-aware rule の最小出力を検証した |
 | [M4: improvement and auto-decision implementation](milestones/M4-improvement-and-auto-decision-implementation/task.md) | 完了 | `generate-improvement-candidates` と `generate-auto-decisions` を実装し、`auto-approved` / `needs-human-review` / `blocked` を出力した |
-| [M5: human-review pipeline connection](milestones/M5-human-review-pipeline-connection/task.md) | 未着手 | M2 で決めた adapter / mapping contract を文書または code に反映し、未接続 pipeline を残さない |
+| [M5: human-review pipeline connection](milestones/M5-human-review-pipeline-connection/task.md) | 完了 | `adapt-diagnosis-candidates` で diagnosis candidate output を既存 M24 diagnosis record に変換し、M24-M27 human-review pipeline で消費できる状態にした |
 | [M6: collaborative real-trace E2E](milestones/M6-collaborative-real-trace-e2e/task.md) | 未着手 | GitHub Copilot CLI と GitHub Copilot Chat の redacted real-trace 入力で candidate pipeline を確認し、agent / user の作業分担と evidence を記録する |
 
 ## Non-scope for Sprint3

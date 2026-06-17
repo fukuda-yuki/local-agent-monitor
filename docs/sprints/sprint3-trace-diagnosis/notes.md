@@ -71,3 +71,13 @@
 - Added opt-in sensitive bundle schema v1 generation with `manifest.json`, `evidence/*.json`, 7-day expiry metadata, source input hashes, and manual deletion paths.
 - Added synthetic xUnit coverage for JSON / CSV measurements, raw OTLP, raw store input, no-leak standard output, opt-in bundle shape, and option validation.
 - Validation passed on 2026-06-17: `dotnet build CopilotAgentObservability.slnx`; `dotnet test CopilotAgentObservability.slnx` with 181 tests passed.
+
+## 2026-06-18: M5 human-review pipeline connection
+
+- Added `adapt-diagnosis-candidates` to convert Sprint3 diagnosis candidate CSV / JSON plus normalized measurement CSV / JSON into existing M24 diagnosis record CSV / JSON.
+- Kept existing M24-M27 commands and schemas unchanged; `validate-diagnoses`, proposal generation, evaluation, and human decision recording remain the downstream human-review workflow.
+- Mapped `candidate_status` to M24 `review_status`: `auto-eligible` to `accepted-for-proposal`, `candidate` to `needs-human-review`, and `blocked` to `rejected`.
+- Joined measurement context by `trace_id`, using exact `source_record_ref` only as a tie-breaker; ambiguous multi-row trace matches leave context columns blank.
+- Mapped blank candidate `trace_id` to `missing-trace-<diagnosis_candidate_id>` so metadata-missing candidates remain consumable by existing M24 validation.
+- Added sanitized `rule_id` and `evidence_ref` to M24 `evidence_summary` without copying `sensitive_bundle_path` or raw fragment values. Measurement refs in summaries are reduced to file name plus row marker.
+- Validation passed on 2026-06-18: `dotnet build CopilotAgentObservability.slnx`; `dotnet test CopilotAgentObservability.slnx` with 199 tests passed.
