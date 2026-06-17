@@ -26,6 +26,8 @@ Raw content is never written to standard CSV / JSON output. When raw content is 
 ## Diagnosis Rule Set
 
 M3 must implement only the rules listed here unless M2 is amended.
+These five rules are the Sprint3 initial implementation set, not the final long-term rule inventory.
+Additional rules such as duration thresholds, token-volume thresholds, unknown-span counts, repeated same-tool calls, or `needs-review`-specific rules are future candidates, likely Sprint4 or later.
 
 | rule_id | Inputs | Deterministic condition | Output |
 | --- | --- | --- | --- |
@@ -264,7 +266,8 @@ Scope-overreach patterns are case-insensitive substring or regex checks over `pr
 
 Sprint3 candidate schemas do not replace M24-M27 schemas.
 
-M5 must connect the pipeline by mapping diagnosis candidates to M24 diagnosis records, then using the existing M25-M27 commands where human review is needed.
+M5 must connect the pipeline by implementing an adapter command that maps diagnosis candidates to M24 diagnosis records, then using the existing M25-M27 commands where human review is needed.
+The adapter may be small, but the Sprint3 connection should not remain a manual mapping only.
 
 ### Adapter Inputs
 

@@ -20,7 +20,7 @@ Findings:
 
 Residual risk:
 
-- M5 still needs to decide whether to implement an adapter command or preserve the M24 mapping as a documented manual procedure first.
+- M5 still needs to implement and verify the adapter command, but the command-vs-manual-mapping decision is resolved.
 - Sprint4 repository modification safety remains intentionally unresolved.
 
 Validation:
