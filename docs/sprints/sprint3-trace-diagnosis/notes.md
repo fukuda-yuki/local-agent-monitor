@@ -81,3 +81,14 @@
 - Mapped blank candidate `trace_id` to `missing-trace-<diagnosis_candidate_id>` so metadata-missing candidates remain consumable by existing M24 validation.
 - Added sanitized `rule_id` and `evidence_ref` to M24 `evidence_summary` without copying `sensitive_bundle_path` or raw fragment values. Measurement refs in summaries are reduced to file name plus row marker.
 - Validation passed on 2026-06-18: `dotnet build CopilotAgentObservability.slnx`; `dotnet test CopilotAgentObservability.slnx` with 199 tests passed.
+
+## 2026-06-18: M6 CLI-side collaborative real-trace E2E
+
+- Used GitHub Copilot CLI 1.0.63 with `COPILOT_OTEL_FILE_EXPORTER_PATH` and content capture for a read-only local telemetry prompt.
+- Converted the file exporter JSONL to a redacted OTLP `resourceSpans` envelope under ignored `tmp\sprint3-m6-real-trace-e2e\20260618-cli\`.
+- Anonymized trace id / span id values and replaced prompt / response, tool schema, tool arguments / results, identity, repository identifiers, branch / commit identifiers, service request ids, interaction ids, and tool call ids with placeholders.
+- CLI-side `ingest-raw -> normalize-raw -> generate-diagnosis-candidates -> generate-improvement-candidates -> generate-auto-decisions` succeeded.
+- Generated 11 normalized measurement rows, 11 diagnosis candidates, 10 improvement candidates, and 10 auto-decision records from the CLI-side redacted real-trace input.
+- Checked the generated sensitive bundle manifest and then deleted the raw content-capturing JSONL files, Copilot session output, and sensitive bundle directory.
+- VS Code Copilot Chat real-trace input remains pending user-side Chat UI operation, so M6 is recorded as in progress rather than complete.
+- Validation passed on 2026-06-18: tracked documentation secret-oriented scan found no checked sensitive strings; `dotnet build CopilotAgentObservability.slnx`; `dotnet test CopilotAgentObservability.slnx` with 199 tests passed.
