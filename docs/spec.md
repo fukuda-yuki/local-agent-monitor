@@ -1228,7 +1228,7 @@ Decision rule は以下の順で評価する。
 | decision_rule_id | 条件 | decision_status | next_action |
 | --- | --- | --- | --- |
 | `DEC-BLOCK-SCOPE-OVERREACH-V1` | proposal が repository 修正、patch / diff、commit / PR、自動勝敗決定、Sprint3 外 target を要求する | `blocked` | `do-not-implement` |
-| `DEC-HUMAN-REVIEW-SENSITIVE-CONTENT-V1` | sensitive content が含まれる、または source diagnosis が `DIAG-CONTENT-SENSITIVE-LEAK-V1` である | `needs-human-review` | `request-human-review` |
+| `DEC-HUMAN-REVIEW-SENSITIVE-CONTENT-V1` | improvement candidate に sensitive content が含まれる、または `sensitive_bundle_path` が空欄ではない | `needs-human-review` | `request-human-review` |
 | `DEC-AUTO-APPROVE-SAFE-METADATA-V1` | blocked ではなく、sensitive content を含まず、severity が `minor` または `major` で、implementation target が Sprint3 の許可 target である | `auto-approved` | `record-for-sprint4-planning` |
 | `DEC-HUMAN-REVIEW-DEFAULT-V1` | 上記に該当しない | `needs-human-review` | `request-human-review` |
 

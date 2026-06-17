@@ -57,3 +57,8 @@
 
 - Promoted the Sprint3 M1/M2 command contracts, candidate schemas, initial rule set, sensitive bundle schema, auto-decision boundary, and M5 adapter command requirement into `docs/spec.md`.
 - Updated Sprint3 state from requirements definition to implementation preparation.
+
+## 2026-06-17: spec promotion review
+
+- Reviewed the promoted Sprint3 candidate pipeline spec against the M1 / M2 sprint-local contracts.
+- Fixed the auto-decision sensitive-content rule so it no longer references `DIAG-CONTENT-SENSITIVE-LEAK-V1`; that diagnosis rule produces `candidate_status=blocked` and does not flow into improvement candidates.

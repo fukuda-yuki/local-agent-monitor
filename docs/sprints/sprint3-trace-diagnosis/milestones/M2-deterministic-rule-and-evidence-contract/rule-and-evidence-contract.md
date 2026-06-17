@@ -247,7 +247,7 @@ Rules are evaluated in this order:
 | decision_rule_id | Deterministic condition | decision_status | next_action |
 | --- | --- | --- | --- |
 | `DEC-BLOCK-SCOPE-OVERREACH-V1` | proposal fields contain a scope-overreach pattern below, or implementation target is outside `prompt`, `instruction`, `skill`, `tool schema`, `workflow`, `eval` | `blocked` | `do-not-implement` |
-| `DEC-HUMAN-REVIEW-SENSITIVE-CONTENT-V1` | `sensitive_content_included=true`, or `sensitive_bundle_path` is non-empty, or the source diagnosis candidate was created by `DIAG-CONTENT-SENSITIVE-LEAK-V1` | `needs-human-review` | `request-human-review` |
+| `DEC-HUMAN-REVIEW-SENSITIVE-CONTENT-V1` | `sensitive_content_included=true`, or `sensitive_bundle_path` is non-empty | `needs-human-review` | `request-human-review` |
 | `DEC-AUTO-APPROVE-SAFE-METADATA-V1` | source candidate is not blocked, sensitive content is not included, severity is `minor` or `major`, and implementation target is one of the allowed Sprint3 targets | `auto-approved` | `record-for-sprint4-planning` |
 | `DEC-HUMAN-REVIEW-DEFAULT-V1` | no earlier rule matches | `needs-human-review` | `request-human-review` |
 
