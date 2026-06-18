@@ -13,6 +13,7 @@
 ## Findings
 
 - No blocking issues found.
+- Self-review finding: The initial security boundary treated `team.id` and `department` as unconditionally forbidden real identity fields. This was too strong because project requirements collect them as Resource Attributes while excluding them from the Sprint4 initial dashboard. Fixed by keeping them out of the M2 required schema and requiring a future retention / access control / masking / communication spec before dashboard display.
 - The Claude follow-up about TTFT acquisition was valid. M2 now treats TTFT as nullable and records `ttft_source`.
 - The Claude follow-up about estimated cost was valid. M2 now defines cost as a unit-price-table estimate, not actual Copilot billing, and records `cost_source`.
 - The Claude follow-up about stuck / long-running thresholds was valid. M2 now defines default thresholds and keeps them as dataset generation parameters.

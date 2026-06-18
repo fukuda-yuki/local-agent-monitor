@@ -63,8 +63,11 @@ They must not contain:
 - Raw prompt, response, system prompt, tool arguments, or tool results.
 - Source code fragments, file contents, or sensitive evidence fragments.
 - Credential, secret, token, API key, password, or Base64 authorization header.
-- Real `user.id`, `user.email`, `team.id`, `department`, or personal identity mapping.
+- Real `user.id`, `user.email`, or personal identity mapping.
 - Sensitive bundle content or direct local sensitive bundle paths.
+
+`team.id` and `department` are collected Resource Attributes in the project requirements, but they are not part of the M2 required dashboard schema.
+If a future shared dashboard displays team or department dimensions, retention, access control, masking / redaction, and user communication must be specified first.
 
 Allowed drilldown references are:
 
