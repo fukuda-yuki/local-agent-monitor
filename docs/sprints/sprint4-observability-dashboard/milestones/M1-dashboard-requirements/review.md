@@ -22,6 +22,13 @@
 - Microsoft Learn's AI coding agents with Grafana guidance was reflected as the reason to make Grafana-first dashboard + Langfuse drilldown the M4 prototype path's first candidate.
 - Grafana product / hosting / backend choices remain undecided; M1 only sets the prototype comparison priority.
 
+## Self-review Follow-up
+
+- Finding: Sprint4 success criteria required users and decision targets, but the added dashboard requirements mostly described views and metrics. This was valid. Fixed by adding primary users and decision targets to `docs/requirements.md`, `docs/spec.md`, and the sprint README.
+- Finding: M4 prototype direction was updated in requirements/spec/README, but `docs/task.md` still only mentioned a generic prototype path. This was valid. Fixed by adding Grafana JSON dashboard as the first candidate while preserving comparison with static report and repository-local preview.
+- Finding: The Microsoft Learn reference in the sprint README was named but not linked. This was valid. Fixed by adding the source URL.
+- Finding: Grafana-first prototype could appear to conflict with the existing non-goal of production Grafana adoption. This was reviewed and not a conflict because M1 now limits the decision to prototype priority and keeps product / hosting / backend choices undecided.
+
 ## Verification
 
 - Ran `git diff --check`; no whitespace errors were reported.

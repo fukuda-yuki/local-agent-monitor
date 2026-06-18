@@ -1339,6 +1339,22 @@ Sprint4 dashboard は以下を目的とする。
 - Sprint3 candidate pipeline の diagnosis / improvement / auto-decision 出力を俯瞰し、human review の優先順位を決める。
 - OTel 収集、Resource Attributes、normalization、candidate generation の欠損を検知する。
 
+Sprint4 dashboard の主な利用者は以下とする。
+
+- Agent / MCP / Skills / CLI の改善担当者。
+- Developer experience / platform engineering 担当者。
+- baseline / variant 計測を行う研究・評価担当者。
+- Sprint3 candidate pipeline の human review 担当者。
+
+Sprint4 dashboard の意思決定対象は以下とする。
+
+- trace review すべき trace / workflow / task の優先順位。
+- 改善候補として調査すべき tool / MCP / CLI 操作。
+- human review に回す diagnosis / improvement / auto-decision candidate。
+- regression candidate として扱う baseline / variant 差分。
+- 先に直すべき OTel 収集、Resource Attributes、normalization、candidate generation の欠損。
+- M4 prototype path で採用する dashboard 実装候補。
+
 Sprint4 dashboard は以下を目的にしない。
 
 - 組織全体の Copilot 利用量把握。

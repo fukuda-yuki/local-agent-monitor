@@ -13,7 +13,7 @@ Sprint4 は、既存の OTel 収集、Langfuse trace viewer、raw telemetry stor
 - `docs/sprints/sprint3-trace-diagnosis/`
 - Speaker Deck: 価格.comをAI駆動で全面刷新する slide 22
 - Docswell: Claude Code / Codex の全社展開とAI観測基盤の設計 page 12 and related pages
-- Microsoft Learn: Monitor AI coding agents with Grafana
+- [Microsoft Learn: Monitor AI coding agents with Grafana](https://learn.microsoft.com/en-us/azure/managed-grafana/grafana-opentelemetry-app-insights)
 - `C:\Users\mwam0\Documents\deep-research-report.md`
 
 ## Goals
@@ -27,6 +27,24 @@ Sprint4 は、既存の OTel 収集、Langfuse trace viewer、raw telemetry stor
 - TTFT、trace duration、tool duration、retry、subagent / nested agent、approval、stuck session を分けて観測する要件を定義する。
 - 集計 dashboard と Langfuse trace viewer / sensitive bundle への drilldown の責務分担を定義する。
 - M4 prototype path では Grafana-first dashboard + Langfuse drilldown を第一候補として比較する。
+
+## Users and Decisions
+
+Primary users:
+
+- Agent / MCP / Skills / CLI improvement owners.
+- Developer experience / platform engineering owners.
+- Baseline / variant measurement and evaluation owners.
+- Sprint3 candidate pipeline human reviewers.
+
+Decision targets:
+
+- Which trace / workflow / task should be reviewed first.
+- Which tool / MCP / CLI operation should be investigated as an improvement candidate.
+- Which diagnosis / improvement / auto-decision candidate should go to human review.
+- Which baseline / variant difference should be treated as a regression candidate.
+- Which collection / normalization / candidate generation gap should be fixed first.
+- Which M4 prototype path should be selected.
 
 ## Non-goals
 
