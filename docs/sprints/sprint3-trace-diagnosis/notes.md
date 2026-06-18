@@ -96,3 +96,10 @@
 - Generated 27 normalized measurement rows, 27 diagnosis candidates, 26 improvement candidates, and 26 auto-decision records from the VS Code Chat-side redacted real-trace input.
 - Checked the VS Code Chat-side sensitive bundle manifest and then deleted the raw content-capturing JSONL file and sensitive bundle directory.
 - M6 is complete for both required client kinds. Validation passed on 2026-06-18: tracked documentation secret-oriented scan found no checked sensitive strings; `dotnet build CopilotAgentObservability.slnx`; `dotnet test CopilotAgentObservability.slnx` with 199 tests passed.
+
+## 2026-06-18: Sprint3 closeout
+
+- Confirmed Sprint3 M1-M6 are complete.
+- Updated the repository sprint index to mark Sprint3 complete.
+- Sprint3 delivered candidate schema / command boundary, deterministic rule and evidence contract, diagnosis candidate generation, improvement candidate generation, auto-decision records, M24-M27 adapter connection, and collaborative redacted real-trace E2E for both GitHub Copilot CLI and VS Code Copilot Chat.
+- Remaining repository-modifying auto-improvement work stays out of Sprint3 and requires Sprint4-or-later safety planning before implementation.
