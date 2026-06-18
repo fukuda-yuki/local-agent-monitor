@@ -22,6 +22,7 @@ Phase 0 では、VS Code GitHub Copilot Chat から Aspire Dashboard へ OTLP HT
 
 Phase 1 / Sprint1 では、ローカル self-host Langfuse に VS Code GitHub Copilot Chat と GitHub Copilot CLI の OTel を直接送信し、Langfuse 上で trace、prompt、response、tool call、token usage を確認した。
 Phase 1 の主目的は、VS Code GitHub Copilot Chat / GitHub Copilot CLI の公式 OTel 出力を Langfuse に取り込み、trace / prompt / response / tool call / token usage を確認することである。
+Codex App / app-server の OTel 収集は任意の追加対象として扱う。Codex App の OTel routing 設定は user-level の `~/.codex/config.toml` に置き、project-local `.codex/config.toml` の `[otel]` は source of truth として扱わない。
 
 Langfuse は Sprint1 baseline observability backend である。
 ただし、改善ループの必須依存とは限らない。
@@ -149,6 +150,7 @@ Config CLI の汎用コマンド `vscode-settings`、`vscode-env`、`copilot-cli
 
 `langfuse-*` コマンドは Langfuse 直接送信を明示する別名として維持する。
 `collector-*` コマンドは M9 Collector 経由送信専用とし、送信先は `http://localhost:4318`、Langfuse 認証は出力しない。
+`langfuse-codex-app-config` と `collector-codex-app-config` は、Codex App / app-server 向けに user-level `~/.codex/config.toml` へ貼り付ける `[otel]` TOML サンプルを出力する。
 
 ### 3.1 VS Code GitHub Copilot Chat
 
@@ -195,7 +197,37 @@ $env:OTEL_RESOURCE_ATTRIBUTES="user.id=example-user,user.email=user@example.com,
 必要に応じて、GitHub Copilot CLI の file exporter を診断用途に使用する。
 file exporter は OTLP export 経路と Copilot CLI の OTel emit 自体を切り分けるための補助であり、Phase 1 の主送信経路ではない。
 
-### 3.3 M9 Collector 経由送信
+### 3.3 Codex App / app-server
+
+Codex App / app-server では、user-level の `~/.codex/config.toml` に `[otel]` を設定する。
+Codex App は同じ repository を開いていても project-local `.codex/config.toml` の `[otel]` を routing source として扱わないため、手動確認では user-level config に設定されていることを確認する。
+
+Langfuse 直接送信の設定例:
+
+```toml
+[otel]
+environment = "dev"
+log_user_prompt = false
+exporter = { otlp-http = { endpoint = "http://localhost:3000/api/public/otel/v1/logs", protocol = "binary", headers = { Authorization = "Basic <base64-public-secret>", "x-langfuse-ingestion-version" = "4" } } }
+metrics_exporter = { otlp-http = { endpoint = "http://localhost:3000/api/public/otel/v1/metrics", protocol = "binary", headers = { Authorization = "Basic <base64-public-secret>", "x-langfuse-ingestion-version" = "4" } } }
+trace_exporter = { otlp-http = { endpoint = "http://localhost:3000/api/public/otel/v1/traces", protocol = "binary", headers = { Authorization = "Basic <base64-public-secret>", "x-langfuse-ingestion-version" = "4" } } }
+```
+
+Collector 経由送信の設定例:
+
+```toml
+[otel]
+environment = "dev"
+log_user_prompt = false
+exporter = { otlp-http = { endpoint = "http://localhost:4318/v1/logs", protocol = "binary" } }
+metrics_exporter = { otlp-http = { endpoint = "http://localhost:4318/v1/metrics", protocol = "binary" } }
+trace_exporter = { otlp-http = { endpoint = "http://localhost:4318/v1/traces", protocol = "binary" } }
+```
+
+`log_user_prompt=false` を既定とする。raw user prompt の保存が必要な場合は、content capture と同じく保存先、保持期間、アクセス権、削除方法を確認してから明示的に変更する。
+設定後は Codex App を再起動して `app-server` に設定を読み込ませる。
+
+### 3.4 M9 Collector 経由送信
 
 Collector 経由送信では、VS Code GitHub Copilot Chat / GitHub Copilot CLI の送信先を Collector の OTLP HTTP receiver に向ける。
 Langfuse Basic Auth は Collector 側で付与するため、クライアント側には Langfuse の public key / secret key / Basic Auth header を設定しない。

@@ -1,6 +1,6 @@
 # 利用者向けガイド
 
-この文書は、`copilot-agent-observability` を使って GitHub Copilot Chat / GitHub Copilot CLI の OpenTelemetry データをローカル Langfuse に送信して trace を確認し、saved raw OTLP JSON から Langfuse 非依存の raw data loop を試すための入口です。
+この文書は、`copilot-agent-observability` を使って GitHub Copilot Chat / GitHub Copilot CLI / Codex App の OpenTelemetry データをローカル Langfuse に送信して trace を確認し、saved raw OTLP JSON から Langfuse 非依存の raw data loop を試すための入口です。
 
 詳細仕様の正は [docs/spec.md](spec.md) です。この文書は、初めて使う人が準備と確認の流れを把握しやすくするためのガイドです。
 
@@ -19,6 +19,7 @@
 - duration
 - error
 - VS Code GitHub Copilot Chat と GitHub Copilot CLI の挙動差分
+- Codex App / app-server の trace / logs / metrics
 - Langfuse が起動していない状態での raw store / normalized dataset / improvement workflow
 
 目的ではないもの:
@@ -37,6 +38,7 @@ Sprint1 baseline は、ローカル PC 上で Langfuse self-host を Docker Desk
 ```text
 VS Code GitHub Copilot Chat
 GitHub Copilot CLI
+Codex App
         |
         | OTLP HTTP
         v
@@ -156,12 +158,19 @@ GitHub Copilot CLI に渡す環境変数の例を出力:
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-copilot-cli-env
 ```
 
+Codex App の user-level `$HOME\.codex\config.toml` に貼る TOML 例を出力:
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-codex-app-config
+```
+
 Collector 経由送信を試す場合の設定サンプル:
 
 ```powershell
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- collector-vscode-settings
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- collector-vscode-env
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- collector-copilot-cli-env
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- collector-codex-app-config
 ```
 
 Collector 経由送信は代替候補です。まずは Langfuse 直接送信で確認してください。
@@ -227,7 +236,29 @@ $env:OTEL_RESOURCE_ATTRIBUTES="user.id=example-user,user.email=user@example.com,
 
 この状態で Copilot CLI を実行します。実行する依頼には、合成データまたは検証用データだけを使ってください。
 
-## 6. Langfuse UI で確認する
+## 6. Codex App を設定する
+
+Codex App / app-server の OTel 設定は、user-level の `$HOME\.codex\config.toml` に `[otel]` として追加します。
+project-local `.codex/config.toml` には置かないでください。
+
+Langfuse 直接送信の例は Config CLI で出力します。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-codex-app-config
+```
+
+出力中の `<base64-public-secret>` は、Langfuse の `<public-key>:<secret-key>` を Base64 化した値に置き換えます。
+実 key や Base64 header は repository に保存しないでください。
+
+設定後は Codex App を再起動し、検証用データだけを使った依頼を実行します。
+
+Collector 経由送信を試す場合は、次のコマンドで `http://localhost:4318` 向けの TOML を出力します。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- collector-codex-app-config
+```
+
+## 7. Langfuse UI で確認する
 
 `http://localhost:3000` を開き、対象 project の traces を確認します。
 
@@ -243,8 +274,9 @@ $env:OTEL_RESOURCE_ATTRIBUTES="user.id=example-user,user.email=user@example.com,
 - error がある場合に確認できる
 
 VS Code Chat と CLI の両方を確認する場合は、`client.kind` で区別します。
+Codex App については、Codex 側が付与する `service.name` / `job` / span 名でも送信元を確認します。
 
-## 7. 研究用 dataset を作る場合
+## 8. 研究用 dataset を作る場合
 
 Langfuse から取得した trace / observation / usage / metadata を、content と identity-bearing 属性を除いた sanitized JSON にしてから集計します。
 
@@ -254,7 +286,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- aggregate-measur
 
 出力は研究用 measurement schema に合わせた CSV / JSON です。実 prompt / response content、tool arguments / results、credential、secret、Base64 header、実 user identity を含めないでください。
 
-## 8. Langfuse なしで raw data loop を試す場合
+## 9. Langfuse なしで raw data loop を試す場合
 
 この手順は synthetic fixture だけを使う確認用です。Langfuse、Copilot live 実行、実 trace content は不要です。
 
@@ -299,7 +331,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- record-human-dec
 
 `<decisions.json>` には synthetic または sanitized された decision record だけを指定してください。実名、実 email address、credential、secret、Base64 header、実 prompt / response content は入れないでください。
 
-## 9. local raw data を削除する場合
+## 10. local raw data を削除する場合
 
 Sprint2 の raw store 既定 path は `data/raw-store.db` です。`data/`、`tmp\sprint2-loop\`、手元に保存した raw payload file は local runtime data であり、repository に commit しません。
 
@@ -312,7 +344,7 @@ Remove-Item tmp\sprint2-loop -Recurse -Force -ErrorAction SilentlyContinue
 
 実データや秘密情報が混入した raw payload を扱ってしまった場合は、その file、生成された raw store、一時 CSV / JSON output を削除し、必要に応じてローカル Langfuse 側の対象 trace や volume も破棄してください。
 
-## 10. Collector 経由送信を試す場合
+## 11. Collector 経由送信を試す場合
 
 通常は Langfuse 直接送信を使います。直接送信が不安定な場合や、後続の組織展開候補を試す場合だけ Collector 経由送信を使います。
 
@@ -336,6 +368,7 @@ docker compose -f infra\otel-collector\docker-compose.example.yml config
 | 認証 error になる | public key / secret key と Basic Auth header が正しいか |
 | VS Code だけ trace が出ない | VS Code を OTel 環境変数を設定した PowerShell から起動したか |
 | CLI だけ trace が出ない | `COPILOT_OTEL_ENABLED` と `OTEL_EXPORTER_OTLP_*` が同じ shell に設定されているか |
+| Codex App だけ trace が出ない | `[otel]` が user-level の `$HOME\.codex\config.toml` にあり、設定後に Codex App を再起動したか |
 | trace はあるが分類できない | `OTEL_RESOURCE_ATTRIBUTES` に `client.kind` と `experiment.id` が入っているか |
 | 実データが混入した | 対象 trace を削除するか、必要に応じてローカル Langfuse volume を破棄する |
 | raw data loop の出力を commit しそうになった | `data/raw-store.db`、`tmp\sprint2-loop\`、raw payload file を削除し、`git status --short` を確認する |

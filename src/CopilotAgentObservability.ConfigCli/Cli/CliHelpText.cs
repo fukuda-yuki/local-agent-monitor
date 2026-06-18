@@ -14,6 +14,8 @@ internal static class CliHelpText
           config-cli copilot-cli-env
           config-cli langfuse-copilot-cli-env
           config-cli collector-copilot-cli-env
+          config-cli langfuse-codex-app-config
+          config-cli collector-codex-app-config
           config-cli validate-resource-attributes <OTEL_RESOURCE_ATTRIBUTES>
           config-cli ingest-raw <raw.json> --db <raw-store.db>
           config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]

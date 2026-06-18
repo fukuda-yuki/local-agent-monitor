@@ -163,4 +163,36 @@ public class ConfigSamplesTests
         Assert.Contains("client.kind=copilot-cli", script);
         Assert.Contains("experiment.id=baseline", script);
     }
+
+    [Fact]
+    public void CreateLangfuseCodexAppConfigToml_IncludesLangfuseOtelConfig()
+    {
+        var config = ConfigSamples.CreateLangfuseCodexAppConfigToml();
+
+        Assert.Contains("[otel]", config);
+        Assert.Contains("environment = \"dev\"", config);
+        Assert.Contains("log_user_prompt = false", config);
+        Assert.Contains("endpoint = \"http://localhost:3000/api/public/otel/v1/logs\"", config);
+        Assert.Contains("endpoint = \"http://localhost:3000/api/public/otel/v1/metrics\"", config);
+        Assert.Contains("endpoint = \"http://localhost:3000/api/public/otel/v1/traces\"", config);
+        Assert.Contains("protocol = \"binary\"", config);
+        Assert.Contains("Authorization = \"Basic <base64-public-secret>\"", config);
+        Assert.Contains("\"x-langfuse-ingestion-version\" = \"4\"", config);
+    }
+
+    [Fact]
+    public void CreateCollectorCodexAppConfigToml_IncludesCollectorOtelConfigWithoutLangfuseHeaders()
+    {
+        var config = ConfigSamples.CreateCollectorCodexAppConfigToml();
+
+        Assert.Contains("[otel]", config);
+        Assert.Contains("environment = \"dev\"", config);
+        Assert.Contains("log_user_prompt = false", config);
+        Assert.Contains("endpoint = \"http://localhost:4318/v1/logs\"", config);
+        Assert.Contains("endpoint = \"http://localhost:4318/v1/metrics\"", config);
+        Assert.Contains("endpoint = \"http://localhost:4318/v1/traces\"", config);
+        Assert.Contains("protocol = \"binary\"", config);
+        Assert.DoesNotContain("Authorization = \"Basic", config);
+        Assert.DoesNotContain("x-langfuse-ingestion-version", config);
+    }
 }

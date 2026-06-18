@@ -58,6 +58,14 @@ internal static class CliApplication
                 output.WriteLine(ConfigSamples.CreateCollectorCopilotCliPowerShellScript());
                 return 0;
 
+            case "langfuse-codex-app-config":
+                output.WriteLine(ConfigSamples.CreateLangfuseCodexAppConfigToml());
+                return 0;
+
+            case "collector-codex-app-config":
+                output.WriteLine(ConfigSamples.CreateCollectorCodexAppConfigToml());
+                return 0;
+
             case "validate-resource-attributes":
                 if (args.Length != 2)
                 {
