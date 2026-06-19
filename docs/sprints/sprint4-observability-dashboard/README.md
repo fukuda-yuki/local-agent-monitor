@@ -66,7 +66,7 @@ Decision targets:
 | [M1: dashboard requirements](milestones/M1-dashboard-requirements/task.md) | complete | dashboard の目的、非目的、view set、metric inventory、dimension / filter、drilldown、data source 境界を確定する |
 | [M2: dashboard dataset contract](milestones/M2-dashboard-dataset-contract/task.md) | complete | normalized measurement / candidate outputs から dashboard dataset を生成する CSV / JSON schema を定義した |
 | [M3: synthetic dashboard data](milestones/M3-synthetic-dashboard-data/task.md) | complete | synthetic fixture から dashboard dataset を生成し、metric 欠損と PII 非混入を確認した |
-| M4: dashboard prototype path | planned | Grafana JSON dashboard を第一候補とし、static report、repository-local preview と比較する |
+| [M4: dashboard prototype path](milestones/M4-dashboard-prototype-path/task.md) | started | Grafana JSON dashboard を第一候補とし、static report、repository-local preview と比較する |
 | M5: review and handoff | planned | Sprint4 の要件と prototype 方針を review し、Sprint5 以降の実装範囲を分離する |
 
 ## Initial View Set
@@ -145,3 +145,11 @@ config-cli generate-dashboard-dataset <measurements.csv|measurements.json>
 M3 generator は TTFT fallback、estimated cost、operation timing、retry、approval wait、subagent wait、stuck / long-running flags、candidate status distribution、collection health を synthetic data で検証する。
 backlog age は既存 candidate schema に generated timestamp がないため nullable とし、M3 では null が dashboard generation を阻害しないことを確認した。
 Grafana JSON dashboard、static report、repository-local preview の選定は M4 に残す。
+
+## M4 Dashboard Prototype Path
+
+M4 では [prototype-path.md](milestones/M4-dashboard-prototype-path/prototype-path.md) で、Grafana JSON dashboard、static report、repository-local preview を同じ基準で比較する。
+既定の prototype path は Grafana JSON dashboard とし、M3 synthetic dashboard dataset を初期検証入力にする。
+
+Static report は Grafana data source が準備できない場合の deterministic fallback として維持する。
+Repository-local preview は最小の視覚確認候補に留め、独自 trace viewer や product UI には広げない。
