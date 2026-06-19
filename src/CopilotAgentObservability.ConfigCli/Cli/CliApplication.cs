@@ -116,6 +116,9 @@ internal static class CliApplication
             case "adapt-diagnosis-candidates":
                 return RunAdaptDiagnosisCandidates(args, output, error);
 
+            case "generate-dashboard-dataset":
+                return RunGenerateDashboardDataset(args, output, error);
+
             case "generate-improvement-proposals":
                 return RunGenerateImprovementProposals(args, output, error);
 
@@ -471,6 +474,115 @@ internal static class CliApplication
         catch (InvalidDataException exception)
         {
             error.WriteLine($"error: {exception.Message}");
+            return 1;
+        }
+        catch (IOException exception)
+        {
+            error.WriteLine($"error: failed to read or write file: {exception.Message}");
+            return 1;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            error.WriteLine($"error: failed to access file: {exception.Message}");
+            return 1;
+        }
+    }
+
+    private static int RunGenerateDashboardDataset(string[] args, TextWriter output, TextWriter error)
+    {
+        var parseResult = DashboardDatasetOptions.Parse(args);
+        if (parseResult.Error is not null)
+        {
+            error.WriteLine($"error: {parseResult.Error}");
+            return 1;
+        }
+
+        try
+        {
+            var options = parseResult.Options!;
+            if (!File.Exists(options.MeasurementsPath))
+            {
+                error.WriteLine($"error: measurements file not found: {options.MeasurementsPath}");
+                return 1;
+            }
+
+            if (options.RawInputPath is not null && !File.Exists(options.RawInputPath))
+            {
+                error.WriteLine($"error: raw input file not found: {options.RawInputPath}");
+                return 1;
+            }
+
+            if (options.DiagnosisCandidatesPath is not null && !File.Exists(options.DiagnosisCandidatesPath))
+            {
+                error.WriteLine($"error: diagnosis candidates file not found: {options.DiagnosisCandidatesPath}");
+                return 1;
+            }
+
+            if (options.ImprovementCandidatesPath is not null && !File.Exists(options.ImprovementCandidatesPath))
+            {
+                error.WriteLine($"error: improvement candidates file not found: {options.ImprovementCandidatesPath}");
+                return 1;
+            }
+
+            if (options.AutoDecisionsPath is not null && !File.Exists(options.AutoDecisionsPath))
+            {
+                error.WriteLine($"error: auto decisions file not found: {options.AutoDecisionsPath}");
+                return 1;
+            }
+
+            var measurements = DiagnosisCandidateMeasurementReader.Read(options.MeasurementsPath);
+            var rawOperations = options.RawInputPath is null
+                ? []
+                : DashboardRawOperationReader.Read(options.RawInputPath);
+            var diagnosisCandidates = options.DiagnosisCandidatesPath is null
+                ? []
+                : DiagnosisCandidateInputReader.Read(options.DiagnosisCandidatesPath);
+            var improvementCandidates = options.ImprovementCandidatesPath is null
+                ? []
+                : ImprovementCandidateInputReader.Read(options.ImprovementCandidatesPath);
+            var autoDecisions = options.AutoDecisionsPath is null
+                ? []
+                : AutoDecisionInputReader.Read(options.AutoDecisionsPath);
+            var dataset = DashboardDatasetGenerator.Generate(
+                measurements,
+                rawOperations,
+                diagnosisCandidates,
+                improvementCandidates,
+                autoDecisions,
+                options.TimeBucketGranularity,
+                DateTimeOffset.UtcNow);
+
+            if (options.CsvOutputDirectory is not null)
+            {
+                DashboardDatasetOutputWriter.WriteCsvDirectory(dataset, options.CsvOutputDirectory);
+            }
+
+            if (options.JsonOutputPath is not null)
+            {
+                File.WriteAllText(options.JsonOutputPath, DashboardDatasetOutputWriter.WriteJson(dataset), Encoding.UTF8);
+            }
+
+            output.WriteLine($"Generated dashboard dataset with {dataset.RunSummary.Count} run row(s), {dataset.OperationSummary.Count} operation row(s), {dataset.CandidateSummary.Count} candidate row(s), and {dataset.CollectionHealth.Count} collection health row(s).");
+            return 0;
+        }
+        catch (FileNotFoundException exception)
+        {
+            error.WriteLine($"error: file not found: {exception.FileName}");
+            return 1;
+        }
+        catch (JsonException exception)
+        {
+            error.WriteLine($"error: input JSON is invalid: {exception.Message}");
+            return 1;
+        }
+        catch (InvalidDataException exception)
+        {
+            error.WriteLine($"error: {exception.Message}");
+            return 1;
+        }
+        catch (SqliteException exception)
+        {
+            error.WriteLine($"error: failed to read raw store: {exception.Message}");
             return 1;
         }
         catch (IOException exception)

@@ -1455,6 +1455,26 @@ TTFT は `ttft_source` で `direct-attribute`、`derived-first-generation-event`
 estimated cost は `cost_source` で `unit-price-table`、`unavailable-unit-price`、`not-calculated` のいずれかを記録する。
 これらは dashboard 上の比較・異常値発見のための派生指標であり、Copilot の実課金額や公式 SLA 指標を意味しない。
 
+Sprint4 M3 では、以下の command で M2 dashboard dataset を synthetic input から生成する。
+
+```text
+config-cli generate-dashboard-dataset <measurements.csv|measurements.json>
+  [--raw <raw-store.db|raw-otlp.json>]
+  [--diagnosis-candidates <input.csv|input.json>]
+  [--improvement-candidates <input.csv|input.json>]
+  [--auto-decisions <input.csv|input.json>]
+  [--time-bucket <day|hour|week>]
+  [--csv-dir <output-dir>]
+  [--json <output.json>]
+```
+
+`generate-dashboard-dataset` は JSON output では M2 contract の単一 object を出力し、CSV output では `--csv-dir` 配下に 4 logical table ごとの CSV file を出力する。
+`--raw` は operation timing、TTFT fallback、LLM model、retry、approval wait、permission result、subagent / nested agent count の synthetic derivation に使う。
+`--raw` がない場合でも dashboard dataset は生成でき、raw-derived nullable fields は null または `unavailable` とする。
+estimated cost は small built-in unit price table に基づく観測用概算であり、model が table にない場合は null とする。
+candidate input に sensitive bundle path がある場合、dashboard dataset には path を出さず `sensitive_bundle_present=true` と sanitized evidence / candidate reference だけを出力する。
+backlog age は既存 candidate schema に generated timestamp がないため M3 では nullable とし、timestamp source の本格追加は M4 / M5 以降の候補とする。
+
 #### Dimension and filter contract
 
 Dashboard dataset は以下の dimension / filter を持つ。

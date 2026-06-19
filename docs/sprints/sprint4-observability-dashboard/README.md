@@ -65,7 +65,7 @@ Decision targets:
 | --- | --- | --- |
 | [M1: dashboard requirements](milestones/M1-dashboard-requirements/task.md) | complete | dashboard の目的、非目的、view set、metric inventory、dimension / filter、drilldown、data source 境界を確定する |
 | [M2: dashboard dataset contract](milestones/M2-dashboard-dataset-contract/task.md) | complete | normalized measurement / candidate outputs から dashboard dataset を生成する CSV / JSON schema を定義した |
-| M3: synthetic dashboard data | planned | synthetic fixture から dashboard dataset を生成し、metric 欠損と PII 非混入を確認する |
+| [M3: synthetic dashboard data](milestones/M3-synthetic-dashboard-data/task.md) | complete | synthetic fixture から dashboard dataset を生成し、metric 欠損と PII 非混入を確認した |
 | M4: dashboard prototype path | planned | Grafana JSON dashboard を第一候補とし、static report、repository-local preview と比較する |
 | M5: review and handoff | planned | Sprint4 の要件と prototype 方針を review し、Sprint5 以降の実装範囲を分離する |
 
@@ -125,3 +125,23 @@ TTFT は直接属性がある場合のみ使用し、ない場合は first gener
 estimated cost は token 数と model 別 unit price table による観測用概算であり、実課金額として扱わない。
 time bucket の既定粒度は `day`、long-running / stuck 判定は M2 contract の既定閾値を初期値とする。
 `client_kind=codex-app` は任意 source の予約値であり、M2 / M3 の必須 fixture 対象にはしない。
+
+## M3 Synthetic Dataset Generator
+
+M3 では `generate-dashboard-dataset` を追加し、normalized measurement、raw OTLP synthetic fixture、diagnosis candidate、improvement candidate、auto-decision record から M2 の 4 logical table を生成できることを確認した。
+JSON output は単一 object、CSV output は table ごとの file とする。
+
+```text
+config-cli generate-dashboard-dataset <measurements.csv|measurements.json>
+  [--raw <raw-store.db|raw-otlp.json>]
+  [--diagnosis-candidates <input.csv|input.json>]
+  [--improvement-candidates <input.csv|input.json>]
+  [--auto-decisions <input.csv|input.json>]
+  [--time-bucket <day|hour|week>]
+  [--csv-dir <output-dir>]
+  [--json <output.json>]
+```
+
+M3 generator は TTFT fallback、estimated cost、operation timing、retry、approval wait、subagent wait、stuck / long-running flags、candidate status distribution、collection health を synthetic data で検証する。
+backlog age は既存 candidate schema に generated timestamp がないため nullable とし、M3 では null が dashboard generation を阻害しないことを確認した。
+Grafana JSON dashboard、static report、repository-local preview の選定は M4 に残す。
