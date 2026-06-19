@@ -33,7 +33,10 @@ x86/
 
 # .NET publish outputs
 publish/
-artifacts/
+artifacts/*
+!artifacts/dashboard-input/
+artifacts/dashboard-input/*
+!artifacts/dashboard-input/README.md
 artifacts-*/
 artifacts_*/
 

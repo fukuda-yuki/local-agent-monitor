@@ -53,12 +53,60 @@ public class StaticDashboardGenerationTests
         Assert.DoesNotContain("authorization.header", dataset);
         Assert.DoesNotContain("sensitive_bundle_path", dataset);
         Assert.DoesNotContain("C:/sensitive-bundle", dataset);
+        Assert.DoesNotContain("secret_key", dataset);
+        Assert.DoesNotContain("sensitive-bundle", dataset);
 
         using var document = JsonDocument.Parse(dataset);
         var run = document.RootElement.GetProperty("dashboard_run_summary").EnumerateArray().Single();
         Assert.Equal("user@example.com", run.GetProperty("user_email").GetString());
         Assert.False(run.TryGetProperty("prompt", out _));
         Assert.False(run.TryGetProperty("authorization", out _));
+    }
+
+    [Fact]
+    public void GenerateStaticDashboard_SanitizesRealDataShapedSnapshot()
+    {
+        using var tempDirectory = new TempDirectory();
+        var inputPath = tempDirectory.WriteFile("dashboard.json", RealDataShapedDashboardJson());
+        var outputDirectory = Path.Combine(tempDirectory.Path, "site");
+
+        var exitCode = CliApplication.Run(
+            [
+                "generate-static-dashboard",
+                inputPath,
+                "--out-dir",
+                outputDirectory,
+                "--snapshot-date",
+                "2026-06-20",
+            ],
+            new StringWriter(),
+            new StringWriter());
+
+        Assert.Equal(0, exitCode);
+
+        var html = File.ReadAllText(Path.Combine(outputDirectory, "index.html"));
+        Assert.Contains("Snapshot: <span id=\"snapshot-date\">2026-06-20</span>", html);
+
+        var dataset = File.ReadAllText(Path.Combine(outputDirectory, "dashboard-data.json"));
+        Assert.Contains("real.user@example.com", dataset);
+        Assert.Contains("real-user-001", dataset);
+        Assert.Contains("repo-real-snapshot-2026-06-20", dataset);
+        Assert.DoesNotContain("Real prompt content must not be published", dataset);
+        Assert.DoesNotContain("Real response content must not be published", dataset);
+        Assert.DoesNotContain("Real tool arguments must not be published", dataset);
+        Assert.DoesNotContain("Real tool result must not be published", dataset);
+        Assert.DoesNotContain("Authorization: Basic", dataset);
+        Assert.DoesNotContain("secret_key", dataset);
+        Assert.DoesNotContain("C:/Users/real-user/sensitive-bundle", dataset.Replace('\\', '/'));
+
+        using var document = JsonDocument.Parse(dataset);
+        var run = document.RootElement.GetProperty("dashboard_run_summary").EnumerateArray().Single();
+        Assert.Equal("real.user@example.com", run.GetProperty("user_email").GetString());
+        Assert.Equal("real-user-001", run.GetProperty("user_id").GetString());
+        Assert.Equal("repo-real-snapshot-2026-06-20", run.GetProperty("repo_snapshot").GetString());
+        Assert.False(run.TryGetProperty("messages", out _));
+        Assert.False(run.TryGetProperty("content", out _));
+        Assert.False(run.TryGetProperty("secret_key", out _));
     }
 
     [Fact]
@@ -123,7 +171,9 @@ public class StaticDashboardGenerationTests
                   "prompt": "synthetic raw prompt should be removed",
                   "response.content": "synthetic dotted response should be removed",
                   "tool.arguments": "synthetic dotted tool args should be removed",
-                  "authorization.header": "Authorization=Basic abc123"
+                  "authorization.header": "Authorization=Basic abc123",
+                  "secret_key": "secret_key=synthetic-secret",
+                  "evidence_ref": "C:/sensitive-bundle/manifest.json"
                 }
               ],
               "dashboard_operation_summary": [],
@@ -133,6 +183,68 @@ public class StaticDashboardGenerationTests
                   "trace_id": "trace-1",
                   "user_email": "user@example.com",
                   "sensitive_bundle_path": "C:/sensitive-bundle/manifest.json"
+                }
+              ],
+              "dashboard_collection_health": []
+            }
+            """;
+    }
+
+    private static string RealDataShapedDashboardJson()
+    {
+        return """
+            {
+              "schema_version": "sprint4-m2-v1",
+              "generated_at_utc": "2026-06-20T00:00:00.0000000+00:00",
+              "time_bucket_granularity": "day",
+              "dashboard_run_summary": [
+                {
+                  "schema_version": "sprint4-m2-v1",
+                  "time_bucket_start_utc": "2026-06-20T00:00:00.0000000+00:00",
+                  "trace_id": "real-trace-redacted-001",
+                  "user_id": "real-user-001",
+                  "user_email": "real.user@example.com",
+                  "client_kind": "copilot-cli",
+                  "experiment_id": "baseline",
+                  "agent_variant": "baseline",
+                  "repo_snapshot": "repo-real-snapshot-2026-06-20",
+                  "status": "success",
+                  "success_status": "pass",
+                  "duration_ms": 4567,
+                  "ttft_ms": 321,
+                  "total_tokens": 1234,
+                  "tool_call_count": 5,
+                  "error_count": 0,
+                  "messages": [
+                    "Real prompt content must not be published"
+                  ],
+                  "content": "Real response content must not be published",
+                  "tool_args": "Real tool arguments must not be published",
+                  "tool_result": "Real tool result must not be published",
+                  "headers": {
+                    "authorization": "Authorization: Basic cHVibGljOnNlY3JldA==",
+                    "secret_key": "secret_key=real-secret"
+                  }
+                }
+              ],
+              "dashboard_operation_summary": [
+                {
+                  "trace_id": "real-trace-redacted-001",
+                  "user_email": "real.user@example.com",
+                  "client_kind": "copilot-cli",
+                  "operation_kind": "tool",
+                  "tool_name": "shell",
+                  "status": "success",
+                  "call_count": 1,
+                  "result": "Real tool result must not be published"
+                }
+              ],
+              "dashboard_candidate_summary": [
+                {
+                  "candidate_kind": "diagnosis",
+                  "trace_id": "real-trace-redacted-001",
+                  "user_email": "real.user@example.com",
+                  "evidence_ref": "C:/Users/real-user/sensitive-bundle/manifest.json"
                 }
               ],
               "dashboard_collection_health": []

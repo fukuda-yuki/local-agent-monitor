@@ -104,12 +104,12 @@ Outcome Linkage Candidate は placeholder / future candidate とし、外部 API
 | M2 static dashboard artifact contract | 完了。HTML / JSON artifact、Pages layout、snapshot policy、client-side filter contract を定義した |
 | M3 local static dashboard generator | 完了。dashboard dataset から local static HTML を生成する `generate-static-dashboard` を追加した |
 | M4 daily GitHub Actions publish workflow | 完了。raw store / normalized dataset から日次 dashboard を生成し GitHub Pages へ publish する workflow を追加した |
-| M5 real-data snapshot validation | 実データ由来の集計 dashboard、user 表示、snapshot 履歴、raw content 非表示を検証する |
+| M5 real-data snapshot validation | 完了。実データ由来入力の staging contract、user 表示、snapshot metadata、raw content / credential / sensitive path 非表示を検証した |
 | M6 review and handoff | Sprint5 の実装、運用境界、残課題を review して後続へ渡す |
 
 ## Open Questions
 
-- Actions が参照する raw store / normalized dataset の初期配置は `artifacts/dashboard-input/` とする。実データ配置の正式運用は M5 で検証する。
+- Actions が参照する raw store / normalized dataset の初期配置は `artifacts/dashboard-input/` とする。JSON 入力は accidental commit を避けるため git ignored とし、M5 では staging contract と sanitizer coverage を検証した。
 - Published JSON dataset は `gh-pages` branch と GitHub Pages artifact に保持する。main branch には生成済み snapshot を commit しない。
 - email / display name mapping の入力形式。
 - 日次 snapshot が長期蓄積した場合の repository size monitoring 方法。
