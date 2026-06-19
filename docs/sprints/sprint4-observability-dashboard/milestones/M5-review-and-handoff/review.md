@@ -27,7 +27,7 @@ Complete.
 
 - Sprint5 candidate: implement a Grafana JSON dashboard artifact against the M2 / M3 four-table dataset.
 - Sprint5 candidate: define a minimal local import or data source validation workflow for the Grafana JSON dashboard using synthetic dashboard data.
-- Sprint5 candidate: add static report generation only as a deterministic fallback for review packets and metric correctness.
+- Later fallback candidate: add static report generation only if Grafana data source setup is unavailable or deterministic review packets are needed.
 - Later optional candidate: add candidate timestamp fields or a separate timestamp source if backlog age becomes important enough to make nullable values insufficient.
 - Later optional candidate: use repository-local preview only if Grafana import or data source setup blocks basic visual validation.
 - Out of scope until separately specified: production Grafana / Azure Managed Grafana / self-host Grafana hosting, Application Insights / Tempo / Loki / Mimir backend selection, external ETL, GitHub / Notion API integration, identity mapping, shared dashboard access control, and organization usage / ROI dashboarding.
@@ -48,6 +48,13 @@ Complete.
 - Backlog age remains nullable because existing candidate records do not carry generated timestamps.
 - Outcome linkage remains placeholder-only until privacy, identity, retention, access-control, and external integration decisions are made.
 - Shared or real-data dashboards require a separate retention, masking / redaction, access-rights, and user-communication specification before use.
+
+## Self-review Follow-up
+
+- Finding: Outcome Linkage tiers were recorded in `docs/spec.md` and this review note, but `docs/requirements.md` still only said M5 would tier them later. This was valid because requirements are the higher source of truth. Fixed by recording the M5 tier boundary in `docs/requirements.md`.
+- Finding: `docs/spec.md` still described Sprint4 as an active requirements-definition phase after M5 closeout. This was valid because implementers read the current phase section first. Fixed by marking Sprint4 complete and naming the M5 handoff boundary as part of the Sprint4 deliverable.
+- Finding: The Sprint4 README still described M5 review and handoff in future tense after closeout. This was valid. Fixed by changing the M5 summary to completed wording.
+- Finding: The static report handoff entry could be read as an equal-priority Sprint5 implementation candidate. This was valid. Fixed by making it a later fallback candidate that is conditional on Grafana data source setup or deterministic review packet needs.
 
 ## Verification
 

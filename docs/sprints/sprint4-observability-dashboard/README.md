@@ -156,8 +156,8 @@ Repository-local preview は最小の視覚確認候補に留め、独自 trace 
 
 ## M5 Review and Handoff
 
-M5 では [task.md](milestones/M5-review-and-handoff/task.md) に従い、Sprint4 の要件、dataset contract、synthetic dataset generator、prototype path decision を review する。
-handoff では Grafana JSON dashboard 実装、static report fallback、repository-local preview の扱い、Outcome Linkage Candidate の Tier 分けを Sprint5 以降の候補として分離する。
+M5 では [task.md](milestones/M5-review-and-handoff/task.md) に従い、Sprint4 の要件、dataset contract、synthetic dataset generator、prototype path decision を review した。
+handoff では Grafana JSON dashboard 実装、static report fallback、repository-local preview の扱い、Outcome Linkage Candidate の Tier 分けを Sprint5 以降の候補として分離した。
 
 M5 review は [review.md](milestones/M5-review-and-handoff/review.md) に記録した。
 Sprint5 以降の第一候補は Grafana JSON dashboard artifact と synthetic dashboard data による import / data source validation workflow である。
