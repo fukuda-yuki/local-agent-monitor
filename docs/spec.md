@@ -1597,6 +1597,26 @@ Sprint4 の初期 milestone は以下とする。
 | M4 dashboard prototype path | Grafana JSON dashboard を第一候補とし、static report、repository-local preview と比較して実装方針を決める |
 | M5 review and handoff | Sprint4 要件と prototype 方針を review し、Sprint5 以降の実装範囲を分離する |
 
+#### M5 review and handoff boundary
+
+Sprint4 M5 では、M1-M4 の要件、dataset contract、synthetic dataset generator、prototype path decision を review し、Sprint5 以降へ送る実装候補を分離した。
+
+Sprint5 以降の第一候補は、M2 / M3 の 4 logical table を入力にする Grafana JSON dashboard artifact と、synthetic dashboard data による最小 import / data source validation workflow である。
+Static report は Grafana data source が準備できない場合や deterministic review packet が必要な場合の fallback として扱う。
+Repository-local preview は Grafana import / data source setup が基本的な視覚確認を阻害する場合の last-resort visual aid とし、custom trace viewer や product UI に広げない。
+
+Outcome Linkage Candidate は以下の Tier で扱う。
+
+| Tier | 位置づけ | 例 | 扱い |
+| --- | --- | --- | --- |
+| Tier 0 | Sprint4 初期 dashboard に含めない | 外部 API ingestion、production GitHub / Notion / HR integration、identity mapping、org usage / ROI dashboard | Sprint4 outputs から除外する |
+| Tier 1 | sanitized / manual reference による future planning candidate | PR / issue / CI / review placeholder、手動で sanitized した outcome reference | Sprint5 planning 候補にできるが、外部 API 実装は約束しない |
+| Tier 2 | product / security decision 後のみ実装可能 | shared dashboard、team / department 表示、実 GitHub / Notion ingestion | retention、access control、masking、利用者周知を先に仕様化する |
+| Tier 3 | 明示的な非目的 | 個人別生産性評価、勤務監視、ランキング、HR data correlation、経営向け利用状況 dashboard | Sprint4 / 初期 Sprint5 dashboard work では実装しない |
+
+Sprint4 M5 は documentation review のみで完了し、dashboard dataset schema、Config CLI behavior、runtime dependency、Grafana artifact、static report generator、repository-local preview、external ETL は変更しない。
+共有環境、実データ、社内サーバー検証、個人識別属性の dashboard 表示が必要になった場合は、retention、アクセス権、masking / redaction、利用者周知を先に仕様化する。
+
 ## 6. セキュリティとデータ扱い
 
 Phase 1 はローカル限定 PoC とし、Langfuse に投入するデータは合成データまたは検証用データを基本とする。

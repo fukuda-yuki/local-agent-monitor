@@ -67,7 +67,7 @@ Decision targets:
 | [M2: dashboard dataset contract](milestones/M2-dashboard-dataset-contract/task.md) | complete | normalized measurement / candidate outputs から dashboard dataset を生成する CSV / JSON schema を定義した |
 | [M3: synthetic dashboard data](milestones/M3-synthetic-dashboard-data/task.md) | complete | synthetic fixture から dashboard dataset を生成し、metric 欠損と PII 非混入を確認した |
 | [M4: dashboard prototype path](milestones/M4-dashboard-prototype-path/task.md) | complete | Grafana JSON dashboard を第一候補とし、static report、repository-local preview と比較した |
-| [M5: review and handoff](milestones/M5-review-and-handoff/task.md) | started | Sprint4 の要件と prototype 方針を review し、Sprint5 以降の実装範囲を分離する |
+| [M5: review and handoff](milestones/M5-review-and-handoff/task.md) | complete | Sprint4 の要件と prototype 方針を review し、Sprint5 以降の実装範囲を分離した |
 
 ## Initial View Set
 
@@ -158,3 +158,8 @@ Repository-local preview は最小の視覚確認候補に留め、独自 trace 
 
 M5 では [task.md](milestones/M5-review-and-handoff/task.md) に従い、Sprint4 の要件、dataset contract、synthetic dataset generator、prototype path decision を review する。
 handoff では Grafana JSON dashboard 実装、static report fallback、repository-local preview の扱い、Outcome Linkage Candidate の Tier 分けを Sprint5 以降の候補として分離する。
+
+M5 review は [review.md](milestones/M5-review-and-handoff/review.md) に記録した。
+Sprint5 以降の第一候補は Grafana JSON dashboard artifact と synthetic dashboard data による import / data source validation workflow である。
+Static report は deterministic fallback、repository-local preview は Grafana setup が基本的な視覚確認を阻害する場合の last-resort visual aid として扱う。
+Outcome Linkage Candidate は placeholder / future planning candidate に留め、外部 API 連携、identity mapping、組織利用状況 dashboard は別途 product / security decision があるまで実装しない。
