@@ -17,6 +17,7 @@ Initial review recorded at M4 start.
 - Scope control: M4 start does not implement Grafana JSON, static report generation, repository-local preview, external ETL, live Langfuse validation, or production dashboard hosting.
 - Safety boundary: prototype documents keep raw prompt / response / tool arguments / tool results, credentials, Base64 headers, real identity values, and sensitive bundle paths out of dashboard artifacts.
 - Residual risk: the eventual Grafana implementation will still need a concrete file or data source import workflow, which M4 start intentionally leaves for a later implementation milestone.
+- Self-review finding: `git diff --check HEAD~1 HEAD` reported extra blank lines at EOF in the new M4 documents. This was valid and corrected.
 
 ## Verification
 
@@ -27,4 +28,3 @@ Initial review recorded at M4 start.
 - Later implementation should start with the Grafana JSON dashboard path and M3 synthetic dashboard dataset output.
 - Static report should remain the deterministic fallback.
 - Repository-local preview should be used only if Grafana setup blocks visual validation.
-

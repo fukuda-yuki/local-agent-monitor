@@ -77,4 +77,3 @@ Later implementation work should start with the Grafana JSON dashboard path and 
 The static report path should be retained as a fallback when Grafana data source setup is not available or when deterministic review artifacts are needed.
 
 Repository-local preview should remain a last-resort visual aid and must not become a custom trace viewer or product UI.
-
