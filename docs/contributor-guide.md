@@ -1,6 +1,6 @@
 # Contributor Guide
 
-この文書は Copilot Agent Observability を変更する contributor 向けの作業ガイドです。
+contributor 向けの作業ガイドです。
 
 ## Source Of Truth
 

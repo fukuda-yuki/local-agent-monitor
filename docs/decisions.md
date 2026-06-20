@@ -1,6 +1,6 @@
 # Decisions
 
-この文書は Copilot Agent Observability の軽量 decision log である。
+ユーザーとの決定ログを共有する．ディスカッションログです．
 詳細仕様は [docs/specifications/](specifications/) を参照する。
 
 ## D001: 公式 OpenTelemetry 出力を主入力にする

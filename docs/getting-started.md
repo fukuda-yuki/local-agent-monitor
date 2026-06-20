@@ -1,6 +1,6 @@
 # Getting Started
 
-この文書は最短で Copilot Agent Observability を試すための手順である。
+スターティングガイド。
 詳しい利用者向け説明は [docs/user-guide.md](user-guide.md) を参照する。
 
 ## 1. Synthetic Dashboard を生成する
