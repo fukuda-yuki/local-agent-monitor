@@ -65,6 +65,14 @@ Existing explicit commands such as `langfuse-vscode-env` and
 | M5 remote managed endpoint warning | Add README / user guide warning and placeholder-only config behavior for remote managed endpoints. |
 | M6 review and handoff | Verify build, tests, profile docs, and hand off `raw-local-receiver` to Sprint7. |
 
+## Status
+
+Sprint6 M4-M6 review was recorded on 2026-06-21. The non-receiver
+profile code and documentation were accepted, and `raw-local-receiver` was
+handed to Sprint7. Remote managed live validation remains gated on external
+access-control, consent / notice, retention, deletion, masking, identity, and
+credential decisions.
+
 ## Handoff To Sprint7
 
 Sprint6 must not pretend that `raw-local-receiver` is implemented.

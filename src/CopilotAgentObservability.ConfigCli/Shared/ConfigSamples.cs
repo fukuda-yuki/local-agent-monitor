@@ -359,6 +359,7 @@ internal static class ConfigSamples
     {
         var builder = new StringBuilder();
         builder.AppendLine("# WARNING: confirm access control, retention, deletion process, masking / redaction, user notice or consent, identity handling, and credential handling before sending telemetry to a remote managed endpoint.");
+        builder.AppendLine("# This repository does not implement a remote or shared endpoint user consent workflow.");
         builder.Append(content);
         return builder.ToString();
     }

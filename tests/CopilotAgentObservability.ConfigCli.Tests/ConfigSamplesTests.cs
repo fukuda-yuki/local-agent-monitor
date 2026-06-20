@@ -271,4 +271,26 @@ public class ConfigSamplesTests
         Assert.Contains("Prefer localhost when WSL2 localhost forwarding exposes published container ports to Windows.", config);
         Assert.Contains("machine-specific IP addresses out of repository files", config);
     }
+
+    [Theory]
+    [InlineData(CollectionProfileOptions.RemoteManagedLangfuse)]
+    [InlineData(CollectionProfileOptions.RemoteManagedCollector)]
+    public void CreateProfilePowerShellScripts_ForRemoteManagedProfilesWarnConsentWorkflowIsNotImplemented(string profile)
+    {
+        var vscodeScript = ConfigSamples.CreateProfileVsCodePowerShellScript(profile);
+        var copilotCliScript = ConfigSamples.CreateProfileCopilotCliPowerShellScript(profile);
+
+        Assert.Contains("This repository does not implement a remote or shared endpoint user consent workflow.", vscodeScript);
+        Assert.Contains("This repository does not implement a remote or shared endpoint user consent workflow.", copilotCliScript);
+    }
+
+    [Theory]
+    [InlineData(CollectionProfileOptions.RemoteManagedLangfuse)]
+    [InlineData(CollectionProfileOptions.RemoteManagedCollector)]
+    public void CreateProfileCodexAppConfigToml_ForRemoteManagedProfilesWarnConsentWorkflowIsNotImplemented(string profile)
+    {
+        var config = ConfigSamples.CreateProfileCodexAppConfigToml(profile);
+
+        Assert.Contains("This repository does not implement a remote or shared endpoint user consent workflow.", config);
+    }
 }
