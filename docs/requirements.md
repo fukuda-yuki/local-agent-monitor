@@ -24,7 +24,6 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 - prompt、skill、MCP、CLI wrapper の改善効果を比較する実装者。
 - trace 由来の失敗傾向や改善候補を確認する maintainer。
 - dashboard snapshot を確認する reviewer。
-- 会社貸与 PC などの制約により、追加 software、Docker Desktop、または Langfuse self-host を利用できない開発者。
 
 対象外の利用者像:
 
@@ -38,8 +37,7 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 
 - VS Code GitHub Copilot Chat の OTel trace / metrics / events 収集。
 - GitHub Copilot CLI の OTel trace / metrics 収集。
-- 利用者の実行環境に応じた collection profile の選択。
-- Langfuse が利用可能な profile における個別 trace viewer。
+- Langfuse による個別 trace viewer。
 - saved raw OTLP JSON の file-based ingest。
 - SQLite raw store。
 - raw store から normalized measurement dataset への変換。
@@ -51,8 +49,6 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 
 - Codex App / app-server の OTel trace / logs / metrics 収集。
 - ローカル OpenTelemetry Collector 経由送信。
-- Docker Desktop 上の Langfuse self-host。
-- WSL2 上の Docker Engine を使う Langfuse / Collector 実行。
 - Grafana JSON dashboard fallback。
 
 参考のみ:
@@ -78,30 +74,7 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 - 改善効果の自動合否判定。
 - GitHub / Notion / HR system との本番 ETL。
 
-## 5. Environment Profile Requirements
-
-本製品は、利用者の local machine 制約に応じて明示的に collection profile を選べる必要がある。
-Profile selection は利用者が指定し、tool が暗黙に別 profile へ fallback してはならない。
-
-Initial profile candidates:
-
-| Profile | 想定利用者 | 許可される local runtime | 必須 workflow | Langfuse |
-| --- | --- | --- | --- | --- |
-| `raw-only` | 追加 software を一切 install できない利用者 | .NET SDK、PowerShell、保存済み raw OTLP JSON file | raw data loop、normalized dataset、candidate pipeline、static dashboard | 不要 |
-| `docker-desktop` | Docker Desktop を install / 起動できる利用者 | Docker Desktop、Langfuse self-host、任意の Collector | live trace review、raw data loop、static dashboard | 利用可 |
-| `wsl2-docker-engine` | Docker Desktop は使えないが WSL2 上の Docker Engine を使える利用者 | WSL2 Docker Engine、Langfuse self-host、任意の Collector | live trace review、raw data loop、static dashboard | 利用可 |
-| `collector-only` | Langfuse credential を client に置きたくない、または collector relay を検証する利用者 | Collector runtime。実行基盤は profile 別に定義 | collector relay と下流 backend への送信 | 下流 backend として任意 |
-
-`raw-only` profile は、Langfuse UI、Docker Desktop、WSL2 Docker Engine、local network receiver、long-running local agent を要求してはならない。
-この profile で保証する最小 loop は、saved raw OTLP JSON から SQLite raw store、normalized measurements、candidate records、static dashboard を生成することに限定する。
-
-`docker-desktop` profile は、既存の Langfuse self-host と Collector example を利用する標準 live trace review path として扱う。
-`wsl2-docker-engine` profile は候補であり、Windows host と WSL2 runtime 間の endpoint、volume、credential handling、validation command を仕様化するまで実装してはならない。
-
-Config CLI または user-facing guide が profile を受け取る場合は、profile 名、必要な prerequisite、出力される endpoint / environment variable、未対応事項を明示する。
-Profile 指定の具体的な flag 名と command surface は、実装前に [docs/specifications/interfaces/config-cli.md](specifications/interfaces/config-cli.md) で定義する。
-
-## 6. Data Requirements
+## 5. Data Requirements
 
 収集対象:
 
@@ -126,7 +99,7 @@ Profile 指定の具体的な flag 名と command surface は、実装前に [do
 Span 名は client 実装や version により変化し得るため、特定 span 名だけには依存しない。
 正規化後は、agent invocation、LLM call、tool call、permission / approval、file operation、shell command、error、user interaction などの論理カテゴリで扱う。
 
-## 7. Resource Attributes
+## 6. Resource Attributes
 
 必須 Resource Attributes:
 
@@ -164,7 +137,7 @@ mcp.profile
 cli.wrapper.version
 ```
 
-## 8. Data Safety Requirements
+## 7. Data Safety Requirements
 
 Repository に保存してよいもの:
 
@@ -189,7 +162,7 @@ Repository に保存してはならないもの:
 
 共有環境、実データ、社内サーバー、GitHub Pages publish を扱う場合は、アクセス権、保持期間、削除方法、masking / redaction、利用者周知を先に決める。
 
-## 9. Dashboard Requirements
+## 8. Dashboard Requirements
 
 Static HTML dashboard は Agent workflow 改善判断のための aggregate view とする。
 個別 trace の詳細調査は Langfuse trace viewer、raw store、または明示 opt-in の sensitive bundle へ drill down する。
@@ -222,7 +195,7 @@ Static HTML dashboard は Agent workflow 改善判断のための aggregate view
 Dashboard に raw prompt / response / tool arguments / tool results の全文を表示してはならない。
 `user.id` と `user.email` は表示および filter / search 対象に含めてよいが、publish 先の access control を先に確認する。
 
-## 10. Validation Requirements
+## 9. Validation Requirements
 
 Code、project file、CLI behavior、workflow を変更した場合は以下を実行する。
 
@@ -241,13 +214,10 @@ docker compose -f infra\otel-collector\docker-compose.example.yml config
 Copilot 実行に依存する挙動は自動テストだけで保証しない。
 live validation では、確認日時、実行環境、設定値、trace id または識別情報、確認項目、未確認項目を記録する。
 
-## 11. Open Product Decisions
+## 10. Open Product Decisions
 
 以下は実装前または共有運用前に決める。
 
-- collection profile の CLI flag 名、既定 profile、既存 config command との互換方針。
-- WSL2 Docker Engine profile の endpoint、volume、credential、validation command。
-- Langfuse を使えない利用者向け raw OTLP JSON の取得手順。
 - GitHub Pages access control の具体設定。
 - 初回 live workflow 実行結果の確認。
 - 日次 snapshot の repository size monitoring。

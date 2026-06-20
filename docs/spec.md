@@ -26,8 +26,7 @@ Copilot Agent Observability は Local-first な Agent workflow observability 製
 ```text
 Copilot clients
   -> OTLP HTTP
-  -> selected collection profile
-  -> Langfuse trace viewer when available
+  -> Langfuse trace viewer
   -> saved raw OTLP JSON
   -> Config CLI
   -> SQLite raw store
@@ -36,18 +35,6 @@ Copilot clients
   -> dashboard dataset
   -> static HTML dashboard
 ```
-
-Supported collection profile candidates:
-
-| Profile | Primary path | Status |
-| --- | --- | --- |
-| `raw-only` | saved raw OTLP JSON -> raw data loop -> static dashboard | Required |
-| `docker-desktop` | Copilot clients -> Langfuse self-host and optional Collector -> raw data loop | Required for Langfuse-capable local use |
-| `wsl2-docker-engine` | Copilot clients -> WSL2-hosted Langfuse / Collector -> raw data loop | Proposed, requires endpoint and credential specification |
-| `collector-only` | Copilot clients -> Collector relay -> selected downstream backend | Optional |
-
-Profile selection must be explicit.
-The product must not silently switch collection path, input source, endpoint, schema, or validation command when the selected profile is unavailable.
 
 GitHub Pages publish は private repository と明示的な access control を前提にした候補である。
 実データ由来 aggregate を publish する前に、Pages visibility、retention、削除方法、利用者周知を確認する。

@@ -22,17 +22,6 @@ config-cli validate-resource-attributes <OTEL_RESOURCE_ATTRIBUTES>
 
 Configuration commands must emit placeholders instead of real credentials.
 
-Collection profile selection is a planned public interface.
-Before adding a profile flag or profile-specific command output, this file must define:
-
-- accepted profile names.
-- default profile, if any.
-- which existing commands accept the profile selector.
-- generated endpoint and environment variable differences per profile.
-- behavior when the selected profile prerequisite is unavailable.
-
-Profile-aware commands must not silently emit another profile's settings when the requested profile is unavailable.
-
 ## Raw Data Commands
 
 ```text

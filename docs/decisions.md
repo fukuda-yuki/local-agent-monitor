@@ -19,14 +19,13 @@ Rationale:
 
 Status: Accepted
 
-Langfuse が利用可能な環境では、ローカル Docker Desktop 上の Langfuse self-host を標準 trace viewer とする。
+ローカル Docker Desktop 上の Langfuse self-host を標準 trace viewer とする。
 Clients は OTLP HTTP で `http://localhost:3000/api/public/otel` に直接送信できる。
 
 Consequences:
 
 - Langfuse credential は環境変数で扱い、repository に保存しない。
 - Langfuse UI は個別 trace viewer として使うが、改善 loop の唯一の source of truth にはしない。
-- Langfuse を使えない利用者は raw data loop profile を使える必要がある。
 
 ## D003: OTel Collector は任意の代替経路にする
 
@@ -229,18 +228,3 @@ Status: Open
 - Pages visibility。
 - live workflow operation。
 - snapshot growth monitoring。
-
-## D017: Collection profile を明示選択にする
-
-Status: Proposed
-
-会社貸与 PC などで Langfuse、Docker Desktop、または追加 software を使えない利用者を正式に扱う。
-Initial profile candidates は `raw-only`、`docker-desktop`、`wsl2-docker-engine`、`collector-only` とする。
-
-Consequences:
-
-- `raw-only` は Langfuse、Docker Desktop、WSL2 Docker Engine、Collector、local receiver、daemon を要求しない。
-- `docker-desktop` は既存 Langfuse self-host と Collector example を使う live trace review path とする。
-- `wsl2-docker-engine` は候補に留め、Windows host / WSL2 endpoint、volume、credential、validation command を決めるまで実装しない。
-- Profile は利用者が明示指定し、前提条件が欠ける場合に tool が別 profile へ暗黙 fallback しない。
-- Config CLI の具体 flag 名、既定 profile、既存 command との互換方針は実装前に仕様化する。

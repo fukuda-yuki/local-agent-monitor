@@ -8,8 +8,7 @@
 現在の中心は Local-first な Agent workflow observability である。
 
 - Copilot clients から OTel を収集する。
-- 利用者の環境に応じた collection profile を選ぶ。
-- Langfuse が利用可能な profile では個別 trace を確認する。
+- Langfuse で個別 trace を確認する。
 - saved raw OTLP JSON から normalized dataset を生成する。
 - deterministic candidate pipeline で診断・改善候補を整理する。
 - static HTML dashboard を生成し、必要に応じて GitHub Pages snapshot として公開する。
@@ -27,9 +26,6 @@
 
 ## Open Follow-ups
 
-- Collection profile の CLI flag 名、既定 profile、既存 config command との互換方針。
-- Langfuse / Docker Desktop を使えない利用者向け raw-only 手順の user guide 化。
-- WSL2 Docker Engine profile の endpoint、volume、credential、validation command。
 - GitHub Pages access control の環境確認。
 - 初回 live workflow 実行結果の確認。
 - 日次 snapshot の repository size monitoring。
