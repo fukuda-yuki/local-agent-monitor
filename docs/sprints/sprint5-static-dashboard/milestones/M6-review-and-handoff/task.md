@@ -34,7 +34,7 @@ Review Sprint5 static dashboard implementation, record the operating boundary, a
 - `dotnet build CopilotAgentObservability.slnx`
 - `dotnet test CopilotAgentObservability.slnx`
 - `git check-ignore -v artifacts/dashboard-input/measurements.json`
-- `git check-ignore -v artifacts/dashboard-input/README.md`
+- PowerShell check that fails if `artifacts/dashboard-input/measurements.json` is not ignored or if `artifacts/dashboard-input/README.md` is ignored.
 
 ## Handoff
 

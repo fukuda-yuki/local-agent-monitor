@@ -24,4 +24,4 @@ Accepted after Sprint-level self-review.
 - `dotnet build CopilotAgentObservability.slnx` succeeded.
 - `dotnet test CopilotAgentObservability.slnx` succeeded.
 - `git check-ignore -v artifacts/dashboard-input/measurements.json` confirmed staged JSON inputs remain ignored.
-- `git check-ignore -v artifacts/dashboard-input/README.md` confirmed the staging README remains trackable.
+- A PowerShell check confirmed `artifacts/dashboard-input/README.md` remains trackable while staged JSON inputs remain ignored.
