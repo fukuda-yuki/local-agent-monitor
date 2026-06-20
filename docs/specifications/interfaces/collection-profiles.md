@@ -37,6 +37,23 @@ and the non-receiver routing profiles. Sprint7 implements `raw-local-receiver`.
 - `raw-only` must work without Langfuse, Docker Desktop, WSL2 Docker Engine, Collector, remote endpoints, or a background process.
 - Profile selection must not alter normalized measurement schema, candidate record schema, dashboard dataset schema, or repository-safe data boundaries.
 
+## WSL2 Docker Engine Endpoint Behavior
+
+`wsl2-docker-langfuse` and `wsl2-docker-collector-langfuse` are Windows client
+profiles. Langfuse or Collector runs in containers through Docker Engine inside
+the selected WSL2 distro, but the Copilot client runs on Windows.
+
+Generated configuration must use a placeholder Windows-reachable host:
+
+```text
+<windows-reachable-wsl2-host>
+```
+
+Operators should use `localhost` when WSL2 localhost forwarding exposes the
+published container ports to Windows. If that forwarding is unavailable, the
+operator may resolve the current WSL2 distro address during live validation.
+Machine-specific WSL2 IP addresses must not be committed to repository files.
+
 ## Remote And Shared Endpoint Warning
 
 `remote-managed-langfuse` and `remote-managed-collector` are supported routing

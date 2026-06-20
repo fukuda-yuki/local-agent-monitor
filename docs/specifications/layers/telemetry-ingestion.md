@@ -82,6 +82,25 @@ Collector may attach Langfuse authorization headers so clients do not store Lang
 The repository example handles trace pipeline only.
 Masking, sampling, TLS, SSO, and shared operation require separate product / security decisions.
 
+## WSL2 Docker Engine Path
+
+For `wsl2-docker-langfuse` and `wsl2-docker-collector-langfuse`, Docker Engine
+runs inside WSL2 while VS Code, GitHub Copilot CLI, or Codex App runs on
+Windows. The client endpoint must therefore be reachable from Windows, not only
+from inside the WSL2 distro.
+
+Generated samples use:
+
+```text
+http://<windows-reachable-wsl2-host>:3000/api/public/otel
+http://<windows-reachable-wsl2-host>:4318
+```
+
+Use `localhost` when WSL2 localhost forwarding exposes published container
+ports to Windows. If forwarding is unavailable, resolve the current WSL2 distro
+address during live validation and keep that machine-specific value out of
+repository files.
+
 ## Raw Local Receiver Path
 
 The `raw-local-receiver` profile sends telemetry directly to a repository-hosted

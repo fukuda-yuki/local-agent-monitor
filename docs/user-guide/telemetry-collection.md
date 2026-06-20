@@ -114,6 +114,30 @@ $env:LANGFUSE_AUTH="dummy"
 docker compose -f infra\otel-collector\docker-compose.example.yml config
 ```
 
+## WSL2 Docker Engine
+
+`wsl2-docker-langfuse` と `wsl2-docker-collector-langfuse` では、Docker Engine と container は WSL2 distro 内で動き、VS Code / GitHub Copilot CLI / Codex App は Windows process として送信します。
+そのため endpoint は WSL2 内からではなく、Windows client から到達できる host / port にしてください。
+
+Profile-aware command の例:
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-vscode-env --profile wsl2-docker-langfuse
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-copilot-cli-env --profile wsl2-docker-collector-langfuse
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-codex-app-config --profile wsl2-docker-langfuse
+```
+
+出力内の `<windows-reachable-wsl2-host>` は、Windows から到達できる値に置き換えます。
+WSL2 localhost forwarding で publish 済み container port が Windows に公開される環境では `localhost` を使います。
+それが使えない場合は live validation 時に現在の WSL2 distro address を解決し、machine-specific IP address は repository file に保存しないでください。
+
+代表 endpoint shape:
+
+```text
+http://<windows-reachable-wsl2-host>:3000/api/public/otel
+http://<windows-reachable-wsl2-host>:4318
+```
+
 ## Live 確認項目
 
 - trace が Langfuse に作成されている。

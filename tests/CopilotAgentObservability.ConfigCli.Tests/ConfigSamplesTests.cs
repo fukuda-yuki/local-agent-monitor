@@ -200,8 +200,8 @@ public class ConfigSamplesTests
     [InlineData(CollectionProfileOptions.RawOnly, "raw-only uses saved raw OTLP JSON")]
     [InlineData(CollectionProfileOptions.DockerDesktopLangfuse, "http://localhost:3000/api/public/otel")]
     [InlineData(CollectionProfileOptions.DockerDesktopCollectorLangfuse, "http://localhost:4318")]
-    [InlineData(CollectionProfileOptions.Wsl2DockerLangfuse, "http://<wsl2-host-ip>:3000/api/public/otel")]
-    [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse, "http://<wsl2-host-ip>:4318")]
+    [InlineData(CollectionProfileOptions.Wsl2DockerLangfuse, "http://<windows-reachable-wsl2-host>:3000/api/public/otel")]
+    [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse, "http://<windows-reachable-wsl2-host>:4318")]
     [InlineData(CollectionProfileOptions.RemoteManagedLangfuse, "https://<langfuse-host>/api/public/otel")]
     [InlineData(CollectionProfileOptions.RemoteManagedCollector, "https://<collector-host>")]
     public void CreateProfileVsCodePowerShellScript_GeneratesProfileOutput(string profile, string expected)
@@ -216,8 +216,8 @@ public class ConfigSamplesTests
     [InlineData(CollectionProfileOptions.RawOnly, "raw-only uses saved raw OTLP JSON")]
     [InlineData(CollectionProfileOptions.DockerDesktopLangfuse, "http://localhost:3000/api/public/otel")]
     [InlineData(CollectionProfileOptions.DockerDesktopCollectorLangfuse, "http://localhost:4318")]
-    [InlineData(CollectionProfileOptions.Wsl2DockerLangfuse, "http://<wsl2-host-ip>:3000/api/public/otel")]
-    [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse, "http://<wsl2-host-ip>:4318")]
+    [InlineData(CollectionProfileOptions.Wsl2DockerLangfuse, "http://<windows-reachable-wsl2-host>:3000/api/public/otel")]
+    [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse, "http://<windows-reachable-wsl2-host>:4318")]
     [InlineData(CollectionProfileOptions.RemoteManagedLangfuse, "https://<langfuse-host>/api/public/otel")]
     [InlineData(CollectionProfileOptions.RemoteManagedCollector, "https://<collector-host>")]
     public void CreateProfileCopilotCliPowerShellScript_GeneratesProfileOutput(string profile, string expected)
@@ -232,8 +232,8 @@ public class ConfigSamplesTests
     [InlineData(CollectionProfileOptions.RawOnly, "raw-only uses saved raw OTLP JSON")]
     [InlineData(CollectionProfileOptions.DockerDesktopLangfuse, "http://localhost:3000/api/public/otel/v1/traces")]
     [InlineData(CollectionProfileOptions.DockerDesktopCollectorLangfuse, "http://localhost:4318/v1/traces")]
-    [InlineData(CollectionProfileOptions.Wsl2DockerLangfuse, "http://<wsl2-host-ip>:3000/api/public/otel/v1/traces")]
-    [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse, "http://<wsl2-host-ip>:4318/v1/traces")]
+    [InlineData(CollectionProfileOptions.Wsl2DockerLangfuse, "http://<windows-reachable-wsl2-host>:3000/api/public/otel/v1/traces")]
+    [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse, "http://<windows-reachable-wsl2-host>:4318/v1/traces")]
     [InlineData(CollectionProfileOptions.RemoteManagedLangfuse, "https://<langfuse-host>/api/public/otel/v1/traces")]
     [InlineData(CollectionProfileOptions.RemoteManagedCollector, "https://<collector-host>/v1/traces")]
     public void CreateProfileCodexAppConfigToml_GeneratesProfileOutput(string profile, string expected)
@@ -242,5 +242,33 @@ public class ConfigSamplesTests
 
         Assert.Contains($"CAO_COLLECTION_PROFILE={profile}", config);
         Assert.Contains(expected, config);
+    }
+
+    [Theory]
+    [InlineData(CollectionProfileOptions.Wsl2DockerLangfuse)]
+    [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse)]
+    public void CreateProfilePowerShellScripts_ForWsl2ProfilesDocumentWindowsReachableEndpoint(string profile)
+    {
+        var vscodeScript = ConfigSamples.CreateProfileVsCodePowerShellScript(profile);
+        var copilotCliScript = ConfigSamples.CreateProfileCopilotCliPowerShellScript(profile);
+
+        Assert.Contains("<windows-reachable-wsl2-host>", vscodeScript);
+        Assert.Contains("Prefer localhost when WSL2 localhost forwarding exposes published container ports to Windows.", vscodeScript);
+        Assert.Contains("machine-specific IP addresses out of repository files", vscodeScript);
+        Assert.Contains("<windows-reachable-wsl2-host>", copilotCliScript);
+        Assert.Contains("Prefer localhost when WSL2 localhost forwarding exposes published container ports to Windows.", copilotCliScript);
+        Assert.Contains("machine-specific IP addresses out of repository files", copilotCliScript);
+    }
+
+    [Theory]
+    [InlineData(CollectionProfileOptions.Wsl2DockerLangfuse)]
+    [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse)]
+    public void CreateProfileCodexAppConfigToml_ForWsl2ProfilesDocumentsWindowsReachableEndpoint(string profile)
+    {
+        var config = ConfigSamples.CreateProfileCodexAppConfigToml(profile);
+
+        Assert.Contains("<windows-reachable-wsl2-host>", config);
+        Assert.Contains("Prefer localhost when WSL2 localhost forwarding exposes published container ports to Windows.", config);
+        Assert.Contains("machine-specific IP addresses out of repository files", config);
     }
 }

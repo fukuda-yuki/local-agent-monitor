@@ -25,7 +25,7 @@
 | Trace Diagnosis | 完了 | [docs/sprints/sprint3-trace-diagnosis/](sprints/sprint3-trace-diagnosis/) で deterministic 診断候補生成、改善候補生成、自動採用判断 record を実装した |
 | Observability Dashboard | 完了 | [docs/sprints/sprint4-observability-dashboard/](sprints/sprint4-observability-dashboard/) で dashboard view、metric、dimension、drilldown、dataset contract を定義した |
 | Static Dashboard | 完了 | [docs/sprints/sprint5-static-dashboard/](sprints/sprint5-static-dashboard/) で static HTML dashboard、GitHub Actions publish workflow、dashboard input staging contract を実装した |
-| Collection Profiles | 進行中 | [docs/sprints/sprint6-collection-profiles/](sprints/sprint6-collection-profiles/) で `CAO_COLLECTION_PROFILE`、raw-only minimum、Docker Desktop / WSL2 / remote managed routing profiles を実装する。M3 Docker Desktop profiles は live validation evidence 記録済み |
+| Collection Profiles | 進行中 | [docs/sprints/sprint6-collection-profiles/](sprints/sprint6-collection-profiles/) で `CAO_COLLECTION_PROFILE`、raw-only minimum、Docker Desktop / WSL2 / remote managed routing profiles を実装する。M3 Docker Desktop profiles と M4 WSL2 Docker Engine profiles は live validation evidence 記録済み |
 | Local Raw Receiver | 未着手 | [docs/sprints/sprint7-local-raw-receiver/](sprints/sprint7-local-raw-receiver/) で `raw-local-receiver`、repository-hosted receiver、VS Code direct telemetry validation を実装する |
 
 ## Open Follow-ups

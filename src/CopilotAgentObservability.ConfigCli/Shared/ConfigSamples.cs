@@ -11,14 +11,14 @@ internal static class ConfigSamples
     public const string CollectorOtlpHttpLogsEndpoint = "http://localhost:4318/v1/logs";
     public const string CollectorOtlpHttpMetricsEndpoint = "http://localhost:4318/v1/metrics";
     public const string CollectorOtlpHttpTracesEndpoint = "http://localhost:4318/v1/traces";
-    public const string Wsl2LangfuseOtlpEndpoint = "http://<wsl2-host-ip>:3000/api/public/otel";
-    public const string Wsl2LangfuseOtlpTracesEndpoint = "http://<wsl2-host-ip>:3000/api/public/otel/v1/traces";
-    public const string Wsl2LangfuseOtlpLogsEndpoint = "http://<wsl2-host-ip>:3000/api/public/otel/v1/logs";
-    public const string Wsl2LangfuseOtlpMetricsEndpoint = "http://<wsl2-host-ip>:3000/api/public/otel/v1/metrics";
-    public const string Wsl2CollectorOtlpHttpEndpoint = "http://<wsl2-host-ip>:4318";
-    public const string Wsl2CollectorOtlpHttpLogsEndpoint = "http://<wsl2-host-ip>:4318/v1/logs";
-    public const string Wsl2CollectorOtlpHttpMetricsEndpoint = "http://<wsl2-host-ip>:4318/v1/metrics";
-    public const string Wsl2CollectorOtlpHttpTracesEndpoint = "http://<wsl2-host-ip>:4318/v1/traces";
+    public const string Wsl2LangfuseOtlpEndpoint = "http://<windows-reachable-wsl2-host>:3000/api/public/otel";
+    public const string Wsl2LangfuseOtlpTracesEndpoint = "http://<windows-reachable-wsl2-host>:3000/api/public/otel/v1/traces";
+    public const string Wsl2LangfuseOtlpLogsEndpoint = "http://<windows-reachable-wsl2-host>:3000/api/public/otel/v1/logs";
+    public const string Wsl2LangfuseOtlpMetricsEndpoint = "http://<windows-reachable-wsl2-host>:3000/api/public/otel/v1/metrics";
+    public const string Wsl2CollectorOtlpHttpEndpoint = "http://<windows-reachable-wsl2-host>:4318";
+    public const string Wsl2CollectorOtlpHttpLogsEndpoint = "http://<windows-reachable-wsl2-host>:4318/v1/logs";
+    public const string Wsl2CollectorOtlpHttpMetricsEndpoint = "http://<windows-reachable-wsl2-host>:4318/v1/metrics";
+    public const string Wsl2CollectorOtlpHttpTracesEndpoint = "http://<windows-reachable-wsl2-host>:4318/v1/traces";
     public const string RemoteLangfuseOtlpEndpoint = "https://<langfuse-host>/api/public/otel";
     public const string RemoteLangfuseOtlpTracesEndpoint = "https://<langfuse-host>/api/public/otel/v1/traces";
     public const string RemoteLangfuseOtlpLogsEndpoint = "https://<langfuse-host>/api/public/otel/v1/logs";
@@ -138,8 +138,8 @@ internal static class ConfigSamples
             CollectionProfileOptions.RawOnly => CreateRawOnlyProfileScript(profile, "raw-only uses saved raw OTLP JSON. No live VS Code receiver environment is required."),
             CollectionProfileOptions.DockerDesktopLangfuse => CreateLangfuseVsCodePowerShellScript(profile, LangfuseOtlpEndpoint, LangfuseOtlpTracesEndpoint),
             CollectionProfileOptions.DockerDesktopCollectorLangfuse => CreateCollectorVsCodePowerShellScript(profile, CollectorOtlpHttpEndpoint),
-            CollectionProfileOptions.Wsl2DockerLangfuse => CreateLangfuseVsCodePowerShellScript(profile, Wsl2LangfuseOtlpEndpoint, Wsl2LangfuseOtlpTracesEndpoint),
-            CollectionProfileOptions.Wsl2DockerCollectorLangfuse => CreateCollectorVsCodePowerShellScript(profile, Wsl2CollectorOtlpHttpEndpoint),
+            CollectionProfileOptions.Wsl2DockerLangfuse => CreateWsl2EndpointWarning(CreateLangfuseVsCodePowerShellScript(profile, Wsl2LangfuseOtlpEndpoint, Wsl2LangfuseOtlpTracesEndpoint)),
+            CollectionProfileOptions.Wsl2DockerCollectorLangfuse => CreateWsl2EndpointWarning(CreateCollectorVsCodePowerShellScript(profile, Wsl2CollectorOtlpHttpEndpoint)),
             CollectionProfileOptions.RemoteManagedLangfuse => CreateRemoteWarning(CreateLangfuseVsCodePowerShellScript(profile, RemoteLangfuseOtlpEndpoint, RemoteLangfuseOtlpTracesEndpoint)),
             CollectionProfileOptions.RemoteManagedCollector => CreateRemoteWarning(CreateCollectorVsCodePowerShellScript(profile, RemoteCollectorOtlpHttpEndpoint)),
             _ => throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unsupported collection profile."),
@@ -198,8 +198,8 @@ internal static class ConfigSamples
             CollectionProfileOptions.RawOnly => CreateRawOnlyProfileScript(profile, "raw-only uses saved raw OTLP JSON. No live Copilot CLI receiver environment is required."),
             CollectionProfileOptions.DockerDesktopLangfuse => CreateLangfuseCopilotCliPowerShellScript(profile, LangfuseOtlpEndpoint, LangfuseOtlpTracesEndpoint),
             CollectionProfileOptions.DockerDesktopCollectorLangfuse => CreateCollectorCopilotCliPowerShellScript(profile, CollectorOtlpHttpEndpoint),
-            CollectionProfileOptions.Wsl2DockerLangfuse => CreateLangfuseCopilotCliPowerShellScript(profile, Wsl2LangfuseOtlpEndpoint, Wsl2LangfuseOtlpTracesEndpoint),
-            CollectionProfileOptions.Wsl2DockerCollectorLangfuse => CreateCollectorCopilotCliPowerShellScript(profile, Wsl2CollectorOtlpHttpEndpoint),
+            CollectionProfileOptions.Wsl2DockerLangfuse => CreateWsl2EndpointWarning(CreateLangfuseCopilotCliPowerShellScript(profile, Wsl2LangfuseOtlpEndpoint, Wsl2LangfuseOtlpTracesEndpoint)),
+            CollectionProfileOptions.Wsl2DockerCollectorLangfuse => CreateWsl2EndpointWarning(CreateCollectorCopilotCliPowerShellScript(profile, Wsl2CollectorOtlpHttpEndpoint)),
             CollectionProfileOptions.RemoteManagedLangfuse => CreateRemoteWarning(CreateLangfuseCopilotCliPowerShellScript(profile, RemoteLangfuseOtlpEndpoint, RemoteLangfuseOtlpTracesEndpoint)),
             CollectionProfileOptions.RemoteManagedCollector => CreateRemoteWarning(CreateCollectorCopilotCliPowerShellScript(profile, RemoteCollectorOtlpHttpEndpoint)),
             _ => throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unsupported collection profile."),
@@ -237,8 +237,8 @@ internal static class ConfigSamples
             CollectionProfileOptions.RawOnly => CreateRawOnlyCodexAppConfigToml(profile),
             CollectionProfileOptions.DockerDesktopLangfuse => CreateCodexAppConfigToml(profile, LangfuseOtlpLogsEndpoint, LangfuseOtlpMetricsEndpoint, LangfuseOtlpTracesEndpoint, includeLangfuseHeaders: true),
             CollectionProfileOptions.DockerDesktopCollectorLangfuse => CreateCodexAppConfigToml(profile, CollectorOtlpHttpLogsEndpoint, CollectorOtlpHttpMetricsEndpoint, CollectorOtlpHttpTracesEndpoint, includeLangfuseHeaders: false),
-            CollectionProfileOptions.Wsl2DockerLangfuse => CreateCodexAppConfigToml(profile, Wsl2LangfuseOtlpLogsEndpoint, Wsl2LangfuseOtlpMetricsEndpoint, Wsl2LangfuseOtlpTracesEndpoint, includeLangfuseHeaders: true),
-            CollectionProfileOptions.Wsl2DockerCollectorLangfuse => CreateCodexAppConfigToml(profile, Wsl2CollectorOtlpHttpLogsEndpoint, Wsl2CollectorOtlpHttpMetricsEndpoint, Wsl2CollectorOtlpHttpTracesEndpoint, includeLangfuseHeaders: false),
+            CollectionProfileOptions.Wsl2DockerLangfuse => CreateWsl2EndpointWarning(CreateCodexAppConfigToml(profile, Wsl2LangfuseOtlpLogsEndpoint, Wsl2LangfuseOtlpMetricsEndpoint, Wsl2LangfuseOtlpTracesEndpoint, includeLangfuseHeaders: true)),
+            CollectionProfileOptions.Wsl2DockerCollectorLangfuse => CreateWsl2EndpointWarning(CreateCodexAppConfigToml(profile, Wsl2CollectorOtlpHttpLogsEndpoint, Wsl2CollectorOtlpHttpMetricsEndpoint, Wsl2CollectorOtlpHttpTracesEndpoint, includeLangfuseHeaders: false)),
             CollectionProfileOptions.RemoteManagedLangfuse => CreateRemoteWarning(CreateCodexAppConfigToml(profile, RemoteLangfuseOtlpLogsEndpoint, RemoteLangfuseOtlpMetricsEndpoint, RemoteLangfuseOtlpTracesEndpoint, includeLangfuseHeaders: true)),
             CollectionProfileOptions.RemoteManagedCollector => CreateRemoteWarning(CreateCodexAppConfigToml(profile, RemoteCollectorOtlpHttpLogsEndpoint, RemoteCollectorOtlpHttpMetricsEndpoint, RemoteCollectorOtlpHttpTracesEndpoint, includeLangfuseHeaders: false)),
             _ => throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unsupported collection profile."),
@@ -359,6 +359,16 @@ internal static class ConfigSamples
     {
         var builder = new StringBuilder();
         builder.AppendLine("# WARNING: confirm access control, retention, deletion process, masking / redaction, user notice or consent, identity handling, and credential handling before sending telemetry to a remote managed endpoint.");
+        builder.Append(content);
+        return builder.ToString();
+    }
+
+    private static string CreateWsl2EndpointWarning(string content)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("# WSL2 Docker Engine: replace <windows-reachable-wsl2-host> with the host name or address that Windows clients can reach for the selected WSL2 distro.");
+        builder.AppendLine("# Prefer localhost when WSL2 localhost forwarding exposes published container ports to Windows.");
+        builder.AppendLine("# If localhost forwarding is unavailable, resolve the current WSL2 address during live validation and keep machine-specific IP addresses out of repository files.");
         builder.Append(content);
         return builder.ToString();
     }

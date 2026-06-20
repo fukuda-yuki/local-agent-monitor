@@ -29,7 +29,8 @@ public class CliApplicationTests
 
         Assert.Equal(0, exitCode);
         Assert.Contains("$env:CAO_COLLECTION_PROFILE=\"wsl2-docker-langfuse\"", output.ToString());
-        Assert.Contains("http://<wsl2-host-ip>:3000/api/public/otel", output.ToString());
+        Assert.Contains("http://<windows-reachable-wsl2-host>:3000/api/public/otel", output.ToString());
+        Assert.Contains("Prefer localhost when WSL2 localhost forwarding exposes published container ports to Windows.", output.ToString());
         Assert.Equal(string.Empty, error.ToString());
     }
 

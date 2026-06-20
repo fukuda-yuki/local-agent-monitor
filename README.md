@@ -83,6 +83,8 @@ Required support profiles:
 | `remote-managed-collector` | 管理された remote Collector endpoint へ送信する |
 | `raw-local-receiver` | この repository の local receiver が VS Code から直接 telemetry を受ける |
 
+WSL2 Docker Engine profile の endpoint placeholder `<windows-reachable-wsl2-host>` は、Windows client から到達できる host に置き換えます。WSL2 localhost forwarding が使える場合は `localhost` を使い、machine-specific IP address は repository file に保存しないでください。
+
 ## 最短手順
 
 1. Docker Desktop を起動し、Langfuse self-host をローカルで起動する。
