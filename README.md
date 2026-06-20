@@ -30,6 +30,7 @@ filter、search、sort は browser 上で完結します。
 ## できること
 
 - VS Code GitHub Copilot Chat、GitHub Copilot CLI、Codex App の OTel trace / metrics / logs を収集する。
+- collection profile で telemetry routing mode を切り替える。
 - Langfuse で prompt、response、tool call、token usage、duration、error を trace 単位で確認する。
 - saved raw OTLP JSON を SQLite raw store に取り込み、normalized measurement dataset を生成する。
 - trace 由来の diagnosis candidate、improvement candidate、auto-decision、human decision record を生成・検証する。
@@ -52,11 +53,35 @@ filter、search、sort は browser 上で完結します。
 | GitHub Copilot を利用できるアカウント | Copilot Chat / CLI の実行 |
 | VS Code + GitHub Copilot Chat extension | VS Code 側 telemetry source |
 | GitHub Copilot CLI | CLI 側 telemetry source |
-| Docker Desktop | Langfuse self-host と任意の OTel Collector |
 | .NET SDK | Config CLI、build、test |
 | PowerShell | Windows 向け設定例の実行 |
+| Docker Desktop | `docker-desktop-langfuse` / `docker-desktop-collector-langfuse` profile |
+| WSL2 Docker Engine | `wsl2-docker-langfuse` / `wsl2-docker-collector-langfuse` profile |
 
-共有環境、実データ公開、GitHub Pages 公開、社内サーバー運用を行う場合は、access control、retention、削除方法、masking / redaction、利用者周知を先に決めてください。
+`raw-only` は最小必須 profile であり、Langfuse、Docker Desktop、WSL2 Docker Engine、Collector、remote endpoint、background process なしで saved raw OTLP JSON から raw data loop を実行します。
+
+WARNING: remote managed Langfuse / Collector endpoint、共有環境、実データ公開、GitHub Pages 公開、社内サーバー運用を行う場合は、送信前に access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を先に決めてください。この repository は remote / shared endpoint の利用者同意 workflow を実装しません。
+
+## Collection Profiles
+
+Profile selector:
+
+```text
+CAO_COLLECTION_PROFILE
+```
+
+Required support profiles:
+
+| Profile | 用途 |
+| --- | --- |
+| `raw-only` | 最小構成。保存済み raw OTLP JSON から raw data loop を実行する |
+| `docker-desktop-langfuse` | 標準 full profile。Docker Desktop 上の Langfuse で live trace review を行う |
+| `docker-desktop-collector-langfuse` | Docker Desktop 上の Collector 経由で Langfuse へ relay する |
+| `wsl2-docker-langfuse` | WSL2 Docker Engine 上の Langfuse へ Windows client から送信する |
+| `wsl2-docker-collector-langfuse` | WSL2 Docker Engine 上の Collector 経由で Langfuse へ relay する |
+| `remote-managed-langfuse` | 管理された remote Langfuse endpoint へ送信する |
+| `remote-managed-collector` | 管理された remote Collector endpoint へ送信する |
+| `raw-local-receiver` | この repository の local receiver が VS Code から直接 telemetry を受ける |
 
 ## 最短手順
 

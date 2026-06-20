@@ -6,6 +6,7 @@
 ## 1. Synthetic Dashboard を生成する
 
 外部サービスや実データなしで、静的 dashboard の生成経路を確認できる。
+これは `raw-only` profile の最小確認にも使える。
 
 ```powershell
 New-Item -ItemType Directory -Force tmp\dashboard-demo | Out-Null
@@ -25,7 +26,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 
 ## 2. Live Trace Review を試す
 
-Live trace を確認する場合は Langfuse self-host をローカルで起動し、client を OTLP HTTP で Langfuse に送る。
+Live trace を確認する場合は `docker-desktop-langfuse` profile を使い、Langfuse self-host をローカルで起動して client を OTLP HTTP で Langfuse に送る。
 
 代表コマンド:
 
@@ -38,7 +39,20 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-codex-a
 Langfuse key、Base64 authorization header、secret は repository に保存しない。
 検証には synthetic data または公開してよい検証用 data だけを使う。
 
-## 3. Raw Data Loop を試す
+## 3. Collection Profile を選ぶ
+
+Collection profile は telemetry routing mode を表す。
+
+```powershell
+$env:CAO_COLLECTION_PROFILE="raw-only"
+```
+
+最小 profile は `raw-only`、標準 full profile は `docker-desktop-langfuse`。
+詳細は [collection profile specification](specifications/interfaces/collection-profiles.md) を参照する。
+
+WARNING: `remote-managed-langfuse` と `remote-managed-collector` は、送信前に access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を決める必要がある。この repository は remote / shared endpoint の利用者同意 workflow を実装しない。
+
+## 4. Raw Data Loop を試す
 
 saved raw OTLP JSON がある場合は SQLite raw store に取り込み、normalized measurement dataset を生成する。
 
@@ -50,7 +64,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw da
 
 `data\raw-store.db`、raw payload、一時 CSV / JSON は local runtime data として扱い、commit しない。
 
-## 4. Diagnosis / Improvement Support を試す
+## 5. Diagnosis / Improvement Support を試す
 
 Synthetic diagnosis input から improvement proposal、evaluation、human decision template を生成する。
 
@@ -63,7 +77,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-decisio
 
 この loop は repository を自動修正しない。patch / diff / commit / push / pull request は生成しない。
 
-## 5. 次に読むもの
+## 6. 次に読むもの
 
 - [利用者向け詳細ガイド](user-guide.md)
 - [要件定義](requirements.md)

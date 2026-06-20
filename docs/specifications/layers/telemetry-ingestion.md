@@ -11,16 +11,44 @@ Required:
 
 - VS Code GitHub Copilot Chat。
 - GitHub Copilot CLI。
+- OpenTelemetry Collector as relay。
 
 Optional:
 
 - Codex App / app-server。
-- OpenTelemetry Collector as relay。
 
 Reference-only:
 
 - Claude Code examples。
 - Visual Studio client family。
+
+## Collection Profiles
+
+Collection profile selection is a public interface.
+The profile selector is:
+
+```text
+CAO_COLLECTION_PROFILE
+```
+
+The required profile values are defined in
+[../interfaces/collection-profiles.md](../interfaces/collection-profiles.md).
+
+Telemetry ingestion must support:
+
+- `raw-only`
+- `docker-desktop-langfuse`
+- `docker-desktop-collector-langfuse`
+- `wsl2-docker-langfuse`
+- `wsl2-docker-collector-langfuse`
+- `remote-managed-langfuse`
+- `remote-managed-collector`
+- `raw-local-receiver`
+
+`raw-only` is the minimum profile and does not require a live receiver.
+`docker-desktop-langfuse` is the standard full profile.
+`raw-local-receiver` is implemented as a local receiver profile and is split
+from other routing profiles because it introduces a long-running local process.
 
 ## Langfuse Direct Path
 
@@ -41,7 +69,7 @@ Credentials are passed through local environment variables or user-level config,
 
 ## Collector Relay Path
 
-Collector relay is optional.
+Collector relay is required for profiles that include `collector`.
 
 Default local receiver:
 
@@ -53,6 +81,21 @@ localhost:4317
 Collector may attach Langfuse authorization headers so clients do not store Langfuse credentials.
 The repository example handles trace pipeline only.
 Masking, sampling, TLS, SSO, and shared operation require separate product / security decisions.
+
+## Raw Local Receiver Path
+
+The `raw-local-receiver` profile sends telemetry directly to a repository-hosted
+local receiver instead of Langfuse.
+
+Initial receiver requirements:
+
+- bind to a local endpoint unless a later security decision allows broader exposure.
+- accept OTLP HTTP telemetry from supported clients.
+- persist raw telemetry as local runtime data for the raw data loop.
+- avoid changing normalized measurement, candidate, or dashboard dataset contracts.
+- avoid committing raw receiver output.
+
+The local receiver is not implemented through Aspire AppHost by default.
 
 ## Resource Attributes
 
@@ -100,5 +143,5 @@ Project-local `.codex/config.toml` is not a routing source of truth.
 ## Aspire AppHost Boundary
 
 The Aspire AppHost is retained for build coverage and historical local dashboard connectivity context.
-Do not add Langfuse, Collector, Config CLI, ServiceDefaults, Web app, DB, Redis, or Worker resources by default.
+Do not add Langfuse, Collector, Config CLI, raw local receiver, ServiceDefaults, Web app, DB, Redis, or Worker resources to AppHost by default.
 If resources are added later, define MCP exposure and sensitive telemetry exclusions before implementation.

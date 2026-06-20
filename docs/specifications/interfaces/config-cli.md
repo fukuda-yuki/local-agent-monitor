@@ -5,6 +5,10 @@
 ## Configuration Commands
 
 ```text
+config-cli list-collection-profiles
+config-cli profile-vscode-env [--profile <collection-profile>]
+config-cli profile-copilot-cli-env [--profile <collection-profile>]
+config-cli profile-codex-app-config [--profile <collection-profile>]
 config-cli vscode-settings
 config-cli langfuse-vscode-settings
 config-cli collector-vscode-settings
@@ -21,6 +25,16 @@ config-cli validate-resource-attributes <OTEL_RESOURCE_ATTRIBUTES>
 ```
 
 Configuration commands must emit placeholders instead of real credentials.
+
+`--profile` uses the values defined in
+[collection-profiles.md](collection-profiles.md).
+When `--profile` is omitted, profile-aware commands read
+`CAO_COLLECTION_PROFILE`.
+If neither is set, profile-aware commands must fail with a deterministic error
+instead of silently choosing a profile.
+
+Existing explicit commands such as `langfuse-vscode-env` and
+`collector-vscode-env` remain supported compatibility entry points.
 
 ## Raw Data Commands
 

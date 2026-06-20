@@ -2,6 +2,7 @@
 
 Raw data loop は、saved raw OTLP JSON を SQLite raw store に取り込み、normalized measurement dataset を生成する流れです。
 Langfuse UI が起動していなくても、file-based input だけで再現できます。
+`raw-local-receiver` profile の実装後は、この repository の local receiver が受け取った telemetry も同じ raw data loop に接続します。
 
 ## 入力
 

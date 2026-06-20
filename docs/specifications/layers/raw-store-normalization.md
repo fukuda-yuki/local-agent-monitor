@@ -2,8 +2,8 @@
 
 ## Scope
 
-This layer converts saved raw OTLP JSON into repository-local deterministic datasets.
-It does not run a network receiver and does not require Langfuse UI.
+This layer converts raw telemetry into repository-local deterministic datasets.
+It does not require Langfuse UI.
 
 ## Input
 
@@ -11,6 +11,7 @@ Accepted input:
 
 - saved raw OTLP JSON file。
 - SQLite raw store created by `ingest-raw`。
+- SQLite raw store populated by the `raw-local-receiver` profile。
 
 Raw payloads may include prompt, response, tool arguments / results, path information, identity-bearing attributes, and credential-like strings.
 Raw payloads must not be committed.
@@ -26,11 +27,13 @@ data/raw-store.db
 `data/` is local runtime data.
 The SQLite store is not a shared operational database.
 
-Rejected for current scope:
+Rejected for current default storage scope:
 
-- custom OTLP HTTP receiver。
-- long-running local telemetry agent。
 - PostgreSQL as default raw telemetry store。
+
+The `raw-local-receiver` profile owns local receiver behavior.
+This layer owns deterministic storage and normalization after raw telemetry is
+available.
 
 ## Commands
 
@@ -41,6 +44,10 @@ config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <o
 
 `normalize-raw` may read either a raw store or a raw OTLP JSON file.
 At least one output option must be provided by commands that require output.
+
+The local receiver may write directly to the SQLite raw store or produce a raw
+OTLP file that can be passed to `ingest-raw`.
+Either path must preserve the same normalization output contract.
 
 ## Normalized Measurement Responsibilities
 

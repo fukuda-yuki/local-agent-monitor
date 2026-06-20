@@ -9,12 +9,15 @@ VS Code GitHub Copilot Chat
 GitHub Copilot CLI
 Codex App / app-server
         |
-        | OTLP HTTP
+        | OTLP HTTP via collection profile
         v
-Langfuse self-host
+Langfuse self-host / Collector / raw local receiver / saved raw OTLP JSON
 ```
 
-Langfuse は個別 trace viewer として使います。
+Collection profile は `CAO_COLLECTION_PROFILE` で選びます。
+最小 profile は `raw-only`、標準 full profile は `docker-desktop-langfuse` です。
+
+Langfuse は標準 full profile の個別 trace viewer として使います。
 Raw data loop と static dashboard は Langfuse UI に必須依存しません。
 
 ## Langfuse endpoint
@@ -95,7 +98,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-codex-a
 
 ## Collector 経由送信
 
-Collector 経由送信は任意の代替経路です。
+Collector 経由送信は `docker-desktop-collector-langfuse`、`wsl2-docker-collector-langfuse`、`remote-managed-collector` profile で使います。
 client 側から Langfuse credential を外し、Collector 側で Langfuse authorization header を付与できます。
 
 ```powershell
@@ -117,3 +120,6 @@ docker compose -f infra\otel-collector\docker-compose.example.yml config
 - `client.kind` と `experiment.id` が付いている。
 - prompt / response / tool call / token usage / duration / error を確認できる。
 - 実データや secret を repository に保存していない。
+
+Remote managed Langfuse / Collector endpoint に送信する場合は、送信前に access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を決めてください。
+この repository は remote / shared endpoint の利用者同意 workflow を実装しません。

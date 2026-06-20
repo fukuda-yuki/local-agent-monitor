@@ -19,7 +19,7 @@ Rationale:
 
 Status: Accepted
 
-ローカル Docker Desktop 上の Langfuse self-host を標準 trace viewer とする。
+ローカル Docker Desktop 上の Langfuse self-host を標準 full profile の trace viewer とする。
 Clients は OTLP HTTP で `http://localhost:3000/api/public/otel` に直接送信できる。
 
 Consequences:
@@ -32,6 +32,7 @@ Consequences:
 Status: Accepted
 
 Collector は直接送信を置き換えず、直接送信が不安定な場合や組織展開候補として使う。
+Sprint6 以降は Collector routing を collection profile の required support target として扱う。
 
 Consequences:
 
@@ -86,8 +87,10 @@ Local-first の raw store は SQLite とし、file-based ingest を使う。
 Rejected for current scope:
 
 - PostgreSQL as primary raw telemetry store。
-- custom OTLP HTTP receiver。
-- long-running local telemetry agent。
+
+Note:
+
+- `raw-local-receiver` profile は D017 / D018 により別 Sprint の required support target として扱う。
 
 ## D008: Candidate pipeline は deterministic records までに留める
 
@@ -228,3 +231,50 @@ Status: Open
 - Pages visibility。
 - live workflow operation。
 - snapshot growth monitoring。
+
+## D017: Collection profile を public interface にする
+
+Status: Accepted
+
+Telemetry routing mode は collection profile として明示する。
+Profile selector は `CAO_COLLECTION_PROFILE` とする。
+
+Required profiles:
+
+```text
+raw-only
+docker-desktop-langfuse
+docker-desktop-collector-langfuse
+wsl2-docker-langfuse
+wsl2-docker-collector-langfuse
+remote-managed-langfuse
+remote-managed-collector
+raw-local-receiver
+```
+
+Consequences:
+
+- `raw-only` は最小必須 profile とする。
+- `docker-desktop-langfuse` は標準 full profile とする。
+- Profile 差分は collection / routing / live viewer availability の差分とし、raw store、measurement、candidate、dashboard schema を分岐させない。
+- Remote managed profiles は本 repository では WARNING と placeholder configuration までを扱う。
+- 利用者同意 workflow は本 repository の対象外とする。
+
+## D018: raw-local-receiver は別 Sprint で実装する
+
+Status: Accepted
+
+Langfuse なし構成として、この repository が VS Code から直接 telemetry を受け取る仕組みを `raw-local-receiver` profile とする。
+
+Rationale:
+
+- これは単なる profile 切り替えではなく、repository-hosted OTLP receiver / local agent surface を追加する作業である。
+- Raw prompt、response、tool arguments、tool results、local path、identity attributes、credential-like values を受け取り得るため、安全境界と validation を先に決める必要がある。
+- Company-managed PC では packaged exe install が blocked される可能性があるため、初期 required path は repository-local execution を優先する。
+
+Consequences:
+
+- Sprint6 は collection profiles と既存 routing paths を扱う。
+- Sprint7 は `raw-local-receiver` の receiver、host model、raw store integration、VS Code direct telemetry validation を扱う。
+- Tray app、packaged exe installer、Windows Service は初期 required path ではない。
+- IIS / IIS Express は practical な常駐候補として Sprint7 で評価する。
