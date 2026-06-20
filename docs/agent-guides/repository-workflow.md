@@ -17,6 +17,12 @@ Keep `AGENTS.md` short and practical. Codex loads `AGENTS.md` automatically, so 
 These rules follow the official Codex distinction between `AGENTS.md` guidance, configuration, and command execution rules.
 They also reflect common agent-maintenance practice: keep the always-loaded instruction file short, put commands early, include flags and paths, and move rarely used detail to referenced guides.
 
+## Do Not Rule Shape
+
+Keep prohibitions short, concrete, and testable.
+Prefer "Do not commit secrets" over broad statements like "Be careful with security."
+If a prohibition needs nuance, put the short rule in `AGENTS.md` and keep the nuance in this guide or the relevant specification.
+
 ## Repository Commands
 
 Run these commands from the repository root.

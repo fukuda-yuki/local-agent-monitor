@@ -66,21 +66,26 @@ For Aspire AppHost usage decisions, refer to `docs/specifications/layers/telemet
 Ask before irreversible changes, product behavior or public interface changes, security policy changes, dependency additions, source-of-truth conflicts, missing spec decisions, or unclear preserved review records.
 Keep changes minimum, scoped, and traceable to the request.
 
+## Do Not
+
+- Do not change product behavior, public interfaces, or security policy without updating the current specs first.
+- Do not add runtime or development dependencies, or update lockfiles, unless specs require it or the user explicitly asks.
+- Do not commit secrets, real user data, raw prompts/responses, tool arguments/results, sensitive bundle content/paths, or generated runtime artifacts.
+- Do not substitute a failed, skipped, or unavailable validation command with a different command.
+- Do not use `.codex/rules` as natural-language workflow guidance.
+- Do not delegate to subagents unless the user explicitly asks and the active surface supports it.
+- Do not push, tag, create/update/merge pull requests, or rewrite remote history.
+- Do not hide product specifications only in sprint notes, review notes, knowledge files, or handoff records.
+
 ## Tests And Validation
 
 Derive test scope from `docs/requirements.md`, `docs/spec.md`, and the relevant `docs/specifications/` file.
 Use small synthetic or anonymized fixtures.
-Do not commit secrets, real user data, confidential data, or generated runtime artifacts.
 
 If a required command fails, is skipped, or cannot run because a tool is missing, do not treat a different command as an equivalent success.
 Diagnostic commands may be useful follow-up evidence, but they do not replace required validation.
 In the final report, state commands run, results, unverified scope, and exact commands still needed.
-
-## Dependencies And Environment
-
-- Do not add runtime or development dependencies unless the current specifications require it or the user explicitly asks.
-- Do not update lockfiles as a side effect when dependency changes are out of scope.
-- Do not use network-dependent validation as the only proof of correctness.
+Do not use network-dependent validation as the only proof of correctness.
 
 ## Codex Guidance Files
 
@@ -88,7 +93,6 @@ In the final report, state commands run, results, unverified scope, and exact co
 Keep it short and practical; put detailed procedures in `docs/agent-guides/` and read them when relevant.
 
 `.codex/rules/*.rules` is for command execution policy outside the sandbox, not for natural-language workflow guidance.
-Do not use `.codex/rules` as a replacement for `AGENTS.md`.
 
 ## Subagent Requests
 
@@ -106,7 +110,6 @@ Documentation-only, typo-only, formatting-only, or other minor reversible change
 Update `docs/requirements.md`, `docs/spec.md`, and the relevant `docs/specifications/` file when product behavior or public interfaces change.
 Update user-facing guides when the user workflow changes.
 Update `docs/task.md` when roadmap or historical status changes.
-Do not hide product specifications only in sprint notes or knowledge files.
 
 ## Git Rules
 
@@ -114,7 +117,6 @@ Create local commits in small, coherent steps after validation and review are co
 Do not wait for an explicit user request when a completed, verified step can be committed cleanly.
 If the active work item is unclear, or the change mixes unrelated concerns, ask before committing.
 
-Do not push branches or tags, create/update/merge/auto-merge pull requests, or rewrite remote history.
 Commit messages must start with the active work item name and then follow Conventional Commits.
 
 ---
