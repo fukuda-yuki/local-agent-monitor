@@ -164,6 +164,21 @@ Weak success criteria such as "make it work" require clarification or an explici
 - Do not substitute a different workflow when it changes what is being verified.
 - In the final report, state the commands run, their result, any unverified scope, and the exact command still needed.
 
+## Fallbacks, Blockers, And Compatibility
+
+Use the specified path first.
+If the specified path is unavailable, stop and report the blocker instead of silently switching to a fallback.
+Name the missing condition precisely: missing tool, missing credential, unavailable service, failing command, unclear product decision, or absent spec.
+
+Do not add compatibility shims, dual behavior, migration layers, alternate parsers, default fallbacks, or silent retry paths unless one of these is true:
+
+- the current source of truth requires compatibility;
+- the user explicitly asks for compatibility behavior;
+- the change is needed to preserve an existing documented public interface.
+
+When compatibility is required, keep it narrow and document the exact interface being preserved.
+When compatibility is not required, prefer one clear behavior and fail loudly on unsupported inputs.
+
 ## Dependencies And Environment
 
 - Do not add runtime or development dependencies unless the current specifications require it or the user explicitly asks.
