@@ -5,6 +5,11 @@ internal static class RawOtlpIngestor
     public static RawTelemetryRecord CreateRecord(string inputPath, DateTimeOffset receivedAt)
     {
         var payloadJson = File.ReadAllText(inputPath, Encoding.UTF8);
+        return CreateRecordFromPayloadJson(payloadJson, receivedAt);
+    }
+
+    public static RawTelemetryRecord CreateRecordFromPayloadJson(string payloadJson, DateTimeOffset receivedAt)
+    {
         using var document = JsonDocument.Parse(payloadJson);
         ValidateRawOtlpEnvelope(document.RootElement);
 

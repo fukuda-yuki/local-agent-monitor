@@ -94,7 +94,7 @@ Run the same targeted test. Expected: pass.
 - Modify: `src/CopilotAgentObservability.ConfigCli/RawTelemetry/RawOtlpIngestor.cs`
 - Test: `tests/CopilotAgentObservability.ConfigCli.Tests/RawOtlpIngestorTests.cs`
 
-- [ ] **Step 1: Write a failing payload-string test**
+- [x] **Step 1: Write a failing payload-string test**
 
 Test that a synthetic JSON payload string creates a `RawTelemetryRecord` with the same trace id and resource attributes as the file-based path.
 
@@ -106,11 +106,11 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 
 Expected: fail because `CreateRecordFromPayload` does not exist.
 
-- [ ] **Step 2: Implement payload-string creation**
+- [x] **Step 2: Implement payload-string creation**
 
 Share the existing envelope validation, trace id extraction, and resource attribute extraction.
 
-- [ ] **Step 3: Verify ingestor tests**
+- [x] **Step 3: Verify ingestor tests**
 
 Run the same targeted test. Expected: pass.
 

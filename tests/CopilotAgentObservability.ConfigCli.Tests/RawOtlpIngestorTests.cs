@@ -6,6 +6,44 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public class RawOtlpIngestorTests
 {
     [Fact]
+    public void CreateRecordFromPayloadJson_PreservesExactPayloadStringAndExtractsMetadata()
+    {
+        var payloadJson = """
+            {
+              "resourceSpans": [
+                {
+                  "resource": {
+                    "attributes": [
+                      { "key": "client.kind", "value": { "stringValue": "copilot-cli" } }
+                    ]
+                  },
+                  "scopeSpans": [
+                    {
+                      "spans": [
+                        {
+                          "traceId": "11111111111111111111111111111111"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """;
+        var receivedAt = new DateTimeOffset(2026, 6, 5, 1, 2, 3, TimeSpan.Zero);
+
+        var record = RawOtlpIngestor.CreateRecordFromPayloadJson(payloadJson, receivedAt);
+
+        Assert.Equal(RawTelemetrySources.RawOtlp, record.Source);
+        Assert.Equal("11111111111111111111111111111111", record.TraceId);
+        Assert.Equal(receivedAt, record.ReceivedAt);
+        Assert.Equal(payloadJson, record.PayloadJson);
+
+        using var attributes = JsonDocument.Parse(record.ResourceAttributesJson!);
+        Assert.Equal("copilot-cli", attributes.RootElement.GetProperty("client.kind").GetString());
+    }
+
+    [Fact]
     public void CreateRecord_ExtractsTraceIdAndResourceAttributes()
     {
         using var tempDirectory = new TempDirectory();

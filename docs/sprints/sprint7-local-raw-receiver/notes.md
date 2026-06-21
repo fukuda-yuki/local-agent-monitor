@@ -73,3 +73,7 @@ behavior decisions to `docs/requirements.md`, `docs/spec.md`, or
   The run emitted the existing `NU1903` warnings for
   `SQLitePCLRaw.lib.e_sqlite3` and the existing `NETSDK1057` preview .NET SDK
   message.
+- The Task 3 writer Sub-Agent returned a complete patch rather than relying on
+  direct workspace synchronization. After integration, the targeted
+  `RawOtlpIngestorTests` run passed 5 tests and emitted the same existing
+  `NU1903` and `NETSDK1057` messages.
