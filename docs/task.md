@@ -32,12 +32,15 @@
 
 - **未対応の機能仕様・検証（未確認の検証フェーズ）**
   - Sprint 7 ローカル・レシーバー（`raw-local-receiver`）の VS Code 実機連携のライブ検証（VS Code direct telemetry live validation）。
+    - 検証時には VS Code / GitHub Copilot extension version、receiver command、loopback bind、raw record identifier、Langfuse 不要であること、確認済み / 未確認 telemetry signal を記録する。
   - リモート・プロファイル（`remote-managed-*`）の実環境での疎通検証（Live Validation）。
+  - 静的ダッシュボード publish workflow の実 repository 上での初回 GitHub Actions / GitHub Pages ライブ実行結果確認。
   - ローカル・レシーバーの常駐起動・配置オプション（IIS / IIS Express ホスティング、Windows サービス化、タスクトレイアプリ化など）の評価とパッケージング検討。
 - **未検討・未決定の意思決定事項（Open Product / Security Decisions）**
   - 静的ダッシュボード（GitHub Pages 等）の共有運用におけるアクセス制御の具体設計。
   - 共有ダッシュボードのデータ保持期間（Retention）、削除方法、利用者への周知方法。
   - 実データ運用時のマスキング・秘匿化（Redaction）方針の決定。
+  - Collector / remote / shared operation での TLS、SSO、sampling、credential handling の採用方針。
   - リモート・プロファイル利用時のユーザー同意ワークフロー（User Consent Workflow）の実装・定義。
   - ID情報のハンドリング（`user.id` / `user.email` から表示名（Display Name）へのマッピング設計）。
   - 外部成果物との紐付け（External Outcome Linkage - GitHub Issues, PR, Notion等）の採用可否とプロダクト/セキュリティポリシーの策定。
