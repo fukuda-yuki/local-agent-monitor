@@ -77,3 +77,20 @@ behavior decisions to `docs/requirements.md`, `docs/spec.md`, or
   direct workspace synchronization. After integration, the targeted
   `RawOtlpIngestorTests` run passed 5 tests and emitted the same existing
   `NU1903` and `NETSDK1057` messages.
+- During Task 4 RED test authoring, the first attempt failed because of test
+  syntax / variable-name mistakes rather than the intended missing converter.
+  The test was corrected and then failed for the intended missing
+  `OtlpProtobufTraceConverter` type before production code was added.
+- Task 4 targeted `OtlpProtobufTraceConverterTests` passed 1 test after adding
+  the minimal internal protobuf trace converter. The run emitted the same
+  existing `NU1903` and `NETSDK1057` messages.
+- A combined targeted run for Task 2-4 tests
+  (`RawLocalReceiverOptionsTests`, `RawOtlpIngestorTests`, and
+  `OtlpProtobufTraceConverterTests`) passed 20 tests and emitted the same
+  existing `NU1903` and `NETSDK1057` messages.
+- Task 4 spec/code reviews requested fixes before approval: convert event
+  `time_unix_nano` to `timeUnixNano`, cover event/status conversion in tests,
+  preserve signed `int64` values, and normalize malformed protobuf length
+  overflow to `InvalidDataException`. These fixes were applied, and the
+  targeted `OtlpProtobufTraceConverterTests` run passed 6 tests with the same
+  existing warnings/messages.

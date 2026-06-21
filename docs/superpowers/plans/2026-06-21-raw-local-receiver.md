@@ -120,7 +120,7 @@ Run the same targeted test. Expected: pass.
 - Create: `src/CopilotAgentObservability.ConfigCli/RawLocalReceiver/OtlpProtobufTraceConverter.cs`
 - Test: `tests/CopilotAgentObservability.ConfigCli.Tests/OtlpProtobufTraceConverterTests.cs`
 
-- [ ] **Step 1: Write failing protobuf conversion tests**
+- [x] **Step 1: Write failing protobuf conversion tests**
 
 Build a small synthetic binary `ExportTraceServiceRequest` in the test helper with one resource span, one scope span, and one span containing:
 
@@ -144,11 +144,11 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 
 Expected: fail because converter does not exist.
 
-- [ ] **Step 2: Implement the minimal protobuf reader**
+- [x] **Step 2: Implement the minimal protobuf reader**
 
 Implement only the OTLP trace fields required by the test and existing normalizer: resource attributes, scope spans, spans, span attributes, events, status, trace id, span id, name, kind, start/end time.
 
-- [ ] **Step 3: Verify conversion tests**
+- [x] **Step 3: Verify conversion tests**
 
 Run the same targeted test. Expected: pass.
 
