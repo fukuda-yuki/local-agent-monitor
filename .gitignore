@@ -121,6 +121,7 @@ docker-compose.*.override.yml
 data/
 tmp/
 temp/
+.worktrees/
 
 # Langfuse / OTel / observability local data
 langfuse-data/
