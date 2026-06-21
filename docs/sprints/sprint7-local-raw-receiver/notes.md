@@ -134,3 +134,25 @@ behavior decisions to `docs/requirements.md`, `docs/spec.md`, or
   `RawLocalReceiverIntegrationTests`, `CliApplicationTests`, and
   `ConfigSamplesTests`) passed 115 tests and emitted the same existing
   `NU1903` and `NETSDK1057` messages.
+- Task 7 full validation:
+  `dotnet build CopilotAgentObservability.slnx` passed with 0 errors and 6
+  warnings. The warnings were the existing `NU1903` vulnerability warnings for
+  `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 and `MessagePack` 2.5.192; the run also
+  emitted the existing `NETSDK1057` preview SDK message.
+- Task 7 full validation:
+  `dotnet test CopilotAgentObservability.slnx` passed with 290 tests,
+  0 failures, and 0 skipped tests. The run emitted the same existing `NU1903`
+  and `NETSDK1057` messages.
+- The first Task 7 synthetic smoke attempt started the receiver but posted an
+  invalid synthetic payload from the inline PowerShell helper, producing a
+  handler `invalid_payload` response. The helper was corrected before recording
+  smoke evidence.
+- Task 7 synthetic smoke succeeded with the receiver bound to
+  `http://127.0.0.1:54320`, raw store under `%TEMP%`, one JSON POST and one
+  protobuf POST returning HTTP 200, and `normalize-raw` producing 2 measurement
+  rows. The run emitted the existing `NU1903` warning for
+  `SQLitePCLRaw.lib.e_sqlite3`.
+- Task 7 final review could not use a fresh Sub-Agent because the environment
+  was still at the usage limit. Main chat performed local self-review instead.
+- `git diff --check` passed with no whitespace errors; it emitted only the
+  usual CRLF conversion notices for edited files.

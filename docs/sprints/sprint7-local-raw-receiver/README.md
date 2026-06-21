@@ -58,5 +58,32 @@ Therefore:
 
 ## Current Status
 
-Sprint7 has started with M1, which defines the local receiver requirements,
-data safety boundary, and validation evidence before implementation work begins.
+Sprint7 has implemented the initial repository-local foreground receiver path
+for M2-M4 and synthetic validation for M3-M4.
+
+Implemented:
+
+- `serve-raw-local-receiver` foreground Config CLI command.
+- Loopback-only receiver URL validation with default
+  `http://127.0.0.1:4319`.
+- `/v1/traces` handling for OTLP HTTP JSON and protobuf trace payloads.
+- SQLite raw store persistence using the existing raw store schema.
+- `raw-local-receiver` profile output that points to the local receiver and
+  does not emit Langfuse credentials, Collector headers, or remote endpoints.
+
+Validation on 2026-06-21:
+
+- `dotnet build CopilotAgentObservability.slnx` passed with 0 errors and
+  existing package vulnerability warnings.
+- `dotnet test CopilotAgentObservability.slnx` passed with 290 tests,
+  0 failures, and 0 skipped tests.
+- Synthetic smoke started the receiver on `http://127.0.0.1:54320`, posted one
+  JSON trace and one protobuf trace, and normalized 2 raw measurement rows from
+  the temp SQLite raw store.
+
+Still unconfirmed:
+
+- Live VS Code GitHub Copilot Chat telemetry against the receiver.
+- VS Code and GitHub Copilot extension version evidence for M5.
+- Packaging / always-on host options beyond the repository-local foreground
+  command.

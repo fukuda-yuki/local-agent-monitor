@@ -53,3 +53,16 @@ Rejected for the initial required path:
 
 - Record the selected host model and rejected alternatives.
 - Confirm required validation commands and local run instructions.
+
+## Status 2026-06-21
+
+M2 is complete for the initial required path.
+
+Confirmed:
+
+- Initial host model is the repository-local foreground Config CLI command.
+- Default bind URL is `http://127.0.0.1:4319`.
+- Default raw store path is `data/raw-store.db`.
+- Non-loopback bind URLs are rejected before binding.
+- IIS / IIS Express, packaged exe, tray app, and Windows Service remain outside
+  the initial required path and are future packaging / always-on candidates.

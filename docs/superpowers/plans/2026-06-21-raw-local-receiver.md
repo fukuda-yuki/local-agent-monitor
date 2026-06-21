@@ -237,7 +237,7 @@ Run the relevant targeted tests. Expected: pass.
 - Modify: `docs/sprints/sprint7-local-raw-receiver/milestones/M5-vscode-direct-telemetry-validation/task.md`
 - Modify: `docs/sprints/sprint7-local-raw-receiver/milestones/M6-review-and-release-boundary/task.md`
 
-- [ ] **Step 1: Run full validation**
+- [x] **Step 1: Run full validation**
 
 Run:
 
@@ -248,14 +248,14 @@ dotnet test CopilotAgentObservability.slnx
 
 Expected: pass. Record any warnings in `docs/sprints/sprint7-local-raw-receiver/notes.md`.
 
-- [ ] **Step 2: Run synthetic smoke validation**
+- [x] **Step 2: Run synthetic smoke validation**
 
 Run the receiver against a temp DB, post synthetic JSON and protobuf trace payloads from a local script or test helper, then run `normalize-raw` on the DB.
 
-- [ ] **Step 3: Update sprint records**
+- [x] **Step 3: Update sprint records**
 
 Mark M2 complete, record M3/M4 synthetic evidence, document the M5 live validation procedure and any unconfirmed live items, and add M6 release boundary notes for IIS/IIS Express, packaged exe, tray app, and Windows Service as future work.
 
-- [ ] **Step 4: Review and commit**
+- [x] **Step 4: Review and commit**
 
 Review diffs for raw data safety, generated artifacts, and unrelated changes. Commit coherent completed steps with messages starting `Sprint7 M2-M7`.
