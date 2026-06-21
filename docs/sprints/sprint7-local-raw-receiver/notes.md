@@ -94,3 +94,26 @@ behavior decisions to `docs/requirements.md`, `docs/spec.md`, or
   overflow to `InvalidDataException`. These fixes were applied, and the
   targeted `OtlpProtobufTraceConverterTests` run passed 6 tests with the same
   existing warnings/messages.
+- During Task 5 RED test authoring, the intended compile failure occurred
+  because `RawLocalReceiverHandler` and `RawLocalReceiverRequest` did not exist.
+  The run also emitted the same existing `NU1903` and `NETSDK1057` messages.
+- During Task 5 GREEN verification, the first handler test run failed because a
+  test asserted that the JSON error response did not contain `{`, even though
+  every JSON response starts with `{`. The assertion was corrected to inspect
+  the structured error body instead.
+- Task 5 targeted handler/integration tests passed 7 tests after adding the
+  deterministic handler and protobuf-to-store-to-normalize integration path.
+  The run emitted the same existing `NU1903` and `NETSDK1057` messages.
+- Task 5 code-quality review found two actionable issues: raw store write
+  failures escaped the handler instead of returning a deterministic failure,
+  and empty/non-trace payloads could be accepted as successful raw telemetry.
+  Added failing tests for database persistence failure, empty JSON spans,
+  empty protobuf payloads, and malformed protobuf at the handler boundary.
+- After fixing Task 5 review findings, targeted `RawLocalReceiverHandlerTests`
+  passed 10 tests, and the combined handler/integration run passed 11 tests.
+  Both runs emitted the same existing `NU1903` and `NETSDK1057` messages.
+- A combined targeted run for Task 2-5 receiver tests
+  (`RawLocalReceiverOptionsTests`, `RawOtlpIngestorTests`,
+  `OtlpProtobufTraceConverterTests`, `RawLocalReceiverHandlerTests`, and
+  `RawLocalReceiverIntegrationTests`) passed 36 tests and emitted the same
+  existing `NU1903` and `NETSDK1057` messages.

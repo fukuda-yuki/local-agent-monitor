@@ -159,7 +159,7 @@ Run the same targeted test. Expected: pass.
 - Test: `tests/CopilotAgentObservability.ConfigCli.Tests/RawLocalReceiverHandlerTests.cs`
 - Test: `tests/CopilotAgentObservability.ConfigCli.Tests/RawLocalReceiverIntegrationTests.cs`
 
-- [ ] **Step 1: Write failing handler tests**
+- [x] **Step 1: Write failing handler tests**
 
 Cover:
 
@@ -172,11 +172,11 @@ POST /v1/metrics returns unsupported signal failure and writes no record.
 POST /v1/traces text/plain returns unsupported content type and writes no record.
 ```
 
-- [ ] **Step 2: Implement handler**
+- [x] **Step 2: Implement handler**
 
 Return a small result object with status code, content type, response body, and persisted raw record id. Do not expose raw payload content in the response.
 
-- [ ] **Step 3: Write failing normalize integration test**
+- [x] **Step 3: Write failing normalize integration test**
 
 Use handler output written to a temp SQLite DB, then run:
 
@@ -186,7 +186,7 @@ CliApplication.Run(["normalize-raw", dbPath, "--json", measurementsPath], output
 
 Assert the measurement JSON has `client_kind=vscode-copilot-chat`, `experiment_id=baseline`, token counts, and one trace row.
 
-- [ ] **Step 4: Verify handler and integration tests**
+- [x] **Step 4: Verify handler and integration tests**
 
 Run:
 
