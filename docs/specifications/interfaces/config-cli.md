@@ -36,10 +36,11 @@ instead of silently choosing a profile.
 Existing explicit commands such as `langfuse-vscode-env` and
 `collector-vscode-env` remain supported compatibility entry points.
 
-`list-collection-profiles` lists all product profile values, including
-reserved values whose implementation belongs to a later sprint. Sprint6
-profile-aware output commands must return a deterministic error for
-`raw-local-receiver` because the receiver is implemented in Sprint7.
+`list-collection-profiles` lists all product profile values. Sprint6
+profile-aware output commands returned a deterministic error for
+`raw-local-receiver`; Sprint7 replaces that reserved error with generated
+configuration that points to the local receiver endpoint and does not emit
+Langfuse credentials, Collector headers, or remote endpoints.
 
 ## Raw Data Commands
 
@@ -47,7 +48,21 @@ profile-aware output commands must return a deterministic error for
 config-cli ingest-raw <raw.json> --db <raw-store.db>
 config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]
 config-cli aggregate-measurements <input.json> [--csv <output.csv>] [--json <output.json>]
+config-cli serve-raw-local-receiver [--db <raw-store.db>] [--url <loopback-http-url>]
 ```
+
+`serve-raw-local-receiver` starts the initial repository-local foreground
+receiver for the `raw-local-receiver` profile. Defaults:
+
+```text
+--db data/raw-store.db
+--url http://127.0.0.1:4319
+```
+
+The receiver must reject non-loopback bind URLs. It accepts OTLP HTTP trace
+payloads on `/v1/traces`, persists received telemetry as local runtime raw
+store data, and leaves normalized measurement, candidate, and dashboard
+dataset schemas unchanged.
 
 ## Candidate Commands
 

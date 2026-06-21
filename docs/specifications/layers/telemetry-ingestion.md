@@ -107,12 +107,27 @@ repository files.
 The `raw-local-receiver` profile sends telemetry directly to a repository-hosted
 local receiver instead of Langfuse.
 
+Initial host model:
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- serve-raw-local-receiver --db data\raw-store.db --url http://127.0.0.1:4319
+```
+
+The initial required path is a repository-local foreground `dotnet run`
+process. IIS, IIS Express, packaged exe, tray app, and Windows Service hosting
+are not part of the initial required path.
+
 Initial receiver requirements:
 
 - bind to loopback-only local development endpoints unless a later security
   decision allows broader exposure.
 - accept OTLP HTTP telemetry from supported clients through the standard OTLP
   HTTP signal paths, including `/v1/traces`.
+- accept OTLP HTTP protobuf trace payloads on `/v1/traces` because VS Code
+  Copilot Chat uses HTTP/protobuf for `otlp-http` unless configured for gRPC.
+- JSON OTLP trace payloads may be accepted for synthetic local validation, but
+  JSON support does not replace the protobuf requirement for VS Code direct
+  validation.
 - accept trace telemetry as the first required signal; metrics and event-like
   telemetry may be accepted when supported by the receiver implementation, but
   unsupported signals must fail clearly and must not be treated as successful
@@ -125,6 +140,16 @@ Initial receiver requirements:
 - avoid committing raw receiver output.
 
 The local receiver is not implemented through Aspire AppHost by default.
+
+Initial HTTP behavior:
+
+- `POST /v1/traces` returns success only after a raw telemetry record is
+  persisted.
+- methods other than `POST` fail with a deterministic method error.
+- `/v1/metrics`, `/v1/logs`, and other unsupported paths fail clearly and must
+  not write raw records.
+- invalid payloads fail clearly and must not write raw records.
+- unsupported content types fail clearly and must not write raw records.
 
 Generated `raw-local-receiver` configuration must point clients at the local
 receiver endpoint and must not include Langfuse credentials, Collector headers,
