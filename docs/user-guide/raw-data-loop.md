@@ -2,7 +2,7 @@
 
 Raw data loop は、saved raw OTLP JSON を SQLite raw store に取り込み、normalized measurement dataset を生成する流れです。
 Langfuse UI が起動していなくても、file-based input だけで再現できます。
-`raw-local-receiver` profile の実装後は、この repository の local receiver が受け取った telemetry も同じ raw data loop に接続します。
+`raw-local-receiver` profile では、この repository の local receiver が受け取った telemetry も同じ raw data loop に接続します。
 
 ## 入力
 
@@ -24,6 +24,24 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- ingest-raw tests
 
 `data\raw-store.db` は local runtime data です。
 commit しません。
+
+## Receive Locally
+
+`raw-local-receiver` profile を使う場合は、repository-local foreground receiver を起動します。
+
+```powershell
+New-Item -ItemType Directory -Force data | Out-Null
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- serve-raw-local-receiver --db data\raw-store.db --url http://127.0.0.1:4319
+```
+
+別の shell で client environment を生成し、対象 client process に適用します。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-vscode-env --profile raw-local-receiver
+```
+
+Receiver は `/v1/traces` の OTLP HTTP JSON / protobuf trace payload を受け取り、既存 SQLite raw store に `raw-otlp` record として保存します。
+`data\raw-store.db` は raw payload を含み得る local runtime data なので commit しません。
 
 ## Normalize
 

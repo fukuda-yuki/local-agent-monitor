@@ -156,3 +156,8 @@ behavior decisions to `docs/requirements.md`, `docs/spec.md`, or
   was still at the usage limit. Main chat performed local self-review instead.
 - `git diff --check` passed with no whitespace errors; it emitted only the
   usual CRLF conversion notices for edited files.
+- Post-commit completion audit found user-facing guides and `docs/task.md`
+  still described `raw-local-receiver` as future or merely started. Updated
+  `docs/user-guide/raw-data-loop.md`, `docs/user-guide/telemetry-collection.md`,
+  and `docs/task.md` to reflect the implemented foreground receiver, synthetic
+  validation, and remaining live VS Code validation gap.

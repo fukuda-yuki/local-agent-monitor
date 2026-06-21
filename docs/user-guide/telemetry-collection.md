@@ -59,6 +59,46 @@ $env:OTEL_RESOURCE_ATTRIBUTES="user.id=example-user,user.email=user@example.com,
 code .
 ```
 
+## Raw Local Receiver
+
+`raw-local-receiver` profile は Langfuse や Collector を使わず、この repository の local receiver に telemetry を送ります。
+Raw payload は prompt、response、tool arguments / results、identity attributes、credential-like strings を含み得るため、raw store と一時出力を repository に commit しないでください。
+
+Receiver を foreground process として起動します。
+
+```powershell
+New-Item -ItemType Directory -Force data | Out-Null
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- serve-raw-local-receiver --db data\raw-store.db --url http://127.0.0.1:4319
+```
+
+別の shell で VS Code 用 environment を生成し、VS Code process に適用します。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-vscode-env --profile raw-local-receiver
+```
+
+代表値:
+
+```powershell
+$env:CAO_COLLECTION_PROFILE="raw-local-receiver"
+$env:COPILOT_OTEL_ENABLED="true"
+$env:COPILOT_OTEL_ENDPOINT="http://127.0.0.1:4319"
+$env:COPILOT_OTEL_CAPTURE_CONTENT="true"
+$env:OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4319"
+$env:OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+$env:OTEL_RESOURCE_ATTRIBUTES="user.id=example-user,user.email=user@example.com,team.id=platform,department=engineering,client.kind=vscode-copilot-chat,experiment.id=baseline"
+code .
+```
+
+受信後は raw store を normalize します。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw data\raw-store.db --json tmp\raw-local-receiver\measurements.json
+```
+
+Live VS Code direct telemetry は Sprint7 の未確認項目です。
+検証時は VS Code version、GitHub Copilot Chat extension version、receiver command、raw store path、trace id または raw record id、confirmed / unconfirmed signals を記録してください。
+
 ## GitHub Copilot CLI
 
 環境変数の例:
