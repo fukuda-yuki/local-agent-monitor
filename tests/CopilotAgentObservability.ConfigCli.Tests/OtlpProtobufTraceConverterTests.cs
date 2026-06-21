@@ -74,6 +74,54 @@ public class OtlpProtobufTraceConverterTests
         Assert.Equal("2", status.GetProperty("code").GetRawText());
     }
 
+    [Fact]
+    public void ConvertTraceRequestToRawOtlpJson_PreservesStructuredAnyValues()
+    {
+        var traceId = Convert.FromHexString("11111111111111111111111111111111");
+        var spanId = Convert.FromHexString("2222222222222222");
+        var arrayValue = OtlpProtobufTestPayload.Message(
+            OtlpProtobufTestPayload.LengthDelimited(1, OtlpProtobufTestPayload.StringValue("first")),
+            OtlpProtobufTestPayload.LengthDelimited(1, OtlpProtobufTestPayload.IntValue(2)));
+        var keyValueList = OtlpProtobufTestPayload.Message(
+            OtlpProtobufTestPayload.LengthDelimited(
+                1,
+                OtlpProtobufTestPayload.KeyValue("nested", OtlpProtobufTestPayload.StringValue("value"))));
+        var spanMessage = OtlpProtobufTestPayload.Message(
+            OtlpProtobufTestPayload.LengthDelimited(1, traceId),
+            OtlpProtobufTestPayload.LengthDelimited(2, spanId),
+            OtlpProtobufTestPayload.StringField(5, "structured attributes"),
+            OtlpProtobufTestPayload.Fixed64Field(7, 1_000_000_000),
+            OtlpProtobufTestPayload.Fixed64Field(8, 1_500_000_000),
+            OtlpProtobufTestPayload.LengthDelimited(
+                9,
+                OtlpProtobufTestPayload.KeyValue(
+                    "synthetic.array",
+                    OtlpProtobufTestPayload.Message(OtlpProtobufTestPayload.LengthDelimited(5, arrayValue)))),
+            OtlpProtobufTestPayload.LengthDelimited(
+                9,
+                OtlpProtobufTestPayload.KeyValue(
+                    "synthetic.kvlist",
+                    OtlpProtobufTestPayload.Message(OtlpProtobufTestPayload.LengthDelimited(6, keyValueList)))));
+        var scopeSpans = OtlpProtobufTestPayload.Message(OtlpProtobufTestPayload.LengthDelimited(2, spanMessage));
+        var resourceSpans = OtlpProtobufTestPayload.Message(OtlpProtobufTestPayload.LengthDelimited(2, scopeSpans));
+        var request = OtlpProtobufTestPayload.Message(OtlpProtobufTestPayload.LengthDelimited(1, resourceSpans));
+
+        var json = OtlpProtobufTraceConverter.ConvertTraceRequestToRawOtlpJson(request);
+
+        using var document = JsonDocument.Parse(json);
+        var attributes = document.RootElement
+            .GetProperty("resourceSpans")[0]
+            .GetProperty("scopeSpans")[0]
+            .GetProperty("spans")[0]
+            .GetProperty("attributes");
+        var array = attributes[0].GetProperty("value").GetProperty("arrayValue").GetProperty("values");
+        Assert.Equal("first", array[0].GetProperty("stringValue").GetString());
+        Assert.Equal("2", array[1].GetProperty("intValue").GetString());
+        var kvlist = attributes[1].GetProperty("value").GetProperty("kvlistValue").GetProperty("values");
+        Assert.Equal("nested", kvlist[0].GetProperty("key").GetString());
+        Assert.Equal("value", kvlist[0].GetProperty("value").GetProperty("stringValue").GetString());
+    }
+
     [Theory]
     [MemberData(nameof(MalformedPayloads))]
     public void ConvertTraceRequestToRawOtlpJson_RejectsMalformedPayloads(byte[] payload)
@@ -90,4 +138,3 @@ public class OtlpProtobufTraceConverterTests
         yield return [new byte[] { 0x0F }];
     }
 }
-

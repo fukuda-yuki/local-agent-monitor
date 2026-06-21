@@ -197,6 +197,12 @@ internal static class OtlpProtobufTraceConverter
                 case (4, ProtoWireType.Fixed64):
                     value["doubleValue"] = BitConverter.Int64BitsToDouble((long)field.Fixed64);
                     break;
+                case (5, ProtoWireType.LengthDelimited):
+                    value["arrayValue"] = ParseArrayValue(field.Value);
+                    break;
+                case (6, ProtoWireType.LengthDelimited):
+                    value["kvlistValue"] = ParseKeyValueList(field.Value);
+                    break;
                 case (7, ProtoWireType.LengthDelimited):
                     value["bytesValue"] = Convert.ToBase64String(field.Value);
                     break;
@@ -204,6 +210,34 @@ internal static class OtlpProtobufTraceConverter
         }
 
         return value;
+    }
+
+    private static JsonObject ParseArrayValue(ReadOnlySpan<byte> payload)
+    {
+        var arrayValue = new JsonObject { ["values"] = new JsonArray() };
+        foreach (var field in ProtoReader.ReadFields(payload))
+        {
+            if (field.FieldNumber == 1 && field.WireType == ProtoWireType.LengthDelimited)
+            {
+                arrayValue["values"]!.AsArray().Add(ParseAnyValue(field.Value));
+            }
+        }
+
+        return arrayValue;
+    }
+
+    private static JsonObject ParseKeyValueList(ReadOnlySpan<byte> payload)
+    {
+        var keyValueList = new JsonObject { ["values"] = new JsonArray() };
+        foreach (var field in ProtoReader.ReadFields(payload))
+        {
+            if (field.FieldNumber == 1 && field.WireType == ProtoWireType.LengthDelimited)
+            {
+                keyValueList["values"]!.AsArray().Add(ParseKeyValue(field.Value));
+            }
+        }
+
+        return keyValueList;
     }
 
     private static JsonArray GetOrCreateArray(JsonObject parent, string propertyName)

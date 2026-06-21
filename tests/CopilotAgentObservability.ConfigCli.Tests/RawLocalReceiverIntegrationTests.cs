@@ -44,4 +44,3 @@ public class RawLocalReceiverIntegrationTests
         Assert.Equal(500, row.GetProperty("duration_ms").GetInt32());
     }
 }
-
