@@ -206,7 +206,7 @@ Expected: pass.
 - Test: `tests/CopilotAgentObservability.ConfigCli.Tests/CliApplicationTests.cs`
 - Test: `tests/CopilotAgentObservability.ConfigCli.Tests/ConfigSamplesTests.cs`
 
-- [ ] **Step 1: Write failing CLI and profile tests**
+- [x] **Step 1: Write failing CLI and profile tests**
 
 Assert:
 
@@ -216,15 +216,15 @@ profile-vscode-env --profile raw-local-receiver succeeds and points to http://12
 raw-local-receiver profile output does not contain Authorization=Basic, x-langfuse-ingestion-version, <langfuse-host>, or <collector-host>.
 ```
 
-- [ ] **Step 2: Implement profile output**
+- [x] **Step 2: Implement profile output**
 
 Emit `CAO_COLLECTION_PROFILE=raw-local-receiver`, clear Langfuse/Collector headers, enable OTel, set the receiver endpoint, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, and include required resource attributes.
 
-- [ ] **Step 3: Implement foreground host dispatch**
+- [x] **Step 3: Implement foreground host dispatch**
 
 Wire `serve-raw-local-receiver` to options parsing and the HTTP host. Keep host code thin; do not unit-test long-running blocking behavior through `CliApplication.Run`.
 
-- [ ] **Step 4: Verify CLI/profile tests**
+- [x] **Step 4: Verify CLI/profile tests**
 
 Run the relevant targeted tests. Expected: pass.
 

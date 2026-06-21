@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace CopilotAgentObservability.ConfigCli;
 
 internal static class CliApplication
@@ -114,6 +116,9 @@ internal static class CliApplication
             case "normalize-raw":
                 return RunNormalizeRaw(args, output, error);
 
+            case "serve-raw-local-receiver":
+                return RunServeRawLocalReceiver(args, output, error);
+
             case "validate-diagnoses":
                 return RunValidateDiagnoses(args, output, error);
 
@@ -163,14 +168,38 @@ internal static class CliApplication
             return 1;
         }
 
-        if (parseResult.Options!.Profile == CollectionProfileOptions.RawLocalReceiver)
+        output.WriteLine(createOutput(parseResult.Options!.Profile));
+        return 0;
+    }
+
+    private static int RunServeRawLocalReceiver(string[] args, TextWriter output, TextWriter error)
+    {
+        var parseResult = RawLocalReceiverOptions.Parse(args);
+        if (parseResult.Error is not null)
         {
-            error.WriteLine("error: raw-local-receiver is reserved for Sprint7 and is not implemented by Sprint6 profile commands.");
+            error.WriteLine($"error: {parseResult.Error}");
             return 1;
         }
 
-        output.WriteLine(createOutput(parseResult.Options.Profile));
-        return 0;
+        try
+        {
+            return RawLocalReceiverHost.Run(parseResult.Options!, output);
+        }
+        catch (HttpListenerException exception)
+        {
+            error.WriteLine($"error: failed to start raw local receiver: {exception.Message}");
+            return 1;
+        }
+        catch (IOException exception)
+        {
+            error.WriteLine($"error: failed to run raw local receiver: {exception.Message}");
+            return 1;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            error.WriteLine($"error: failed to access raw local receiver resource: {exception.Message}");
+            return 1;
+        }
     }
 
     private static int RunIngestRaw(string[] args, TextWriter output, TextWriter error)

@@ -23,6 +23,7 @@ internal static class CliHelpText
           config-cli validate-resource-attributes <OTEL_RESOURCE_ATTRIBUTES>
           config-cli ingest-raw <raw.json> --db <raw-store.db>
           config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]
+          config-cli serve-raw-local-receiver [--db <raw-store.db>] [--url <loopback-http-url>]
           config-cli aggregate-measurements <input.json> [--csv <output.csv>] [--json <output.json>]
           config-cli generate-diagnosis-candidates <measurements.csv|measurements.json> [--raw <raw-store.db|raw-otlp.json>] [--include-sensitive-content] [--sensitive-output-dir <dir>] [--csv <output.csv>] [--json <output.json>]
           config-cli generate-improvement-candidates <diagnosis-candidates.csv|diagnosis-candidates.json> [--csv <output.csv>] [--json <output.json>]

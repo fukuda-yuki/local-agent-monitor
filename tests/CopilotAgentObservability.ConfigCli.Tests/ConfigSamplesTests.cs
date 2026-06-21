@@ -204,6 +204,7 @@ public class ConfigSamplesTests
     [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse, "http://<windows-reachable-wsl2-host>:4318")]
     [InlineData(CollectionProfileOptions.RemoteManagedLangfuse, "https://<langfuse-host>/api/public/otel")]
     [InlineData(CollectionProfileOptions.RemoteManagedCollector, "https://<collector-host>")]
+    [InlineData(CollectionProfileOptions.RawLocalReceiver, "http://127.0.0.1:4319")]
     public void CreateProfileVsCodePowerShellScript_GeneratesProfileOutput(string profile, string expected)
     {
         var script = ConfigSamples.CreateProfileVsCodePowerShellScript(profile);
@@ -220,6 +221,7 @@ public class ConfigSamplesTests
     [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse, "http://<windows-reachable-wsl2-host>:4318")]
     [InlineData(CollectionProfileOptions.RemoteManagedLangfuse, "https://<langfuse-host>/api/public/otel")]
     [InlineData(CollectionProfileOptions.RemoteManagedCollector, "https://<collector-host>")]
+    [InlineData(CollectionProfileOptions.RawLocalReceiver, "http://127.0.0.1:4319")]
     public void CreateProfileCopilotCliPowerShellScript_GeneratesProfileOutput(string profile, string expected)
     {
         var script = ConfigSamples.CreateProfileCopilotCliPowerShellScript(profile);
@@ -236,12 +238,32 @@ public class ConfigSamplesTests
     [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse, "http://<windows-reachable-wsl2-host>:4318/v1/traces")]
     [InlineData(CollectionProfileOptions.RemoteManagedLangfuse, "https://<langfuse-host>/api/public/otel/v1/traces")]
     [InlineData(CollectionProfileOptions.RemoteManagedCollector, "https://<collector-host>/v1/traces")]
+    [InlineData(CollectionProfileOptions.RawLocalReceiver, "http://127.0.0.1:4319/v1/traces")]
     public void CreateProfileCodexAppConfigToml_GeneratesProfileOutput(string profile, string expected)
     {
         var config = ConfigSamples.CreateProfileCodexAppConfigToml(profile);
 
         Assert.Contains($"CAO_COLLECTION_PROFILE={profile}", config);
         Assert.Contains(expected, config);
+    }
+
+    [Fact]
+    public void CreateProfileOutputs_ForRawLocalReceiverUseLocalEndpointWithoutRemoteCredentials()
+    {
+        var vscodeScript = ConfigSamples.CreateProfileVsCodePowerShellScript(CollectionProfileOptions.RawLocalReceiver);
+        var copilotCliScript = ConfigSamples.CreateProfileCopilotCliPowerShellScript(CollectionProfileOptions.RawLocalReceiver);
+        var codexConfig = ConfigSamples.CreateProfileCodexAppConfigToml(CollectionProfileOptions.RawLocalReceiver);
+        var combined = string.Concat(vscodeScript, copilotCliScript, codexConfig);
+
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_PROTOCOL=\"http/protobuf\"", vscodeScript);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_PROTOCOL=\"http/protobuf\"", copilotCliScript);
+        Assert.Contains("client.kind=vscode-copilot-chat", vscodeScript);
+        Assert.Contains("client.kind=copilot-cli", copilotCliScript);
+        Assert.DoesNotContain("Authorization=Basic", combined);
+        Assert.DoesNotContain("Authorization = \"Basic", combined);
+        Assert.DoesNotContain("x-langfuse-ingestion-version", combined);
+        Assert.DoesNotContain("<langfuse-host>", combined);
+        Assert.DoesNotContain("<collector-host>", combined);
     }
 
     [Fact]

@@ -80,16 +80,59 @@ public class CliApplicationTests
     }
 
     [Fact]
-    public void Run_ProfileCommand_ReturnsNonZeroForRawLocalReceiver()
+    public void Run_ProfileVsCodeEnv_RawLocalReceiverWritesLocalReceiverEnvironment()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["profile-vscode-env", "--profile", "raw-local-receiver"], output, error);
+
+        var script = output.ToString();
+        Assert.Equal(0, exitCode);
+        Assert.Equal(string.Empty, error.ToString());
+        Assert.Contains("$env:CAO_COLLECTION_PROFILE=\"raw-local-receiver\"", script);
+        Assert.Contains("$env:COPILOT_OTEL_ENDPOINT=\"http://127.0.0.1:4319\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"http://127.0.0.1:4319\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_PROTOCOL=\"http/protobuf\"", script);
+        Assert.Contains("client.kind=vscode-copilot-chat", script);
+        Assert.Contains("experiment.id=baseline", script);
+        Assert.DoesNotContain("Authorization=Basic", script);
+        Assert.DoesNotContain("x-langfuse-ingestion-version", script);
+        Assert.DoesNotContain("<langfuse-host>", script);
+        Assert.DoesNotContain("<collector-host>", script);
+    }
+
+    [Fact]
+    public void Run_ProfileCodexAppConfig_RawLocalReceiverWritesTraceExporterWithoutRemoteHeaders()
     {
         using var output = new StringWriter();
         using var error = new StringWriter();
 
         var exitCode = CliApplication.Run(["profile-codex-app-config", "--profile", "raw-local-receiver"], output, error);
 
+        var config = output.ToString();
+        Assert.Equal(0, exitCode);
+        Assert.Equal(string.Empty, error.ToString());
+        Assert.Contains("CAO_COLLECTION_PROFILE=raw-local-receiver", config);
+        Assert.Contains("endpoint = \"http://127.0.0.1:4319/v1/traces\"", config);
+        Assert.Contains("protocol = \"binary\"", config);
+        Assert.DoesNotContain("Authorization = \"Basic", config);
+        Assert.DoesNotContain("x-langfuse-ingestion-version", config);
+        Assert.DoesNotContain("<langfuse-host>", config);
+        Assert.DoesNotContain("<collector-host>", config);
+    }
+
+    [Fact]
+    public void Run_ServeRawLocalReceiver_RejectsNonLoopbackUrlBeforeBinding()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["serve-raw-local-receiver", "--url", "http://0.0.0.0:4319"], output, error);
+
         Assert.Equal(1, exitCode);
-        Assert.Contains("raw-local-receiver is reserved for Sprint7", error.ToString());
         Assert.Equal(string.Empty, output.ToString());
+        Assert.Contains("serve-raw-local-receiver only allows localhost, 127.0.0.1, or ::1", error.ToString());
     }
 
     [Fact]

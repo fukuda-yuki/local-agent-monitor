@@ -27,6 +27,8 @@ internal static class ConfigSamples
     public const string RemoteCollectorOtlpHttpLogsEndpoint = "https://<collector-host>/v1/logs";
     public const string RemoteCollectorOtlpHttpMetricsEndpoint = "https://<collector-host>/v1/metrics";
     public const string RemoteCollectorOtlpHttpTracesEndpoint = "https://<collector-host>/v1/traces";
+    public const string RawLocalReceiverOtlpHttpEndpoint = "http://127.0.0.1:4319";
+    public const string RawLocalReceiverOtlpHttpTracesEndpoint = "http://127.0.0.1:4319/v1/traces";
     public const string VsCodeClientKind = "vscode-copilot-chat";
     public const string CopilotCliClientKind = "copilot-cli";
     public const string DefaultExperimentId = "baseline";
@@ -142,6 +144,7 @@ internal static class ConfigSamples
             CollectionProfileOptions.Wsl2DockerCollectorLangfuse => CreateWsl2EndpointWarning(CreateCollectorVsCodePowerShellScript(profile, Wsl2CollectorOtlpHttpEndpoint)),
             CollectionProfileOptions.RemoteManagedLangfuse => CreateRemoteWarning(CreateLangfuseVsCodePowerShellScript(profile, RemoteLangfuseOtlpEndpoint, RemoteLangfuseOtlpTracesEndpoint)),
             CollectionProfileOptions.RemoteManagedCollector => CreateRemoteWarning(CreateCollectorVsCodePowerShellScript(profile, RemoteCollectorOtlpHttpEndpoint)),
+            CollectionProfileOptions.RawLocalReceiver => CreateRawLocalReceiverVsCodePowerShellScript(profile),
             _ => throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unsupported collection profile."),
         };
     }
@@ -202,6 +205,7 @@ internal static class ConfigSamples
             CollectionProfileOptions.Wsl2DockerCollectorLangfuse => CreateWsl2EndpointWarning(CreateCollectorCopilotCliPowerShellScript(profile, Wsl2CollectorOtlpHttpEndpoint)),
             CollectionProfileOptions.RemoteManagedLangfuse => CreateRemoteWarning(CreateLangfuseCopilotCliPowerShellScript(profile, RemoteLangfuseOtlpEndpoint, RemoteLangfuseOtlpTracesEndpoint)),
             CollectionProfileOptions.RemoteManagedCollector => CreateRemoteWarning(CreateCollectorCopilotCliPowerShellScript(profile, RemoteCollectorOtlpHttpEndpoint)),
+            CollectionProfileOptions.RawLocalReceiver => CreateRawLocalReceiverCopilotCliPowerShellScript(profile),
             _ => throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unsupported collection profile."),
         };
     }
@@ -241,6 +245,7 @@ internal static class ConfigSamples
             CollectionProfileOptions.Wsl2DockerCollectorLangfuse => CreateWsl2EndpointWarning(CreateCodexAppConfigToml(profile, Wsl2CollectorOtlpHttpLogsEndpoint, Wsl2CollectorOtlpHttpMetricsEndpoint, Wsl2CollectorOtlpHttpTracesEndpoint, includeLangfuseHeaders: false)),
             CollectionProfileOptions.RemoteManagedLangfuse => CreateRemoteWarning(CreateCodexAppConfigToml(profile, RemoteLangfuseOtlpLogsEndpoint, RemoteLangfuseOtlpMetricsEndpoint, RemoteLangfuseOtlpTracesEndpoint, includeLangfuseHeaders: true)),
             CollectionProfileOptions.RemoteManagedCollector => CreateRemoteWarning(CreateCodexAppConfigToml(profile, RemoteCollectorOtlpHttpLogsEndpoint, RemoteCollectorOtlpHttpMetricsEndpoint, RemoteCollectorOtlpHttpTracesEndpoint, includeLangfuseHeaders: false)),
+            CollectionProfileOptions.RawLocalReceiver => CreateRawLocalReceiverCodexAppConfigToml(profile),
             _ => throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unsupported collection profile."),
         };
     }
@@ -302,6 +307,37 @@ internal static class ConfigSamples
         AppendCollectorCleanup(builder);
         builder.AppendLine("$env:COPILOT_OTEL_ENABLED=\"true\"");
         builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"{otlpEndpoint}\"");
+        builder.AppendLine("$env:OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=\"true\"");
+        builder.Append($"$env:OTEL_RESOURCE_ATTRIBUTES=\"{resourceAttributes}\"");
+        return builder.ToString();
+    }
+
+    private static string CreateRawLocalReceiverVsCodePowerShellScript(string profile)
+    {
+        var resourceAttributes = CreateResourceAttributes(VsCodeClientKind);
+
+        var builder = new StringBuilder();
+        AppendProfileSelection(builder, profile);
+        AppendRawLocalReceiverCleanup(builder);
+        builder.AppendLine("$env:COPILOT_OTEL_ENABLED=\"true\"");
+        builder.AppendLine($"$env:COPILOT_OTEL_ENDPOINT=\"{RawLocalReceiverOtlpHttpEndpoint}\"");
+        builder.AppendLine("$env:COPILOT_OTEL_CAPTURE_CONTENT=\"true\"");
+        builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"{RawLocalReceiverOtlpHttpEndpoint}\"");
+        builder.AppendLine("$env:OTEL_EXPORTER_OTLP_PROTOCOL=\"http/protobuf\"");
+        builder.Append($"$env:OTEL_RESOURCE_ATTRIBUTES=\"{resourceAttributes}\"");
+        return builder.ToString();
+    }
+
+    private static string CreateRawLocalReceiverCopilotCliPowerShellScript(string profile)
+    {
+        var resourceAttributes = CreateResourceAttributes(CopilotCliClientKind);
+
+        var builder = new StringBuilder();
+        AppendProfileSelection(builder, profile);
+        AppendRawLocalReceiverCleanup(builder);
+        builder.AppendLine("$env:COPILOT_OTEL_ENABLED=\"true\"");
+        builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"{RawLocalReceiverOtlpHttpEndpoint}\"");
+        builder.AppendLine("$env:OTEL_EXPORTER_OTLP_PROTOCOL=\"http/protobuf\"");
         builder.AppendLine("$env:OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=\"true\"");
         builder.Append($"$env:OTEL_RESOURCE_ATTRIBUTES=\"{resourceAttributes}\"");
         return builder.ToString();
@@ -383,6 +419,15 @@ internal static class ConfigSamples
         builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_HEADERS -ErrorAction SilentlyContinue");
     }
 
+    private static void AppendRawLocalReceiverCleanup(StringBuilder builder)
+    {
+        AppendCollectorCleanup(builder);
+        builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_LOGS_ENDPOINT -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_LOGS_HEADERS -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_METRICS_ENDPOINT -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_METRICS_HEADERS -ErrorAction SilentlyContinue");
+    }
+
     private static void AppendLiveTelemetryCleanup(StringBuilder builder)
     {
         builder.AppendLine("Remove-Item Env:COPILOT_OTEL_ENABLED -ErrorAction SilentlyContinue");
@@ -392,6 +437,7 @@ internal static class ConfigSamples
         builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_HEADERS -ErrorAction SilentlyContinue");
         builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT -ErrorAction SilentlyContinue");
         builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_HEADERS -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_PROTOCOL -ErrorAction SilentlyContinue");
         builder.AppendLine("Remove-Item Env:OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT -ErrorAction SilentlyContinue");
     }
 
@@ -408,6 +454,17 @@ internal static class ConfigSamples
         }
 
         builder.AppendLine($"{key} = {{ otlp-http = {{ endpoint = \"{endpoint}\", protocol = \"binary\" }} }}");
+    }
+
+    private static string CreateRawLocalReceiverCodexAppConfigToml(string profile)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine($"# {CollectionProfileOptions.EnvironmentVariableName}={profile}");
+        builder.AppendLine("[otel]");
+        builder.AppendLine("environment = \"dev\"");
+        builder.AppendLine("log_user_prompt = false");
+        AppendCodexAppOtlpHttpExporter(builder, "trace_exporter", RawLocalReceiverOtlpHttpTracesEndpoint, includeLangfuseHeaders: false);
+        return builder.ToString();
     }
 
     private static string CreateResourceAttributes(string clientKind)

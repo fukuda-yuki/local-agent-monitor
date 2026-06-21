@@ -117,3 +117,20 @@ behavior decisions to `docs/requirements.md`, `docs/spec.md`, or
   `OtlpProtobufTraceConverterTests`, `RawLocalReceiverHandlerTests`, and
   `RawLocalReceiverIntegrationTests`) passed 36 tests and emitted the same
   existing `NU1903` and `NETSDK1057` messages.
+- During Task 6 RED test authoring, CLI/profile tests failed because
+  `raw-local-receiver` profile output still used the Sprint6 reserved-error
+  path, `ConfigSamples` did not handle the profile, and
+  `serve-raw-local-receiver` was still an unknown command.
+- The first Task 6 GREEN run passed 79 CLI/profile tests but emitted a new
+  `CS8602` nullable warning in `CliApplication.RunProfileCommand`. The warning
+  was fixed before continuing.
+- After fixing the Task 6 nullable warning, the targeted CLI/profile run passed
+  79 tests and emitted only the existing `NU1903` and `NETSDK1057` messages.
+- Task 6 Sub-Agent review attempts failed because the environment hit the
+  current usage limit. Main chat continued with local spec/code review instead.
+- A combined targeted run for Task 2-6 receiver and profile tests
+  (`RawLocalReceiverOptionsTests`, `RawOtlpIngestorTests`,
+  `OtlpProtobufTraceConverterTests`, `RawLocalReceiverHandlerTests`,
+  `RawLocalReceiverIntegrationTests`, `CliApplicationTests`, and
+  `ConfigSamplesTests`) passed 115 tests and emitted the same existing
+  `NU1903` and `NETSDK1057` messages.
