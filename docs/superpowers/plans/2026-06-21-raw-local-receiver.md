@@ -61,7 +61,7 @@ Append warnings and unresolved risks to `docs/sprints/sprint7-local-raw-receiver
 - Create: `src/CopilotAgentObservability.ConfigCli/RawLocalReceiver/RawLocalReceiverOptions.cs`
 - Test: `tests/CopilotAgentObservability.ConfigCli.Tests/RawLocalReceiverOptionsTests.cs`
 
-- [ ] **Step 1: Write failing option tests**
+- [x] **Step 1: Write failing option tests**
 
 Cover defaults, explicit `--db`, explicit `--url`, duplicate options, missing option values, unknown options, and non-loopback URL rejection.
 
@@ -73,7 +73,7 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 
 Expected: fail because the test class or production type does not exist.
 
-- [ ] **Step 2: Implement minimal option parsing**
+- [x] **Step 2: Implement minimal option parsing**
 
 Add defaults:
 
@@ -84,7 +84,7 @@ Url = http://127.0.0.1:4319
 
 Reject non-HTTP URLs and any host that is not `localhost`, `127.0.0.1`, or `[::1]`.
 
-- [ ] **Step 3: Verify options**
+- [x] **Step 3: Verify options**
 
 Run the same targeted test. Expected: pass.
 
