@@ -30,17 +30,21 @@
 
 ## Open Follow-ups
 
-- GitHub Pages access control の環境確認。
-- 初回 live workflow 実行結果の確認。
-- 日次 snapshot の repository size monitoring。
-- email / display name mapping。
-- shared dashboard の access control、retention、利用者周知。
-- external outcome linkage の product / security decision。
-- 実データを扱う場合の masking / redaction 方針。
-- Remote managed collection profile の access control / consent / retention
-  決定後の live validation。
-- Sprint7 raw local receiver の VS Code direct telemetry live validation。
-- remote managed Langfuse / Collector 利用時の user consent workflow。
+- **未対応の機能仕様・検証（未確認の検証フェーズ）**
+  - Sprint 7 ローカル・レシーバー（`raw-local-receiver`）の VS Code 実機連携のライブ検証（VS Code direct telemetry live validation）。
+  - リモート・プロファイル（`remote-managed-*`）の実環境での疎通検証（Live Validation）。
+  - ローカル・レシーバーの常駐起動・配置オプション（IIS / IIS Express ホスティング、Windows サービス化、タスクトレイアプリ化など）の評価とパッケージング検討。
+- **未検討・未決定の意思決定事項（Open Product / Security Decisions）**
+  - 静的ダッシュボード（GitHub Pages 等）の共有運用におけるアクセス制御の具体設計。
+  - 共有ダッシュボードのデータ保持期間（Retention）、削除方法、利用者への周知方法。
+  - 実データ運用時のマスキング・秘匿化（Redaction）方針の決定。
+  - リモート・プロファイル利用時のユーザー同意ワークフロー（User Consent Workflow）の実装・定義。
+  - ID情報のハンドリング（`user.id` / `user.email` から表示名（Display Name）へのマッピング設計）。
+  - 外部成果物との紐付け（External Outcome Linkage - GitHub Issues, PR, Notion等）の採用可否とプロダクト/セキュリティポリシーの策定。
+  - 日次ダッシュボードスナップショットによるリポジトリ肥大化の監視および対策。
+- **仕様上のプレースホルダー・保留事項**
+  - `dashboard-dataset` における Outcome Linkage Candidate のプレースホルダー実装の具体化。
+  - 互換性のために残されている古いエントリポイント（`langfuse-*`, `collector-*`）のクリーンアップ時期と方法の決定。
 
 ## Rule For New Work
 
