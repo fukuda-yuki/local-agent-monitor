@@ -32,7 +32,9 @@ and the non-receiver routing profiles. Sprint7 implements `raw-local-receiver`.
 
 - Profile selection must be explicit in generated configuration output.
 - Commands must preserve existing explicit `langfuse-*` and `collector-*` entry points until a later compatibility decision removes them.
-- Generated settings must use placeholders for endpoints and credentials.
+- Generated settings must use placeholders for credentials.
+- Generated settings may use documented local defaults for Docker Desktop
+  profiles. Environment-specific non-local endpoints must use placeholders.
 - Generated settings must not store Langfuse keys, Basic Auth headers, API keys, or secrets in repository files.
 - `raw-only` must work without Langfuse, Docker Desktop, WSL2 Docker Engine, Collector, remote endpoints, or a background process.
 - Profile selection must not alter normalized measurement schema, candidate record schema, dashboard dataset schema, or repository-safe data boundaries.

@@ -29,6 +29,8 @@ profiles.
 
 2026-06-21 M6 reviewed Sprint6 M4-M6 and recorded the handoff in
 [review.md](review.md).
+2026-06-21 parallel sub-agent review follow-up was also recorded in
+[review.md](review.md).
 
 Automated validation:
 

@@ -69,7 +69,15 @@ Before shared dashboard or real-data publishing:
 - validate Pages visibility。
 - confirm snapshot growth monitoring。
 
-Before using `remote-managed-langfuse` or `remote-managed-collector`, also
-define user notice or consent and credential handling.
+Before using `remote-managed-langfuse` or `remote-managed-collector`, define:
+
+- access control。
+- retention。
+- deletion process。
+- masking / redaction。
+- user notice or consent。
+- identity handling。
+- credential handling。
+
 This repository documents the warning but does not implement the consent
 workflow.

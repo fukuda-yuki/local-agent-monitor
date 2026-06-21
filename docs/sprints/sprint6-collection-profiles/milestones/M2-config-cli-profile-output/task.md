@@ -11,7 +11,9 @@ Implement profile-aware Config CLI output for the Sprint6 profiles.
   client supports the selected profile.
 - Keep existing explicit commands such as `langfuse-vscode-env` and
   `collector-vscode-env`.
-- Emit placeholders for endpoints and credentials.
+- Emit credential placeholders. Use documented local defaults for Docker
+  Desktop endpoints, and placeholders for environment-specific non-local
+  endpoints.
 - Never emit real secrets or authorization headers to repository files.
 
 ## Verification

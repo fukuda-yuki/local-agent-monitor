@@ -36,6 +36,11 @@ instead of silently choosing a profile.
 Existing explicit commands such as `langfuse-vscode-env` and
 `collector-vscode-env` remain supported compatibility entry points.
 
+`list-collection-profiles` lists all product profile values, including
+reserved values whose implementation belongs to a later sprint. Sprint6
+profile-aware output commands must return a deterministic error for
+`raw-local-receiver` because the receiver is implemented in Sprint7.
+
 ## Raw Data Commands
 
 ```text

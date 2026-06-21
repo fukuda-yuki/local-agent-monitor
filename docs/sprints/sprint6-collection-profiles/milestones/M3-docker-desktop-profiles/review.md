@@ -28,6 +28,14 @@ Accepted after collaborative live validation.
 - User supplied real local Langfuse project credentials in their own PowerShell session only; no credential values were recorded in the repository.
 - User confirmed Langfuse project `local-validation` showed direct trace id `33333333333333333333333333333333`.
 - User confirmed Langfuse project `local-validation` showed Collector relay trace id `55555555555555555555555555555555`.
+- Direct trace evidence: profile value `docker-desktop-langfuse`, client kind
+  `vscode-copilot-chat`, endpoint
+  `http://localhost:3000/api/public/otel/v1/traces`, Docker Desktop local
+  Langfuse, trace id `33333333333333333333333333333333`.
+- Collector relay trace evidence: profile value
+  `docker-desktop-collector-langfuse`, client kind `copilot-cli`, endpoint
+  `http://localhost:4318/v1/traces`, Docker Desktop Collector relay to local
+  Langfuse, trace id `55555555555555555555555555555555`.
 - User reported no unverified items or errors for the final live validation.
 
 ## Findings

@@ -98,8 +98,8 @@ WSL2 Docker Engine profile の endpoint placeholder `<windows-reachable-wsl2-hos
 代表コマンド:
 
 ```powershell
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-vscode-env
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-copilot-cli-env
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-vscode-env --profile docker-desktop-langfuse
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-copilot-cli-env --profile docker-desktop-langfuse
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- ingest-raw <raw.json> --db data\raw-store.db
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw data\raw-store.db --json tmp\measurements.json
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-dashboard-dataset tmp\measurements.json --json tmp\dashboard.json

@@ -341,6 +341,7 @@ internal static class ConfigSamples
     {
         var builder = new StringBuilder();
         AppendProfileSelection(builder, profile);
+        AppendLiveTelemetryCleanup(builder);
         builder.AppendLine($"# {message}");
         builder.Append("# Use saved raw OTLP JSON with ingest-raw or normalize-raw.");
         return builder.ToString();
@@ -350,6 +351,7 @@ internal static class ConfigSamples
     {
         var builder = new StringBuilder();
         builder.AppendLine($"# {CollectionProfileOptions.EnvironmentVariableName}={profile}");
+        builder.AppendLine("# Remove or omit active [otel] routing entries from user-level ~/.codex/config.toml.");
         builder.AppendLine("# raw-only uses saved raw OTLP JSON. No Codex App OTel routing config is required.");
         builder.Append("# Use saved raw OTLP JSON with ingest-raw or normalize-raw.");
         return builder.ToString();
@@ -379,6 +381,18 @@ internal static class ConfigSamples
         builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_HEADERS -ErrorAction SilentlyContinue");
         builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT -ErrorAction SilentlyContinue");
         builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_HEADERS -ErrorAction SilentlyContinue");
+    }
+
+    private static void AppendLiveTelemetryCleanup(StringBuilder builder)
+    {
+        builder.AppendLine("Remove-Item Env:COPILOT_OTEL_ENABLED -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:COPILOT_OTEL_ENDPOINT -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:COPILOT_OTEL_CAPTURE_CONTENT -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_ENDPOINT -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_HEADERS -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_HEADERS -ErrorAction SilentlyContinue");
+        builder.AppendLine("Remove-Item Env:OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT -ErrorAction SilentlyContinue");
     }
 
     private static void AppendCodexAppOtlpHttpExporter(

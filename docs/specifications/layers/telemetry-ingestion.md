@@ -47,8 +47,9 @@ Telemetry ingestion must support:
 
 `raw-only` is the minimum profile and does not require a live receiver.
 `docker-desktop-langfuse` is the standard full profile.
-`raw-local-receiver` is implemented as a local receiver profile and is split
-from other routing profiles because it introduces a long-running local process.
+`raw-local-receiver` is a required support target to be implemented in Sprint7
+and is split from other routing profiles because it introduces a long-running
+local process.
 
 ## Langfuse Direct Path
 

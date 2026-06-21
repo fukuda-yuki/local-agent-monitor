@@ -74,19 +74,23 @@ Live validation environment:
   `client=29.1.3 server=29.1.3 os=linux kernel=6.6.87.2-microsoft-standard-WSL2`.
 - Docker Engine details:
   `operating_system=Ubuntu 24.04.4 LTS docker_root=/var/lib/docker cgroup_driver=systemd`.
-- Windows-reachable WSL2 endpoint host used for validation: `172.28.43.119`.
+- Windows-reachable WSL2 endpoint host used for validation:
+  `<redacted-wsl2-validation-host>`.
+- Port binding evidence: WSL2 Docker Engine published Langfuse on host port
+  `3000/tcp` and Collector OTLP HTTP on host port `4318/tcp`; the
+  machine-specific WSL2 host address was redacted from repository files.
 - Langfuse health from Windows:
-  `GET http://172.28.43.119:3000/api/public/health` returned
+  `GET http://<redacted-wsl2-validation-host>:3000/api/public/health` returned
   `200 {"status":"OK","version":"3.194.0"}`.
 
 `wsl2-docker-langfuse` validation:
 
 - Profile value: `wsl2-docker-langfuse`.
 - Client kind: `vscode-copilot-chat`.
-- Endpoint: `http://172.28.43.119:3000/api/public/otel/v1/traces`.
+- Endpoint: `http://<redacted-wsl2-validation-host>:3000/api/public/otel/v1/traces`.
 - Windows PowerShell POST of synthetic OTLP JSON returned HTTP 200.
 - Langfuse public API lookup
-  `GET http://172.28.43.119:3000/api/public/traces/66666666666666666666666666666666`
+  `GET http://<redacted-wsl2-validation-host>:3000/api/public/traces/66666666666666666666666666666666`
   returned HTTP 200 with returned trace id
   `66666666666666666666666666666666`.
 
@@ -94,18 +98,17 @@ Live validation environment:
 
 - Profile value: `wsl2-docker-collector-langfuse`.
 - Client kind: `copilot-cli`.
-- Collector endpoint: `http://172.28.43.119:4318/v1/traces`.
+- Collector endpoint: `http://<redacted-wsl2-validation-host>:4318/v1/traces`.
 - Windows PowerShell POST of synthetic OTLP JSON returned
   `200 {"partialSuccess":{}}`.
 - Langfuse public API lookup
-  `GET http://172.28.43.119:3000/api/public/traces/88888888888888888888888888888888`
+  `GET http://<redacted-wsl2-validation-host>:3000/api/public/traces/88888888888888888888888888888888`
   returned HTTP 200 with returned trace id
   `88888888888888888888888888888888`.
 
 Unverified or residual risk:
 
-- The validation host `172.28.43.119` is a machine-specific WSL2 address and is
-  recorded as live evidence only. It is not used in tracked configuration
-  output.
+- The validation host is a machine-specific WSL2 address and is redacted from
+  tracked repository files. It is not used in tracked configuration output.
 - WSL2 localhost forwarding was not the successful path on this machine because
   Docker Desktop was already using the localhost validation ports.

@@ -244,6 +244,40 @@ public class ConfigSamplesTests
         Assert.Contains(expected, config);
     }
 
+    [Fact]
+    public void CreateProfilePowerShellScripts_ForRawOnlyClearLiveTelemetryEnvironmentVariables()
+    {
+        var vscodeScript = ConfigSamples.CreateProfileVsCodePowerShellScript(CollectionProfileOptions.RawOnly);
+        var copilotCliScript = ConfigSamples.CreateProfileCopilotCliPowerShellScript(CollectionProfileOptions.RawOnly);
+
+        Assert.Contains("Remove-Item Env:COPILOT_OTEL_ENABLED -ErrorAction SilentlyContinue", vscodeScript);
+        Assert.Contains("Remove-Item Env:COPILOT_OTEL_ENDPOINT -ErrorAction SilentlyContinue", vscodeScript);
+        Assert.Contains("Remove-Item Env:COPILOT_OTEL_CAPTURE_CONTENT -ErrorAction SilentlyContinue", vscodeScript);
+        Assert.Contains("Remove-Item Env:OTEL_EXPORTER_OTLP_ENDPOINT -ErrorAction SilentlyContinue", vscodeScript);
+        Assert.Contains("Remove-Item Env:OTEL_EXPORTER_OTLP_HEADERS -ErrorAction SilentlyContinue", vscodeScript);
+        Assert.Contains("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT -ErrorAction SilentlyContinue", vscodeScript);
+        Assert.Contains("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_HEADERS -ErrorAction SilentlyContinue", vscodeScript);
+        Assert.Contains("Remove-Item Env:OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT -ErrorAction SilentlyContinue", vscodeScript);
+
+        Assert.Contains("Remove-Item Env:COPILOT_OTEL_ENABLED -ErrorAction SilentlyContinue", copilotCliScript);
+        Assert.Contains("Remove-Item Env:COPILOT_OTEL_ENDPOINT -ErrorAction SilentlyContinue", copilotCliScript);
+        Assert.Contains("Remove-Item Env:COPILOT_OTEL_CAPTURE_CONTENT -ErrorAction SilentlyContinue", copilotCliScript);
+        Assert.Contains("Remove-Item Env:OTEL_EXPORTER_OTLP_ENDPOINT -ErrorAction SilentlyContinue", copilotCliScript);
+        Assert.Contains("Remove-Item Env:OTEL_EXPORTER_OTLP_HEADERS -ErrorAction SilentlyContinue", copilotCliScript);
+        Assert.Contains("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT -ErrorAction SilentlyContinue", copilotCliScript);
+        Assert.Contains("Remove-Item Env:OTEL_EXPORTER_OTLP_TRACES_HEADERS -ErrorAction SilentlyContinue", copilotCliScript);
+        Assert.Contains("Remove-Item Env:OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT -ErrorAction SilentlyContinue", copilotCliScript);
+    }
+
+    [Fact]
+    public void CreateProfileCodexAppConfigToml_ForRawOnlyTellsUserToRemoveActiveOtelRouting()
+    {
+        var config = ConfigSamples.CreateProfileCodexAppConfigToml(CollectionProfileOptions.RawOnly);
+
+        Assert.Contains("Remove or omit active [otel] routing entries from user-level ~/.codex/config.toml.", config);
+        Assert.DoesNotContain("otlp-http", config);
+    }
+
     [Theory]
     [InlineData(CollectionProfileOptions.Wsl2DockerLangfuse)]
     [InlineData(CollectionProfileOptions.Wsl2DockerCollectorLangfuse)]
@@ -292,5 +326,37 @@ public class ConfigSamplesTests
         var config = ConfigSamples.CreateProfileCodexAppConfigToml(profile);
 
         Assert.Contains("This repository does not implement a remote or shared endpoint user consent workflow.", config);
+    }
+
+    [Fact]
+    public void CreateProfileOutputs_ForRemoteManagedLangfuseUseCredentialPlaceholders()
+    {
+        var vscodeScript = ConfigSamples.CreateProfileVsCodePowerShellScript(CollectionProfileOptions.RemoteManagedLangfuse);
+        var copilotCliScript = ConfigSamples.CreateProfileCopilotCliPowerShellScript(CollectionProfileOptions.RemoteManagedLangfuse);
+        var codexConfig = ConfigSamples.CreateProfileCodexAppConfigToml(CollectionProfileOptions.RemoteManagedLangfuse);
+
+        Assert.Contains("$publicKey = \"<public-key>\"", vscodeScript);
+        Assert.Contains("$secretKey = \"<secret-key>\"", vscodeScript);
+        Assert.Contains("Authorization=Basic $auth", vscodeScript);
+        Assert.Contains("$publicKey = \"<public-key>\"", copilotCliScript);
+        Assert.Contains("$secretKey = \"<secret-key>\"", copilotCliScript);
+        Assert.Contains("Authorization=Basic $auth", copilotCliScript);
+        Assert.Contains("Authorization = \"Basic <base64-public-secret>\"", codexConfig);
+    }
+
+    [Fact]
+    public void CreateProfileOutputs_ForRemoteManagedCollectorDoNotEmitLangfuseCredentials()
+    {
+        var vscodeScript = ConfigSamples.CreateProfileVsCodePowerShellScript(CollectionProfileOptions.RemoteManagedCollector);
+        var copilotCliScript = ConfigSamples.CreateProfileCopilotCliPowerShellScript(CollectionProfileOptions.RemoteManagedCollector);
+        var codexConfig = ConfigSamples.CreateProfileCodexAppConfigToml(CollectionProfileOptions.RemoteManagedCollector);
+
+        Assert.DoesNotContain("<public-key>", vscodeScript);
+        Assert.DoesNotContain("<secret-key>", vscodeScript);
+        Assert.DoesNotContain("Authorization=Basic", vscodeScript);
+        Assert.DoesNotContain("<public-key>", copilotCliScript);
+        Assert.DoesNotContain("<secret-key>", copilotCliScript);
+        Assert.DoesNotContain("Authorization=Basic", copilotCliScript);
+        Assert.DoesNotContain("Authorization = \"Basic", codexConfig);
     }
 }
