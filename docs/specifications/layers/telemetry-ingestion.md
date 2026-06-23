@@ -280,7 +280,10 @@ Readiness body (machine-readable, returned on both `200` and `503`):
 
 - `status` ⇒ HTTP mapping: `ready` and `degraded` ⇒ `200`; `not_ready` ⇒ `503`.
 - `degraded_reasons` enumerates active conditions, e.g. `ingestion_stalled`,
-  `projection_lag_exceeded`, `migration_failed`, `fatal_error`.
+  `projection_lag_exceeded`, `migration_failed`, `fatal_error`, and
+  `projection_worker_missing` (emitted while no projection worker is running yet —
+  e.g. before the projection worker milestone adds it — so an ingestion-healthy
+  monitor still reports `not_ready` rather than falsely claiming `ready`).
 - mandatory tests cover the default thresholds **and** a configured override,
   asserting both the HTTP status and the body `status` / `degraded_reasons`.
 
