@@ -316,6 +316,49 @@ public class MonitorHostTests
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    [Fact]
+    public async Task ConcurrentExternalReadTransaction_DoesNotLoseMonitorWrites()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(tempDirectory);
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = tempDirectory.DatabasePath,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        ExecuteSql(connection, "BEGIN;");
+        ExecuteSql(connection, "SELECT COUNT(*) FROM raw_records;");
+
+        for (var i = 0; i < 5; i++)
+        {
+            var response = await host.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        ExecuteSql(connection, "ROLLBACK;");
+        Assert.Equal(5, new RawTelemetryStore(tempDirectory.DatabasePath).ListRecords().Count);
+    }
+
+    [Fact]
+    public async Task ErrorResponses_DoNotLeakDbPathUserNameOrExceptionText()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(
+            tempDirectory,
+            testOptions: new MonitorHostTestOptions { Writer = new ThrowingRawWriter(busy: false) });
+
+        var failed = await host.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
+        var body = await failed.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
+        Assert.Contains("persistence_failed", body);
+        Assert.DoesNotContain(tempDirectory.DatabasePath, body);
+        Assert.DoesNotContain(Environment.UserName, body);
+        Assert.DoesNotContain("Exception", body);
+        Assert.DoesNotContain("Sqlite", body);
+    }
+
     private static async Task<RunningMonitorForTest> StartHostAsync(
         MonitorTempDirectory tempDirectory,
         int? port = null,
