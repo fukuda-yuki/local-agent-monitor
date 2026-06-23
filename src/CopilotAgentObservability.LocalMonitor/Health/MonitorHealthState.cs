@@ -17,6 +17,10 @@ internal sealed class MonitorHealthState
     private bool writerRunning;
     private bool fatalError;
     private DateTimeOffset? unableToCommitSince;
+    private bool projectionWorkerRunning;
+    private int projectionBacklog;
+    private DateTimeOffset? oldestUnprocessedReceivedAt;
+    private int projectionFailureCount;
 
     public MonitorHealthState(TimeProvider? timeProvider = null)
     {
@@ -93,6 +97,38 @@ internal sealed class MonitorHealthState
         }
     }
 
+    /// <summary>The projection worker has started (true) or stopped (false).</summary>
+    public void SetProjectionWorkerRunning(bool value)
+    {
+        lock (gate)
+        {
+            projectionWorkerRunning = value;
+        }
+    }
+
+    /// <summary>
+    /// The projection worker's latest view of the backlog and the oldest
+    /// unprocessed ingestion time. Readiness derives live projection lag from the
+    /// oldest timestamp, so a stalled worker still shows growing lag.
+    /// </summary>
+    public void SetProjectionStatus(int backlog, DateTimeOffset? oldestUnprocessedReceivedAt)
+    {
+        lock (gate)
+        {
+            projectionBacklog = backlog;
+            this.oldestUnprocessedReceivedAt = oldestUnprocessedReceivedAt;
+        }
+    }
+
+    /// <summary>A projection attempt failed for a non-busy reason; the raw record is retained and retried.</summary>
+    public void RecordProjectionFailure()
+    {
+        lock (gate)
+        {
+            projectionFailureCount++;
+        }
+    }
+
     public MonitorHealthSnapshot Snapshot()
     {
         lock (gate)
@@ -103,7 +139,11 @@ internal sealed class MonitorHealthState
                 MigrationComplete: migrationComplete,
                 WriterRunning: writerRunning,
                 FatalError: fatalError,
-                UnableToCommitSince: unableToCommitSince);
+                UnableToCommitSince: unableToCommitSince,
+                ProjectionWorkerRunning: projectionWorkerRunning,
+                ProjectionBacklog: projectionBacklog,
+                OldestUnprocessedReceivedAt: oldestUnprocessedReceivedAt,
+                ProjectionFailureCount: projectionFailureCount);
         }
     }
 
@@ -168,7 +208,11 @@ internal sealed record MonitorHealthSnapshot(
     bool MigrationComplete,
     bool WriterRunning,
     bool FatalError,
-    DateTimeOffset? UnableToCommitSince);
+    DateTimeOffset? UnableToCommitSince,
+    bool ProjectionWorkerRunning,
+    int ProjectionBacklog,
+    DateTimeOffset? OldestUnprocessedReceivedAt,
+    int ProjectionFailureCount);
 
 internal sealed record MonitorReadiness(
     string Status,
