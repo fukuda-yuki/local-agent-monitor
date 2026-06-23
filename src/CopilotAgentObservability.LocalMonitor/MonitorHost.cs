@@ -1,5 +1,6 @@
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
+using CopilotAgentObservability.LocalMonitor.Projection;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -42,6 +43,18 @@ internal static class MonitorHost
             builder.Services.AddHostedService(_ => worker);
         }
 
+        var projectionStore = testOptions?.ProjectionStore
+            ?? new RawTelemetryStoreProjectionStore(
+                new RawTelemetryStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
+
+        if (testOptions?.StartProjectionWorker ?? true)
+        {
+            // Registered after the ingestion writer so its synchronous migration
+            // runs first; the projection worker also guards on migration_complete.
+            var projectionWorker = new ProjectionWorker(projectionStore, health, pollInterval: testOptions?.ProjectionPollInterval);
+            builder.Services.AddHostedService(_ => projectionWorker);
+        }
+
         var app = builder.Build();
         app.UseExceptionHandler(errorApp =>
         {
@@ -82,6 +95,71 @@ internal static class MonitorHost
                 : StatusCodes.Status503ServiceUnavailable;
             context.Response.ContentType = JsonContentType;
             await context.Response.WriteAsync(MonitorReadinessJson.Serialize(readiness));
+        });
+        app.MapGet("/api/monitor/ingestions", async context =>
+        {
+            if (!TryParseCursorQuery(context, out var after, out var limit))
+            {
+                await WriteInvalidCursorQueryAsync(context);
+                return;
+            }
+
+            try
+            {
+                var page = projectionStore.ListMonitorIngestions(after, limit);
+                var items = page.Items.Select(row => new
+                {
+                    raw_record_id = row.RawRecordId,
+                    received_at = row.ReceivedAt,
+                    source = row.Source,
+                    trace_id = row.TraceId,
+                    client_kind = row.ClientKind,
+                    span_count = row.SpanCount,
+                    projected_at = row.ProjectedAt,
+                });
+                long? nextCursor = page.HasMore && page.Items.Count > 0 ? page.Items[^1].RawRecordId : null;
+                await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
+            }
+            catch (PersistenceBusyException)
+            {
+                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+            }
+        });
+        app.MapGet("/api/monitor/traces", async context =>
+        {
+            if (!TryParseCursorQuery(context, out var after, out var limit))
+            {
+                await WriteInvalidCursorQueryAsync(context);
+                return;
+            }
+
+            try
+            {
+                var page = projectionStore.ListMonitorTraces(after, limit);
+                var items = page.Items.Select(row => new
+                {
+                    id = row.Id,
+                    trace_id = row.TraceId,
+                    client_kind = row.ClientKind,
+                    experiment_id = row.ExperimentId,
+                    task_id = row.TaskId,
+                    task_category = row.TaskCategory,
+                    agent_variant = row.AgentVariant,
+                    prompt_version = row.PromptVersion,
+                    span_count = row.SpanCount,
+                    tool_call_count = row.ToolCallCount,
+                    error_count = row.ErrorCount,
+                    first_seen_at = row.FirstSeenAt,
+                    last_seen_at = row.LastSeenAt,
+                    projected_at = row.ProjectedAt,
+                });
+                long? nextCursor = page.HasMore && page.Items.Count > 0 ? page.Items[^1].Id : null;
+                await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
+            }
+            catch (PersistenceBusyException)
+            {
+                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+            }
         });
         app.MapPost(TracePath, async context =>
         {
@@ -268,6 +346,40 @@ internal static class MonitorHost
         context.Response.ContentType = JsonContentType;
         await context.Response.WriteAsync($$"""{"accepted":false,"error":"{{error}}","message":"{{message}}"}""");
     }
+
+    private static Task WriteInvalidCursorQueryAsync(HttpContext context) =>
+        WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_query", "after must be a non-negative integer and limit must be between 1 and 200.");
+
+    private static async Task WriteJsonAsync(HttpContext context, object body)
+    {
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = JsonContentType;
+        await context.Response.WriteAsync(JsonSerializer.Serialize(body));
+    }
+
+    private static bool TryParseCursorQuery(HttpContext context, out long after, out int limit)
+    {
+        const int defaultLimit = 50;
+        const int maxLimit = 200;
+        after = 0;
+        limit = defaultLimit;
+
+        var afterValue = context.Request.Query["after"].ToString();
+        if (!string.IsNullOrEmpty(afterValue)
+            && (!long.TryParse(afterValue, NumberStyles.None, CultureInfo.InvariantCulture, out after) || after < 0))
+        {
+            return false;
+        }
+
+        var limitValue = context.Request.Query["limit"].ToString();
+        if (!string.IsNullOrEmpty(limitValue)
+            && (!int.TryParse(limitValue, NumberStyles.None, CultureInfo.InvariantCulture, out limit) || limit < 1 || limit > maxLimit))
+        {
+            return false;
+        }
+
+        return true;
+    }
 }
 
 internal sealed class MonitorHostTestOptions
@@ -281,4 +393,10 @@ internal sealed class MonitorHostTestOptions
     public TimeSpan? CommitTimeout { get; init; }
 
     public bool StartWriter { get; init; } = true;
+
+    public IMonitorProjectionStore? ProjectionStore { get; init; }
+
+    public bool StartProjectionWorker { get; init; } = true;
+
+    public TimeSpan? ProjectionPollInterval { get; init; }
 }

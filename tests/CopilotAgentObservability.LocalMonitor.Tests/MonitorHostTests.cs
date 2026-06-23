@@ -167,10 +167,29 @@ public class MonitorHostTests
     }
 
     [Fact]
-    public async Task HealthReady_Returns503NotReadyWhileProjectionWorkerAbsent()
+    public async Task HealthReady_Returns200ReadyWhenHealthyAndCaughtUp()
     {
         using var tempDirectory = new MonitorTempDirectory();
         await using var host = await StartHostAsync(tempDirectory);
+
+        var response = await host.Client.GetAsync("/health/ready");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"status\":\"ready\"", body);
+        Assert.Contains("\"migration_complete\":true", body);
+        Assert.Contains("\"writer_running\":true", body);
+        Assert.Contains("\"projection_worker_running\":true", body);
+        Assert.Contains("\"degraded_reasons\":[]", body);
+    }
+
+    [Fact]
+    public async Task HealthReady_Returns503NotReadyWhenProjectionWorkerDisabled()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(
+            tempDirectory,
+            testOptions: new MonitorHostTestOptions { StartProjectionWorker = false });
 
         var response = await host.Client.GetAsync("/health/ready");
 
@@ -178,8 +197,6 @@ public class MonitorHostTests
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("\"status\":\"not_ready\"", body);
         Assert.Contains("projection_worker_missing", body);
-        Assert.Contains("\"migration_complete\":true", body);
-        Assert.Contains("\"writer_running\":true", body);
         Assert.Contains("\"projection_worker_running\":false", body);
     }
 
@@ -448,13 +465,24 @@ public class MonitorHostTests
         command.ExecuteNonQuery();
     }
 
-    private sealed class RunningMonitorForTest(IAsyncDisposable app, HttpClient client) : IAsyncDisposable
+    private sealed class RunningMonitorForTest(Microsoft.AspNetCore.Builder.WebApplication app, HttpClient client) : IAsyncDisposable
     {
         public HttpClient Client { get; } = client;
 
         public async ValueTask DisposeAsync()
         {
             Client.Dispose();
+            // Gracefully stop hosted services (incl. the polling projection worker)
+            // so no SQLite connection is open when the temp DB directory is deleted.
+            try
+            {
+                await app.StopAsync();
+            }
+            catch
+            {
+                // Ignore stop faults during teardown.
+            }
+
             await app.DisposeAsync();
         }
     }
