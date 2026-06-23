@@ -103,6 +103,74 @@ public class CliApplicationTests
     }
 
     [Fact]
+    public void Run_ProfileVsCodeEnv_RawLocalReceiverTargetMonitorWritesMonitorEndpoint()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["profile-vscode-env", "--profile", "raw-local-receiver", "--target", "monitor"], output, error);
+
+        var script = output.ToString();
+        Assert.Equal(0, exitCode);
+        Assert.Equal(string.Empty, error.ToString());
+        Assert.Contains("$env:COPILOT_OTEL_ENDPOINT=\"http://127.0.0.1:4320\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"http://127.0.0.1:4320\"", script);
+    }
+
+    [Fact]
+    public void Run_ProfileVsCodeEnv_RawLocalReceiverEndpointOverrideWritesExplicitLoopbackEndpoint()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["profile-vscode-env", "--profile", "raw-local-receiver", "--endpoint", "http://127.0.0.1:54321"], output, error);
+
+        var script = output.ToString();
+        Assert.Equal(0, exitCode);
+        Assert.Equal(string.Empty, error.ToString());
+        Assert.Contains("$env:COPILOT_OTEL_ENDPOINT=\"http://127.0.0.1:54321\"", script);
+        Assert.Contains("$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"http://127.0.0.1:54321\"", script);
+    }
+
+    [Fact]
+    public void Run_ProfileVsCodeEnv_TargetWithNonRawLocalReceiverProfileReturnsError()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["profile-vscode-env", "--profile", "raw-only", "--target", "monitor"], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(string.Empty, output.ToString());
+        Assert.Contains("--target and --endpoint apply only to raw-local-receiver.", error.ToString());
+    }
+
+    [Fact]
+    public void Run_ProfileVsCodeEnv_EndpointWithNonLoopbackHostReturnsError()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["profile-vscode-env", "--profile", "raw-local-receiver", "--endpoint", "http://example.com:4320"], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(string.Empty, output.ToString());
+        Assert.Contains("profile-vscode-env --endpoint only allows localhost, 127.0.0.1, or ::1", error.ToString());
+    }
+
+    [Fact]
+    public void Run_ProfileCopilotCliEnv_RejectsTargetAsUnknownOption()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["profile-copilot-cli-env", "--profile", "raw-local-receiver", "--target", "monitor"], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("unknown collection profile option '--target'", error.ToString());
+    }
+
+    [Fact]
     public void Run_ProfileCodexAppConfig_RawLocalReceiverWritesTraceExporterWithoutRemoteHeaders()
     {
         using var output = new StringWriter();

@@ -85,7 +85,7 @@ static-dashboard non-exposure (§9) are unchanged. Full model:
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | M1 Shared Component Extraction | Extract `Telemetry` + `Persistence.Sqlite` projects; keep Config CLI behavior and tests green. | **Implemented** |
-| M2 ASP.NET Core Receiver Host | LocalMonitor project, Kestrel loopback, `POST /v1/traces`, request size limit, deterministic HTTP errors. | Pending |
+| M2 ASP.NET Core Receiver Host | LocalMonitor project, Kestrel loopback, `POST /v1/traces`, request size limit, deterministic HTTP errors. | **Implemented** |
 | M3 Ingestion Queue + SQLite Concurrency | Bounded channel, single writer worker, WAL, schema versioning, cursor query, graceful shutdown. | Pending |
 | M4 Monitor Projection | `monitor_ingestions` / `monitor_traces`, ProjectionWorker, startup catch-up, retry/failure state, sanitized default projections + opt-in raw access. | Pending |
 | M5 Web UI + SSE | Overview / Live Ingestions / Traces / Diagnostics; SSE event stream with reconnect/gap recovery. | Pending |
@@ -93,7 +93,8 @@ static-dashboard non-exposure (§9) are unchanged. Full model:
 
 ## Current Status
 
-M1 (Shared Component Extraction) is implemented. See
+M1 (Shared Component Extraction) and M2 (ASP.NET Core Receiver Host) are
+implemented. See
 [`milestones/M1-shared-component-extraction/plan.md`](milestones/M1-shared-component-extraction/plan.md)
 for the accepted plan (challenge-reviewed via `/codex:adversarial-review`),
 [`pre-implementation-review.md`](pre-implementation-review.md) for the original
@@ -124,8 +125,9 @@ Validation:
 
 Deferred (carried into later milestones, recorded in D019):
 
-- B1 / B2 / B3 receiver-host robustness — absorbed by the ASP.NET Core host
-  (M2/M3); the Sprint7 HttpListener host is untouched.
+- M3/M4 storage/readiness/projection contracts — M2 is an internal,
+  non-shippable subset. It intentionally exposes no `/health/*` placeholders and
+  no raw-detail route.
 - T5 / T6 store behavior (schema-once / single writer / projection query) —
   M3/M4; the store was relocated without behavior changes.
 - T7 single-threaded accept loop — superseded by the M3 channel/worker model.

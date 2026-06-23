@@ -3,10 +3,12 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal sealed class RawTelemetryStore
 {
     private readonly string databasePath;
+    private readonly RawTelemetryStoreConnectionOptions connectionOptions;
 
-    public RawTelemetryStore(string databasePath)
+    public RawTelemetryStore(string databasePath, RawTelemetryStoreConnectionOptions? connectionOptions = null)
     {
         this.databasePath = databasePath;
+        this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
     }
 
     public void CreateSchema()
@@ -18,6 +20,7 @@ internal sealed class RawTelemetryStore
         }
 
         using var connection = OpenConnection();
+        ApplyWriteAheadLog(connection);
         ExecuteNonQuery(
             connection,
             """
@@ -119,7 +122,24 @@ internal sealed class RawTelemetryStore
         }.ToString();
         var connection = new SqliteConnection(connectionString);
         connection.Open();
+        ApplyBusyTimeout(connection);
         return connection;
+    }
+
+    private void ApplyBusyTimeout(SqliteConnection connection)
+    {
+        if (connectionOptions.BusyTimeoutMilliseconds is { } busyTimeoutMilliseconds)
+        {
+            ExecuteNonQuery(connection, $"PRAGMA busy_timeout = {busyTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)};");
+        }
+    }
+
+    private void ApplyWriteAheadLog(SqliteConnection connection)
+    {
+        if (connectionOptions.EnableWriteAheadLog)
+        {
+            ExecuteNonQuery(connection, "PRAGMA journal_mode = WAL;");
+        }
     }
 
     private static void ExecuteNonQuery(SqliteConnection connection, string commandText)
@@ -133,4 +153,17 @@ internal sealed class RawTelemetryStore
     {
         command.Parameters.AddWithValue(name, value ?? DBNull.Value);
     }
+}
+
+internal sealed record RawTelemetryStoreConnectionOptions(
+    bool EnableWriteAheadLog,
+    int? BusyTimeoutMilliseconds)
+{
+    public static RawTelemetryStoreConnectionOptions Default { get; } = new(
+        EnableWriteAheadLog: false,
+        BusyTimeoutMilliseconds: null);
+
+    public static RawTelemetryStoreConnectionOptions MonitorWriter { get; } = new(
+        EnableWriteAheadLog: true,
+        BusyTimeoutMilliseconds: 5_000);
 }

@@ -19,7 +19,7 @@ internal static class CliApplication
                 return 0;
 
             case "profile-vscode-env":
-                return RunProfileCommand(args, output, error, ConfigSamples.CreateProfileVsCodePowerShellScript);
+                return RunProfileVsCodeEnvCommand(args, output, error);
 
             case "profile-copilot-cli-env":
                 return RunProfileCommand(args, output, error, ConfigSamples.CreateProfileCopilotCliPowerShellScript);
@@ -169,6 +169,20 @@ internal static class CliApplication
         }
 
         output.WriteLine(createOutput(parseResult.Options!.Profile));
+        return 0;
+    }
+
+    private static int RunProfileVsCodeEnvCommand(string[] args, TextWriter output, TextWriter error)
+    {
+        var parseResult = ProfileVsCodeEnvOptions.Parse(args);
+        if (parseResult.Error is not null)
+        {
+            error.WriteLine($"error: {parseResult.Error}");
+            return 1;
+        }
+
+        var options = parseResult.Options!;
+        output.WriteLine(ConfigSamples.CreateProfileVsCodePowerShellScript(options.Profile, options.RawLocalReceiverEndpoint));
         return 0;
     }
 

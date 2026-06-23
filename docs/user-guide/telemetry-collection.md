@@ -99,12 +99,12 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw da
 Live VS Code direct telemetry は Sprint7 の未確認項目です。
 検証時は VS Code version、GitHub Copilot Chat extension version、receiver command、raw store path、trace id または raw record id、confirmed / unconfirmed signals を記録してください。
 
-## Local Ingestion Monitor（Sprint8 で実装予定 / 現在は未実装）
+## Local Ingestion Monitor（Sprint8 M2 internal receiver）
 
-> **未実装の予告です。** Local Ingestion Monitor（`src\CopilotAgentObservability.LocalMonitor`）と
-> `profile-vscode-env --target monitor` / `--endpoint` は Sprint8 M2–M6 で実装予定であり、
-> 現在の作業ツリーには存在しません。以下のコマンドはまだ実行できません。
-> 現時点で VS Code から直接受信するには、上記 **Raw Local Receiver（`4319`）** を使ってください。
+> Sprint8 M2 時点の内部増分です。LocalMonitor は loopback-only receiver として
+> `POST /v1/traces` を受信して SQLite raw store に永続化できますが、monitor UI、
+> `/health/*` readiness、sanitized projection、raw-detail route はまだ M3 以降です。
+> 通常の raw local receiver workflow は引き続き上記 **Raw Local Receiver（`4319`）** を使えます。
 
 仕様（正本）は次を参照してください。
 
@@ -113,15 +113,16 @@ Live VS Code direct telemetry は Sprint7 の未確認項目です。
 - [docs/specifications/security-data-boundaries.md](../specifications/security-data-boundaries.md)（raw / PII 境界）。
 - [docs/decisions.md](../decisions.md) D020。
 
-実装後の想定手順（参考。現在は動作しません）:
+M2 receiver host の手順:
 
 - monitor 起動（既定 loopback `127.0.0.1:4320`、Collector `4318` / CLI receiver `4319` を回避）:
   `dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\raw-store.db --url http://127.0.0.1:4320`
 - VS Code を monitor へ向ける env 生成（既定 `--target receiver` は `4319` のまま）:
   `config-cli profile-vscode-env --profile raw-local-receiver --target monitor`
-- raw 本文を自分でローカル確認する場合のみ `--enable-raw-view` を付与（既定 off、loopback-only、自分のデータの自己デバッグ用途。raw は server-rendered の `GET /traces/{rawRecordId}/raw` のみ、log / repository へは出力しない）。
+- `--endpoint http://127.0.0.1:<port>` で非既定の loopback port を指定できます。
+- `--enable-raw-view` は M2 では parse されますが、raw-detail route はまだ登録されません。`GET /traces/{rawRecordId}/raw` は M4 まで `404` です。
 
-実装完了後、本 section を通常手順へ更新し、live VS Code direct telemetry（monitor 経由）を Sprint8 の hard gate として検証します。
+live VS Code direct telemetry（monitor 経由）は Sprint8 の hard gate として M6 で検証します。
 
 ## GitHub Copilot CLI
 
