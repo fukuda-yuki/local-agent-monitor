@@ -11,16 +11,46 @@ internal sealed class RawTelemetryStore
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
     }
 
+    public const int MonitorSchemaVersion = 1;
+
     public void CreateSchema()
+    {
+        EnsureParentDirectory();
+
+        using var connection = OpenConnection();
+        ApplyWriteAheadLog(connection);
+        EnsureRawRecordsSchema(connection);
+    }
+
+    /// <summary>
+    /// Idempotent additive migration for the Local Ingestion Monitor: ensures the
+    /// raw_records store, then adds the schema_version table and the empty
+    /// monitor_ingestions / monitor_traces projection tables defined in
+    /// docs/specifications/layers/raw-store-normalization.md. Existing raw_records
+    /// rows are preserved; the projection tables are not populated here (M4 owns
+    /// projection population).
+    /// </summary>
+    public void CreateMonitorSchema()
+    {
+        EnsureParentDirectory();
+
+        using var connection = OpenConnection();
+        ApplyWriteAheadLog(connection);
+        EnsureRawRecordsSchema(connection);
+        EnsureMonitorProjectionSchema(connection);
+    }
+
+    private void EnsureParentDirectory()
     {
         var parentDirectory = Path.GetDirectoryName(Path.GetFullPath(databasePath));
         if (!string.IsNullOrEmpty(parentDirectory))
         {
             Directory.CreateDirectory(parentDirectory);
         }
+    }
 
-        using var connection = OpenConnection();
-        ApplyWriteAheadLog(connection);
+    private static void EnsureRawRecordsSchema(SqliteConnection connection)
+    {
         ExecuteNonQuery(
             connection,
             """
@@ -43,6 +73,59 @@ internal sealed class RawTelemetryStore
         ExecuteNonQuery(
             connection,
             "CREATE INDEX IF NOT EXISTS IX_raw_records_source ON raw_records(source);");
+    }
+
+    private static void EnsureMonitorProjectionSchema(SqliteConnection connection)
+    {
+        ExecuteNonQuery(
+            connection,
+            """
+            CREATE TABLE IF NOT EXISTS schema_version (
+                component TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
+            );
+            """);
+        ExecuteNonQuery(
+            connection,
+            $"""
+            INSERT INTO schema_version (component, version)
+            VALUES ('monitor', {MonitorSchemaVersion})
+            ON CONFLICT (component) DO UPDATE SET version = excluded.version;
+            """);
+        ExecuteNonQuery(
+            connection,
+            """
+            CREATE TABLE IF NOT EXISTS monitor_ingestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_record_id INTEGER NOT NULL UNIQUE,
+                received_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                trace_id TEXT NULL,
+                client_kind TEXT NULL,
+                span_count INTEGER NULL,
+                projected_at TEXT NOT NULL
+            );
+            """);
+        ExecuteNonQuery(
+            connection,
+            """
+            CREATE TABLE IF NOT EXISTS monitor_traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT NOT NULL UNIQUE,
+                client_kind TEXT NULL,
+                experiment_id TEXT NULL,
+                task_id TEXT NULL,
+                task_category TEXT NULL,
+                agent_variant TEXT NULL,
+                prompt_version TEXT NULL,
+                span_count INTEGER NULL,
+                tool_call_count INTEGER NULL,
+                error_count INTEGER NULL,
+                first_seen_at TEXT NULL,
+                last_seen_at TEXT NULL,
+                projected_at TEXT NOT NULL
+            );
+            """);
     }
 
     public long Insert(RawTelemetryRecord record)
