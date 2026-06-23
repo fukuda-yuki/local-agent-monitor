@@ -209,7 +209,7 @@ Implement `BackgroundService` that:
 - runs migration/schema setup before marking the writer healthy.
 - reads queue requests sequentially.
 - calls `RawTelemetryStore.Insert`.
-- completes each ack with committed raw record id or typed failure.
+- completes each ack with committed raw record id or a typed failure that distinguishes DB-busy (after `busy_timeout` / retry) from non-busy persistence failure, so the HTTP layer can map `503` vs `500`.
 - updates `MonitorHealthState` for writer running, migration complete, last commit success/failure, and queue-full/backpressure timestamps.
 - receives `TimeProvider.System` from DI in production and accepts a test `TimeProvider` so health threshold tests can advance time without sleeping.
 
@@ -248,6 +248,7 @@ Extend real Kestrel tests to assert:
 - commit timeout returns `504` / `commit_timeout` after `5s`. Use an internal test host option to override the timeout to `50ms`; do not expose commit timeout as a public CLI/env option in M3.
 - shutdown returns `503` / `shutting_down`.
 - DB busy after retry returns `503` / `persistence_busy`.
+- non-busy persistence failure returns `500` / `persistence_failed` (preserving M2 behavior) with a sanitized body.
 - `/traces/{id}/raw` remains `404`.
 
 - [ ] **Step 2: Run endpoint tests and confirm failure**
@@ -270,6 +271,7 @@ In `MonitorHost.Build`:
 - after decoding, create `RawTelemetryRecord` and call `TryEnqueue`.
 - if enqueue fails, write `503` `queue_full`.
 - await commit ack for `5s`; on timeout write `504` `commit_timeout`. Keep the timeout as an internal constant/test-overridable host setting, not a public interface.
+- on a failed ack, map DB-busy to `503` `persistence_busy` and non-busy persistence failure to `500` `persistence_failed`; bodies stay sanitized (no DB path, user name, or exception text).
 - on successful ack write `200` with raw record id.
 
 - [ ] **Step 4: Run endpoint tests**
@@ -301,7 +303,7 @@ git commit -m "Sprint8 M3: feat: queue monitor ingestion requests"
 Cover:
 
 - opening a raw-records-only DB adds `schema_version`.
-- opening a raw-records-only DB adds empty `monitor_ingestions` and `monitor_traces` projection tables.
+- opening a raw-records-only DB adds empty `monitor_ingestions` and `monitor_traces` projection tables with the allowlist columns from `raw-store-normalization.md` (assert the column set; no raw/PII columns).
 - running migration twice is idempotent.
 - existing `raw_records` rows remain readable by `normalize-raw` / `ListRecords`.
 - migration failure is surfaced to `MonitorHealthState` as not ready.
@@ -323,7 +325,7 @@ Add an internal monitor migration method on the persistence layer, called by the
 
 - creates `schema_version` if absent.
 - records a monitor schema version row.
-- creates empty `monitor_ingestions` and `monitor_traces` tables with the additive monitor projection schema required by `raw-store-normalization.md`.
+- creates empty `monitor_ingestions` and `monitor_traces` tables using the exact per-table allowlist columns defined in the "Projection table allowlist schema" section of `raw-store-normalization.md` (sanitized columns only; no raw payload, no PII).
 - is additive only and preserves existing `raw_records`.
 - does not populate `monitor_ingestions` or `monitor_traces`; M4 owns projection population, cursor queries, and projection retry/failure state.
 
