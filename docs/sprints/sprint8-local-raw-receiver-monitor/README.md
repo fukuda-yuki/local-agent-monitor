@@ -86,15 +86,49 @@ static-dashboard non-exposure (§9) are unchanged. Full model:
 | --- | --- | --- |
 | M1 Shared Component Extraction | Extract `Telemetry` + `Persistence.Sqlite` projects; keep Config CLI behavior and tests green. | **Implemented** |
 | M2 ASP.NET Core Receiver Host | LocalMonitor project, Kestrel loopback, `POST /v1/traces`, request size limit, deterministic HTTP errors. | **Implemented** |
-| M3 Ingestion Queue + SQLite Concurrency | Bounded channel, single writer worker, WAL, schema versioning, cursor query, graceful shutdown. | Pending |
+| M3 Ingestion Queue + SQLite Concurrency | Bounded channel, single writer worker, WAL, schema-version additive migration (creates empty projection tables), first `/health/*` endpoints, graceful shutdown. | **Implemented** |
 | M4 Monitor Projection | `monitor_ingestions` / `monitor_traces`, ProjectionWorker, startup catch-up, retry/failure state, sanitized default projections + opt-in raw access. | Pending |
 | M5 Web UI + SSE | Overview / Live Ingestions / Traces / Diagnostics; SSE event stream with reconnect/gap recovery. | Pending |
 | M6 Security + Live Validation | DR6 threat-model negative tests (non-loopback, Host validation, cross-origin raw read, opt-in gating, CSRF), readiness non-2xx under saturation, raw non-logging, restart recovery, real VS Code validation. | Pending |
 
 ## Current Status
 
-M1 (Shared Component Extraction) and M2 (ASP.NET Core Receiver Host) are
-implemented. See
+M1 (Shared Component Extraction), M2 (ASP.NET Core Receiver Host), and M3
+(Ingestion Queue + SQLite Concurrency) are implemented. M3 is still **not** a
+shippable monitor: projection population, the `/api/monitor/*` cursor API, the
+Web UI / SSE, the opt-in raw-detail route, the full DR6 negative security matrix,
+and live VS Code evidence remain M4–M6.
+
+Implemented in M3 (see
+[`milestones/M3-ingestion-queue-sqlite-concurrency/plan.md`](milestones/M3-ingestion-queue-sqlite-concurrency/plan.md)
+and `review.md` in the same folder):
+
+- Threshold options `--ingestion-stall-threshold-seconds` (default 10) and
+  `--projection-lag-threshold-seconds` (default 60), with `CAO_MONITOR_*` env
+  fallbacks.
+- Ack-backed bounded ingestion queue (`System.Threading.Channels`, capacity 1024,
+  full ⇒ deterministic non-blocking reject) and a single `IngestionWriterWorker`
+  that owns all SQLite writes; `POST /v1/traces` returns `2xx` only after commit.
+- Fixed ingestion errors: queue full `503`/`queue_full`, commit timeout
+  `504`/`commit_timeout` (internal 5s, not a public option), shutdown
+  `503`/`shutting_down`, DB busy `503`/`persistence_busy`, non-busy persistence
+  failure `500`/`persistence_failed`; bodies stay sanitized.
+- Additive `schema_version` migration that creates the empty `monitor_ingestions`
+  / `monitor_traces` projection tables (allowlist columns; no raw/PII), preserving
+  `raw_records`; WAL + `busy_timeout` retained for concurrent external readers.
+- First real `/health/live` (`200`) and `/health/ready` (machine-readable body).
+  In M3 `/health/ready` is always `503` / `not_ready`: ingestion-healthy ⇒
+  `projection_worker_missing`; sustained stall ⇒ `ingestion_stalled`; migration
+  failure ⇒ `migration_failed`; fatal worker error ⇒ `fatal_error`. It never
+  falsely returns `ready` before the M4 projection worker exists.
+
+Validation (M3):
+
+- `dotnet build CopilotAgentObservability.slnx`: 0 errors, 0 warnings.
+- `dotnet test CopilotAgentObservability.slnx`: 371 passing, 0 failing,
+  0 skipped (300 Config CLI + 71 LocalMonitor; above the M2 baseline of 322).
+
+See
 [`milestones/M1-shared-component-extraction/plan.md`](milestones/M1-shared-component-extraction/plan.md)
 for the accepted plan (challenge-reviewed via `/codex:adversarial-review`),
 [`pre-implementation-review.md`](pre-implementation-review.md) for the original
