@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using Microsoft.Data.Sqlite;
 
@@ -275,6 +276,26 @@ public class MonitorHostTests
         Assert.Equal(HttpStatusCode.GatewayTimeout, response.StatusCode);
         Assert.Contains("commit_timeout", await response.Content.ReadAsStringAsync());
         AssertNoRecords(tempDirectory.DatabasePath);
+    }
+
+    [Fact]
+    public async Task PostTraces_CommitTimeout_StartsTheReadinessStallWindow()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        var health = new MonitorHealthState();
+        await using var host = await StartHostAsync(
+            tempDirectory,
+            testOptions: new MonitorHostTestOptions
+            {
+                StartWriter = false,
+                CommitTimeout = TimeSpan.FromMilliseconds(50),
+                Health = health,
+            });
+
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
+
+        Assert.Equal(HttpStatusCode.GatewayTimeout, response.StatusCode);
+        Assert.NotNull(health.Snapshot().UnableToCommitSince);
     }
 
     [Fact]

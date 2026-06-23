@@ -29,7 +29,7 @@ internal static class MonitorHost
         });
 
         var queue = testOptions?.Queue ?? new IngestionQueue();
-        var health = new MonitorHealthState();
+        var health = testOptions?.Health ?? new MonitorHealthState();
         health.SetLoopbackBound(true);
         var commitTimeout = testOptions?.CommitTimeout ?? DefaultCommitTimeout;
 
@@ -169,6 +169,10 @@ internal static class MonitorHost
             }
             catch (TimeoutException)
             {
+                // A commit that never acks is a form of "writer unable to commit":
+                // start the same stall window queue-full / persistence failures use
+                // so sustained timeouts surface as ingestion_stalled in readiness.
+                health.RecordBackpressure();
                 await WriteFailureAsync(context, StatusCodes.Status504GatewayTimeout, "commit_timeout", "Trace payload was not committed within the allowed time.");
                 return;
             }
@@ -271,6 +275,8 @@ internal sealed class MonitorHostTestOptions
     public IngestionQueue? Queue { get; init; }
 
     public IRawTelemetryWriter? Writer { get; init; }
+
+    public MonitorHealthState? Health { get; init; }
 
     public TimeSpan? CommitTimeout { get; init; }
 
