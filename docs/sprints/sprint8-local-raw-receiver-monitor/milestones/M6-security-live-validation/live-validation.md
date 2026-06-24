@@ -18,6 +18,13 @@ credentialed Copilot LLM interaction), and have the Copilot extension export
 telemetry. No agent-available tool can drive a credentialed Copilot Chat session
 that emits telemetry.
 
+Environment check (this machine, 2026-06-25): VS Code `1.125.1` is installed
+(`code` CLI present), but no GitHub Copilot / Copilot Chat extension was detected
+under `~/.vscode/extensions`. So even a human operator must first install the
+Copilot Chat extension and sign in to a Copilot account before the live run is
+possible. Extension install, GitHub authentication, and a real Copilot Chat
+interaction are all human/credential-gated actions the agent cannot perform.
+
 ## What IS Verified (ready-state evidence)
 
 These confirm the monitor is ready to receive real VS Code telemetry; only the
