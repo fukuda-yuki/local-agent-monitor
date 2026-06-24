@@ -88,16 +88,44 @@ static-dashboard non-exposure (§9) are unchanged. Full model:
 | M2 ASP.NET Core Receiver Host | LocalMonitor project, Kestrel loopback, `POST /v1/traces`, request size limit, deterministic HTTP errors. | **Implemented** |
 | M3 Ingestion Queue + SQLite Concurrency | Bounded channel, single writer worker, WAL, schema-version additive migration (creates empty projection tables), first `/health/*` endpoints, graceful shutdown. | **Implemented** |
 | M4 Monitor Projection | `monitor_ingestions` / `monitor_traces`, ProjectionWorker, startup catch-up, retry/failure state, sanitized default projections + cursor API + opt-in raw access. | **Implemented** |
-| M5 Web UI + SSE | Overview / Live Ingestions / Traces / Diagnostics; SSE event stream with reconnect/gap recovery. | Pending |
+| M5 Web UI + SSE | Overview / Live Ingestions / Traces / Diagnostics; SSE event stream with reconnect/gap recovery. | **Implemented** |
 | M6 Security + Live Validation | DR6 threat-model negative tests (non-loopback, Host validation, cross-origin raw read, opt-in gating, CSRF), readiness non-2xx under saturation, raw non-logging, restart recovery, real VS Code validation. | Pending |
 
 ## Current Status
 
-M1–M4 are implemented. M4 populates the sanitized projections, exposes the
-cursor read API, activates projection-lag readiness, and adds the opt-in
-raw-detail route. The monitor is still **not** fully shippable: the Razor Web UI
-and SSE stream (M5), the full DR6 negative security matrix and CSRF on
-state-changing actions, and live VS Code HTTP/protobuf evidence (M6) remain.
+M1–M5 are implemented. M5 adds the Razor Web UI (`/`, `/ingestions`, `/traces`,
+`/diagnostics`) and a notification-only SSE stream (`GET /events`) over the M4
+contracts, all sanitized. The monitor is still **not** fully shippable: the full
+DR6 negative security matrix and CSRF on state-changing actions, readiness `503`
+under saturation, restart recovery, raw non-logging, and live VS Code
+HTTP/protobuf evidence (M6) remain.
+
+Implemented in M5 (see
+[`milestones/M5-web-ui-sse/plan.md`](milestones/M5-web-ui-sse/plan.md) and
+`review.md` in the same folder):
+
+- Razor Pages `/`, `/ingestions`, `/traces`, `/diagnostics` served by the existing
+  `MonitorHost`, as thin sanitized readers over `IMonitorProjectionStore` +
+  `MonitorHealthState`. Default views render allowlisted columns only (no raw / PII);
+  the `raw` link appears only with `--enable-raw-view` and still points to the M4
+  opt-in route. Pages use framework default output encoding (no `Html.Raw`).
+- `GET /events`: a `text/event-stream` notification-only stream. After the
+  projection worker newly projects records it emits one `projection` event with
+  `data: {}` — never raw payloads, trace ids, raw record ids, or PII. Subscriptions
+  register synchronously before a `: connected` comment flush (no missed events);
+  reconnecting clients recover gaps via `/api/monitor/*` cursors.
+- `wwwroot/monitor.js`: on each notification re-reads the sanitized cursor APIs from
+  its last-seen cursor; never inserts raw payloads into the DOM. Served (with
+  `monitor.css`) via the static web assets manifest, loaded explicitly so it works
+  in the default Production environment.
+
+Validation (M5):
+
+- `dotnet build CopilotAgentObservability.slnx`: 0 errors, 0 warnings.
+- `dotnet test CopilotAgentObservability.slnx`: 433 passing, 0 failing, 0 skipped
+  (300 Config CLI + 133 LocalMonitor; above the M4 baseline of 421).
+- Live smoke (`dotnet run`, default Production env): all four pages return
+  `200 text/html`; `/monitor.js` and `/monitor.css` are served.
 
 Implemented in M4 (see
 [`milestones/M4-monitor-projection/plan.md`](milestones/M4-monitor-projection/plan.md)
