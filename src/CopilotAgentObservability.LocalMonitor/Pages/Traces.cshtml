@@ -1,0 +1,51 @@
+@page "/traces"
+@model TracesModel
+
+<section>
+    <h2>Traces</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Id</th>
+                <th>TraceId</th>
+                <th>ClientKind</th>
+                <th>ExperimentId</th>
+                <th>TaskId</th>
+                <th>TaskCategory</th>
+                <th>AgentVariant</th>
+                <th>PromptVersion</th>
+                <th>SpanCount</th>
+                <th>ToolCallCount</th>
+                <th>ErrorCount</th>
+                <th>FirstSeenAt</th>
+                <th>LastSeenAt</th>
+                <th>ProjectedAt</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var row in Model.Result.Items)
+            {
+                <tr>
+                    <td>@row.Id</td>
+                    <td>@row.TraceId</td>
+                    <td>@row.ClientKind</td>
+                    <td>@row.ExperimentId</td>
+                    <td>@row.TaskId</td>
+                    <td>@row.TaskCategory</td>
+                    <td>@row.AgentVariant</td>
+                    <td>@row.PromptVersion</td>
+                    <td>@row.SpanCount</td>
+                    <td>@row.ToolCallCount</td>
+                    <td>@row.ErrorCount</td>
+                    <td>@row.FirstSeenAt</td>
+                    <td>@row.LastSeenAt</td>
+                    <td>@row.ProjectedAt</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    @if (Model.Result.HasMore && Model.Result.Items.Count > 0)
+    {
+        <p><a href="/traces?after=@Model.Result.Items[^1].Id">next</a></p>
+    }
+</section>

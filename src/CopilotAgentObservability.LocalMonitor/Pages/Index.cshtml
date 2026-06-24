@@ -1,0 +1,45 @@
+@page "/"
+@model IndexModel
+
+<section>
+    <h2>Overview</h2>
+    <dl>
+        <dt>status</dt>
+        <dd>@Model.Readiness.Status</dd>
+        <dt>projection backlog</dt>
+        <dd>@Model.Readiness.ProjectionBacklog</dd>
+        <dt>projection lag seconds</dt>
+        <dd>@Model.Readiness.ProjectionLagSeconds</dd>
+    </dl>
+</section>
+
+<section>
+    <h2>Recent Ingestions</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>RawRecordId</th>
+                <th>ReceivedAt</th>
+                <th>Source</th>
+                <th>TraceId</th>
+                <th>ClientKind</th>
+                <th>SpanCount</th>
+                <th>ProjectedAt</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var row in Model.RecentIngestions)
+            {
+                <tr>
+                    <td>@row.RawRecordId</td>
+                    <td>@row.ReceivedAt</td>
+                    <td>@row.Source</td>
+                    <td>@row.TraceId</td>
+                    <td>@row.ClientKind</td>
+                    <td>@row.SpanCount</td>
+                    <td>@row.ProjectedAt</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</section>

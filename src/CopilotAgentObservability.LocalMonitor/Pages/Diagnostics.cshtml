@@ -1,0 +1,28 @@
+@page "/diagnostics"
+@model DiagnosticsModel
+
+<section>
+    <h2>health/ready</h2>
+    <dl>
+        <dt>Status</dt>
+        <dd>@Model.Readiness.Status</dd>
+        <dt>LoopbackBound</dt>
+        <dd>@Model.Readiness.LoopbackBound</dd>
+        <dt>DbOpen</dt>
+        <dd>@Model.Readiness.DbOpen</dd>
+        <dt>MigrationComplete</dt>
+        <dd>@Model.Readiness.MigrationComplete</dd>
+        <dt>WriterRunning</dt>
+        <dd>@Model.Readiness.WriterRunning</dd>
+        <dt>ProjectionWorkerRunning</dt>
+        <dd>@Model.Readiness.ProjectionWorkerRunning</dd>
+        <dt>IngestionAccepting</dt>
+        <dd>@Model.Readiness.IngestionAccepting</dd>
+        <dt>ProjectionLagSeconds</dt>
+        <dd>@Model.Readiness.ProjectionLagSeconds</dd>
+        <dt>ProjectionBacklog</dt>
+        <dd>@Model.Readiness.ProjectionBacklog</dd>
+        <dt>DegradedReasons</dt>
+        <dd>@string.Join(", ", Model.Readiness.DegradedReasons)</dd>
+    </dl>
+</section>

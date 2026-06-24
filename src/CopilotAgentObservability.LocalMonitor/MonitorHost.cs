@@ -34,6 +34,15 @@ internal static class MonitorHost
         var health = testOptions?.Health ?? new MonitorHealthState();
         health.SetLoopbackBound(true);
         var commitTimeout = testOptions?.CommitTimeout ?? DefaultCommitTimeout;
+        var mvcBuilder = builder.Services.AddRazorPages();
+        var monitorAssembly = typeof(MonitorHost).Assembly;
+        if (!ReferenceEquals(System.Reflection.Assembly.GetEntryAssembly(), monitorAssembly))
+        {
+            mvcBuilder.AddApplicationPart(monitorAssembly);
+        }
+
+        builder.Services.AddSingleton(options);
+        builder.Services.AddSingleton(health);
 
         if (testOptions?.StartWriter ?? true)
         {
@@ -47,6 +56,7 @@ internal static class MonitorHost
         var projectionStore = testOptions?.ProjectionStore
             ?? new RawTelemetryStoreProjectionStore(
                 new RawTelemetryStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
+        builder.Services.AddSingleton(projectionStore);
 
         if (testOptions?.StartProjectionWorker ?? true)
         {
@@ -82,6 +92,8 @@ internal static class MonitorHost
 
             await next();
         });
+        app.UseStaticFiles();
+        app.MapRazorPages();
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;

@@ -1,0 +1,45 @@
+@page "/ingestions"
+@model IngestionsModel
+
+<section>
+    <h2>Ingestions</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>RawRecordId</th>
+                <th>ReceivedAt</th>
+                <th>Source</th>
+                <th>TraceId</th>
+                <th>ClientKind</th>
+                <th>SpanCount</th>
+                <th>ProjectedAt</th>
+                @if (Model.RawViewEnabled)
+                {
+                    <th>Raw</th>
+                }
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var row in Model.Result.Items)
+            {
+                <tr>
+                    <td>@row.RawRecordId</td>
+                    <td>@row.ReceivedAt</td>
+                    <td>@row.Source</td>
+                    <td>@row.TraceId</td>
+                    <td>@row.ClientKind</td>
+                    <td>@row.SpanCount</td>
+                    <td>@row.ProjectedAt</td>
+                    @if (Model.RawViewEnabled)
+                    {
+                        <td><a href="/traces/@row.RawRecordId/raw">raw</a></td>
+                    }
+                </tr>
+            }
+        </tbody>
+    </table>
+    @if (Model.Result.HasMore && Model.Result.Items.Count > 0)
+    {
+        <p><a href="/ingestions?after=@Model.Result.Items[^1].RawRecordId">next</a></p>
+    }
+</section>
