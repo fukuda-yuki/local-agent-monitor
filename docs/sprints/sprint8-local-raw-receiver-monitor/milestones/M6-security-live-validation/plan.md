@@ -153,6 +153,8 @@ git commit -m "Sprint8 M6: test: cover monitor security boundary"
 
 - [ ] **Step 1: Write readiness failure tests.**
 
+`MutableTimeProvider` and `ReadyState` are defined as `private` members in `MonitorHealthTests.cs`. To use them in `MonitorReadinessFailureTests.cs`, extract them to a shared `internal` helper file in the test project (e.g., `MonitorTestHelpers.cs`) before writing the tests below, or redefine `MutableTimeProvider` in the new file if extraction would be too broad.
+
 ```csharp
 [Fact]
 public async Task Ready_Returns503ForSustainedQueueFullAnd200ForMomentaryBackpressure()
@@ -239,7 +241,7 @@ public async Task RestartRecovery_ReusesDatabaseAndCatchesUpProjection()
 
     await using (var first = await StartHostAsync(temp, projectionPollInterval: TimeSpan.FromMilliseconds(50)))
     {
-        var response = await first.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson("restart-trace")));
+        var response = await first.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(1, await WaitForIngestionProjectionCountAsync(first, expected: 1));
     }

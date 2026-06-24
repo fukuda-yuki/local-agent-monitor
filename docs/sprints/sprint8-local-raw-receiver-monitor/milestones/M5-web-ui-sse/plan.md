@@ -518,7 +518,7 @@ Expected: script is missing or does not reference the cursor APIs.
     if (!response.ok) return;
     const page = await response.json();
     for (const item of page.items) {
-      state[key] = Math.max(state[key], item.raw_record_id ?? item.id ?? 0);
+      state[key] = Math.max(state[key], item.rawRecordId ?? item.id ?? 0);
     }
     document.dispatchEvent(new CustomEvent('cao-monitor-refresh', { detail: { path, count: page.items.length } }));
   }
