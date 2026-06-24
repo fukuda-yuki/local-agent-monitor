@@ -87,6 +87,34 @@ public class MonitorUiTests
         Assert.Equal(HttpStatusCode.BadRequest, traces.StatusCode);
     }
 
+    [Fact]
+    public async Task Pages_ReferenceMonitorScriptAndScriptUsesCursorApis()
+    {
+        using var temp = new MonitorTempDirectory();
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp);
+
+        var index = await host.Client.GetStringAsync("/");
+        var script = await host.Client.GetStringAsync("/monitor.js");
+
+        Assert.Contains("/monitor.js", index);
+        Assert.Contains("/api/monitor/ingestions", script);
+        Assert.Contains("/api/monitor/traces", script);
+        Assert.Contains("new EventSource('/events')", script);
+    }
+
+    [Fact]
+    public async Task MonitorCss_IsServed()
+    {
+        using var temp = new MonitorTempDirectory();
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp);
+
+        var response = await host.Client.GetAsync("/monitor.css");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     private static void EnsureSchema(MonitorTempDirectory temp)
     {
         var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);

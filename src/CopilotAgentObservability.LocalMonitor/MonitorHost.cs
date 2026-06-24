@@ -23,9 +23,21 @@ internal static class MonitorHost
 
     internal static WebApplication Build(MonitorOptions options, MonitorHostTestOptions? testOptions)
     {
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            // Pin the application name to this assembly so MVC discovers the monitor's
+            // compiled Razor pages and so the static web assets manifest
+            // (CopilotAgentObservability.LocalMonitor.staticwebassets.runtime.json)
+            // resolves under both the real host and the test host (whose entry
+            // assembly is the test runner, not this one).
+            ApplicationName = typeof(MonitorHost).Assembly.GetName().Name,
+        });
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls(options.Url);
+        // Serve wwwroot/monitor.css and wwwroot/monitor.js from the static web
+        // assets manifest. CreateBuilder only auto-loads it in Development, but the
+        // monitor runs in the default Production environment, so load it explicitly.
+        builder.WebHost.UseStaticWebAssets();
         builder.WebHost.ConfigureKestrel(kestrelOptions =>
         {
             kestrelOptions.Limits.MaxRequestBodySize = options.MaxRequestBodyBytes;
@@ -36,13 +48,7 @@ internal static class MonitorHost
         health.SetLoopbackBound(true);
         var commitTimeout = testOptions?.CommitTimeout ?? DefaultCommitTimeout;
         var eventBroker = new MonitorEventBroker();
-        var mvcBuilder = builder.Services.AddRazorPages();
-        var monitorAssembly = typeof(MonitorHost).Assembly;
-        if (!ReferenceEquals(System.Reflection.Assembly.GetEntryAssembly(), monitorAssembly))
-        {
-            mvcBuilder.AddApplicationPart(monitorAssembly);
-        }
-
+        builder.Services.AddRazorPages();
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(health);
 
