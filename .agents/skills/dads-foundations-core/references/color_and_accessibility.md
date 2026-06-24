@@ -73,6 +73,9 @@ Neutrals govern body text, borders, dividers, and background surfaces.
 - **Success (Green)**: Indicates safety, completeness, or successful actions.
   - *Tokens*: `Success-1` (Light green for backgrounds), `Success-2` (Dark
     green for text/icons).
+  - *HEX values*: Not included in the local registry below. Fetch the current
+    Green palette from the DADS official site
+    (<https://design.digital.go.jp/dads/>) before implementing Success tokens.
 - **Error (Red)**: Indicates failure, critical warning, or danger.
   - *Tokens*: `Error-1` (Light red for backgrounds), `Error-2` (Dark red for
     text/icons).

@@ -47,8 +47,9 @@ official site.
 
 The current dashboard implementation uses:
 
-- .NET (C#, Razor)
-- Static HTML dashboard generation (index.html + dashboard-data.json)
+- .NET (C#)
+- Static HTML dashboard generation (index.html + dashboard-data.json), produced
+  by `StaticDashboardGenerator.cs` — no Razor templates
 - Plain CSS
 
 The current implementation does not use React, Tailwind CSS, Storybook, or
@@ -104,9 +105,12 @@ is a standard example; services may define additional breakpoints as needed.
 
 ### [project-decision] Typography choice
 
-This project uses Noto Sans JP for body text and Noto Sans Mono for code and
-technical content. To adopt a different font family, update
-docs/architecture.md and docs/decisions.md first.
+The current generated dashboard CSS uses system fonts
+(`"Segoe UI", system-ui, -apple-system, sans-serif`). DADS recommends Noto
+Sans JP for body text and Noto Sans Mono for code and technical content (see
+`[official-guidance] Typography` above). Adopting Noto requires updating
+`docs/architecture.md`, `docs/decisions.md`, and
+`StaticDashboardGenerator.cs` first.
 
 ### [project-decision] Spacing scale
 
