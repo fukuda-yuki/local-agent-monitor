@@ -126,11 +126,14 @@ internal sealed class ProjectionWorker : BackgroundService
         }
         catch (PersistenceBusyException)
         {
-            // Listing or status read was busy; retry on the next pass.
+            // Listing or status read was busy; lag is unknown until a successful
+            // refresh, so readiness must not report ready on a stale snapshot.
+            health.RecordProjectionStatusUnavailable();
         }
         catch (Exception)
         {
             health.RecordProjectionFailure();
+            health.RecordProjectionStatusUnavailable();
         }
     }
 }

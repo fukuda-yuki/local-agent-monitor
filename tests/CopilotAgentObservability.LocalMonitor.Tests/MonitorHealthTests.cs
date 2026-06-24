@@ -170,6 +170,63 @@ public class MonitorHealthTests
     }
 
     [Fact]
+    public void Evaluate_WriterNotRunning_IsNotReadyWithWriterNotRunning()
+    {
+        var time = new MutableTimeProvider(Start);
+        var state = ReadyState(time);
+        state.SetWriterRunning(false);
+
+        var readiness = Evaluate(state);
+
+        Assert.Equal("not_ready", readiness.Status);
+        Assert.Contains("writer_not_running", readiness.DegradedReasons);
+    }
+
+    [Fact]
+    public void Evaluate_LoopbackUnbound_IsNotReadyWithLoopbackUnbound()
+    {
+        var time = new MutableTimeProvider(Start);
+        var state = ReadyState(time);
+        state.SetLoopbackBound(false);
+
+        var readiness = Evaluate(state);
+
+        Assert.Equal("not_ready", readiness.Status);
+        Assert.Contains("loopback_unbound", readiness.DegradedReasons);
+    }
+
+    [Fact]
+    public void Evaluate_ProjectionStatusNeverObserved_IsNotReadyWithStatusUnknown()
+    {
+        var time = new MutableTimeProvider(Start);
+        var state = new MonitorHealthState(time);
+        state.SetLoopbackBound(true);
+        state.MarkMigrationComplete();
+        state.SetWriterRunning(true);
+        state.SetProjectionWorkerRunning(true);
+        // Deliberately no SetProjectionStatus: lag has never been observed.
+
+        var readiness = Evaluate(state);
+
+        Assert.Equal("not_ready", readiness.Status);
+        Assert.Contains("projection_status_unknown", readiness.DegradedReasons);
+    }
+
+    [Fact]
+    public void Evaluate_ProjectionStatusUnavailableAfterObserved_IsNotReady()
+    {
+        var time = new MutableTimeProvider(Start);
+        var state = ReadyState(time); // status observed ⇒ ready
+        Assert.Equal("ready", Evaluate(state).Status);
+
+        state.RecordProjectionStatusUnavailable();
+
+        var readiness = Evaluate(state);
+        Assert.Equal("not_ready", readiness.Status);
+        Assert.Contains("projection_status_unknown", readiness.DegradedReasons);
+    }
+
+    [Fact]
     public void Evaluate_FatalWorkerError_IsNotReadyWithFatalError()
     {
         var time = new MutableTimeProvider(Start);

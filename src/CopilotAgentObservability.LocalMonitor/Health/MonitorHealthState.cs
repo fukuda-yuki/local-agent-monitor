@@ -18,6 +18,7 @@ internal sealed class MonitorHealthState
     private bool fatalError;
     private DateTimeOffset? unableToCommitSince;
     private bool projectionWorkerRunning;
+    private bool projectionStatusKnown;
     private int projectionBacklog;
     private DateTimeOffset? oldestUnprocessedReceivedAt;
     private int projectionFailureCount;
@@ -117,6 +118,20 @@ internal sealed class MonitorHealthState
         {
             projectionBacklog = backlog;
             this.oldestUnprocessedReceivedAt = oldestUnprocessedReceivedAt;
+            projectionStatusKnown = true;
+        }
+    }
+
+    /// <summary>
+    /// The projection worker could not read backlog / lag this pass (list or status
+    /// read failed). Until a successful refresh, lag is unknown and readiness must
+    /// not claim ready on a stale zero-lag snapshot.
+    /// </summary>
+    public void RecordProjectionStatusUnavailable()
+    {
+        lock (gate)
+        {
+            projectionStatusKnown = false;
         }
     }
 
@@ -162,6 +177,18 @@ internal sealed class MonitorHealthState
             var blocking = new List<string>();
             var degraded = new List<string>();
 
+            // Required infrastructure gates: ready demands loopback bind, an open DB,
+            // a completed migration, and a running ingestion writer (telemetry-ingestion.md).
+            if (!loopbackBound)
+            {
+                blocking.Add("loopback_unbound");
+            }
+
+            if (!dbOpen)
+            {
+                blocking.Add("db_unavailable");
+            }
+
             if (!migrationComplete)
             {
                 blocking.Add("migration_failed");
@@ -185,9 +212,20 @@ internal sealed class MonitorHealthState
                 }
             }
 
+            if (!writerRunning)
+            {
+                blocking.Add("writer_not_running");
+            }
+
             if (!projectionWorkerRunning)
             {
                 blocking.Add("projection_worker_missing");
+            }
+            else if (!projectionStatusKnown)
+            {
+                // Worker is running but no successful backlog/lag read yet (startup or
+                // sustained status-read failure): lag is unknown, so do not claim ready.
+                blocking.Add("projection_status_unknown");
             }
 
             var lagSeconds = ComputeProjectionLagSeconds();

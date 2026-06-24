@@ -111,6 +111,24 @@ public class ProjectionWorkerTests
     }
 
     [Fact]
+    public async Task Pass_StatusReadBusy_MarksProjectionStatusUnknownSoReadinessIsNotReady()
+    {
+        var store = new FakeProjectionStore { StatusThrowsBusy = true };
+        var health = new MonitorHealthState();
+        health.SetLoopbackBound(true);
+        health.MarkMigrationComplete();
+        health.SetWriterRunning(true);
+        health.SetProjectionWorkerRunning(true);
+        var worker = new ProjectionWorker(store, health);
+
+        await worker.RunProjectionPassAsync();
+
+        var readiness = health.Evaluate(ingestionStallThresholdSeconds: 10, projectionLagThresholdSeconds: 60);
+        Assert.Equal("not_ready", readiness.Status);
+        Assert.Contains("projection_status_unknown", readiness.DegradedReasons);
+    }
+
+    [Fact]
     public async Task StartStop_TogglesProjectionWorkerRunning()
     {
         var store = new FakeProjectionStore();
@@ -146,6 +164,8 @@ public class ProjectionWorkerTests
         private readonly HashSet<long> projected = new();
 
         public Func<long, ApplyOutcome> OnApply { get; set; } = _ => ApplyOutcome.Success;
+
+        public bool StatusThrowsBusy { get; set; }
 
         public Dictionary<long, int> ApplyCalls { get; } = new();
 
@@ -187,6 +207,11 @@ public class ProjectionWorkerTests
 
         public MonitorProjectionStatus GetProjectionStatus()
         {
+            if (StatusThrowsBusy)
+            {
+                throw new PersistenceBusyException();
+            }
+
             var unprocessed = records.Where(r => !projected.Contains(r.Id!.Value)).ToList();
             var oldest = unprocessed.Count == 0 ? (DateTimeOffset?)null : unprocessed.Min(r => r.ReceivedAt);
             return new MonitorProjectionStatus(unprocessed.Count, oldest);

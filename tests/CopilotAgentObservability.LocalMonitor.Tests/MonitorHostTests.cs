@@ -172,10 +172,10 @@ public class MonitorHostTests
         using var tempDirectory = new MonitorTempDirectory();
         await using var host = await StartHostAsync(tempDirectory);
 
-        var response = await host.Client.GetAsync("/health/ready");
+        // The monitor is ready only after the projection worker's first successful
+        // status read (it is not ready on a stale zero-lag snapshot), so poll.
+        var body = await WaitForReadyBodyAsync(host);
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("\"status\":\"ready\"", body);
         Assert.Contains("\"migration_complete\":true", body);
         Assert.Contains("\"writer_running\":true", body);
@@ -460,6 +460,25 @@ public class MonitorHostTests
 
         Assert.DoesNotContain(tempDirectory.DatabasePath, body);
         Assert.DoesNotContain(Environment.UserName, body);
+    }
+
+    private static async Task<string> WaitForReadyBodyAsync(RunningMonitorForTest host)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        string body = string.Empty;
+        while (DateTime.UtcNow < deadline)
+        {
+            var response = await host.Client.GetAsync("/health/ready");
+            body = await response.Content.ReadAsStringAsync();
+            if (response.StatusCode == HttpStatusCode.OK && body.Contains("\"status\":\"ready\""))
+            {
+                return body;
+            }
+
+            await Task.Delay(25);
+        }
+
+        return body;
     }
 
     private static async Task<int> WaitForIngestionProjectionCountAsync(RunningMonitorForTest host, int expected)

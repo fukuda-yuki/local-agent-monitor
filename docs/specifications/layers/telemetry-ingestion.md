@@ -280,12 +280,15 @@ Readiness body (machine-readable, returned on both `200` and `503`):
 
 - `status` ⇒ HTTP mapping: `ready` and `degraded` ⇒ `200`; `not_ready` ⇒ `503`.
 - `degraded_reasons` enumerates active conditions. **not_ready (`503`) tokens:**
+  `loopback_unbound` (not bound to loopback), `db_unavailable` (DB not open),
   `migration_failed`, `fatal_error`, `ingestion_stalled` (backpressure continuous
-  past the ingestion-stall threshold), `projection_lag_exceeded` (projection lag
-  `≥` the projection-lag threshold), and `projection_worker_missing` (emitted
-  while no projection worker is running yet — e.g. before the projection worker
-  milestone adds it — so an ingestion-healthy monitor still reports `not_ready`
-  rather than falsely claiming `ready`). **degraded (`200`) tokens:**
+  past the ingestion-stall threshold), `writer_not_running` (the ingestion writer
+  is not running), `projection_lag_exceeded` (projection lag `≥` the projection-lag
+  threshold), `projection_worker_missing` (no projection worker running yet — so an
+  ingestion-healthy monitor still reports `not_ready` rather than falsely claiming
+  `ready`), and `projection_status_unknown` (the worker is running but has not yet
+  produced a successful backlog/lag read — startup or a sustained status-read
+  failure — so lag is unknown and ready is withheld). **degraded (`200`) tokens:**
   `ingestion_backpressure` (momentary sub-threshold backpressure) and
   `projection_lag` (projection lag above zero but under the threshold).
 - the `ready` state (`200`, empty `degraded_reasons`) is active once a projection
