@@ -16,53 +16,6 @@ internal static class RawMeasurementNormalizer
         "github.copilot.tool.call.count",
     ];
 
-    private static readonly string[] GenAiOperationKeys =
-    [
-        "gen_ai.operation.name",
-        "genAi.operation.name",
-    ];
-
-    private static readonly string[] GenAiToolNameKeys =
-    [
-        "gen_ai.tool.name",
-        "genAi.tool.name",
-        "tool.name",
-    ];
-
-    private static readonly string[] InputTokenKeys =
-    [
-        "gen_ai.usage.input_tokens",
-        "gen_ai.usage.prompt_tokens",
-        "gen_ai.usage.input",
-        "llm.usage.prompt_tokens",
-        "usage.input",
-        "input_tokens",
-        "inputTokens",
-        "promptTokens",
-    ];
-
-    private static readonly string[] OutputTokenKeys =
-    [
-        "gen_ai.usage.output_tokens",
-        "gen_ai.usage.completion_tokens",
-        "gen_ai.usage.output",
-        "llm.usage.completion_tokens",
-        "usage.output",
-        "output_tokens",
-        "outputTokens",
-        "completionTokens",
-    ];
-
-    private static readonly string[] TotalTokenKeys =
-    [
-        "gen_ai.usage.total_tokens",
-        "gen_ai.usage.total",
-        "llm.usage.total_tokens",
-        "usage.total",
-        "total_tokens",
-        "totalTokens",
-    ];
-
     public static IReadOnlyList<MeasurementRow> Normalize(string payloadJson)
     {
         using var document = JsonDocument.Parse(payloadJson);
@@ -93,12 +46,12 @@ internal static class RawMeasurementNormalizer
 
         foreach (var resourceSpan in resourceSpans.EnumerateArray())
         {
-            var resourceAttributes = ReadResourceAttributes(resourceSpan);
-            foreach (var scopeSpan in EnumerateArrayProperty(resourceSpan, "scopeSpans"))
+            var resourceAttributes = OtlpSpanReader.ReadResourceAttributes(resourceSpan);
+            foreach (var scopeSpan in OtlpSpanReader.EnumerateArrayProperty(resourceSpan, "scopeSpans"))
             {
-                foreach (var span in EnumerateArrayProperty(scopeSpan, "spans"))
+                foreach (var span in OtlpSpanReader.EnumerateArrayProperty(scopeSpan, "spans"))
                 {
-                    var traceId = ReadString(span, "traceId");
+                    var traceId = OtlpSpanReader.ReadString(span, "traceId");
                     var key = string.IsNullOrWhiteSpace(traceId)
                         ? $"__missing_trace_id_{missingTraceIdIndex++}"
                         : traceId!;
@@ -109,8 +62,8 @@ internal static class RawMeasurementNormalizer
                         groups.Add(key, group);
                     }
 
-                    MergeResourceAttributes(group.ResourceAttributes, resourceAttributes);
-                    group.Spans.Add(CreateSpan(span));
+                    OtlpSpanReader.MergeResourceAttributes(group.ResourceAttributes, resourceAttributes);
+                    group.Spans.Add(OtlpSpanReader.CreateSpan(span));
                 }
             }
         }
@@ -120,36 +73,61 @@ internal static class RawMeasurementNormalizer
 
     private static MeasurementRow CreateRow(RawTraceGroup group)
     {
-        var explicitTurnCount = ReadFirstInt(group.ResourceAttributes, TurnCountKeys);
-        var explicitToolCallCount = ReadFirstInt(group.ResourceAttributes, ToolCallCountKeys);
+        var explicitTurnCount = OtlpSpanReader.ReadFirstInt(group.ResourceAttributes, TurnCountKeys);
+        var explicitToolCallCount = OtlpSpanReader.ReadFirstInt(group.ResourceAttributes, ToolCallCountKeys);
         var observedTurnCount = 0;
         var observedToolCallCount = 0;
         var errorCount = 0;
         var unknownSpans = new JsonArray();
-        int? inputTokens = null;
-        int? outputTokens = null;
-        int? totalTokens = null;
         ulong? minStart = null;
         ulong? maxEnd = null;
 
+        // No-double-count token rollup: prefer invoke_agent tokens, fall back
+        // to sum of chat/LLM spans only. Never sum both.
+        int? invokeAgentInput = null;
+        int? invokeAgentOutput = null;
+        int? invokeAgentTotal = null;
+        bool hasInvokeAgentTokens = false;
+        int? chatInputSum = null;
+        int? chatOutputSum = null;
+        int? chatTotalSum = null;
+
         foreach (var span in group.Spans)
         {
-            inputTokens = AddNullable(inputTokens, ReadFirstInt(span.Attributes, InputTokenKeys));
-            outputTokens = AddNullable(outputTokens, ReadFirstInt(span.Attributes, OutputTokenKeys));
-            totalTokens = AddNullable(totalTokens, ReadFirstInt(span.Attributes, TotalTokenKeys));
+            explicitTurnCount ??= OtlpSpanReader.ReadFirstInt(span.Attributes, TurnCountKeys);
+            explicitToolCallCount ??= OtlpSpanReader.ReadFirstInt(span.Attributes, ToolCallCountKeys);
 
-            explicitTurnCount ??= ReadFirstInt(span.Attributes, TurnCountKeys);
-            explicitToolCallCount ??= ReadFirstInt(span.Attributes, ToolCallCountKeys);
+            var isInvokeAgent = OtlpSpanReader.HasSpanName(span, "invoke_agent");
+            var isLlm = OtlpSpanReader.IsLlmSpan(span);
 
-            if (IsKnownNonCountedSpan(span))
+            var spanInput = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.InputTokenKeys);
+            var spanOutput = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.OutputTokenKeys);
+            var spanTotal = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.TotalTokenKeys);
+
+            if (isInvokeAgent && !hasInvokeAgentTokens && spanInput.HasValue)
             {
-                // Non-counted spans may still carry token or error metadata.
+                invokeAgentInput = spanInput;
+                invokeAgentOutput = spanOutput;
+                invokeAgentTotal = spanTotal;
+                hasInvokeAgentTokens = true;
             }
-            else if (IsToolSpan(span))
+
+            if (isLlm)
+            {
+                chatInputSum = AddNullable(chatInputSum, spanInput);
+                chatOutputSum = AddNullable(chatOutputSum, spanOutput);
+                chatTotalSum = AddNullable(chatTotalSum, spanTotal);
+            }
+
+            if (OtlpSpanReader.IsKnownNonCountedSpan(span))
+            {
+                // Non-counted spans may still carry error metadata.
+            }
+            else if (OtlpSpanReader.IsToolSpan(span))
             {
                 observedToolCallCount++;
             }
-            else if (IsLlmSpan(span))
+            else if (isLlm)
             {
                 observedTurnCount++;
             }
@@ -158,12 +136,12 @@ internal static class RawMeasurementNormalizer
                 unknownSpans.Add(CreateUnknownSpanNode(span));
             }
 
-            if (IsErrorSpan(span))
+            if (OtlpSpanReader.IsErrorSpan(span))
             {
                 errorCount++;
             }
 
-            errorCount += CountErrorEvents(span);
+            errorCount += OtlpSpanReader.CountErrorEvents(span);
 
             if (span.StartTimeUnixNano.HasValue)
             {
@@ -176,6 +154,23 @@ internal static class RawMeasurementNormalizer
             }
         }
 
+        int? inputTokens;
+        int? outputTokens;
+        int? totalTokens;
+
+        if (hasInvokeAgentTokens)
+        {
+            inputTokens = invokeAgentInput;
+            outputTokens = invokeAgentOutput;
+            totalTokens = invokeAgentTotal;
+        }
+        else
+        {
+            inputTokens = chatInputSum;
+            outputTokens = chatOutputSum;
+            totalTokens = chatTotalSum;
+        }
+
         totalTokens ??= inputTokens.HasValue && outputTokens.HasValue
             ? inputTokens + outputTokens
             : null;
@@ -185,15 +180,15 @@ internal static class RawMeasurementNormalizer
 
         return new MeasurementRow(
             TraceId: group.TraceId,
-            ExperimentId: ReadString(group.ResourceAttributes, "experiment.id"),
-            ClientKind: ReadString(group.ResourceAttributes, "client.kind"),
-            TaskId: ReadString(group.ResourceAttributes, "task.id"),
-            TaskCategory: ReadString(group.ResourceAttributes, "task.category"),
-            TaskRunIndex: ReadInt(group.ResourceAttributes, "task.run_index"),
-            ExperimentCondition: ReadString(group.ResourceAttributes, "experiment.condition"),
-            PromptVersion: ReadString(group.ResourceAttributes, "prompt.version"),
-            AgentVariant: ReadString(group.ResourceAttributes, "agent.variant"),
-            RepoSnapshot: ReadString(group.ResourceAttributes, "repo.snapshot"),
+            ExperimentId: OtlpSpanReader.ReadString(group.ResourceAttributes, "experiment.id"),
+            ClientKind: OtlpSpanReader.ReadString(group.ResourceAttributes, "client.kind"),
+            TaskId: OtlpSpanReader.ReadString(group.ResourceAttributes, "task.id"),
+            TaskCategory: OtlpSpanReader.ReadString(group.ResourceAttributes, "task.category"),
+            TaskRunIndex: OtlpSpanReader.ReadInt(group.ResourceAttributes, "task.run_index"),
+            ExperimentCondition: OtlpSpanReader.ReadString(group.ResourceAttributes, "experiment.condition"),
+            PromptVersion: OtlpSpanReader.ReadString(group.ResourceAttributes, "prompt.version"),
+            AgentVariant: OtlpSpanReader.ReadString(group.ResourceAttributes, "agent.variant"),
+            RepoSnapshot: OtlpSpanReader.ReadString(group.ResourceAttributes, "repo.snapshot"),
             InputTokens: inputTokens,
             OutputTokens: outputTokens,
             TotalTokens: totalTokens,
@@ -210,113 +205,7 @@ internal static class RawMeasurementNormalizer
             AggregationNotes: CreateAggregationNotes(unknownSpans));
     }
 
-    private static JsonObject ReadResourceAttributes(JsonElement resourceSpan)
-    {
-        if (!resourceSpan.TryGetProperty("resource", out var resource)
-            || !resource.TryGetProperty("attributes", out var attributes)
-            || attributes.ValueKind != JsonValueKind.Array)
-        {
-            return new JsonObject();
-        }
-
-        return OtlpAttributeConverter.ConvertAttributesArray(attributes);
-    }
-
-    private static RawSpanInfo CreateSpan(JsonElement span)
-    {
-        var attributes = span.TryGetProperty("attributes", out var attributesElement)
-            && attributesElement.ValueKind == JsonValueKind.Array
-                ? OtlpAttributeConverter.ConvertAttributesArray(attributesElement)
-                : new JsonObject();
-
-        var events = new List<RawSpanEvent>();
-        foreach (var eventElement in EnumerateArrayProperty(span, "events"))
-        {
-            var eventAttributes = eventElement.TryGetProperty("attributes", out var eventAttributesElement)
-                && eventAttributesElement.ValueKind == JsonValueKind.Array
-                    ? OtlpAttributeConverter.ConvertAttributesArray(eventAttributesElement)
-                    : new JsonObject();
-            events.Add(new RawSpanEvent(
-                Name: ReadString(eventElement, "name"),
-                Attributes: eventAttributes));
-        }
-
-        return new RawSpanInfo(
-            SpanId: ReadString(span, "spanId"),
-            Name: ReadString(span, "name"),
-            Kind: ReadString(span, "kind"),
-            StartTimeUnixNano: ReadUnsignedLong(span, "startTimeUnixNano"),
-            EndTimeUnixNano: ReadUnsignedLong(span, "endTimeUnixNano"),
-            StatusCode: TryGetObject(span, "status", out var status) ? ReadString(status, "code") : null,
-            Attributes: attributes,
-            Events: events);
-    }
-
-    private static bool IsLlmSpan(RawSpanInfo span)
-    {
-        return HasAnyStringValue(span.Attributes, GenAiOperationKeys, "chat", "generate_content", "text_completion")
-            || HasStringValue(span.Attributes, "type", "generation")
-            || HasStringValue(span.Attributes, "type", "chat")
-            || HasSpanName(span, "chat");
-    }
-
-    private static bool IsToolSpan(RawSpanInfo span)
-    {
-        return HasStringValue(span.Attributes, "type", "tool")
-            || HasStringValue(span.Attributes, "kind", "tool")
-            || HasStringValue(span.Attributes, "category", "tool")
-            || HasAnyStringValue(span.Attributes, GenAiToolNameKeys)
-            || HasSpanName(span, "execute_tool");
-    }
-
-    private static bool IsKnownNonCountedSpan(RawSpanInfo span)
-    {
-        return HasSpanName(span, "invoke_agent")
-            || HasSpanName(span, "execute_hook")
-            || HasSpanName(span, "lifecycle_event")
-            || HasAnyStringValue(span.Attributes, ["type", "kind", "category"], "permission", "approval", "hook", "lifecycle");
-    }
-
-    private static bool IsErrorSpan(RawSpanInfo span)
-    {
-        if (span.StatusCode is not null
-            && (string.Equals(span.StatusCode, "2", StringComparison.Ordinal)
-                || string.Equals(span.StatusCode, "ERROR", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(span.StatusCode, "STATUS_CODE_ERROR", StringComparison.OrdinalIgnoreCase)))
-        {
-            return true;
-        }
-
-        return HasStringValue(span.Attributes, "level", "error")
-            || HasStringValue(span.Attributes, "status", "error")
-            || ReadString(span.Attributes, "error") is not null;
-    }
-
-    private static int CountErrorEvents(RawSpanInfo span)
-    {
-        var count = 0;
-        foreach (var spanEvent in span.Events)
-        {
-            if (spanEvent.Name is not null
-                && (spanEvent.Name.Contains("exception", StringComparison.OrdinalIgnoreCase)
-                    || spanEvent.Name.Contains("error", StringComparison.OrdinalIgnoreCase)))
-            {
-                count++;
-                continue;
-            }
-
-            if (ReadString(spanEvent.Attributes, "exception.type") is not null
-                || ReadString(spanEvent.Attributes, "error") is not null
-                || HasStringValue(spanEvent.Attributes, "level", "error"))
-            {
-                count++;
-            }
-        }
-
-        return count;
-    }
-
-    private static JsonObject CreateUnknownSpanNode(RawSpanInfo span)
+    private static JsonObject CreateUnknownSpanNode(OtlpSpanReader.RawSpanInfo span)
     {
         var node = new JsonObject();
         AddStringNode(node, "id", span.SpanId);
@@ -356,168 +245,6 @@ internal static class RawMeasurementNormalizer
         return value.HasValue ? (current ?? 0) + value.Value : current;
     }
 
-    private static int? ReadFirstInt(JsonObject attributes, IReadOnlyList<string> candidateKeys)
-    {
-        foreach (var candidateKey in candidateKeys)
-        {
-            var value = ReadInt(attributes, candidateKey);
-            if (value.HasValue)
-            {
-                return value;
-            }
-        }
-
-        return null;
-    }
-
-    private static bool HasStringValue(JsonObject attributes, string propertyName, string expected)
-    {
-        return ReadString(attributes, propertyName) is { } actual
-            && string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool HasAnyStringValue(JsonObject attributes, IReadOnlyList<string> propertyNames, params string[] expectedValues)
-    {
-        foreach (var propertyName in propertyNames)
-        {
-            if (ReadString(attributes, propertyName) is not { } actual)
-            {
-                continue;
-            }
-
-            if (expectedValues.Length == 0
-                || expectedValues.Any(expected => string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase)))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool HasSpanName(RawSpanInfo span, string expectedName)
-    {
-        if (span.Name is null)
-        {
-            return false;
-        }
-
-        return string.Equals(span.Name, expectedName, StringComparison.OrdinalIgnoreCase)
-            || span.Name.StartsWith($"{expectedName} ", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? ReadString(JsonObject attributes, string propertyName)
-    {
-        if (!attributes.TryGetPropertyValue(propertyName, out var value) || value is null)
-        {
-            return null;
-        }
-
-        return value.GetValueKind() == JsonValueKind.String
-            ? value.GetValue<string>()
-            : value.ToJsonString();
-    }
-
-    private static int? ReadInt(JsonObject attributes, string propertyName)
-    {
-        if (!attributes.TryGetPropertyValue(propertyName, out var value) || value is null)
-        {
-            return null;
-        }
-
-        return ReadInt(value);
-    }
-
-    private static int? ReadInt(JsonNode value)
-    {
-        if (value is JsonValue jsonValue)
-        {
-            if (jsonValue.TryGetValue<int>(out var intValue))
-            {
-                return intValue;
-            }
-
-            if (jsonValue.TryGetValue<long>(out var longValue)
-                && longValue >= int.MinValue
-                && longValue <= int.MaxValue)
-            {
-                return (int)longValue;
-            }
-
-            if (jsonValue.TryGetValue<string>(out var stringValue)
-                && int.TryParse(stringValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
-            {
-                return parsed;
-            }
-        }
-
-        return null;
-    }
-
-    private static string? ReadString(JsonElement element, string propertyName)
-    {
-        if (element.ValueKind != JsonValueKind.Object
-            || !element.TryGetProperty(propertyName, out var property)
-            || property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
-        {
-            return null;
-        }
-
-        return property.ValueKind == JsonValueKind.String
-            ? property.GetString()
-            : property.GetRawText();
-    }
-
-    private static ulong? ReadUnsignedLong(JsonElement element, string propertyName)
-    {
-        if (element.ValueKind != JsonValueKind.Object
-            || !element.TryGetProperty(propertyName, out var property))
-        {
-            return null;
-        }
-
-        return property.ValueKind switch
-        {
-            JsonValueKind.Number when property.TryGetUInt64(out var value) => value,
-            JsonValueKind.String when ulong.TryParse(property.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) => value,
-            _ => null,
-        };
-    }
-
-    private static bool TryGetObject(JsonElement element, string propertyName, out JsonElement value)
-    {
-        value = default;
-        return element.ValueKind == JsonValueKind.Object
-            && element.TryGetProperty(propertyName, out value)
-            && value.ValueKind == JsonValueKind.Object;
-    }
-
-    private static IEnumerable<JsonElement> EnumerateArrayProperty(JsonElement element, string propertyName)
-    {
-        if (!element.TryGetProperty(propertyName, out var arrayElement) || arrayElement.ValueKind != JsonValueKind.Array)
-        {
-            yield break;
-        }
-
-        foreach (var item in arrayElement.EnumerateArray())
-        {
-            yield return item;
-        }
-    }
-
-    private static void MergeResourceAttributes(JsonObject target, JsonObject source)
-    {
-        foreach (var property in source)
-        {
-            if (!target.ContainsKey(property.Key))
-            {
-                target[property.Key] = property.Value is null
-                    ? null
-                    : JsonNode.Parse(property.Value.ToJsonString());
-            }
-        }
-    }
-
     private static void AddStringNode(JsonObject node, string propertyName, string? value)
     {
         if (value is not null)
@@ -545,20 +272,6 @@ internal static class RawMeasurementNormalizer
 
         public JsonObject ResourceAttributes { get; } = new();
 
-        public List<RawSpanInfo> Spans { get; } = [];
+        public List<OtlpSpanReader.RawSpanInfo> Spans { get; } = [];
     }
-
-    private sealed record RawSpanInfo(
-        string? SpanId,
-        string? Name,
-        string? Kind,
-        ulong? StartTimeUnixNano,
-        ulong? EndTimeUnixNano,
-        string? StatusCode,
-        JsonObject Attributes,
-        IReadOnlyList<RawSpanEvent> Events);
-
-    private sealed record RawSpanEvent(
-        string? Name,
-        JsonObject Attributes);
 }
