@@ -466,7 +466,8 @@ internal sealed class RawTelemetryStore
         command.CommandText =
             """
             SELECT id, trace_id, client_kind, experiment_id, task_id, task_category, agent_variant, prompt_version,
-                   span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at
+                   span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at,
+                   input_tokens, output_tokens, total_tokens, turn_count, agent_invocation_count, duration_ms, primary_model
             FROM monitor_traces
             WHERE id > $after
             ORDER BY id
@@ -493,7 +494,14 @@ internal sealed class RawTelemetryStore
                 ErrorCount: reader.IsDBNull(10) ? null : reader.GetInt32(10),
                 FirstSeenAt: reader.IsDBNull(11) ? null : reader.GetString(11),
                 LastSeenAt: reader.IsDBNull(12) ? null : reader.GetString(12),
-                ProjectedAt: reader.GetString(13)));
+                ProjectedAt: reader.GetString(13),
+                InputTokens: reader.IsDBNull(14) ? null : reader.GetInt32(14),
+                OutputTokens: reader.IsDBNull(15) ? null : reader.GetInt32(15),
+                TotalTokens: reader.IsDBNull(16) ? null : reader.GetInt32(16),
+                TurnCount: reader.IsDBNull(17) ? null : reader.GetInt32(17),
+                AgentInvocationCount: reader.IsDBNull(18) ? null : reader.GetInt32(18),
+                DurationMs: reader.IsDBNull(19) ? null : reader.GetDouble(19),
+                PrimaryModel: reader.IsDBNull(20) ? null : reader.GetString(20)));
         }
 
         return BuildPage(items, limit);
@@ -755,6 +763,71 @@ internal sealed class RawTelemetryStore
         var backlog = reader.GetInt32(0);
         var oldest = reader.IsDBNull(1) ? (DateTimeOffset?)null : ParseTimestamp(reader.GetString(1));
         return new MonitorProjectionStatus(backlog, oldest);
+    }
+
+    /// <summary>
+    /// Cursor page of sanitized <c>monitor_spans</c> rows for a trace after
+    /// <paramref name="afterId"/>, ordered by projection-row id, using the same
+    /// <c>limit + 1</c> probe as the other cursor reads.
+    /// </summary>
+    public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, raw_record_id, trace_id, span_id, parent_span_id, span_ordinal,
+                   operation, category, tool_name, tool_type, mcp_tool_name, mcp_server_hash,
+                   agent_name, request_model, response_model, input_tokens, output_tokens,
+                   total_tokens, reasoning_tokens, cache_read_tokens, cache_creation_tokens,
+                   status, error_type, finish_reasons, conversation_id, duration_ms,
+                   start_time, end_time, projected_at
+            FROM monitor_spans
+            WHERE trace_id = $trace_id AND id > $after
+            ORDER BY id
+            LIMIT $limit;
+            """;
+        AddParameter(command, "$trace_id", traceId);
+        AddParameter(command, "$after", afterId);
+        AddParameter(command, "$limit", limit + 1);
+
+        using var reader = command.ExecuteReader();
+        var items = new List<MonitorSpanRow>();
+        while (reader.Read())
+        {
+            items.Add(new MonitorSpanRow(
+                Id: reader.GetInt64(0),
+                RawRecordId: reader.GetInt64(1),
+                TraceId: reader.GetString(2),
+                SpanId: reader.IsDBNull(3) ? null : reader.GetString(3),
+                ParentSpanId: reader.IsDBNull(4) ? null : reader.GetString(4),
+                SpanOrdinal: reader.GetInt32(5),
+                Operation: reader.IsDBNull(6) ? null : reader.GetString(6),
+                Category: reader.IsDBNull(7) ? null : reader.GetString(7),
+                ToolName: reader.IsDBNull(8) ? null : reader.GetString(8),
+                ToolType: reader.IsDBNull(9) ? null : reader.GetString(9),
+                McpToolName: reader.IsDBNull(10) ? null : reader.GetString(10),
+                McpServerHash: reader.IsDBNull(11) ? null : reader.GetString(11),
+                AgentName: reader.IsDBNull(12) ? null : reader.GetString(12),
+                RequestModel: reader.IsDBNull(13) ? null : reader.GetString(13),
+                ResponseModel: reader.IsDBNull(14) ? null : reader.GetString(14),
+                InputTokens: reader.IsDBNull(15) ? null : reader.GetInt32(15),
+                OutputTokens: reader.IsDBNull(16) ? null : reader.GetInt32(16),
+                TotalTokens: reader.IsDBNull(17) ? null : reader.GetInt32(17),
+                ReasoningTokens: reader.IsDBNull(18) ? null : reader.GetInt32(18),
+                CacheReadTokens: reader.IsDBNull(19) ? null : reader.GetInt32(19),
+                CacheCreationTokens: reader.IsDBNull(20) ? null : reader.GetInt32(20),
+                Status: reader.IsDBNull(21) ? null : reader.GetString(21),
+                ErrorType: reader.IsDBNull(22) ? null : reader.GetString(22),
+                FinishReasons: reader.IsDBNull(23) ? null : reader.GetString(23),
+                ConversationId: reader.IsDBNull(24) ? null : reader.GetString(24),
+                DurationMs: reader.IsDBNull(25) ? null : reader.GetDouble(25),
+                StartTime: reader.IsDBNull(26) ? null : reader.GetString(26),
+                EndTime: reader.IsDBNull(27) ? null : reader.GetString(27),
+                ProjectedAt: reader.GetString(28)));
+        }
+
+        return BuildPage(items, limit);
     }
 
     /// <summary>All <c>monitor_spans</c> rows for a trace, ordered for deterministic reads in tests.</summary>

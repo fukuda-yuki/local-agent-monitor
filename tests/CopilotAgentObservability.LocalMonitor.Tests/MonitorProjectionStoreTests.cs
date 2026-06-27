@@ -175,6 +175,7 @@ public class MonitorProjectionStoreTests
             {
                 "Id", "TraceId", "ClientKind", "ExperimentId", "TaskId", "TaskCategory", "AgentVariant",
                 "PromptVersion", "SpanCount", "ToolCallCount", "ErrorCount", "FirstSeenAt", "LastSeenAt", "ProjectedAt",
+                "InputTokens", "OutputTokens", "TotalTokens", "TurnCount", "AgentInvocationCount", "DurationMs", "PrimaryModel",
             },
             trace);
 

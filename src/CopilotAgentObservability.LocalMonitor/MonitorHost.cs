@@ -173,6 +173,64 @@ internal static class MonitorHost
                     first_seen_at = row.FirstSeenAt,
                     last_seen_at = row.LastSeenAt,
                     projected_at = row.ProjectedAt,
+                    input_tokens = row.InputTokens,
+                    output_tokens = row.OutputTokens,
+                    total_tokens = row.TotalTokens,
+                    turn_count = row.TurnCount,
+                    agent_invocation_count = row.AgentInvocationCount,
+                    duration_ms = row.DurationMs,
+                    primary_model = row.PrimaryModel,
+                });
+                long? nextCursor = page.HasMore && page.Items.Count > 0 ? page.Items[^1].Id : null;
+                await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
+            }
+            catch (PersistenceBusyException)
+            {
+                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+            }
+        });
+        app.MapGet("/api/monitor/traces/{traceId}/spans", async (string traceId, HttpContext context) =>
+        {
+            if (!TryParseCursorQuery(context, out var after, out var limit))
+            {
+                await WriteInvalidCursorQueryAsync(context);
+                return;
+            }
+
+            try
+            {
+                var page = projectionStore.ListMonitorSpans(traceId, after, limit);
+                var items = page.Items.Select(row => new
+                {
+                    id = row.Id,
+                    raw_record_id = row.RawRecordId,
+                    trace_id = row.TraceId,
+                    span_id = row.SpanId,
+                    parent_span_id = row.ParentSpanId,
+                    span_ordinal = row.SpanOrdinal,
+                    operation = row.Operation,
+                    category = row.Category,
+                    tool_name = row.ToolName,
+                    tool_type = row.ToolType,
+                    mcp_tool_name = row.McpToolName,
+                    mcp_server_hash = row.McpServerHash,
+                    agent_name = row.AgentName,
+                    request_model = row.RequestModel,
+                    response_model = row.ResponseModel,
+                    input_tokens = row.InputTokens,
+                    output_tokens = row.OutputTokens,
+                    total_tokens = row.TotalTokens,
+                    reasoning_tokens = row.ReasoningTokens,
+                    cache_read_tokens = row.CacheReadTokens,
+                    cache_creation_tokens = row.CacheCreationTokens,
+                    status = row.Status,
+                    error_type = row.ErrorType,
+                    finish_reasons = row.FinishReasons,
+                    conversation_id = row.ConversationId,
+                    duration_ms = row.DurationMs,
+                    start_time = row.StartTime,
+                    end_time = row.EndTime,
+                    projected_at = row.ProjectedAt,
                 });
                 long? nextCursor = page.HasMore && page.Items.Count > 0 ? page.Items[^1].Id : null;
                 await WriteJsonAsync(context, new { items, next_cursor = nextCursor });

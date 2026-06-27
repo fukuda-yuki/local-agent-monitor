@@ -31,7 +31,14 @@ internal sealed record MonitorTraceRow(
     int? ErrorCount,
     string? FirstSeenAt,
     string? LastSeenAt,
-    string ProjectedAt);
+    string ProjectedAt,
+    int? InputTokens,
+    int? OutputTokens,
+    int? TotalTokens,
+    int? TurnCount,
+    int? AgentInvocationCount,
+    double? DurationMs,
+    string? PrimaryModel);
 
 /// <summary>Backlog and the oldest unprocessed ingestion time, for projection-lag readiness.</summary>
 internal sealed record MonitorProjectionStatus(

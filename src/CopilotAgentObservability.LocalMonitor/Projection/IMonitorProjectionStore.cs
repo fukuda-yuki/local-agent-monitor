@@ -38,6 +38,8 @@ internal interface IMonitorProjectionStore
 
     MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit);
 
+    MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit);
+
     RawTelemetryRecord? GetRawRecordById(long id);
 }
 
@@ -81,6 +83,9 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
 
     public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
         Guard(() => store.ListMonitorTraces(afterId, limit));
+
+    public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
+        Guard(() => store.ListMonitorSpans(traceId, afterId, limit));
 
     public RawTelemetryRecord? GetRawRecordById(long id) =>
         Guard(() => store.GetRawRecordById(id));

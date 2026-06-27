@@ -1,7 +1,8 @@
 # Sprint9 M4 — Sanitized Read API (Plan)
 
-Status: **Planned** — to be challenge-reviewed via the Codex companion `review`
-path before implementation (per `CLAUDE.md`).
+Status: **Implemented** (2026-06-27). Implementation delegated to a Sonnet
+subagent and verified by the orchestrator (build/test + baseline-diff review +
+sanitizer/attribute-key trace of the negative tests).
 Author role: Claude (orchestrator) per `CLAUDE.md`.
 
 Sprint-local planning evidence, not product behavior. Source-of-truth order:
@@ -31,9 +32,10 @@ Out of scope (deferred):
 - A JSON **raw** API — raw stays server-rendered only (README non-goal).
 
 ## Tasks
-- [ ] Add the new rollup columns to the `/api/monitor/traces` row shape.
-- [ ] Add the cursor-paginated span list endpoint (allowlist columns only).
-- [ ] Add negative tests (no raw/PII; invalid query `400`) + per-attribute
+- [x] Add the new rollup columns to the `/api/monitor/traces` row shape.
+- [x] Add the cursor-paginated span list endpoint
+      (`GET /api/monitor/traces/{traceId}/spans`, allowlist columns only).
+- [x] Add negative tests (no raw/PII; invalid query `400`) + per-attribute
       sanitization assertions at the API layer.
 
 ## Acceptance criteria
@@ -55,6 +57,19 @@ negative tests present and passing.
 - Depends on **M3** (tables + columns) and **M2** (projection shape).
 
 ## Review
-- Challenge-reviewed via the Codex companion `review` / adversarial path
-  (read-only) before implementation, per `CLAUDE.md`. Record the outcome here (or
-  in a sibling `review.md`).
+- Recorded orchestrator self-review (per `CLAUDE.md` review-workflow; user
+  authorized Sonnet delegation for this milestone in place of the Codex path).
+  The orchestrator verified the diff against the sanitized-only invariant and
+  traced each negative test end-to-end: the injected markers reach the projection
+  via the real builder attribute keys (`gen_ai.tool.name`,
+  `github.copilot.tool.parameters.mcp_tool_name`, `gen_ai.agent.name`,
+  `error.type`) and are dropped by `MeasurementSanitizer.IsUnsafeStringValue`
+  (email regex, `[A-Za-z]:\\` path rule, case-insensitive `secret` substring) —
+  so the assertions are meaningful, not trivially passing.
+- Validation: `dotnet build` 0 warnings / 0 errors; `dotnet test` **502/502**
+  green (300 ConfigCli + 202 LocalMonitor; +6 over the 496 baseline). No storage,
+  projection, or sanitization logic changed — read-API surface + tests only.
+- Files changed: `MonitorProjectionRows.cs`, `RawTelemetryStore.cs`,
+  `IMonitorProjectionStore.cs`, `MonitorHost.cs` (production);
+  `MonitorProjectionApiTests.cs` (new tests) plus mechanical interface/allowlist
+  updates in `ProjectionWorkerTests.cs` and `MonitorProjectionStoreTests.cs`.

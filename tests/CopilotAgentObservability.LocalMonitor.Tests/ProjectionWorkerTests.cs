@@ -276,6 +276,9 @@ public class ProjectionWorkerTests
         public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
             throw new NotSupportedException();
 
+        public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
+            throw new NotSupportedException();
+
         public RawTelemetryRecord? GetRawRecordById(long id) =>
             throw new NotSupportedException();
     }
