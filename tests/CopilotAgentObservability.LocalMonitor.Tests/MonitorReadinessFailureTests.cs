@@ -143,7 +143,7 @@ public class MonitorReadinessFailureTests
         var options = new MonitorOptions(
             temp.DatabasePath,
             url,
-            EnableRawView: false,
+            SanitizedOnly: false,
             MaxRequestBodyBytes: 31_457_280,
             ingestionStallThresholdSeconds,
             projectionLagThresholdSeconds);

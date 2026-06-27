@@ -22,11 +22,11 @@ public class MonitorSecurityBoundaryTests
     };
 
     [Fact]
-    public async Task DefaultSurfaces_NeverReturnRawOrPii_EvenWithRawViewEnabled()
+    public async Task DefaultSurfaces_NeverReturnRawOrPii_EvenWithRawShownByDefault()
     {
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
-        await using var host = await StartReadOnlyHostAsync(temp, enableRawView: true);
+        await using var host = await StartReadOnlyHostAsync(temp);
 
         foreach (var path in new[]
                  {
@@ -43,11 +43,11 @@ public class MonitorSecurityBoundaryTests
     }
 
     [Fact]
-    public async Task RawRoute_IsAbsentWithoutFlag()
+    public async Task RawRoute_IsAbsentUnderSanitizedOnly()
     {
         using var temp = new MonitorTempDirectory();
         var id = SeedSensitiveProjectedRecord(temp);
-        await using var host = await StartReadOnlyHostAsync(temp, enableRawView: false);
+        await using var host = await StartReadOnlyHostAsync(temp, sanitizedOnly: true);
 
         var response = await host.Client.GetAsync($"/traces/{id}/raw");
 
@@ -55,11 +55,11 @@ public class MonitorSecurityBoundaryTests
     }
 
     [Fact]
-    public async Task RawRoute_WithFlag_CrossOriginIsForbidden()
+    public async Task RawRoute_CrossOriginIsForbidden()
     {
         using var temp = new MonitorTempDirectory();
         var id = SeedSensitiveProjectedRecord(temp);
-        await using var host = await StartReadOnlyHostAsync(temp, enableRawView: true);
+        await using var host = await StartReadOnlyHostAsync(temp);
 
         using var crossSite = new HttpRequestMessage(HttpMethod.Get, $"/traces/{id}/raw");
         crossSite.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "cross-site");
@@ -74,7 +74,7 @@ public class MonitorSecurityBoundaryTests
     public async Task Events_DoesNotAcceptCrossOriginPost()
     {
         using var temp = new MonitorTempDirectory();
-        await using var host = await StartReadOnlyHostAsync(temp, enableRawView: true);
+        await using var host = await StartReadOnlyHostAsync(temp);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "/events")
         {
@@ -94,7 +94,7 @@ public class MonitorSecurityBoundaryTests
     {
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
-        await using var host = await StartReadOnlyHostAsync(temp, enableRawView: true);
+        await using var host = await StartReadOnlyHostAsync(temp);
 
         using var request = new HttpRequestMessage(HttpMethod.Get, "/")
         {
@@ -129,7 +129,7 @@ public class MonitorSecurityBoundaryTests
     public async Task RawPayloadMarkers_DoNotAppearInErrorResponses()
     {
         using var temp = new MonitorTempDirectory();
-        await using var host = await StartLiveHostAsync(temp, enableRawView: true);
+        await using var host = await StartLiveHostAsync(temp);
 
         var accepted = await host.Client.PostAsync("/v1/traces", JsonContent(SensitiveTraceJson));
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
@@ -188,19 +188,19 @@ public class MonitorSecurityBoundaryTests
         return -1;
     }
 
-    private static async Task<RunningHost> StartReadOnlyHostAsync(MonitorTempDirectory temp, bool enableRawView)
+    private static async Task<RunningHost> StartReadOnlyHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false)
     {
         var url = $"http://127.0.0.1:{GetFreePort()}";
-        var options = new MonitorOptions(temp.DatabasePath, url, EnableRawView: enableRawView, MaxRequestBodyBytes: 31_457_280);
+        var options = new MonitorOptions(temp.DatabasePath, url, SanitizedOnly: sanitizedOnly, MaxRequestBodyBytes: 31_457_280);
         var app = MonitorHost.Build(options, new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
         await app.StartAsync();
         return new RunningHost(app, new HttpClient { BaseAddress = new Uri(url) });
     }
 
-    private static async Task<RunningHost> StartLiveHostAsync(MonitorTempDirectory temp, bool enableRawView = false)
+    private static async Task<RunningHost> StartLiveHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false)
     {
         var url = $"http://127.0.0.1:{GetFreePort()}";
-        var options = new MonitorOptions(temp.DatabasePath, url, EnableRawView: enableRawView, MaxRequestBodyBytes: 31_457_280);
+        var options = new MonitorOptions(temp.DatabasePath, url, SanitizedOnly: sanitizedOnly, MaxRequestBodyBytes: 31_457_280);
         var app = MonitorHost.Build(options, new MonitorHostTestOptions { ProjectionPollInterval = TimeSpan.FromMilliseconds(50) });
         await app.StartAsync();
         return new RunningHost(app, new HttpClient { BaseAddress = new Uri(url) });

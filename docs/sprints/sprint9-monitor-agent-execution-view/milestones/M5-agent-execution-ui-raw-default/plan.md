@@ -1,7 +1,7 @@
 # Sprint9 M5 — Agent-Execution UI + raw default (Plan)
 
-Status: **Planned** — to be challenge-reviewed via the Codex companion `review`
-path before implementation (per `CLAUDE.md`).
+Status: **Implemented** — see [review.md](review.md) (recorded self-review; build
+0/0, 509 tests passing).
 Author role: Claude (orchestrator) per `CLAUDE.md`.
 
 Sprint-local planning evidence, not product behavior. Source-of-truth order:

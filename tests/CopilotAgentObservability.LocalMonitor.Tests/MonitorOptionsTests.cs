@@ -3,15 +3,33 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public class MonitorOptionsTests
 {
     [Fact]
-    public void Parse_DefaultsToLoopbackPort4320AndRawViewOff()
+    public void Parse_DefaultsToLoopbackPort4320AndRawShown()
     {
         var result = MonitorOptions.Parse([]);
 
         Assert.Null(result.Error);
         Assert.Equal(RawStoreDefaults.DefaultDatabasePath, result.Options!.DatabasePath);
         Assert.Equal("http://127.0.0.1:4320", result.Options.Url);
-        Assert.False(result.Options.EnableRawView);
+        // D023: raw is shown by default; --sanitized-only is the opt-out.
+        Assert.False(result.Options.SanitizedOnly);
         Assert.Equal(31_457_280, result.Options.MaxRequestBodyBytes);
+    }
+
+    [Fact]
+    public void Parse_SanitizedOnlyFlagRestoresMetadataOnlyMode()
+    {
+        var result = MonitorOptions.Parse(["--sanitized-only"]);
+
+        Assert.Null(result.Error);
+        Assert.True(result.Options!.SanitizedOnly);
+    }
+
+    [Fact]
+    public void Parse_RejectsRemovedEnableRawViewFlag()
+    {
+        var result = MonitorOptions.Parse(["--enable-raw-view"]);
+
+        Assert.Equal("unknown local-monitor option '--enable-raw-view'.", result.Error);
     }
 
     [Fact]

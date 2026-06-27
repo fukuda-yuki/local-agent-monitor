@@ -17,6 +17,13 @@
                 <th>SpanCount</th>
                 <th>ToolCallCount</th>
                 <th>ErrorCount</th>
+                <th>InputTokens</th>
+                <th>OutputTokens</th>
+                <th>TotalTokens</th>
+                <th>TurnCount</th>
+                <th>AgentInvocationCount</th>
+                <th>DurationMs</th>
+                <th>PrimaryModel</th>
                 <th>FirstSeenAt</th>
                 <th>LastSeenAt</th>
                 <th>ProjectedAt</th>
@@ -27,7 +34,7 @@
             {
                 <tr>
                     <td>@row.Id</td>
-                    <td>@row.TraceId</td>
+                    <td><a href="/traces/@row.TraceId">@row.TraceId</a></td>
                     <td>@row.ClientKind</td>
                     <td>@row.ExperimentId</td>
                     <td>@row.TaskId</td>
@@ -37,6 +44,13 @@
                     <td>@row.SpanCount</td>
                     <td>@row.ToolCallCount</td>
                     <td>@row.ErrorCount</td>
+                    <td>@row.InputTokens</td>
+                    <td>@row.OutputTokens</td>
+                    <td>@row.TotalTokens</td>
+                    <td>@row.TurnCount</td>
+                    <td>@row.AgentInvocationCount</td>
+                    <td>@row.DurationMs</td>
+                    <td>@row.PrimaryModel</td>
                     <td>@row.FirstSeenAt</td>
                     <td>@row.LastSeenAt</td>
                     <td>@row.ProjectedAt</td>

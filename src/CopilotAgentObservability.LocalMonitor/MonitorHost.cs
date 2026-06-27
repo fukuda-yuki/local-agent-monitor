@@ -260,9 +260,10 @@ internal static class MonitorHost
                 // Client disconnected or host shutting down; end the stream quietly.
             }
         });
-        if (options.EnableRawView)
+        if (!options.SanitizedOnly)
         {
-            // The only raw / PII surface, and only with the explicit opt-in flag.
+            // A raw / PII surface (alongside the trace-detail page), active by
+            // default per D023; --sanitized-only removes it (route absent → 404).
             // Same-origin enforced (cross-site browser reads cannot exfiltrate),
             // no-store, and the payload rendered as HTML-encoded inert text.
             app.MapGet("/traces/{rawRecordId:long}/raw", async (long rawRecordId, HttpContext context) =>
@@ -464,12 +465,13 @@ internal static class MonitorHost
     }
 
     /// <summary>
-    /// Strict same-origin check for the opt-in raw-detail route: a browser
-    /// <c>Sec-Fetch-Site</c> other than <c>same-origin</c> / <c>none</c>, or an
-    /// <c>Origin</c> that does not match the request's own scheme/host/port, is a
-    /// cross-site request and is refused (blocks other-origin browser exfiltration).
+    /// Strict same-origin check for the raw-bearing routes (raw-detail route and
+    /// the trace-detail page): a browser <c>Sec-Fetch-Site</c> other than
+    /// <c>same-origin</c> / <c>none</c>, or an <c>Origin</c> that does not match the
+    /// request's own scheme/host/port, is a cross-site request and is refused
+    /// (blocks other-origin browser exfiltration).
     /// </summary>
-    private static bool IsCrossSiteRequest(HttpContext context)
+    internal static bool IsCrossSiteRequest(HttpContext context)
     {
         var secFetchSite = context.Request.Headers["Sec-Fetch-Site"].ToString();
         if (!string.IsNullOrEmpty(secFetchSite)

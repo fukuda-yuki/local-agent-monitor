@@ -244,7 +244,7 @@ public class MonitorProjectionApiTests
     private static async Task<RunningHost> StartReadOnlyHostAsync(MonitorTempDirectory temp)
     {
         var url = $"http://127.0.0.1:{GetFreePort()}";
-        var options = new MonitorOptions(temp.DatabasePath, url, EnableRawView: false, MaxRequestBodyBytes: 31_457_280);
+        var options = new MonitorOptions(temp.DatabasePath, url, SanitizedOnly: false, MaxRequestBodyBytes: 31_457_280);
         var app = MonitorHost.Build(options, new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
         await app.StartAsync();
         return new RunningHost(app, new HttpClient { BaseAddress = new Uri(url) });
@@ -253,7 +253,7 @@ public class MonitorProjectionApiTests
     private static async Task<RunningHost> StartLiveHostAsync(MonitorTempDirectory temp)
     {
         var url = $"http://127.0.0.1:{GetFreePort()}";
-        var options = new MonitorOptions(temp.DatabasePath, url, EnableRawView: false, MaxRequestBodyBytes: 31_457_280);
+        var options = new MonitorOptions(temp.DatabasePath, url, SanitizedOnly: false, MaxRequestBodyBytes: 31_457_280);
         var app = MonitorHost.Build(options, new MonitorHostTestOptions { ProjectionPollInterval = TimeSpan.FromMilliseconds(50) });
         await app.StartAsync();
         return new RunningHost(app, new HttpClient { BaseAddress = new Uri(url) });

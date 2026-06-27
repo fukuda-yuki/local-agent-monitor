@@ -507,6 +507,54 @@ internal sealed class RawTelemetryStore
         return BuildPage(items, limit);
     }
 
+    /// <summary>
+    /// Fetches one sanitized <c>monitor_traces</c> row by <c>trace_id</c> for the
+    /// trace-detail page summary; null if the trace has not been projected.
+    /// </summary>
+    public MonitorTraceRow? GetMonitorTrace(string traceId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, trace_id, client_kind, experiment_id, task_id, task_category, agent_variant, prompt_version,
+                   span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at,
+                   input_tokens, output_tokens, total_tokens, turn_count, agent_invocation_count, duration_ms, primary_model
+            FROM monitor_traces
+            WHERE trace_id = $trace_id;
+            """;
+        AddParameter(command, "$trace_id", traceId);
+
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new MonitorTraceRow(
+            Id: reader.GetInt64(0),
+            TraceId: reader.GetString(1),
+            ClientKind: reader.IsDBNull(2) ? null : reader.GetString(2),
+            ExperimentId: reader.IsDBNull(3) ? null : reader.GetString(3),
+            TaskId: reader.IsDBNull(4) ? null : reader.GetString(4),
+            TaskCategory: reader.IsDBNull(5) ? null : reader.GetString(5),
+            AgentVariant: reader.IsDBNull(6) ? null : reader.GetString(6),
+            PromptVersion: reader.IsDBNull(7) ? null : reader.GetString(7),
+            SpanCount: reader.IsDBNull(8) ? null : reader.GetInt32(8),
+            ToolCallCount: reader.IsDBNull(9) ? null : reader.GetInt32(9),
+            ErrorCount: reader.IsDBNull(10) ? null : reader.GetInt32(10),
+            FirstSeenAt: reader.IsDBNull(11) ? null : reader.GetString(11),
+            LastSeenAt: reader.IsDBNull(12) ? null : reader.GetString(12),
+            ProjectedAt: reader.GetString(13),
+            InputTokens: reader.IsDBNull(14) ? null : reader.GetInt32(14),
+            OutputTokens: reader.IsDBNull(15) ? null : reader.GetInt32(15),
+            TotalTokens: reader.IsDBNull(16) ? null : reader.GetInt32(16),
+            TurnCount: reader.IsDBNull(17) ? null : reader.GetInt32(17),
+            AgentInvocationCount: reader.IsDBNull(18) ? null : reader.GetInt32(18),
+            DurationMs: reader.IsDBNull(19) ? null : reader.GetDouble(19),
+            PrimaryModel: reader.IsDBNull(20) ? null : reader.GetString(20));
+    }
+
     /// <summary>Fetches one raw record by id for the opt-in raw-detail route; null if not found.</summary>
     public RawTelemetryRecord? GetRawRecordById(long id)
     {
@@ -522,6 +570,34 @@ internal sealed class RawTelemetryStore
 
         using var reader = command.ExecuteReader();
         return reader.Read() ? ReadRawRecord(reader) : null;
+    }
+
+    /// <summary>
+    /// All raw records for a trace (ordered by id) for the raw-bearing trace-detail
+    /// page's inline rendering; empty when the trace has no raw records. Uses the
+    /// <c>IX_raw_records_trace_id</c> index.
+    /// </summary>
+    public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, source, trace_id, received_at, resource_attributes_json, payload_json, schema_version
+            FROM raw_records
+            WHERE trace_id = $trace_id
+            ORDER BY id;
+            """;
+        AddParameter(command, "$trace_id", traceId);
+
+        using var reader = command.ExecuteReader();
+        var records = new List<RawTelemetryRecord>();
+        while (reader.Read())
+        {
+            records.Add(ReadRawRecord(reader));
+        }
+
+        return records;
     }
 
     /// <summary>

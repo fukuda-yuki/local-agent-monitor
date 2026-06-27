@@ -38,9 +38,15 @@ internal interface IMonitorProjectionStore
 
     MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit);
 
+    MonitorTraceRow? GetMonitorTrace(string traceId);
+
     MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit);
 
+    IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId);
+
     RawTelemetryRecord? GetRawRecordById(long id);
+
+    IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId);
 }
 
 internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
@@ -84,11 +90,20 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
     public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
         Guard(() => store.ListMonitorTraces(afterId, limit));
 
+    public MonitorTraceRow? GetMonitorTrace(string traceId) =>
+        Guard(() => store.GetMonitorTrace(traceId));
+
     public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
         Guard(() => store.ListMonitorSpans(traceId, afterId, limit));
 
+    public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) =>
+        Guard(() => store.GetSpansForTrace(traceId));
+
     public RawTelemetryRecord? GetRawRecordById(long id) =>
         Guard(() => store.GetRawRecordById(id));
+
+    public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId) =>
+        Guard(() => store.ListRawRecordsByTraceId(traceId));
 
     private static T Guard<T>(Func<T> operation)
     {

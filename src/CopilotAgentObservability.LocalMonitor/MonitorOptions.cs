@@ -3,7 +3,7 @@ namespace CopilotAgentObservability.LocalMonitor;
 internal sealed record MonitorOptions(
     string DatabasePath,
     string Url,
-    bool EnableRawView,
+    bool SanitizedOnly,
     int MaxRequestBodyBytes,
     int IngestionStallThresholdSeconds = MonitorOptions.DefaultIngestionStallThresholdSeconds,
     int ProjectionLagThresholdSeconds = MonitorOptions.DefaultProjectionLagThresholdSeconds)
@@ -26,7 +26,7 @@ internal sealed record MonitorOptions(
         var databasePathSet = false;
         var urlSet = false;
         var portSet = false;
-        var enableRawView = false;
+        var sanitizedOnly = false;
         int? maxRequestBodyBytes = null;
         int? ingestionStallThresholdSeconds = null;
         int? projectionLagThresholdSeconds = null;
@@ -106,8 +106,8 @@ internal sealed record MonitorOptions(
                     index++;
                     break;
 
-                case "--enable-raw-view":
-                    enableRawView = true;
+                case "--sanitized-only":
+                    sanitizedOnly = true;
                     break;
 
                 case "--max-request-body-bytes":
@@ -221,7 +221,7 @@ internal sealed record MonitorOptions(
             new MonitorOptions(
                 databasePath,
                 url,
-                enableRawView,
+                sanitizedOnly,
                 maxRequestBodyBytes ?? DefaultMaxRequestBodyBytes,
                 ingestionStallThresholdSeconds ?? DefaultIngestionStallThresholdSeconds,
                 projectionLagThresholdSeconds ?? DefaultProjectionLagThresholdSeconds),

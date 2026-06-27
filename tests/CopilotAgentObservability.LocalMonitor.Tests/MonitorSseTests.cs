@@ -87,7 +87,7 @@ public class MonitorSseTests
     private static async Task<RunningHost> StartHostAsync(MonitorTempDirectory temp, TimeSpan projectionPollInterval)
     {
         var url = $"http://127.0.0.1:{GetFreePort()}";
-        var options = new MonitorOptions(temp.DatabasePath, url, EnableRawView: false, MaxRequestBodyBytes: 31_457_280);
+        var options = new MonitorOptions(temp.DatabasePath, url, SanitizedOnly: false, MaxRequestBodyBytes: 31_457_280);
         var app = MonitorHost.Build(options, new MonitorHostTestOptions { ProjectionPollInterval = projectionPollInterval });
         await app.StartAsync();
         return new RunningHost(app, new HttpClient { BaseAddress = new Uri(url) });

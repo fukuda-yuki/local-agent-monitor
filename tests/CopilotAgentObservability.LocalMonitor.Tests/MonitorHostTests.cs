@@ -210,7 +210,7 @@ public class MonitorHostTests
         using var error = new StringWriter();
 
         var exitCode = await MonitorHost.RunAsync(
-            new MonitorOptions(tempDirectory.DatabasePath, $"http://127.0.0.1:{port}", EnableRawView: false, MaxRequestBodyBytes: 31_457_280),
+            new MonitorOptions(tempDirectory.DatabasePath, $"http://127.0.0.1:{port}", SanitizedOnly: false, MaxRequestBodyBytes: 31_457_280),
             output,
             error,
             CancellationToken.None);
@@ -344,10 +344,10 @@ public class MonitorHostTests
     }
 
     [Fact]
-    public async Task RawDetailRoute_RemainsAbsent()
+    public async Task RawDetailRoute_IsAbsentUnderSanitizedOnly()
     {
         using var tempDirectory = new MonitorTempDirectory();
-        await using var host = await StartHostAsync(tempDirectory);
+        await using var host = await StartHostAsync(tempDirectory, sanitizedOnly: true);
 
         var response = await host.Client.GetAsync("/traces/1/raw");
 
@@ -504,11 +504,12 @@ public class MonitorHostTests
         MonitorTempDirectory tempDirectory,
         int? port = null,
         int maxRequestBodyBytes = 31_457_280,
-        MonitorHostTestOptions? testOptions = null)
+        MonitorHostTestOptions? testOptions = null,
+        bool sanitizedOnly = false)
     {
         port ??= GetFreePort();
         var url = $"http://127.0.0.1:{port}";
-        var options = new MonitorOptions(tempDirectory.DatabasePath, url, EnableRawView: false, maxRequestBodyBytes);
+        var options = new MonitorOptions(tempDirectory.DatabasePath, url, SanitizedOnly: sanitizedOnly, maxRequestBodyBytes);
         var app = testOptions is null ? MonitorHost.Build(options) : MonitorHost.Build(options, testOptions);
         await app.StartAsync();
         return new RunningMonitorForTest(app, new HttpClient { BaseAddress = new Uri(url) });

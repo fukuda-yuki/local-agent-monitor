@@ -6,11 +6,11 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public class MonitorRawViewTests
 {
     [Fact]
-    public async Task RawDetail_AbsentWithoutFlag_Returns404()
+    public async Task RawDetail_AbsentUnderSanitizedOnly_Returns404()
     {
         using var temp = new MonitorTempDirectory();
         var id = SeedRawRecord(temp);
-        await using var host = await StartHostAsync(temp, enableRawView: false);
+        await using var host = await StartHostAsync(temp, sanitizedOnly: true);
 
         var response = await host.Client.GetAsync($"/traces/{id}/raw");
 
@@ -18,11 +18,11 @@ public class MonitorRawViewTests
     }
 
     [Fact]
-    public async Task RawDetail_WithFlag_RendersInertEscapedHtmlWithNoStore()
+    public async Task RawDetail_ByDefault_RendersInertEscapedHtmlWithNoStore()
     {
         using var temp = new MonitorTempDirectory();
         var id = SeedRawRecord(temp);
-        await using var host = await StartHostAsync(temp, enableRawView: true);
+        await using var host = await StartHostAsync(temp);
 
         var response = await host.Client.GetAsync($"/traces/{id}/raw");
         var body = await response.Content.ReadAsStringAsync();
@@ -36,11 +36,11 @@ public class MonitorRawViewTests
     }
 
     [Fact]
-    public async Task RawDetail_WithFlag_CrossSiteFetchIsForbidden()
+    public async Task RawDetail_CrossSiteFetchIsForbidden()
     {
         using var temp = new MonitorTempDirectory();
         var id = SeedRawRecord(temp);
-        await using var host = await StartHostAsync(temp, enableRawView: true);
+        await using var host = await StartHostAsync(temp);
 
         using var request = new HttpRequestMessage(HttpMethod.Get, $"/traces/{id}/raw");
         request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "cross-site");
@@ -52,11 +52,11 @@ public class MonitorRawViewTests
     }
 
     [Fact]
-    public async Task RawDetail_WithFlag_ForeignOriginIsForbidden()
+    public async Task RawDetail_ForeignOriginIsForbidden()
     {
         using var temp = new MonitorTempDirectory();
         var id = SeedRawRecord(temp);
-        await using var host = await StartHostAsync(temp, enableRawView: true);
+        await using var host = await StartHostAsync(temp);
 
         using var request = new HttpRequestMessage(HttpMethod.Get, $"/traces/{id}/raw");
         request.Headers.TryAddWithoutValidation("Origin", "http://evil.example.com");
@@ -67,11 +67,11 @@ public class MonitorRawViewTests
     }
 
     [Fact]
-    public async Task RawDetail_WithFlag_SameOriginTopLevelNavigationIsAllowed()
+    public async Task RawDetail_SameOriginTopLevelNavigationIsAllowed()
     {
         using var temp = new MonitorTempDirectory();
         var id = SeedRawRecord(temp);
-        await using var host = await StartHostAsync(temp, enableRawView: true);
+        await using var host = await StartHostAsync(temp);
 
         using var request = new HttpRequestMessage(HttpMethod.Get, $"/traces/{id}/raw");
         request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "none");
@@ -82,11 +82,11 @@ public class MonitorRawViewTests
     }
 
     [Fact]
-    public async Task RawDetail_WithFlag_UnknownIdReturns404()
+    public async Task RawDetail_UnknownIdReturns404()
     {
         using var temp = new MonitorTempDirectory();
         SeedRawRecord(temp);
-        await using var host = await StartHostAsync(temp, enableRawView: true);
+        await using var host = await StartHostAsync(temp);
 
         var response = await host.Client.GetAsync("/traces/999999/raw");
 
@@ -95,11 +95,11 @@ public class MonitorRawViewTests
     }
 
     [Fact]
-    public async Task RawDetail_WithFlag_CursorApisStaySanitized()
+    public async Task RawDetail_CursorApisStaySanitized()
     {
         using var temp = new MonitorTempDirectory();
         SeedRawRecord(temp);
-        await using var host = await StartHostAsync(temp, enableRawView: true);
+        await using var host = await StartHostAsync(temp);
 
         var ingestions = await host.Client.GetStringAsync("/api/monitor/ingestions");
         var traces = await host.Client.GetStringAsync("/api/monitor/traces");
@@ -127,10 +127,10 @@ public class MonitorRawViewTests
         return id;
     }
 
-    private static async Task<RunningHost> StartHostAsync(MonitorTempDirectory temp, bool enableRawView)
+    private static async Task<RunningHost> StartHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false)
     {
         var url = $"http://127.0.0.1:{GetFreePort()}";
-        var options = new MonitorOptions(temp.DatabasePath, url, EnableRawView: enableRawView, MaxRequestBodyBytes: 31_457_280);
+        var options = new MonitorOptions(temp.DatabasePath, url, SanitizedOnly: sanitizedOnly, MaxRequestBodyBytes: 31_457_280);
         var app = MonitorHost.Build(options, new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
         await app.StartAsync();
         return new RunningHost(app, new HttpClient { BaseAddress = new Uri(url) });
