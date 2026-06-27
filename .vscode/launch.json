@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch AppHost (http)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/src/CopilotAgentObservability.AppHost/bin/Debug/net10.0/CopilotAgentObservability.AppHost.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/src/CopilotAgentObservability.AppHost",
+      "stopAtEntry": false,
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "\\bNow listening on:\\s+(https?://\\S+)"
+      },
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "http://localhost:19163",
+        "ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL": "http://localhost:19164",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "http://localhost:18223",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "http://localhost:20011",
+        "ASPIRE_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS": "true",
+        "ASPIRE_ALLOW_UNSECURED_TRANSPORT": "true"
+      },
+      "console": "internalConsole"
+    }
+  ],
+  "compounds": []
+}
