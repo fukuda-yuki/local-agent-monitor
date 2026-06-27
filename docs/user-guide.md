@@ -17,9 +17,10 @@ Copilot Agent Observability は、Copilot agent workflow の実行過程を次�
 
 1. [Data Safety](user-guide/data-safety.md)
 2. [Telemetry Collection](user-guide/telemetry-collection.md)
-3. [Raw Data Loop](user-guide/raw-data-loop.md)
-4. [Static Dashboard](user-guide/static-dashboard.md)
-5. [Diagnosis / Improvement Loop](user-guide/diagnosis-improvement-loop.md)
+3. [Local Ingestion Monitor](user-guide/local-monitor.md)
+4. [Raw Data Loop](user-guide/raw-data-loop.md)
+5. [Static Dashboard](user-guide/static-dashboard.md)
+6. [Diagnosis / Improvement Loop](user-guide/diagnosis-improvement-loop.md)
 
 ## 利用モード
 

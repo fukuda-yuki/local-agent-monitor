@@ -147,12 +147,8 @@ raw / PII 表示は opt-in です。
 - raw / PII は repository-safe artifacts には決して出力しません。raw store や一時出力
   を repository に commit しないでください。
 
-> live VS Code direct telemetry（monitor 経由の実機受信）は Sprint8 の hard gate
-> として **未確認** です（M6 のブロッカー）。合成 OTLP では取り込み→projection→
-> readiness のループを実プロセスで確認済みですが、実際の VS Code GitHub Copilot Chat
-> からの送出は人手での Copilot 操作が必要です。検証手順は
-> [docs/sprints/sprint8-local-raw-receiver-monitor/milestones/M6-security-live-validation/live-validation.md](../sprints/sprint8-local-raw-receiver-monitor/milestones/M6-security-live-validation/live-validation.md)
-> を参照してください。
+VS Code GitHub Copilot Chat および GitHub Copilot CLI からの OTLP HTTP/protobuf 実機受信は
+2026-06-27 に検証済みです。詳細は [Local Ingestion Monitor ユーザーガイド](local-monitor.md) を参照してください。
 
 ## GitHub Copilot CLI
 

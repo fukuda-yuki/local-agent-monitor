@@ -24,7 +24,33 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 
 `tmp\` は local runtime output であり、commit しない。
 
-## 2. Live Trace Review を試す
+## 2. Local Ingestion Monitor を使う（Langfuse 不要）
+
+Docker Desktop や外部サービスなしで VS Code Copilot Chat / GitHub Copilot CLI の
+テレメトリをリアルタイムに確認できます。
+
+**ターミナル A — モニター起動：**
+
+```powershell
+New-Item -ItemType Directory -Force data | Out-Null
+dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\monitor.db --url http://127.0.0.1:4320
+```
+
+ブラウザで `http://127.0.0.1:4320/` を開く。
+
+**ターミナル B — VS Code 用環境変数を生成して適用し、VS Code を起動：**
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-vscode-env --profile raw-local-receiver --target monitor
+# 出力結果を貼り付けて実行してから：
+code .
+```
+
+VS Code で Copilot Chat に質問すると、ブラウザの `/ingestions` と `/traces` に受信結果が表示されます。
+
+詳細は [Local Ingestion Monitor ユーザーガイド](user-guide/local-monitor.md) を参照する。
+
+## 3. Live Trace Review を試す（Langfuse）
 
 Live trace を確認する場合は `docker-desktop-langfuse` profile を使い、Langfuse self-host をローカルで起動して client を OTLP HTTP で Langfuse に送る。
 
@@ -39,7 +65,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-codex-a
 Langfuse key、Base64 authorization header、secret は repository に保存しない。
 検証には synthetic data または公開してよい検証用 data だけを使う。
 
-## 3. Collection Profile を選ぶ
+## 4. Collection Profile を選ぶ
 
 Collection profile は telemetry routing mode を表す。
 
@@ -52,7 +78,7 @@ $env:CAO_COLLECTION_PROFILE="raw-only"
 
 WARNING: `remote-managed-langfuse` と `remote-managed-collector` は、送信前に access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を決める必要がある。この repository は remote / shared endpoint の利用者同意 workflow を実装しない。
 
-## 4. Raw Data Loop を試す
+## 5. Raw Data Loop を試す
 
 saved raw OTLP JSON がある場合は SQLite raw store に取り込み、normalized measurement dataset を生成する。
 
@@ -64,7 +90,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw da
 
 `data\raw-store.db`、raw payload、一時 CSV / JSON は local runtime data として扱い、commit しない。
 
-## 5. Diagnosis / Improvement Support を試す
+## 6. Diagnosis / Improvement Support を試す
 
 Synthetic diagnosis input から improvement proposal、evaluation、human decision template を生成する。
 
@@ -77,7 +103,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-decisio
 
 この loop は repository を自動修正しない。patch / diff / commit / push / pull request は生成しない。
 
-## 6. 次に読むもの
+## 7. 次に読むもの
 
 - [利用者向け詳細ガイド](user-guide.md)
 - [要件定義](requirements.md)
