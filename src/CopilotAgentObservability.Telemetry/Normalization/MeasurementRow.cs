@@ -1,4 +1,4 @@
-namespace CopilotAgentObservability.ConfigCli;
+namespace CopilotAgentObservability.Telemetry;
 
 internal sealed record MeasurementRow(
     [property: JsonPropertyName("trace_id")] string? TraceId,

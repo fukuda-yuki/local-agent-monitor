@@ -66,6 +66,29 @@ For Aspire AppHost usage decisions, refer to `docs/specifications/layers/telemet
 Ask before irreversible changes, product behavior or public interface changes, security policy changes, dependency additions, source-of-truth conflicts, missing spec decisions, or unclear preserved review records.
 Keep changes minimum, scoped, and traceable to the request.
 
+## Local-First Risk Posture
+
+This repository's local tools (e.g. the Sprint8 Local Ingestion Monitor) target a
+single trusted local user who accepts same-machine exposure of their own data.
+Defend the risks that cross the machine boundary — remote / non-loopback access,
+other-origin browser-mediated exfiltration, and raw/PII leaking into logs or
+repository-committed artifacts — with low-cost controls: loopback bind,
+Host-header validation, CORS off, same-origin on the raw-detail route, CSRF on
+state-changing actions, no raw/PII in logs or repo.
+
+Do not over-engineer the display side. The monitor exists to show the user their
+own captured prompts/outputs, so do not add a heavy anti-XSS / CSP apparatus,
+payload sanitizers, or XSS payload-matrix tests for that display — rely on the UI
+framework's default output encoding (text, not live markup). The kept baseline is normal correct
+rendering: captured content is shown as escaped / inert text (framework default;
+no `Html.Raw`), so stored markup does not execute — that is not "over-defense".
+The accepted residual is only the absence of defense-in-depth on top of that
+escaping. Do not confuse this display de-scope with loosening genuine monitoring
+contracts: the readiness contract (default thresholds, units, config names, HTTP
+status mapping, machine-readable body) is the monitor's purpose and stays pinned.
+Detail: `docs/decisions.md` D020 and
+`docs/specifications/security-data-boundaries.md`.
+
 ## Do Not
 
 - Do not change product behavior, public interfaces, or security policy without updating the current specs first.

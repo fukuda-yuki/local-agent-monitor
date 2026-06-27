@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Ingestion Monitor</title>
+    <link rel=stylesheet href=/monitor.css />
+</head>
+<body>
+    <header>
+        <h1>Local Ingestion Monitor</h1>
+        <nav aria-label="Monitor navigation">
+            <a href="/">Overview</a>
+            <a href="/ingestions">Ingestions</a>
+            <a href="/traces">Traces</a>
+            <a href="/diagnostics">Diagnostics</a>
+        </nav>
+    </header>
+    <main>
+        @RenderBody()
+    </main>
+    <script src=/monitor.js></script>
+</body>
+</html>

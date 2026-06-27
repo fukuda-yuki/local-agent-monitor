@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace CopilotAgentObservability.ConfigCli.Tests;
+namespace CopilotAgentObservability.TestSupport;
 
 internal static class OtlpProtobufTestPayload
 {

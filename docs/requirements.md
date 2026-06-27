@@ -46,6 +46,7 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 - remote managed Langfuse profile。
 - remote managed Collector profile。
 - repository-hosted raw local receiver profile。Langfuse なしで VS Code からこの repository の local receiver へ telemetry を送信し、raw data loop に接続できること。
+- Local Ingestion Monitor。VS Code GitHub Copilot Chat から OTLP HTTP/protobuf を直接受信し、SQLite raw store に永続化し、loopback-only のローカル UI で取り込みの健全性（受信、永続化、projection、エラー有無、health / readiness）を確認できること。既定では sanitized metadata のみを表示し、明示的な opt-in 起動（`--enable-raw-view`）時に限り、ローカル利用者が自分の raw prompt / response / tool content と PII 属性（`user.id` / `user.email`）を loopback-only で閲覧できること。
 - Langfuse による個別 trace viewer。ただし Langfuse は standard full profile の viewer であり、raw-only minimum profile の必須要素ではない。
 - saved raw OTLP JSON の file-based ingest。
 - SQLite raw store。
@@ -197,6 +198,8 @@ Repository に保存してはならないもの:
 - Base64 authorization header。
 - sensitive bundle content。
 - sensitive bundle local path。
+
+Local Ingestion Monitor の opt-in raw / PII 表示（`--enable-raw-view`）は loopback-only の runtime surface であり、ここで定義する repository 保存禁止や §9 の static dashboard 非表示とは別物である。opt-in 時も raw / PII を repository-safe outputs、static dashboard、ログ、GitHub Pages snapshot へ出力してはならない。この opt-in 表示は単一のローカル利用者が自分のデータを閲覧する用途に限り、cross-machine な露出（remote / non-loopback、browser 経由の off-machine 送出）から防御する。
 
 共有環境、実データ、社内サーバー、GitHub Pages publish を扱う場合は、アクセス権、保持期間、削除方法、masking / redaction、利用者周知を先に決める。
 remote managed Langfuse / Collector endpoint を使う場合は、送信前に access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を確認する。

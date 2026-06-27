@@ -2,8 +2,12 @@
   <Folder Name="/src/">
     <Project Path="src/CopilotAgentObservability.AppHost/CopilotAgentObservability.AppHost.csproj" />
     <Project Path="src/CopilotAgentObservability.ConfigCli/CopilotAgentObservability.ConfigCli.csproj" />
+    <Project Path="src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj" />
+    <Project Path="src/CopilotAgentObservability.Telemetry/CopilotAgentObservability.Telemetry.csproj" />
+    <Project Path="src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/CopilotAgentObservability.ConfigCli.Tests/CopilotAgentObservability.ConfigCli.Tests.csproj" />
+    <Project Path="tests/CopilotAgentObservability.LocalMonitor.Tests/CopilotAgentObservability.LocalMonitor.Tests.csproj" />
   </Folder>
 </Solution>

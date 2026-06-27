@@ -99,6 +99,57 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw da
 Live VS Code direct telemetry は Sprint7 の未確認項目です。
 検証時は VS Code version、GitHub Copilot Chat extension version、receiver command、raw store path、trace id または raw record id、confirmed / unconfirmed signals を記録してください。
 
+## Local Ingestion Monitor（Sprint8）
+
+LocalMonitor は loopback-only の単一 ASP.NET Core プロセスです。VS Code GitHub
+Copilot Chat の OTLP HTTP/protobuf を `POST /v1/traces` で直接受信し、SQLite raw
+store に永続化し、sanitized projection を生成し、ローカルブラウザ UI で取り込みの
+健全性を確認できます。既定では **sanitized metadata のみ** を表示します。
+
+仕様（正本）は次を参照してください。
+
+- [docs/spec.md](../spec.md) Public Interfaces。
+- [docs/specifications/layers/telemetry-ingestion.md](../specifications/layers/telemetry-ingestion.md)（receiver / port / health / UI / SSE）。
+- [docs/specifications/security-data-boundaries.md](../specifications/security-data-boundaries.md)（raw / PII 境界）。
+- [docs/decisions.md](../decisions.md) D020。
+
+手順:
+
+1. monitor を起動します（既定 loopback `127.0.0.1:4320`、Collector `4318` / CLI
+   receiver `4319` を回避）。
+
+   ```powershell
+   dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\raw-store.db --url http://127.0.0.1:4320
+   ```
+
+2. 別 shell で VS Code を monitor へ向ける environment を生成します（`--target monitor`
+   は endpoint を `4320` にします。既定 `--target receiver` は `4319` のまま）。
+
+   ```powershell
+   dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-vscode-env --profile raw-local-receiver --target monitor
+   ```
+
+   `--endpoint http://127.0.0.1:<port>` で非既定の loopback port を指定できます。
+
+3. ブラウザで `http://127.0.0.1:4320/` を開きます。`/`（Overview）、`/ingestions`、
+   `/traces`、`/diagnostics` の各ページと、通知専用 SSE `GET /events`、readiness
+   `GET /health/ready` / `GET /health/live`、sanitized cursor API
+   `GET /api/monitor/ingestions` / `GET /api/monitor/traces` を利用できます。
+   既定ページ・API・SSE は sanitized metadata のみで、raw payload や PII を含みません。
+
+raw / PII 表示は opt-in です。
+
+- `--enable-raw-view` は既定 off、loopback 限定です。付けると raw-detail route
+  `GET /traces/{rawRecordId}/raw` が有効になり、UI の ingestion 行に `raw` リンクが
+  出ます。route は same-origin 限定（cross-site は `403`）、`Cache-Control: no-store`、
+  内容は HTML エスケープした inert text として描画されます。フラグ無しでは route は
+  存在せず `404` です。
+- raw / PII は repository-safe artifacts には決して出力しません。raw store や一時出力
+  を repository に commit しないでください。
+
+VS Code GitHub Copilot Chat および GitHub Copilot CLI からの OTLP HTTP/protobuf 実機受信は
+2026-06-27 に検証済みです。詳細は [Local Ingestion Monitor ユーザーガイド](local-monitor.md) を参照してください。
+
 ## GitHub Copilot CLI
 
 環境変数の例:

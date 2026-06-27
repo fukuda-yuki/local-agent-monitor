@@ -29,6 +29,7 @@ internal static class ConfigSamples
     public const string RemoteCollectorOtlpHttpTracesEndpoint = "https://<collector-host>/v1/traces";
     public const string RawLocalReceiverOtlpHttpEndpoint = "http://127.0.0.1:4319";
     public const string RawLocalReceiverOtlpHttpTracesEndpoint = "http://127.0.0.1:4319/v1/traces";
+    public const string LocalMonitorOtlpHttpEndpoint = "http://127.0.0.1:4320";
     public const string VsCodeClientKind = "vscode-copilot-chat";
     public const string CopilotCliClientKind = "copilot-cli";
     public const string DefaultExperimentId = "baseline";
@@ -135,6 +136,11 @@ internal static class ConfigSamples
 
     public static string CreateProfileVsCodePowerShellScript(string profile)
     {
+        return CreateProfileVsCodePowerShellScript(profile, rawLocalReceiverEndpoint: null);
+    }
+
+    public static string CreateProfileVsCodePowerShellScript(string profile, string? rawLocalReceiverEndpoint)
+    {
         return profile switch
         {
             CollectionProfileOptions.RawOnly => CreateRawOnlyProfileScript(profile, "raw-only uses saved raw OTLP JSON. No live VS Code receiver environment is required."),
@@ -144,7 +150,7 @@ internal static class ConfigSamples
             CollectionProfileOptions.Wsl2DockerCollectorLangfuse => CreateWsl2EndpointWarning(CreateCollectorVsCodePowerShellScript(profile, Wsl2CollectorOtlpHttpEndpoint)),
             CollectionProfileOptions.RemoteManagedLangfuse => CreateRemoteWarning(CreateLangfuseVsCodePowerShellScript(profile, RemoteLangfuseOtlpEndpoint, RemoteLangfuseOtlpTracesEndpoint)),
             CollectionProfileOptions.RemoteManagedCollector => CreateRemoteWarning(CreateCollectorVsCodePowerShellScript(profile, RemoteCollectorOtlpHttpEndpoint)),
-            CollectionProfileOptions.RawLocalReceiver => CreateRawLocalReceiverVsCodePowerShellScript(profile),
+            CollectionProfileOptions.RawLocalReceiver => CreateRawLocalReceiverVsCodePowerShellScript(profile, rawLocalReceiverEndpoint ?? RawLocalReceiverOtlpHttpEndpoint),
             _ => throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unsupported collection profile."),
         };
     }
@@ -312,7 +318,7 @@ internal static class ConfigSamples
         return builder.ToString();
     }
 
-    private static string CreateRawLocalReceiverVsCodePowerShellScript(string profile)
+    private static string CreateRawLocalReceiverVsCodePowerShellScript(string profile, string otlpEndpoint)
     {
         var resourceAttributes = CreateResourceAttributes(VsCodeClientKind);
 
@@ -320,9 +326,9 @@ internal static class ConfigSamples
         AppendProfileSelection(builder, profile);
         AppendRawLocalReceiverCleanup(builder);
         builder.AppendLine("$env:COPILOT_OTEL_ENABLED=\"true\"");
-        builder.AppendLine($"$env:COPILOT_OTEL_ENDPOINT=\"{RawLocalReceiverOtlpHttpEndpoint}\"");
+        builder.AppendLine($"$env:COPILOT_OTEL_ENDPOINT=\"{otlpEndpoint}\"");
         builder.AppendLine("$env:COPILOT_OTEL_CAPTURE_CONTENT=\"true\"");
-        builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"{RawLocalReceiverOtlpHttpEndpoint}\"");
+        builder.AppendLine($"$env:OTEL_EXPORTER_OTLP_ENDPOINT=\"{otlpEndpoint}\"");
         builder.AppendLine("$env:OTEL_EXPORTER_OTLP_PROTOCOL=\"http/protobuf\"");
         builder.Append($"$env:OTEL_RESOURCE_ATTRIBUTES=\"{resourceAttributes}\"");
         return builder.ToString();

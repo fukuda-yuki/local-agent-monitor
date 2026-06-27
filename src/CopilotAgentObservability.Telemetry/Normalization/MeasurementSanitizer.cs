@@ -1,4 +1,4 @@
-namespace CopilotAgentObservability.ConfigCli;
+namespace CopilotAgentObservability.Telemetry;
 
 internal static class MeasurementSanitizer
 {

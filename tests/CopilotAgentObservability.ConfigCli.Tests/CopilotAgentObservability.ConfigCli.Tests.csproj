@@ -16,10 +16,16 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="CopilotAgentObservability.Telemetry" />
+    <Using Include="CopilotAgentObservability.Persistence.Sqlite" />
+    <Using Include="CopilotAgentObservability.TestSupport" />
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\TestSupport\OtlpProtobufTestPayload.cs" Link="TestSupport\OtlpProtobufTestPayload.cs" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.ConfigCli\CopilotAgentObservability.ConfigCli.csproj" />
+    <ProjectReference Include="..\..\src\CopilotAgentObservability.Telemetry\CopilotAgentObservability.Telemetry.csproj" />
+    <ProjectReference Include="..\..\src\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </ItemGroup>
 
   <ItemGroup>

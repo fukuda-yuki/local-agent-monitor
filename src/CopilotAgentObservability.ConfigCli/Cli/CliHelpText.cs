@@ -5,7 +5,7 @@ internal static class CliHelpText
     public const string Text = """
         Usage:
           config-cli list-collection-profiles
-          config-cli profile-vscode-env [--profile <collection-profile>]
+          config-cli profile-vscode-env [--profile <collection-profile>] [--target <receiver|monitor>] [--endpoint <loopback-http-url>]
           config-cli profile-copilot-cli-env [--profile <collection-profile>]
           config-cli profile-codex-app-config [--profile <collection-profile>]
           config-cli vscode-settings

@@ -6,7 +6,7 @@
 
 ```text
 config-cli list-collection-profiles
-config-cli profile-vscode-env [--profile <collection-profile>]
+config-cli profile-vscode-env [--profile <collection-profile>] [--target <receiver|monitor>] [--endpoint <loopback-http-url>]
 config-cli profile-copilot-cli-env [--profile <collection-profile>]
 config-cli profile-codex-app-config [--profile <collection-profile>]
 config-cli vscode-settings
@@ -36,6 +36,18 @@ instead of silently choosing a profile.
 Existing explicit commands such as `langfuse-vscode-env` and
 `collector-vscode-env` remain supported compatibility entry points.
 
+For the `raw-local-receiver` profile, `profile-vscode-env` selects which local
+raw target the generated VS Code environment points at:
+
+- `--target receiver` (default): the Config CLI receiver, `http://127.0.0.1:4319`
+  (unchanged behavior).
+- `--target monitor`: the Local Ingestion Monitor, `http://127.0.0.1:4320`.
+- `--endpoint <loopback-http-url>`: explicit override (must be loopback) for a
+  non-default monitor / receiver port; overrides the `--target` default.
+
+`--target` and `--endpoint` apply only to `raw-local-receiver`; combining them
+with another profile fails with a deterministic error.
+
 `list-collection-profiles` lists all product profile values. Sprint6
 profile-aware output commands returned a deterministic error for
 `raw-local-receiver`; Sprint7 replaces that reserved error with generated
@@ -63,6 +75,20 @@ The receiver must reject non-loopback bind URLs. It accepts OTLP HTTP trace
 payloads on `/v1/traces`, persists received telemetry as local runtime raw
 store data, and leaves normalized measurement, candidate, and dashboard
 dataset schemas unchanged.
+
+`serve-raw-local-receiver` is retained and runs **side-by-side** with the Local
+Ingestion Monitor (Sprint8). The monitor is a **separate ASP.NET Core process**
+(`src/CopilotAgentObservability.LocalMonitor`), not a Config CLI subcommand; it
+binds a distinct loopback port (default `http://127.0.0.1:4320`, avoiding the
+Collector `4318` and this receiver's `4319`) while this receiver keeps
+`http://127.0.0.1:4319`. The monitor run interface, ports, and
+health endpoints are specified in
+[../layers/telemetry-ingestion.md](../layers/telemetry-ingestion.md), and its
+raw / PII boundary in
+[../security-data-boundaries.md](../security-data-boundaries.md). To point VS
+Code at the monitor, generate the environment with `profile-vscode-env --profile
+raw-local-receiver --target monitor`; the default `--target receiver` keeps
+emitting `4319`.
 
 ## Candidate Commands
 
