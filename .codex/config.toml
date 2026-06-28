@@ -1,8 +1,6 @@
 # Repository-scoped template. Verify how your Codex surface loads project config before relying on
 # this file as an effective runtime configuration.
 
-model = "gpt-5.5"
-model_reasoning_effort = "high"
 
 # 人間への承認要求で停止しない
 approval_policy = "never"
