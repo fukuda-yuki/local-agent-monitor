@@ -520,3 +520,77 @@ rendering）。
 - raw / PII は起動フラグなしで loopback 上に到達可能（process 生存中ずっと）。
   単一利用者ローカルマシンのトレードオフとして product owner が受容。`--sanitized-only` は
   opt-out 安全弁。
+
+## D024: Local Monitor の design views 非目的を絞り込む
+
+Status: Accepted
+
+Sprint9 README 上、graphical Flow Chart・Cache Explorer・視覚デザインの polish・
+timeline filter/sort は「後続の design sprint」へ deferred としていた。Sprint10 を
+その design sprint と位置づけ、非目的を絞り込む。Local Ingestion Monitor は graphical
+Flow Chart、Cache Explorer、polished theme、timeline filter/sort UI を **提示してよい**。
+いずれも既存 spans API（`GET /api/monitor/traces/{traceId}/spans`）上の **sanitized・
+client-side presentation** に限る。4 ビュー（Summary / Timeline / Flow Chart / Cache）は
+既存 sanitized spans JSON から client-side で描画する。
+
+不変（絞り込む対象は "design deferred" の側のみで、以下の決定は変更しない）:
+
+- D001 / D021 — 入力は monitor が受信する公式 OTel signals のまま。VS Code 内部ログ /
+  workspaceStorage / chatSessions は入力にせず、VS Code in-editor Debug UI も複製しない。
+- D020 / D023 — raw 境界と sanitized-JSON / SSE invariant は不変。新 client views は
+  sanitized JSON / SSE のみ消費し、raw-bearing route を増やさない。
+
+つまり Sprint10 は新たな telemetry 入力・schema・API field・raw 境界変更を **加えない**。
+
+## D025: Cytoscape.js + dagre を vendored client-side 可視化依存にする
+
+Status: Accepted
+
+A1 Flow Chart の interactive graph（pan/zoom、node selection、auto-layout）には graph
+library と DAG layout algorithm が必要。product owner が Cytoscape.js と dagre extension
+（cytoscape-dagre + dagre）を承認した。3 ファイルとも **`wwwroot/vendor/` に UMD 単一
+ファイルとして vendoring** する（CDN 不使用＝loopback-only / offline 運用維持、runtime の
+外部 fetch 回避）。MIT。消費するのは sanitized spans JSON のみ（raw / PII は読まない）。
+その他の interactive UI（filters / sort / tabs / Cache Explorer）は追加ライブラリなしの
+**Vanilla JS** で実装する。CSS framework・build step は追加しない。
+
+Consequences:
+
+- vendoring（version / SHA-256 / size / license）は M3 で記録する。sanitized-only
+  消費 invariant は
+  [security-data-boundaries.md](specifications/security-data-boundaries.md) に追記する。
+
+## D026: Cache Explorer は sanitized-metrics-only / trace-internal only
+
+Status: Accepted
+
+A2 Cache Explorer は cache-hit rate（`cache_read_tokens / input_tokens`、ゼロ除算ガード）、
+cache-creation tokens、duration、model、timestamp、per-turn token breakdown を、単一
+trace 内で grouping して表示する。
+
+明示的に out of scope:
+
+- VS Code の「連続 request の prefix diff」機能は **raw prompt body** を比較するため扱わない。
+  これを入れると raw-bearing route が増え D023 境界を破るため却下。
+- `conversation_id` による **cross-trace stitching** は deferred。現行 API は trace-scoped で
+  あり、cross-trace grouping には新たな query parameter / endpoint が必要になって
+  「no API change」制約に反するため。
+
+## D027: VS Code 風 dark theme。Local Monitor に DADS を適用しない
+
+Status: Accepted
+
+Local Monitor は開発者向けの debugging tool であり、視覚デザインは Digital Agency Design
+System（DADS）ではなく VS Code の慣習（dark theme、system fonts、VS Code の color
+vocabulary）に従う。DADS の accessibility baseline（`[official-must]` rules）も適用せず、
+accessibility は VS Code 慣習に従う。Static Dashboard は従来のデザインを独立して維持する。
+DADS skills（`dads-foundations-core` / `dads-ui-review` / `project-dads-policy`）は Sprint10
+実行前の別タスクで削除済み（Sprint10 スコープ外）。
+
+## D028: Noto Sans JP / Noto Sans Mono を vendored typography にする
+
+Status: Accepted
+
+Noto Sans JP（full weight set）と Noto Sans Mono を **`wwwroot/vendor/fonts/` に vendoring**
+する（CDN 不使用）。合計サイズは概ね 5–10 MB。network コストがゼロのローカル専用ツール
+として受容する。vendoring（version / SHA-256 / size / license）は M2 で記録する。

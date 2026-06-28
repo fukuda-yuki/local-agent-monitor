@@ -199,6 +199,31 @@ Mandatory negative tests:
   `error_type`) are guarded out of the projection tables, the `/api/monitor/*`
   JSON, and the SSE-driven default UI — including under `--sanitized-only`.
 
+Sprint10 design views (client-side presentation, boundary unchanged):
+
+- the Sprint10 design views (Flow Chart, Cache Explorer, timeline filter/sort,
+  themed trace-detail UI) are **client-side rendering over the sanitized
+  `/api/monitor/*` JSON and SSE only**. They never read a raw-bearing route, add
+  no raw-bearing route, and add no new endpoint / field. The raw-bearing route
+  set, the default-on posture, and `--sanitized-only` (raw routes ⇒ `404`) are
+  all unchanged; the new views work identically under `--sanitized-only` because
+  they were sanitized to begin with.
+- **vendored, no CDN.** Cytoscape.js + dagre + cytoscape-dagre (D025) and Noto
+  Sans JP / Noto Sans Mono (D028) are vendored locally under `wwwroot/vendor/`;
+  no Content-Delivery-Network or external font fetch is introduced, so offline /
+  loopback-only operation is preserved and no third-party origin is contacted at
+  runtime. Version / SHA-256 / size / license are recorded at vendoring time
+  (fonts M2, Cytoscape / dagre M3).
+- **Cache Explorer is sanitized-metrics-only** (D026): cache-hit rate,
+  cache-creation tokens, duration, model, timestamp, and the per-turn token
+  breakdown, grouped within one trace. The VS Code "prefix diff of consecutive
+  requests" feature compares **raw prompt bodies** and is **out of scope** (it
+  would add a raw-bearing surface); `conversation_id` cross-trace stitching is
+  deferred (it would require an API change).
+- captured content keeps rendering as escaped, inert text (framework default; no
+  `Html.Raw`); the design views add no CSP / sanitizer / XSS-matrix apparatus
+  (AGENTS.md Local-First Risk Posture, D020).
+
 ## Shared Use Preconditions
 
 Before shared dashboard or real-data publishing:

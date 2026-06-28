@@ -19,7 +19,8 @@
 
 | Area | 状態 | 概要 |
 | --- | --- | --- |
-| Monitor Agent Execution View | M1 実施中 | [docs/sprints/sprint9-monitor-agent-execution-view/](sprints/sprint9-monitor-agent-execution-view/) で Local Ingestion Monitor を「取り込み健全性」から「エージェント実行詳細」へ拡張する。受信済み OTel から sanitized な per-span projection（どのツール/MCP・成否・sub-agent のモデル/トークン・turn 単位トークン）を生成し、VS Code Agent Debug View を参考にした機能的 UI で表示する。決定 D021（非目的の絞り込み）/ D022（span projection）/ D023（raw 既定表示＋`--sanitized-only` 安全弁、D020 更新）を M1 で記録。デザイン改善は後続 Sprint。 |
+| Monitor Agent Execution View | 実装マージ済 / ライブ検証 human-gated | [docs/sprints/sprint9-monitor-agent-execution-view/](sprints/sprint9-monitor-agent-execution-view/) で Local Ingestion Monitor を「取り込み健全性」から「エージェント実行詳細」へ拡張する。受信済み OTel から sanitized な per-span projection（どのツール/MCP・成否・sub-agent のモデル/トークン・turn 単位トークン）を生成し、VS Code Agent Debug View を参考にした機能的 UI で表示する。決定 D021（非目的の絞り込み）/ D022（span projection）/ D023（raw 既定表示＋`--sanitized-only` 安全弁、D020 更新）を記録済み。後続のデザイン改善は Sprint10（Monitor Design Views）へ。 |
+| Monitor Design Views | 計画中（M1 実施） | [docs/sprints/sprint10-monitor-design-views/](sprints/sprint10-monitor-design-views/) で、Sprint9 で deferred とした design 項目（graphical Flow Chart / Cache Explorer / 視覚 polish / timeline filter-sort）を、既存 spans API 上の **sanitized・client-side presentation** として実装する。新たな telemetry 入力・schema・API field・raw 境界変更は加えない。決定 D024（design 非目的の絞り込み）/ D025（Cytoscape.js + dagre を vendored）/ D026（Cache Explorer は sanitized-metrics-only、prefix-diff・cross-trace は out）/ D027（VS Code 風 dark theme、DADS 非適用）/ D028（Noto fonts vendored）を M1 で記録。 |
 
 ## Historical Work
 

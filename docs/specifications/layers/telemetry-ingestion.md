@@ -344,8 +344,19 @@ Monitor read API (sanitized, cursor pagination):
 `/api/monitor/traces/{traceId}/spans` returns sanitized per-span rows from
 `monitor_spans` for the given `trace_id`. Same `after`/`limit` contract as the
 other cursor endpoints. Each row includes operation, category, tool/MCP name,
-agent name, model, token counts, status, error type, timing, and hierarchy
+agent name, model, token counts (including `cache_read_tokens` /
+`cache_creation_tokens`), status, error type, timing, and hierarchy
 (`parent_span_id`, `span_ordinal`). No raw content or PII.
+
+The Sprint10 monitor **design views** (Flow Chart, Cache Explorer, timeline
+filter/sort, themed trace-detail UI) are **client-side presentation over this
+existing endpoint only** — they add no new endpoint, query parameter, or response
+field. Every field they need (`parent_span_id`, category, agent/tool/MCP names,
+models, the per-span token counts above, `finish_reasons`, `conversation_id`,
+status / `error_type`, and span timing) is already in this sanitized row. See
+[../security-data-boundaries.md](../security-data-boundaries.md) for the
+sanitized-only consumption invariant and the out-of-scope items (Cache Explorer
+raw prefix-diff, `conversation_id` cross-trace stitching).
 
 Raw / PII exposure follows the Local Ingestion Monitor boundary in
 [../security-data-boundaries.md](../security-data-boundaries.md): raw body
