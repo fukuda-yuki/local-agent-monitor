@@ -21,8 +21,8 @@ and
 
 ## Decision
 
-Resolved with the product owner on 2026-06-28 (requirements brainstorm). Recorded
-in `docs/decisions.md` during M1 as **D024–D026**.
+Resolved with the product owner on 2026-06-28 (requirements brainstorm +
+grill-me session). Recorded in `docs/decisions.md` during M1 as **D024–D028**.
 
 - **D024 — Narrow the "design views deferred" non-goal.** Sprint9's README and
   `docs/requirements.md` §4 defer the graphical Flow Chart, the Cache Explorer,
@@ -35,69 +35,142 @@ in `docs/decisions.md` during M1 as **D024–D026**.
   non-inputs, and we still do not re-implement VS Code's in-editor debug UI.
   **D020 and D023 are preserved**: the raw boundary and the sanitized-JSON/SSE
   invariant are unchanged (see [Safety boundary](#safety-boundary)).
-- **D025 — Cytoscape.js is the single permitted client-side visualization
-  dependency, vendored locally.** A1's interactive graph (pan/zoom, node
-  selection, auto-layout) needs one client library; the product owner approved
-  exactly one. It is **vendored as a UMD single file under `wwwroot`** (no CDN,
-  to keep loopback-only / offline operation and avoid a runtime external fetch),
-  MIT-licensed, and **consumes only the sanitized spans JSON** — never raw, never
-  PII. No second JS dependency, no CSS framework, no build step is added.
-- **D026 — Cache Explorer is sanitized-metrics-only.** A2 shows cache-hit rate,
-  cache-creation tokens, duration, model, timestamp, and the per-turn token
-  breakdown. The VS Code "prefix diff of consecutive requests" feature compares
-  **raw prompt bodies** and is therefore **explicitly out of scope** — including
-  it would add a raw-bearing route and is rejected to preserve the D023 boundary.
+- **D025 — Cytoscape.js and its dagre layout extension are the permitted
+  client-side visualization dependencies, vendored locally.** A1's interactive
+  graph (pan/zoom, node selection, auto-layout) needs a graph library and a DAG
+  layout algorithm; the product owner approved Cytoscape.js with its dagre
+  extension (cytoscape-dagre + dagre). All three files are **vendored as UMD
+  single files under `wwwroot/vendor/`** (no CDN, to keep loopback-only / offline
+  operation and avoid a runtime external fetch), MIT-licensed, and **consume only
+  the sanitized spans JSON** — never raw, never PII. All other interactive UI
+  (filters, sort, tabs, Cache Explorer) is implemented in **Vanilla JS** with no
+  additional library. No CSS framework, no build step is added.
+- **D026 — Cache Explorer is sanitized-metrics-only, trace-internal only.** A2
+  shows cache-hit rate, cache-creation tokens, duration, model, timestamp, and
+  the per-turn token breakdown, grouped within a single trace. The VS Code
+  "prefix diff of consecutive requests" feature compares **raw prompt bodies**
+  and is therefore **explicitly out of scope** — including it would add a
+  raw-bearing route and is rejected to preserve the D023 boundary.
+  **Cross-trace stitching by `conversation_id`** is deferred — the current API
+  is trace-scoped, and implementing cross-trace grouping would require a new
+  query parameter or endpoint, violating the "no API change" constraint.
+- **D027 — VS Code-styled dark theme; DADS not applied to Local Monitor.**
+  The Local Monitor is a developer-facing debugging tool. Its visual design
+  follows VS Code conventions (dark theme, system fonts, VS Code color
+  vocabulary) rather than the Digital Agency Design System (DADS). DADS
+  accessibility baselines (`[official-must]` rules) are also not applied;
+  accessibility follows VS Code conventions. The Static Dashboard retains its
+  existing design independently. DADS skills (`dads-foundations-core`,
+  `dads-ui-review`, `project-dads-policy`) are removed in a separate task
+  **before Sprint10 execution** (Sprint10 scope-external).
+- **D028 — Noto Sans JP and Noto Sans Mono vendored as monitor typography.**
+  Noto Sans JP (full weight set) and Noto Sans Mono are vendored under
+  `wwwroot/vendor/fonts/` (no CDN). Combined size is approximately 5–10 MB.
+  This is accepted for a local-only tool where network cost is zero.
 
 ## Scope
 
 Presentation only. No backend / schema / API / boundary change. Sequenced
-foundation-first (A3 → A4 → A1 → A2).
+foundation-first: **A3 → A1 → A4 → A2**.
 
 - **A3 — Visual polish (foundation, first).** A dark, VS Code-styled theme in
-  `monitor.css` (color tokens, typography, spacing, table/card treatment); tidy
-  layout and navigation across Overview / Ingestions / Traces / Diagnostics /
-  TraceDetail; the 21-column trace-list table made readable via a primary-column
-  set plus progressive disclosure. Routes, behavior, and data contracts
-  unchanged.
+  `monitor.css` (color tokens, Noto Sans JP / Noto Sans Mono typography, 8px
+  spacing scale, table/card treatment); tidy layout and navigation across
+  Overview / Ingestions / Traces / Diagnostics / TraceDetail. The 21-column
+  trace-list table made readable via 7 **primary columns** (TraceId with link,
+  ClientKind, TotalTokens, ToolCallCount, ErrorCount, TurnCount, PrimaryModel)
+  plus a **row-expand button** for remaining columns (progressive disclosure).
+  TraceDetail page restructured into **two sections**: an upper **sanitized
+  section** (JS-rendered, with tab navigation) and a lower **raw section**
+  (Razor-rendered, raw OTLP preview — unchanged). Other pages (Overview,
+  Ingestions, Traces, Diagnostics) remain Razor-rendered with CSS-only changes.
+  Routes, behavior, and data contracts unchanged.
+- **A1 — Flow Chart.** Vendor Cytoscape.js + dagre extension (D025) under
+  `wwwroot/vendor/`. Render an interactive graph of one trace in the **Flow
+  Chart tab**: nodes for every span by category (`agent_invocation` /
+  `llm_call` / `tool_call` / `hook`); edges from `parent_span_id` hierarchy;
+  dagre layout (top-to-bottom DAG); pan/zoom; **clicking a node switches to the
+  Timeline tab and highlights/scrolls to that span**. Error spans are visually
+  distinguished (red border/badge). Built client-side from the existing spans
+  JSON — **no new endpoint**. No filter on the Flow Chart (full trace overview).
 - **A4 — Timeline filter / sort.** Operates on the spans **within a trace**,
-  filtered **client-side** over the already-loaded spans JSON (no boundary
-  change). Filters: event type (`llm_call` / `tool_call` / `agent_invocation` /
-  `hook` / `error`), status (errors only), tool / MCP name, sub-agent name, time
-  range. Sort: duration / tokens / time. View toggle: flat list ⇔ sub-agent
-  tree.
-- **A1 — Flow Chart.** Cytoscape.js (D025) renders an interactive graph of one
-  trace: nodes for **agent, sub-agent, and tool/MCP** calls; edges from
-  `parent_span_id` hierarchy; pan/zoom; clicking a node reveals that span's
-  detail / scrolls the timeline. Error spans are visually distinguished. Built
-  client-side from the existing spans JSON — **no new endpoint**.
-- **A2 — Cache Explorer.** Groups `chat` (LLM) turns by their **root
-  `invoke_agent` span** (the available approximation of "user request" — see
-  [Data mapping](#data-mapping)); cross-trace stitching by `conversation_id`.
-  Per turn / per group it shows **cache-hit rate** (`cache_read_tokens /
-  input_tokens`, divide-by-zero guarded), cache-creation tokens, duration,
-  model, timestamp, and the token breakdown. Sanitized only.
+  displayed as a **flat list** in the **Timeline tab** (no tree toggle — the
+  tree view is covered by A1 Flow Chart). Filtered **client-side** over the
+  already-loaded spans JSON (no boundary change). **Filter: status (errors
+  only)**. **Sort: tokens / time (default)**. Minimal filter bar implemented in
+  Vanilla JS. Event type, tool/MCP name, sub-agent name, and time-range filters
+  are deferred (can be added later with no architecture change).
+- **A2 — Cache Explorer.** The **Cache tab** within TraceDetail. Groups `chat`
+  (LLM) turns within the current trace by their **root `invoke_agent` span**
+  (the available approximation of "user request" — see
+  [Data mapping](#data-mapping)). Per turn / per group it shows **cache-hit
+  rate** (`cache_read_tokens / input_tokens`, divide-by-zero guarded),
+  cache-creation tokens, duration, model, timestamp, and the token breakdown.
+  Sanitized only. **Cross-trace stitching by `conversation_id` is deferred**
+  (see D026).
+
+## TraceDetail page architecture
+
+The TraceDetail page is restructured as two distinct rendering zones:
+
+```
+┌─────────────────────────────────────────────┐
+│  ← Traces                                   │
+│  Trace {traceId}                             │
+│                                              │
+│  ┌─────────────────────────────────────────┐ │
+│  │ [Summary] [Timeline] [Flow Chart] [Cache]│ │
+│  │                                          │ │
+│  │   JS-rendered sanitized content          │ │
+│  │   (fetches /api/monitor/traces/{id}/spans│ │
+│  │    via client-side JS)                   │ │
+│  │                                          │ │
+│  └─────────────────────────────────────────┘ │
+│                                              │
+│  ─── Raw OTLP payload ────────────────────── │
+│  (Razor-rendered, server-side, unchanged)    │
+│  raw record previews / full raw links        │
+└─────────────────────────────────────────────┘
+```
+
+- **Upper section (sanitized, JS)**: Empty container divs are output by Razor.
+  Client-side JS fetches the spans JSON, then builds all four tab views
+  (Summary, Timeline, Flow Chart, Cache). Tab state is managed in JS; only one
+  tab is visible at a time. SSE `projection` events trigger a re-fetch and view
+  update (preserving selected tab and scroll position).
+- **Lower section (raw, Razor)**: The existing raw OTLP preview remains
+  server-rendered by Razor. Unchanged from Sprint9. D023 boundary preserved —
+  raw is never served via JSON API.
+- **Flow Chart → Timeline interaction**: Clicking a node in the Flow Chart tab
+  switches to the Timeline tab and scrolls to / highlights the corresponding
+  span row.
 
 ## Non-goals
 
 - A2 prefix-diff over raw prompt bodies; any raw-bearing route; any change to the
   raw default / `--sanitized-only` posture (D020 / D023 preserved).
-- A second client-side JS dependency, a CSS framework, a CDN reference, or a
-  front-end build step (only Cytoscape.js, vendored, per D025).
+- A2 cross-trace stitching by `conversation_id` (deferred — requires API change).
+- A4 tree view toggle (the tree/hierarchy view is Flow Chart's role).
+- A4 event-type filter, tool/MCP name filter, sub-agent name filter, time-range
+  filter (deferred — flat list + errors-only filter + sort is Sprint10 scope).
+- A CSS framework, a CDN reference, or a front-end build step. Only Cytoscape.js
+  + dagre extension (vendored) and Vanilla JS.
 - Any new telemetry input, projection column, schema bump, or API field — the
   existing spans API already carries every field these views need.
 - Changing the normalized measurement, candidate, or dashboard dataset
   contracts.
 - VS Code internal logs / `workspaceStorage` / `chatSessions` as input; a replica
   of VS Code's in-editor debug UI (D001 / D021 preserved).
+- DADS design system application to Local Monitor (D027). DADS skills are removed
+  in a separate pre-Sprint10 task.
 
 ## Data mapping
 
-The two non-obvious mappings these views rely on, pinned here for M1:
+The non-obvious mapping these views rely on, pinned here for M1:
 
 - **"User request" grouping (A2).** There is no per-user-request id in the
   telemetry. The available grouping is `trace_id` → root `invoke_agent` span →
-  child `chat` spans (via `parent_span_id`), with `gen_ai.conversation.id` for
-  cross-trace stitching
+  child `chat` spans (via `parent_span_id`)
   ([MonitorSpanProjectionBuilder.cs](../../../src/CopilotAgentObservability.Telemetry/Monitoring/MonitorSpanProjectionBuilder.cs)).
   A2 therefore treats the **root `invoke_agent` span as the "user request"
   group** and labels it as an approximation. The Sprint9 `parent_span_id`-absent
@@ -112,14 +185,15 @@ The two non-obvious mappings these views rely on, pinned here for M1:
 **Unchanged from Sprint9 (D020 / D023).** Sprint10 adds no raw-bearing surface.
 The key invariant that makes the new client-side views safe:
 
-- Cytoscape.js and all A1/A2/A4 client code consume **only** the sanitized
-  `/api/monitor/*` JSON (and SSE). Raw / PII is still served **only** by the
-  existing server-rendered routes; the new views never read raw.
+- Cytoscape.js, dagre, and all A1/A2/A4 client code consume **only** the
+  sanitized `/api/monitor/*` JSON (and SSE). Raw / PII is still served **only**
+  by the existing server-rendered routes; the new views never read raw.
 - Loopback bind, `Host`-header validation, CORS disabled, same-origin +
   `Cache-Control: no-store` on the existing raw-bearing routes, and "no raw / PII
   in logs or repository-committed outputs" are all unchanged.
-- Cytoscape.js is vendored locally (no CDN), so no external fetch is introduced
-  and offline / loopback operation is preserved.
+- Cytoscape.js and dagre are vendored locally (no CDN), so no external fetch is
+  introduced and offline / loopback operation is preserved.
+- Noto Sans JP / Noto Sans Mono are vendored locally (no Google Fonts CDN).
 - Captured content continues to render as escaped, inert text (framework default;
   no `Html.Raw`). No CSP / sanitizer / XSS-matrix apparatus is added (AGENTS.md
   Local-First Risk Posture).
@@ -135,26 +209,29 @@ Each milestone produces its own `milestones/Mx-*/plan.md` at execution time
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
-| M1 Specs & Decisions | Record D024–D026; update `requirements.md` §3/§4 (capability + narrow the deferred-design non-goal), `spec.md` (monitor views), `telemetry-ingestion.md` (note the views consume the existing spans API; no new field), `security-data-boundaries.md` (Cytoscape vendored + sanitized-only consumption invariant; A2 prefix-diff explicitly out), user guide. Confirm the spans API field coverage (done: all required fields present). No code. | Planned |
-| M2 A3 Visual polish | Dark VS Code-styled theme + layout/navigation across all monitor pages; trace-list readability (primary columns + disclosure). No route/behavior/data change. UI tests assert pages still render and required data is present. | Planned |
-| M3 A4 Timeline filter/sort | Client-side filter (event type / status / tool / MCP / sub-agent / time), sort (duration / tokens / time), flat ⇔ tree toggle on the trace-detail span timeline. Sanitized JSON only; no API change. | Planned |
-| M4 A1 Flow Chart | Vendor Cytoscape.js (UMD, `wwwroot`, no CDN); render agent + sub-agent + tool/MCP nodes with `parent_span_id` edges, pan/zoom, node-click → span detail, error styling. Built from the existing spans JSON. | Planned |
-| M5 A2 Cache Explorer | Group chat turns by root `invoke_agent` (≈ user request) + `conversation_id`; cache-hit rate / cache-creation / duration / model / timestamp / token breakdown. Sanitized only; prefix-diff out (D026). | Planned |
-| M6 Validation | `dotnet build` / `dotnet test`; re-assert the sanitized-JSON/SSE invariant (new views read sanitized only; no raw via JSON/SSE); `--sanitized-only` health check (new views work, raw routes 404); dark-theme render sanity. Live VS Code Copilot Chat validation human-gated (inherited). | Planned (live human-gated) |
+| M1 Specs & Decisions | Record D024–D028; update `requirements.md` §3/§4 (capability + narrow the deferred-design non-goal + DADS non-applicability), `spec.md` (monitor views + TraceDetail architecture), `telemetry-ingestion.md` (note the views consume the existing spans API; no new field), `security-data-boundaries.md` (Cytoscape + dagre vendored + sanitized-only consumption invariant; A2 prefix-diff and cross-trace out), user guide. Confirm the spans API field coverage (done: all required fields present). No code. | Planned |
+| M2 A3 Visual polish | Dark VS Code-styled theme (D027) + Noto Sans JP/Mono vendor (D028) + layout/navigation across all monitor pages; trace-list readability (7 primary columns + row-expand disclosure); TraceDetail page restructured into sanitized JS section (empty container + tab shell) + raw Razor section. No route/behavior/data change. Existing UI tests assert pages still render and required data is present. | Planned |
+| M3 A1 Flow Chart | Vendor Cytoscape.js + dagre + cytoscape-dagre (UMD, `wwwroot/vendor/`, no CDN); render span nodes by category with `parent_span_id` edges, dagre layout, pan/zoom, node-click → Timeline tab switch + highlight, error styling. Built from the existing spans JSON. Record version + SHA in this README. | Planned |
+| M4 A4 Timeline filter/sort | Client-side filter (status: errors only) and sort (tokens / time) on the flat span list in the Timeline tab. Vanilla JS; sanitized JSON only; no API change. | Planned |
+| M5 A2 Cache Explorer | Cache tab: group chat turns within the current trace by root `invoke_agent` (≈ user request); cache-hit rate / cache-creation / duration / model / timestamp / token breakdown. Sanitized only; prefix-diff out (D026); cross-trace deferred (D026). | Planned |
+| M6 Validation | `dotnet build` / `dotnet test`; Playwright smoke tests (tab switch, filter apply, Flow Chart render); re-assert the sanitized-JSON/SSE invariant (new views read sanitized only; no raw via JSON/SSE); `--sanitized-only` health check (new views work, raw routes 404); dark-theme render sanity. Live VS Code Copilot Chat validation human-gated (inherited). | Planned (live human-gated) |
 
 ## Spec changes required (applied in M1)
 
 - `docs/requirements.md` — §3: note the monitor's design views (Flow Chart /
   Cache Explorer / timeline filter / themed UI) as sanitized presentation; §4:
-  narrow the "later design sprint" deferral per D024.
-- `docs/spec.md` — monitor section: the four design views and the single
-  client-side dependency.
+  narrow the "later design sprint" deferral per D024; note DADS non-applicability
+  to Local Monitor (D027).
+- `docs/spec.md` — monitor section: the four design views, the TraceDetail tab
+  architecture, the client-side dependency set (Cytoscape.js + dagre), Noto font
+  vendor.
 - `docs/specifications/layers/telemetry-ingestion.md` — note the views consume
   the existing `/api/monitor/traces/{traceId}/spans`; no new endpoint/field.
-- `docs/specifications/security-data-boundaries.md` — Cytoscape.js vendored
-  (no CDN), client views consume sanitized JSON only, A2 prefix-diff out of scope
-  (D026); boundary otherwise unchanged.
-- `docs/decisions.md` — add D024–D026.
+- `docs/specifications/security-data-boundaries.md` — Cytoscape.js + dagre
+  vendored (no CDN), Noto fonts vendored (no CDN), client views consume sanitized
+  JSON only, A2 prefix-diff and cross-trace out of scope (D026); boundary
+  otherwise unchanged.
+- `docs/decisions.md` — add D024–D028.
 - `docs/task.md` — roadmap pointer.
 - User guide (`docs/user-guide/local-monitor.md`) — the new views and theme.
 
@@ -168,21 +245,64 @@ dotnet test CopilotAgentObservability.slnx
 ```
 
 Automated tests use synthetic OTLP fixtures only. Client-side view behavior is
-covered by the existing server-rendered UI tests plus assertions that the views
-read only sanitized JSON. Live VS Code Copilot Chat validation is **human-gated**
-(same constraint as Sprint8/Sprint9 M6).
+covered by **Playwright smoke tests** (tab switching, filter application, Flow
+Chart rendering) plus assertions that the views read only sanitized JSON. Live
+VS Code Copilot Chat validation is **human-gated** (same constraint as
+Sprint8/Sprint9 M6).
 
 ## Dependencies & risks
 
-- **Single new dependency (Cytoscape.js).** Vendored locally, MIT, UMD single
-  file, no CDN, no build step (D025). Risk: vendored asset size / version drift —
-  pin the version and record provenance in M4.
-- **"User request" is an approximation.** A2 groups by root `invoke_agent`, not a
-  true user-request id (none exists in the telemetry). Documented in
+- **Vendored client-side assets (~7–12 MB total).** Cytoscape.js (~1.3 MB) +
+  dagre (~90 KB) + cytoscape-dagre (~40 KB) + Noto Sans JP full weight set
+  (~5–10 MB) + Noto Sans Mono (~100 KB). All vendored locally, MIT, UMD/woff2
+  single files, no CDN, no build step (D025, D028). Risk: repository size
+  increase — accepted for a local-only tool. Version pinned; provenance recorded
+  in M2 (fonts) and M3 (Cytoscape/dagre).
+- **Playwright dev dependency.** Required for M6 client-side smoke tests. Added
+  as a test-project NuGet package (Microsoft.Playwright). Risk: browser binary
+  download (~100 MB+) in CI. Record in `docs/decisions.md`.
+- **"User request" is an approximation.** A2 groups by root `invoke_agent`, not
+  a true user-request id (none exists in the telemetry). Documented in
   [Data mapping](#data-mapping); acceptable for a local self-debugging view.
 - **No boundary change, but new client code.** The risk is a view accidentally
   reading a raw route; M6 re-asserts the sanitized-only consumption invariant and
   that `--sanitized-only` leaves the new views functional.
+- **TraceDetail Razor/JS dual rendering.** The page has two rendering engines
+  (JS for sanitized tabs, Razor for raw preview). This is accepted for Sprint10
+  to preserve the D023 boundary. Future unification direction recorded in
+  `docs/decisions.md`.
 - **Live validation human-gated** (inherited). Graph hierarchy and cache/token
   emission are confirmed only by a real run; M2–M5 build and test against the
   synthetic fixtures shaped to the documented contract.
+
+## Vendor provenance
+
+Recorded during milestone execution. Updated in-place.
+
+| Asset | Version | SHA-256 | Size | License | Milestone |
+| --- | --- | --- | --- | --- | --- |
+| `wwwroot/vendor/cytoscape.min.js` | TBD | TBD | ~1.3 MB | MIT | M3 |
+| `wwwroot/vendor/dagre.min.js` | TBD | TBD | ~90 KB | MIT | M3 |
+| `wwwroot/vendor/cytoscape-dagre.js` | TBD | TBD | ~40 KB | MIT | M3 |
+| `wwwroot/vendor/fonts/NotoSansJP-*` | TBD | TBD | ~5–10 MB | OFL | M2 |
+| `wwwroot/vendor/fonts/NotoSansMono-*` | TBD | TBD | ~100 KB | OFL | M2 |
+
+## Requirements brainstorm record (2026-06-28)
+
+The requirements were refined through a structured grill-me session (14 design
+decisions). Key changes from the initial draft:
+
+| Topic | Initial draft | Final decision |
+| --- | --- | --- |
+| Sequence | A3→A4→A1→A2 | **A3→A1→A4→A2** (Flow Chart first) |
+| DADS | Implicit (skills existed) | **Not applied to Local Monitor** (D027) |
+| Accessibility | Implicit DADS | **VS Code conventions** |
+| Typography | Not specified | **Noto Sans JP/Mono full vendor** (D028) |
+| A4 view toggle | flat ⇔ sub-agent tree | **Flat only** (tree = Flow Chart) |
+| A4 filters | 6 filter types | **Status (errors only)** |
+| A4 sort | duration / tokens / time | **Tokens / time** |
+| A2 cross-trace | conversation_id stitching | **Trace-internal only** (deferred) |
+| Testing | Existing tests only | **Playwright smoke tests added** |
+| Graph layout | Not specified | **dagre** (D025 updated) |
+| TraceDetail | Not specified | **2-section split** (JS sanitized + Razor raw) |
+| Tab UI | Not specified | **Summary \| Timeline \| Flow Chart \| Cache** |
