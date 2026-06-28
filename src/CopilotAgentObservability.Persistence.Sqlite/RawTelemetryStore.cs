@@ -573,11 +573,12 @@ internal sealed class RawTelemetryStore
     }
 
     /// <summary>
-    /// All raw records for a trace (ordered by id) for the raw-bearing trace-detail
-    /// page's inline rendering; empty when the trace has no raw records. Uses the
-    /// <c>IX_raw_records_trace_id</c> index.
+    /// Raw records for a trace (ordered by id) for the raw-bearing trace-detail
+    /// page's bounded inline preview. Uses the span projection's raw_record_id
+    /// mapping so secondary traces inside a multi-trace OTLP request resolve to
+    /// their containing raw payload.
     /// </summary>
-    public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId)
+    public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit)
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
@@ -585,10 +586,16 @@ internal sealed class RawTelemetryStore
             """
             SELECT id, source, trace_id, received_at, resource_attributes_json, payload_json, schema_version
             FROM raw_records
-            WHERE trace_id = $trace_id
-            ORDER BY id;
+            WHERE id IN (
+                SELECT DISTINCT raw_record_id
+                FROM monitor_spans
+                WHERE trace_id = $trace_id
+            )
+            ORDER BY id
+            LIMIT $limit;
             """;
         AddParameter(command, "$trace_id", traceId);
+        AddParameter(command, "$limit", limit);
 
         using var reader = command.ExecuteReader();
         var records = new List<RawTelemetryRecord>();
@@ -672,8 +679,12 @@ internal sealed class RawTelemetryStore
             return false;
         }
 
+        var validSpans = spans
+            .Where(span => !string.IsNullOrWhiteSpace(span.TraceId))
+            .ToList();
+
         // Insert spans — idempotent via UNIQUE(raw_record_id, span_ordinal).
-        foreach (var span in spans)
+        foreach (var span in validSpans)
         {
             using var insert = connection.CreateCommand();
             insert.Transaction = transaction;
@@ -698,7 +709,7 @@ internal sealed class RawTelemetryStore
                 );
                 """;
             AddParameter(insert, "$raw_record_id", rawRecordId);
-            AddParameter(insert, "$trace_id", span.TraceId ?? (object)DBNull.Value);
+            AddParameter(insert, "$trace_id", span.TraceId);
             AddParameter(insert, "$span_id", span.SpanId);
             AddParameter(insert, "$parent_span_id", span.ParentSpanId);
             AddParameter(insert, "$span_ordinal", span.SpanOrdinal);
@@ -729,9 +740,8 @@ internal sealed class RawTelemetryStore
         }
 
         // Update rollup columns on monitor_traces for each affected trace_id.
-        var affectedTraceIds = spans
+        var affectedTraceIds = validSpans
             .Select(s => s.TraceId)
-            .Where(t => !string.IsNullOrEmpty(t))
             .Distinct(StringComparer.Ordinal)
             .ToList();
 
@@ -744,7 +754,8 @@ internal sealed class RawTelemetryStore
                 readSpans.Transaction = transaction;
                 readSpans.CommandText =
                     """
-                    SELECT operation, category, input_tokens, output_tokens, total_tokens,
+                    SELECT trace_id, span_id, parent_span_id, span_ordinal,
+                           operation, category, input_tokens, output_tokens, total_tokens,
                            request_model, response_model, start_time, end_time
                     FROM monitor_spans
                     WHERE trace_id = $trace_id
@@ -755,22 +766,22 @@ internal sealed class RawTelemetryStore
                 while (sr.Read())
                 {
                     traceSpans.Add(new MonitorSpanProjection(
-                        TraceId: traceId,
-                        SpanId: null,
-                        ParentSpanId: null,
-                        SpanOrdinal: 0,
-                        Operation: sr.IsDBNull(0) ? null : sr.GetString(0),
-                        Category: sr.IsDBNull(1) ? null : sr.GetString(1),
+                        TraceId: sr.IsDBNull(0) ? null : sr.GetString(0),
+                        SpanId: sr.IsDBNull(1) ? null : sr.GetString(1),
+                        ParentSpanId: sr.IsDBNull(2) ? null : sr.GetString(2),
+                        SpanOrdinal: sr.GetInt32(3),
+                        Operation: sr.IsDBNull(4) ? null : sr.GetString(4),
+                        Category: sr.IsDBNull(5) ? null : sr.GetString(5),
                         ToolName: null,
                         ToolType: null,
                         McpToolName: null,
                         McpServerHash: null,
                         AgentName: null,
-                        RequestModel: sr.IsDBNull(5) ? null : sr.GetString(5),
-                        ResponseModel: sr.IsDBNull(6) ? null : sr.GetString(6),
-                        InputTokens: sr.IsDBNull(2) ? null : sr.GetInt32(2),
-                        OutputTokens: sr.IsDBNull(3) ? null : sr.GetInt32(3),
-                        TotalTokens: sr.IsDBNull(4) ? null : sr.GetInt32(4),
+                        RequestModel: sr.IsDBNull(9) ? null : sr.GetString(9),
+                        ResponseModel: sr.IsDBNull(10) ? null : sr.GetString(10),
+                        InputTokens: sr.IsDBNull(6) ? null : sr.GetInt32(6),
+                        OutputTokens: sr.IsDBNull(7) ? null : sr.GetInt32(7),
+                        TotalTokens: sr.IsDBNull(8) ? null : sr.GetInt32(8),
                         ReasoningTokens: null,
                         CacheReadTokens: null,
                         CacheCreationTokens: null,
@@ -779,8 +790,8 @@ internal sealed class RawTelemetryStore
                         FinishReasons: null,
                         ConversationId: null,
                         DurationMs: null,
-                        StartTime: sr.IsDBNull(7) ? null : sr.GetString(7),
-                        EndTime: sr.IsDBNull(8) ? null : sr.GetString(8)));
+                        StartTime: sr.IsDBNull(11) ? null : sr.GetString(11),
+                        EndTime: sr.IsDBNull(12) ? null : sr.GetString(12)));
                 }
             }
 

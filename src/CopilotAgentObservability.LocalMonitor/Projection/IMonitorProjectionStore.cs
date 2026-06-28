@@ -46,7 +46,7 @@ internal interface IMonitorProjectionStore
 
     RawTelemetryRecord? GetRawRecordById(long id);
 
-    IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId);
+    IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit);
 }
 
 internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
@@ -102,8 +102,8 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
     public RawTelemetryRecord? GetRawRecordById(long id) =>
         Guard(() => store.GetRawRecordById(id));
 
-    public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId) =>
-        Guard(() => store.ListRawRecordsByTraceId(traceId));
+    public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) =>
+        Guard(() => store.ListRawRecordsByTraceId(traceId, limit));
 
     private static T Guard<T>(Func<T> operation)
     {

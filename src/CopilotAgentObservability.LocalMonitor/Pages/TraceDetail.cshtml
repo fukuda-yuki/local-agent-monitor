@@ -87,7 +87,12 @@
         @foreach (var record in Model.RawRecords)
         {
             <h4>Raw record @record.Id</h4>
-            <pre>@record.PayloadJson</pre>
+            <p><a href="/traces/@record.Id/raw">Open full raw record</a> (@record.PayloadLength chars)</p>
+            @if (record.IsTruncated)
+            {
+                <p>Raw preview truncated.</p>
+            }
+            <pre>@record.Preview</pre>
         }
     }
 </section>

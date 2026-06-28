@@ -219,11 +219,14 @@ Per-field sanitization policy:
   unsafe-value guard (rejects email / path / secret-like values), and truncated
   to a pinned max length. A value that fails the guard is dropped (the row keeps
   its other columns), not stored verbatim.
-- **`error_type`**: the class token only (e.g. `timeout`, `ECONNREFUSED`).
-  Exception messages and free-form `error` / `exception.message` attributes are
-  never copied; same guard + max length applies.
+- **`error_type`**: the class token only (e.g. `timeout`, `ECONNREFUSED`,
+  `TokenExpiredError`). Exception messages and free-form `error` /
+  `exception.message` attributes are never copied. Values must be identifier-like
+  tokens (`[A-Za-z0-9._]`) and are truncated to the pinned max length; malformed
+  strings, paths, emails, and message text are dropped.
 - **`finish_reasons`**: enum-like tokens (`stop`, `length`, …) from a fixed set;
-  unknown values pass the guard + max length.
+  unknown string tokens pass the guard + max length. Malformed serialized arrays
+  are dropped rather than stored as raw text.
 - **`mcp_server_hash`**: stored as the client-provided hash only; the unhashed
   server name is never derived or stored.
 - **reference ids** (`trace_id`, `span_id`, `parent_span_id`, `conversation_id`):
@@ -256,8 +259,10 @@ Raw access (default-on):
 
 - raw body (tool call arguments / results, sub-agent instructions / responses,
   system prompt) and PII (`user.id` / `user.email`) are shown **by default** on
-  raw-bearing routes (the trace-detail page and `GET /traces/{rawRecordId}/raw`),
-  server-rendered as inert text. There is no JSON raw API.
+  raw-bearing routes: the trace-detail page renders a bounded inline preview and
+  links to the full single-record view, while `GET /traces/{rawRecordId}/raw`
+  renders one full raw record. Both are server-rendered as inert text. There is
+  no JSON raw API.
 - `--sanitized-only` restores metadata-only mode: raw-bearing routes return
   `404`, PII is excluded. No cacheable raw response is generated.
 - raw-bearing routes enforce same-origin (`Origin` / `Sec-Fetch-Site` ⇒

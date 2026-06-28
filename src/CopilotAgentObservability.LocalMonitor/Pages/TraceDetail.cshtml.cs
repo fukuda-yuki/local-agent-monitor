@@ -1,3 +1,4 @@
+using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
 using Microsoft.AspNetCore.Http;
@@ -17,6 +18,9 @@ namespace CopilotAgentObservability.LocalMonitor.Pages;
 /// </summary>
 public sealed class TraceDetailModel : PageModel
 {
+    private const int RawPreviewRecordLimit = 5;
+    private const int RawPreviewCharLimit = 4096;
+
     public string TraceId { get; private set; } = string.Empty;
 
     internal MonitorTraceRow Trace { get; private set; } = null!;
@@ -25,11 +29,15 @@ public sealed class TraceDetailModel : PageModel
 
     internal IReadOnlyList<MonitorSpanRow> Turns { get; private set; } = Array.Empty<MonitorSpanRow>();
 
-    internal IReadOnlyList<RawTelemetryRecord> RawRecords { get; private set; } = Array.Empty<RawTelemetryRecord>();
+    internal IReadOnlyList<RawRecordPreview> RawRecords { get; private set; } = Array.Empty<RawRecordPreview>();
 
     public IActionResult OnGet(string traceId)
     {
         var options = HttpContext.RequestServices.GetRequiredService<MonitorOptions>();
+
+        // Raw / PII must not be left in the browser cache after process exit or a
+        // --sanitized-only restart.
+        Response.Headers["Cache-Control"] = "no-store";
 
         // The trace-detail page is raw-bearing; --sanitized-only removes it.
         if (options.SanitizedOnly)
@@ -49,29 +57,53 @@ public sealed class TraceDetailModel : PageModel
             };
         }
 
-        // Raw / PII must not be left in the browser cache after process exit or a
-        // --sanitized-only restart.
-        Response.Headers["Cache-Control"] = "no-store";
-
         TraceId = traceId;
         var store = HttpContext.RequestServices.GetRequiredService<IMonitorProjectionStore>();
 
-        var trace = store.GetMonitorTrace(traceId);
-        if (trace is null)
+        MonitorTraceRow? trace;
+        IReadOnlyList<MonitorSpanRow> spans;
+        IReadOnlyList<RawTelemetryRecord> rawRecords;
+        try
         {
-            return NotFound();
+            trace = store.GetMonitorTrace(traceId);
+            if (trace is null)
+            {
+                return NotFound();
+            }
+
+            spans = store.GetSpansForTrace(traceId);
+            rawRecords = store.ListRawRecordsByTraceId(traceId, RawPreviewRecordLimit);
+        }
+        catch (PersistenceBusyException)
+        {
+            return new ContentResult
+            {
+                StatusCode = StatusCodes.Status503ServiceUnavailable,
+                ContentType = "application/json",
+                Content = "{\"accepted\":false,\"error\":\"persistence_busy\",\"message\":\"The local monitor raw store is busy.\"}",
+            };
         }
 
         Trace = trace;
-        var spans = store.GetSpansForTrace(traceId);
         Tree = BuildTree(spans);
         Turns = spans
             .Where(span => string.Equals(span.Category, "llm_call", StringComparison.Ordinal)
                 || string.Equals(span.Operation, "chat", StringComparison.Ordinal))
             .ToList();
-        RawRecords = store.ListRawRecordsByTraceId(traceId);
+        RawRecords = rawRecords.Select(ToPreview).ToList();
 
         return Page();
+    }
+
+    private static RawRecordPreview ToPreview(RawTelemetryRecord record)
+    {
+        var payload = record.PayloadJson;
+        var truncated = payload.Length > RawPreviewCharLimit;
+        return new RawRecordPreview(
+            Id: record.Id!.Value,
+            Preview: truncated ? payload[..RawPreviewCharLimit] : payload,
+            PayloadLength: payload.Length,
+            IsTruncated: truncated);
     }
 
     /// <summary>
@@ -153,3 +185,5 @@ public sealed class TraceDetailModel : PageModel
 }
 
 internal sealed record SpanTreeNode(MonitorSpanRow Span, int Depth);
+
+internal sealed record RawRecordPreview(long Id, string Preview, int PayloadLength, bool IsTruncated);

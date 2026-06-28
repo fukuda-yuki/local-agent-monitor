@@ -126,8 +126,8 @@ Raw-bearing route set (raw / PII surfaces):
 
 - raw / PII is exposed through server-rendered routes only. The raw-bearing
   route set is:
-  - the **trace-detail page** (agent-execution view, which renders raw body
-    inline).
+  - the **trace-detail page** (agent-execution view, which renders a bounded raw
+    preview inline and links to the full single-record raw route).
   - `GET /traces/{rawRecordId}/raw` (server-rendered HTML, one raw record on
     demand by id from `raw_records`).
 - there is **no JSON raw API**; `/api/monitor/*` and the SSE stream **never**
@@ -158,11 +158,14 @@ Per-field sanitization policy:
   unsafe-value guard (rejects email / path / secret-like values), and truncated
   to a pinned max length. A value that fails the guard is dropped (the row keeps
   its other columns), not stored verbatim.
-- **`error_type`**: the class token only (e.g. `timeout`, `ECONNREFUSED`).
-  Exception messages and free-form `error` / `exception.message` attributes are
-  never copied; same guard + max length applies.
+- **`error_type`**: the class token only (e.g. `timeout`, `ECONNREFUSED`,
+  `TokenExpiredError`). Exception messages and free-form `error` /
+  `exception.message` attributes are never copied. Values must be identifier-like
+  tokens (`[A-Za-z0-9._]`) and are truncated to the pinned max length; malformed
+  strings, paths, emails, and message text are dropped.
 - **`finish_reasons`**: enum-like tokens (`stop`, `length`, …) from a fixed set;
-  unknown values pass the guard + max length.
+  unknown string tokens pass the guard + max length. Malformed serialized arrays
+  are dropped rather than stored as raw text.
 - **`mcp_server_hash`**: stored as the client-provided hash only; the unhashed
   server name is never derived or stored.
 - **reference ids** (`trace_id`, `span_id`, `parent_span_id`, `conversation_id`):

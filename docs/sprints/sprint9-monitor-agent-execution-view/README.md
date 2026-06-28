@@ -139,10 +139,13 @@ name, internal identifier, or path fragment. Therefore:
   to a pinned max length**. A value that fails the guard is dropped (the row keeps
   its other columns), not stored verbatim.
 - **`error.type`**: the **class token only** (e.g. `timeout`,
-  `ECONNREFUSED`). Exception messages and the free-form `error` / `exception.message`
-  attributes are **never** copied; same guard + max length applies.
+  `ECONNREFUSED`, `TokenExpiredError`). Exception messages and the free-form
+  `error` / `exception.message` attributes are **never** copied. Values must be
+  identifier-like tokens (`[A-Za-z0-9._]`) and are truncated to the pinned max
+  length; malformed strings, paths, emails, and message text are dropped.
 - **`finish_reasons`**: enum-like tokens (`stop`, `length`, …) from a fixed set;
-  unknown values pass the guard + max length.
+  unknown string tokens pass the guard + max length. Malformed serialized arrays
+  are dropped rather than stored as raw text.
 - **`mcp_server_hash`**: stored as the client-provided **hash** only
   (`github.copilot.tool.parameters.mcp_server_name_hash`); the unhashed server
   name is never derived or stored.
@@ -213,9 +216,10 @@ Changed by D023:
   zero-friction self-debugging; `--sanitized-only` is the opt-out for shared
   screens / health-check runs.
 
-Raw-bearing routes (default-on). Because raw bodies are now rendered **inline**,
-the **trace-detail page becomes a raw-bearing route** alongside the existing
-`GET /traces/{rawRecordId}/raw`. M1 pins the exact raw-bearing route set; **every
+Raw-bearing routes (default-on). Because raw bodies are now rendered as a
+bounded inline preview, the **trace-detail page becomes a raw-bearing route**
+alongside the existing `GET /traces/{rawRecordId}/raw` full-record view. M1 pins
+the exact raw-bearing route set; **every
 route in it** enforces same-origin (`Origin` / `Sec-Fetch-Site` ⇒ cross-site
 `403`) **and** `Cache-Control: no-store` (so raw / PII is not left in the browser
 cache after process exit or a `--sanitized-only` restart). The trace **list**,

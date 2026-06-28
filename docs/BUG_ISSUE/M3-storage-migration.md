@@ -9,9 +9,9 @@ preserved.
 
 | Card | Severity | Fix unit | Plan note |
 | --- | --- | --- | --- |
-| M3-1 | High | Span-backfill progress surfacing | Fix before declaring upgraded DBs trustworthy. |
-| M3-2 | Medium | Missing/blank `traceId` poison record | Can be planned with M3-1 because the invisible poison case is part of the same risk. |
-| M3-3 | Low | Span cursor performance index | Defer unless already changing migration DDL. |
+| M3-1 | High | Span-backfill progress surfacing | Fixed: span projection backlog and failure count are surfaced in readiness body. |
+| M3-2 | Medium | Missing/blank `traceId` poison record | Closed: missing trace id was already ignored; blank/null trace ids are explicitly skipped. |
+| M3-3 | Low | Span cursor performance index | Closed without code change: defer until span volumes justify migration DDL. |
 
 Primary next plan: M3-1 + M3-2 as one storage/backfill reliability fix plan.
 Keep M3-3 optional unless the migration is already being touched.
@@ -63,6 +63,10 @@ Key files: `src/CopilotAgentObservability.Persistence.Sqlite/RawTelemetryStore.c
   (non-gating is acceptable) or emit a log/metric when span backlog > 0 after the
   trace backlog drains; add a test asserting a Sprint8-upgrade window reports
   remaining span work rather than a clean `ready`.
+- **Resolution:** Fixed. Readiness body now includes independent
+  `span_projection_backlog`, `span_projection_lag_seconds`, and
+  `projection_failure_count`; span backlog is surfaced as a degraded reason
+  without becoming a readiness gate.
 
 <a id="M3-2"></a>
 
@@ -91,6 +95,10 @@ Key files: `src/CopilotAgentObservability.Persistence.Sqlite/RawTelemetryStore.c
   whose `traceId` is null/blank **before** insert, consistent with "degrade, do
   not fail". Add a fixture with a trace-less span and assert the record still
   stamps `span_projected_at` (drops only the bad span).
+- **Resolution:** Closed with hardening. The missing-`traceId` wedge did not
+  reproduce because `INSERT OR IGNORE` already drops the NOT NULL violation, but
+  span projection now explicitly skips null/blank trace ids and still stamps the
+  raw record as span-projected.
 
 <a id="M3-3"></a>
 

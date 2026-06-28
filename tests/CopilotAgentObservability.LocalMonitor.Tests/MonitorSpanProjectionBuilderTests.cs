@@ -410,6 +410,27 @@ public class MonitorSpanProjectionBuilderTests
     }
 
     [Fact]
+    public void Build_SecretNamedErrorClassToken_Passes()
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[
+          {"traceId":"err-token","spanId":"1111","name":"chat gpt-4o",
+           "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000001000000000",
+           "status":{"code":"STATUS_CODE_ERROR"},
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+             {"key":"error.type","value":{"stringValue":"TokenExpiredError"}}
+           ]}
+        ]}]}]}
+        """;
+        var record = Record("err-token", payload);
+        var spans = MonitorSpanProjectionBuilder.Build(record);
+
+        var span = Assert.Single(spans);
+        Assert.Equal("TokenExpiredError", span.ErrorType);
+    }
+
+    [Fact]
     public void Build_UnsafeFinishReason_GuardedOut()
     {
         var payload = """
@@ -427,6 +448,26 @@ public class MonitorSpanProjectionBuilderTests
 
         var span = Assert.Single(spans);
         Assert.Equal("stop", span.FinishReasons);
+    }
+
+    [Fact]
+    public void Build_MalformedFinishReasons_DropsRawText()
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[
+          {"traceId":"finish-bad","spanId":"1111","name":"chat gpt-4o",
+           "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000001000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+             {"key":"gen_ai.response.finish_reasons","value":{"stringValue":"[not json]"}}
+           ]}
+        ]}]}]}
+        """;
+        var record = Record("finish-bad", payload);
+        var spans = MonitorSpanProjectionBuilder.Build(record);
+
+        var span = Assert.Single(spans);
+        Assert.Null(span.FinishReasons);
     }
 
     [Fact]
@@ -598,6 +639,65 @@ public class MonitorSpanProjectionBuilderTests
         Assert.Equal(3000, rollup.TotalTokens);
     }
 
+    [Fact]
+    public void Rollup_ChildInvokeAgentBeforeRoot_UsesRootAgentTokens()
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[
+          {"traceId":"roll-child-first","spanId":"child","parentSpanId":"root","name":"invoke_agent sub",
+           "startTimeUnixNano":"1710000001000000000","endTimeUnixNano":"1710000002000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},
+             {"key":"gen_ai.usage.input_tokens","value":{"intValue":"10"}},
+             {"key":"gen_ai.usage.output_tokens","value":{"intValue":"5"}}
+           ]},
+          {"traceId":"roll-child-first","spanId":"root","name":"invoke_agent",
+           "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000003000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},
+             {"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}},
+             {"key":"gen_ai.usage.output_tokens","value":{"intValue":"50"}}
+           ]}
+        ]}]}]}
+        """;
+        var record = Record("roll-child-first", payload);
+        var spans = MonitorSpanProjectionBuilder.Build(record);
+        var rollup = MonitorTraceRollupBuilder.ComputeRollup(spans);
+
+        Assert.Equal(100, rollup.InputTokens);
+        Assert.Equal(50, rollup.OutputTokens);
+        Assert.Equal(150, rollup.TotalTokens);
+    }
+
+    [Fact]
+    public void Rollup_InvokeAgentWithOnlyTotalTokens_UsesAgentTotal()
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[
+          {"traceId":"roll-total-only","spanId":"root","name":"invoke_agent",
+           "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000003000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},
+             {"key":"gen_ai.usage.total_tokens","value":{"intValue":"900"}}
+           ]},
+          {"traceId":"roll-total-only","spanId":"chat","parentSpanId":"root","name":"chat gpt-4o",
+           "startTimeUnixNano":"1710000001000000000","endTimeUnixNano":"1710000002000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+             {"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}},
+             {"key":"gen_ai.usage.output_tokens","value":{"intValue":"50"}}
+           ]}
+        ]}]}]}
+        """;
+        var record = Record("roll-total-only", payload);
+        var spans = MonitorSpanProjectionBuilder.Build(record);
+        var rollup = MonitorTraceRollupBuilder.ComputeRollup(spans);
+
+        Assert.Null(rollup.InputTokens);
+        Assert.Null(rollup.OutputTokens);
+        Assert.Equal(900, rollup.TotalTokens);
+    }
+
     // --- Normalizer over-count fix ---
 
     [Fact]
@@ -668,6 +768,65 @@ public class MonitorSpanProjectionBuilderTests
         Assert.Equal(500, row.InputTokens);
         Assert.Equal(250, row.OutputTokens);
         Assert.Equal(750, row.TotalTokens);
+    }
+
+    [Fact]
+    public void Normalizer_ChildInvokeAgentBeforeRoot_UsesRootAgentTokens()
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"norm-child-first","spanId":"child","parentSpanId":"root","name":"invoke_agent sub",
+           "startTimeUnixNano":"1710000001000000000","endTimeUnixNano":"1710000002000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},
+             {"key":"gen_ai.usage.input_tokens","value":{"intValue":"10"}},
+             {"key":"gen_ai.usage.output_tokens","value":{"intValue":"5"}}
+           ]},
+          {"traceId":"norm-child-first","spanId":"root","name":"invoke_agent",
+           "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000003000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},
+             {"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}},
+             {"key":"gen_ai.usage.output_tokens","value":{"intValue":"50"}}
+           ]}
+        ]}]}]}
+        """;
+
+        var row = Assert.Single(RawMeasurementNormalizer.Normalize(payload));
+        Assert.Equal(100, row.InputTokens);
+        Assert.Equal(50, row.OutputTokens);
+        Assert.Equal(150, row.TotalTokens);
+    }
+
+    [Fact]
+    public void Normalizer_InvokeAgentWithOnlyTotalTokens_UsesAgentTotal()
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"norm-total-only","spanId":"root","name":"invoke_agent",
+           "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000003000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},
+             {"key":"gen_ai.usage.total_tokens","value":{"intValue":"900"}}
+           ]},
+          {"traceId":"norm-total-only","spanId":"chat","parentSpanId":"root","name":"chat gpt-4o",
+           "startTimeUnixNano":"1710000001000000000","endTimeUnixNano":"1710000002000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+             {"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}},
+             {"key":"gen_ai.usage.output_tokens","value":{"intValue":"50"}}
+           ]}
+        ]}]}]}
+        """;
+
+        var row = Assert.Single(RawMeasurementNormalizer.Normalize(payload));
+        Assert.Null(row.InputTokens);
+        Assert.Null(row.OutputTokens);
+        Assert.Equal(900, row.TotalTokens);
     }
 
     // --- Path detection in IsUnsafeStringValue ---

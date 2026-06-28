@@ -272,13 +272,22 @@ Readiness body (machine-readable, returned on both `200` and `503`):
     "projection_worker_running": true,
     "ingestion_accepting": true,
     "projection_lag_seconds": 0,
-    "projection_backlog": 0
+    "projection_backlog": 0,
+    "span_projection_lag_seconds": 0,
+    "span_projection_backlog": 0,
+    "projection_failure_count": 0
   },
   "degraded_reasons": []
 }
 ```
 
 - `status` ⇒ HTTP mapping: `ready` and `degraded` ⇒ `200`; `not_ready` ⇒ `503`.
+- `projection_backlog` / `projection_lag_seconds` describe trace projection work.
+  `span_projection_backlog` / `span_projection_lag_seconds` describe the
+  independent per-span backfill queue. Span projection backlog does not gate
+  readiness by itself, but it must be visible while upgraded databases are still
+  being backfilled. `projection_failure_count` is cumulative for projection
+  failures in the running process and is diagnostic only.
 - `degraded_reasons` enumerates active conditions. **not_ready (`503`) tokens:**
   `loopback_unbound` (not bound to loopback), `db_unavailable` (DB not open),
   `migration_failed`, `fatal_error`, `ingestion_stalled` (backpressure continuous
@@ -289,8 +298,10 @@ Readiness body (machine-readable, returned on both `200` and `503`):
   `ready`), and `projection_status_unknown` (the worker is running but has not yet
   produced a successful backlog/lag read — startup or a sustained status-read
   failure — so lag is unknown and ready is withheld). **degraded (`200`) tokens:**
-  `ingestion_backpressure` (momentary sub-threshold backpressure) and
-  `projection_lag` (projection lag above zero but under the threshold).
+  `ingestion_backpressure` (momentary sub-threshold backpressure),
+  `projection_lag` (projection lag above zero but under the threshold), and
+  `span_projection_backlog` (trace projection is current, but per-span projection
+  or upgrade backfill still has queued work).
 - the `ready` state (`200`, empty `degraded_reasons`) is active once a projection
   worker is running, migration is complete, the writer can accept/commit, and
   projection lag is `0`.
@@ -340,9 +351,10 @@ Raw / PII exposure follows the Local Ingestion Monitor boundary in
 [../security-data-boundaries.md](../security-data-boundaries.md): raw body
 (tool call arguments / results, sub-agent instructions / responses, system
 prompt) and PII (`user.id` / `user.email`) are shown **by default**
-(server-rendered, inert text) on raw-bearing routes (the trace-detail page and
-`GET /traces/{rawRecordId}/raw`). `/api/monitor/*` and SSE never carry raw / PII.
-The `--sanitized-only` flag restores metadata-only mode (raw-bearing routes
+(server-rendered, inert text) on raw-bearing routes. The trace-detail page
+renders a bounded inline raw preview and links to `GET /traces/{rawRecordId}/raw`
+for the full single-record payload. `/api/monitor/*` and SSE never carry raw /
+PII. The `--sanitized-only` flag restores metadata-only mode (raw-bearing routes
 return `404`, PII is excluded). Raw / PII is never logged or committed.
 
 Live validation for the monitor records the same evidence as the

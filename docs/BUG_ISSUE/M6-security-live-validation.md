@@ -7,7 +7,7 @@ the new surfaces, plus the human-gated live-validation evidence record.
 
 | Card | Severity | Fix unit | Plan note |
 | --- | --- | --- | --- |
-| M6-1 | Medium | Live-validation document consistency | Requires human confirmation if Part B is marked complete. |
+| M6-1 | Medium | Live-validation document consistency | Fixed: Part B remains pending unless user-confirmed; candidate evidence is not closure evidence. |
 
 Primary next plan: reconcile the four milestone records only after the user
 confirms whether VS Code Copilot Chat Part B was actually run on 2026-06-28.
@@ -56,6 +56,9 @@ is documentation consistency.
   `review.md` / `plan.md` / the README M6 row to match, then commit. If not, mark
   Part B as still PENDING in `live-validation.md`. The status must be consistent
   across all four documents before M6 is declared complete.
+- **Resolution:** Fixed without claiming human-gated completion. The Part B
+  section now remains `PENDING USER CONFIRMATION`; the detailed VS Code evidence
+  is retained as candidate evidence until the user confirms the run.
 
 ---
 

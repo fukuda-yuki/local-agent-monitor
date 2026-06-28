@@ -28,15 +28,20 @@ internal static class MonitorTraceRollupBuilder
         int? chatOutputSum = null;
         int? chatTotalSum = null;
 
+        var spanIds = spans
+            .Select(span => span.SpanId)
+            .Where(spanId => !string.IsNullOrEmpty(spanId))
+            .Select(spanId => spanId!)
+            .ToHashSet(StringComparer.Ordinal);
+
         foreach (var span in spans)
         {
             if (string.Equals(span.Operation, "invoke_agent", StringComparison.Ordinal))
             {
                 agentInvocationCount++;
-                // Use the first (root) invoke_agent with tokens as the trace total.
-                if (rootInvokeAgent is null && span.InputTokens.HasValue)
+                if (HasUsage(span) && IsRootSpan(span, spanIds))
                 {
-                    rootInvokeAgent = span;
+                    rootInvokeAgent ??= span;
                 }
             }
 
@@ -75,6 +80,10 @@ internal static class MonitorTraceRollupBuilder
         }
 
         // No-double-count: prefer invoke_agent tokens, fall back to chat sum.
+        rootInvokeAgent ??= spans.FirstOrDefault(span =>
+            string.Equals(span.Operation, "invoke_agent", StringComparison.Ordinal)
+            && HasUsage(span));
+
         if (rootInvokeAgent is not null)
         {
             inputTokens = rootInvokeAgent.InputTokens;
@@ -116,4 +125,10 @@ internal static class MonitorTraceRollupBuilder
     {
         return value.HasValue ? (current ?? 0) + value.Value : current;
     }
+
+    private static bool HasUsage(MonitorSpanProjection span) =>
+        span.InputTokens.HasValue || span.OutputTokens.HasValue || span.TotalTokens.HasValue;
+
+    private static bool IsRootSpan(MonitorSpanProjection span, HashSet<string> spanIds) =>
+        string.IsNullOrEmpty(span.ParentSpanId) || !spanIds.Contains(span.ParentSpanId);
 }

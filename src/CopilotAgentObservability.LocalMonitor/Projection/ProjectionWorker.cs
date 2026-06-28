@@ -167,6 +167,9 @@ internal sealed class ProjectionWorker : BackgroundService
                 }
             }
 
+            var spanStatus = store.GetSpanProjectionStatus();
+            health.SetSpanProjectionStatus(spanStatus.Backlog, spanStatus.OldestUnprocessedReceivedAt);
+
             if (anyProjected)
             {
                 eventBroker?.PublishProjectionChanged();

@@ -91,6 +91,11 @@ internal static class RawMeasurementNormalizer
         int? chatInputSum = null;
         int? chatOutputSum = null;
         int? chatTotalSum = null;
+        var spanIds = group.Spans
+            .Select(span => span.SpanId)
+            .Where(spanId => !string.IsNullOrEmpty(spanId))
+            .Select(spanId => spanId!)
+            .ToHashSet(StringComparer.Ordinal);
 
         foreach (var span in group.Spans)
         {
@@ -104,7 +109,10 @@ internal static class RawMeasurementNormalizer
             var spanOutput = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.OutputTokenKeys);
             var spanTotal = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.TotalTokenKeys);
 
-            if (isInvokeAgent && !hasInvokeAgentTokens && spanInput.HasValue)
+            if (isInvokeAgent
+                && !hasInvokeAgentTokens
+                && HasUsage(spanInput, spanOutput, spanTotal)
+                && IsRootSpan(span, spanIds))
             {
                 invokeAgentInput = spanInput;
                 invokeAgentOutput = spanOutput;
@@ -151,6 +159,31 @@ internal static class RawMeasurementNormalizer
             if (span.EndTimeUnixNano.HasValue)
             {
                 maxEnd = maxEnd.HasValue ? Math.Max(maxEnd.Value, span.EndTimeUnixNano.Value) : span.EndTimeUnixNano.Value;
+            }
+        }
+
+        if (!hasInvokeAgentTokens)
+        {
+            foreach (var span in group.Spans)
+            {
+                if (!OtlpSpanReader.HasSpanName(span, "invoke_agent"))
+                {
+                    continue;
+                }
+
+                var spanInput = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.InputTokenKeys);
+                var spanOutput = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.OutputTokenKeys);
+                var spanTotal = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.TotalTokenKeys);
+                if (!HasUsage(spanInput, spanOutput, spanTotal))
+                {
+                    continue;
+                }
+
+                invokeAgentInput = spanInput;
+                invokeAgentOutput = spanOutput;
+                invokeAgentTotal = spanTotal;
+                hasInvokeAgentTokens = true;
+                break;
             }
         }
 
@@ -244,6 +277,12 @@ internal static class RawMeasurementNormalizer
     {
         return value.HasValue ? (current ?? 0) + value.Value : current;
     }
+
+    private static bool HasUsage(int? inputTokens, int? outputTokens, int? totalTokens) =>
+        inputTokens.HasValue || outputTokens.HasValue || totalTokens.HasValue;
+
+    private static bool IsRootSpan(OtlpSpanReader.RawSpanInfo span, HashSet<string> spanIds) =>
+        string.IsNullOrEmpty(span.ParentSpanId) || !spanIds.Contains(span.ParentSpanId);
 
     private static void AddStringNode(JsonObject node, string propertyName, string? value)
     {

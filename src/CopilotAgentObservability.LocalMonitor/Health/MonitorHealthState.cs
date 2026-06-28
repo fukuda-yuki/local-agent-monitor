@@ -21,6 +21,8 @@ internal sealed class MonitorHealthState
     private bool projectionStatusKnown;
     private int projectionBacklog;
     private DateTimeOffset? oldestUnprocessedReceivedAt;
+    private int spanProjectionBacklog;
+    private DateTimeOffset? oldestUnprocessedSpanReceivedAt;
     private int projectionFailureCount;
 
     public MonitorHealthState(TimeProvider? timeProvider = null)
@@ -123,6 +125,20 @@ internal sealed class MonitorHealthState
     }
 
     /// <summary>
+    /// The projection worker's latest view of the independent per-span projection
+    /// backlog. This is surfaced for upgraded databases without making span
+    /// backfill a readiness gate by itself.
+    /// </summary>
+    public void SetSpanProjectionStatus(int backlog, DateTimeOffset? oldestUnprocessedReceivedAt)
+    {
+        lock (gate)
+        {
+            spanProjectionBacklog = backlog;
+            oldestUnprocessedSpanReceivedAt = oldestUnprocessedReceivedAt;
+        }
+    }
+
+    /// <summary>
     /// The projection worker could not read backlog / lag this pass (list or status
     /// read failed). Until a successful refresh, lag is unknown and readiness must
     /// not claim ready on a stale zero-lag snapshot.
@@ -158,6 +174,8 @@ internal sealed class MonitorHealthState
                 ProjectionWorkerRunning: projectionWorkerRunning,
                 ProjectionBacklog: projectionBacklog,
                 OldestUnprocessedReceivedAt: oldestUnprocessedReceivedAt,
+                SpanProjectionBacklog: spanProjectionBacklog,
+                OldestUnprocessedSpanReceivedAt: oldestUnprocessedSpanReceivedAt,
                 ProjectionFailureCount: projectionFailureCount);
         }
     }
@@ -229,6 +247,7 @@ internal sealed class MonitorHealthState
             }
 
             var lagSeconds = ComputeProjectionLagSeconds();
+            var spanLagSeconds = ComputeSpanProjectionLagSeconds();
             if (lagSeconds >= projectionLagThresholdSeconds)
             {
                 blocking.Add("projection_lag_exceeded");
@@ -236,6 +255,11 @@ internal sealed class MonitorHealthState
             else if (lagSeconds > 0)
             {
                 degraded.Add("projection_lag");
+            }
+
+            if (spanProjectionBacklog > 0 || spanLagSeconds > 0)
+            {
+                degraded.Add("span_projection_backlog");
             }
 
             string status;
@@ -266,6 +290,9 @@ internal sealed class MonitorHealthState
                 IngestionAccepting: ingestionAccepting,
                 ProjectionLagSeconds: lagSeconds,
                 ProjectionBacklog: projectionBacklog,
+                SpanProjectionLagSeconds: spanLagSeconds,
+                SpanProjectionBacklog: spanProjectionBacklog,
+                ProjectionFailureCount: projectionFailureCount,
                 DegradedReasons: reasons);
         }
     }
@@ -273,6 +300,17 @@ internal sealed class MonitorHealthState
     private int ComputeProjectionLagSeconds()
     {
         if (oldestUnprocessedReceivedAt is not { } oldest)
+        {
+            return 0;
+        }
+
+        var seconds = (timeProvider.GetUtcNow() - oldest).TotalSeconds;
+        return seconds <= 0 ? 0 : (int)Math.Floor(seconds);
+    }
+
+    private int ComputeSpanProjectionLagSeconds()
+    {
+        if (oldestUnprocessedSpanReceivedAt is not { } oldest)
         {
             return 0;
         }
@@ -292,6 +330,8 @@ internal sealed record MonitorHealthSnapshot(
     bool ProjectionWorkerRunning,
     int ProjectionBacklog,
     DateTimeOffset? OldestUnprocessedReceivedAt,
+    int SpanProjectionBacklog,
+    DateTimeOffset? OldestUnprocessedSpanReceivedAt,
     int ProjectionFailureCount);
 
 internal sealed record MonitorReadiness(
@@ -304,6 +344,9 @@ internal sealed record MonitorReadiness(
     bool IngestionAccepting,
     int ProjectionLagSeconds,
     int ProjectionBacklog,
+    int SpanProjectionLagSeconds,
+    int SpanProjectionBacklog,
+    int ProjectionFailureCount,
     IReadOnlyList<string> DegradedReasons)
 {
     /// <summary>HTTP mapping: <c>ready</c> and <c>degraded</c> map to 200; <c>not_ready</c> maps to 503.</summary>
@@ -327,6 +370,9 @@ internal static class MonitorReadinessJson
                 ingestion_accepting = readiness.IngestionAccepting,
                 projection_lag_seconds = readiness.ProjectionLagSeconds,
                 projection_backlog = readiness.ProjectionBacklog,
+                span_projection_lag_seconds = readiness.SpanProjectionLagSeconds,
+                span_projection_backlog = readiness.SpanProjectionBacklog,
+                projection_failure_count = readiness.ProjectionFailureCount,
             },
             degraded_reasons = readiness.DegradedReasons,
         };

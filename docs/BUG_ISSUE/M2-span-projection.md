@@ -8,11 +8,11 @@ sanitization policy.
 
 | Card | Severity | Fix unit | Plan note |
 | --- | --- | --- | --- |
-| M2-1 | High | Root agent token rollup | Fix before relying on trace headline token totals. |
-| M2-2 | Medium | Agent usage presence detection | Can be planned with M2-1 because both touch rollup behavior. |
-| M2-3 | Low | `turn_count` semantics | Requires a spec decision before behavior changes. |
-| M2-4 | Low | `error_type` token sanitization | Small projection-builder change plus negative/positive tests. |
-| M2-5 | Low | `finish_reasons` parsing | Small projection-builder change plus malformed-input test. |
+| M2-1 | High | Root agent token rollup | Fixed: root selected by span hierarchy; child-before-root regression added. |
+| M2-2 | Medium | Agent usage presence detection | Fixed: any usage component counts, including total-only usage. |
+| M2-3 | Low | `turn_count` semantics | Closed without code change: current spec defines all `chat` / LLM spans. |
+| M2-4 | Low | `error_type` token sanitization | Fixed: identifier/class-token policy replaces generic secret substring guard. |
+| M2-5 | Low | `finish_reasons` parsing | Fixed: malformed serialized arrays are dropped. |
 
 Primary next plan: M2-1 + M2-2 as one token-rollup fix plan. Keep M2-3 as a
 decision item unless the intended turn-count semantics are confirmed.
@@ -58,6 +58,9 @@ Key files: `src/CopilotAgentObservability.Telemetry/Monitoring/MonitorTraceRollu
   trace-detail tree already uses in `TraceDetail.cshtml.cs:98-111`), rather than
   the first by ordinal. Add a fixture where the child `invoke_agent` precedes the
   root.
+- **Resolution:** Fixed. Rollup now selects the root `invoke_agent` by span
+  hierarchy and falls back deterministically only when no root candidate carries
+  usage.
 
 <a id="M2-2"></a>
 
@@ -78,6 +81,8 @@ Key files: `src/CopilotAgentObservability.Telemetry/Monitoring/MonitorTraceRollu
   documented usage contract usually includes input tokens.
 - **Recommendation:** Treat the `invoke_agent` total as present when **any** of
   `total/input/output` is set; derive `total` from whichever components exist.
+- **Resolution:** Fixed. Monitor rollup and raw normalization now treat any
+  input/output/total usage component as agent-level usage.
 
 <a id="M2-3"></a>
 
@@ -97,6 +102,9 @@ Key files: `src/CopilotAgentObservability.Telemetry/Monitoring/MonitorTraceRollu
 - **Recommendation:** Decide the intended semantics; if "root-agent turns",
   exclude spans whose nearest `invoke_agent` ancestor is not the root. If the
   literal "all chat spans" is intended, no change — but pin it in the spec.
+- **Resolution:** Closed without code change. The current source of truth defines
+  `turn_count` as all `chat` / LLM spans, so changing it would require a new spec
+  decision.
 
 <a id="M2-4"></a>
 
@@ -120,6 +128,8 @@ Key files: `src/CopilotAgentObservability.Telemetry/Monitoring/MonitorTraceRollu
   policy (e.g. allow `[A-Za-z0-9._]` identifier tokens up to max length) over the
   generic free-form-secret heuristic, so genuine class names survive while
   emails/paths/secrets are still rejected.
+- **Resolution:** Fixed. `error_type` now accepts identifier-like class tokens
+  (`[A-Za-z0-9._]`) up to the pinned max length and drops malformed strings.
 
 <a id="M2-5"></a>
 
@@ -134,6 +144,8 @@ Key files: `src/CopilotAgentObservability.Telemetry/Monitoring/MonitorTraceRollu
   `finish_reasons` is enum-like and the leak path is guarded.
 - **Recommendation:** On parse failure, drop rather than store the raw text; only
   accept string tokens.
+- **Resolution:** Fixed. Malformed serialized arrays are dropped; only parsed or
+  comma-separated string tokens are considered.
 
 ---
 

@@ -214,7 +214,19 @@ internal static class MonitorSpanProjectionBuilder
     private static string? SanitizeErrorType(JsonObject attributes)
     {
         var errorType = OtlpSpanReader.ReadFirstString(attributes, ErrorTypeKeys);
-        return MeasurementSanitizer.SanitizeFreeFormName(errorType);
+        if (string.IsNullOrWhiteSpace(errorType))
+        {
+            return null;
+        }
+
+        if (!System.Text.RegularExpressions.Regex.IsMatch(errorType, @"^[A-Za-z0-9._]+$"))
+        {
+            return null;
+        }
+
+        return errorType.Length > MeasurementSanitizer.MaxSanitizedNameLength
+            ? errorType[..MeasurementSanitizer.MaxSanitizedNameLength]
+            : errorType;
     }
 
     private static string? SanitizeFinishReasons(JsonObject attributes)
@@ -246,7 +258,7 @@ internal static class MonitorSpanProjectionBuilder
             }
             catch (JsonException)
             {
-                tokens.Add(raw);
+                return null;
             }
         }
         else

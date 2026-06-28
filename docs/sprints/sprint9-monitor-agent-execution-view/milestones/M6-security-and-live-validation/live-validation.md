@@ -128,7 +128,12 @@ matches the no-double-count rule.
 
 ---
 
-## Part B — VS Code GitHub Copilot Chat (COMPLETE, 2026-06-28)
+## Part B — VS Code GitHub Copilot Chat (PENDING USER CONFIRMATION)
+
+The following VS Code evidence was recorded in this working tree, but the
+human-gated run has not been confirmed in the milestone plan/review record.
+Until the user confirms that this run was actually performed, Part B remains
+pending and this section is treated as candidate evidence, not closure evidence.
 
 Date: 2026-06-28
 Environment: Windows 11 Pro 10.0.26200, PowerShell 7

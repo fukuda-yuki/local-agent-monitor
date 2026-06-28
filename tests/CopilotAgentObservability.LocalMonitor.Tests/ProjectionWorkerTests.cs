@@ -142,6 +142,26 @@ public class ProjectionWorkerTests
     }
 
     [Fact]
+    public async Task Pass_UpdatesHealthWithRemainingSpanProjectionBacklog()
+    {
+        var store = new FakeProjectionStore();
+        for (var i = 1; i <= 101; i++)
+        {
+            store.SeedProjected(i, T(i));
+        }
+
+        var health = ReadyHealth();
+        var worker = new ProjectionWorker(store, health);
+
+        await worker.RunProjectionPassAsync();
+
+        var snapshot = health.Snapshot();
+        Assert.Equal(0, snapshot.ProjectionBacklog);
+        Assert.Equal(1, snapshot.SpanProjectionBacklog);
+        Assert.Equal(T(101), snapshot.OldestUnprocessedSpanReceivedAt);
+    }
+
+    [Fact]
     public async Task Pass_StatusReadBusy_MarksProjectionStatusUnknownSoReadinessIsNotReady()
     {
         var store = new FakeProjectionStore { StatusThrowsBusy = true };
@@ -211,6 +231,12 @@ public class ProjectionWorkerTests
                 ReceivedAt: receivedAt,
                 ResourceAttributesJson: null,
                 PayloadJson: """{"resourceSpans":[]}"""));
+
+        public void SeedProjected(long id, DateTimeOffset receivedAt)
+        {
+            Seed(id, receivedAt);
+            projected.Add(id);
+        }
 
         public bool IsProjected(long id) => projected.Contains(id);
 
@@ -288,7 +314,7 @@ public class ProjectionWorkerTests
         public RawTelemetryRecord? GetRawRecordById(long id) =>
             throw new NotSupportedException();
 
-        public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId) =>
+        public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) =>
             throw new NotSupportedException();
     }
 }

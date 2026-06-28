@@ -8,10 +8,10 @@ rollup), new trace-list columns, raw bodies inline by default,
 
 | Card | Severity | Fix unit | Plan note |
 | --- | --- | --- | --- |
-| M5-1 | Medium | Raw lookup for secondary trace ids | Fix with a multi-trace-in-one-record fixture. |
-| M5-4 | Medium | Bounded inline raw rendering | Fix before using large live traces in the trace-detail page. |
-| M5-2 | Low | `no-store` on early returns | Small header-ordering cleanup; can batch with M5-4. |
-| M5-3 | Low | DB busy status mapping | Small page-handler cleanup; can batch with M5-1 if touching page loading. |
+| M5-1 | Medium | Raw lookup for secondary trace ids | Fixed: raw lookup uses `monitor_spans.raw_record_id`. |
+| M5-4 | Medium | Bounded inline raw rendering | Fixed: inline raw is a bounded preview with full-record links. |
+| M5-2 | Low | `no-store` on early returns | Fixed: header is set before trace-detail early returns. |
+| M5-3 | Low | DB busy status mapping | Fixed: trace-detail maps persistence busy to `503 persistence_busy`. |
 
 Primary next plan: M5-1 + M5-4 as one trace-detail raw-surface fix plan.
 Batch M5-2/M5-3 only if the same page handler is already being edited.
@@ -55,6 +55,9 @@ Key files: `src/CopilotAgentObservability.LocalMonitor/Pages/TraceDetail.cshtml{
   span→`raw_record_id` mapping (`monitor_spans.raw_record_id` for the trace), not
   via `raw_records.trace_id`. Add a multi-trace-in-one-record fixture asserting
   the secondary trace renders its raw payload.
+- **Resolution:** Fixed. `ListRawRecordsByTraceId` now resolves raw records
+  through `monitor_spans.raw_record_id`, and the trace-detail regression covers a
+  secondary trace in one OTLP export.
 
 <a id="M5-2"></a>
 
@@ -74,6 +77,8 @@ Key files: `src/CopilotAgentObservability.LocalMonitor/Pages/TraceDetail.cshtml{
 - **Impact:** Hygiene gap only; no raw-exposure consequence.
 - **Recommendation:** Set `no-store` before the early returns (or in middleware
   for the route) so the header is unconditional on the raw-bearing route.
+- **Resolution:** Fixed. Trace-detail sets `Cache-Control: no-store` before
+  `--sanitized-only` and cross-site early returns.
 
 <a id="M5-3"></a>
 
@@ -91,6 +96,8 @@ Key files: `src/CopilotAgentObservability.LocalMonitor/Pages/TraceDetail.cshtml{
 - **Impact:** Less accurate status under contention; no security impact.
 - **Recommendation:** Catch `PersistenceBusyException` on the page and return
   `503` consistent with the other routes.
+- **Resolution:** Fixed. Trace-detail catches `PersistenceBusyException` and
+  returns `503 persistence_busy`.
 
 <a id="M5-4"></a>
 
@@ -101,6 +108,8 @@ Key files: `src/CopilotAgentObservability.LocalMonitor/Pages/TraceDetail.cshtml{
 - **Observed:** The page loads every raw record for a trace, and the Razor view renders each full `PayloadJson` inline. With raw default-on and a 30 MiB per-request limit, a trace split over many accepted records can produce hundreds of MiB of HTML, freezing the local UI or exhausting memory.
 - **Impact:** Opening `/traces/{traceId}` with many accepted OTLP exports for the same trace id, each near `MaxRequestBodyBytes`, synchronously reads and renders all of them, causing UI freezes or OOM.
 - **Recommendation:** Make raw inline bounded: paginate raw records, collapse by default with size limits/previews, and link to the single-record raw route for full payloads. Add a test that the trace-detail page does not render unlimited raw bodies.
+- **Resolution:** Fixed. Trace-detail renders bounded raw previews and links to
+  `GET /traces/{rawRecordId}/raw` for the full payload.
 
 ---
 
