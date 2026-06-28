@@ -1,5 +1,6 @@
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Telemetry;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Projection;
@@ -24,11 +25,28 @@ internal interface IMonitorProjectionStore
 
     MonitorProjectionStatus GetProjectionStatus();
 
+    IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit);
+
+    bool ApplySpanProjection(
+        long rawRecordId,
+        IReadOnlyList<MonitorSpanProjection> spans,
+        DateTimeOffset projectedAt);
+
+    MonitorProjectionStatus GetSpanProjectionStatus();
+
     MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit);
 
     MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit);
 
+    MonitorTraceRow? GetMonitorTrace(string traceId);
+
+    MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit);
+
+    IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId);
+
     RawTelemetryRecord? GetRawRecordById(long id);
+
+    IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit);
 }
 
 internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
@@ -54,14 +72,38 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
     public MonitorProjectionStatus GetProjectionStatus() =>
         Guard(store.GetProjectionStatus);
 
+    public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) =>
+        Guard(() => store.ListUnprocessedForSpanProjection(limit));
+
+    public bool ApplySpanProjection(
+        long rawRecordId,
+        IReadOnlyList<MonitorSpanProjection> spans,
+        DateTimeOffset projectedAt) =>
+        Guard(() => store.ApplySpanProjection(rawRecordId, spans, projectedAt));
+
+    public MonitorProjectionStatus GetSpanProjectionStatus() =>
+        Guard(store.GetSpanProjectionStatus);
+
     public MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) =>
         Guard(() => store.ListMonitorIngestions(afterRawRecordId, limit));
 
     public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
         Guard(() => store.ListMonitorTraces(afterId, limit));
 
+    public MonitorTraceRow? GetMonitorTrace(string traceId) =>
+        Guard(() => store.GetMonitorTrace(traceId));
+
+    public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
+        Guard(() => store.ListMonitorSpans(traceId, afterId, limit));
+
+    public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) =>
+        Guard(() => store.GetSpansForTrace(traceId));
+
     public RawTelemetryRecord? GetRawRecordById(long id) =>
         Guard(() => store.GetRawRecordById(id));
+
+    public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) =>
+        Guard(() => store.ListRawRecordsByTraceId(traceId, limit));
 
     private static T Guard<T>(Func<T> operation)
     {

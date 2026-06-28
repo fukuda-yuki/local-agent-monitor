@@ -11,7 +11,7 @@ internal sealed class RawTelemetryStore
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
     }
 
-    public const int MonitorSchemaVersion = 1;
+    public const int MonitorSchemaVersion = 2;
 
     public void CreateSchema()
     {
@@ -87,13 +87,6 @@ internal sealed class RawTelemetryStore
             """);
         ExecuteNonQuery(
             connection,
-            $"""
-            INSERT INTO schema_version (component, version)
-            VALUES ('monitor', {MonitorSchemaVersion})
-            ON CONFLICT (component) DO UPDATE SET version = excluded.version;
-            """);
-        ExecuteNonQuery(
-            connection,
             """
             CREATE TABLE IF NOT EXISTS monitor_ingestions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,7 +96,8 @@ internal sealed class RawTelemetryStore
                 trace_id TEXT NULL,
                 client_kind TEXT NULL,
                 span_count INTEGER NULL,
-                projected_at TEXT NOT NULL
+                projected_at TEXT NOT NULL,
+                span_projected_at TEXT NULL
             );
             """);
         ExecuteNonQuery(
@@ -123,9 +117,95 @@ internal sealed class RawTelemetryStore
                 error_count INTEGER NULL,
                 first_seen_at TEXT NULL,
                 last_seen_at TEXT NULL,
-                projected_at TEXT NOT NULL
+                projected_at TEXT NOT NULL,
+                input_tokens INTEGER NULL,
+                output_tokens INTEGER NULL,
+                total_tokens INTEGER NULL,
+                turn_count INTEGER NULL,
+                agent_invocation_count INTEGER NULL,
+                duration_ms REAL NULL,
+                primary_model TEXT NULL
             );
             """);
+        ExecuteNonQuery(
+            connection,
+            """
+            CREATE TABLE IF NOT EXISTS monitor_spans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_record_id INTEGER NOT NULL,
+                trace_id TEXT NOT NULL,
+                span_id TEXT NULL,
+                parent_span_id TEXT NULL,
+                span_ordinal INTEGER NOT NULL,
+                operation TEXT NULL,
+                category TEXT NULL,
+                tool_name TEXT NULL,
+                tool_type TEXT NULL,
+                mcp_tool_name TEXT NULL,
+                mcp_server_hash TEXT NULL,
+                agent_name TEXT NULL,
+                request_model TEXT NULL,
+                response_model TEXT NULL,
+                input_tokens INTEGER NULL,
+                output_tokens INTEGER NULL,
+                total_tokens INTEGER NULL,
+                reasoning_tokens INTEGER NULL,
+                cache_read_tokens INTEGER NULL,
+                cache_creation_tokens INTEGER NULL,
+                status TEXT NULL,
+                error_type TEXT NULL,
+                finish_reasons TEXT NULL,
+                conversation_id TEXT NULL,
+                duration_ms REAL NULL,
+                start_time TEXT NULL,
+                end_time TEXT NULL,
+                projected_at TEXT NOT NULL,
+                UNIQUE(raw_record_id, span_ordinal)
+            );
+            """);
+        ExecuteNonQuery(
+            connection,
+            "CREATE INDEX IF NOT EXISTS IX_monitor_spans_trace_id ON monitor_spans(trace_id);");
+        ExecuteNonQuery(
+            connection,
+            "CREATE INDEX IF NOT EXISTS IX_monitor_spans_raw_record_id ON monitor_spans(raw_record_id);");
+
+        // Upgrade existing v1 DBs: add columns that were absent in the original DDL.
+        // CREATE TABLE IF NOT EXISTS above is a no-op on existing tables, so we
+        // use PRAGMA table_info to add missing columns idempotently.
+        AddColumnIfMissing(connection, "monitor_ingestions", "span_projected_at", "TEXT NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "input_tokens", "INTEGER NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "output_tokens", "INTEGER NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "total_tokens", "INTEGER NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "turn_count", "INTEGER NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "agent_invocation_count", "INTEGER NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "duration_ms", "REAL NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "primary_model", "TEXT NULL");
+
+        ExecuteNonQuery(
+            connection,
+            $"""
+            INSERT INTO schema_version (component, version)
+            VALUES ('monitor', {MonitorSchemaVersion})
+            ON CONFLICT (component) DO UPDATE SET version = excluded.version;
+            """);
+    }
+
+    private static void AddColumnIfMissing(SqliteConnection connection, string table, string column, string columnDdl)
+    {
+        using var pragma = connection.CreateCommand();
+        pragma.CommandText = $"PRAGMA table_info({table});";
+        using var reader = pragma.ExecuteReader();
+        while (reader.Read())
+        {
+            // Column 1 in PRAGMA table_info is the column name.
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+            {
+                return; // Column already exists.
+            }
+        }
+
+        ExecuteNonQuery(connection, $"ALTER TABLE {table} ADD COLUMN {column} {columnDdl};");
     }
 
     public long Insert(RawTelemetryRecord record)
@@ -386,7 +466,8 @@ internal sealed class RawTelemetryStore
         command.CommandText =
             """
             SELECT id, trace_id, client_kind, experiment_id, task_id, task_category, agent_variant, prompt_version,
-                   span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at
+                   span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at,
+                   input_tokens, output_tokens, total_tokens, turn_count, agent_invocation_count, duration_ms, primary_model
             FROM monitor_traces
             WHERE id > $after
             ORDER BY id
@@ -413,10 +494,65 @@ internal sealed class RawTelemetryStore
                 ErrorCount: reader.IsDBNull(10) ? null : reader.GetInt32(10),
                 FirstSeenAt: reader.IsDBNull(11) ? null : reader.GetString(11),
                 LastSeenAt: reader.IsDBNull(12) ? null : reader.GetString(12),
-                ProjectedAt: reader.GetString(13)));
+                ProjectedAt: reader.GetString(13),
+                InputTokens: reader.IsDBNull(14) ? null : reader.GetInt32(14),
+                OutputTokens: reader.IsDBNull(15) ? null : reader.GetInt32(15),
+                TotalTokens: reader.IsDBNull(16) ? null : reader.GetInt32(16),
+                TurnCount: reader.IsDBNull(17) ? null : reader.GetInt32(17),
+                AgentInvocationCount: reader.IsDBNull(18) ? null : reader.GetInt32(18),
+                DurationMs: reader.IsDBNull(19) ? null : reader.GetDouble(19),
+                PrimaryModel: reader.IsDBNull(20) ? null : reader.GetString(20)));
         }
 
         return BuildPage(items, limit);
+    }
+
+    /// <summary>
+    /// Fetches one sanitized <c>monitor_traces</c> row by <c>trace_id</c> for the
+    /// trace-detail page summary; null if the trace has not been projected.
+    /// </summary>
+    public MonitorTraceRow? GetMonitorTrace(string traceId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, trace_id, client_kind, experiment_id, task_id, task_category, agent_variant, prompt_version,
+                   span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at,
+                   input_tokens, output_tokens, total_tokens, turn_count, agent_invocation_count, duration_ms, primary_model
+            FROM monitor_traces
+            WHERE trace_id = $trace_id;
+            """;
+        AddParameter(command, "$trace_id", traceId);
+
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new MonitorTraceRow(
+            Id: reader.GetInt64(0),
+            TraceId: reader.GetString(1),
+            ClientKind: reader.IsDBNull(2) ? null : reader.GetString(2),
+            ExperimentId: reader.IsDBNull(3) ? null : reader.GetString(3),
+            TaskId: reader.IsDBNull(4) ? null : reader.GetString(4),
+            TaskCategory: reader.IsDBNull(5) ? null : reader.GetString(5),
+            AgentVariant: reader.IsDBNull(6) ? null : reader.GetString(6),
+            PromptVersion: reader.IsDBNull(7) ? null : reader.GetString(7),
+            SpanCount: reader.IsDBNull(8) ? null : reader.GetInt32(8),
+            ToolCallCount: reader.IsDBNull(9) ? null : reader.GetInt32(9),
+            ErrorCount: reader.IsDBNull(10) ? null : reader.GetInt32(10),
+            FirstSeenAt: reader.IsDBNull(11) ? null : reader.GetString(11),
+            LastSeenAt: reader.IsDBNull(12) ? null : reader.GetString(12),
+            ProjectedAt: reader.GetString(13),
+            InputTokens: reader.IsDBNull(14) ? null : reader.GetInt32(14),
+            OutputTokens: reader.IsDBNull(15) ? null : reader.GetInt32(15),
+            TotalTokens: reader.IsDBNull(16) ? null : reader.GetInt32(16),
+            TurnCount: reader.IsDBNull(17) ? null : reader.GetInt32(17),
+            AgentInvocationCount: reader.IsDBNull(18) ? null : reader.GetInt32(18),
+            DurationMs: reader.IsDBNull(19) ? null : reader.GetDouble(19),
+            PrimaryModel: reader.IsDBNull(20) ? null : reader.GetString(20));
     }
 
     /// <summary>Fetches one raw record by id for the opt-in raw-detail route; null if not found.</summary>
@@ -434,6 +570,439 @@ internal sealed class RawTelemetryStore
 
         using var reader = command.ExecuteReader();
         return reader.Read() ? ReadRawRecord(reader) : null;
+    }
+
+    /// <summary>
+    /// Raw records for a trace (ordered by id) for the raw-bearing trace-detail
+    /// page's bounded inline preview. Uses the span projection's raw_record_id
+    /// mapping so secondary traces inside a multi-trace OTLP request resolve to
+    /// their containing raw payload.
+    /// </summary>
+    public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, source, trace_id, received_at, resource_attributes_json, payload_json, schema_version
+            FROM raw_records
+            WHERE id IN (
+                SELECT DISTINCT raw_record_id
+                FROM monitor_spans
+                WHERE trace_id = $trace_id
+            )
+            ORDER BY id
+            LIMIT $limit;
+            """;
+        AddParameter(command, "$trace_id", traceId);
+        AddParameter(command, "$limit", limit);
+
+        using var reader = command.ExecuteReader();
+        var records = new List<RawTelemetryRecord>();
+        while (reader.Read())
+        {
+            records.Add(ReadRawRecord(reader));
+        }
+
+        return records;
+    }
+
+    /// <summary>
+    /// Returns up to <paramref name="limit"/> raw records whose
+    /// <c>monitor_ingestions.span_projected_at</c> is NULL (span projection not yet
+    /// applied), ordered by id. A record must already have a <c>monitor_ingestions</c>
+    /// row (i.e. trace-projection has completed) to be eligible.
+    /// </summary>
+    public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT
+                id,
+                source,
+                trace_id,
+                received_at,
+                resource_attributes_json,
+                payload_json,
+                schema_version
+            FROM raw_records
+            WHERE id IN (SELECT raw_record_id FROM monitor_ingestions WHERE span_projected_at IS NULL)
+            ORDER BY id
+            LIMIT $limit;
+            """;
+        AddParameter(command, "$limit", limit);
+
+        using var reader = command.ExecuteReader();
+        var records = new List<RawTelemetryRecord>();
+        while (reader.Read())
+        {
+            records.Add(ReadRawRecord(reader));
+        }
+
+        return records;
+    }
+
+    /// <summary>
+    /// Idempotently projects span rows for one raw record. Inserts <c>monitor_spans</c>
+    /// rows and updates the <c>monitor_traces</c> rollup columns. Returns <c>true</c>
+    /// when newly projected, <c>false</c> when already projected or not yet ingested.
+    /// </summary>
+    public bool ApplySpanProjection(
+        long rawRecordId,
+        IReadOnlyList<MonitorSpanProjection> spans,
+        DateTimeOffset projectedAt)
+    {
+        var projectedAtText = FormatTimestamp(projectedAt);
+
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+
+        // Idempotency check: only proceed if the ingestion row exists and span_projected_at is null.
+        string? spanProjectedAt;
+        bool ingestionExists;
+        using (var check = connection.CreateCommand())
+        {
+            check.Transaction = transaction;
+            check.CommandText =
+                "SELECT span_projected_at FROM monitor_ingestions WHERE raw_record_id = $id;";
+            AddParameter(check, "$id", rawRecordId);
+            using var r = check.ExecuteReader();
+            ingestionExists = r.Read();
+            spanProjectedAt = ingestionExists && !r.IsDBNull(0) ? r.GetString(0) : null;
+        }
+
+        if (!ingestionExists || spanProjectedAt is not null)
+        {
+            transaction.Rollback();
+            return false;
+        }
+
+        var validSpans = spans
+            .Where(span => !string.IsNullOrWhiteSpace(span.TraceId))
+            .ToList();
+
+        // Insert spans — idempotent via UNIQUE(raw_record_id, span_ordinal).
+        foreach (var span in validSpans)
+        {
+            using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText =
+                """
+                INSERT OR IGNORE INTO monitor_spans (
+                    raw_record_id, trace_id, span_id, parent_span_id, span_ordinal,
+                    operation, category, tool_name, tool_type, mcp_tool_name,
+                    mcp_server_hash, agent_name, request_model, response_model,
+                    input_tokens, output_tokens, total_tokens, reasoning_tokens,
+                    cache_read_tokens, cache_creation_tokens, status, error_type,
+                    finish_reasons, conversation_id, duration_ms, start_time, end_time,
+                    projected_at
+                ) VALUES (
+                    $raw_record_id, $trace_id, $span_id, $parent_span_id, $span_ordinal,
+                    $operation, $category, $tool_name, $tool_type, $mcp_tool_name,
+                    $mcp_server_hash, $agent_name, $request_model, $response_model,
+                    $input_tokens, $output_tokens, $total_tokens, $reasoning_tokens,
+                    $cache_read_tokens, $cache_creation_tokens, $status, $error_type,
+                    $finish_reasons, $conversation_id, $duration_ms, $start_time, $end_time,
+                    $projected_at
+                );
+                """;
+            AddParameter(insert, "$raw_record_id", rawRecordId);
+            AddParameter(insert, "$trace_id", span.TraceId);
+            AddParameter(insert, "$span_id", span.SpanId);
+            AddParameter(insert, "$parent_span_id", span.ParentSpanId);
+            AddParameter(insert, "$span_ordinal", span.SpanOrdinal);
+            AddParameter(insert, "$operation", span.Operation);
+            AddParameter(insert, "$category", span.Category);
+            AddParameter(insert, "$tool_name", span.ToolName);
+            AddParameter(insert, "$tool_type", span.ToolType);
+            AddParameter(insert, "$mcp_tool_name", span.McpToolName);
+            AddParameter(insert, "$mcp_server_hash", span.McpServerHash);
+            AddParameter(insert, "$agent_name", span.AgentName);
+            AddParameter(insert, "$request_model", span.RequestModel);
+            AddParameter(insert, "$response_model", span.ResponseModel);
+            AddParameter(insert, "$input_tokens", span.InputTokens);
+            AddParameter(insert, "$output_tokens", span.OutputTokens);
+            AddParameter(insert, "$total_tokens", span.TotalTokens);
+            AddParameter(insert, "$reasoning_tokens", span.ReasoningTokens);
+            AddParameter(insert, "$cache_read_tokens", span.CacheReadTokens);
+            AddParameter(insert, "$cache_creation_tokens", span.CacheCreationTokens);
+            AddParameter(insert, "$status", span.Status);
+            AddParameter(insert, "$error_type", span.ErrorType);
+            AddParameter(insert, "$finish_reasons", span.FinishReasons);
+            AddParameter(insert, "$conversation_id", span.ConversationId);
+            AddParameter(insert, "$duration_ms", span.DurationMs);
+            AddParameter(insert, "$start_time", span.StartTime);
+            AddParameter(insert, "$end_time", span.EndTime);
+            AddParameter(insert, "$projected_at", projectedAtText);
+            insert.ExecuteNonQuery();
+        }
+
+        // Update rollup columns on monitor_traces for each affected trace_id.
+        var affectedTraceIds = validSpans
+            .Select(s => s.TraceId)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        foreach (var traceId in affectedTraceIds)
+        {
+            // Read back all spans for this trace_id within the transaction.
+            var traceSpans = new List<MonitorSpanProjection>();
+            using (var readSpans = connection.CreateCommand())
+            {
+                readSpans.Transaction = transaction;
+                readSpans.CommandText =
+                    """
+                    SELECT trace_id, span_id, parent_span_id, span_ordinal,
+                           operation, category, input_tokens, output_tokens, total_tokens,
+                           request_model, response_model, start_time, end_time
+                    FROM monitor_spans
+                    WHERE trace_id = $trace_id
+                    ORDER BY raw_record_id, span_ordinal;
+                    """;
+                AddParameter(readSpans, "$trace_id", traceId!);
+                using var sr = readSpans.ExecuteReader();
+                while (sr.Read())
+                {
+                    traceSpans.Add(new MonitorSpanProjection(
+                        TraceId: sr.IsDBNull(0) ? null : sr.GetString(0),
+                        SpanId: sr.IsDBNull(1) ? null : sr.GetString(1),
+                        ParentSpanId: sr.IsDBNull(2) ? null : sr.GetString(2),
+                        SpanOrdinal: sr.GetInt32(3),
+                        Operation: sr.IsDBNull(4) ? null : sr.GetString(4),
+                        Category: sr.IsDBNull(5) ? null : sr.GetString(5),
+                        ToolName: null,
+                        ToolType: null,
+                        McpToolName: null,
+                        McpServerHash: null,
+                        AgentName: null,
+                        RequestModel: sr.IsDBNull(9) ? null : sr.GetString(9),
+                        ResponseModel: sr.IsDBNull(10) ? null : sr.GetString(10),
+                        InputTokens: sr.IsDBNull(6) ? null : sr.GetInt32(6),
+                        OutputTokens: sr.IsDBNull(7) ? null : sr.GetInt32(7),
+                        TotalTokens: sr.IsDBNull(8) ? null : sr.GetInt32(8),
+                        ReasoningTokens: null,
+                        CacheReadTokens: null,
+                        CacheCreationTokens: null,
+                        Status: null,
+                        ErrorType: null,
+                        FinishReasons: null,
+                        ConversationId: null,
+                        DurationMs: null,
+                        StartTime: sr.IsDBNull(11) ? null : sr.GetString(11),
+                        EndTime: sr.IsDBNull(12) ? null : sr.GetString(12)));
+                }
+            }
+
+            var rollup = MonitorTraceRollupBuilder.ComputeRollup(traceSpans);
+
+            using var updateTrace = connection.CreateCommand();
+            updateTrace.Transaction = transaction;
+            updateTrace.CommandText =
+                """
+                UPDATE monitor_traces
+                SET input_tokens = $it, output_tokens = $ot, total_tokens = $tt,
+                    turn_count = $turn, agent_invocation_count = $aic,
+                    duration_ms = $dur, primary_model = $pm
+                WHERE trace_id = $trace_id;
+                """;
+            AddParameter(updateTrace, "$it", rollup.InputTokens);
+            AddParameter(updateTrace, "$ot", rollup.OutputTokens);
+            AddParameter(updateTrace, "$tt", rollup.TotalTokens);
+            AddParameter(updateTrace, "$turn", rollup.TurnCount);
+            AddParameter(updateTrace, "$aic", rollup.AgentInvocationCount);
+            AddParameter(updateTrace, "$dur", rollup.DurationMs);
+            AddParameter(updateTrace, "$pm", rollup.PrimaryModel);
+            AddParameter(updateTrace, "$trace_id", traceId!);
+            updateTrace.ExecuteNonQuery();
+        }
+
+        // Stamp the ingestion row as span-projected.
+        using (var stamp = connection.CreateCommand())
+        {
+            stamp.Transaction = transaction;
+            stamp.CommandText =
+                "UPDATE monitor_ingestions SET span_projected_at = $p WHERE raw_record_id = $id;";
+            AddParameter(stamp, "$p", projectedAtText);
+            AddParameter(stamp, "$id", rawRecordId);
+            stamp.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+        return true;
+    }
+
+    /// <summary>Backlog count for span projection (records with ingestion row but no span_projected_at).</summary>
+    public MonitorProjectionStatus GetSpanProjectionStatus()
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT COUNT(*), MIN(received_at)
+            FROM monitor_ingestions
+            WHERE span_projected_at IS NULL;
+            """;
+
+        using var reader = command.ExecuteReader();
+        reader.Read();
+        var backlog = reader.GetInt32(0);
+        var oldest = reader.IsDBNull(1) ? (DateTimeOffset?)null : ParseTimestamp(reader.GetString(1));
+        return new MonitorProjectionStatus(backlog, oldest);
+    }
+
+    /// <summary>
+    /// Cursor page of sanitized <c>monitor_spans</c> rows for a trace after
+    /// <paramref name="afterId"/>, ordered by projection-row id, using the same
+    /// <c>limit + 1</c> probe as the other cursor reads.
+    /// </summary>
+    public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, raw_record_id, trace_id, span_id, parent_span_id, span_ordinal,
+                   operation, category, tool_name, tool_type, mcp_tool_name, mcp_server_hash,
+                   agent_name, request_model, response_model, input_tokens, output_tokens,
+                   total_tokens, reasoning_tokens, cache_read_tokens, cache_creation_tokens,
+                   status, error_type, finish_reasons, conversation_id, duration_ms,
+                   start_time, end_time, projected_at
+            FROM monitor_spans
+            WHERE trace_id = $trace_id AND id > $after
+            ORDER BY id
+            LIMIT $limit;
+            """;
+        AddParameter(command, "$trace_id", traceId);
+        AddParameter(command, "$after", afterId);
+        AddParameter(command, "$limit", limit + 1);
+
+        using var reader = command.ExecuteReader();
+        var items = new List<MonitorSpanRow>();
+        while (reader.Read())
+        {
+            items.Add(new MonitorSpanRow(
+                Id: reader.GetInt64(0),
+                RawRecordId: reader.GetInt64(1),
+                TraceId: reader.GetString(2),
+                SpanId: reader.IsDBNull(3) ? null : reader.GetString(3),
+                ParentSpanId: reader.IsDBNull(4) ? null : reader.GetString(4),
+                SpanOrdinal: reader.GetInt32(5),
+                Operation: reader.IsDBNull(6) ? null : reader.GetString(6),
+                Category: reader.IsDBNull(7) ? null : reader.GetString(7),
+                ToolName: reader.IsDBNull(8) ? null : reader.GetString(8),
+                ToolType: reader.IsDBNull(9) ? null : reader.GetString(9),
+                McpToolName: reader.IsDBNull(10) ? null : reader.GetString(10),
+                McpServerHash: reader.IsDBNull(11) ? null : reader.GetString(11),
+                AgentName: reader.IsDBNull(12) ? null : reader.GetString(12),
+                RequestModel: reader.IsDBNull(13) ? null : reader.GetString(13),
+                ResponseModel: reader.IsDBNull(14) ? null : reader.GetString(14),
+                InputTokens: reader.IsDBNull(15) ? null : reader.GetInt32(15),
+                OutputTokens: reader.IsDBNull(16) ? null : reader.GetInt32(16),
+                TotalTokens: reader.IsDBNull(17) ? null : reader.GetInt32(17),
+                ReasoningTokens: reader.IsDBNull(18) ? null : reader.GetInt32(18),
+                CacheReadTokens: reader.IsDBNull(19) ? null : reader.GetInt32(19),
+                CacheCreationTokens: reader.IsDBNull(20) ? null : reader.GetInt32(20),
+                Status: reader.IsDBNull(21) ? null : reader.GetString(21),
+                ErrorType: reader.IsDBNull(22) ? null : reader.GetString(22),
+                FinishReasons: reader.IsDBNull(23) ? null : reader.GetString(23),
+                ConversationId: reader.IsDBNull(24) ? null : reader.GetString(24),
+                DurationMs: reader.IsDBNull(25) ? null : reader.GetDouble(25),
+                StartTime: reader.IsDBNull(26) ? null : reader.GetString(26),
+                EndTime: reader.IsDBNull(27) ? null : reader.GetString(27),
+                ProjectedAt: reader.GetString(28)));
+        }
+
+        return BuildPage(items, limit);
+    }
+
+    /// <summary>All <c>monitor_spans</c> rows for a trace, ordered for deterministic reads in tests.</summary>
+    public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, raw_record_id, trace_id, span_id, parent_span_id, span_ordinal,
+                   operation, category, tool_name, tool_type, mcp_tool_name, mcp_server_hash,
+                   agent_name, request_model, response_model, input_tokens, output_tokens,
+                   total_tokens, reasoning_tokens, cache_read_tokens, cache_creation_tokens,
+                   status, error_type, finish_reasons, conversation_id, duration_ms,
+                   start_time, end_time, projected_at
+            FROM monitor_spans
+            WHERE trace_id = $trace_id
+            ORDER BY raw_record_id, span_ordinal;
+            """;
+        AddParameter(command, "$trace_id", traceId);
+
+        using var reader = command.ExecuteReader();
+        var rows = new List<MonitorSpanRow>();
+        while (reader.Read())
+        {
+            rows.Add(new MonitorSpanRow(
+                Id: reader.GetInt64(0),
+                RawRecordId: reader.GetInt64(1),
+                TraceId: reader.GetString(2),
+                SpanId: reader.IsDBNull(3) ? null : reader.GetString(3),
+                ParentSpanId: reader.IsDBNull(4) ? null : reader.GetString(4),
+                SpanOrdinal: reader.GetInt32(5),
+                Operation: reader.IsDBNull(6) ? null : reader.GetString(6),
+                Category: reader.IsDBNull(7) ? null : reader.GetString(7),
+                ToolName: reader.IsDBNull(8) ? null : reader.GetString(8),
+                ToolType: reader.IsDBNull(9) ? null : reader.GetString(9),
+                McpToolName: reader.IsDBNull(10) ? null : reader.GetString(10),
+                McpServerHash: reader.IsDBNull(11) ? null : reader.GetString(11),
+                AgentName: reader.IsDBNull(12) ? null : reader.GetString(12),
+                RequestModel: reader.IsDBNull(13) ? null : reader.GetString(13),
+                ResponseModel: reader.IsDBNull(14) ? null : reader.GetString(14),
+                InputTokens: reader.IsDBNull(15) ? null : reader.GetInt32(15),
+                OutputTokens: reader.IsDBNull(16) ? null : reader.GetInt32(16),
+                TotalTokens: reader.IsDBNull(17) ? null : reader.GetInt32(17),
+                ReasoningTokens: reader.IsDBNull(18) ? null : reader.GetInt32(18),
+                CacheReadTokens: reader.IsDBNull(19) ? null : reader.GetInt32(19),
+                CacheCreationTokens: reader.IsDBNull(20) ? null : reader.GetInt32(20),
+                Status: reader.IsDBNull(21) ? null : reader.GetString(21),
+                ErrorType: reader.IsDBNull(22) ? null : reader.GetString(22),
+                FinishReasons: reader.IsDBNull(23) ? null : reader.GetString(23),
+                ConversationId: reader.IsDBNull(24) ? null : reader.GetString(24),
+                DurationMs: reader.IsDBNull(25) ? null : reader.GetDouble(25),
+                StartTime: reader.IsDBNull(26) ? null : reader.GetString(26),
+                EndTime: reader.IsDBNull(27) ? null : reader.GetString(27),
+                ProjectedAt: reader.GetString(28)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>Rollup columns for a single trace_id; null if trace not found.</summary>
+    public MonitorTraceRollupRow? GetTraceRollup(string traceId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT input_tokens, output_tokens, total_tokens, turn_count,
+                   agent_invocation_count, duration_ms, primary_model
+            FROM monitor_traces
+            WHERE trace_id = $trace_id;
+            """;
+        AddParameter(command, "$trace_id", traceId);
+
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new MonitorTraceRollupRow(
+            InputTokens: reader.IsDBNull(0) ? null : reader.GetInt32(0),
+            OutputTokens: reader.IsDBNull(1) ? null : reader.GetInt32(1),
+            TotalTokens: reader.IsDBNull(2) ? null : reader.GetInt32(2),
+            TurnCount: reader.IsDBNull(3) ? null : reader.GetInt32(3),
+            AgentInvocationCount: reader.IsDBNull(4) ? null : reader.GetInt32(4),
+            DurationMs: reader.IsDBNull(5) ? null : reader.GetDouble(5),
+            PrimaryModel: reader.IsDBNull(6) ? null : reader.GetString(6));
     }
 
     private static MonitorProjectionPage<T> BuildPage<T>(List<T> rows, int limit)

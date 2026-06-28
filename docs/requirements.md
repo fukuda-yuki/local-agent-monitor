@@ -46,7 +46,7 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 - remote managed Langfuse profile。
 - remote managed Collector profile。
 - repository-hosted raw local receiver profile。Langfuse なしで VS Code からこの repository の local receiver へ telemetry を送信し、raw data loop に接続できること。
-- Local Ingestion Monitor。VS Code GitHub Copilot Chat から OTLP HTTP/protobuf を直接受信し、SQLite raw store に永続化し、loopback-only のローカル UI で取り込みの健全性（受信、永続化、projection、エラー有無、health / readiness）を確認できること。既定では sanitized metadata のみを表示し、明示的な opt-in 起動（`--enable-raw-view`）時に限り、ローカル利用者が自分の raw prompt / response / tool content と PII 属性（`user.id` / `user.email`）を loopback-only で閲覧できること。
+- Local Ingestion Monitor。VS Code GitHub Copilot Chat から OTLP HTTP/protobuf を直接受信し、SQLite raw store に永続化し、loopback-only のローカル UI で取り込みの健全性（受信、永続化、projection、エラー有無、health / readiness）を確認できること。さらに、受信済み OTel テレメトリから per-span の sanitized projection を生成し、agent-execution view として、どのツール / MCP を呼び出したか（名前単位）、各呼び出しの成否、sub-agent のモデル / トークン使用量、turn 単位のトークン合計を表示できること。raw body（tool call arguments / results、sub-agent instructions / responses、system prompt）と PII（`user.id` / `user.email`）は既定で表示する（server-rendered、inert text）。`--sanitized-only` フラグで metadata-only モードを復元し、raw-bearing route を `404` にして PII を除外できること。
 - Langfuse による個別 trace viewer。ただし Langfuse は standard full profile の viewer であり、raw-only minimum profile の必須要素ではない。
 - saved raw OTLP JSON の file-based ingest。
 - SQLite raw store。
@@ -74,8 +74,7 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 - 個人別の生産性評価、勤務監視、ランキング。
 - 経営向け利用状況 dashboard、課金、コスト配賦。
 - DLP、機密情報検査、監査ログ基盤。
-- VS Code Agent Debug / Chat Debug View 相当の UI。
-- VS Code 内部ログ、workspaceStorage、chatSessions を主入力にした解析。
+- VS Code 内部ログ、workspaceStorage、chatSessions を入力ソースにした解析、および VS Code の in-editor Debug UI の複製。ただし受信済み OTel テレメトリから導出する sanitized agent-execution view は許可する（D021）。
 - Langfuse / Collector / Grafana / Pages の共有運用決定。
 - remote managed Langfuse / Collector の利用者同意 workflow。
 - trace から repository patch / diff を生成すること。
@@ -199,7 +198,7 @@ Repository に保存してはならないもの:
 - sensitive bundle content。
 - sensitive bundle local path。
 
-Local Ingestion Monitor の opt-in raw / PII 表示（`--enable-raw-view`）は loopback-only の runtime surface であり、ここで定義する repository 保存禁止や §9 の static dashboard 非表示とは別物である。opt-in 時も raw / PII を repository-safe outputs、static dashboard、ログ、GitHub Pages snapshot へ出力してはならない。この opt-in 表示は単一のローカル利用者が自分のデータを閲覧する用途に限り、cross-machine な露出（remote / non-loopback、browser 経由の off-machine 送出）から防御する。
+Local Ingestion Monitor の raw / PII 表示は loopback-only の runtime surface であり、ここで定義する repository 保存禁止や §9 の static dashboard 非表示とは別物である。raw body（tool call arguments / results、sub-agent instructions / responses、system prompt）と PII（`user.id` / `user.email`）は **既定で表示する**（server-rendered、inert text）。`--sanitized-only` フラグで metadata-only モードを復元し、raw-bearing route を `404` にして PII を除外できる（D023）。既定・`--sanitized-only` いずれの場合も raw / PII を repository-safe outputs、static dashboard、ログ、GitHub Pages snapshot へ出力してはならない。`/api/monitor/*` と SSE は常に sanitized metadata のみを返す。この表示は単一のローカル利用者が自分のデータを閲覧する用途に限り、cross-machine な露出（remote / non-loopback、browser 経由の off-machine 送出）から防御する。
 
 共有環境、実データ、社内サーバー、GitHub Pages publish を扱う場合は、アクセス権、保持期間、削除方法、masking / redaction、利用者周知を先に決める。
 remote managed Langfuse / Collector endpoint を使う場合は、送信前に access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を確認する。

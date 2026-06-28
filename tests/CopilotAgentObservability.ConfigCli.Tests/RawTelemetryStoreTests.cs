@@ -209,6 +209,7 @@ public class RawTelemetryStoreTests
                 "client_kind",
                 "span_count",
                 "projected_at",
+                "span_projected_at",
             ],
             ReadColumns(connection, "monitor_ingestions"));
         Assert.Equal(
@@ -227,8 +228,21 @@ public class RawTelemetryStoreTests
                 "first_seen_at",
                 "last_seen_at",
                 "projected_at",
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "turn_count",
+                "agent_invocation_count",
+                "duration_ms",
+                "primary_model",
             ],
             ReadColumns(connection, "monitor_traces"));
+        // Verify monitor_spans table exists with the idempotency key columns.
+        var spanCols = ReadColumns(connection, "monitor_spans");
+        Assert.Contains("raw_record_id", spanCols);
+        Assert.Contains("span_ordinal", spanCols);
+        Assert.Contains("trace_id", spanCols);
+        Assert.Contains("projected_at", spanCols);
     }
 
     [Fact]

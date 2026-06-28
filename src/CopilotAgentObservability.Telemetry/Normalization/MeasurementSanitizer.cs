@@ -2,6 +2,8 @@ namespace CopilotAgentObservability.Telemetry;
 
 internal static class MeasurementSanitizer
 {
+    internal const int MaxSanitizedNameLength = 256;
+
     private static readonly HashSet<string> MappedResourceAttributeKeys = new(StringComparer.Ordinal)
     {
         "experiment.id",
@@ -100,7 +102,37 @@ internal static class MeasurementSanitizer
             || value.Contains("response:", StringComparison.OrdinalIgnoreCase)
             || value.Contains("content:", StringComparison.OrdinalIgnoreCase)
             || value.Contains("tool argument", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("tool result", StringComparison.OrdinalIgnoreCase);
+            || value.Contains("tool result", StringComparison.OrdinalIgnoreCase)
+            || Regex.IsMatch(value, @"[A-Za-z]:\\")
+            || value.StartsWith(@"\\", StringComparison.Ordinal)
+            || value.Contains("../", StringComparison.Ordinal)
+            || value.Contains(@"..\", StringComparison.Ordinal)
+            || value.StartsWith("/home/", StringComparison.Ordinal)
+            || value.StartsWith("/usr/", StringComparison.Ordinal)
+            || value.StartsWith("/var/", StringComparison.Ordinal)
+            || value.StartsWith("/tmp/", StringComparison.Ordinal)
+            || value.StartsWith("/etc/", StringComparison.Ordinal)
+            || value.StartsWith("/opt/", StringComparison.Ordinal);
+    }
+
+    internal static string? SanitizeFreeFormName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        if (IsUnsafeStringValue(value))
+        {
+            return null;
+        }
+
+        if (value.Length > MaxSanitizedNameLength)
+        {
+            return value[..MaxSanitizedNameLength];
+        }
+
+        return value;
     }
 
     private static bool TrySanitizeNode(JsonNode? value, out JsonNode? sanitizedValue)

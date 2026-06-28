@@ -15,6 +15,12 @@
 - deterministic candidate pipeline で診断・改善候補を整理する。
 - static HTML dashboard を生成し、必要に応じて GitHub Pages snapshot として公開する。
 
+## Planned Work
+
+| Area | 状態 | 概要 |
+| --- | --- | --- |
+| Monitor Agent Execution View | M1 実施中 | [docs/sprints/sprint9-monitor-agent-execution-view/](sprints/sprint9-monitor-agent-execution-view/) で Local Ingestion Monitor を「取り込み健全性」から「エージェント実行詳細」へ拡張する。受信済み OTel から sanitized な per-span projection（どのツール/MCP・成否・sub-agent のモデル/トークン・turn 単位トークン）を生成し、VS Code Agent Debug View を参考にした機能的 UI で表示する。決定 D021（非目的の絞り込み）/ D022（span projection）/ D023（raw 既定表示＋`--sanitized-only` 安全弁、D020 更新）を M1 で記録。デザイン改善は後続 Sprint。 |
+
 ## Historical Work
 
 | Area | 状態 | 概要 |

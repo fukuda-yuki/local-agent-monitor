@@ -15,6 +15,13 @@ Rationale:
 - client が公式に出す trace / metrics / events を扱う方が再現性と保守性が高い。
 - VS Code Agent Debug / Chat Debug View は手動デバッグ機能として残し、本製品では再実装しない。
 
+Update (D021):
+
+- 「本製品では再実装しない」は入力ソース（VS Code 内部ログ / workspaceStorage /
+  chatSessions）と UI 複製を禁止する。受信済み OTel テレメトリから導出する sanitized
+  agent-execution view は許可する。D001 の入力ソース制限は維持し、VS Code の内部ログや
+  ストレージを入力にしない点は不変。
+
 ## D002: Langfuse は local trace viewer として使う
 
 Status: Accepted
@@ -380,3 +387,136 @@ Consequences:
   [security-data-boundaries.md](specifications/security-data-boundaries.md) に明示
   記録する。表示は必ずエスケープ済み inert テキストで行う一方、重い CSP / anti-XSS 機構は
   ローカル単一利用者ツールには設けない。
+
+Update (D023):
+
+- Sprint9 で raw 表示の既定を反転する。`--enable-raw-view`（既定 off）は廃止し、
+  raw body と PII は **既定で表示する**（server-rendered、inert text）。
+  `--sanitized-only` フラグを新設し、metadata-only モードを復元する
+  （raw-bearing route は `404`、PII は除外）。DR6 の cross-machine 防御（loopback
+  bind、Host header 検証、CORS 無効、same-origin + `Cache-Control: no-store`）は
+  不変。`/api/monitor/*` と SSE は引き続き sanitized metadata のみを返す。
+
+## D021: Agent Debug View 非目的を絞り込む
+
+Status: Accepted
+
+`docs/requirements.md` §4 の「VS Code Agent Debug / Chat Debug View 相当の UI」非目的を
+絞り込む。monitor は受信済み OTel テレメトリから導出する **sanitized agent-execution view**
+を提示してよい。
+
+禁止の対象:
+
+- VS Code 内部ログ、`workspaceStorage`、`chatSessions` を入力ソースとすること。
+- VS Code の in-editor Debug UI を複製すること。
+
+許可する対象:
+
+- monitor が受信した OTLP telemetry から per-span の sanitized projection を生成し、
+  ツール / MCP 呼び出し名、成否、sub-agent のモデル / トークン、turn 単位トークンを
+  表示する agent-execution view。
+
+D001 は維持する。入力は公式 OpenTelemetry signals のみであり、VS Code 内部の
+ストレージやログは入力にしない。D001 に Update note を追加済み。
+
+## D022: Span-level sanitized projection
+
+Status: Accepted
+
+monitor projection に per-span のテーブル `monitor_spans` と、`monitor_traces` への
+token / turn / agent rollup 列を追加する。
+
+Sanitized metadata（既定表示面に載る）:
+
+| Field | OTel source |
+| --- | --- |
+| operation (`invoke_agent` / `chat` / `execute_tool` / `execute_hook`) | `gen_ai.operation.name`、span name |
+| logical category (`llm_call` / `tool_call` / `agent_invocation` / `hook` / `error` / `unknown`) | derived |
+| tool name | `gen_ai.tool.name` |
+| tool type (`function` / `extension`=MCP) | `gen_ai.tool.type` |
+| MCP tool name | `github.copilot.tool.parameters.mcp_tool_name` |
+| MCP server (hashed) | `github.copilot.tool.parameters.mcp_server_name_hash` |
+| sub-agent name | `gen_ai.agent.name` |
+| request / response model | `gen_ai.request.model` / `gen_ai.response.model` |
+| input / output / total / reasoning / cache tokens | `gen_ai.usage.*` |
+| status (ok / error) | span status code |
+| error class | `error.type`（class token のみ。exception message は含めない） |
+| finish reasons | `gen_ai.response.finish_reasons` |
+| duration | span start / end |
+| trace_id / span_id / parent_span_id / conversation_id | span / `gen_ai.conversation.id` |
+
+Raw（server-rendered route でのみ提供。既定で表示、`--sanitized-only` で除外）:
+
+- tool call arguments / results（`gen_ai.tool.call.arguments` / `.result`）。
+- sub-agent instructions / responses（message content）。
+- system prompt text（message content）。
+- PII（`user.id` / `user.email`）。
+
+Per-field sanitization policy:
+
+- free-form name fields（`tool_name`、`mcp_tool_name`、`agent_name`、span `name`）は
+  既存の `MeasurementSanitizer` unsafe-value guard を通し、pinned max length で
+  truncate する。guard に失敗した値は drop（行の他列は保持）。
+- `error.type` は class token のみ（`timeout`、`ECONNREFUSED` 等）。exception message
+  や free-form error 属性は投入しない。同じ guard + max length を適用する。
+- `finish_reasons` は enum-like token（`stop`、`length` 等）。unknown 値は guard +
+  max length を適用する。
+- `mcp_server_hash` は client 提供の hash をそのまま保存。unhash しない。
+- reference id（`trace_id`、`span_id`、`parent_span_id`、`conversation_id`）は
+  opaque reference id として扱う。`requirements.md` §5（session id / run id は収集
+  対象）および §8（reference id は repository-allowed）と整合する。
+
+Token rollup rule（二重計上禁止）:
+
+- per-turn tokens = `chat` span 自身の `gen_ai.usage.*`（1 turn = 1 `chat` / LLM span）。
+- per-trace total = trace の root `invoke_agent` usage（存在時）。複数の root
+  `invoke_agent` が usage を持つ場合は root usage の合計。なければ `chat` span の
+  合計（fallback）。
+- `invoke_agent` total を `chat` per-call tokens に加算しない。sub-agent
+  （child `invoke_agent`）usage はその sub-agent に帰属し、parent の trace total には
+  parent 自身の agent-level total 経由でのみ含める（child の `chat` span を再合算しない）。
+- token rollup は range-safe accumulator で計算し、公開 projection の nullable
+  `int` token 欄の範囲を超える導出 / 合計値は wrap せず `NULL` とする。
+
+Consequences:
+
+- `monitor_spans` と `monitor_traces` rollup 列の allowlist schema は
+  [raw-store-normalization.md](specifications/layers/raw-store-normalization.md) に
+  定義する。
+- per-field sanitization policy の negative test（email / path / secret-like values を
+  name fields に inject し guard out を検証）は M2 / M4 / M6 で必須とする。
+
+## D023: Raw body を既定表示し `--sanitized-only` 安全弁を設ける（D020 更新）
+
+Status: Accepted
+
+Sprint8 の姿勢（raw は `--enable-raw-view` opt-in）を反転する。単一ローカル利用者ツール
+として、raw body と PII を **既定で表示する**（server-rendered、inert text、inline
+rendering）。
+
+変更点:
+
+- `--enable-raw-view` は廃止（既定が raw 表示のため不要）。
+- `--sanitized-only` フラグを新設。有効にすると raw-bearing route は `404`、PII は除外。
+  health-check や画面共有時に metadata-only モードを復元する安全弁。
+- trace-detail page（agent-execution view）は raw body を inline 表示するため、
+  既存の `GET /traces/{rawRecordId}/raw` と並ぶ **raw-bearing route** になる。
+  raw-bearing route set の全 route で same-origin（`Origin` / `Sec-Fetch-Site` ⇒
+  cross-site `403`）と `Cache-Control: no-store` を強制する。
+
+不変（D020 / DR6 の cross-machine 防御）:
+
+- loopback-only bind、`Host` header 検証。
+- CORS 無効。state-changing action に CSRF + same-origin。
+- raw / PII を log、repository-safe outputs、static dashboard、GitHub Pages snapshot に
+  書かない。
+- `/api/monitor/*` と SSE は sanitized metadata のみ（raw / PII を返さない）。
+- captured content は escaped inert text で描画（framework 既定エンコード。`Html.Raw`
+  不可）。追加の CSP / sanitizer / XSS payload-matrix 機構は設けない（ローカル単一利用者
+  ツール。AGENTS.md Local-First Risk Posture 参照）。
+
+受容リスクの拡張:
+
+- raw / PII は起動フラグなしで loopback 上に到達可能（process 生存中ずっと）。
+  単一利用者ローカルマシンのトレードオフとして product owner が受容。`--sanitized-only` は
+  opt-out 安全弁。

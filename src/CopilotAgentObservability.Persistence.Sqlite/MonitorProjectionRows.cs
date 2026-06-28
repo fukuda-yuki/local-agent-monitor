@@ -31,7 +31,14 @@ internal sealed record MonitorTraceRow(
     int? ErrorCount,
     string? FirstSeenAt,
     string? LastSeenAt,
-    string ProjectedAt);
+    string ProjectedAt,
+    int? InputTokens,
+    int? OutputTokens,
+    int? TotalTokens,
+    int? TurnCount,
+    int? AgentInvocationCount,
+    double? DurationMs,
+    string? PrimaryModel);
 
 /// <summary>Backlog and the oldest unprocessed ingestion time, for projection-lag readiness.</summary>
 internal sealed record MonitorProjectionStatus(
@@ -46,3 +53,50 @@ internal sealed record MonitorProjectionStatus(
 internal sealed record MonitorProjectionPage<T>(
     IReadOnlyList<T> Items,
     bool HasMore);
+
+/// <summary>
+/// Sanitized read DTO for a <c>monitor_spans</c> row. Allowlist columns only.
+/// </summary>
+internal sealed record MonitorSpanRow(
+    long Id,
+    long RawRecordId,
+    string TraceId,
+    string? SpanId,
+    string? ParentSpanId,
+    int SpanOrdinal,
+    string? Operation,
+    string? Category,
+    string? ToolName,
+    string? ToolType,
+    string? McpToolName,
+    string? McpServerHash,
+    string? AgentName,
+    string? RequestModel,
+    string? ResponseModel,
+    int? InputTokens,
+    int? OutputTokens,
+    int? TotalTokens,
+    int? ReasoningTokens,
+    int? CacheReadTokens,
+    int? CacheCreationTokens,
+    string? Status,
+    string? ErrorType,
+    string? FinishReasons,
+    string? ConversationId,
+    double? DurationMs,
+    string? StartTime,
+    string? EndTime,
+    string ProjectedAt);
+
+/// <summary>
+/// Sanitized read DTO for the rollup columns on a <c>monitor_traces</c> row
+/// (Sprint9 additive columns).
+/// </summary>
+internal sealed record MonitorTraceRollupRow(
+    int? InputTokens,
+    int? OutputTokens,
+    int? TotalTokens,
+    int? TurnCount,
+    int? AgentInvocationCount,
+    double? DurationMs,
+    string? PrimaryModel);

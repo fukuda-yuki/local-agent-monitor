@@ -13,7 +13,7 @@
                 <th>ClientKind</th>
                 <th>SpanCount</th>
                 <th>ProjectedAt</th>
-                @if (Model.RawViewEnabled)
+                @if (Model.RawAvailable)
                 {
                     <th>Raw</th>
                 }
@@ -30,7 +30,7 @@
                     <td>@row.ClientKind</td>
                     <td>@row.SpanCount</td>
                     <td>@row.ProjectedAt</td>
-                    @if (Model.RawViewEnabled)
+                    @if (Model.RawAvailable)
                     {
                         <td><a href="/traces/@row.RawRecordId/raw">raw</a></td>
                     }

@@ -89,12 +89,15 @@ Defended (in scope):
 
 Default posture:
 
-- the raw / PII view is **off by default**. It is enabled only by an explicit
-  launch flag (`--enable-raw-view`), so a health-checking run never serves raw
-  without a deliberate choice.
-- default views, API responses, list endpoints, and the SSE stream carry
-  sanitized metadata only; PII (`user.id` / `user.email`) is excluded by
-  default.
+- raw body (tool call arguments / results, sub-agent instructions / responses,
+  system prompt) and PII (`user.id` / `user.email`) are shown **by default**
+  (server-rendered, inert text) on raw-bearing routes.
+- `--sanitized-only` restores metadata-only mode: raw-bearing routes return
+  `404`, PII is excluded. This is the safety valve for health-check or
+  screen-sharing runs.
+- API responses (`/api/monitor/*`), list endpoints, and the SSE stream carry
+  sanitized metadata only — they **never** return raw / PII, regardless of
+  `--sanitized-only`.
 - there is **no bearer-token-to-console** scheme; a reusable token printed to a
   capturable stream cannot uphold a secrecy guarantee on this machine, so the
   boundary does not claim one.
@@ -106,12 +109,11 @@ Accepted out of scope (explicit accepted risk):
   output are already readable by same-user processes; the monitor does not widen
   that exposure. Multi-user-OS isolation is a documented deployment assumption,
   not a control.
-- `--enable-raw-view` is permitted in **any launch mode, including an
-  unattended / background / always-on receiver**. The consequence — raw / PII
-  reachable on loopback for the **full process lifetime** rather than only while
-  attended — is a **product-owner-accepted risk** on this single-user local
-  machine, chosen for convenience (always-on capture plus view-anytime). A
-  foreground-only restriction was considered and deliberately not adopted.
+- raw / PII is shown **by default** (no launch flag required), so raw / PII is
+  reachable on loopback for the **full process lifetime** in any launch mode
+  including unattended / background / always-on receivers. This is a
+  **product-owner-accepted risk** on this single-user local machine, chosen for
+  zero-friction self-debugging. `--sanitized-only` is the opt-out safety valve.
 - **defense-in-depth beyond default escaping.** The baseline against stored
   markup is the required inert text rendering above; on top of that the monitor
   adds **no** CSP backstop, payload sanitizer, or XSS payload-matrix test suite.
@@ -120,28 +122,54 @@ Accepted out of scope (explicit accepted risk):
   risk, not a separately defended boundary. This is the display hardening
   deliberately not added — see `AGENTS.md` Local-First Risk Posture and D020.
 
-Raw-detail interface (the only raw / PII surface):
+Raw-bearing route set (raw / PII surfaces):
 
-- raw / PII is exposed solely through a server-rendered route
-  `GET /traces/{rawRecordId}/raw` (HTML), which reads one raw record on demand by
-  id from `raw_records`. There is **no JSON raw API**; `/api/monitor/*` and the
-  SSE stream never return raw / PII.
-- the `--enable-raw-view` launch flag is the gate. Without it the route is **not
-  registered** and any request returns `404` (testable absence). The flag is the
-  process-level switch; there is no reusable token.
-- with the flag on: a request whose `Sec-Fetch-Site` is cross-site / cross-origin
-  (or whose `Origin` is foreign) is rejected with `403`; an unknown id returns
-  `404`; the response carries `Cache-Control: no-store`, and no raw is written to
-  logs.
+- raw / PII is exposed through server-rendered routes only. The raw-bearing
+  route set is:
+  - the **trace-detail page** (agent-execution view, which renders a bounded raw
+    preview inline and links to the full single-record raw route).
+  - `GET /traces/{rawRecordId}/raw` (server-rendered HTML, one raw record on
+    demand by id from `raw_records`).
+- there is **no JSON raw API**; `/api/monitor/*` and the SSE stream **never**
+  return raw / PII.
+- **default-on**: raw-bearing routes are active by default (no launch flag
+  required). `--sanitized-only` removes them: routes return `404`, PII is
+  excluded, and no cacheable raw response is generated.
+- **every route in the raw-bearing set** enforces:
+  - same-origin: a request whose `Sec-Fetch-Site` is cross-site / cross-origin
+    (or whose `Origin` is foreign) is rejected with `403`.
+  - `Cache-Control: no-store` (so raw / PII is not left in the browser cache
+    after process exit or a `--sanitized-only` restart).
+- an unknown id returns `404`; no raw is written to logs.
 - **inert text rendering is required.** Captured content (and likewise the
   default UI, list, and SSE-rendered fields) is rendered as **escaped, inert
   text** via the UI framework's default output encoding — never via `Html.Raw` /
   raw `MarkupString`, and never reflected into an HTML, attribute, script, style,
   or URL context as live markup. Stored markup therefore displays as text and
-  does not execute, so it cannot pivot to a same-origin read of this route. The
+  does not execute, so it cannot pivot to a same-origin read of these routes. The
   monitor does **not** add a heavier layer on top of this default escaping (no
   dedicated CSP, `nosniff`, or payload-sanitizer apparatus) — that was judged
   over-engineering for a local single-user tool (see accepted local risk above).
+
+Per-field sanitization policy:
+
+- **free-form name fields** (`tool_name`, `mcp_tool_name`, `agent_name`, span
+  `name`): stored only after passing the existing `MeasurementSanitizer`
+  unsafe-value guard (rejects email / path / secret-like values), and truncated
+  to a pinned max length. A value that fails the guard is dropped (the row keeps
+  its other columns), not stored verbatim.
+- **`error_type`**: the class token only (e.g. `timeout`, `ECONNREFUSED`,
+  `TokenExpiredError`). Exception messages and free-form `error` /
+  `exception.message` attributes are never copied. Values must be identifier-like
+  tokens (`[A-Za-z0-9._]`) and are truncated to the pinned max length; malformed
+  strings, paths, emails, and message text are dropped.
+- **`finish_reasons`**: enum-like tokens (`stop`, `length`, …) from a fixed set;
+  unknown string tokens pass the guard + max length. Malformed serialized arrays
+  are dropped rather than stored as raw text.
+- **`mcp_server_hash`**: stored as the client-provided hash only; the unhashed
+  server name is never derived or stored.
+- **reference ids** (`trace_id`, `span_id`, `parent_span_id`, `conversation_id`):
+  treated as opaque reference ids per `requirements.md` §5 and §8.
 
 Additional monitor web-security requirements:
 
@@ -157,13 +185,19 @@ Additional monitor web-security requirements:
 Mandatory negative tests:
 
 - non-loopback bind rejected; `Host`-header validation enforced.
-- `GET /traces/{rawRecordId}/raw` returns `404` without `--enable-raw-view`, and
-  serves raw only with it.
-- with the flag on, a cross-site / cross-origin request to the raw-detail route
-  is rejected with `403`.
+- with `--sanitized-only`, all raw-bearing routes return `404` and PII is
+  excluded; no cacheable raw response is generated.
+- a cross-site / cross-origin request to any raw-bearing route is rejected with
+  `403`.
+- `Cache-Control: no-store` is present on **all** raw-bearing routes (not only
+  the raw-detail route).
 - raw / PII is never returned by `/api/monitor/*` or the SSE stream.
 - a state-changing request without CSRF / same-origin is rejected.
 - raw / PII never appears in logs or repository-committed outputs.
+- per-field sanitization: email / path / secret-like values injected into
+  free-form attributes (`tool_name`, `mcp_tool_name`, `agent_name`,
+  `error_type`) are guarded out of the projection tables, the `/api/monitor/*`
+  JSON, and the SSE-driven default UI — including under `--sanitized-only`.
 
 ## Shared Use Preconditions
 

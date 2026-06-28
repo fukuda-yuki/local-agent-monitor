@@ -1,6 +1,7 @@
 using CopilotAgentObservability.LocalMonitor.Events;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
+using CopilotAgentObservability.Telemetry;
 using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.Projection;
@@ -130,13 +131,49 @@ internal sealed class ProjectionWorker : BackgroundService
                 }
             }
 
+            var status = store.GetProjectionStatus();
+            health.SetProjectionStatus(status.Backlog, status.OldestUnprocessedReceivedAt);
+
+            // Phase 2: span projection (runs after trace projection in the same pass).
+            var spanRecords = store.ListUnprocessedForSpanProjection(BatchSize);
+            foreach (var record in spanRecords)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                try
+                {
+                    var spans = MonitorSpanProjectionBuilder.Build(record);
+                    var newlyProjected = store.ApplySpanProjection(
+                        record.Id!.Value,
+                        spans,
+                        timeProvider.GetUtcNow());
+                    if (newlyProjected)
+                    {
+                        anyProjected = true;
+                    }
+                }
+                catch (PersistenceBusyException)
+                {
+                    // DB busy: stop this pass; retry next cycle.
+                    break;
+                }
+                catch (Exception)
+                {
+                    // Non-busy span projection failure: record failure and continue.
+                    health.RecordProjectionFailure();
+                }
+            }
+
+            var spanStatus = store.GetSpanProjectionStatus();
+            health.SetSpanProjectionStatus(spanStatus.Backlog, spanStatus.OldestUnprocessedReceivedAt);
+
             if (anyProjected)
             {
                 eventBroker?.PublishProjectionChanged();
             }
-
-            var status = store.GetProjectionStatus();
-            health.SetProjectionStatus(status.Backlog, status.OldestUnprocessedReceivedAt);
         }
         catch (PersistenceBusyException)
         {

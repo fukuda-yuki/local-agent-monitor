@@ -3,6 +3,7 @@ using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Telemetry;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -141,6 +142,26 @@ public class ProjectionWorkerTests
     }
 
     [Fact]
+    public async Task Pass_UpdatesHealthWithRemainingSpanProjectionBacklog()
+    {
+        var store = new FakeProjectionStore();
+        for (var i = 1; i <= 101; i++)
+        {
+            store.SeedProjected(i, T(i));
+        }
+
+        var health = ReadyHealth();
+        var worker = new ProjectionWorker(store, health);
+
+        await worker.RunProjectionPassAsync();
+
+        var snapshot = health.Snapshot();
+        Assert.Equal(0, snapshot.ProjectionBacklog);
+        Assert.Equal(1, snapshot.SpanProjectionBacklog);
+        Assert.Equal(T(101), snapshot.OldestUnprocessedSpanReceivedAt);
+    }
+
+    [Fact]
     public async Task Pass_StatusReadBusy_MarksProjectionStatusUnknownSoReadinessIsNotReady()
     {
         var store = new FakeProjectionStore { StatusThrowsBusy = true };
@@ -192,6 +213,7 @@ public class ProjectionWorkerTests
     {
         private readonly List<RawTelemetryRecord> records = new();
         private readonly HashSet<long> projected = new();
+        private readonly HashSet<long> spanProjected = new();
 
         public Func<long, ApplyOutcome> OnApply { get; set; } = _ => ApplyOutcome.Success;
 
@@ -209,6 +231,12 @@ public class ProjectionWorkerTests
                 ReceivedAt: receivedAt,
                 ResourceAttributesJson: null,
                 PayloadJson: """{"resourceSpans":[]}"""));
+
+        public void SeedProjected(long id, DateTimeOffset receivedAt)
+        {
+            Seed(id, receivedAt);
+            projected.Add(id);
+        }
 
         public bool IsProjected(long id) => projected.Contains(id);
 
@@ -247,13 +275,46 @@ public class ProjectionWorkerTests
             return new MonitorProjectionStatus(unprocessed.Count, oldest);
         }
 
+        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) =>
+            records.Where(r => projected.Contains(r.Id!.Value) && !spanProjected.Contains(r.Id!.Value)).Take(limit).ToList();
+
+        public bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt)
+        {
+            if (!projected.Contains(rawRecordId) || spanProjected.Contains(rawRecordId))
+            {
+                return false;
+            }
+
+            spanProjected.Add(rawRecordId);
+            return true;
+        }
+
+        public MonitorProjectionStatus GetSpanProjectionStatus()
+        {
+            var pending = records.Where(r => projected.Contains(r.Id!.Value) && !spanProjected.Contains(r.Id!.Value)).ToList();
+            var oldest = pending.Count == 0 ? (DateTimeOffset?)null : pending.Min(r => r.ReceivedAt);
+            return new MonitorProjectionStatus(pending.Count, oldest);
+        }
+
         public MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) =>
             throw new NotSupportedException();
 
         public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
             throw new NotSupportedException();
 
+        public MonitorTraceRow? GetMonitorTrace(string traceId) =>
+            throw new NotSupportedException();
+
+        public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
+            throw new NotSupportedException();
+
+        public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) =>
+            throw new NotSupportedException();
+
         public RawTelemetryRecord? GetRawRecordById(long id) =>
+            throw new NotSupportedException();
+
+        public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) =>
             throw new NotSupportedException();
     }
 }

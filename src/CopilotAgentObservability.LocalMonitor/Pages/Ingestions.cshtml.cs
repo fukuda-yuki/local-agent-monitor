@@ -13,7 +13,7 @@ public sealed class IngestionsModel : PageModel
 
     internal MonitorProjectionPage<MonitorIngestionRow> Result { get; private set; } = null!;
 
-    internal bool RawViewEnabled { get; private set; }
+    internal bool RawAvailable { get; private set; }
 
     public IActionResult OnGet()
     {
@@ -24,7 +24,7 @@ public sealed class IngestionsModel : PageModel
 
         var store = HttpContext.RequestServices.GetRequiredService<IMonitorProjectionStore>();
         var options = HttpContext.RequestServices.GetRequiredService<MonitorOptions>();
-        RawViewEnabled = options.EnableRawView;
+        RawAvailable = !options.SanitizedOnly;
         Result = store.ListMonitorIngestions(After, 50);
         return Page();
     }

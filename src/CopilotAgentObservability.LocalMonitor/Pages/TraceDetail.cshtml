@@ -1,0 +1,98 @@
+@page "/traces/{traceId}"
+@model TraceDetailModel
+
+<section>
+    <p><a href="/traces">&larr; Traces</a></p>
+    <h2>Trace @Model.TraceId</h2>
+
+    <h3>Summary</h3>
+    <table>
+        <tbody>
+            <tr><th>ClientKind</th><td>@Model.Trace.ClientKind</td></tr>
+            <tr><th>Total tool calls</th><td>@Model.Trace.ToolCallCount</td></tr>
+            <tr><th>Tokens (input / output / total)</th><td>@Model.Trace.InputTokens / @Model.Trace.OutputTokens / @Model.Trace.TotalTokens</td></tr>
+            <tr><th>Error count</th><td>@Model.Trace.ErrorCount</td></tr>
+            <tr><th>Duration (ms)</th><td>@Model.Trace.DurationMs</td></tr>
+            <tr><th>Turns</th><td>@Model.Trace.TurnCount</td></tr>
+            <tr><th>Agent invocations</th><td>@Model.Trace.AgentInvocationCount</td></tr>
+            <tr><th>Primary model</th><td>@Model.Trace.PrimaryModel</td></tr>
+            <tr><th>Spans</th><td>@Model.Trace.SpanCount</td></tr>
+            <tr><th>First / Last seen</th><td>@Model.Trace.FirstSeenAt / @Model.Trace.LastSeenAt</td></tr>
+        </tbody>
+    </table>
+
+    <h3>Sub-agent span tree</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Operation</th>
+                <th>Category</th>
+                <th>Tool / MCP / Agent</th>
+                <th>Model</th>
+                <th>Tokens (in / out / total)</th>
+                <th>Status</th>
+                <th>Duration (ms)</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var node in Model.Tree)
+            {
+                <tr>
+                    <td style="padding-left:@(node.Depth * 20)px">@node.Span.Operation</td>
+                    <td>@node.Span.Category</td>
+                    <td>@node.Span.ToolName@(node.Span.McpToolName is null ? null : " / " + node.Span.McpToolName)@(node.Span.AgentName is null ? null : " / " + node.Span.AgentName)</td>
+                    <td>@(node.Span.ResponseModel ?? node.Span.RequestModel)</td>
+                    <td>@node.Span.InputTokens / @node.Span.OutputTokens / @node.Span.TotalTokens</td>
+                    <td>@node.Span.Status@(node.Span.ErrorType is null ? null : " (" + node.Span.ErrorType + ")")</td>
+                    <td>@node.Span.DurationMs</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    <h3>Per-turn token rollup</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Ordinal</th>
+                <th>Operation</th>
+                <th>Model</th>
+                <th>Input</th>
+                <th>Output</th>
+                <th>Total</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var turn in Model.Turns)
+            {
+                <tr>
+                    <td>@turn.SpanOrdinal</td>
+                    <td>@turn.Operation</td>
+                    <td>@(turn.ResponseModel ?? turn.RequestModel)</td>
+                    <td>@turn.InputTokens</td>
+                    <td>@turn.OutputTokens</td>
+                    <td>@turn.TotalTokens</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    <h3>Raw OTLP payload</h3>
+    @if (Model.RawRecords.Count == 0)
+    {
+        <p>No raw records for this trace.</p>
+    }
+    else
+    {
+        @foreach (var record in Model.RawRecords)
+        {
+            <h4>Raw record @record.Id</h4>
+            <p><a href="/traces/@record.Id/raw">Open full raw record</a> (@record.PayloadLength chars)</p>
+            @if (record.IsTruncated)
+            {
+                <p>Raw preview truncated.</p>
+            }
+            <pre>@record.Preview</pre>
+        }
+    }
+</section>

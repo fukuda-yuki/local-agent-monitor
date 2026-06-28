@@ -28,7 +28,7 @@ public class MonitorUiTests
     {
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
-        await using var host = await StartHostAsync(temp, enableRawView: false);
+        await using var host = await StartHostAsync(temp);
 
         var overview = await host.Client.GetStringAsync("/");
         var diagnostics = await host.Client.GetStringAsync("/diagnostics");
@@ -40,22 +40,22 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task ListPages_RenderSanitizedRowsAndOnlyLinkRawWhenEnabled()
+    public async Task ListPages_LinkRawByDefaultAndHideUnderSanitizedOnly()
     {
         using var temp = new MonitorTempDirectory();
         var rawRecordId = SeedRawWithSensitiveMarkers(temp);
 
-        await using var sanitizedHost = await StartHostAsync(temp, enableRawView: false);
-        var sanitizedIngestions = await sanitizedHost.Client.GetStringAsync("/ingestions");
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", sanitizedIngestions);
-        Assert.DoesNotContain("leak-marker@example.com", sanitizedIngestions);
-        Assert.DoesNotContain($"/traces/{rawRecordId}/raw", sanitizedIngestions);
+        await using var defaultHost = await StartHostAsync(temp);
+        var defaultIngestions = await defaultHost.Client.GetStringAsync("/ingestions");
+        Assert.Contains($"/traces/{rawRecordId}/raw", defaultIngestions);
+        // Raw is reachable by default, but the list itself stays sanitized; raw is a link only.
+        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", defaultIngestions);
+        Assert.DoesNotContain("leak-marker@example.com", defaultIngestions);
 
-        await using var rawHost = await StartHostAsync(temp, enableRawView: true);
-        var rawIngestions = await rawHost.Client.GetStringAsync("/ingestions");
-        Assert.Contains($"/traces/{rawRecordId}/raw", rawIngestions);
-        // Even with the raw view enabled, the list itself stays sanitized; raw is a link only.
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", rawIngestions);
+        await using var sanitizedHost = await StartHostAsync(temp, sanitizedOnly: true);
+        var sanitizedIngestions = await sanitizedHost.Client.GetStringAsync("/ingestions");
+        Assert.DoesNotContain($"/traces/{rawRecordId}/raw", sanitizedIngestions);
+        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", sanitizedIngestions);
     }
 
     [Fact]
@@ -63,7 +63,7 @@ public class MonitorUiTests
     {
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
-        await using var host = await StartHostAsync(temp, enableRawView: true);
+        await using var host = await StartHostAsync(temp);
 
         var traces = await host.Client.GetStringAsync("/traces");
 
@@ -142,10 +142,10 @@ public class MonitorUiTests
         return id;
     }
 
-    private static async Task<RunningHost> StartHostAsync(MonitorTempDirectory temp, bool enableRawView = false)
+    private static async Task<RunningHost> StartHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false)
     {
         var url = $"http://127.0.0.1:{GetFreePort()}";
-        var options = new MonitorOptions(temp.DatabasePath, url, EnableRawView: enableRawView, MaxRequestBodyBytes: 31_457_280);
+        var options = new MonitorOptions(temp.DatabasePath, url, SanitizedOnly: sanitizedOnly, MaxRequestBodyBytes: 31_457_280);
         var app = MonitorHost.Build(options, new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
         await app.StartAsync();
         return new RunningHost(app, new HttpClient { BaseAddress = new Uri(url) });

@@ -63,9 +63,9 @@ internal static class MonitorProjectionBuilder
 
         foreach (var resourceSpan in resourceSpans.EnumerateArray())
         {
-            foreach (var scopeSpan in EnumerateArrayProperty(resourceSpan, "scopeSpans"))
+            foreach (var scopeSpan in OtlpSpanReader.EnumerateArrayProperty(resourceSpan, "scopeSpans"))
             {
-                foreach (var span in EnumerateArrayProperty(scopeSpan, "spans"))
+                foreach (var span in OtlpSpanReader.EnumerateArrayProperty(scopeSpan, "spans"))
                 {
                     total++;
                     if (span.TryGetProperty("traceId", out var traceIdElement)
@@ -82,20 +82,5 @@ internal static class MonitorProjectionBuilder
         }
 
         return (total, byTrace);
-    }
-
-    private static IEnumerable<JsonElement> EnumerateArrayProperty(JsonElement element, string propertyName)
-    {
-        if (element.ValueKind != JsonValueKind.Object
-            || !element.TryGetProperty(propertyName, out var arrayElement)
-            || arrayElement.ValueKind != JsonValueKind.Array)
-        {
-            yield break;
-        }
-
-        foreach (var item in arrayElement.EnumerateArray())
-        {
-            yield return item;
-        }
     }
 }

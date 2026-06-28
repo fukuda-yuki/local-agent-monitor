@@ -245,6 +245,7 @@ public class MonitorHealthTests
         var time = new MutableTimeProvider(Start);
         var state = ReadyState(time);
         state.SetProjectionStatus(backlog: 0, oldestUnprocessedReceivedAt: null);
+        state.SetSpanProjectionStatus(backlog: 0, oldestUnprocessedReceivedAt: null);
 
         var json = MonitorReadinessJson.Serialize(Evaluate(state));
 
@@ -258,6 +259,9 @@ public class MonitorHealthTests
         Assert.Contains("\"ingestion_accepting\":true", json);
         Assert.Contains("\"projection_lag_seconds\":0", json);
         Assert.Contains("\"projection_backlog\":0", json);
+        Assert.Contains("\"span_projection_lag_seconds\":0", json);
+        Assert.Contains("\"span_projection_backlog\":0", json);
+        Assert.Contains("\"projection_failure_count\":0", json);
         Assert.Contains("\"degraded_reasons\":[]", json);
     }
 }

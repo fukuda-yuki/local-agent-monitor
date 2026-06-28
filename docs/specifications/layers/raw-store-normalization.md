@@ -162,14 +162,119 @@ ingestion list and the `/api/monitor/ingestions` cursor):
 | `last_seen_at` | TEXT NULL | ISO-8601, latest ingestion for the trace |
 | `projected_at` | TEXT NOT NULL | ISO-8601 time the projection worker wrote/updated the row |
 
-Opt-in raw access:
+`monitor_spans` (one row per span; drives the agent-execution detail view and
+the `/api/monitor/traces/{traceId}/spans` cursor):
 
-- when the monitor is launched with `--enable-raw-view`, the server-rendered
-  raw-detail route `GET /traces/{rawRecordId}/raw` fetches one raw payload on
-  demand by id from `raw_records`. There is no JSON raw API.
-- this path is off by default (route absent ⇒ `404`), loopback-only, same-origin
-  enforced, and is never part of the default projections, list responses, SSE
-  notifications, or logs.
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | INTEGER PK | projection row id |
+| `raw_record_id` | INTEGER NOT NULL | references `raw_records.id` |
+| `trace_id` | TEXT NOT NULL | trace-level reference |
+| `span_id` | TEXT NULL | span-level reference |
+| `parent_span_id` | TEXT NULL | hierarchy reference |
+| `span_ordinal` | INTEGER NOT NULL | intra-record ordering for idempotency |
+| `operation` | TEXT NULL | `invoke_agent` / `chat` / `execute_tool` / `execute_hook` |
+| `category` | TEXT NULL | `llm_call` / `tool_call` / `agent_invocation` / `hook` / `error` / `unknown` |
+| `tool_name` | TEXT NULL | sanitized (guard + max length) |
+| `tool_type` | TEXT NULL | `function` / `extension` (MCP) |
+| `mcp_tool_name` | TEXT NULL | sanitized (guard + max length) |
+| `mcp_server_hash` | TEXT NULL | client-provided hash only |
+| `agent_name` | TEXT NULL | sanitized (guard + max length) |
+| `request_model` | TEXT NULL | model identifier |
+| `response_model` | TEXT NULL | model identifier |
+| `input_tokens` | INTEGER NULL | per-span |
+| `output_tokens` | INTEGER NULL | per-span |
+| `total_tokens` | INTEGER NULL | per-span |
+| `reasoning_tokens` | INTEGER NULL | per-span |
+| `cache_read_tokens` | INTEGER NULL | per-span |
+| `cache_creation_tokens` | INTEGER NULL | per-span |
+| `status` | TEXT NULL | `ok` / `error` |
+| `error_type` | TEXT NULL | class token only (guard + max length) |
+| `finish_reasons` | TEXT NULL | comma-separated enum tokens |
+| `conversation_id` | TEXT NULL | reference id |
+| `duration_ms` | REAL NULL | computed from span start / end |
+| `start_time` | TEXT NULL | ISO-8601 |
+| `end_time` | TEXT NULL | ISO-8601 |
+| `projected_at` | TEXT NOT NULL | ISO-8601 |
+
+Idempotency key: `(raw_record_id, span_ordinal)` UNIQUE — tolerates missing or
+duplicate `span_id`.
+
+Additive rollup columns on `monitor_traces` (Sprint9):
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `input_tokens` | INTEGER NULL | trace-level (sum of root `invoke_agent` usage, or fallback sum of `chat` spans) |
+| `output_tokens` | INTEGER NULL | trace-level |
+| `total_tokens` | INTEGER NULL | trace-level |
+| `turn_count` | INTEGER NULL | count of `chat` / LLM spans |
+| `agent_invocation_count` | INTEGER NULL | count of `invoke_agent` spans |
+| `duration_ms` | REAL NULL | trace duration |
+| `primary_model` | TEXT NULL | most-used model |
+
+Per-field sanitization policy:
+
+- **free-form name fields** (`tool_name`, `mcp_tool_name`, `agent_name`, span
+  `name`): stored only after passing the existing `MeasurementSanitizer`
+  unsafe-value guard (rejects email / path / secret-like values), and truncated
+  to a pinned max length. A value that fails the guard is dropped (the row keeps
+  its other columns), not stored verbatim.
+- **`error_type`**: the class token only (e.g. `timeout`, `ECONNREFUSED`,
+  `TokenExpiredError`). Exception messages and free-form `error` /
+  `exception.message` attributes are never copied. Values must be identifier-like
+  tokens (`[A-Za-z0-9._]`) and are truncated to the pinned max length; malformed
+  strings, paths, emails, and message text are dropped.
+- **`finish_reasons`**: enum-like tokens (`stop`, `length`, …) from a fixed set;
+  unknown string tokens pass the guard + max length. Malformed serialized arrays
+  are dropped rather than stored as raw text.
+- **`mcp_server_hash`**: stored as the client-provided hash only; the unhashed
+  server name is never derived or stored.
+- **reference ids** (`trace_id`, `span_id`, `parent_span_id`, `conversation_id`):
+  treated as opaque reference ids per `requirements.md` §5 and §8.
+
+Token rollup rule (no double count):
+
+- per-turn tokens = the `chat` span's own `gen_ai.usage.*` (one turn = one
+  `chat` / LLM span).
+- per-trace total = the trace's root `invoke_agent` usage when present;
+  otherwise the sum of `chat` spans (fallback when no agent-level total is
+  emitted).
+- if a trace has multiple root `invoke_agent` spans with usage, the trace-level
+  token fields are the sum of those root `invoke_agent` usage fields.
+- never add `invoke_agent` totals to `chat` per-call tokens. Sub-agent (child
+  `invoke_agent`) usage is attributed to that sub-agent and rolled into the
+  parent only through the parent's own agent-level total, not by re-summing
+  child `chat` spans.
+- token rollup is computed with a range-safe accumulator. Because the public
+  projection rows expose nullable `int` token fields, a derived or summed token
+  field that exceeds the `int` range is stored as `NULL` rather than wrapped.
+
+Projection-version and backfill:
+
+- a new `schema_version` entry tracks the span-projection version independently
+  of the existing ingestion/trace projection version.
+- existing Sprint8-processed `raw_records` are re-projected for spans and the
+  new `monitor_traces` rollup columns. Span-projection progress is tracked
+  independently of `monitor_ingestions`, so a record that was already projected
+  for ingestion/trace but not yet for spans is detected and not hidden as
+  backlog 0.
+- mandatory upgrade test from a Sprint8-populated DB verifies backfill
+  correctness.
+
+Raw access (default-on):
+
+- raw body (tool call arguments / results, sub-agent instructions / responses,
+  system prompt) and PII (`user.id` / `user.email`) are shown **by default** on
+  raw-bearing routes: the trace-detail page renders a bounded inline preview and
+  links to the full single-record view, while `GET /traces/{rawRecordId}/raw`
+  renders one full raw record. Both are server-rendered as inert text. There is
+  no JSON raw API.
+- `--sanitized-only` restores metadata-only mode: raw-bearing routes return
+  `404`, PII is excluded. No cacheable raw response is generated.
+- raw-bearing routes enforce same-origin (`Origin` / `Sec-Fetch-Site` ⇒
+  cross-site `403`) and `Cache-Control: no-store`.
+- raw / PII is never part of the projection tables, list responses, SSE
+  notifications, `/api/monitor/*` JSON, or logs.
 - the full raw / PII trust boundary and the route contract are defined in
   [../security-data-boundaries.md](../security-data-boundaries.md).
 
