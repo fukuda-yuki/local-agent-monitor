@@ -46,6 +46,24 @@ public class MonitorTraceDetailTests
     }
 
     [Fact]
+    public async Task TraceDetail_RendersTabShellWithDeferredFlowAndCachePanes()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedProjectedTrace(temp);
+        await using var host = await StartHostAsync(temp);
+
+        var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
+
+        // A3 tab shell: Summary/Timeline server-rendered, Flow Chart/Cache deferred
+        // (empty container panes filled by JS in M3/M5).
+        Assert.Contains("role=\"tablist\"", body);
+        Assert.Contains("Flow Chart", body);
+        Assert.Contains("Cache", body);
+        Assert.Contains("panel-flow", body);
+        Assert.Contains("panel-cache", body);
+    }
+
+    [Fact]
     public async Task TraceDetail_UnderSanitizedOnly_Returns404AndNoRaw()
     {
         using var temp = new MonitorTempDirectory();
