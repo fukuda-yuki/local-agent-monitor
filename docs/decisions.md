@@ -600,3 +600,25 @@ Noto Sans JP は Regular(400) / Medium(500) / Bold(700)、Noto Sans Mono は Reg
 vendoring した（full weight set ではなく、repository の肥大化を抑えるため）。latin と
 japanese subset を分け、合計約 3.1 MB。provenance は
 `docs/sprints/sprint10-monitor-design-views/README.md` の Vendor provenance 表に記録。
+
+## D029: Sprint10 M6 Playwright smoke tests are test-only validation
+
+Status: Accepted
+
+Sprint10 M6 adds `Microsoft.Playwright` to
+`tests/CopilotAgentObservability.LocalMonitor.Tests` as a **test-only**
+dependency for browser-level smoke validation of the Local Monitor design views.
+The dependency is not part of the Local Monitor runtime surface and does not
+introduce a frontend build step, CDN, endpoint, schema, telemetry input, query
+parameter, or raw-boundary change.
+
+Consequences:
+
+- Chromium browser binaries are installed outside tracked source for local
+  validation. They must not be committed.
+- Playwright tests verify the existing client-side views consume sanitized spans
+  JSON and do not fetch raw-bearing routes.
+- M6 validation records, rather than fixes, the current `--sanitized-only`
+  conflict: the sprint specification says the new views work under
+  `--sanitized-only`, while current TraceDetail behavior is raw-bearing and
+  returns `404` in that mode.
