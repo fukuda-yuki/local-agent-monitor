@@ -44,6 +44,8 @@ filed" section and are not part of the fix backlog.
 | [M2-5](M2-span-projection.md#M2-5) | Finish reason sanitization | Low | Fixed | Malformed serialized finish-reason arrays are dropped; only string tokens are stored. |
 | [M2-6](M2-span-projection.md#M2-6) | Multiple root token rollup | Medium | Fixed | Multiple root `invoke_agent` usage fields are summed; child `invoke_agent` spans remain excluded from trace-level totals. |
 | [M2-7](M2-span-projection.md#M2-7) | Token rollup overflow | Low | Fixed | Summed / derived token fields use range-safe accumulation and become null when outside the nullable `int` projection range. |
+| [M2-8](M2-span-projection.md#M2-8) | Custom operation name | Medium | Open | Drop unexpected operation names before projection. |
+| [M2-9](M2-span-projection.md#M2-9) | Unallowlisted toolType | Medium | Open | Allowlist tool types before storing. |
 | [M3-3](M3-storage-migration.md#M3-3) | Span query performance | Low | Closed | Optional composite index deferred until span volumes justify it. |
 | [M5-2](M5-agent-execution-ui.md#M5-2) | Raw-bearing route headers | Low | Fixed | `Cache-Control: no-store` is set before trace-detail early returns. |
 | [M5-3](M5-agent-execution-ui.md#M5-3) | Trace-detail busy handling | Low | Fixed | Trace-detail maps `PersistenceBusyException` to `503 persistence_busy`. |
@@ -57,6 +59,7 @@ filed" section and are not part of the fix backlog.
 | [M5-agent-execution-ui.md](M5-agent-execution-ui.md) | Trace-detail page, raw default behavior, raw lookup/rendering | M5-1 through M5-4 |
 | [M6-security-live-validation.md](M6-security-live-validation.md) | Security boundary validation records and human-gated live evidence | M6-1 |
 | [codex_adversarial_review.md](codex_adversarial_review.md) | Raw Codex review output retained as evidence | Duplicate source for M2-1, M3-1, M3-2, M5-1, M5-4 |
+| [codex_pr32_review.md](codex_pr32_review.md) | Raw Codex review output for PR #32 retained as evidence | Duplicate source for M2-8, M2-9 |
 
 **M4 - Sanitized read API:** reviewed by sub-agent and Codex; no valid defect
 was filed. The sanitized-only invariant, cursor pagination on the unique key,

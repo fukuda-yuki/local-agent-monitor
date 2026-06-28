@@ -15,6 +15,9 @@ sanitization policy.
 | M2-5 | Low | `finish_reasons` parsing | Fixed: malformed serialized arrays are dropped. |
 | M2-6 | Medium | Multiple root agent token rollup | Fixed: multiple root `invoke_agent` usage fields are summed. |
 | M2-7 | Low | Token rollup overflow | Fixed: summed / derived token fields that exceed the nullable `int` projection range become null, not wrapped values. |
+| M2-8 | Medium | Unsanitized custom operation name | Open: drop unexpected operation names before projection. |
+| M2-9 | Medium | Unallowlisted toolType projection | Open: allowlist tool types before storing. |
+
 
 Primary next plan: M2-1 + M2-2 as one token-rollup fix plan. Keep M2-3 as a
 decision item unless the intended turn-count semantics are confirmed.
@@ -191,6 +194,28 @@ Key files: `src/CopilotAgentObservability.Telemetry/Monitoring/MonitorTraceRollu
   projection-range decision before exposing / storing the field.
 - **Resolution:** Fixed. Token accumulation uses `long`, then converts to
   nullable `int`; out-of-range fields become null.
+
+<a id="M2-8"></a>
+
+## M2-8 — Unsanitized custom operation name projection leaks attributes/PII — Medium (confidence: High) [Codex review on PR #32]
+
+- **Location:** `src/CopilotAgentObservability.Telemetry/Monitoring/MonitorSpanProjectionBuilder.cs:181` (`ClassifyOperation`).
+- **Spec:** `docs/specifications/layers/raw-store-normalization.md` and local-first data boundaries. Unexpected values should not leak into the projection storage or APIs.
+- **Observed:** `ClassifyOperation` returns `opName` verbatim in the default switch case. The raw value of `gen_ai.operation.name` is stored in the database and exposed via the trace spans API. OTLP spans can contain raw prompts or PII in this attribute.
+- **Impact:** Potential data leak to database and API when a client sends malicious or unexpected operation name values.
+- **Recommendation:** Allowlist valid operation names (`invoke_agent`, `chat`, `execute_tool`, `execute_hook`) and return `null` (or a generic safe token) for any other values.
+- **Resolution:** Open.
+
+<a id="M2-9"></a>
+
+## M2-9 — Unallowlisted toolType projection bypasses sanitization policy — Medium (confidence: High) [Codex review on PR #32]
+
+- **Location:** `src/CopilotAgentObservability.Telemetry/Monitoring/MonitorSpanProjectionBuilder.cs:115` (`ProjectSpan`).
+- **Spec:** `tool_type` is defined as an enum-like field (e.g. `function`, `extension`), but no validation is applied during projection.
+- **Observed:** `ProjectSpan` extracts the raw string for `tool_type` from span attributes and stores/exposes it directly, which can contain arbitrary strings (local paths, tool arguments, or secrets).
+- **Impact:** Sensitive details may leak into the projection layer if a client provides malformed or malicious `tool_type` values.
+- **Recommendation:** Restrict `toolType` to known valid values (e.g. `function`, `extension`) or drop it (set to null) if it does not match.
+- **Resolution:** Open.
 
 ---
 
