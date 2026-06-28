@@ -210,7 +210,7 @@ Each milestone produces its own `milestones/Mx-*/plan.md` at execution time
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | M1 Specs & Decisions | Record D024–D028; update `requirements.md` §3/§4 (capability + narrow the deferred-design non-goal + DADS non-applicability), `spec.md` (monitor views + TraceDetail architecture), `telemetry-ingestion.md` (note the views consume the existing spans API; no new field), `security-data-boundaries.md` (Cytoscape + dagre vendored + sanitized-only consumption invariant; A2 prefix-diff and cross-trace out), user guide. Confirm the spans API field coverage (done: all required fields present). No code. | Planned |
-| M2 A3 Visual polish | Dark VS Code-styled theme (D027) + Noto Sans JP/Mono vendor (D028) + layout/navigation across all monitor pages; trace-list readability (7 primary columns + row-expand disclosure); TraceDetail page restructured into sanitized JS section (empty container + tab shell) + raw Razor section. No route/behavior/data change. Existing UI tests assert pages still render and required data is present. | Planned |
+| M2 A3 Visual polish | Dark VS Code-styled theme (D027) + Noto Sans JP/Mono vendor (D028, trimmed to 400/500/700 + mono 400) + layout/navigation across all monitor pages; trace-list readability (7 primary columns + row-expand disclosure); TraceDetail restructured into a sanitized **tab shell** (Summary/Timeline server-rendered, Flow Chart/Cache empty panes) + raw Razor section. Staged migration: per-tab JS rendering deferred (Flow Chart M3, Timeline filter/sort M4, Cache M5), so existing UI tests stay green unmodified. No route/behavior/data/boundary change. | Done |
 | M3 A1 Flow Chart | Vendor Cytoscape.js + dagre + cytoscape-dagre (UMD, `wwwroot/vendor/`, no CDN); render span nodes by category with `parent_span_id` edges, dagre layout, pan/zoom, node-click → Timeline tab switch + highlight, error styling. Built from the existing spans JSON. Record version + SHA in this README. | Planned |
 | M4 A4 Timeline filter/sort | Client-side filter (status: errors only) and sort (tokens / time) on the flat span list in the Timeline tab. Vanilla JS; sanitized JSON only; no API change. | Planned |
 | M5 A2 Cache Explorer | Cache tab: group chat turns within the current trace by root `invoke_agent` (≈ user request); cache-hit rate / cache-creation / duration / model / timestamp / token breakdown. Sanitized only; prefix-diff out (D026); cross-trace deferred (D026). | Planned |
@@ -284,8 +284,20 @@ Recorded during milestone execution. Updated in-place.
 | `wwwroot/vendor/cytoscape.min.js` | TBD | TBD | ~1.3 MB | MIT | M3 |
 | `wwwroot/vendor/dagre.min.js` | TBD | TBD | ~90 KB | MIT | M3 |
 | `wwwroot/vendor/cytoscape-dagre.js` | TBD | TBD | ~40 KB | MIT | M3 |
-| `wwwroot/vendor/fonts/NotoSansJP-*` | TBD | TBD | ~5–10 MB | OFL | M2 |
-| `wwwroot/vendor/fonts/NotoSansMono-*` | TBD | TBD | ~100 KB | OFL | M2 |
+| `wwwroot/vendor/fonts/noto-sans-jp-japanese-400-normal.woff2` | fontsource 5.2.9 | `4a7b928d4d75e7fc0bace614030664a7ea7eb7d2f754fd2b2da9c3c0ed350570` | 1017536 B | OFL 1.1 | M2 |
+| `wwwroot/vendor/fonts/noto-sans-jp-japanese-500-normal.woff2` | fontsource 5.2.9 | `116eacf750caa59db9d404d43d2daf0f02ae01c439825716972da8dcc97ce024` | 1030340 B | OFL 1.1 | M2 |
+| `wwwroot/vendor/fonts/noto-sans-jp-japanese-700-normal.woff2` | fontsource 5.2.9 | `a5861823629995d9abb4b16b96a1c57139d9663d7a256209cb6b40640ed5431e` | 1039792 B | OFL 1.1 | M2 |
+| `wwwroot/vendor/fonts/noto-sans-jp-latin-400-normal.woff2` | fontsource 5.2.9 | `c3ca2d64070bf809fad5aec44a65f65ea88082e1a13faab4ef903f46a8c6f024` | 13072 B | OFL 1.1 | M2 |
+| `wwwroot/vendor/fonts/noto-sans-jp-latin-500-normal.woff2` | fontsource 5.2.9 | `16399f6ffc142d4d427ba56b203b48cb1c5adf71bc9f018b53f1e9d5d4ad5783` | 13092 B | OFL 1.1 | M2 |
+| `wwwroot/vendor/fonts/noto-sans-jp-latin-700-normal.woff2` | fontsource 5.2.9 | `1baabeedde8b3dfce0aa05cb784362d9dc42e7cf05abf87d83c9ffc3e8c69fb5` | 13080 B | OFL 1.1 | M2 |
+| `wwwroot/vendor/fonts/noto-sans-mono-latin-400-normal.woff2` | fontsource 5.2.10 | `1e4b885e90f8e794d33fff5095497e4ce847d8c5fa2b7810d1b10a770d0f8e34` | 10876 B | OFL 1.1 | M2 |
+
+Fonts vendored from [Fontsource](https://fontsource.org) (`@fontsource/noto-sans-jp@5.2.9`,
+`@fontsource/noto-sans-mono@5.2.10`), OFL 1.1 license text at
+`wwwroot/vendor/fonts/OFL.txt`. Per D028's M2 narrowing, only the UI-needed weights are
+vendored (JP 400/500/700 + Mono 400; latin + japanese subsets), total ≈ 3.1 MB — not the
+full weight set. No glyph subsetting or build step; woff2 served by the default static
+content-type provider.
 
 ## Requirements brainstorm record (2026-06-28)
 

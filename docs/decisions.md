@@ -594,3 +594,9 @@ Status: Accepted
 Noto Sans JP（full weight set）と Noto Sans Mono を **`wwwroot/vendor/fonts/` に vendoring**
 する（CDN 不使用）。合計サイズは概ね 5–10 MB。network コストがゼロのローカル専用ツール
 として受容する。vendoring（version / SHA-256 / size / license）は M2 で記録する。
+
+M2 実装時の narrowing（ユーザー承認済み、2026-06-28）: UI が必要とする weight のみに絞り、
+Noto Sans JP は Regular(400) / Medium(500) / Bold(700)、Noto Sans Mono は Regular(400) を
+vendoring した（full weight set ではなく、repository の肥大化を抑えるため）。latin と
+japanese subset を分け、合計約 3.1 MB。provenance は
+`docs/sprints/sprint10-monitor-design-views/README.md` の Vendor provenance 表に記録。
