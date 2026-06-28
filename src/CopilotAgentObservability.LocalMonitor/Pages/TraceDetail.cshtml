@@ -5,9 +5,9 @@
     <p><a href="/traces">&larr; Traces</a></p>
     <h2>Trace @Model.TraceId</h2>
 
-    @* Sanitized section: tab shell. Summary / Timeline are server-rendered here;
-       Flow Chart (M3) is filled by JS from the sanitized spans API. Cache (M5)
-       remains an empty container filled by JS later.
+    @* Sanitized section: tab shell. Summary stays server-rendered; Timeline
+       (M4) and Flow Chart (M3) are filled by JS from the sanitized spans API.
+       Cache (M5) remains an empty container filled by JS later.
        Tab switching is Vanilla JS (monitor-views.js). *@
     <div class="tabs" role="tablist" aria-label="Trace views">
         <button class="tab" type="button" role="tab" id="tab-summary" aria-controls="panel-summary" aria-selected="true" tabindex="0">Summary</button>
@@ -35,9 +35,28 @@
     </div>
 
     <div class="tab-panel" id="panel-timeline" role="tabpanel" aria-labelledby="tab-timeline" hidden>
-        <h3>Sub-agent span tree</h3>
+        <h3>Timeline</h3>
+        <div class="timeline-toolbar" data-timeline-trace-id="@Model.TraceId">
+            <label class="timeline-filter">
+                <input id="timeline-errors-only" type="checkbox" />
+                Errors only
+            </label>
+            <fieldset class="segmented-control" aria-label="Timeline sort">
+                <legend>Sort</legend>
+                <label>
+                    <input type="radio" name="timeline-sort" value="time" checked />
+                    <span>Time</span>
+                </label>
+                <label>
+                    <input type="radio" name="timeline-sort" value="tokens" />
+                    <span>Tokens</span>
+                </label>
+            </fieldset>
+            <span id="timeline-count" class="timeline-count" role="status">Loading spans...</span>
+        </div>
+        <p id="timeline-empty" class="timeline-empty" hidden>No spans match the current Timeline filter.</p>
         <div class="table-scroll">
-            <table>
+            <table class="timeline-table">
                 <thead>
                     <tr>
                         <th>Operation</th>
@@ -49,49 +68,7 @@
                         <th>Duration (ms)</th>
                     </tr>
                 </thead>
-                <tbody>
-                    @foreach (var node in Model.Tree)
-                    {
-                        <tr data-span-row-id="@node.Span.Id">
-                            <td class="span-op" style="--depth:@node.Depth">@node.Span.Operation</td>
-                            <td>@node.Span.Category</td>
-                            <td>@node.Span.ToolName@(node.Span.McpToolName is null ? null : " / " + node.Span.McpToolName)@(node.Span.AgentName is null ? null : " / " + node.Span.AgentName)</td>
-                            <td>@(node.Span.ResponseModel ?? node.Span.RequestModel)</td>
-                            <td>@node.Span.InputTokens / @node.Span.OutputTokens / @node.Span.TotalTokens</td>
-                            <td class="@(node.Span.ErrorType is null ? null : "status-error")">@node.Span.Status@(node.Span.ErrorType is null ? null : " (" + node.Span.ErrorType + ")")</td>
-                            <td>@node.Span.DurationMs</td>
-                        </tr>
-                    }
-                </tbody>
-            </table>
-        </div>
-
-        <h3>Per-turn token rollup</h3>
-        <div class="table-scroll">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Ordinal</th>
-                        <th>Operation</th>
-                        <th>Model</th>
-                        <th>Input</th>
-                        <th>Output</th>
-                        <th>Total</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @foreach (var turn in Model.Turns)
-                    {
-                        <tr>
-                            <td>@turn.SpanOrdinal</td>
-                            <td>@turn.Operation</td>
-                            <td>@(turn.ResponseModel ?? turn.RequestModel)</td>
-                            <td>@turn.InputTokens</td>
-                            <td>@turn.OutputTokens</td>
-                            <td>@turn.TotalTokens</td>
-                        </tr>
-                    }
-                </tbody>
+                <tbody id="timeline-rows" data-timeline-trace-id="@Model.TraceId"></tbody>
             </table>
         </div>
     </div>

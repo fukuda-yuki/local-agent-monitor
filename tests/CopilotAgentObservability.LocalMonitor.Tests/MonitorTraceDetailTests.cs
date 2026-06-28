@@ -36,8 +36,8 @@ public class MonitorTraceDetailTests
 
         // Sanitized sections present.
         Assert.Contains("Summary", body);
-        Assert.Contains("Sub-agent span tree", body);
-        Assert.Contains("Per-turn token rollup", body);
+        Assert.Contains("Timeline", body);
+        Assert.Contains("Errors only", body);
         Assert.Contains("read_file", body);
 
         // Raw body shown inline by default.
@@ -46,7 +46,7 @@ public class MonitorTraceDetailTests
     }
 
     [Fact]
-    public async Task TraceDetail_RendersFlowChartContainerAndTimelineSpanRowIds()
+    public async Task TraceDetail_RendersFlowChartContainerAndTimelineShell()
     {
         using var temp = new MonitorTempDirectory();
         SeedProjectedTrace(temp);
@@ -54,8 +54,8 @@ public class MonitorTraceDetailTests
 
         var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
 
-        // M3 keeps Summary/Timeline server-rendered, adds the Flow Chart JS
-        // container, and gives graph node clicks a stable Timeline row target.
+        // M4 keeps Summary server-rendered, adds JS-rendered Timeline/Flow
+        // containers, and lets monitor-views.js create stable Timeline row targets.
         Assert.Contains("role=\"tablist\"", body);
         Assert.Contains("Flow Chart", body);
         Assert.Contains("Cache", body);
@@ -63,9 +63,28 @@ public class MonitorTraceDetailTests
         Assert.Contains("id=\"flow-chart\"", body);
         Assert.Contains("id=\"flow-status\"", body);
         Assert.Contains("data-flow-chart-trace-id=\"trace-detail\"", body);
-        Assert.Contains("data-span-row-id=\"", body);
+        Assert.Contains("id=\"timeline-rows\"", body);
         Assert.DoesNotContain("Flow Chart is not yet available", body);
         Assert.Contains("panel-cache", body);
+    }
+
+    [Fact]
+    public async Task TraceDetail_RendersTimelineFilterSortShell()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedProjectedTrace(temp);
+        await using var host = await StartHostAsync(temp);
+
+        var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
+
+        Assert.Contains("id=\"timeline-errors-only\"", body);
+        Assert.Contains("Errors only", body);
+        Assert.Contains("name=\"timeline-sort\"", body);
+        Assert.Contains("value=\"time\"", body);
+        Assert.Contains("value=\"tokens\"", body);
+        Assert.Contains("id=\"timeline-rows\"", body);
+        Assert.Contains("data-timeline-trace-id=\"trace-detail\"", body);
+        Assert.Contains("id=\"timeline-count\"", body);
     }
 
     [Fact]

@@ -195,6 +195,26 @@ public class MonitorUiTests
         Assert.DoesNotContain("innerHTML", script);
     }
 
+    [Fact]
+    public async Task MonitorViewsScript_UsesSanitizedSpanFieldsForTimelineFilterSort()
+    {
+        using var temp = new MonitorTempDirectory();
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp);
+
+        var script = await host.Client.GetStringAsync("/monitor-views.js");
+
+        Assert.Contains("timeline-errors-only", script);
+        Assert.Contains("timeline-sort", script);
+        Assert.Contains("status", script);
+        Assert.Contains("error_type", script);
+        Assert.Contains("total_tokens", script);
+        Assert.Contains("start_time", script);
+        Assert.Contains("textContent", script);
+        Assert.DoesNotContain("/raw", script);
+        Assert.DoesNotContain("innerHTML", script);
+    }
+
     private static void EnsureSchema(MonitorTempDirectory temp)
     {
         var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);

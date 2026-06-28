@@ -1,4 +1,4 @@
-// Local Ingestion Monitor — view interactions (Sprint10 A3 / M3).
+// Local Ingestion Monitor — view interactions (Sprint10 A3 / M3 / M4).
 //
 // Vanilla JS plus the locally vendored Cytoscape/dagre files on TraceDetail
 // (D025). Presentation only: this script reads sanitized monitor JSON and
@@ -141,6 +141,141 @@
         row.scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
+    function textOrDash(value) {
+        return value === null || value === undefined || value === "" ? "-" : String(value);
+    }
+
+    function formatSpanSubject(span) {
+        const parts = [span.tool_name, span.mcp_tool_name, span.agent_name].filter(Boolean);
+        return parts.length > 0 ? parts.join(" / ") : "-";
+    }
+
+    function formatModel(span) {
+        return textOrDash(span.response_model || span.request_model);
+    }
+
+    function formatTokens(span) {
+        return `${textOrDash(span.input_tokens)} / ${textOrDash(span.output_tokens)} / ${textOrDash(span.total_tokens)}`;
+    }
+
+    function isErrorSpan(span) {
+        return span.status === "error" || Boolean(span.error_type);
+    }
+
+    function formatStatus(span) {
+        const status = textOrDash(span.status);
+        return span.error_type ? `${status} (${span.error_type})` : status;
+    }
+
+    function appendCell(row, text, className) {
+        const cell = document.createElement("td");
+        if (className) {
+            cell.className = className;
+        }
+
+        cell.textContent = text;
+        row.appendChild(cell);
+    }
+
+    function compareTimelineTime(a, b) {
+        if (a.start_time && b.start_time && a.start_time !== b.start_time) {
+            return String(a.start_time).localeCompare(String(b.start_time));
+        }
+
+        if (a.start_time && !b.start_time) {
+            return -1;
+        }
+
+        if (!a.start_time && b.start_time) {
+            return 1;
+        }
+
+        const ordinal = (a.span_ordinal ?? 0) - (b.span_ordinal ?? 0);
+        return ordinal !== 0 ? ordinal : (a.id ?? 0) - (b.id ?? 0);
+    }
+
+    function compareTimelineTokens(a, b) {
+        const tokens = (b.total_tokens ?? 0) - (a.total_tokens ?? 0);
+        return tokens !== 0 ? tokens : compareTimelineTime(a, b);
+    }
+
+    function selectedTimelineSort() {
+        const selected = document.querySelector('input[name="timeline-sort"]:checked');
+        return selected && selected.value === "tokens" ? "tokens" : "time";
+    }
+
+    function renderTimelineRows(spans) {
+        const rows = document.getElementById("timeline-rows");
+        if (!rows) {
+            return;
+        }
+
+        const errorsOnly = document.getElementById("timeline-errors-only");
+        const count = document.getElementById("timeline-count");
+        const empty = document.getElementById("timeline-empty");
+        const filtered = (errorsOnly && errorsOnly.checked ? spans.filter(isErrorSpan) : [...spans])
+            .sort(selectedTimelineSort() === "tokens" ? compareTimelineTokens : compareTimelineTime);
+
+        if (count) {
+            count.textContent = `${filtered.length} of ${spans.length} spans`;
+        }
+
+        if (empty) {
+            empty.hidden = filtered.length > 0;
+        }
+
+        const fragment = document.createDocumentFragment();
+        for (const span of filtered) {
+            const row = document.createElement("tr");
+            row.dataset.spanRowId = String(span.id);
+            appendCell(row, textOrDash(span.operation));
+            appendCell(row, textOrDash(span.category));
+            appendCell(row, formatSpanSubject(span));
+            appendCell(row, formatModel(span));
+            appendCell(row, formatTokens(span));
+            appendCell(row, formatStatus(span), isErrorSpan(span) ? "status-error" : "status-ok");
+            appendCell(row, textOrDash(span.duration_ms));
+            fragment.appendChild(row);
+        }
+
+        rows.replaceChildren(fragment);
+    }
+
+    async function renderTimeline() {
+        const rows = document.getElementById("timeline-rows");
+        if (!rows) {
+            return;
+        }
+
+        const traceId = rows.dataset.timelineTraceId;
+        const count = document.getElementById("timeline-count");
+        if (!traceId) {
+            if (count) {
+                count.textContent = "Trace id is unavailable.";
+            }
+            return;
+        }
+
+        try {
+            const spans = await fetchAllSpans(traceId);
+            const refresh = () => renderTimelineRows(spans);
+            const errorsOnly = document.getElementById("timeline-errors-only");
+            if (errorsOnly) {
+                errorsOnly.addEventListener("change", refresh);
+            }
+
+            for (const sort of document.querySelectorAll('input[name="timeline-sort"]')) {
+                sort.addEventListener("change", refresh);
+            }
+
+            refresh();
+        } catch {
+            if (count) {
+                count.textContent = "Timeline could not be loaded.";
+            }
+        }
+    }
+
     async function renderFlowChart() {
         const graph = document.getElementById("flow-chart");
         if (!graph) {
@@ -278,5 +413,6 @@
     });
 
     document.addEventListener("keydown", onTabKeydown);
+    renderTimeline();
     renderFlowChart();
 })();
