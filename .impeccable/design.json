@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-29T19:09:08.5092098+09:00",
+  "title": "Design System: Copilot Agent Observability",
+  "extensions": {
+    "colorMeta": {
+      "vscode-bg": {
+        "role": "neutral",
+        "displayName": "Editor Black",
+        "canonical": "#1e1e1e",
+        "tonalRamp": ["#0f0f0f", "#151515", "#1e1e1e", "#2a2a2a", "#3a3a3a", "#595959", "#8a8a8a", "#d4d4d4"]
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "Panel Graphite",
+        "canonical": "#252526",
+        "tonalRamp": ["#101011", "#19191a", "#252526", "#323234", "#454548", "#66666a", "#99999e", "#d8d8dc"]
+      },
+      "accent-blue": {
+        "role": "primary",
+        "displayName": "Command Blue",
+        "canonical": "#4daafc",
+        "tonalRamp": ["#06253f", "#0a3f6f", "#0f5d9d", "#247fd0", "#4daafc", "#8cc8ff", "#c4e2ff", "#edf7ff"]
+      },
+      "selection-blue": {
+        "role": "primary",
+        "displayName": "Selection Reservoir",
+        "canonical": "#264f78",
+        "tonalRamp": ["#071522", "#10263c", "#183957", "#264f78", "#3b6d9d", "#6795c2", "#a5c4df", "#e5f1fb"]
+      },
+      "error": {
+        "role": "semantic",
+        "displayName": "Trace Error Coral",
+        "canonical": "#f48771",
+        "tonalRamp": ["#32110c", "#5b2118", "#873629", "#b95745", "#f48771", "#ffb29f", "#ffd8cf", "#fff4f1"]
+      },
+      "success-teal": {
+        "role": "semantic",
+        "displayName": "Cache Teal",
+        "canonical": "#4ec9b0",
+        "tonalRamp": ["#06271f", "#0f4438", "#176554", "#2b8f79", "#4ec9b0", "#84e1d0", "#bff3ea", "#effdfa"]
+      },
+      "warning-gold": {
+        "role": "semantic",
+        "displayName": "Warning Gold",
+        "canonical": "#cca700",
+        "tonalRamp": ["#2b2200", "#4f3f00", "#735d00", "#9d7f00", "#cca700", "#e4c94c", "#f5e79b", "#fff9dc"]
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Title",
+        "purpose": "Dense page and panel headings."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Default product UI text."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Table headers and compact metadata labels."
+      },
+      "mono": {
+        "displayName": "Evidence Mono",
+        "purpose": "Trace ids, raw previews, timestamps, and code-shaped values."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "state-fast",
+        "value": "150ms ease-out",
+        "purpose": "Short hover, focus, tab, and selected-state transitions only."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "content-max",
+        "value": "1200px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Navigation Link",
+      "kind": "nav",
+      "refersTo": "nav-link",
+      "description": "Compact top navigation link for monitor pages.",
+      "html": "<a class=\"ds-nav-link\" href=\"#\">Traces</a>",
+      "css": ".ds-nav-link { display: inline-block; padding: 4px 16px; border-radius: 4px; color: #9d9d9d; font: 400 14px/1.5 'Noto Sans JP', 'Segoe UI', system-ui, sans-serif; text-decoration: none; background: transparent; } .ds-nav-link:hover { background: #2d2d30; color: #d4d4d4; } .ds-nav-link:focus-visible { outline: 2px solid #4daafc; outline-offset: 2px; } .ds-nav-link[aria-current='page'] { background: #2d2d30; color: #ffffff; }"
+    },
+    {
+      "name": "Selected Tab",
+      "kind": "button",
+      "refersTo": "tab-selected",
+      "description": "TraceDetail tab control with underline selection.",
+      "html": "<button class=\"ds-tab\" type=\"button\" aria-selected=\"true\">Timeline</button>",
+      "css": ".ds-tab { appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent; padding: 8px 16px; color: #9d9d9d; font: 400 14px/1.5 'Noto Sans JP', 'Segoe UI', system-ui, sans-serif; cursor: pointer; } .ds-tab:hover { color: #d4d4d4; } .ds-tab:focus-visible { outline: 2px solid #4daafc; outline-offset: 2px; } .ds-tab[aria-selected='true'] { color: #ffffff; border-bottom-color: #4daafc; }"
+    },
+    {
+      "name": "Panel Container",
+      "kind": "card",
+      "refersTo": "panel-container",
+      "description": "Flat tonal panel used for readiness, cache groups, and grouped diagnostics.",
+      "html": "<section class=\"ds-panel\"><h3>Readiness</h3><p>ready</p></section>",
+      "css": ".ds-panel { background: #252526; color: #d4d4d4; border: 1px solid #2b2b2b; border-radius: 6px; padding: 16px 24px; font: 400 14px/1.5 'Noto Sans JP', 'Segoe UI', system-ui, sans-serif; } .ds-panel h3 { margin: 0 0 8px; color: #ffffff; font-size: 1rem; line-height: 1.25; font-weight: 600; } .ds-panel p { margin: 0; }"
+    },
+    {
+      "name": "Table Row",
+      "kind": "custom",
+      "refersTo": "table-cell",
+      "description": "Dense evidence table row with hover state and muted metadata labels.",
+      "html": "<table class=\"ds-table\"><thead><tr><th>TraceId</th><th>TotalTokens</th></tr></thead><tbody><tr><td>trace-1</td><td>1234</td></tr></tbody></table>",
+      "css": ".ds-table { width: 100%; border-collapse: collapse; color: #d4d4d4; font: 400 14px/1.5 'Noto Sans JP', 'Segoe UI', system-ui, sans-serif; } .ds-table th, .ds-table td { padding: 8px 16px; border-bottom: 1px solid #2b2b2b; text-align: left; white-space: nowrap; } .ds-table th { background: #2d2d30; color: #9d9d9d; font-size: .78rem; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; } .ds-table tbody tr:hover { background: #2a2d2e; }"
+    },
+    {
+      "name": "Row Toggle Button",
+      "kind": "button",
+      "refersTo": "row-toggle",
+      "description": "Small disclosure button for trace-list progressive detail rows.",
+      "html": "<button class=\"ds-row-toggle\" type=\"button\" aria-expanded=\"false\">+</button>",
+      "css": ".ds-row-toggle { appearance: none; width: 1.6rem; height: 1.6rem; background: #2d2d30; border: 1px solid #3c3c3c; border-radius: 4px; color: #d4d4d4; font: 400 14px/1 'Noto Sans JP', 'Segoe UI', system-ui, sans-serif; cursor: pointer; } .ds-row-toggle:hover { background: #2a2d2e; } .ds-row-toggle:focus-visible { outline: 2px solid #4daafc; outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Local Agent Control Room",
+    "overview": "This design system is a local observability control room for agent workflows. It should feel close to Grafana in information density and operational scanability, but grounded in the current Local Ingestion Monitor posture: VS Code Dark+, vendored assets, no CDN, and a trusted single-user loopback workflow.",
+    "keyCharacteristics": [
+      "Dense, table-first, and dashboard-like.",
+      "VS Code dark surfaces with one primary blue accent.",
+      "Grafana-like operational confidence without neon monitoring decoration.",
+      "Raw/sanitized boundaries visible in structure, not hidden in copy.",
+      "All runtime assets local and offline-safe."
+    ],
+    "rules": [
+      {
+        "name": "The One Accent Rule",
+        "body": "Command Blue is for action, selection, and focus. Do not add decorative accent colors to inactive surfaces.",
+        "section": "colors"
+      },
+      {
+        "name": "The Boundary Color Rule",
+        "body": "Raw-bearing areas use inset surfaces and muted text. Sanitized dashboard views use normal panel/table surfaces. The data boundary must be visible through layout and surface treatment.",
+        "section": "colors"
+      },
+      {
+        "name": "The No Display Type Rule",
+        "body": "This is a developer tool. Do not use oversized display headlines, decorative typefaces, or fluid hero typography.",
+        "section": "typography"
+      },
+      {
+        "name": "The Tonal Layer Rule",
+        "body": "Use panel, panel-raised, and inset to create hierarchy. Do not add wide decorative shadows to tables, controls, or cards.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do preserve the current VS Code Dark+ base tokens unless a source-of-truth spec changes.",
+      "Do keep Grafana-like density: compact panels, tables, tabs, status text, and direct metric labels.",
+      "Do make sanitized views and raw-bearing sections structurally distinct.",
+      "Do keep focus visible and keyboard controls standard.",
+      "Do use vendored local assets only for Local Monitor runtime UI.",
+      "Do use progressive disclosure when a table has more columns than the primary task can scan."
+    ],
+    "donts": [
+      "Don't turn this into a Copilot adoption, billing, productivity, ranking, or employee-monitoring dashboard.",
+      "Don't show raw prompt, response, tool arguments, tool results, source fragments, credentials, or sensitive paths in repository-safe outputs, static dashboards, logs, or GitHub Pages snapshots.",
+      "Don't copy VS Code Agent Debug / Chat Debug View or use VS Code internal logs, workspaceStorage, or chatSessions as inputs.",
+      "Don't apply DADS styling to the Local Monitor.",
+      "Don't use marketing hero sections, decorative card grids, gradient text, glass panels, neon dark-mode accents, or hero-stat layouts.",
+      "Don't add broad shadows, 32px+ card radii, colored side-stripe borders, or decorative animation.",
+      "Don't add CDN fonts, CDN graph libraries, or a frontend build step to the Local Monitor."
+    ]
+  }
+}
