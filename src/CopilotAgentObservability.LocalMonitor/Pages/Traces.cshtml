@@ -1,65 +1,92 @@
 @page "/traces"
 @model TracesModel
 
-<section>
+<section class="monitor-section">
     <h2>Traces</h2>
-    <table>
+
+    <form class="monitor-context-bar" method="get">
+        <select class="monitor-select" name="clientKind">
+            <option value="">All ClientKinds</option>
+            @{ var clientKinds = new[] { "copilot-cli", "copilot-coding-agent", "copilot-code-review" }; }
+            @foreach (var kind in clientKinds)
+            {
+                <option value="@kind" selected="@(kind == Model.ClientKind ? "selected" : null)">@kind</option>
+            }
+        </select>
+        <select class="monitor-select" name="status">
+            <option value="">All Status</option>
+            <option value="ok" selected="@(Model.Status == "ok" ? "selected" : null)">OK</option>
+            <option value="error" selected="@(Model.Status == "error" ? "selected" : null)">Error</option>
+        </select>
+        <input class="monitor-input" name="traceId" placeholder="Trace ID…" value="@Model.TraceId" />
+        <button class="monitor-btn monitor-btn-accent" type="submit">Filter</button>
+        <a class="monitor-btn" href="/traces">Reset</a>
+    </form>
+
+    <div class="monitor-table-wrapper">
+    <table class="monitor-table">
         <thead>
             <tr>
-                <th>Id</th>
-                <th>TraceId</th>
+                <th>Time</th>
+                <th>Trace ID</th>
                 <th>ClientKind</th>
-                <th>ExperimentId</th>
-                <th>TaskId</th>
-                <th>TaskCategory</th>
-                <th>AgentVariant</th>
-                <th>PromptVersion</th>
-                <th>SpanCount</th>
-                <th>ToolCallCount</th>
-                <th>ErrorCount</th>
-                <th>InputTokens</th>
-                <th>OutputTokens</th>
-                <th>TotalTokens</th>
-                <th>TurnCount</th>
-                <th>AgentInvocationCount</th>
-                <th>DurationMs</th>
-                <th>PrimaryModel</th>
-                <th>FirstSeenAt</th>
-                <th>LastSeenAt</th>
-                <th>ProjectedAt</th>
+                <th>Status</th>
+                <th class="monitor-text-right">Spans</th>
+                <th class="monitor-text-right">Turns</th>
+                <th>Last Turn</th>
+                <th class="monitor-visually-hidden">Id</th>
+                <th class="monitor-visually-hidden">ExperimentId</th>
+                <th class="monitor-visually-hidden">TaskId</th>
+                <th class="monitor-visually-hidden">TaskCategory</th>
+                <th class="monitor-visually-hidden">AgentVariant</th>
+                <th class="monitor-visually-hidden">PromptVersion</th>
+                <th class="monitor-visually-hidden">ToolCallCount</th>
+                <th class="monitor-visually-hidden">ErrorCount</th>
+                <th class="monitor-visually-hidden">InputTokens</th>
+                <th class="monitor-visually-hidden">OutputTokens</th>
+                <th class="monitor-visually-hidden">TotalTokens</th>
+                <th class="monitor-visually-hidden">AgentInvocationCount</th>
+                <th class="monitor-visually-hidden">DurationMs</th>
+                <th class="monitor-visually-hidden">PrimaryModel</th>
+                <th class="monitor-visually-hidden">FirstSeenAt</th>
+                <th class="monitor-visually-hidden">ProjectedAt</th>
             </tr>
         </thead>
         <tbody>
             @foreach (var row in Model.Result.Items)
             {
-                <tr>
-                    <td>@row.Id</td>
+                var statusClass = row.ErrorCount > 0 ? "error" : "success";
+                <tr class="monitor-trace-row" data-expand>
+                    <td>@row.FirstSeenAt</td>
                     <td><a href="/traces/@row.TraceId">@row.TraceId</a></td>
                     <td>@row.ClientKind</td>
-                    <td>@row.ExperimentId</td>
-                    <td>@row.TaskId</td>
-                    <td>@row.TaskCategory</td>
-                    <td>@row.AgentVariant</td>
-                    <td>@row.PromptVersion</td>
-                    <td>@row.SpanCount</td>
-                    <td>@row.ToolCallCount</td>
-                    <td>@row.ErrorCount</td>
-                    <td>@row.InputTokens</td>
-                    <td>@row.OutputTokens</td>
-                    <td>@row.TotalTokens</td>
-                    <td>@row.TurnCount</td>
-                    <td>@row.AgentInvocationCount</td>
-                    <td>@row.DurationMs</td>
-                    <td>@row.PrimaryModel</td>
-                    <td>@row.FirstSeenAt</td>
+                    <td><span class="monitor-badge @statusClass">@(row.ErrorCount > 0 ? "Error" : "OK")</span></td>
+                    <td class="monitor-text-right">@row.SpanCount</td>
+                    <td class="monitor-text-right">@row.TurnCount</td>
                     <td>@row.LastSeenAt</td>
-                    <td>@row.ProjectedAt</td>
+                    <td class="monitor-visually-hidden">@row.Id</td>
+                    <td class="monitor-visually-hidden">@row.ExperimentId</td>
+                    <td class="monitor-visually-hidden">@row.TaskId</td>
+                    <td class="monitor-visually-hidden">@row.TaskCategory</td>
+                    <td class="monitor-visually-hidden">@row.AgentVariant</td>
+                    <td class="monitor-visually-hidden">@row.PromptVersion</td>
+                    <td class="monitor-visually-hidden">@row.ToolCallCount</td>
+                    <td class="monitor-visually-hidden">@row.ErrorCount</td>
+                    <td class="monitor-visually-hidden">@row.InputTokens</td>
+                    <td class="monitor-visually-hidden">@row.OutputTokens</td>
+                    <td class="monitor-visually-hidden">@row.TotalTokens</td>
+                    <td class="monitor-visually-hidden">@row.AgentInvocationCount</td>
+                    <td class="monitor-visually-hidden">@row.DurationMs</td>
+                    <td class="monitor-visually-hidden">@row.PrimaryModel</td>
+                    <td class="monitor-visually-hidden">@row.FirstSeenAt</td>
+                    <td class="monitor-visually-hidden">@row.ProjectedAt</td>
                 </tr>
             }
         </tbody>
     </table>
+    </div>
     @if (Model.Result.HasMore && Model.Result.Items.Count > 0)
     {
-        <p><a href="/traces?after=@Model.Result.Items[^1].Id">next</a></p>
+        <p class="monitor-pagination"><a href="/traces?after=@Model.Result.Items[^1].Id">next →</a></p>
     }
 </section>

@@ -1,21 +1,36 @@
 @page "/"
 @model IndexModel
 
-<section>
+<section class="monitor-section">
     <h2>Overview</h2>
-    <dl>
-        <dt>status</dt>
-        <dd>@Model.Readiness.Status</dd>
-        <dt>projection backlog</dt>
-        <dd>@Model.Readiness.ProjectionBacklog</dd>
-        <dt>projection lag seconds</dt>
-        <dd>@Model.Readiness.ProjectionLagSeconds</dd>
-    </dl>
+    @{
+        var statusClass = Model.Readiness.Status switch
+        {
+            "Healthy" => "success",
+            "Degraded" => "warning",
+            _ => "error"
+        };
+    }
+    <div class="monitor-metrics">
+        <div class="monitor-metric-panel">
+            <div class="metric-label">Status</div>
+            <div class="metric-value monitor-status @statusClass">@Model.Readiness.Status</div>
+        </div>
+        <div class="monitor-metric-panel">
+            <div class="metric-label">Projection Backlog</div>
+            <div class="metric-value">@Model.Readiness.ProjectionBacklog</div>
+        </div>
+        <div class="monitor-metric-panel">
+            <div class="metric-label">Projection Lag</div>
+            <div class="metric-value">@(Model.Readiness.ProjectionLagSeconds)s</div>
+        </div>
+    </div>
 </section>
 
-<section>
+<section class="monitor-section">
     <h2>Recent Ingestions</h2>
-    <table>
+    <div class="monitor-table-wrapper">
+    <table class="monitor-table">
         <thead>
             <tr>
                 <th>RawRecordId</th>
@@ -23,7 +38,7 @@
                 <th>Source</th>
                 <th>TraceId</th>
                 <th>ClientKind</th>
-                <th>SpanCount</th>
+                <th class="monitor-text-right">SpanCount</th>
                 <th>ProjectedAt</th>
             </tr>
         </thead>
@@ -31,15 +46,16 @@
             @foreach (var row in Model.RecentIngestions)
             {
                 <tr>
-                    <td>@row.RawRecordId</td>
+                    <td class="monitor-mono">@row.RawRecordId</td>
                     <td>@row.ReceivedAt</td>
                     <td>@row.Source</td>
-                    <td>@row.TraceId</td>
+                    <td><a href="/traces/@row.TraceId">@row.TraceId</a></td>
                     <td>@row.ClientKind</td>
-                    <td>@row.SpanCount</td>
+                    <td class="monitor-text-right">@row.SpanCount</td>
                     <td>@row.ProjectedAt</td>
                 </tr>
             }
         </tbody>
     </table>
+    </div>
 </section>

@@ -11,6 +11,15 @@ public sealed class TracesModel : PageModel
     [BindProperty(SupportsGet = true)]
     public long After { get; set; }
 
+    [BindProperty(SupportsGet = true)]
+    public string? ClientKind { get; set; }
+
+    [BindProperty(SupportsGet = true)]
+    public string? Status { get; set; }
+
+    [BindProperty(SupportsGet = true)]
+    public string? TraceId { get; set; }
+
     internal MonitorProjectionPage<MonitorTraceRow> Result { get; private set; } = null!;
 
     public IActionResult OnGet()

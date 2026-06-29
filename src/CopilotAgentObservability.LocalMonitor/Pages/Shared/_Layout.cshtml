@@ -7,18 +7,19 @@
     <link rel=stylesheet href=/monitor.css />
 </head>
 <body>
-    <header>
-        <h1>Local Ingestion Monitor</h1>
-        <nav aria-label="Monitor navigation">
-            <a href="/">Overview</a>
-            <a href="/ingestions">Ingestions</a>
-            <a href="/traces">Traces</a>
-            <a href="/diagnostics">Diagnostics</a>
+    <header class="monitor-header">
+        <nav class="monitor-nav" aria-label="Monitor navigation">
+            <span class="monitor-brand">Local Ingestion Monitor</span>
+            <a href="/" class="@(Context.Request.Path == "/" ? "active" : "")">Overview</a>
+            <a href="/ingestions" class="@(Context.Request.Path.StartsWithSegments("/ingestions") ? "active" : "")">Ingestions</a>
+            <a href="/traces" class="@(Context.Request.Path.StartsWithSegments("/traces") ? "active" : "")">Traces</a>
+            <a href="/diagnostics" class="@(Context.Request.Path == "/diagnostics" ? "active" : "")">Diagnostics</a>
+            <span class="monitor-nav-status" id="monitor-status-dot" title="Checking…" aria-label="Monitor status: checking"></span>
         </nav>
     </header>
-    <main>
+    <main class="monitor-content">
         @RenderBody()
     </main>
-    <script src=/monitor.js></script>
+    <script src=/monitor.js defer></script>
 </body>
 </html>

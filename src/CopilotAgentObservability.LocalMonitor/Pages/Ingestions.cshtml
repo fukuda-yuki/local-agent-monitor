@@ -1,9 +1,10 @@
 @page "/ingestions"
 @model IngestionsModel
 
-<section>
+<section class="monitor-section">
     <h2>Ingestions</h2>
-    <table>
+    <div class="monitor-table-wrapper">
+    <table class="monitor-table">
         <thead>
             <tr>
                 <th>RawRecordId</th>
@@ -11,7 +12,7 @@
                 <th>Source</th>
                 <th>TraceId</th>
                 <th>ClientKind</th>
-                <th>SpanCount</th>
+                <th class="monitor-text-right">SpanCount</th>
                 <th>ProjectedAt</th>
                 @if (Model.RawAvailable)
                 {
@@ -23,12 +24,12 @@
             @foreach (var row in Model.Result.Items)
             {
                 <tr>
-                    <td>@row.RawRecordId</td>
+                    <td class="monitor-mono">@row.RawRecordId</td>
                     <td>@row.ReceivedAt</td>
                     <td>@row.Source</td>
-                    <td>@row.TraceId</td>
+                    <td><a href="/traces/@row.TraceId">@row.TraceId</a></td>
                     <td>@row.ClientKind</td>
-                    <td>@row.SpanCount</td>
+                    <td class="monitor-text-right">@row.SpanCount</td>
                     <td>@row.ProjectedAt</td>
                     @if (Model.RawAvailable)
                     {
@@ -38,8 +39,9 @@
             }
         </tbody>
     </table>
+    </div>
     @if (Model.Result.HasMore && Model.Result.Items.Count > 0)
     {
-        <p><a href="/ingestions?after=@Model.Result.Items[^1].RawRecordId">next</a></p>
+        <p class="monitor-pagination"><a href="/ingestions?after=@Model.Result.Items[^1].RawRecordId">next →</a></p>
     }
 </section>

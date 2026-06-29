@@ -1,28 +1,77 @@
 @page "/diagnostics"
 @model DiagnosticsModel
 
-<section>
+@{
+    var statusClass = Model.Readiness.Status switch
+    {
+        "Healthy" => "success",
+        "Degraded" => "warning",
+        _ => "error"
+    };
+    var degradedReasons = Model.Readiness.DegradedReasons?.ToList() ?? new List<string>();
+}
+
+<section class="monitor-section">
     <h2>health/ready</h2>
-    <dl>
-        <dt>Status</dt>
-        <dd>@Model.Readiness.Status</dd>
-        <dt>LoopbackBound</dt>
-        <dd>@Model.Readiness.LoopbackBound</dd>
-        <dt>DbOpen</dt>
-        <dd>@Model.Readiness.DbOpen</dd>
-        <dt>MigrationComplete</dt>
-        <dd>@Model.Readiness.MigrationComplete</dd>
-        <dt>WriterRunning</dt>
-        <dd>@Model.Readiness.WriterRunning</dd>
-        <dt>ProjectionWorkerRunning</dt>
-        <dd>@Model.Readiness.ProjectionWorkerRunning</dd>
-        <dt>IngestionAccepting</dt>
-        <dd>@Model.Readiness.IngestionAccepting</dd>
-        <dt>ProjectionLagSeconds</dt>
-        <dd>@Model.Readiness.ProjectionLagSeconds</dd>
-        <dt>ProjectionBacklog</dt>
-        <dd>@Model.Readiness.ProjectionBacklog</dd>
-        <dt>DegradedReasons</dt>
-        <dd>@string.Join(", ", Model.Readiness.DegradedReasons)</dd>
-    </dl>
+
+    @if (degradedReasons.Count > 0)
+    {
+        var bannerClass = Model.Readiness.Status == "Unhealthy" ? "error" : "warning";
+        <div class="monitor-banner @bannerClass">
+            <strong>@Model.Readiness.Status:</strong> @string.Join("; ", degradedReasons)
+        </div>
+    }
+
+    <div class="monitor-metrics">
+        <div class="monitor-metric-panel">
+            <div class="metric-label">Status</div>
+            <div class="metric-value monitor-status @statusClass">@Model.Readiness.Status</div>
+        </div>
+        <div class="monitor-metric-panel">
+            <div class="metric-label">Loopback Bound</div>
+            <div class="metric-value monitor-status @(Model.Readiness.LoopbackBound ? "success" : "error")">@Model.Readiness.LoopbackBound</div>
+        </div>
+        <div class="monitor-metric-panel">
+            <div class="metric-label">Projection Lag</div>
+            <div class="metric-value">@(Model.Readiness.ProjectionLagSeconds)s</div>
+        </div>
+        <div class="monitor-metric-panel">
+            <div class="metric-label">Projection Backlog</div>
+            <div class="metric-value">@Model.Readiness.ProjectionBacklog</div>
+        </div>
+    </div>
+
+    <h3>Component Checks</h3>
+    <div class="monitor-table-wrapper">
+    <table class="monitor-table">
+        <thead>
+            <tr>
+                <th>Component</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>DbOpen</td>
+                <td><span class="monitor-badge @(Model.Readiness.DbOpen ? "success" : "error")">@(Model.Readiness.DbOpen ? "OK" : "FAIL")</span></td>
+            </tr>
+            <tr>
+                <td>MigrationComplete</td>
+                <td><span class="monitor-badge @(Model.Readiness.MigrationComplete ? "success" : "error")">@(Model.Readiness.MigrationComplete ? "OK" : "FAIL")</span></td>
+            </tr>
+            <tr>
+                <td>WriterRunning</td>
+                <td><span class="monitor-badge @(Model.Readiness.WriterRunning ? "success" : "error")">@(Model.Readiness.WriterRunning ? "OK" : "FAIL")</span></td>
+            </tr>
+            <tr>
+                <td>ProjectionWorkerRunning</td>
+                <td><span class="monitor-badge @(Model.Readiness.ProjectionWorkerRunning ? "success" : "error")">@(Model.Readiness.ProjectionWorkerRunning ? "OK" : "FAIL")</span></td>
+            </tr>
+            <tr>
+                <td>IngestionAccepting</td>
+                <td><span class="monitor-badge @(Model.Readiness.IngestionAccepting ? "success" : "error")">@(Model.Readiness.IngestionAccepting ? "OK" : "FAIL")</span></td>
+            </tr>
+        </tbody>
+    </table>
+    </div>
 </section>

@@ -1,12 +1,13 @@
 @page "/traces/{traceId}"
 @model TraceDetailModel
 
-<section>
-    <p><a href="/traces">&larr; Traces</a></p>
+<section class="monitor-section">
+    <p class="monitor-back-link"><a href="/traces">&larr; Traces</a></p>
     <h2>Trace @Model.TraceId</h2>
 
     <h3>Summary</h3>
-    <table>
+    <div class="monitor-table-wrapper">
+    <table class="monitor-table">
         <tbody>
             <tr><th>ClientKind</th><td>@Model.Trace.ClientKind</td></tr>
             <tr><th>Total tool calls</th><td>@Model.Trace.ToolCallCount</td></tr>
@@ -20,18 +21,29 @@
             <tr><th>First / Last seen</th><td>@Model.Trace.FirstSeenAt / @Model.Trace.LastSeenAt</td></tr>
         </tbody>
     </table>
+    </div>
+
+    <div class="monitor-tabs" id="trace-tabs">
+        <button class="monitor-tab active" data-tab="summary">Summary</button>
+        <button class="monitor-tab" data-tab="timeline">Timeline</button>
+        <button class="monitor-tab" data-tab="flowchart">Flow Chart</button>
+        <button class="monitor-tab" data-tab="cache">Cache</button>
+    </div>
+    <div class="monitor-tab-content" id="trace-tab-content">
+        <div data-tab-panel="summary">
 
     <h3>Sub-agent span tree</h3>
-    <table>
+    <div class="monitor-table-wrapper">
+    <table class="monitor-table">
         <thead>
             <tr>
                 <th>Operation</th>
                 <th>Category</th>
                 <th>Tool / MCP / Agent</th>
                 <th>Model</th>
-                <th>Tokens (in / out / total)</th>
+                <th class="monitor-text-right">Tokens (in / out / total)</th>
                 <th>Status</th>
-                <th>Duration (ms)</th>
+                <th class="monitor-text-right">Duration (ms)</th>
             </tr>
         </thead>
         <tbody>
@@ -42,40 +54,46 @@
                     <td>@node.Span.Category</td>
                     <td>@node.Span.ToolName@(node.Span.McpToolName is null ? null : " / " + node.Span.McpToolName)@(node.Span.AgentName is null ? null : " / " + node.Span.AgentName)</td>
                     <td>@(node.Span.ResponseModel ?? node.Span.RequestModel)</td>
-                    <td>@node.Span.InputTokens / @node.Span.OutputTokens / @node.Span.TotalTokens</td>
+                    <td class="monitor-text-right monitor-mono">@node.Span.InputTokens / @node.Span.OutputTokens / @node.Span.TotalTokens</td>
                     <td>@node.Span.Status@(node.Span.ErrorType is null ? null : " (" + node.Span.ErrorType + ")")</td>
-                    <td>@node.Span.DurationMs</td>
+                    <td class="monitor-text-right monitor-mono">@node.Span.DurationMs</td>
                 </tr>
             }
         </tbody>
     </table>
+    </div>
 
     <h3>Per-turn token rollup</h3>
-    <table>
+    <div class="monitor-table-wrapper">
+    <table class="monitor-table">
         <thead>
             <tr>
                 <th>Ordinal</th>
                 <th>Operation</th>
                 <th>Model</th>
-                <th>Input</th>
-                <th>Output</th>
-                <th>Total</th>
+                <th class="monitor-text-right">Input</th>
+                <th class="monitor-text-right">Output</th>
+                <th class="monitor-text-right">Total</th>
             </tr>
         </thead>
         <tbody>
             @foreach (var turn in Model.Turns)
             {
                 <tr>
-                    <td>@turn.SpanOrdinal</td>
+                    <td class="monitor-mono">@turn.SpanOrdinal</td>
                     <td>@turn.Operation</td>
                     <td>@(turn.ResponseModel ?? turn.RequestModel)</td>
-                    <td>@turn.InputTokens</td>
-                    <td>@turn.OutputTokens</td>
-                    <td>@turn.TotalTokens</td>
+                    <td class="monitor-text-right monitor-mono">@turn.InputTokens</td>
+                    <td class="monitor-text-right monitor-mono">@turn.OutputTokens</td>
+                    <td class="monitor-text-right monitor-mono">@turn.TotalTokens</td>
                 </tr>
             }
         </tbody>
     </table>
+    </div>
+
+        </div>
+    </div>
 
     <h3>Raw OTLP payload</h3>
     @if (Model.RawRecords.Count == 0)
@@ -86,13 +104,14 @@
     {
         @foreach (var record in Model.RawRecords)
         {
-            <h4>Raw record @record.Id</h4>
-            <p><a href="/traces/@record.Id/raw">Open full raw record</a> (@record.PayloadLength chars)</p>
-            @if (record.IsTruncated)
-            {
-                <p>Raw preview truncated.</p>
-            }
-            <pre>@record.Preview</pre>
+            <details>
+                <summary>Raw record @record.Id — <a href="/traces/@record.Id/raw">open full</a> (@record.PayloadLength chars)</summary>
+                @if (record.IsTruncated)
+                {
+                    <p>Raw preview truncated.</p>
+                }
+                <pre class="monitor-raw-preview">@record.Preview</pre>
+            </details>
         }
     }
 </section>
