@@ -1,8 +1,7 @@
 # Sprint11 M2 - Extension Scaffold (Plan)
 
-Status: **Blocked** - Canvas scaffold and validation tools are unavailable in
-the current Codex environment; no hand-written skeleton was created.
-Gated by M1 canonical docs.
+Status: **Implemented** — Canvas tools became available; scaffold, extension.mjs,
+open(), and diagnostics completed. M3 is the next milestone.
 
 Sprint-local planning evidence, not product behavior. Source-of-truth order:
 `docs/requirements.md` -> `docs/spec.md` -> `docs/specifications/`. Sprint

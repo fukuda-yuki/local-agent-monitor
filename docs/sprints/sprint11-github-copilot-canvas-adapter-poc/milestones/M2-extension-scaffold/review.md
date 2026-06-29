@@ -1,6 +1,6 @@
 # Sprint11 M2 Review
 
-## 2026-06-29: Canvas scaffold tool blocker review
+## 2026-06-29 (initial): Canvas scaffold tool blocker review
 
 Scope reviewed:
 
@@ -10,44 +10,66 @@ Scope reviewed:
   validation helpers.
 - Existing repository extension paths.
 
-Files and surfaces checked:
-
-- `.github/skills/create-canvas/SKILL.md`
-- `docs/sprints/sprint11-github-copilot-canvas-adapter-poc/milestones/M2-extension-scaffold/plan.md`
-- `.github/extensions/`
-- Tool discovery for `extensions_manage`, `extensions_reload`,
-  `list_canvas_capabilities`, `open_canvas`, and `invoke_canvas_action`
-
 Findings:
 
 - Blocking issue found: the active Codex environment does not expose the Copilot
   app Canvas scaffold or validation helpers required by Sprint11 M2.
-- `tool_search` for Canvas scaffold and validation terms did not make
-  `extensions_manage`, `extensions_reload`, `list_canvas_capabilities`,
-  `open_canvas`, or `invoke_canvas_action` callable. The exposed follow-up tools
-  were GitHub, security, multi-agent, and Codex app thread-management tools only.
 - `.github/extensions/` does not exist, and no
   `.github/extensions/otel-monitor-canvas/` scaffold exists.
 - No hand-written fallback was performed because the current source of truth
   requires explicit product-owner approval before bypassing the scaffold-first
   workflow.
 
+Result: M2 is blocked in this environment.
+
+## 2026-06-29 (update): Blocker cleared — M2 implemented
+
+The Canvas extension tool surface (`extensions_manage`, `extensions_reload`,
+`list_canvas_capabilities`, `open_canvas`, `invoke_canvas_action`) is now
+callable in the active Codex environment. M2 proceeded with the scaffold-first
+workflow.
+
+Changes committed:
+- `.github/extensions/otel-monitor-canvas/extension.mjs` — project-scoped Canvas
+  extension entrypoint.
+
+Implementation:
+- Canvas id: `otel-monitor`, display name: `OTel Monitor`.
+- `joinSession({ canvases: [createCanvas({...})] })`, ES modules.
+- `inputSchema`: optional `monitorBaseUrl` (default `http://127.0.0.1:4320`).
+- `open()`: validates loopback-only URL (rejects non-loopback with
+  `CanvasError("invalid_monitor_url", ...)`), checks `/health/ready`, returns
+  monitor URL when healthy or extension-owned diagnostic page when unavailable.
+- `onClose()`: tears down extension-owned HTTP servers.
+- No actions (M3 scope).
+- No `session.log()` inside callbacks (not available before `joinSession`
+  resolves); diagnostic content is rendered in the HTML page instead.
+
 Validation:
+- `extensions_reload` → extension running (project:otel-monitor-canvas).
+- `extensions_manage inspect` → status: running, no errors.
+- `list_canvas_capabilities({ canvasId: "otel-monitor" })` → correct id,
+  display name, input schema, empty actions array.
+- `open_canvas({ canvasId: "otel-monitor", instanceId: "m2-smoke-2" })` →
+  returns `OTel Monitor — Offline` with diagnostic URL on ephemeral port
+  (monitor not running — expected).
+- Diagnostic server serves valid HTML on `127.0.0.1`.
+- `dotnet build CopilotAgentObservability.slnx` → 0 warnings, 0 errors.
+- `dotnet test CopilotAgentObservability.slnx` → ConfigCli 300/300 passed.
+  LocalMonitor 249/250 passed; 1 pre-existing concurrency test flake
+  (`Worker_DrainsAlreadyAcceptedQueueItemsDuringShutdown`) unrelated to
+  Canvas changes (no .NET code modified).
 
-- `tool_search` for `extensions_manage canvas open_canvas list_canvas_capabilities GitHub Copilot app canvas`
-- `Test-Path '.github\extensions\otel-monitor-canvas'; git ls-files '.github/extensions/*'`
-- `git status --short`
+Out of scope (not performed):
+- No `package.json`, `node_modules`, or lockfiles added.
+- No dependencies introduced beyond Copilot SDK (`@github/copilot-sdk/extension`).
+- No raw prompt/response, tool arguments/results, PII, credentials, tokens,
+  local sensitive paths, runtime artifacts, or generated telemetry committed.
 
-Result:
-
-- M2 is blocked in this environment.
-- No extension skeleton was created.
-- No product code, project files, dependencies, lockfiles, `node_modules`,
-  generated telemetry, runtime canvas state, or captured monitor data were added.
-- Canvas scaffold, reload, inspect, open, and action validation were not run
-  because the required Copilot app Canvas tools are unavailable.
-
-Residual risk:
-
-- Canvas SDK behavior and scaffold output remain unvalidated until Sprint11 M2 is
-  resumed in an active Copilot app environment that exposes the required tools.
+Residual:
+- `onClose()` server cleanup verified via code review; runtime lifecycle
+  validation requires a long-running Canvas instance (deferred to M3+).
+- Live validation with a running Local Monitor (actual `dotnet run
+  --sanitized-only`) deferred to M3+ when monitor actions are testable.
+- No `session.log()` diagnostics inside callbacks due to `joinSession()` timing;
+  acceptable for M2 — diagnostic info is fully available in the rendered HTML.

@@ -221,7 +221,7 @@ security/data boundaries, and relationship to Sprint10 design views.
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | M1 Specs & guidance alignment | Read `/create-canvas`; record project scope, scaffold-first workflow, action contracts, `--sanitized-only` Canvas posture, and security boundary in canonical specs. No product code. | Implemented |
-| M2 Extension scaffold | Use scaffold when available; add project-scoped extension skeleton; implement `open()` and monitor health diagnostics. Stop and record blocker if Canvas tools are unavailable. | Blocked |
+| M2 Extension scaffold | Use scaffold when available; add project-scoped extension skeleton; implement `open()` and monitor health diagnostics. Stop and record blocker if Canvas tools are unavailable. | Implemented |
 | M3 Minimal actions | Implement `monitor_health`, `list_recent_traces`, and `get_trace_summary` with bounded sanitized DTOs. | Planned |
 | M4 Trace analysis actions | Implement `get_trace_span_tree`, `get_cache_summary`, schema validation, size bounds, and `CanvasError` expected failures. | Planned |
 | M5 UI trigger | Add or document the `Analyze selected trace with Copilot` trigger. | Planned |
