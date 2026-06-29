@@ -30,6 +30,13 @@ jobs:
         with:
           global-json-file: global.json
 
+      - name: Build
+        run: dotnet build CopilotAgentObservability.slnx
+
+      - name: Install Playwright Chromium
+        shell: pwsh
+        run: pwsh tests/CopilotAgentObservability.LocalMonitor.Tests/bin/Debug/net10.0/playwright.ps1 install --with-deps chromium
+
       - name: Test
         run: dotnet test CopilotAgentObservability.slnx
 

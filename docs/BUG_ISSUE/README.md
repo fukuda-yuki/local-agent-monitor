@@ -23,7 +23,7 @@ Sprint10 review cards are in
 | Card | Feature unit | Severity | Status | Plan boundary |
 | --- | --- | --- | --- | --- |
 | [S10-1](Sprint10-monitor-design-views.md#S10-1) | `--sanitized-only` TraceDetail design views | High | Open | Resolve spec conflict, then keep sanitized tabs available while raw preview/raw links stay absent. |
-| [S10-2](Sprint10-monitor-design-views.md#S10-2) | Playwright validation/bootstrap | High | Open | Make `dotnet test CopilotAgentObservability.slnx` pass in a clean environment without hidden browser state. |
+| [S10-2](Sprint10-monitor-design-views.md#S10-2) | Playwright validation/bootstrap | High | Fixed | CI and local validation bootstrap install Chromium before `dotnet test CopilotAgentObservability.slnx`. |
 | [S10-3](Sprint10-monitor-design-views.md#S10-3) | Sprint10 completion evidence/state | Medium | Open | Record real VS Code Copilot Chat live evidence and update completion docs only after blockers are cleared. |
 
 ## Sprint9 Recommended Fix Order

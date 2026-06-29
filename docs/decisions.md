@@ -213,8 +213,16 @@ Code、project file、CLI behavior、workflow を変更した場合は以下を�
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
+pwsh tests\CopilotAgentObservability.LocalMonitor.Tests\bin\Debug\net10.0\playwright.ps1 install chromium
 dotnet test CopilotAgentObservability.slnx
 ```
+
+Update (D029):
+
+- Because Sprint10 M6 added a Playwright browser smoke test to the normal
+  solution test suite, the validation bootstrap includes installing Chromium
+  after `dotnet build` generates the Playwright script. Browser binaries remain
+  outside tracked source.
 
 Collector example を変更した場合は dummy credential で Compose config を確認する。
 
@@ -616,6 +624,9 @@ Consequences:
 
 - Chromium browser binaries are installed outside tracked source for local
   validation. They must not be committed.
+- CI and local validation bootstrap must install Chromium before running
+  `dotnet test CopilotAgentObservability.slnx`; Linux CI uses
+  `install --with-deps chromium`.
 - Playwright tests verify the existing client-side views consume sanitized spans
   JSON and do not fetch raw-bearing routes.
 - M6 validation records, rather than fixes, the current `--sanitized-only`

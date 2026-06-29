@@ -243,6 +243,7 @@ Per D015:
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
+pwsh tests\CopilotAgentObservability.LocalMonitor.Tests\bin\Debug\net10.0\playwright.ps1 install chromium
 dotnet test CopilotAgentObservability.slnx
 ```
 
@@ -262,8 +263,9 @@ Sprint8/Sprint9 M6).
   (Cytoscape/dagre).
 - **Playwright dev dependency.** Required for M6 client-side smoke tests. Added
   as a test-project NuGet package (`Microsoft.Playwright` 1.61.0). Risk:
-  browser binary download (~100 MB+) in CI. Recorded in `docs/decisions.md` as
-  D029.
+  browser binary download (~100 MB+) in CI. The standard validation bootstrap
+  installs Chromium before `dotnet test`; Linux CI uses
+  `install --with-deps chromium`. Recorded in `docs/decisions.md` as D029.
 - **"User request" is an approximation.** A2 groups by root `invoke_agent`, not
   a true user-request id (none exists in the telemetry). Documented in
   [Data mapping](#data-mapping); acceptable for a local self-debugging view.

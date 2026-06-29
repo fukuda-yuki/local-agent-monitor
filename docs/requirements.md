@@ -244,8 +244,14 @@ Code、project file、CLI behavior、workflow を変更した場合は以下を�
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
+pwsh tests\CopilotAgentObservability.LocalMonitor.Tests\bin\Debug\net10.0\playwright.ps1 install chromium
 dotnet test CopilotAgentObservability.slnx
 ```
+
+`dotnet test CopilotAgentObservability.slnx` includes Local Ingestion Monitor
+Playwright smoke tests. The browser install step is therefore part of the
+required validation bootstrap and installs browser binaries outside tracked
+source.
 
 Collector example を変更した場合は、実 credential ではなく dummy `LANGFUSE_AUTH` で Compose 構文を確認する。
 

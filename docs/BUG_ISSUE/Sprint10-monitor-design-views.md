@@ -33,7 +33,7 @@ Result:
 | Card | Severity | Fix unit | Status |
 | --- | --- | --- | --- |
 | S10-1 | High | `--sanitized-only` TraceDetail design views | Open |
-| S10-2 | High | Playwright validation/bootstrap | Open |
+| S10-2 | High | Playwright validation/bootstrap | Fixed |
 | S10-3 | Medium | Sprint10 completion evidence/state | Open |
 
 ---
@@ -144,6 +144,10 @@ the same change so this validation command can pass in a clean environment.
 <a id="S10-2"></a>
 
 ## S10-2 — Standard `dotnet test CopilotAgentObservability.slnx` fails when Playwright browsers are not preinstalled — High
+
+Status: Fixed. CI and repository validation docs now bootstrap Playwright
+Chromium after solution build and before the solution test command, so the
+browser smoke test no longer depends on hidden developer-profile browser state.
 
 ### Problem
 

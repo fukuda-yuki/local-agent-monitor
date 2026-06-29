@@ -22,8 +22,13 @@ Code、project file、CLI behavior、workflow を変更した場合:
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
+pwsh tests\CopilotAgentObservability.LocalMonitor.Tests\bin\Debug\net10.0\playwright.ps1 install chromium
 dotnet test CopilotAgentObservability.slnx
 ```
+
+The browser install is part of the standard validation sequence because the
+solution test suite includes LocalMonitor Playwright smoke coverage. On Linux
+CI, run the same script with `install --with-deps chromium`.
 
 Collector example を変更した場合:
 

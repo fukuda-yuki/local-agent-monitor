@@ -31,8 +31,13 @@ Standard validation for code, project file, CLI behavior, or workflow changes:
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
+pwsh tests\CopilotAgentObservability.LocalMonitor.Tests\bin\Debug\net10.0\playwright.ps1 install chromium
 dotnet test CopilotAgentObservability.slnx
 ```
+
+The Playwright install runs after build because `playwright.ps1` is generated
+under the LocalMonitor test output directory. Linux CI uses the same script with
+`install --with-deps chromium`.
 
 Targeted test example while iterating:
 

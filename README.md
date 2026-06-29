@@ -156,8 +156,14 @@ Code、project file、CLI behavior、workflow を変更した場合は以下を�
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
+pwsh tests\CopilotAgentObservability.LocalMonitor.Tests\bin\Debug\net10.0\playwright.ps1 install chromium
 dotnet test CopilotAgentObservability.slnx
 ```
+
+`dotnet test` includes the LocalMonitor Playwright smoke test. Run the
+Playwright install after `dotnet build` because the script is generated under
+the test project's `bin\Debug\net10.0` directory. In Linux CI, use
+`install --with-deps chromium`.
 
 Collector example を変更した場合は、実 credential ではなく dummy value で Compose 構文を確認します。
 

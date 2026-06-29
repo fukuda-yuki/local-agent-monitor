@@ -15,8 +15,13 @@ Run these commands from the repository root.
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
+pwsh tests\CopilotAgentObservability.LocalMonitor.Tests\bin\Debug\net10.0\playwright.ps1 install chromium
 dotnet test CopilotAgentObservability.slnx
 ```
+
+The Playwright install command is required because the solution test suite
+contains LocalMonitor browser smoke tests. On Linux CI, pass `--with-deps` to
+the same script.
 
 Targeted test while iterating:
 
