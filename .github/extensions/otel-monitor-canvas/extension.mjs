@@ -1,14 +1,20 @@
 // Extension: otel-monitor-canvas
 //
-// Sprint11 M3/M4: project-scoped Canvas extension for the Local Ingestion
+// Sprint11 M3/M4/M5: project-scoped Canvas extension for the Local Ingestion
 // Monitor. This is a thin adapter — it does not reimplement the monitor UI or
 // expose sensitive telemetry data. The Local Monitor must be launched with
 // --sanitized-only for Canvas-safe posture.
+//
+// M5 adds an extension-owned loopback helper page with a trace dropdown
+// (proxied from sanitized /api/monitor/traces) and an "Analyze selected trace
+// with Copilot" trigger that calls session.send() with a sanitized-only
+// instruction. See D029.
 //
 // Canvas id: otel-monitor
 // Display name: OTel Monitor
 
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { joinSession, createCanvas, CanvasError } from "@github/copilot-sdk/extension";
 
 const DEFAULT_MONITOR_URL = "http://127.0.0.1:4320";
@@ -19,6 +25,7 @@ const MAX_TOP_SPANS = 10;
 const MAX_TREE_NODES = 50;
 const MAX_CACHE_TURNS = 50;
 const REQUEST_TIMEOUT_MS = 5000;
+const FOCUS_VALUES = ["latency", "tokens", "cache", "errors"];
 
 const traceIdSchema = {
     type: "object",
@@ -33,7 +40,7 @@ const traceIdSchema = {
     additionalProperties: false,
 };
 
-// Per-instance HTTP servers for diagnostic / status pages.
+// Per-instance HTTP servers for the helper page (M5).
 const servers = new Map();
 
 // --------------- helpers ---------------
@@ -48,18 +55,20 @@ function escapeHtml(value) {
     });
 }
 
-function renderDiagnosticHtml({ instanceId, monitorUrl, healthStatus, healthBody, error }) {
+function renderHelperHtml({ instanceId, monitorUrl, healthStatus, healthBody, error, token }) {
     const escapedUrl = escapeHtml(monitorUrl);
     const escapedInstance = escapeHtml(instanceId);
     const escapedHealth = escapeHtml(healthStatus ?? "unknown");
     const escapedBody = escapeHtml(healthBody ?? "");
     const escapedError = escapeHtml(error ?? "");
+    const escapedToken = escapeHtml(token);
+    const healthy = healthStatus === "healthy";
 
     return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>OTel Monitor — Diagnostic</title>
+  <title>OTel Monitor — Canvas</title>
   <style>
     :root {
       --bg: var(--background-color-default, #ffffff);
@@ -111,47 +120,270 @@ function renderDiagnosticHtml({ instanceId, monitorUrl, healthStatus, healthBody
     }
     .banner-warn { background: #fff8c5; border: 1px solid #d4a72c; color: #5c4b00; }
     .banner-err  { background: #ffebe9; border: 1px solid #cf222e; color: #5c0000; }
+    label { display: block; font-weight: 500; margin-bottom: 4px; }
+    select, input[type="text"] {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font: inherit;
+      background: var(--bg);
+      color: var(--fg);
+    }
+    .row { margin-bottom: 12px; }
+    button {
+      padding: 8px 16px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--accent);
+      color: #ffffff;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #result { margin-top: 12px; font-size: 12px; }
+    .ok { color: var(--success); }
+    .err { color: var(--danger); }
+    a { color: var(--accent); }
   </style>
 </head>
 <body>
-  <h1>OTel Monitor — Diagnostic</h1>
+  <h1>OTel Monitor — Canvas</h1>
 
   ${error ? `<div class="banner banner-err">${escapedError}</div>` : ""}
-  ${healthStatus === "healthy" ? "" : `<div class="banner banner-warn">Monitor is not reporting healthy. Ensure the Local Monitor is running with <code>--sanitized-only</code>.</div>`}
+  ${healthy ? "" : `<div class="banner banner-warn">Monitor is not reporting healthy. Ensure the Local Monitor is running with <code>--sanitized-only</code>.</div>`}
 
   <div class="card">
     <h2>Connection</h2>
     <dl class="kv">
       <dt>Monitor URL</dt><dd><code>${escapedUrl}</code></dd>
       <dt>Instance</dt><dd><code>${escapedInstance}</code></dd>
-      <dt>Health status</dt><dd><span class="${healthStatus === "healthy" ? "status-ok" : "status-err"}">${escapedHealth}</span></dd>
+      <dt>Health status</dt><dd><span class="${healthy ? "status-ok" : "status-err"}">${escapedHealth}</span></dd>
     </dl>
   </div>
 
   ${escapedBody ? `<div class="card"><h2>Health Response</h2><pre>${escapedBody}</pre></div>` : ""}
 
   <div class="card">
+    <h2>Analyze selected trace with Copilot</h2>
+    <p style="margin-bottom:12px;color:var(--muted);">Select a trace and a focus, then trigger a Copilot analysis. Copilot will use sanitized monitor actions only and must not request raw prompt/response bodies.</p>
+    <div class="row">
+      <label for="trace">Trace</label>
+      <select id="trace" ${healthy ? "" : "disabled"}></select>
+    </div>
+    <div class="row">
+      <label for="focus">Focus</label>
+      <select id="focus" ${healthy ? "" : "disabled"}>
+        <option value="latency">latency</option>
+        <option value="tokens">tokens</option>
+        <option value="cache">cache</option>
+        <option value="errors">errors</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="span">Span id (optional)</label>
+      <input type="text" id="span" placeholder="optional span id" ${healthy ? "" : "disabled"} />
+    </div>
+    <button id="analyze" ${healthy ? "" : "disabled"}>Analyze selected trace with Copilot</button>
+    <div id="result"></div>
+  </div>
+
+  <div class="card">
+    <h2>Monitor pages</h2>
+    <p>Open the sanitized Local Monitor pages in your browser: <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer">${escapedUrl}</a></p>
+  </div>
+
+  <div class="card">
     <h2>Canvas-safe posture</h2>
     <p>This Canvas adapter requires the Local Monitor to be launched with <code>--sanitized-only</code>. Sensitive local telemetry must not be exposed through Canvas actions or display.</p>
   </div>
+
+  <script>
+    (function () {
+      var token = ${JSON.stringify(escapedToken)};
+      var traceSel = document.getElementById("trace");
+      var focusSel = document.getElementById("focus");
+      var spanInput = document.getElementById("span");
+      var btn = document.getElementById("analyze");
+      var result = document.getElementById("result");
+
+      function setResult(msg, ok) {
+        result.textContent = msg;
+        result.className = ok ? "ok" : "err";
+      }
+
+      if (!token) { setResult("Missing launch token.", false); return; }
+
+      fetch("/api/traces?t=" + encodeURIComponent(token), { headers: { "x-canvas-token": token } })
+        .then(function (r) {
+          if (!r.ok) { throw new Error("HTTP " + r.status); }
+          return r.json();
+        })
+        .then(function (data) {
+          (data.items || []).forEach(function (t) {
+            var opt = document.createElement("option");
+            opt.value = t.trace_id;
+            opt.textContent = t.trace_id + " — " + (t.status || "?") + " — spans:" + (t.span_count || 0);
+            traceSel.appendChild(opt);
+          });
+          if (!traceSel.options.length) { setResult("No recent traces found.", true); }
+        })
+        .catch(function (e) { setResult("Failed to load traces: " + e.message, false); });
+
+      btn.addEventListener("click", function () {
+        var traceId = traceSel.value;
+        if (!traceId) { setResult("Select a trace first.", false); return; }
+        var focus = focusSel.value;
+        var spanId = spanInput.value.trim();
+        btn.disabled = true;
+        setResult("Dispatching…", true);
+        fetch("/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-canvas-token": token },
+          body: JSON.stringify({ traceId: traceId, spanId: spanId || undefined, focus: focus })
+        })
+          .then(function (r) { return r.json().then(function (b) { return { status: r.status, body: b }; }); })
+          .then(function (out) {
+            if (out.status === 200) { setResult("Analysis dispatched to Copilot. Check the Copilot chat.", true); }
+            else { setResult("Failed: " + (out.body && out.body.error || ("HTTP " + out.status)), false); }
+          })
+          .catch(function (e) { setResult("Failed: " + e.message, false); })
+          .finally(function () { btn.disabled = false; });
+      });
+    })();
+  </script>
 </body>
 </html>`;
 }
 
-function createDiagnosticServer(instanceId, monitorUrl, healthStatus, healthBody, error) {
-    const server = createServer((_req, res) => {
-        res.setHeader("Content-Type", "text/html; charset=utf-8");
-        res.end(renderDiagnosticHtml({ instanceId, monitorUrl, healthStatus, healthBody, error }));
+function matchesTraceId(value) {
+    return typeof value === "string" && new RegExp(TRACE_ID_PATTERN).test(value);
+}
+
+function buildAnalysisPrompt({ traceId, spanId, focus }) {
+    const focusActions = {
+        latency: ["get_trace_summary", "get_trace_span_tree"],
+        tokens: ["get_trace_summary", "get_cache_summary"],
+        cache: ["get_cache_summary"],
+        errors: ["get_trace_span_tree"],
+    };
+    const actions = focusActions[focus] ?? ["get_trace_summary"];
+    const spanLine = spanId ? `Selected span id: ${spanId}\n` : "";
+    return [
+        `Analyze the selected Local Ingestion Monitor trace using only sanitized Canvas actions.`,
+        `Trace id: ${traceId}`,
+        spanLine,
+        `Analysis focus: ${focus}.`,
+        ``,
+        `Call the following sanitized monitor actions via invoke_canvas_action on the open otel-monitor canvas instance to gather data:`,
+        ...actions.map((a) => `  - ${a}({ traceId: "${traceId}" })`),
+        ``,
+        `Constraints:`,
+        `- Use only the sanitized monitor actions listed above.`,
+        `- You must not request raw prompt bodies, raw response bodies, tool arguments, tool results, PII, credentials, tokens, or local sensitive paths.`,
+        `- Do not attempt to open raw-bearing monitor routes.`,
+        `- Summarize findings and suggest improvements for the ${focus} focus.`,
+    ].filter(Boolean).join("\n");
+}
+
+function readRequestBody(req) {
+    return new Promise((resolve) => {
+        let data = "";
+        req.on("data", (chunk) => { data += chunk; if (data.length > 8192) { req.destroy(); } });
+        req.on("end", () => resolve(data));
+        req.on("error", () => resolve(""));
+    });
+}
+
+function sendJson(res, statusCode, payload) {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.statusCode = statusCode;
+    res.end(JSON.stringify(payload));
+}
+
+function createHelperServer({ instanceId, monitorUrl, healthStatus, healthBody, error, token, session }) {
+    const server = createServer(async (req, res) => {
+        const url = new URL(req.url, "http://127.0.0.1");
+        const path = url.pathname;
+
+        // Token validation for all routes.
+        const headerToken = req.headers["x-canvas-token"];
+        const queryToken = url.searchParams.get("t");
+        const suppliedToken = headerToken || queryToken;
+        if (suppliedToken !== token) {
+            sendJson(res, 401, { error: "unauthorized" });
+            return;
+        }
+
+        if (req.method === "GET" && path === "/") {
+            res.setHeader("Content-Type", "text/html; charset=utf-8");
+            res.end(renderHelperHtml({ instanceId, monitorUrl, healthStatus, healthBody, error, token }));
+            return;
+        }
+
+        if (req.method === "GET" && path === "/api/traces") {
+            try {
+                const monitorUrlValidated = monitorUrl;
+                if (!isLoopbackUrl(monitorUrlValidated)) {
+                    sendJson(res, 400, { error: "invalid_monitor_url" });
+                    return;
+                }
+                const { response, body } = await fetchTextWithTimeout(monitorApiUrl(monitorUrlValidated, `/api/monitor/traces?limit=${MAX_TRACE_LIST_LIMIT}`));
+                if (!response.ok) {
+                    sendJson(res, 502, { error: "monitor_unavailable", status: response.status });
+                    return;
+                }
+                const page = body ? parseJsonBody(body) : { items: [] };
+                const items = Array.isArray(page.items) ? page.items.map(compactTrace) : [];
+                sendJson(res, 200, { items, count: items.length });
+            } catch (err) {
+                const code = err instanceof CanvasError ? err.code : "monitor_unavailable";
+                sendJson(res, 502, { error: code, message: err.message });
+            }
+            return;
+        }
+
+        if (req.method === "POST" && path === "/analyze") {
+            try {
+                const raw = await readRequestBody(req);
+                const payload = raw ? parseJsonBody(raw, "invalid_input") : {};
+                const traceId = payload.traceId;
+                const spanId = payload.spanId;
+                const focus = payload.focus;
+                if (!matchesTraceId(traceId)) {
+                    sendJson(res, 400, { error: "invalid_trace_id" });
+                    return;
+                }
+                if (spanId !== undefined && spanId !== null && spanId !== "" && !matchesTraceId(spanId)) {
+                    sendJson(res, 400, { error: "invalid_span_id" });
+                    return;
+                }
+                if (!FOCUS_VALUES.includes(focus)) {
+                    sendJson(res, 400, { error: "invalid_focus" });
+                    return;
+                }
+                const prompt = buildAnalysisPrompt({ traceId, spanId: spanId || null, focus });
+                await session.send({ prompt });
+                sendJson(res, 200, { ok: true, dispatched: true });
+            } catch (err) {
+                const code = err instanceof CanvasError ? err.code : "analyze_failed";
+                sendJson(res, 500, { error: code, message: err.message });
+            }
+            return;
+        }
+
+        sendJson(res, 404, { error: "not_found" });
     });
     return server;
 }
 
-async function startDiagnosticServer(instanceId, monitorUrl, healthStatus, healthBody, error) {
-    const server = createDiagnosticServer(instanceId, monitorUrl, healthStatus, healthBody, error);
+async function startHelperServer({ instanceId, monitorUrl, healthStatus, healthBody, error, token, session }) {
+    const server = createHelperServer({ instanceId, monitorUrl, healthStatus, healthBody, error, token, session });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : 0;
-    return { server, url: `http://127.0.0.1:${port}/` };
+    return { server, url: `http://127.0.0.1:${port}/?t=${token}` };
 }
 
 function isLoopbackUrl(urlString) {
@@ -722,28 +954,29 @@ const session = await joinSession({
 
                 // Check monitor health.
                 const health = await checkMonitorHealth(monitorUrl);
+                const healthStatus = health.healthy
+                    ? "healthy"
+                    : (health.statusCode !== null ? `unhealthy (${health.statusCode})` : "unreachable");
 
-                if (health.healthy) {
-                    return {
-                        title: "OTel Monitor",
-                        status: "Connected",
-                        url: monitorUrl,
-                    };
-                }
-
-                // Monitor is not healthy. Start a diagnostic server on an
-                // ephemeral loopback port and show the diagnostic page.
-                const entry = await startDiagnosticServer(
-                    ctx.instanceId,
+                // Always start the extension-owned helper page (M5). The page
+                // shows monitor health, a trace dropdown (proxied from sanitized
+                // /api/monitor/traces), a focus selector, and the
+                // "Analyze selected trace with Copilot" trigger. The trigger is
+                // disabled when the monitor is not healthy.
+                const token = randomUUID();
+                const entry = await startHelperServer({
+                    instanceId: ctx.instanceId,
                     monitorUrl,
-                    health.statusCode !== null ? `unhealthy (${health.statusCode})` : "unreachable",
-                    health.body,
-                    health.error,
-                );
+                    healthStatus,
+                    healthBody: health.body,
+                    error: health.error,
+                    token,
+                    session,
+                });
                 servers.set(ctx.instanceId, entry);
                 return {
-                    title: "OTel Monitor — Offline",
-                    status: "Monitor unavailable",
+                    title: health.healthy ? "OTel Monitor" : "OTel Monitor — Offline",
+                    status: health.healthy ? "Connected" : "Monitor unavailable",
                     url: entry.url,
                 };
             },

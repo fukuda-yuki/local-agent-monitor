@@ -254,6 +254,24 @@ unchanged):
 - The Canvas adapter introduces no CDN, remote runtime fetch, or third-party
   origin dependency. It reads the configured loopback Local Monitor and serves
   extension-owned helper pages from loopback only.
+- Sprint11 M5 UI-to-Copilot trigger (D029): `open()` returns an
+  extension-owned loopback helper page (per-launch token in the page URL) that
+  shows monitor health, a trace dropdown, a focus selector, and an
+  "Analyze selected trace with Copilot" button. The helper page proxies only
+  sanitized `GET /api/monitor/traces?limit=50` for the dropdown
+  (`compactTrace`-shaped items only) on a token-protected route; the proxy
+  rejects missing/wrong tokens with `401`. The trigger button posts to a
+  token-protected `POST /analyze` route that validates trace id / optional span
+  id / focus, then calls `session.send({ prompt })` with an instruction that
+  references only the selected ids, the focus, and sanitized action names
+  (`get_trace_summary` / `get_trace_span_tree` / `get_cache_summary`), and
+  explicitly forbids requesting raw prompt / response bodies, tool arguments /
+  results, PII, credentials, or local sensitive paths. The trigger payload
+  never embeds monitor payload, raw bodies, tool arguments / results, PII,
+  credentials, tokens, or local sensitive paths. `session.send()` is
+  fire-and-forget; the helper page returns `{ ok: true, dispatched: true }`.
+  Token transport uses the page URL query parameter for the page and the
+  `x-canvas-token` header for the proxy and analyze XHR routes.
 - `/create-canvas` is the repository-local skill at
   `.github/skills/create-canvas/SKILL.md`; it must not be replaced with a
   `.github/prompts/*.prompt.md` prompt file. The project scaffold is created

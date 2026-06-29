@@ -149,6 +149,17 @@ use sanitized actions and must not request raw prompt/response bodies.
 If the runtime does not expose a direct UI-to-Copilot trigger, document the
 limitation and keep agent-callable actions usable from Copilot.
 
+**M5 status: Implemented (D029).** The Canvas SDK exposes
+`session.send({ prompt })` as the UI-to-Copilot trigger mechanism. `open()`
+returns an extension-owned loopback helper page (per-launch token) that shows
+monitor health, a trace dropdown (proxied from sanitized
+`/api/monitor/traces?limit=50`), a focus selector, an optional span id input,
+and the trigger button. The button posts to a token-protected `POST /analyze`
+route that validates the payload and calls `session.send()` with a
+sanitized-only instruction. Canvas runtime live validation is human-gated
+(tools not available in the implementation surface); M6 will attempt in an
+active Copilot app environment.
+
 ### A6 - Security posture
 
 Preserve D020/D023/D030 and the Sprint9/Sprint10 sanitized-JSON/SSE invariant.
@@ -224,7 +235,7 @@ security/data boundaries, and relationship to Sprint10 design views.
 | M2 Extension scaffold | Use scaffold when available; add project-scoped extension skeleton; implement `open()` and monitor health diagnostics. Stop and record blocker if Canvas tools are unavailable. | Implemented |
 | M3 Minimal actions | Implement `monitor_health`, `list_recent_traces`, and `get_trace_summary` with bounded sanitized DTOs. | Implemented with M4 |
 | M4 Trace analysis actions | Implement `get_trace_span_tree`, `get_cache_summary`, schema validation, size bounds, and `CanvasError` expected failures. | Implemented; Canvas runtime validation unavailable in this Codex surface |
-| M5 UI trigger | Add or document the `Analyze selected trace with Copilot` trigger. | Planned |
+| M5 UI trigger | Add or document the `Analyze selected trace with Copilot` trigger. | Implemented (D029) |
 | M6 Validation & docs | Build/test, Canvas validation, sanitized-only assertions, loopback server lifecycle checks, and user guide updates. | Planned |
 
 ## Validation

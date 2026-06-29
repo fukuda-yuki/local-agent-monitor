@@ -62,7 +62,11 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
   monitor context を Copilot app side panel から参照する任意統合として扱う。
   Canvas-safe posture は Local Monitor を `--sanitized-only` で起動することとし、
   Canvas adapter は既存 `/api/monitor/*` と sanitized TraceDetail tab shell の
-  範囲だけを扱う。
+  範囲だけを扱う。Sprint11 M5 では拡張所有の loopback ヘルパーページ上に
+  「Analyze selected trace with Copilot」UI トリガーを任意提供し、トリガー指示は
+  選択した trace id・optional span id・focus・sanitized action 名のみを含み、
+  raw prompt / response body、tool arguments / results、PII、credential、token、
+  local sensitive path を含めない（D029）。
 - Grafana JSON dashboard fallback。
 
 参考のみ:

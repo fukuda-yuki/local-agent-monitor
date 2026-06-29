@@ -590,3 +590,40 @@ Noto Sans Mono を採用する。
 - 合計サイズ約 5–10 MB。ローカル専用ツールのため許容。
 - ライセンス: OFL。
 - システムフォントスタックは使用しない（vendored フォントに固定）。
+
+## D029: Sprint11 M5 UI トリガーは拡張所有ヘルパーページ + `session.send` + token 保護付き sanitized proxy で実装する
+
+Status: Accepted
+
+Sprint11 M5 の「Analyze selected trace with Copilot」UI トリガーは、
+Canvas SDK の `session.send()` を公式の UI→Copilot トリガー経路として使い、
+`open()` が返す URL を拡張所有の loopback ヘルパーページに置き換える。
+
+- **ヘルパーページ**: `open()` は常に拡張が立てる loopback（`127.0.0.1`）の
+  ヘルパーサーバを起動し、per-launch token を生成して
+  `http://127.0.0.1:<port>/?t=<token>` を返す。M2-M4 の「monitor 直表示」挙動は
+  ヘルパーページ内の monitor sanitized ページへのリンクに置き換わる。
+  `open()` は冪等（同一 instanceId の再接続時は前回サーバを close して再起動）。
+- **trace 選択 UI**: ヘルパーページは trace ドロップダウンを描画するため、
+  拡張の loopback サーバが monitor の sanitized `/api/monitor/traces?limit=50`
+  をプロキシする（`compactTrace` 形状のみ）。プロキシ route は per-launch token
+  で保護し、不正 token は `401` を返す。CORS は無効のまま。
+- **トリガー**: ヘルパーページの「Analyze selected trace with Copilot」ボタン押下で
+  `POST /analyze`（token は `x-canvas-token` ヘッダ）を受け、検証済みの
+  trace id・optional span id・focus（`latency` / `tokens` / `cache` / `errors`）から
+  Copilot 指示文字列を構築して `session.send({ prompt })` を呼ぶ。
+  `session.send()` は非同期 fire-and-forget とし、結果は Copilot chat 側で確認
+  する。ヘルパーページは `{ ok: true, dispatched: true }` を返す。
+- **payload 制限**: トリガー指示は trace id・span id・focus・sanitized action 名
+  （`get_trace_summary` / `get_trace_span_tree` / `get_cache_summary`、focus 別に選択）
+  だけを含み、raw prompt / response body、tool arguments / results、PII、
+  credential、token、local sensitive path を含めない。指示内で raw 要求を明示禁止
+  する。monitor payload は指示に埋め込まない。
+- **境界維持**: D020 / D023 / D030 と Sprint9/Sprint10 の sanitized JSON/SSE 不変条件
+  は変更なし。拡張所有サーバは `127.0.0.1` のみ、`onClose()` で close、
+  診断は `session.log()`（`console.log` 不使用）、CDN / remote fetch / 依存追加なし。
+  新たな telemetry input / schema / endpoint / raw route は追加しない。
+- **Canvas runtime live validation**: `extensions_manage` / `open_canvas` /
+  `invoke_canvas_action` / `list_canvas_capabilities` は一部の surface で未提供
+  のため、M5 の Canvas 実機検証は human-gated とし、代替証拠として contract test・
+  静的 check・境界レビューを記録する。M6 で実環境検証を試みる。

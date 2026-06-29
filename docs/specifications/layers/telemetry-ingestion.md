@@ -373,6 +373,18 @@ display requires the monitor to run with `--sanitized-only`, so the sanitized
 TraceDetail tab shell remains available and raw-bearing sections/routes are not
 opened by the adapter.
 
+Sprint11 M5 adds an optional UI-to-Copilot analysis trigger (D029). `open()`
+returns an extension-owned loopback helper page (per-launch token) that proxies
+only sanitized `GET /api/monitor/traces?limit=50` for a trace dropdown and
+exposes an "Analyze selected trace with Copilot" button. The button posts to a
+token-protected `POST /analyze` route that calls `session.send({ prompt })` with
+an instruction referencing only the selected trace id, optional span id, focus
+(`latency` / `tokens` / `cache` / `errors`), and sanitized action names; it
+explicitly forbids requesting raw bodies, tool arguments / results, PII,
+credentials, or local sensitive paths. No monitor payload is embedded in the
+trigger instruction. M5 adds no telemetry input, schema, endpoint, query
+parameter, response field, raw route, or dependency.
+
 Raw / PII exposure follows the Local Ingestion Monitor boundary in
 [../security-data-boundaries.md](../security-data-boundaries.md): raw body
 (tool call arguments / results, sub-agent instructions / responses, system

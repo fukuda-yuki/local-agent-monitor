@@ -60,6 +60,39 @@ public class CanvasExtensionContractTests
         Assert.Contains("cache_hit_rate", script);
     }
 
+    [Fact]
+    public void Extension_DeclaresM5UiTriggerSurface()
+    {
+        var script = ReadExtension();
+
+        // M5 helper page + trigger button.
+        Assert.Contains("Analyze selected trace with Copilot", script);
+        Assert.Contains("renderHelperHtml", script);
+        Assert.Contains("startHelperServer", script);
+
+        // session.send() is the UI-to-Copilot trigger mechanism.
+        Assert.Contains("session.send({ prompt })", script);
+
+        // Per-launch token protection on proxy + analyze routes.
+        Assert.Contains("randomUUID", script);
+        Assert.Contains("x-canvas-token", script);
+        Assert.Contains("/api/traces", script);
+        Assert.Contains("/analyze", script);
+
+        // Focus enum.
+        Assert.Contains("\"latency\"", script);
+        Assert.Contains("\"tokens\"", script);
+        Assert.Contains("\"cache\"", script);
+        Assert.Contains("\"errors\"", script);
+
+        // Trigger instruction forbids raw bodies.
+        Assert.Contains("must not request raw prompt bodies", script);
+
+        // Boundary invariants preserved.
+        Assert.DoesNotContain("/raw", script);
+        Assert.DoesNotContain("console.log", script);
+    }
+
     private static string ReadExtension()
     {
         var repoRoot = FindRepoRoot();

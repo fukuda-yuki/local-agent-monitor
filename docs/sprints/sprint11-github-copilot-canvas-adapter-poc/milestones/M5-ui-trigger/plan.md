@@ -1,7 +1,10 @@
 # Sprint11 M5 - UI Trigger (Plan)
 
-Status: **Planned** - optional Canvas UI-to-Copilot analysis trigger. Gated by
-M4 action set.
+Status: **Implemented** - Canvas UI-to-Copilot analysis trigger via
+extension-owned loopback helper page + `session.send()` + token-protected
+sanitized proxy (D029). Canvas runtime live validation is human-gated (tools
+not available in the implementation surface); M6 will attempt in an active
+Copilot app environment.
 
 Sprint-local planning evidence, not product behavior. Source-of-truth order:
 `docs/requirements.md` -> `docs/spec.md` -> `docs/specifications/`. Sprint
@@ -85,3 +88,55 @@ dotnet build CopilotAgentObservability.slnx
 pwsh tests\CopilotAgentObservability.LocalMonitor.Tests\bin\Debug\net10.0\playwright.ps1 install chromium
 dotnet test CopilotAgentObservability.slnx
 ```
+
+## Implementation notes
+
+M5 implemented the supported-runtime path. The Canvas SDK exposes
+`session.send({ prompt })` as the UI-to-Copilot trigger mechanism; the extension
+captures the `session` object from `joinSession()` and the helper page's
+`POST /analyze` route calls it after validating the trigger payload.
+
+Changes to `.github/extensions/otel-monitor-canvas/extension.mjs`:
+
+- `open()` now always starts an extension-owned loopback helper server
+  (`127.0.0.1`, ephemeral port) with a per-launch token (`crypto.randomUUID()`)
+  and returns `http://127.0.0.1:<port>/?t=<token>`. The previous "return the
+  monitor URL directly when healthy" behavior is replaced by a helper page that
+  links to the sanitized monitor pages.
+- The helper page (`renderHelperHtml`) shows monitor health, a trace dropdown
+  populated from the proxied sanitized `/api/monitor/traces?limit=50`, a focus
+  selector (`latency` / `tokens` / `cache` / `errors`), an optional span id
+  input, and the **"Analyze selected trace with Copilot"** button. The trigger
+  is disabled when the monitor is not healthy.
+- Helper server routes (all loopback, token-validated via `x-canvas-token`
+  header or `?t=` query):
+  - `GET /` → helper HTML;
+  - `GET /api/traces` → proxies sanitized `/api/monitor/traces?limit=50` and
+    returns `compactTrace`-shaped items only;
+  - `POST /analyze` → validates trace id / optional span id / focus, builds a
+    sanitized-only Copilot instruction, and calls `session.send({ prompt })`.
+- The Copilot instruction references only the selected trace id, optional span
+  id, focus, and sanitized action names (`get_trace_summary` /
+  `get_trace_span_tree` / `get_cache_summary`, chosen by focus). It explicitly
+  forbids requesting raw prompt/response bodies, tool arguments/results, PII,
+  credentials, or local sensitive paths. No monitor payload is embedded.
+- `onClose()` closes the helper server for the instance.
+- M3/M4 actions are unchanged. `sanitizeDto`, loopback validation, and the
+  `session.log()` / no-`console.log` invariant are preserved.
+
+Spec/decision updates: D029 recorded in `docs/decisions.md`;
+`docs/specifications/security-data-boundaries.md` and
+`docs/specifications/layers/telemetry-ingestion.md` extended with the helper
+page / proxy / token / `session.send` trigger invariants;
+`docs/requirements.md` extended with the UI-trigger requirement.
+
+Contract tests: `CanvasExtensionContractTests.cs` adds
+`Extension_DeclaresM5UiTriggerSurface` asserting the trigger surface, token
+protection, focus enum, raw-forbidding instruction, and the preserved
+`/raw` / `console.log` negative checks.
+
+Canvas runtime live validation (`extensions_manage`, `open_canvas`,
+`invoke_canvas_action`, `list_canvas_capabilities`) is not available in the
+implementation surface and is recorded as a human-gated blocker for M6.
+Fallback evidence: contract tests (5 passing), `node --check` syntax check,
+and boundary review.
