@@ -16,6 +16,60 @@
         "kind": "build",
         "isDefault": true
       }
+    },
+    {
+      "label": "build-local-monitor",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "build",
+        "${workspaceFolder}/src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj",
+        "/property:GenerateFullPaths=true",
+        "/consoleloggerparameters:NoSummary"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "ensure-data-dir",
+      "type": "shell",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-Command",
+        "New-Item -ItemType Directory -Force -Path '${workspaceFolder}/data' | Out-Null"
+      ],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "run-local-monitor",
+      "type": "shell",
+      "command": "dotnet",
+      "args": [
+        "run",
+        "--project",
+        "${workspaceFolder}/src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj",
+        "--no-build",
+        "--",
+        "--db",
+        "${workspaceFolder}/data/raw-store.db",
+        "--url",
+        "http://127.0.0.1:4320"
+      ],
+      "dependsOn": [
+        "ensure-data-dir",
+        "build-local-monitor"
+      ],
+      "dependsOrder": "sequence",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "isBackground": true,
+      "problemMatcher": []
     }
   ]
 }

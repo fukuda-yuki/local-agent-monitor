@@ -25,6 +25,27 @@
         "ASPIRE_ALLOW_UNSECURED_TRANSPORT": "true"
       },
       "console": "internalConsole"
+    },
+    {
+      "name": "Launch Local Monitor",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-local-monitor",
+      "program": "${workspaceFolder}/src/CopilotAgentObservability.LocalMonitor/bin/Debug/net10.0/CopilotAgentObservability.LocalMonitor.dll",
+      "args": [
+        "--db",
+        "data/raw-store.db",
+        "--url",
+        "http://127.0.0.1:4320"
+      ],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "\\bNow listening on:\\s+(https?://\\S+)",
+        "uriFormat": "http://127.0.0.1:4320/"
+      },
+      "console": "internalConsole"
     }
   ],
   "compounds": []
