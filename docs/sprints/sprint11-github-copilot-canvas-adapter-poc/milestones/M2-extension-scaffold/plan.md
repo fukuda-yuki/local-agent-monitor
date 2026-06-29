@@ -1,6 +1,7 @@
 # Sprint11 M2 - Extension Scaffold (Plan)
 
-Status: **Planned** - project-scoped Canvas scaffold and `open()` diagnostics.
+Status: **Blocked** - Canvas scaffold and validation tools are unavailable in
+the current Codex environment; no hand-written skeleton was created.
 Gated by M1 canonical docs.
 
 Sprint-local planning evidence, not product behavior. Source-of-truth order:
