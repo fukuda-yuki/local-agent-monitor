@@ -229,6 +229,39 @@ Sprint10 design views (client-side presentation, boundary unchanged):
   `Html.Raw`); the design views add no CSP / sanitizer / XSS-matrix apparatus
   (AGENTS.md Local-First Risk Posture, D020).
 
+Sprint11 GitHub Copilot app Canvas adapter (sanitized adapter, boundary
+unchanged):
+
+- The Canvas adapter is a thin project-scoped extension over the existing Local
+  Monitor. It does not add telemetry input, schema, API field, raw-bearing route,
+  repository-stored monitor output, or a replacement monitor UI.
+- Canvas-safe posture requires launching the Local Monitor with
+  `--sanitized-only`. Canvas surfaces may open only sanitized monitor pages or an
+  explicit diagnostic page; they must not open the default raw-bearing
+  TraceDetail lower section.
+- Canvas actions consume sanitized `/api/monitor/*` responses and readiness
+  status only. Action responses must be bounded DTOs and must never include raw
+  prompt bodies, raw response bodies, tool arguments, tool results, PII,
+  credentials, tokens, local sensitive paths, raw OTLP payloads, or raw monitor
+  payload dumps.
+- Extension-owned HTTP servers bind only to `127.0.0.1`, close during
+  `onClose()`, and use per-launch token protection when a helper/proxy route
+  exposes monitor state. CORS stays disabled unless a later explicit decision
+  changes that boundary.
+- Diagnostics use `session.log()`, not `console.log()`, because stdout is
+  reserved for JSON-RPC in the Copilot app extension runtime. Logs must not
+  contain raw / PII or local sensitive paths.
+- The Canvas adapter introduces no CDN, remote runtime fetch, or third-party
+  origin dependency. It reads the configured loopback Local Monitor and serves
+  extension-owned helper pages from loopback only.
+- `/create-canvas` is the repository-local skill at
+  `.github/skills/create-canvas/SKILL.md`; it must not be replaced with a
+  `.github/prompts/*.prompt.md` prompt file. The project scaffold is created
+  through `extensions_manage({ operation: "scaffold", kind: "canvas", name:
+  "otel-monitor-canvas", location: "project" })` when available. If scaffold or
+  validation tools are unavailable, implementation records the blocker and stops;
+  hand-written fallback requires explicit product-owner approval.
+
 ## Shared Use Preconditions
 
 Before shared dashboard or real-data publishing:

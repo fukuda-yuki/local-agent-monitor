@@ -358,6 +358,21 @@ status / `error_type`, and span timing) is already in this sanitized row. See
 sanitized-only consumption invariant and the out-of-scope items (Cache Explorer
 raw prefix-diff, `conversation_id` cross-trace stitching).
 
+The Sprint11 GitHub Copilot app Canvas adapter is a consumer of the same
+sanitized monitor APIs. Canvas actions read `GET /api/monitor/traces`,
+`GET /api/monitor/traces/{traceId}/spans`, and `/health/ready` as needed, then
+return bounded LLM-oriented DTOs rather than raw monitor payload dumps. The
+documented actions are `monitor_health()`,
+`list_recent_traces({ limit, status?, model? })`,
+`get_trace_summary({ traceId })`, `get_trace_span_tree({ traceId })`, and
+`get_cache_summary({ traceId })`; `list_recent_traces.limit` is bounded to
+`1..50` for Canvas action output. Sprint11 adds no telemetry input, SQLite
+schema, projection column, endpoint, query parameter, response field, raw route,
+normalized dataset field, candidate record field, or dashboard contract. Canvas
+display requires the monitor to run with `--sanitized-only`, so the sanitized
+TraceDetail tab shell remains available and raw-bearing sections/routes are not
+opened by the adapter.
+
 Raw / PII exposure follows the Local Ingestion Monitor boundary in
 [../security-data-boundaries.md](../security-data-boundaries.md): raw body
 (tool call arguments / results, sub-agent instructions / responses, system
