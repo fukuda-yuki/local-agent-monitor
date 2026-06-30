@@ -83,6 +83,7 @@ Publicly documented interfaces are:
 - Local Ingestion Monitor raw-bearing routes（既定表示）: trace-detail page（agent-execution view、bounded raw preview inline + full raw record link）および `GET /traces/{rawRecordId}/raw`（server-rendered HTML）。raw-bearing route set の全 route で same-origin 強制（cross-site は `403`）、`Cache-Control: no-store`。`--sanitized-only` 起動時は raw-bearing route は `404`、PII は除外。JSON raw API は提供しない。
 - Local Ingestion Monitor run interface: loopback port（既定 `http://127.0.0.1:4320`）、`--port` / `--url`、`--sanitized-only`（metadata-only モード。raw-bearing route を `404` にし PII を除外）、リクエスト本文サイズ上限 `--max-request-body-bytes`（既定 `31457280` bytes = 30 MiB、env `CAO_MONITOR_MAX_REQUEST_BODY_BYTES`）。`POST /v1/traces` は本文が上限を超えると `413` / `request_too_large` を返し raw を書かない。
 - Local Ingestion Monitor client config: `config-cli profile-vscode-env --profile raw-local-receiver --target monitor`（または `--endpoint`）が monitor endpoint（既定 `http://127.0.0.1:4320`）向けの VS Code env を出力。`--target receiver` 既定は `4319` のまま。
+- Canvas adapter は raw default の Local Monitor と併用できる。`--sanitized-only` は Canvas の必須起動条件ではなく、Local Monitor の任意 metadata-only opt-out である。Canvas actions は引き続き既存 sanitized `/api/monitor/*` と readiness を読む bounded DTO surface であり、action responses / logs / committed outputs に raw / PII を返さない。
 
 Changing these requires updating the relevant specification file and tests.
 

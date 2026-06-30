@@ -229,21 +229,23 @@ Sprint10 design views (client-side presentation, boundary unchanged):
   `Html.Raw`); the design views add no CSP / sanitizer / XSS-matrix apparatus
   (AGENTS.md Local-First Risk Posture, D020).
 
-Sprint11 GitHub Copilot app Canvas adapter (sanitized adapter, boundary
+Sprint11 GitHub Copilot app Canvas adapter (bounded adapter, boundary
 unchanged):
 
 - The Canvas adapter is a thin project-scoped extension over the existing Local
   Monitor. It does not add telemetry input, schema, API field, raw-bearing route,
   repository-stored monitor output, or a replacement monitor UI.
-- Canvas-safe posture requires launching the Local Monitor with
-  `--sanitized-only`. Canvas surfaces may open only sanitized monitor pages or an
-  explicit diagnostic page; they must not open the default raw-bearing
-  TraceDetail lower section.
-- Canvas actions consume sanitized `/api/monitor/*` responses and readiness
-  status only. Action responses must be bounded DTOs and must never include raw
-  prompt bodies, raw response bodies, tool arguments, tool results, PII,
-  credentials, tokens, local sensitive paths, raw OTLP payloads, or raw monitor
-  payload dumps.
+- The Canvas adapter may be used with the normal raw-default Local Monitor.
+  Canvas surfaces may link to Local Monitor pages that show raw-bearing
+  server-rendered UI under the Local Monitor's existing loopback, same-origin,
+  no-store, and inert-rendering controls.
+- `--sanitized-only` remains an optional Local Monitor opt-out mode, not a
+  Canvas requirement.
+- Canvas actions consume existing sanitized `/api/monitor/*` responses and
+  readiness status only. Action responses must be bounded DTOs and must never
+  include raw prompt bodies, raw response bodies, tool arguments, tool results,
+  PII, credentials, tokens, local sensitive paths, raw OTLP payloads, or raw
+  monitor payload dumps.
 - Extension-owned HTTP servers bind only to `127.0.0.1`, close during
   `onClose()`, and use per-launch token protection when a helper/proxy route
   exposes monitor state. CORS stays disabled unless a later explicit decision
@@ -257,16 +259,16 @@ unchanged):
 - Sprint11 M5 UI-to-Copilot trigger (D029): `open()` returns an
   extension-owned loopback helper page (per-launch token in the page URL) that
   shows monitor health, a trace dropdown, a focus selector, and an
-  "Analyze selected trace with Copilot" button. The helper page proxies only
+  "Analyze selected trace with Copilot" button. The helper page proxies
   sanitized `GET /api/monitor/traces?limit=50` for the dropdown
   (`compactTrace`-shaped items only) on a token-protected route; the proxy
   rejects missing/wrong tokens with `401`. The trigger button posts to a
   token-protected `POST /analyze` route that validates trace id / optional span
   id / focus, then calls `session.send({ prompt })` with an instruction that
-  references only the selected ids, the focus, and sanitized action names
-  (`get_trace_summary` / `get_trace_span_tree` / `get_cache_summary`), and
-  explicitly forbids requesting raw prompt / response bodies, tool arguments /
-  results, PII, credentials, or local sensitive paths. The trigger payload
+  references only the selected ids, the focus, and bounded action names
+  (`get_trace_summary` / `get_trace_span_tree` / `get_cache_summary`). Raw
+  details remain local Monitor UI data and are not copied into Canvas action
+  responses, logs, committed files, or static artifacts. The trigger payload
   never embeds monitor payload, raw bodies, tool arguments / results, PII,
   credentials, tokens, or local sensitive paths. `session.send()` is
   fire-and-forget; the helper page returns `{ ok: true, dispatched: true }`.

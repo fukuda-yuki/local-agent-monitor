@@ -358,8 +358,9 @@ status / `error_type`, and span timing) is already in this sanitized row. See
 sanitized-only consumption invariant and the out-of-scope items (Cache Explorer
 raw prefix-diff, `conversation_id` cross-trace stitching).
 
-The Sprint11 GitHub Copilot app Canvas adapter is a consumer of the same
-sanitized monitor APIs. Canvas actions read `GET /api/monitor/traces`,
+The Sprint11 GitHub Copilot app Canvas adapter is a consumer of the same Local
+Monitor surface and may be used with the normal raw-default monitor. Canvas
+actions read `GET /api/monitor/traces`,
 `GET /api/monitor/traces/{traceId}/spans`, and `/health/ready` as needed, then
 return bounded LLM-oriented DTOs rather than raw monitor payload dumps. The
 documented actions are `monitor_health()`,
@@ -368,20 +369,19 @@ documented actions are `monitor_health()`,
 `get_cache_summary({ traceId })`; `list_recent_traces.limit` is bounded to
 `1..50` for Canvas action output. Sprint11 adds no telemetry input, SQLite
 schema, projection column, endpoint, query parameter, response field, raw route,
-normalized dataset field, candidate record field, or dashboard contract. Canvas
-display requires the monitor to run with `--sanitized-only`, so the sanitized
-TraceDetail tab shell remains available and raw-bearing sections/routes are not
-opened by the adapter.
+normalized dataset field, candidate record field, or dashboard contract.
+`--sanitized-only` remains an optional Local Monitor metadata-only mode, not a
+Canvas requirement.
 
 Sprint11 M5 adds an optional UI-to-Copilot analysis trigger (D029). `open()`
 returns an extension-owned loopback helper page (per-launch token) that proxies
-only sanitized `GET /api/monitor/traces?limit=50` for a trace dropdown and
+sanitized `GET /api/monitor/traces?limit=50` for a trace dropdown and
 exposes an "Analyze selected trace with Copilot" button. The button posts to a
 token-protected `POST /analyze` route that calls `session.send({ prompt })` with
 an instruction referencing only the selected trace id, optional span id, focus
-(`latency` / `tokens` / `cache` / `errors`), and sanitized action names; it
-explicitly forbids requesting raw bodies, tool arguments / results, PII,
-credentials, or local sensitive paths. No monitor payload is embedded in the
+(`latency` / `tokens` / `cache` / `errors`), and action names. Raw details remain
+local Monitor UI data and are not copied into Canvas action responses, logs,
+committed files, or static artifacts. No monitor payload is embedded in the
 trigger instruction. M5 adds no telemetry input, schema, endpoint, query
 parameter, response field, raw route, or dependency.
 
@@ -399,7 +399,7 @@ excluded. Raw / PII is never logged or committed.
 
 Live validation for the monitor records the same evidence as the
 `raw-local-receiver` profile, plus the monitor port, the VS Code / GitHub
-Copilot extension version, and whether `--sanitized-only` was set.
+Copilot extension version, and optionally whether `--sanitized-only` was set.
 
 ## Resource Attributes
 

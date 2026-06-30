@@ -33,7 +33,7 @@ public class CanvasExtensionContractTests
     }
 
     [Fact]
-    public void Extension_FetchesOnlySanitizedMonitorEndpoints()
+    public void Extension_ActionsFetchOnlyBoundedMonitorEndpoints()
     {
         var script = ReadExtension();
 
@@ -85,12 +85,24 @@ public class CanvasExtensionContractTests
         Assert.Contains("\"cache\"", script);
         Assert.Contains("\"errors\"", script);
 
-        // Trigger instruction forbids raw bodies.
-        Assert.Contains("must not request raw prompt bodies", script);
+        // Canvas launch mode is not constrained here, but action/log/artifact boundaries remain.
+        Assert.DoesNotContain("--sanitized-only", script);
+        Assert.Contains("normal raw-default Local Monitor", script);
+        Assert.Contains("must not contain raw telemetry or PII", script);
 
         // Boundary invariants preserved.
         Assert.DoesNotContain("/raw", script);
         Assert.DoesNotContain("console.log", script);
+    }
+
+    [Fact]
+    public void Extension_DoesNotRequireSanitizedOnlyLaunch()
+    {
+        var script = ReadExtension();
+
+        Assert.DoesNotContain("--sanitized-only", script);
+        Assert.DoesNotContain("Canvas-safe" + " posture", script);
+        Assert.DoesNotContain("Requires the Local" + " Monitor", script);
     }
 
     private static string ReadExtension()
@@ -105,7 +117,8 @@ public class CanvasExtensionContractTests
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {
-            if (Directory.Exists(Path.Combine(directory.FullName, ".git")))
+            var gitPath = Path.Combine(directory.FullName, ".git");
+            if (Directory.Exists(gitPath) || File.Exists(gitPath))
             {
                 return directory.FullName;
             }

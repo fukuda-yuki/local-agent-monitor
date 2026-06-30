@@ -2,13 +2,13 @@
 //
 // Sprint11 M3/M4/M5: project-scoped Canvas extension for the Local Ingestion
 // Monitor. This is a thin adapter — it does not reimplement the monitor UI or
-// expose sensitive telemetry data. The Local Monitor must be launched with
-// --sanitized-only for Canvas-safe posture.
+// expose raw telemetry through Canvas action responses or logs. It may be used
+// with the Local Monitor's normal raw-default UI posture.
 //
 // M5 adds an extension-owned loopback helper page with a trace dropdown
 // (proxied from sanitized /api/monitor/traces) and an "Analyze selected trace
-// with Copilot" trigger that calls session.send() with a sanitized-only
-// instruction. See D029.
+// with Copilot" trigger that calls session.send() with a bounded monitor
+// analysis instruction. See D029.
 //
 // Canvas id: otel-monitor
 // Display name: OTel Monitor
@@ -152,7 +152,7 @@ function renderHelperHtml({ instanceId, monitorUrl, healthStatus, healthBody, er
   <h1>OTel Monitor — Canvas</h1>
 
   ${error ? `<div class="banner banner-err">${escapedError}</div>` : ""}
-  ${healthy ? "" : `<div class="banner banner-warn">Monitor is not reporting healthy. Ensure the Local Monitor is running with <code>--sanitized-only</code>.</div>`}
+  ${healthy ? "" : `<div class="banner banner-warn">Monitor is not reporting healthy. Check that the Local Monitor is running and ready.</div>`}
 
   <div class="card">
     <h2>Connection</h2>
@@ -167,7 +167,7 @@ function renderHelperHtml({ instanceId, monitorUrl, healthStatus, healthBody, er
 
   <div class="card">
     <h2>Analyze selected trace with Copilot</h2>
-    <p style="margin-bottom:12px;color:var(--muted);">Select a trace and a focus, then trigger a Copilot analysis. Copilot will use sanitized monitor actions only and must not request raw prompt/response bodies.</p>
+    <p style="margin-bottom:12px;color:var(--muted);">Select a trace and a focus, then trigger a Copilot analysis. Copilot will use bounded monitor actions and will not receive raw monitor payloads from this helper.</p>
     <div class="row">
       <label for="trace">Trace</label>
       <select id="trace" ${healthy ? "" : "disabled"}></select>
@@ -191,12 +191,12 @@ function renderHelperHtml({ instanceId, monitorUrl, healthStatus, healthBody, er
 
   <div class="card">
     <h2>Monitor pages</h2>
-    <p>Open the sanitized Local Monitor pages in your browser: <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer">${escapedUrl}</a></p>
+    <p>Open the Local Monitor pages in your browser: <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer">${escapedUrl}</a></p>
   </div>
 
   <div class="card">
-    <h2>Canvas-safe posture</h2>
-    <p>This Canvas adapter requires the Local Monitor to be launched with <code>--sanitized-only</code>. Sensitive local telemetry must not be exposed through Canvas actions or display.</p>
+    <h2>Local monitor posture</h2>
+    <p>This adapter works with the Local Monitor's normal raw-default UI. Canvas action responses and logs must not contain raw telemetry or PII.</p>
   </div>
 
   <script>
@@ -271,18 +271,18 @@ function buildAnalysisPrompt({ traceId, spanId, focus }) {
     const actions = focusActions[focus] ?? ["get_trace_summary"];
     const spanLine = spanId ? `Selected span id: ${spanId}\n` : "";
     return [
-        `Analyze the selected Local Ingestion Monitor trace using only sanitized Canvas actions.`,
+        `Analyze the selected Local Ingestion Monitor trace using bounded Canvas actions.`,
         `Trace id: ${traceId}`,
         spanLine,
         `Analysis focus: ${focus}.`,
         ``,
-        `Call the following sanitized monitor actions via invoke_canvas_action on the open otel-monitor canvas instance to gather data:`,
+        `Call the following monitor actions via invoke_canvas_action on the open otel-monitor canvas instance to gather bounded data:`,
         ...actions.map((a) => `  - ${a}({ traceId: "${traceId}" })`),
         ``,
         `Constraints:`,
-        `- Use only the sanitized monitor actions listed above.`,
-        `- You must not request raw prompt bodies, raw response bodies, tool arguments, tool results, PII, credentials, tokens, or local sensitive paths.`,
-        `- Do not attempt to open raw-bearing monitor routes.`,
+        `- Use the monitor actions listed above; they return bounded DTOs from existing Local Monitor APIs.`,
+        `- Do not copy raw prompt bodies, raw response bodies, tool arguments, tool results, PII, credentials, tokens, or local sensitive paths into Canvas action responses, logs, committed files, or static artifacts.`,
+        `- Raw details, when needed, remain local Monitor UI data under its existing loopback and same-origin boundary.`,
         `- Summarize findings and suggest improvements for the ${focus} focus.`,
     ].filter(Boolean).join("\n");
 }
@@ -728,7 +728,7 @@ async function handleMonitorHealth(ctx) {
             canvas_safe: health.ok && health.readiness?.status === "ready",
             monitor_base_url: health.monitorUrl,
             diagnostic: health.ok
-                ? "Local Monitor is reachable. Canvas-safe posture still requires --sanitized-only launch."
+                ? "Local Monitor is reachable. Canvas adapter can be used with the normal raw-default Local Monitor."
                 : "Local Monitor is reachable but not ready.",
         });
     } catch (err) {
@@ -864,7 +864,7 @@ const session = await joinSession({
             id: "otel-monitor",
             displayName: "OTel Monitor",
             description:
-                "Local Ingestion Monitor Canvas adapter. Requires the Local Monitor to run with --sanitized-only. Opens sanitized monitor pages and provides agent-callable actions over existing /api/monitor/* data.",
+                "Local Ingestion Monitor Canvas adapter. Opens Local Monitor pages and provides agent-callable bounded actions over existing /api/monitor/* data.",
 
             inputSchema: {
                 type: "object",
@@ -881,7 +881,7 @@ const session = await joinSession({
             actions: [
                 {
                     name: "monitor_health",
-                    description: "Return Local Monitor readiness and Canvas-safe posture diagnostics.",
+                    description: "Return Local Monitor readiness and Canvas adapter diagnostics.",
                     inputSchema: {
                         type: "object",
                         additionalProperties: false,
@@ -959,7 +959,7 @@ const session = await joinSession({
                     : (health.statusCode !== null ? `unhealthy (${health.statusCode})` : "unreachable");
 
                 // Always start the extension-owned helper page (M5). The page
-                // shows monitor health, a trace dropdown (proxied from sanitized
+                // shows monitor health, a trace dropdown (proxied from
                 // /api/monitor/traces), a focus selector, and the
                 // "Analyze selected trace with Copilot" trigger. The trigger is
                 // disabled when the monitor is not healthy.

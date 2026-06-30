@@ -58,15 +58,15 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 任意機能:
 
 - Codex App / app-server の OTel trace / logs / metrics 収集。
-- GitHub Copilot app Canvas adapter。Local Ingestion Monitor の既存 sanitized
-  monitor context を Copilot app side panel から参照する任意統合として扱う。
-  Canvas-safe posture は Local Monitor を `--sanitized-only` で起動することとし、
-  Canvas adapter は既存 `/api/monitor/*` と sanitized TraceDetail tab shell の
-  範囲だけを扱う。Sprint11 M5 では拡張所有の loopback ヘルパーページ上に
-  「Analyze selected trace with Copilot」UI トリガーを任意提供し、トリガー指示は
-  選択した trace id・optional span id・focus・sanitized action 名のみを含み、
-  raw prompt / response body、tool arguments / results、PII、credential、token、
-  local sensitive path を含めない（D029）。
+- GitHub Copilot app Canvas adapter。Local Ingestion Monitor の既存 monitor
+  context を Copilot app side panel から参照する任意統合として扱う。Canvas
+  adapter は raw default の Local Monitor を扱ってよいが、Canvas actions /
+  logs / committed outputs / static artifacts へ raw prompt / response body、
+  tool arguments / results、PII、credential、token、local sensitive path、raw OTLP
+  payload を返してはならない。Sprint11 M5 では拡張所有の loopback
+  ヘルパーページ上に「Analyze selected trace with Copilot」UI トリガーを任意提供し、
+  トリガー指示は選択した trace id・optional span id・focus・action 名のみを含み、
+  monitor payload や raw / PII を埋め込まない（D029）。
 - Grafana JSON dashboard fallback。
 
 参考のみ:
@@ -212,7 +212,7 @@ Repository に保存してはならないもの:
 
 Local Ingestion Monitor の raw / PII 表示は loopback-only の runtime surface であり、ここで定義する repository 保存禁止や §9 の static dashboard 非表示とは別物である。raw body（tool call arguments / results、sub-agent instructions / responses、system prompt）と PII（`user.id` / `user.email`）は **既定で表示する**（server-rendered、inert text）。`--sanitized-only` フラグで metadata-only モードを復元し、TraceDetail の raw section と full raw route を除外して PII を除外できる（D023 / D030）。`--sanitized-only` でも TraceDetail の sanitized tab shell は表示される。既定・`--sanitized-only` いずれの場合も raw / PII を repository-safe outputs、static dashboard、ログ、GitHub Pages snapshot へ出力してはならない。`/api/monitor/*` と SSE は常に sanitized metadata のみを返す。この表示は単一のローカル利用者が自分のデータを閲覧する用途に限り、cross-machine な露出（remote / non-loopback、browser 経由の off-machine 送出）から防御する。
 
-GitHub Copilot app Canvas adapter は Local Monitor の任意表示統合であり、Canvas actions と Canvas 表示は sanitized data boundary の外へ出てはならない。Canvas adapter を使う場合は Local Monitor を `--sanitized-only` で起動することを Canvas-safe posture とし、adapter は既存 sanitized `/api/monitor/*` API と sanitized TraceDetail tab shell だけを読む。Canvas action responses、logs、committed outputs には raw prompt / response body、tool arguments / results、PII、credential、token、local sensitive path、raw OTLP payload を含めてはならない。
+GitHub Copilot app Canvas adapter は Local Monitor の任意表示統合であり、raw default の Local Monitor を扱ってよい。ただし Canvas action responses、logs、committed outputs、repository-safe artifacts、static dashboard、GitHub Pages snapshot には raw prompt / response body、tool arguments / results、PII、credential、token、local sensitive path、raw OTLP payload を含めてはならない。`--sanitized-only` は Canvas 専用要件ではなく、必要に応じて利用者が選ぶ metadata-only opt-out として残す。Canvas adapter は新たな telemetry input / schema / raw JSON API を追加しない。
 
 共有環境、実データ、社内サーバー、GitHub Pages publish を扱う場合は、アクセス権、保持期間、削除方法、masking / redaction、利用者周知を先に決める。
 remote managed Langfuse / Collector endpoint を使う場合は、送信前に access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を確認する。
