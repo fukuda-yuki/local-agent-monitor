@@ -73,6 +73,8 @@ internal static class MonitorHost
             ?? new RawTelemetryStoreProjectionStore(
                 new RawTelemetryStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
         builder.Services.AddSingleton(projectionStore);
+        var summaryService = new MonitorSummaryService(projectionStore);
+        builder.Services.AddSingleton(summaryService);
         var analysisStore = testOptions?.AnalysisStore ?? new SqliteMonitorAnalysisStore(options.DatabasePath);
         analysisStore.CreateSchema();
         builder.Services.AddSingleton(analysisStore);
@@ -170,30 +172,7 @@ internal static class MonitorHost
             try
             {
                 var page = projectionStore.ListMonitorTraces(after, limit);
-                var items = page.Items.Select(row => new
-                {
-                    id = row.Id,
-                    trace_id = row.TraceId,
-                    client_kind = row.ClientKind,
-                    experiment_id = row.ExperimentId,
-                    task_id = row.TaskId,
-                    task_category = row.TaskCategory,
-                    agent_variant = row.AgentVariant,
-                    prompt_version = row.PromptVersion,
-                    span_count = row.SpanCount,
-                    tool_call_count = row.ToolCallCount,
-                    error_count = row.ErrorCount,
-                    first_seen_at = row.FirstSeenAt,
-                    last_seen_at = row.LastSeenAt,
-                    projected_at = row.ProjectedAt,
-                    input_tokens = row.InputTokens,
-                    output_tokens = row.OutputTokens,
-                    total_tokens = row.TotalTokens,
-                    turn_count = row.TurnCount,
-                    agent_invocation_count = row.AgentInvocationCount,
-                    duration_ms = row.DurationMs,
-                    primary_model = row.PrimaryModel,
-                });
+                var items = page.Items.Select(ToTraceDto);
                 long? nextCursor = page.HasMore && page.Items.Count > 0 ? page.Items[^1].Id : null;
                 await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
             }
@@ -247,6 +226,44 @@ internal static class MonitorHost
                 });
                 long? nextCursor = page.HasMore && page.Items.Count > 0 ? page.Items[^1].Id : null;
                 await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
+            }
+            catch (PersistenceBusyException)
+            {
+                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+            }
+        });
+        app.MapGet("/api/monitor/summary", async context =>
+        {
+            if (!TryParseLimitQuery(context, out var limit))
+            {
+                await WriteInvalidLimitQueryAsync(context);
+                return;
+            }
+
+            try
+            {
+                var summary = summaryService.BuildSummary(limit);
+                await WriteJsonAsync(context, new
+                {
+                    scope = new { limit, trace_count = summary.TraceCount },
+                    latest_trace = ToTraceDto(summary.LatestTrace),
+                    top_token_trace = ToTraceDto(summary.TopTokenTrace),
+                    error_trace = ToTraceDto(summary.ErrorTrace),
+                    per_model_summary = summary.PerModelSummary.Select(m => new
+                    {
+                        model = m.Model,
+                        trace_count = m.TraceCount,
+                        total_tokens = m.TotalTokens,
+                        error_count = m.ErrorCount,
+                    }),
+                    per_client_kind_summary = summary.PerClientKindSummary.Select(c => new
+                    {
+                        client_kind = c.ClientKind,
+                        trace_count = c.TraceCount,
+                        total_tokens = c.TotalTokens,
+                        error_count = c.ErrorCount,
+                    }),
+                });
             }
             catch (PersistenceBusyException)
             {
@@ -567,6 +584,32 @@ internal static class MonitorHost
     private static bool HasMonitorCsrfHeader(HttpContext context) =>
         string.Equals(context.Request.Headers["x-monitor-csrf"].ToString(), "local-monitor", StringComparison.Ordinal);
 
+    /// <summary>The same <c>compactTrace</c>-shaped projection <c>/api/monitor/traces</c> emits per item, reused for the summary's embedded highlight traces.</summary>
+    private static object? ToTraceDto(MonitorTraceRow? row) => row is null ? null : new
+    {
+        id = row.Id,
+        trace_id = row.TraceId,
+        client_kind = row.ClientKind,
+        experiment_id = row.ExperimentId,
+        task_id = row.TaskId,
+        task_category = row.TaskCategory,
+        agent_variant = row.AgentVariant,
+        prompt_version = row.PromptVersion,
+        span_count = row.SpanCount,
+        tool_call_count = row.ToolCallCount,
+        error_count = row.ErrorCount,
+        first_seen_at = row.FirstSeenAt,
+        last_seen_at = row.LastSeenAt,
+        projected_at = row.ProjectedAt,
+        input_tokens = row.InputTokens,
+        output_tokens = row.OutputTokens,
+        total_tokens = row.TotalTokens,
+        turn_count = row.TurnCount,
+        agent_invocation_count = row.AgentInvocationCount,
+        duration_ms = row.DurationMs,
+        primary_model = row.PrimaryModel,
+    };
+
     private static object ToRunDto(MonitorAnalysisRun run, bool includeRawResult) => new
     {
         id = run.Id,
@@ -642,6 +685,25 @@ internal static class MonitorHost
 
     private static Task WriteInvalidCursorQueryAsync(HttpContext context) =>
         WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_query", "after must be a non-negative integer and limit must be between 1 and 200.");
+
+    private static Task WriteInvalidLimitQueryAsync(HttpContext context) =>
+        WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_query", "limit must be between 1 and 200.");
+
+    private static bool TryParseLimitQuery(HttpContext context, out int limit)
+    {
+        const int defaultLimit = 50;
+        const int maxLimit = 200;
+        limit = defaultLimit;
+
+        var limitValue = context.Request.Query["limit"].ToString();
+        if (!string.IsNullOrEmpty(limitValue)
+            && (!int.TryParse(limitValue, NumberStyles.None, CultureInfo.InvariantCulture, out limit) || limit < 1 || limit > maxLimit))
+        {
+            return false;
+        }
+
+        return true;
+    }
 
     private static async Task WriteJsonAsync(HttpContext context, object body)
     {

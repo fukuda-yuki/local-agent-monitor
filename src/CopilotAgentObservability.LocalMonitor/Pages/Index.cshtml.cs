@@ -68,14 +68,13 @@ public sealed class IndexModel : PageModel
             return PersistenceBusy();
         }
 
-        // Highlight cards: derived server-side from the rows already fetched above
-        // (existing API only; no new schema or field).
-        LatestTrace = RecentTraces.Count > 0 ? RecentTraces[0] : null;
-        TopTokenTrace = RecentTraces
-            .Where(trace => (trace.TotalTokens ?? 0) > 0)
-            .OrderByDescending(trace => trace.TotalTokens ?? 0)
-            .FirstOrDefault();
-        ErrorTrace = RecentTraces.FirstOrDefault(trace => (trace.ErrorCount ?? 0) > 0);
+        // Highlight cards: derived server-side from the same bounded window via the
+        // shared summary service (also used by GET /api/monitor/summary, D037 child B).
+        var summaryService = HttpContext.RequestServices.GetRequiredService<MonitorSummaryService>();
+        var summary = summaryService.BuildSummary(RecentLimit);
+        LatestTrace = summary.LatestTrace;
+        TopTokenTrace = summary.TopTokenTrace;
+        ErrorTrace = summary.ErrorTrace;
 
         if (RawAvailable)
         {
