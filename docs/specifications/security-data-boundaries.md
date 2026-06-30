@@ -93,9 +93,11 @@ Default posture:
   system prompt) and PII (`user.id` / `user.email`) are shown **by default**
   (server-rendered, inert text) on raw-bearing surfaces.
 - `--sanitized-only` restores metadata-only mode: the full raw route returns
-  `404`, TraceDetail's raw section and full raw links are omitted, PII is
-  excluded, and the sanitized TraceDetail tab shell remains available. This is
-  an optional compatibility / opt-out mode, not a Canvas requirement.
+  `404`, TraceDetail's raw section and full raw links are omitted, the dashboard
+  and trace-list prompt labels are omitted (a shortened TraceId is shown
+  instead), PII is excluded, and the sanitized TraceDetail tab shell remains
+  available. This is an optional compatibility / opt-out mode, not a Canvas
+  requirement.
 - API responses (`/api/monitor/*`), list endpoints, and the SSE stream carry
   sanitized metadata only — they **never** return raw / PII, regardless of
   `--sanitized-only`.
@@ -138,13 +140,22 @@ Raw-bearing surfaces:
     single-record raw route by default).
   - `GET /traces/{rawRecordId}/raw` (server-rendered HTML, one raw record on
     demand by id from `raw_records`).
+  - the **dashboard page (`/`)** and the **trace-list page (`/traces`)** — they
+    render a single representative **user prompt per trace** (extracted
+    server-side from the trace's raw OTLP payload, truncated, escaped inert
+    text) so a trace is identifiable by what the user asked rather than by an
+    opaque id (D032). Only this short prompt label is raw; all other columns
+    stay sanitized metadata. Under `--sanitized-only` the prompt label is
+    omitted and a shortened TraceId is shown instead.
 - there is **no JSON raw API**; `/api/monitor/*` and the SSE stream **never**
-  return raw / PII.
+  return raw / PII (the prompt label is server-rendered only; client-side JS
+  never fetches it).
 - **default-on**: raw-bearing routes are active by default (no launch flag
   required). `--sanitized-only` removes raw-bearing surfaces: the raw-detail
   route returns `404`, the trace-detail page omits its raw section and full raw
-  links while retaining the sanitized tab shell, PII is excluded, and no
-  cacheable raw response is generated.
+  links while retaining the sanitized tab shell, the dashboard and trace-list
+  pages omit their per-trace prompt labels (showing a shortened TraceId), PII is
+  excluded, and no cacheable raw response is generated.
 - **every raw-bearing route or page variant** enforces:
   - same-origin: a request whose `Sec-Fetch-Site` is cross-site / cross-origin
     (or whose `Origin` is foreign) is rejected with `403`.
@@ -198,8 +209,13 @@ Mandatory negative tests:
 
 - non-loopback bind rejected; `Host`-header validation enforced.
 - with `--sanitized-only`, the full raw route returns `404`, the trace-detail
-  raw section and full raw links are absent, PII is excluded, and no cacheable
-  raw response is generated.
+  raw section and full raw links are absent, the dashboard and trace-list
+  per-trace prompt labels are absent, PII is excluded, and no cacheable raw
+  response is generated.
+- the dashboard (`/`) and trace-list (`/traces`) pages render the per-trace
+  user-prompt label **by default**, omit it under `--sanitized-only` (showing a
+  shortened TraceId instead), and the prompt label never appears in
+  `/api/monitor/*` or the SSE stream (D032).
 - a cross-site / cross-origin request to any raw-bearing route / page variant is rejected with
   `403`.
 - `Cache-Control: no-store` is present on **all** raw-bearing routes / page
@@ -221,12 +237,14 @@ Sprint10 design views (client-side presentation, boundary unchanged):
   surfaces, the default-on posture, and `--sanitized-only` raw removal are
   unchanged; the new views work identically under `--sanitized-only` because
   they were sanitized to begin with.
-- **vendored, no CDN.** Cytoscape.js + dagre + cytoscape-dagre (D025) and Noto
-  Sans JP / Noto Sans Mono (D028) are vendored locally under `wwwroot/vendor/`;
-  no Content-Delivery-Network or external font fetch is introduced, so offline /
-  loopback-only operation is preserved and no third-party origin is contacted at
-  runtime. Version / SHA-256 / size / license are recorded at vendoring time
-  (fonts M2, Cytoscape / dagre M3).
+- **vendored, no CDN.** Noto Sans JP / Noto Sans Mono (D028) are vendored
+  locally under `wwwroot/vendor/`; no Content-Delivery-Network or external font
+  fetch is introduced, so offline / loopback-only operation is preserved and no
+  third-party origin is contacted at runtime. Version / SHA-256 / size / license
+  are recorded at vendoring time (fonts M2). The Cytoscape.js + dagre +
+  cytoscape-dagre vendored graph dependency (D025) is **removed** by D033; the
+  Flow Chart and Span Tree are now plain DOM built by Vanilla JS from the
+  sanitized spans API (no third-party graph runtime).
 - **Cache Explorer is sanitized-metrics-only** (D026): cache-hit rate,
   cache-creation tokens, duration, model, timestamp, and the per-turn token
   breakdown, grouped within one trace. The VS Code "prefix diff of consecutive
@@ -289,6 +307,31 @@ unchanged):
   "otel-monitor-canvas", location: "project" })` when available. If scaffold or
   validation tools are unavailable, implementation records the blocker and stops;
   hand-written fallback requires explicit product-owner approval.
+
+Sprint12 UX redesign (prompt identification + DOM views, boundary controls
+reused):
+
+- **Prompt-identified dashboard / trace list (D032).** The dashboard (`/`) and
+  the trace-list page (`/traces`) join the raw-bearing surface set: each renders
+  one representative **user prompt per trace**, extracted server-side from the
+  trace's raw OTLP payload, truncated, and emitted as escaped inert text (Razor
+  default encoding; no `Html.Raw`). Only that short label is raw — every other
+  field stays sanitized metadata. Both pages enforce the same controls as the
+  existing raw-bearing routes: same-origin (`403` on cross-site), `Cache-Control:
+  no-store`, and removal under `--sanitized-only` (the label is dropped and a
+  shortened TraceId is shown). The prompt label is server-rendered only; the
+  sanitized `/api/monitor/*` JSON and the SSE stream are unchanged and still
+  never carry it. No projection schema, API field, or new endpoint is added. The
+  old `/ingestions` page is retired and its ingestion list is folded into the
+  dashboard.
+- **DOM Flow Chart / Span Tree (D033).** The Cytoscape.js + dagre vendored graph
+  dependency is removed; the trace-detail visualization is plain DOM (an
+  indented Span Tree with a waterfall bar, plus a DOM flow view) built by
+  Vanilla JS from the sanitized spans API only — `textContent` rendering, no
+  `innerHTML` / `Html.Raw`, no `/raw` access.
+- captured content (and the prompt label) keeps rendering as escaped inert text;
+  the redesign adds no CSP / sanitizer / XSS-matrix apparatus (AGENTS.md
+  Local-First Risk Posture, D020).
 
 ## Shared Use Preconditions
 

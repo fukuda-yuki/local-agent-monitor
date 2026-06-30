@@ -391,11 +391,18 @@ Raw / PII exposure follows the Local Ingestion Monitor boundary in
 prompt) and PII (`user.id` / `user.email`) are shown **by default**
 (server-rendered, inert text) on raw-bearing surfaces. The trace-detail page
 renders a bounded inline raw preview and links to `GET /traces/{rawRecordId}/raw`
-for the full single-record payload by default. `/api/monitor/*` and SSE never
-carry raw / PII. The `--sanitized-only` flag restores metadata-only mode: the
-trace-detail page still returns the sanitized tab shell, omits the raw section
-and full raw links, `GET /traces/{rawRecordId}/raw` returns `404`, and PII is
-excluded. Raw / PII is never logged or committed.
+for the full single-record payload by default. The dashboard (`/`) and trace-list
+(`/traces`) pages additionally render a single representative user-prompt label
+per trace (server-side extracted from the trace's raw OTLP payload, truncated,
+inert text) so a trace is identifiable by what the user asked (D032); only that
+short label is raw and `/api/monitor/*` / SSE still never carry it. The Sprint12
+Flow Chart / Span Tree views are plain DOM over the sanitized spans API (the
+Cytoscape / dagre vendored dependency is removed, D033). `/api/monitor/*` and SSE
+never carry raw / PII. The `--sanitized-only` flag restores metadata-only mode:
+the trace-detail page still returns the sanitized tab shell, omits the raw
+section and full raw links, the dashboard / trace-list prompt label is omitted (a
+shortened TraceId is shown), `GET /traces/{rawRecordId}/raw` returns `404`, and
+PII is excluded. Raw / PII is never logged or committed.
 
 Live validation for the monitor records the same evidence as the
 `raw-local-receiver` profile, plus the monitor port, the VS Code / GitHub

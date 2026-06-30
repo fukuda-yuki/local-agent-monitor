@@ -696,3 +696,57 @@ Consequences:
 - CI では script existence / parse / stable defaults / dry-run task shape を検証し、
   actual Task Scheduler registration と logon trigger は Windows 実機 validation evidence
   として扱う。
+
+## D032: ダッシュボード / トレース一覧をプロンプト識別の raw-bearing 面に拡張（D023 更新）
+
+Status: Accepted
+
+単一ローカル利用者がトレースを不透明な TraceId ではなく「自分が入力したプロンプト」で
+識別できるよう、ダッシュボード（`/`）とトレース一覧（`/traces`）に代表プロンプトを
+server-rendered で表示する。これにより両ページは trace-detail page と
+`GET /traces/{rawRecordId}/raw` に続く **raw-bearing route** になる。
+
+変更点:
+
+- ダッシュボードとトレース一覧を raw-bearing route set に加える。プロンプトは raw store の
+  OTLP payload から server-side で抽出し、escaped inert text で表示する（`Html.Raw` 不可）。
+- 両ページに既存 raw-bearing route と同一の制御を強制する: same-origin（`Origin` /
+  `Sec-Fetch-Site` ⇒ cross-site `403`）、`Cache-Control: no-store`、`--sanitized-only` で
+  プロンプト表示と raw リンクを除去し短縮 TraceId にフォールバック。
+- プロンプト抽出・表示は server-rendered Razor ページに限定する。`/api/monitor/*` と SSE は
+  従来どおり sanitized metadata のみで、プロンプトを含めない（JS は raw を取得しない）。
+- 旧 `/ingestions` ページは廃止し、取り込み一覧はダッシュボードへ統合する（route 削除）。
+
+不変（D020 / D023 / DR6 の cross-machine 防御を維持）:
+
+- loopback-only bind、`Host` header 検証、CORS 無効、state-changing action の CSRF + same-origin。
+- `/api/monitor/*` と SSE は sanitized metadata のみ。projection schema / API field は追加しない。
+- raw / PII を log、repository-safe outputs、static dashboard、GitHub Pages snapshot に書かない。
+- captured content は escaped inert text で描画。追加の CSP / sanitizer / XSS payload-matrix
+  機構は設けない（AGENTS.md Local-First Risk Posture / D020）。
+
+受容リスクの拡張:
+
+- raw（プロンプト）が到達可能な server-rendered 面が trace-detail から
+  ダッシュボード / トレース一覧へ広がる。単一利用者ローカルマシンの自己デバッグ利便性の
+  トレードオフとして product owner が受容。`--sanitized-only` が opt-out 安全弁。
+
+## D033: Flow Chart を素の DOM 実装に置換し Cytoscape / dagre vendored 依存を撤回（D025 更新）
+
+Status: Accepted
+
+trace-detail の可視化を Cytoscape.js + dagre による canvas グラフから **素の DOM 実装**に
+置き換える。詳細ビューは「スパンツリー（インデント + ウォーターフォールバー）」と
+「DOM フローチャート（時系列ノード + コネクタ）」を toggle で切替える。
+
+変更点:
+
+- `wwwroot/vendor/cytoscape.min.js` / `dagre.min.js` / `cytoscape-dagre.js` と
+  `_Layout.cshtml` の読み込みを削除する。
+- Span Tree / Flow Chart は Vanilla JS が sanitized spans API のみから DOM を構築する
+  （`textContent` 描画、`innerHTML` / `Html.Raw` 不使用、`/raw` 非アクセス）。
+
+不変:
+
+- D026（Cache Explorer は sanitized-metrics-only）、D027（VS Code 風ダークテーマ、DADS 非適用）、
+  D028（vendored Noto フォント、CDN 不使用）は維持。

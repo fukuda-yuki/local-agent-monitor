@@ -268,8 +268,14 @@ Raw access (default-on):
   links to the full single-record view, while `GET /traces/{rawRecordId}/raw`
   renders one full raw record. Both are server-rendered as inert text. There is
   no JSON raw API.
+- the dashboard (`/`) and trace-list (`/traces`) pages also render a single
+  representative **user-prompt label per trace** by default (extracted
+  server-side from the trace's raw OTLP payload, truncated, inert text) so a
+  trace is identifiable by what the user asked (D032); only this short label is
+  raw, all other columns stay sanitized metadata.
 - `--sanitized-only` restores metadata-only mode: raw-bearing routes return
-  `404`, PII is excluded. No cacheable raw response is generated.
+  `404`, the dashboard / trace-list prompt label is omitted (a shortened TraceId
+  is shown), PII is excluded. No cacheable raw response is generated.
 - raw-bearing routes enforce same-origin (`Origin` / `Sec-Fetch-Site` ⇒
   cross-site `403`) and `Cache-Control: no-store`.
 - raw / PII is never part of the projection tables, list responses, SSE
