@@ -813,3 +813,61 @@ raw を Copilot SDK analysis に渡すこと自体は禁止しない。
   repository-safe docs へ raw prompt / response / full tool arguments /
   full tool results / source fragment / credential / PII / local sensitive path を
   出してはならない。
+
+## D036: Canvas adapter を Local Monitor 再利用型診断 surface に位置づける
+
+Status: Accepted
+
+Sprint11 の Canvas adapter は「Local Monitor UI を再実装しない薄い adapter」
+（D029 / D030）として実装したが、ヘルパー UI は trace を英語の最小1行
+（`trace_id — status — spans:N`）でしか出さず、focus / ボタン文言が内部語のまま、
+接続エラー時の次操作も曖昧で、利用者が「どこを見て何を選び次に何をするか」を
+判断しづらい。本 Epic は Canvas adapter を、Local Monitor の既存 API /
+view model / projection を再利用した診断 surface へ引き上げる。second monitor の
+二重実装はしない。
+
+スプリント枠:
+
+- 本 Epic は「Sprint12 親 Issue」として起票されたが、リポジトリの Sprint12
+  （Monitor UX Redesign、D032 / D033）は完了済みであり、Sprint13 完了・Sprint14
+  実装中である。番号衝突を避けるため、本 Epic は **Sprint15**
+  （Canvas Diagnostic Surface）として新設する。
+
+決定:
+
+- Canvas 診断 surface は Local Monitor の sanitized `/api/monitor/*` /
+  `/health/ready` / projection / view model を再利用して構成する。Canvas extension
+  内に Local Monitor UI を再実装しない（D030 を維持）。
+- 子 A（Canvas ヘルパー UX 改善）を**表示境界非変更**で実装する。対象は
+  (a) trace 一覧を status / model / span 数 / tool 数 / token / duration / time /
+  短縮 trace id を含む「判断できる一覧」にすること、(b) focus / ボタン / 見出し /
+  posture note の日本語化（focus の enum 値 `latency` / `tokens` / `cache` /
+  `errors` と action 名は不変）、(c) health / error 状態を
+  `ready` / `not_ready` / `unreachable` に区別し、確認 URL・起動コマンド・
+  設定確認・参照 monitor base URL など次操作を具体化すること、(d) health 生
+  レスポンスの既定折りたたみ。
+- 子 B（Canvas dashboard view）を将来実装する際は、Local Monitor 側に sanitized な
+  集計 endpoint（例 `/api/monitor/summary`）を追加し、`MonitorTraceRollup` と
+  既存 projection store を再利用して Razor Index と Canvas で共用する。公開
+  interface 変更のため spec を先行更新する。本スプリントでは実装しない。
+- 子 C（Canvas trace detail view）は既存 action（`get_trace_summary` /
+  `get_trace_span_tree` / `get_cache_summary`）の bounded projection を Canvas 上に
+  描画する。raw preview は含めない。本スプリントでは実装しない。
+- 子 D（Canvas raw preview boundary）と子 E（session-to-trace correlation）は
+  設計先行の独立した子 Issue とし、本スプリントでは実装しない。子 D は表示境界の
+  設計判断を伴うため、子 A の UX / bounded detail を整えてから判断する。
+- 子 A 着手前に、`docs/task.md` 技術負債 F8（Canvas 契約テストが文字列部分一致
+  中心で構文エラーや helper-server 回帰を検出できない）へ対応する。`extension.mjs`
+  から副作用のない純関数を `canvas-helpers.mjs` に抽出し、`node --check` と
+  `node --test` による実行可能 smoke coverage を追加する。
+
+不変:
+
+- Canvas action response は bounded DTO のまま維持し、raw prompt / response body、
+  tool arguments / results、PII、credential、token、local sensitive path、raw OTLP
+  payload を返さない（D030 / security-data-boundaries を維持）。
+- Canvas extension の loopback bind、per-launch token、`session.send` トリガー、
+  log / committed output / static artifact への raw / PII 非送出を維持する。
+- Canvas surface での prompt / response preview の可否は子 D の独立した境界設計
+  判断に委ね、子 A では有効化しない。
+- `--sanitized-only` を Canvas 利用の前提に戻さない（D030 を維持）。

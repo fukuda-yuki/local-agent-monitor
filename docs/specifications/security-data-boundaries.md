@@ -314,6 +314,31 @@ unchanged):
   validation tools are unavailable, implementation records the blocker and stops;
   hand-written fallback requires explicit product-owner approval.
 
+Sprint15 Canvas diagnostic surface — child A helper UX (boundary unchanged,
+D036):
+
+- Child A improves only the extension-owned helper page presentation. It
+  consumes the same sanitized surfaces as before — `GET /health/ready` and the
+  token-protected proxy of `GET /api/monitor/traces?limit=50`
+  (`compactTrace`-shaped items only) — and adds no new endpoint, raw-bearing
+  route, or monitor payload field. The decision-supporting trace line (status /
+  primary model / span count / tool count / token total / duration / time /
+  shortened trace id) is formatted from `compactTrace` fields that are already
+  sanitized; no prompt body or raw field is introduced.
+- Canvas action responses remain bounded DTOs; the loopback bind, per-launch
+  token (`x-canvas-token` / URL query), `session.send()` fire-and-forget
+  trigger, no-`console.log` diagnostics, and the no-raw/PII-to-logs/committed-
+  output/static-artifact boundary are all unchanged.
+- Prompt / response preview on any Canvas surface is **not** enabled by child A.
+  Whether the Canvas loopback helper page may show a prompt/response preview is
+  deferred to child D as a separate boundary-design decision; until that
+  decision, the helper page shows no raw prompt/response bodies.
+- A future Canvas dashboard view (child B) will reuse a new sanitized aggregate
+  endpoint on the Local Monitor (e.g. `/api/monitor/summary`, built from
+  `MonitorTraceRollup` and the existing projection store) shared with the Razor
+  index page; it must stay within the sanitized `/api/monitor/*` boundary (no
+  prompt body, no raw payload).
+
 Sprint12 UX redesign (prompt identification + DOM views, boundary controls
 reused):
 

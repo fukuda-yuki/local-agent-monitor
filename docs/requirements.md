@@ -61,13 +61,26 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 - Codex App / app-server の OTel trace / logs / metrics 収集。
 - GitHub Copilot app Canvas adapter。Local Ingestion Monitor の既存 monitor
   context を Copilot app side panel から参照する任意統合として扱う。Canvas
-  adapter は raw default の Local Monitor を扱ってよいが、Canvas actions /
-  logs / committed outputs / static artifacts へ raw prompt / response body、
-  tool arguments / results、PII、credential、token、local sensitive path、raw OTLP
-  payload を返してはならない。Sprint11 M5 では拡張所有の loopback
+  adapter は Local Ingestion Monitor の既存 API / view model / projection を
+  再利用した診断 surface であり、Canvas extension 内に Local Monitor UI を
+  再実装しない。Canvas adapter は raw default の Local Monitor を扱ってよいが、
+  Canvas actions / logs / committed outputs / static artifacts へ raw prompt /
+  response body、tool arguments / results、PII、credential、token、local sensitive
+  path、raw OTLP payload を返してはならない。Sprint11 M5 では拡張所有の loopback
   ヘルパーページ上に「Analyze selected trace with Copilot」UI トリガーを任意提供し、
   トリガー指示は選択した trace id・optional span id・focus・action 名のみを含み、
-  monitor payload や raw / PII を埋め込まない（D029）。
+  monitor payload や raw / PII を埋め込まない（D029）。Sprint15 では、拡張所有
+  ヘルパーページが (a) status / primary model / span 数 / tool 数 / token / duration /
+  time / 短縮 trace id を含む「判断できる」trace 一覧、(b) 日本語の focus / ボタン /
+  見出し（focus の enum 値 `latency` / `tokens` / `cache` / `errors` と action 名は
+  不変）、(c) `ready` / `not_ready` / `unreachable` を区別し確認 URL・起動コマンド・
+  設定確認・参照 monitor base URL など次操作を具体化した health / error 導線、
+  (d) health 生レスポンスの既定折りたたみ、を提供する。これは表示境界を変えず、
+  Canvas action response を bounded DTO のまま維持する（D036）。将来の Canvas
+  診断 surface（dashboard view、trace detail view、raw preview、session-to-trace
+  correlation）は Local Monitor の projection / endpoint / view model の再利用で
+  実現し、monitor UI を再実装しない。Canvas surface での prompt / response preview の
+  可否は独立した境界設計判断として扱う（D036）。
 - Grafana JSON dashboard fallback。
 
 参考のみ:
