@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public class CanvasExtensionContractTests
@@ -65,8 +67,8 @@ public class CanvasExtensionContractTests
     {
         var script = ReadExtension();
 
-        // M5 helper page + trigger button.
-        Assert.Contains("Analyze selected trace with Copilot", script);
+        // M5 helper page + trigger button (Sprint15 A3: Japanese button text).
+        Assert.Contains("Copilotでこのトレースを分析", script);
         Assert.Contains("renderHelperHtml", script);
         Assert.Contains("startHelperServer", script);
 
@@ -79,7 +81,7 @@ public class CanvasExtensionContractTests
         Assert.Contains("/api/traces", script);
         Assert.Contains("/analyze", script);
 
-        // Focus enum.
+        // Focus enum unchanged by Sprint15 A2's Japanese label change.
         Assert.Contains("\"latency\"", script);
         Assert.Contains("\"tokens\"", script);
         Assert.Contains("\"cache\"", script);
@@ -105,11 +107,106 @@ public class CanvasExtensionContractTests
         Assert.DoesNotContain("Requires the Local" + " Monitor", script);
     }
 
+    [Fact]
+    public void Extension_UsesJapaneseHelperUiText()
+    {
+        var script = ReadExtension();
+
+        // Sprint15 A2: focus option labels are Japanese; enum values (asserted
+        // above) are unchanged.
+        Assert.Contains("遅い原因", script);
+        Assert.Contains("トークン消費", script);
+        Assert.Contains("キャッシュ効率", script);
+        Assert.Contains("エラー原因", script);
+
+        // Sprint15 A4: concrete, state-specific health/error guidance.
+        Assert.Contains("Local Monitor が起動していません。", script);
+        Assert.Contains("Local Monitor は起動していますが ready ではありません。", script);
+        Assert.Contains("次の操作", script);
+        Assert.Contains("/health/ready", script);
+
+        // Sprint15 A5/A6: collapsed health response + Japanese monitor-page link.
+        Assert.Contains("Local Monitor の接続状態", script);
+        Assert.Contains("<details>", script);
+        Assert.Contains("Local Monitor をブラウザで開く", script);
+    }
+
+    [Fact]
+    public void Extension_DeclaresDecisionSupportingTraceLineFormatters()
+    {
+        var script = ReadExtension();
+
+        // Sprint15 A1: decision-supporting trace line, built only from
+        // sanitized compactTrace fields (no new monitor endpoint).
+        Assert.Contains("formatTraceLine", script);
+        Assert.Contains("statusLabel", script);
+        Assert.Contains("formatTokens", script);
+        Assert.Contains("formatDuration", script);
+        Assert.Contains("formatClock", script);
+        Assert.Contains("shortTraceId", script);
+    }
+
+    [Fact]
+    public void CanvasHelperJsPassesSyntaxCheckAndUnitSmoke()
+    {
+        // Sprint15 M1 A0 (F8 prerequisite): executable JS smoke wired into the
+        // dotnet test gate, not just substring matching.
+        var directory = ExtensionDirectory();
+
+        var extensionCheck = RunNode(directory, "--check", "extension.mjs");
+        Assert.True(extensionCheck.ExitCode == 0, $"node --check extension.mjs failed: {extensionCheck.Output}{extensionCheck.Error}");
+
+        var helpersCheck = RunNode(directory, "--check", "canvas-helpers.mjs");
+        Assert.True(helpersCheck.ExitCode == 0, $"node --check canvas-helpers.mjs failed: {helpersCheck.Output}{helpersCheck.Error}");
+
+        var unitSmoke = RunNode(directory, "--test", "canvas-helpers.test.mjs");
+        Assert.True(unitSmoke.ExitCode == 0, $"node --test canvas-helpers.test.mjs failed: {unitSmoke.Output}{unitSmoke.Error}");
+    }
+
     private static string ReadExtension()
     {
+        var directory = ExtensionDirectory();
+        var extension = File.ReadAllText(Path.Combine(directory, "extension.mjs"));
+        var helpers = File.ReadAllText(Path.Combine(directory, "canvas-helpers.mjs"));
+        return extension + "\n" + helpers;
+    }
+
+    private static string ExtensionDirectory()
+    {
         var repoRoot = FindRepoRoot();
-        var path = Path.Combine(repoRoot, ".github", "extensions", "otel-monitor-canvas", "extension.mjs");
-        return File.ReadAllText(path);
+        return Path.Combine(repoRoot, ".github", "extensions", "otel-monitor-canvas");
+    }
+
+    private static (int ExitCode, string Output, string Error) RunNode(string workingDirectory, params string[] arguments)
+    {
+        ProcessStartInfo startInfo;
+        try
+        {
+            startInfo = new ProcessStartInfo
+            {
+                FileName = "node",
+                WorkingDirectory = workingDirectory,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            foreach (var argument in arguments)
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
+
+            using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start node.");
+            var output = process.StandardOutput.ReadToEnd();
+            var error = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            return (process.ExitCode, output, error);
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            throw new InvalidOperationException(
+                "node was not found on PATH. The otel-monitor-canvas extension is node-based; install Node.js to run its JS smoke tests.",
+                ex);
+        }
     }
 
     private static string FindRepoRoot()
