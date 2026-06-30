@@ -236,7 +236,7 @@ security/data boundaries, and relationship to Sprint10 design views.
 | M3 Minimal actions | Implement `monitor_health`, `list_recent_traces`, and `get_trace_summary` with bounded sanitized DTOs. | Implemented with M4 |
 | M4 Trace analysis actions | Implement `get_trace_span_tree`, `get_cache_summary`, schema validation, size bounds, and `CanvasError` expected failures. | Implemented; Canvas runtime validation unavailable in this Codex surface |
 | M5 UI trigger | Add or document the `Analyze selected trace with Copilot` trigger. | Implemented (D029) |
-| M6 Validation & docs | Build/test, Canvas validation, sanitized-only assertions, loopback server lifecycle checks, and user guide updates. | Planned |
+| M6 Validation & docs | Build/test, Canvas validation, sanitized-only assertions, loopback server lifecycle checks, and user guide updates. | Implemented — live Canvas validation completed |
 
 ## Validation
 
