@@ -385,6 +385,6 @@ Server-rendered `<form method="get">`:
 ## 参照
 
 - `DESIGN.md` — 全トークン・コンポーネント定義
-- `docs/sprints/sprint10.5-monitor-design-shape/milestones/M3-css-tokens/architecture.md` — CSS 実装構造
+- `docs/sprints/sprint12-monitor-design-shape/milestones/M3-css-tokens/architecture.md` — CSS 実装構造
 - `docs/sprints/sprint10-monitor-design-views/README.md` — TraceDetail タブアーキテクチャ（Sprint10）
 - `docs/decisions.md` D024-D028

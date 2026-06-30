@@ -1,14 +1,15 @@
-# Sprint10.5: Local Monitor — Design Shape
+# Sprint12: Local Monitor — Design Shape
 
-Sprint10.5 は Sprint10 M2（A3 Visual Polish）の **設計前工程（Shape）** である。
+Sprint12 は、Sprint10/Sprint11 後の Local Monitor visual foundation を整理する
+**Shape / documentation alignment** sprint である。
 コード実装は行わず、以下のドキュメント成果物をアウトプットする。
 
-Sprint10 M2 の実装（`monitor.css` 書き換え、Noto フォント vendor、全ページレイアウト反映）
-は本スプリントの成果物を設計図として実行する。
+本スプリントは、既存の Local Monitor UI 方針、デザイントークン、ページレイアウト、
+および current source of truth に昇格済みの仕様との整合を記録する。
 
 ## Decision
 
-Sprint10 M1 の D027/D028 定義を拡張し、Shape フェーズで以下を確定する：
+Sprint10 M1 の D027/D028 定義を整理し、Shape フェーズで以下を確認する：
 
 - **D027 拡張**: VS Code Dark+ テーマの具体的カラートークンを OKLCH で定義。
   Grafana インスパイアのレイアウト方針（情報密度、パネル構成、フィルター配置）を
@@ -50,7 +51,7 @@ Sprint10 M1 の D027/D028 定義を拡張し、Shape フェーズで以下を確
 
 ## Non-goals
 
-- コード実装（CSS 書き換え、フォント vendor、Razor テンプレート変更） — Sprint10 M2 で実施
+- コード実装（CSS 書き換え、フォント vendor、Razor テンプレート変更）
 - Static Dashboard のデザイン変更（独立して維持）
 - 新しい telemetry 入力、projection 列、スキーマ変更、API フィールド追加
 - DADS 適用
