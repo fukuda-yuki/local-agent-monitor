@@ -95,7 +95,7 @@ Default posture:
 - `--sanitized-only` restores metadata-only mode: the full raw route returns
   `404`, TraceDetail's raw section and full raw links are omitted, PII is
   excluded, and the sanitized TraceDetail tab shell remains available. This is
-  the safety valve for health-check or screen-sharing runs.
+  an optional compatibility / opt-out mode, not a Canvas requirement.
 - API responses (`/api/monitor/*`), list endpoints, and the SSE stream carry
   sanitized metadata only — they **never** return raw / PII, regardless of
   `--sanitized-only`.

@@ -313,6 +313,9 @@ Update (D020):
 - M1 時点の「monitor は sanitized 集約のみで raw を surface しない」という前提は、
   D020 の opt-in raw view（`--enable-raw-view`、既定 off、loopback-only）で更新された。
   `Telemetry/Monitoring/` の sanitization は引き続き既定表示の境界として有効である。
+- D020 の `--enable-raw-view` 前提はさらに D023 で superseded された。現在の
+  Local Monitor は raw body / PII を既定表示し、`--sanitized-only` は任意の
+  metadata-only opt-out として残る。
 
 ## D020: Local Ingestion Monitor を opt-in raw 付きで実装する
 
@@ -501,7 +504,7 @@ rendering）。
 
 - `--enable-raw-view` は廃止（既定が raw 表示のため不要）。
 - `--sanitized-only` フラグを新設。有効にすると raw-bearing route は `404`、PII は除外。
-  health-check や画面共有時に metadata-only モードを復元する安全弁。
+  必要な利用者が metadata-only モードを復元できる任意の opt-out。
 - trace-detail page（agent-execution view）は raw body を inline 表示するため、
   既存の `GET /traces/{rawRecordId}/raw` と並ぶ **raw-bearing route** になる。
   raw-bearing route set の全 route で same-origin（`Origin` / `Sec-Fetch-Site` ⇒
@@ -676,7 +679,7 @@ Windows の簡易常時起動方式として、Windows Task Scheduler の user-l
   monitor へ向ける正規導線は既存 `profile-vscode-env --profile raw-local-receiver
   --target monitor` のまま。
 - Task Scheduler 経由でも loopback-only bind、Host header validation、CORS 無効、
-  same-origin、`Cache-Control: no-store`、`/api/monitor/*` と SSE の sanitized-only 境界、
+  same-origin、`Cache-Control: no-store`、`/api/monitor/*` と SSE の sanitized metadata 境界、
   raw / PII 非ログ出力を維持する。
 - raw-default と `--sanitized-only` の既存挙動は変更しない。`install-startup-task.ps1
   -SanitizedOnly` で metadata-only 常時起動を選べる。

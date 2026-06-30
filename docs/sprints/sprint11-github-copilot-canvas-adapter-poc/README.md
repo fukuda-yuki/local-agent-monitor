@@ -12,6 +12,13 @@ This sprint is intentionally adapter-first. It does **not** reimplement the
 monitor UI, add telemetry inputs, change raw store schemas, or expose raw prompt
 / response bodies to Copilot actions.
 
+> **Issue #35 update:** Early Sprint11 planning treated `--sanitized-only` as
+> the Canvas display posture. That is superseded by D030 and Issue #35. The
+> current product posture allows the Canvas adapter to work with the normal
+> raw-default Local Monitor; `--sanitized-only` remains only an optional
+> metadata-only opt-out. Canvas action responses, logs, committed outputs, and
+> static artifacts still must not contain raw / PII.
+
 ## Controlling guidance
 
 Sprint11 implementation and review must load and follow the repository-local
@@ -64,16 +71,17 @@ GitHub Copilot Canvas extension (Node / Copilot SDK)
 The Canvas adapter must not become a second monitor. It reuses the existing
 Local Monitor sanitized APIs and views wherever possible.
 
-## Canvas-safe posture
+## Local Monitor posture
 
-Sprint11 requires the Local Monitor to be launched in `--sanitized-only` mode
-for Canvas display. This uses the D030 behavior already in the product: the
-TraceDetail sanitized tab shell remains available, while the raw section and
-full raw links are omitted and the full raw route returns `404`.
+The Canvas adapter may be used with the normal raw-default Local Monitor. Raw
+details remain inside the Local Monitor UI boundary. `--sanitized-only` remains
+available when a user wants metadata-only Local Monitor pages, but it is not a
+Canvas prerequisite.
 
-Canvas surfaces may open only sanitized monitor pages or an explicit diagnostic
-page. The extension must fail fast or show a clear diagnostic when the monitor
-is unavailable or not in a Canvas-safe posture.
+Canvas surfaces may link to Local Monitor pages, including pages that show
+raw-bearing server-rendered UI under the Local Monitor's loopback,
+same-origin, no-store, and inert-rendering controls. The extension must fail
+fast or show a clear diagnostic when the monitor is unavailable.
 
 Raw boundary invariants:
 
@@ -114,11 +122,12 @@ analysis target, not by `instanceId` alone. Expected failures use
 `CanvasError("code", "message")`. Action names are unique and do not use the
 reserved `canvas.*` prefix.
 
-### A3 - Sanitized monitor surface only
+### A3 - Local Monitor surface
 
-Open only a sanitized Local Monitor surface or diagnostic page. The sprint
-default is to require the monitor to run with `--sanitized-only`. Directly
-opening a raw-bearing default TraceDetail page is out of scope.
+Use the existing Local Monitor surface without changing its startup posture.
+The adapter may be used with the raw-default monitor. Canvas actions and helper
+proxy routes still consume bounded sanitized `/api/monitor/*` responses and do
+not copy raw details into Canvas outputs.
 
 ### A4 - Agent-callable monitor actions
 
@@ -170,7 +179,7 @@ decision justifies it.
 ### A7 - Documentation
 
 Document how to load and use the Canvas extension, that `/create-canvas` is a
-skill rather than a prompt file, required Local Monitor startup posture, scope
+skill rather than a prompt file, Local Monitor startup posture, scope
 decision, scaffold-vs-fallback behavior, action contracts, known limitations,
 security/data boundaries, and relationship to Sprint10 design views.
 
@@ -231,7 +240,7 @@ security/data boundaries, and relationship to Sprint10 design views.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
-| M1 Specs & guidance alignment | Read `/create-canvas`; record project scope, scaffold-first workflow, action contracts, `--sanitized-only` Canvas posture, and security boundary in canonical specs. No product code. | Implemented |
+| M1 Specs & guidance alignment | Read `/create-canvas`; record project scope, scaffold-first workflow, action contracts, the then-planned `--sanitized-only` Canvas posture, and security boundary in canonical specs. No product code. Superseded by Issue #35 / D030 for Canvas startup posture. | Implemented |
 | M2 Extension scaffold | Use scaffold when available; add project-scoped extension skeleton; implement `open()` and monitor health diagnostics. Stop and record blocker if Canvas tools are unavailable. | Implemented |
 | M3 Minimal actions | Implement `monitor_health`, `list_recent_traces`, and `get_trace_summary` with bounded sanitized DTOs. | Implemented with M4 |
 | M4 Trace analysis actions | Implement `get_trace_span_tree`, `get_cache_summary`, schema validation, size bounds, and `CanvasError` expected failures. | Implemented; Canvas runtime validation unavailable in this Codex surface |
@@ -261,7 +270,8 @@ invoke_canvas_action({ instanceId: "<instance-id>", actionName: "<action-name>",
 
 Additional checks:
 
-- run Local Monitor with `--sanitized-only`;
+- run Local Monitor in the normal raw-default posture, and optionally repeat
+  with `--sanitized-only` to verify metadata-only compatibility;
 - verify `open()` returns the expected loopback URL or diagnostic;
 - verify every action returns bounded sanitized DTOs;
 - verify invalid inputs are rejected by `inputSchema`;
@@ -278,9 +288,9 @@ Additional checks:
   helpers; M2 must record that as a blocker rather than switching workflows.
 - `127.0.0.1` points to each user's machine, so this does not create a shared
   team monitor.
-- If the default raw-bearing TraceDetail route is opened without
-  `--sanitized-only`, Canvas could display raw local data. Sprint11 rejects that
-  posture.
+- The raw-default Local Monitor can show raw local data on Local Monitor pages.
+  That is accepted for the single trusted local user. Canvas actions, logs,
+  committed outputs, and static artifacts must still not copy raw / PII.
 - Action responses can become too large if they return full span pages; all
   actions must summarize and bound output.
 - UI-to-Copilot session triggering may be unavailable; agent-callable actions

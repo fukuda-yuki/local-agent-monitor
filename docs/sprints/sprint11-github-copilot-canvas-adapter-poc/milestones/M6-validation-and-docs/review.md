@@ -5,6 +5,12 @@ Sprint-local review evidence, not product behavior. Review perspectives per
 loopback/server lifecycle, input schema and bounded DTOs, docs consistency,
 generated/runtime artifact exclusion.
 
+> **Issue #35 update:** This review records that M6 live validation used
+> `--sanitized-only`. That is historical evidence only, not a current Canvas
+> requirement. D030 and Issue #35 allow Canvas adapter use with the normal
+> raw-default Local Monitor while keeping Canvas action/log/artifact raw / PII
+> exclusions.
+
 This milestone is doc-only + validation evidence (no product code changes),
 so a recorded self-review per `docs/agent-guides/review-workflow.md` is
 appropriate.
@@ -27,8 +33,9 @@ appropriate.
 - ✅ `list_recent_traces.limit` bounded to 1..50; `limit=100` rejected.
 - ✅ No new telemetry input, schema, endpoint, query parameter, response field,
   raw route, normalized dataset field, or dashboard contract added.
-- ✅ `--sanitized-only` posture required: raw route 404, no raw section in
-  TraceDetail, sanitized tabs present.
+- ✅ Historical `--sanitized-only` validation: raw route 404, no raw section in
+  TraceDetail, sanitized tabs present. This proves metadata-only compatibility;
+  it is not a current Canvas launch requirement.
 - ✅ D029/D030 boundary invariants preserved.
 
 ### 2. Canvas skill compliance
@@ -108,5 +115,6 @@ evidence file.
 ## Conclusion
 
 M6 acceptance criteria are met. Sprint11 is complete with live Canvas runtime
-validation evidence, repository validation green, sanitized-only posture
-verified, server lifecycle checks passed, and user-facing docs updated.
+validation evidence, repository validation green, metadata-only compatibility
+verified, server lifecycle checks passed, and user-facing docs updated. Issue
+#35 / D030 later removed `--sanitized-only` as a Canvas startup requirement.

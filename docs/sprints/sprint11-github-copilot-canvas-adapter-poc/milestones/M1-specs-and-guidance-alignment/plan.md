@@ -7,12 +7,19 @@ Sprint-local planning evidence, not product behavior. Source-of-truth order:
 `docs/requirements.md` -> `docs/spec.md` -> `docs/specifications/`. Sprint
 context: [../../README.md](../../README.md).
 
+> **Issue #35 update:** This M1 plan captured an early Sprint11 assumption that
+> Canvas display required `--sanitized-only`. That assumption is superseded by
+> D030 and Issue #35. The current product posture allows Canvas adapter use with
+> the normal raw-default Local Monitor; `--sanitized-only` remains an optional
+> metadata-only opt-out.
+
 ## Objective
 
 Promote the Sprint11 Canvas adapter decisions into the canonical docs before any
-Canvas extension files are created. M1 fixes the public intent, scope, scaffold
-workflow, action contracts, `--sanitized-only` Canvas posture, and raw boundary
-so implementation milestones do not invent behavior.
+Canvas extension files are created. M1 fixed the public intent, scope, scaffold
+workflow, action contracts, the then-planned `--sanitized-only` Canvas posture,
+and raw boundary so implementation milestones did not invent behavior. The
+Canvas startup posture part is now superseded by Issue #35 / D030.
 
 ## Scope
 
@@ -30,8 +37,9 @@ In scope:
    set without changing telemetry input, schema, raw store, normalized dataset,
    candidate records, or dashboard contracts.
 5. Update `docs/specifications/layers/telemetry-ingestion.md` to record that
-   Canvas actions consume the existing sanitized `/api/monitor/*` APIs and that
-   Canvas display requires `--sanitized-only`.
+   Canvas actions consume the existing sanitized `/api/monitor/*` APIs and, at
+   that time, that Canvas display required `--sanitized-only`. Issue #35 / D030
+   later superseded the startup-posture requirement.
 6. Update `docs/specifications/security-data-boundaries.md` to record Canvas
    action response restrictions, extension-owned loopback server requirements,
    no raw/PII/log/artifact leakage, and scaffold-tool blocker behavior.
@@ -49,7 +57,8 @@ Out of scope:
 
 - Canonical docs mention the Canvas adapter only as a thin sanitized adapter over
   the existing Local Monitor.
-- `--sanitized-only` is the documented Sprint11 Canvas-safe monitor posture.
+- At M1 time, `--sanitized-only` was the documented Sprint11 Canvas-safe monitor
+  posture. This acceptance criterion is superseded by Issue #35 / D030.
 - The `/create-canvas` skill is referenced as a skill, not a prompt file.
 - The scaffold-first rule is explicit: if `extensions_manage` is unavailable,
   implementation stops and records a blocker.
