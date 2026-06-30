@@ -37,21 +37,26 @@
   });
 
   /* ========================================================================
-   * 2. Status dot — health check via /api/monitor/health
+   * 2. Status dot — health check via /health/ready
+   *    The readiness endpoint returns 200 for `ready`/`degraded` and 503 for
+   *    `not_ready`, with a machine-readable body (`status` / `checks` /
+   *    `degraded_reasons`). The dot maps readiness status to display state.
    * ===================================================================== */
 
   async function updateStatusDot() {
     const dot = document.getElementById("monitor-status-dot");
     if (!dot) return;
 
-    try {
-      const resp = await fetch("/api/monitor/health", { cache: "no-store" });
-      if (!resp.ok) throw new Error("non-ok");
-      const health = await resp.json();
+    dot.classList.remove("healthy", "degraded", "unhealthy");
 
-      dot.classList.remove("healthy", "degraded", "unhealthy");
+    try {
+      const resp = await fetch("/health/ready", { cache: "no-store" });
+      // 200 = ready/degraded; 503 = not_ready. Both carry a JSON body.
+      if (!resp.ok && resp.status !== 503) throw new Error("non-ok");
+      const health = await resp.json();
       const status = (health.status || "").toLowerCase();
-      if (status === "healthy") {
+
+      if (status === "ready") {
         dot.classList.add("healthy");
         dot.title = "Healthy";
         dot.setAttribute("aria-label", "Monitor status: healthy");
@@ -60,12 +65,12 @@
         dot.title = "Degraded";
         dot.setAttribute("aria-label", "Monitor status: degraded");
       } else {
+        // `not_ready` or any unexpected status.
         dot.classList.add("unhealthy");
         dot.title = "Unhealthy";
         dot.setAttribute("aria-label", "Monitor status: unhealthy");
       }
     } catch {
-      dot.classList.remove("healthy", "degraded", "unhealthy");
       dot.classList.add("unhealthy");
       dot.title = "Unreachable";
       dot.setAttribute("aria-label", "Monitor status: unreachable");

@@ -104,6 +104,8 @@ Purpose:
 - candidate severity and rule trend。
 - sanitized evidence reference。
 
+`evidence_ref` is sanitized when candidate rows are imported into the dashboard dataset. Obvious local filesystem paths (drive-letter absolute paths, UNC paths, Unix absolute paths, and `file:` URIs) are rejected and stored as empty, so a sensitive bundle path (or any other local path) placed in `evidence_ref` cannot leak into the repository-safe dataset. Scheme-bearing refs (`measurement:`, `raw:`, `bundle:`) and relative row refs are preserved. Local-only sensitive bundle paths belong in `sensitive_bundle_path` (local-only, never committed), not `evidence_ref`.
+
 ### `dashboard_collection_health`
 
 ```text
@@ -115,6 +117,8 @@ Purpose:
 - required attribute gaps。
 - unknown span / attribute counts。
 - normalization, mapping, and candidate generation failures。
+
+Required-attribute gaps in this repository-safe table are reported only for `trace_id`, `client_kind`, and `experiment_id`. `user_id` / `user_email` columns are display / filter context (see Allowed Identity Fields) and are not validated as required attributes here; `team.id` / `department` are not columns in this table and are not validated as required in repository-safe outputs. PII / organization attribute collection health is observable only on the local monitor side.
 
 ## Allowed Identity Fields
 

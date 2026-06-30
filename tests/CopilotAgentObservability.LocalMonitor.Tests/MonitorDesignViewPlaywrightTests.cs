@@ -4,6 +4,7 @@ using static Microsoft.Playwright.Assertions;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorDesignViewPlaywrightTests
 {
     private const string TraceId = "trace-design";
@@ -16,6 +17,7 @@ public class MonitorDesignViewPlaywrightTests
         using var temp = new MonitorTempDirectory();
         SeedProjectedTrace(temp);
         await using var host = await StartHostAsync(temp, sanitizedOnly);
+        PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
@@ -64,10 +66,18 @@ public class MonitorDesignViewPlaywrightTests
         Assert.DoesNotContain(requestedUrls, url => url.Contains("/raw", StringComparison.OrdinalIgnoreCase));
     }
 
-    private static async Task<bool> FlowChartHasDrawnPixelsAsync(IPage page) =>
-        await page.Locator("#flow-chart").EvaluateAsync<bool>(
+    private static async Task<bool> FlowChartHasDrawnPixelsAsync(IPage page)
+    {
+        try
+        {
+            await page.WaitForFunctionAsync(
             """
-            element => {
+            () => {
+                const element = document.querySelector('#flow-chart');
+                if (!element) {
+                    return false;
+                }
+
                 for (const canvas of element.querySelectorAll('canvas')) {
                     const context = canvas.getContext('2d');
                     if (!context || canvas.width === 0 || canvas.height === 0) {
@@ -86,7 +96,16 @@ public class MonitorDesignViewPlaywrightTests
 
                 return false;
             }
-            """);
+            """,
+                null,
+                new PageWaitForFunctionOptions { Timeout = 5_000, PollingInterval = 100 });
+            return true;
+        }
+        catch (Exception ex) when (ex.GetType().Name.Contains("Timeout", StringComparison.Ordinal))
+        {
+            return false;
+        }
+    }
 
     private static long SeedProjectedTrace(MonitorTempDirectory temp)
     {

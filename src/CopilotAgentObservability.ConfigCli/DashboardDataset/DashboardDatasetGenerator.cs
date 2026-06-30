@@ -624,8 +624,49 @@ internal static class DashboardDatasetGenerator
             return null;
         }
 
-        return evidenceRef.StartsWith("bundle:", StringComparison.Ordinal)
-            ? evidenceRef
-            : evidenceRef.Replace('\\', '/');
+        var trimmed = evidenceRef.Trim();
+
+        // Reject obvious local filesystem paths so a sensitive bundle path (or
+        // any other local path) placed in evidence_ref cannot leak into the
+        // repository-safe dashboard dataset. Scheme-bearing refs (measurement:,
+        // raw:, bundle:) and relative row refs are preserved.
+        if (IsLocalPath(trimmed))
+        {
+            return null;
+        }
+
+        return trimmed.Replace('\\', '/');
+    }
+
+    private static bool IsLocalPath(string value)
+    {
+        // file: URI scheme.
+        if (value.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Windows drive-letter absolute path, e.g. C:\... or C:/...
+        if (value.Length >= 3
+            && char.IsLetter(value[0])
+            && value[1] == ':'
+            && (value[2] == '\\' || value[2] == '/'))
+        {
+            return true;
+        }
+
+        // UNC path, e.g. \\server\share ...
+        if (value.StartsWith("\\\\", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // Unix absolute path, e.g. /home/... or /tmp/...
+        if (value.StartsWith("/", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return false;
     }
 }

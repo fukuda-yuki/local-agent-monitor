@@ -59,6 +59,10 @@ It must not contain raw prompt, raw response, system prompt text, tool arguments
 
 `unknown_spans_json`, `unknown_attributes_json`, `evaluation_notes`, and `aggregation_notes` require the same review as other repository-bound outputs because they can accidentally carry source payload values if normalization logic changes.
 
+## Required-Attribute Health Scope
+
+The required resource attributes (`user.id`, `user.email`, `team.id`, `department`, `client.kind`, `experiment.id`) are defined in [../../requirements.md](../../requirements.md) and [../layers/telemetry-ingestion.md](../layers/telemetry-ingestion.md). This repository-safe dataset omits `user_id`, `user_email`, `team_id`, and `department` columns by design (PII / organization attributes are not repository-safe). Accordingly, the collection-health model in repository-safe outputs validates only `experiment_id` and `client_kind` as required attributes. `team.id` and `department`, when present, are retained as unknown resource attributes in `unknown_attributes_json` but are not validated as required. PII / organization attribute collection health is observable only on the local monitor side (loopback default-on display).
+
 ## Downstream Consumers
 
 Normalized measurements are consumed by:

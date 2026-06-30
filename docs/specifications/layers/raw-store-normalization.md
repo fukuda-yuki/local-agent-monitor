@@ -251,11 +251,10 @@ Token rollup rule (no double count):
 
 Projection-version and backfill:
 
-- a new `schema_version` entry tracks the span-projection version independently
-  of the existing ingestion/trace projection version.
+- the store keeps a single `schema_version` entry (`component = 'monitor'`) that tracks the monitor projection schema as a whole, including ingestion / trace projection and span projection. There is no separate span-projection schema version entry; the span-projection phase is versioned together with the monitor schema.
 - existing Sprint8-processed `raw_records` are re-projected for spans and the
   new `monitor_traces` rollup columns. Span-projection progress is tracked
-  independently of `monitor_ingestions`, so a record that was already projected
+  independently of `monitor_ingestions` via `monitor_ingestions.span_projected_at`, so a record that was already projected
   for ingestion/trace but not yet for spans is detected and not hidden as
   backlog 0.
 - mandatory upgrade test from a Sprint8-populated DB verifies backfill

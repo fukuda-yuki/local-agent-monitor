@@ -401,6 +401,55 @@ Live validation for the monitor records the same evidence as the
 `raw-local-receiver` profile, plus the monitor port, the VS Code / GitHub
 Copilot extension version, and optionally whether `--sanitized-only` was set.
 
+## Local Ingestion Monitor Windows Startup
+
+Windows users may register the Local Ingestion Monitor as a user-level Windows
+Task Scheduler task through `scripts/local-monitor/`. This is an operational
+startup surface for the existing monitor process, not a new telemetry source,
+schema, API, or shared service.
+
+Default task behavior:
+
+- task name: `CopilotAgentObservability LocalMonitor`.
+- trigger: current user logon.
+- principal: current user, interactive logon, least privileges.
+- action: PowerShell script wrapper that starts
+  `dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db <db>
+  --url http://127.0.0.1:4320`.
+- multiple instances: ignore new.
+- restart on failure: short bounded retry.
+- network availability is not required.
+- client routing settings are not modified.
+
+Scheduled startup defaults:
+
+```text
+URL: http://127.0.0.1:4320
+DB:  %LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\raw-store.db
+Logs/state: %LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\
+```
+
+The startup wrapper must preserve the Local Monitor run boundary:
+
+- only loopback HTTP URLs are accepted (`127.0.0.1`, `localhost`, or `::1`).
+- `--sanitized-only` remains available for metadata-only always-on runs.
+- wrapper logs record only operational facts such as start/stop time, process id,
+  exit code, configured URL, health result, and deterministic error code.
+- wrapper logs and state files do not contain raw monitor content, credentials,
+  tokens, PII, or raw OTLP payloads.
+- Task registration scripts do not write VS Code, Copilot CLI, or Codex routing
+  configuration; users continue to use `profile-vscode-env --profile
+  raw-local-receiver --target monitor` for VS Code monitor routing.
+
+Validation:
+
+- automated tests cover script existence, PowerShell parsing, stable defaults,
+  generated task settings, and log-boundary string checks.
+- Windows integration validation should cover start/status/stop, duplicate
+  start prevention, non-loopback URL rejection, occupied-port diagnostics, dry-run
+  task registration output, actual task registration, logon trigger behavior,
+  uninstall, and trace receipt from VS Code / Copilot Chat.
+
 ## Resource Attributes
 
 Required:
@@ -413,6 +462,8 @@ department
 client.kind
 experiment.id
 ```
+
+Repository-safe 成果物（measurement dataset / dashboard dataset / static dashboard）は PII と組織属性を保持しない。そのため repository-safe 成果物の collection-health で**必須属性として検証するのは `experiment.id` と `client.kind` のみ**とし、`user.id` / `user.email` / `team.id` / `department` は検証対象外とする。`team.id` / `department` は PII ではないが repository-safe dataset では未知 resource 属性として保持され、必須検証には含めない。PII / 組織属性の収集健全性は local monitor 側（loopback 既定表示）でのみ観察する。
 
 Recommended `client.kind` values:
 

@@ -45,7 +45,7 @@ Profile selector は `CAO_COLLECTION_PROFILE` とし、詳細は
 
 `raw-local-receiver` は Langfuse なしで VS Code からこの repository の local receiver へ直接 telemetry を送信する profile であり、Sprint7 の実装対象とする。
 
-Local Ingestion Monitor は、`raw-local-receiver` の telemetry をローカルで確認するための単一 ASP.NET Core プロセス（loopback-only）であり、Sprint8 で実装した。Sprint7 の Config CLI receiver（`127.0.0.1:4319`）と並存し、別 loopback port（既定 `127.0.0.1:4320`、Collector の `4317`/`4318` と Sprint7 CLI receiver の `4319` を回避）で動作する。OTLP HTTP/protobuf を受信して SQLite raw store に永続化し、sanitized monitor projection、ローカル UI、health endpoint を提供する。Sprint9 で受信済み OTel テレメトリから per-span の sanitized projection（`monitor_spans`）を追加し、agent-execution view としてツール / MCP 呼び出し名、成否、sub-agent のモデル / トークン、turn 単位トークンを表示する。Sprint10 で TraceDetail ページに4つの設計ビュー（Summary / Timeline / Flow Chart / Cache）をタブ UI として追加し、Flow Chart は vendored Cytoscape.js + dagre（MIT、`wwwroot/vendor/`、CDN 不使用）でレンダリングする。全ビューは既存の sanitized spans API（`GET /api/monitor/traces/{traceId}/spans`）のみを消費し、raw 境界・PII 境界の変更はない。ビジュアルテーマは VS Code Dark+ を基盤とし（D027）、タイポグラフィは vendored Noto Sans JP / Noto Sans Mono（D028、`wwwroot/vendor/fonts/`、OFL）。raw body と PII は既定で表示する（server-rendered、inert text）。`--sanitized-only` フラグで metadata-only モードを復元できる。詳細は [specifications/layers/telemetry-ingestion.md](specifications/layers/telemetry-ingestion.md) と [specifications/security-data-boundaries.md](specifications/security-data-boundaries.md) を正本とする。
+Local Ingestion Monitor は、`raw-local-receiver` の telemetry をローカルで確認するための単一 ASP.NET Core プロセス（loopback-only）であり、Sprint8 で実装した。Sprint7 の Config CLI receiver（`127.0.0.1:4319`）と並存し、別 loopback port（既定 `127.0.0.1:4320`、Collector の `4317`/`4318` と Sprint7 CLI receiver の `4319` を回避）で動作する。OTLP HTTP/protobuf を受信して SQLite raw store に永続化し、sanitized monitor projection、ローカル UI、health endpoint を提供する。Sprint9 で受信済み OTel テレメトリから per-span の sanitized projection（`monitor_spans`）を追加し、agent-execution view としてツール / MCP 呼び出し名、成否、sub-agent のモデル / トークン、turn 単位トークンを表示する。Sprint10 で TraceDetail ページに4つの設計ビュー（Summary / Timeline / Flow Chart / Cache）をタブ UI として追加し、Flow Chart は vendored Cytoscape.js + dagre（MIT、`wwwroot/vendor/`、CDN 不使用）でレンダリングする。全ビューは既存の sanitized spans API（`GET /api/monitor/traces/{traceId}/spans`）のみを消費し、raw 境界・PII 境界の変更はない。ビジュアルテーマは VS Code Dark+ を基盤とし（D027）、タイポグラフィは vendored Noto Sans JP / Noto Sans Mono（D028、`wwwroot/vendor/fonts/`、OFL）。raw body と PII は既定で表示する（server-rendered、inert text）。`--sanitized-only` フラグで metadata-only モードを復元できる。Windows では `scripts/local-monitor/` の PowerShell scripts により user-level Windows Task Scheduler の logon startup を任意登録できる。詳細は [specifications/layers/telemetry-ingestion.md](specifications/layers/telemetry-ingestion.md) と [specifications/security-data-boundaries.md](specifications/security-data-boundaries.md) を正本とする。
 
 GitHub Pages publish は private repository と明示的な access control を前提にした候補である。
 実データ由来 aggregate を publish する前に、Pages visibility、retention、削除方法、利用者周知を確認する。
@@ -82,6 +82,7 @@ Publicly documented interfaces are:
 - Local Ingestion Monitor loopback endpoints: `POST /v1/traces`、`GET /api/monitor/ingestions`、`GET /api/monitor/traces`、`GET /api/monitor/traces/{traceId}/spans`、`GET /health/live`、`GET /health/ready`、および SSE notification stream。`/api/monitor/*` と SSE は raw / PII を返さない（sanitized のみ）。`/health/ready` は飽和継続時に `503`（瞬間的 backpressure は `degraded` の `2xx`）を返し、`status` / `checks` / `degraded_reasons` を持つ機械可読 body を伴う。既定しきい値は ingestion-stall `10s` / projection-lag `60s`（設定可能）。
 - Local Ingestion Monitor raw-bearing routes（既定表示）: trace-detail page（agent-execution view、bounded raw preview inline + full raw record link）および `GET /traces/{rawRecordId}/raw`（server-rendered HTML）。raw-bearing route set の全 route で same-origin 強制（cross-site は `403`）、`Cache-Control: no-store`。`--sanitized-only` 起動時は raw-bearing route は `404`、PII は除外。JSON raw API は提供しない。
 - Local Ingestion Monitor run interface: loopback port（既定 `http://127.0.0.1:4320`）、`--port` / `--url`、`--sanitized-only`（metadata-only モード。raw-bearing route を `404` にし PII を除外）、リクエスト本文サイズ上限 `--max-request-body-bytes`（既定 `31457280` bytes = 30 MiB、env `CAO_MONITOR_MAX_REQUEST_BODY_BYTES`）。`POST /v1/traces` は本文が上限を超えると `413` / `request_too_large` を返し raw を書かない。
+- Local Ingestion Monitor Windows startup scripts: `scripts/local-monitor/start.ps1`、`stop.ps1`、`status.ps1`、`install-startup-task.ps1`、`uninstall-startup-task.ps1`。Task Scheduler task の既定名は `CopilotAgentObservability LocalMonitor`、trigger は current user logon、既定 URL は `http://127.0.0.1:4320`、既定 DB / logs / state は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下。Task 登録 script は client routing 設定を書き換えない。
 - Local Ingestion Monitor client config: `config-cli profile-vscode-env --profile raw-local-receiver --target monitor`（または `--endpoint`）が monitor endpoint（既定 `http://127.0.0.1:4320`）向けの VS Code env を出力。`--target receiver` 既定は `4319` のまま。
 - Canvas adapter は raw default の Local Monitor と併用できる。`--sanitized-only` は Canvas の必須起動条件ではなく、Local Monitor の任意 metadata-only opt-out である。Canvas actions は引き続き既存 sanitized `/api/monitor/*` と readiness を読む bounded DTO surface であり、action responses / logs / committed outputs に raw / PII を返さない。
 
@@ -93,8 +94,11 @@ Code、project file、CLI behavior、workflow を変更した場合:
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
+pwsh scripts\test\install-playwright-chromium.ps1
 dotnet test CopilotAgentObservability.slnx
 ```
+
+LocalMonitor browser smoke test が solution test suite に含まれるため、build と test の間に Playwright chromium bootstrap が必要。wrapper は未指定時に `PLAYWRIGHT_BROWSERS_PATH` を repository-local の ignored `artifacts\playwright-browsers` に設定し、browser binaries と Playwright cache lock を writable workspace 内に置く。Linux CI では同じ script に `-WithDeps` を付ける。
 
 Collector example を変更した場合:
 

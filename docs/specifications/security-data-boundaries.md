@@ -102,6 +102,12 @@ Default posture:
 - there is **no bearer-token-to-console** scheme; a reusable token printed to a
   capturable stream cannot uphold a secrecy guarantee on this machine, so the
   boundary does not claim one.
+- Windows Task Scheduler startup is a user-level convenience wrapper for the
+  same loopback monitor process. It may run in the normal raw-default posture or
+  with `--sanitized-only`; it does not create a shared service boundary. Runtime
+  DB, logs, pid/state files, and task-generated local state live under
+  `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` by default and must
+  not be committed.
 
 Accepted out of scope (explicit accepted risk):
 
@@ -185,6 +191,8 @@ Additional monitor web-security requirements:
 - request logging excludes the body, path, query string, and exception detail.
 - error responses exclude the DB full path, the Windows user name, and raw
   exception messages.
+- startup wrapper logs exclude raw monitor content, credentials, tokens, PII,
+  raw OTLP payloads, request bodies, query strings, and full exception detail.
 
 Mandatory negative tests:
 

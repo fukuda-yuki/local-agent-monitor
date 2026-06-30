@@ -22,13 +22,15 @@ Code、project file、CLI behavior、workflow を変更した場合:
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
-pwsh tests\CopilotAgentObservability.LocalMonitor.Tests\bin\Debug\net10.0\playwright.ps1 install chromium
+pwsh scripts\test\install-playwright-chromium.ps1
 dotnet test CopilotAgentObservability.slnx
 ```
 
 The browser install is part of the standard validation sequence because the
-solution test suite includes LocalMonitor Playwright smoke coverage. On Linux
-CI, run the same script with `install --with-deps chromium`.
+solution test suite includes LocalMonitor Playwright smoke coverage. The wrapper
+uses the repository-local ignored `artifacts\playwright-browsers` cache when
+`PLAYWRIGHT_BROWSERS_PATH` is unset. On Linux CI, run the same script with
+`-WithDeps`.
 
 Collector example を変更した場合:
 

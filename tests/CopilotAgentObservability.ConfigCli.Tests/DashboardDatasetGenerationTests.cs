@@ -152,6 +152,131 @@ public class DashboardDatasetGenerationTests
     }
 
     [Fact]
+    public void GenerateDashboardDataset_RejectsLocalPathEvidenceRefs()
+    {
+        using var tempDirectory = new TempDirectory();
+        var measurements = DiagnosisCandidateMeasurementReader.Read(
+            tempDirectory.WriteFile("measurements.json", MeasurementsJson()));
+        var diagnosisCandidates = new[]
+        {
+            new DiagnosisCandidateRow(
+                DiagnosisCandidateId: "diagcand-local-drive",
+                TraceId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                SourceRecordRef: "measurements.json#row=1",
+                RuleId: "DIAG-METRIC-ERROR-COUNT-V1",
+                FailureCategoryId: "F-ERROR",
+                AntiPatternId: null,
+                Severity: "major",
+                RecommendedImprovementTarget: "workflow",
+                EvidenceSummary: "Synthetic sanitized evidence summary.",
+                EvidenceRef: @"C:\sensitive-bundle\diagcand-local-drive",
+                ContentIncluded: false,
+                SensitiveBundlePath: null,
+                Confidence: "high",
+                RequiredHumanChecks: "Confirm.",
+                CandidateStatus: "candidate"),
+            new DiagnosisCandidateRow(
+                DiagnosisCandidateId: "diagcand-unc",
+                TraceId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                SourceRecordRef: "measurements.json#row=1",
+                RuleId: "DIAG-METRIC-ERROR-COUNT-V1",
+                FailureCategoryId: "F-ERROR",
+                AntiPatternId: null,
+                Severity: "major",
+                RecommendedImprovementTarget: "workflow",
+                EvidenceSummary: "Synthetic sanitized evidence summary.",
+                EvidenceRef: @"\\server\share\bundle",
+                ContentIncluded: false,
+                SensitiveBundlePath: null,
+                Confidence: "high",
+                RequiredHumanChecks: "Confirm.",
+                CandidateStatus: "candidate"),
+            new DiagnosisCandidateRow(
+                DiagnosisCandidateId: "diagcand-unix-abs",
+                TraceId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                SourceRecordRef: "measurements.json#row=1",
+                RuleId: "DIAG-METRIC-ERROR-COUNT-V1",
+                FailureCategoryId: "F-ERROR",
+                AntiPatternId: null,
+                Severity: "major",
+                RecommendedImprovementTarget: "workflow",
+                EvidenceSummary: "Synthetic sanitized evidence summary.",
+                EvidenceRef: "/home/user/sensitive/bundle",
+                ContentIncluded: false,
+                SensitiveBundlePath: null,
+                Confidence: "high",
+                RequiredHumanChecks: "Confirm.",
+                CandidateStatus: "candidate"),
+            new DiagnosisCandidateRow(
+                DiagnosisCandidateId: "diagcand-file-uri",
+                TraceId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                SourceRecordRef: "measurements.json#row=1",
+                RuleId: "DIAG-METRIC-ERROR-COUNT-V1",
+                FailureCategoryId: "F-ERROR",
+                AntiPatternId: null,
+                Severity: "major",
+                RecommendedImprovementTarget: "workflow",
+                EvidenceSummary: "Synthetic sanitized evidence summary.",
+                EvidenceRef: "file:///tmp/sensitive-bundle",
+                ContentIncluded: false,
+                SensitiveBundlePath: null,
+                Confidence: "high",
+                RequiredHumanChecks: "Confirm.",
+                CandidateStatus: "candidate"),
+            new DiagnosisCandidateRow(
+                DiagnosisCandidateId: "diagcand-legit-measurement",
+                TraceId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                SourceRecordRef: "measurements.json#row=1",
+                RuleId: "DIAG-METRIC-ERROR-COUNT-V1",
+                FailureCategoryId: "F-ERROR",
+                AntiPatternId: null,
+                Severity: "major",
+                RecommendedImprovementTarget: "workflow",
+                EvidenceSummary: "Synthetic sanitized evidence summary.",
+                EvidenceRef: "measurement:measurements.json#row=1",
+                ContentIncluded: false,
+                SensitiveBundlePath: null,
+                Confidence: "high",
+                RequiredHumanChecks: "Confirm.",
+                CandidateStatus: "candidate"),
+            new DiagnosisCandidateRow(
+                DiagnosisCandidateId: "diagcand-legit-bundle",
+                TraceId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                SourceRecordRef: "measurements.json#row=1",
+                RuleId: "DIAG-METRIC-ERROR-COUNT-V1",
+                FailureCategoryId: "F-ERROR",
+                AntiPatternId: null,
+                Severity: "major",
+                RecommendedImprovementTarget: "workflow",
+                EvidenceSummary: "Synthetic sanitized evidence summary.",
+                EvidenceRef: "bundle:synthetic:diagcand-legit-bundle",
+                ContentIncluded: false,
+                SensitiveBundlePath: null,
+                Confidence: "high",
+                RequiredHumanChecks: "Confirm.",
+                CandidateStatus: "candidate"),
+        };
+        var generatedAt = DateTimeOffset.Parse("2026-06-19T12:34:56Z", CultureInfo.InvariantCulture);
+
+        var dataset = DashboardDatasetGenerator.Generate(
+            measurements,
+            rawOperations: [],
+            diagnosisCandidates,
+            improvementCandidates: [],
+            autoDecisions: [],
+            "day",
+            generatedAt);
+
+        var byId = dataset.CandidateSummary.ToDictionary(row => row.DiagnosisCandidateId!, StringComparer.Ordinal);
+        Assert.Null(byId["diagcand-local-drive"].EvidenceRef);
+        Assert.Null(byId["diagcand-unc"].EvidenceRef);
+        Assert.Null(byId["diagcand-unix-abs"].EvidenceRef);
+        Assert.Null(byId["diagcand-file-uri"].EvidenceRef);
+        Assert.Equal("measurement:measurements.json#row=1", byId["diagcand-legit-measurement"].EvidenceRef);
+        Assert.Equal("bundle:synthetic:diagcand-legit-bundle", byId["diagcand-legit-bundle"].EvidenceRef);
+    }
+
+    [Fact]
     public void GenerateDashboardDataset_ReturnsNonZeroWithoutOutputOption()
     {
         using var output = new StringWriter();
