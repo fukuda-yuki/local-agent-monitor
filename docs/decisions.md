@@ -696,3 +696,35 @@ Consequences:
 - CI では script existence / parse / stable defaults / dry-run task shape を検証し、
   actual Task Scheduler registration と logon trigger は Windows 実機 validation evidence
   として扱う。
+
+## D032: Local Monitor から Copilot SDK raw analysis を実行する
+
+Status: Accepted
+
+Local Monitor の raw-default posture では、選択 trace / raw record / span を
+.NET 版 GitHub Copilot SDK に渡して raw analysis を実行できる。これは Copilot /
+Agent の観測ログを Copilot に再投入して診断するためのローカル診断機能であり、
+raw を Copilot SDK analysis に渡すこと自体は禁止しない。
+
+決定:
+
+- SDK hosting は Local Monitor process 内の .NET GitHub Copilot SDK analysis
+  service とする。Node ベースの project-scoped raw-analysis extension は使わない。
+- Local Monitor は analysis run を作成し、raw を start request に埋め込まず、
+  process-internal C# tool set から raw trace / raw record / raw span context を SDK
+  session に渡す。
+- raw analysis routes は `/traces/{traceId}/analysis/...` 配下に置き、`/api/monitor/*`
+  と SSE は引き続き sanitized-only とする。raw-returning tool routes は公開しない。
+- `--sanitized-only` では raw analysis UI / start route / result route を無効化する。
+- raw analysis result markdown は local runtime data として保持してよい。
+- GitHub Issue / docs / dashboard 向け出力は、raw 本文を含まない repository-safe
+  summary として別 route で生成する。
+
+不変:
+
+- 既存 Canvas adapter は置き換えない。Canvas action responses / logs /
+  committed outputs への raw / PII 非送出境界を維持する。
+- repository、Issue、PR、GitHub Pages、static dashboard、CI artifact、
+  repository-safe docs へ raw prompt / response / full tool arguments /
+  full tool results / source fragment / credential / PII / local sensitive path を
+  出してはならない。

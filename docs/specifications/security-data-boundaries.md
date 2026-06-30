@@ -290,6 +290,48 @@ unchanged):
   validation tools are unavailable, implementation records the blocker and stops;
   hand-written fallback requires explicit product-owner approval.
 
+## Local Monitor Copilot Raw Analysis Boundary
+
+The Sprint13 raw analysis surface is local runtime behavior for the single
+trusted local user. It may send raw trace / raw record / raw span context to a
+.NET GitHub Copilot SDK analysis session so Copilot can diagnose the captured
+Copilot/agent execution.
+
+Allowed locally:
+
+- Local Monitor displays raw prompt / response / tool content in the normal
+  raw-default posture.
+- Local Monitor creates local analysis runs.
+- Copilot SDK raw analysis tools are process-internal C# tools that can return
+  raw trace / raw record / span context to the .NET SDK session.
+- Raw analysis result markdown is stored only as local runtime data.
+
+Forbidden in repository-safe outputs:
+
+- raw prompt body.
+- raw response body.
+- full tool arguments / tool results.
+- source fragment or observed file content.
+- credential, token, API key, password, or authorization header.
+- PII such as `user.id` / `user.email`.
+- local sensitive path.
+
+Repository-safe summary export is a separate allowlist output. It may include
+trace ids, span ids, raw record ids as references, durations, token counts,
+error counts, cache metrics, classifications, and improvement suggestions that
+do not copy raw content. The implementation must not treat arbitrary model
+free text as repository-safe by default.
+
+Route boundary:
+
+- raw analysis routes live under `/traces/{traceId}/analysis/...`, never under
+  `/api/monitor/*`.
+- `/api/monitor/*` and SSE remain sanitized metadata only.
+- `--sanitized-only` disables the raw analysis UI, start route, and result
+  route.
+- browser state-changing start requests require same-origin and CSRF protection.
+- raw analysis result responses use `Cache-Control: no-store`.
+
 ## Shared Use Preconditions
 
 Before shared dashboard or real-data publishing:

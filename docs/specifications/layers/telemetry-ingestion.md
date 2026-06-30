@@ -401,6 +401,39 @@ Live validation for the monitor records the same evidence as the
 `raw-local-receiver` profile, plus the monitor port, the VS Code / GitHub
 Copilot extension version, and optionally whether `--sanitized-only` was set.
 
+## Local Monitor Copilot Raw Analysis
+
+The Local Monitor may start a Copilot SDK raw analysis run for a selected trace
+in the normal raw-default posture. This does not add telemetry input and does
+not change existing sanitized `/api/monitor/*` or SSE contracts.
+
+Routes:
+
+- `POST /traces/{traceId}/analysis` starts a local run. It accepts focus values
+  `latency`, `tokens`, `cache`, `errors`, `tool-usage`, and `agent-flow`. The
+  request is same-origin and CSRF protected and does not contain raw payload.
+  The monitor dispatches the run to the in-process .NET GitHub Copilot SDK
+  analysis service.
+- `GET /traces/{traceId}/analysis/runs/{runId}` reads local raw-derived result
+  data and is raw-bearing (`Cache-Control: no-store`).
+- `GET /traces/{traceId}/analysis/runs/{runId}/safe-summary` emits a
+  repository-safe allowlist summary.
+
+Supported process-internal .NET SDK tool names:
+
+- `get_raw_trace`
+- `get_raw_record`
+- `get_raw_span_context`
+- `get_trace_summary`
+- `get_trace_span_tree`
+- `get_cache_summary`
+
+These tools are not exposed as public HTTP routes and are separate from
+repository-safe summary generation. The Local Monitor project references the
+official `GitHub.Copilot.SDK` .NET package. Normal repository validation can
+build and test the integration without requiring a signed-in Copilot SDK
+runtime; live analysis validation still requires a signed-in Copilot session.
+
 ## Local Ingestion Monitor Windows Startup
 
 Windows users may register the Local Ingestion Monitor as a user-level Windows

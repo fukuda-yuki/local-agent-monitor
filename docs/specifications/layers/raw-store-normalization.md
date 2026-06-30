@@ -277,6 +277,24 @@ Raw access (default-on):
 - the full raw / PII trust boundary and the route contract are defined in
   [../security-data-boundaries.md](../security-data-boundaries.md).
 
+## Local Analysis Persistence
+
+The Local Monitor adds local-only analysis tables for Copilot SDK raw analysis.
+They are additive and do not change normalized measurement, candidate, dashboard
+dataset, or `/api/monitor/*` contracts.
+
+Tables:
+
+- `monitor_analysis_runs`: one local run per raw analysis request. Stores trace
+  id, optional raw record id/span id, focus, lifecycle status, timestamps, local
+  raw-derived result markdown, and error message.
+- `monitor_analysis_events`: local progress/event log for a run.
+- `monitor_analysis_safe_summaries`: repository-safe allowlist summary for a run.
+
+Raw analysis result markdown is local runtime data and must not be committed.
+Repository-safe summary output must be generated from allowlisted metadata and
+evidence references, not by copying arbitrary raw model output.
+
 ## Validation
 
 Use synthetic fixtures for automated tests.

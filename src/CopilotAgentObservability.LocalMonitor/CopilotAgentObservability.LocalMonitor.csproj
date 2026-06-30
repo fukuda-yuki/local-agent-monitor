@@ -12,4 +12,8 @@
     <ProjectReference Include="..\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.4" />
+  </ItemGroup>
+
 </Project>

@@ -1,4 +1,5 @@
 using System.Text.Encodings.Web;
+using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.LocalMonitor.Events;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
@@ -15,6 +16,7 @@ internal static class MonitorHost
     private const string TracePath = "/v1/traces";
 
     private static readonly TimeSpan DefaultCommitTimeout = TimeSpan.FromSeconds(5);
+    private static readonly JsonSerializerOptions CaseInsensitiveJson = new(JsonSerializerDefaults.Web);
 
     public static WebApplication Build(MonitorOptions options)
     {
@@ -65,6 +67,11 @@ internal static class MonitorHost
             ?? new RawTelemetryStoreProjectionStore(
                 new RawTelemetryStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
         builder.Services.AddSingleton(projectionStore);
+        var analysisStore = testOptions?.AnalysisStore ?? new SqliteMonitorAnalysisStore(options.DatabasePath);
+        analysisStore.CreateSchema();
+        builder.Services.AddSingleton(analysisStore);
+        var analysisRunner = testOptions?.AnalysisRunner ?? new DotNetCopilotRawAnalysisRunner(analysisStore, projectionStore);
+        builder.Services.AddSingleton(analysisRunner);
 
         if (testOptions?.StartProjectionWorker ?? true)
         {
@@ -262,6 +269,93 @@ internal static class MonitorHost
         });
         if (!options.SanitizedOnly)
         {
+            app.MapPost("/traces/{traceId}/analysis", async (string traceId, HttpContext context) =>
+            {
+                if (IsCrossSiteRequest(context))
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden", "The raw analysis action is same-origin only.");
+                    return;
+                }
+
+                if (!HasMonitorCsrfHeader(context))
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status403Forbidden, "csrf_required", "The raw analysis action requires the local monitor CSRF header.");
+                    return;
+                }
+
+                AnalysisStartPayload? payload;
+                try
+                {
+                    payload = await JsonSerializer.DeserializeAsync<AnalysisStartPayload>(context.Request.Body, CaseInsensitiveJson, context.RequestAborted);
+                }
+                catch (JsonException)
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_payload", "Analysis request payload must be valid JSON.");
+                    return;
+                }
+
+                if (!MonitorAnalysisWire.TryParseFocus(payload?.Focus, out var focus))
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_focus", "Analysis focus is not supported.");
+                    return;
+                }
+
+                var start = analysisStore.StartRun(
+                    traceId,
+                    payload?.RawRecordId,
+                    payload?.SpanId,
+                    focus,
+                    DateTimeOffset.UtcNow);
+                await analysisRunner.StartAsync(
+                    new MonitorAnalysisContext(start.RunId, traceId, payload?.RawRecordId, payload?.SpanId, focus),
+                    context.RequestAborted);
+                context.Response.Headers["Cache-Control"] = "no-store";
+                await WriteJsonAsync(context, new
+                {
+                    run_id = start.RunId,
+                    status = MonitorAnalysisStatus.Queued.ToWireValue(),
+                });
+            });
+
+            app.MapGet("/traces/{traceId}/analysis/runs/{runId:long}", async (string traceId, long runId, HttpContext context) =>
+            {
+                if (IsCrossSiteRequest(context))
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden", "The raw analysis result is same-origin only.");
+                    return;
+                }
+
+                var run = analysisStore.GetRun(runId);
+                if (run is null || !string.Equals(run.TraceId, traceId, StringComparison.Ordinal))
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "analysis_run_not_found", "No analysis run exists for that trace.");
+                    return;
+                }
+
+                context.Response.Headers["Cache-Control"] = "no-store";
+                await WriteJsonAsync(context, ToRunDto(run, includeRawResult: true));
+            });
+
+            app.MapGet("/traces/{traceId}/analysis/runs/{runId:long}/safe-summary", async (string traceId, long runId, HttpContext context) =>
+            {
+                var run = analysisStore.GetRun(runId);
+                if (run is null || !string.Equals(run.TraceId, traceId, StringComparison.Ordinal))
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "analysis_run_not_found", "No analysis run exists for that trace.");
+                    return;
+                }
+
+                var summary = analysisStore.GenerateRepositorySafeSummary(runId, DateTimeOffset.UtcNow);
+                context.Response.Headers["Cache-Control"] = "no-store";
+                await WriteJsonAsync(context, new
+                {
+                    repository_safe = true,
+                    run_id = summary.RunId,
+                    generated_at = summary.GeneratedAt,
+                    markdown = summary.Markdown,
+                });
+            });
+
             // A raw / PII surface (alongside the trace-detail page), active by
             // default per D023; --sanitized-only removes it (route absent → 404).
             // Same-origin enforced (cross-site browser reads cannot exfiltrate),
@@ -464,6 +558,24 @@ internal static class MonitorHost
         return !string.IsNullOrWhiteSpace(host) && MonitorOptions.IsAllowedLoopbackHost(host);
     }
 
+    private static bool HasMonitorCsrfHeader(HttpContext context) =>
+        string.Equals(context.Request.Headers["x-monitor-csrf"].ToString(), "local-monitor", StringComparison.Ordinal);
+
+    private static object ToRunDto(MonitorAnalysisRun run, bool includeRawResult) => new
+    {
+        id = run.Id,
+        trace_id = run.TraceId,
+        raw_record_id = run.RawRecordId,
+        span_id = run.SpanId,
+        focus = run.Focus.ToWireValue(),
+        status = run.Status.ToWireValue(),
+        requested_at = run.RequestedAt,
+        started_at = run.StartedAt,
+        completed_at = run.CompletedAt,
+        result_markdown = includeRawResult ? run.ResultMarkdown : null,
+        error_message = run.ErrorMessage,
+    };
+
     /// <summary>
     /// Strict same-origin check for the raw-bearing routes (raw-detail route and
     /// the trace-detail page): a browser <c>Sec-Fetch-Site</c> other than
@@ -516,6 +628,12 @@ internal static class MonitorHost
         await context.Response.WriteAsync($$"""{"accepted":false,"error":"{{error}}","message":"{{message}}"}""");
     }
 
+    private static async Task WriteNoStoreFailureAsync(HttpContext context, int statusCode, string error, string message)
+    {
+        context.Response.Headers["Cache-Control"] = "no-store";
+        await WriteFailureAsync(context, statusCode, error, message);
+    }
+
     private static Task WriteInvalidCursorQueryAsync(HttpContext context) =>
         WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_query", "after must be a non-negative integer and limit must be between 1 and 200.");
 
@@ -565,7 +683,13 @@ internal sealed class MonitorHostTestOptions
 
     public IMonitorProjectionStore? ProjectionStore { get; init; }
 
+    public IMonitorAnalysisStore? AnalysisStore { get; init; }
+
+    public IMonitorAnalysisRunner? AnalysisRunner { get; init; }
+
     public bool StartProjectionWorker { get; init; } = true;
 
     public TimeSpan? ProjectionPollInterval { get; init; }
 }
+
+internal sealed record AnalysisStartPayload(string? Focus, long? RawRecordId, string? SpanId);

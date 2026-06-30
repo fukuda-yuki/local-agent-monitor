@@ -87,6 +87,77 @@
 
     @if (Model.RawAvailable)
     {
+        <section class="monitor-analysis-panel" data-analysis-trace-id="@Model.TraceId">
+            <h3>Analyze raw trace with Copilot</h3>
+            <div class="analysis-controls">
+                <label for="analysis-focus">Focus</label>
+                <select id="analysis-focus">
+                    <option value="latency">latency</option>
+                    <option value="tokens">tokens</option>
+                    <option value="cache">cache</option>
+                    <option value="errors">errors</option>
+                    <option value="tool-usage">tool-usage</option>
+                    <option value="agent-flow">agent-flow</option>
+                </select>
+                <button id="analysis-start" type="button">Analyze raw trace with Copilot</button>
+            </div>
+            <pre id="analysis-result" class="monitor-analysis-result" aria-live="polite"></pre>
+        </section>
+        <script>
+            (function () {
+                var panel = document.querySelector("[data-analysis-trace-id]");
+                if (!panel) return;
+                var traceId = panel.getAttribute("data-analysis-trace-id");
+                var focus = document.getElementById("analysis-focus");
+                var start = document.getElementById("analysis-start");
+                var result = document.getElementById("analysis-result");
+                start.addEventListener("click", function () {
+                    start.disabled = true;
+                    result.textContent = "Starting raw analysis...";
+                    fetch("/traces/" + encodeURIComponent(traceId) + "/analysis", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "x-monitor-csrf": "local-monitor"
+                        },
+                        body: JSON.stringify({ focus: focus.value })
+                    })
+                        .then(function (response) { return response.json().then(function (body) { return { response: response, body: body }; }); })
+                        .then(function (out) {
+                            if (!out.response.ok) {
+                                result.textContent = "Analysis start failed: " + (out.body.error || out.response.status);
+                                return;
+                            }
+
+                            result.textContent = "Queued analysis run " + out.body.run_id + ". Waiting for .NET Copilot SDK result...";
+                            poll(out.body.run_id);
+                        })
+                        .catch(function (error) { result.textContent = "Analysis start failed: " + error.message; })
+                        .finally(function () { start.disabled = false; });
+                });
+
+                function poll(runId) {
+                    fetch("/traces/" + encodeURIComponent(traceId) + "/analysis/runs/" + encodeURIComponent(runId))
+                        .then(function (response) { return response.json().then(function (body) { return { response: response, body: body }; }); })
+                        .then(function (out) {
+                            if (!out.response.ok) {
+                                result.textContent = "Analysis status failed: " + (out.body.error || out.response.status);
+                                return;
+                            }
+
+                            if (out.body.status === "queued" || out.body.status === "running") {
+                                result.textContent = "Analysis run " + runId + " is " + out.body.status + "...";
+                                window.setTimeout(function () { poll(runId); }, 1500);
+                                return;
+                            }
+
+                            result.textContent = out.body.result_markdown || out.body.error_message || ("Analysis run " + runId + " ended with " + out.body.status + ".");
+                        })
+                        .catch(function (error) { result.textContent = "Analysis status failed: " + error.message; });
+                }
+            })();
+        </script>
+
         <h3>Raw OTLP payload</h3>
         @if (Model.RawRecords.Count == 0)
         {
