@@ -83,3 +83,6 @@ Notes:
   failed SDK run.
 - BYOK plus explicit SDK state directory resolved the SDK execution failure in
   this environment.
+- The default GitHub Copilot quota-backed provider path was intentionally not
+  revalidated after BYOK success; the user removed that path from the Sprint13
+  validation gate on 2026-06-30.

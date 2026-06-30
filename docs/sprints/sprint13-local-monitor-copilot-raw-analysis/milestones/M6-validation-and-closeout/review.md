@@ -14,9 +14,9 @@ Results:
 
 - `dotnet build CopilotAgentObservability.slnx`: passed, 0 warnings, 0 errors.
 - `pwsh scripts\test\install-playwright-chromium.ps1`: passed.
-- `dotnet test CopilotAgentObservability.slnx`: passed, 301 ConfigCli + 272 LocalMonitor tests.
+- `dotnet test CopilotAgentObservability.slnx`: passed, 301 ConfigCli + 275 LocalMonitor tests.
 - `GitHub.Copilot.SDK` package restore/build: passed with version 1.0.4.
-  Live signed-in .NET SDK invocation remains unverified.
+  BYOK .NET SDK invocation is live-validated.
 
 ## Coverage added
 
@@ -28,7 +28,7 @@ Results:
 
 ## Live validation
 
-Partially run in this environment. Evidence:
+Run in this environment with BYOK provider configuration. Evidence:
 [live-validation.md](live-validation.md).
 
 Confirmed:
@@ -47,5 +47,5 @@ Additional BYOK validation completed on 2026-06-30:
 
 Remaining live checks:
 
-- Invoke analysis with each internal raw/summary tool available to the SDK.
-- Confirm raw tool data reaches Copilot only through the Local Monitor process.
+- The default GitHub Copilot quota-backed provider path was not revalidated.
+  Per user direction on 2026-06-30, this is not a Sprint13 closeout gate.
