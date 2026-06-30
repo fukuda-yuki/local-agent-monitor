@@ -452,7 +452,7 @@ Validation:
 
 ## Resource Attributes
 
-Required:
+Expected collection metadata（収集期待 Resource Attributes）:
 
 ```text
 user.id
@@ -463,7 +463,9 @@ client.kind
 experiment.id
 ```
 
-Repository-safe 成果物（measurement dataset / dashboard dataset / static dashboard）は PII と組織属性を保持しない。そのため repository-safe 成果物の collection-health で**必須属性として検証するのは `experiment.id` と `client.kind` のみ**とし、`user.id` / `user.email` / `team.id` / `department` は検証対象外とする。`team.id` / `department` は PII ではないが repository-safe dataset では未知 resource 属性として保持され、必須検証には含めない。PII / 組織属性の収集健全性は local monitor 側（loopback 既定表示）でのみ観察する。
+**2層モデル:** 上記 6 属性は収集時の expected collection metadata として維持する。repository-safe 自動欠落検証は `client.kind` と `experiment.id` のみを対象とし、`user.id` / `user.email` / `team.id` / `department` は欠落しても `missing-required-attribute` health row を生成しない。`team.id` / `department` は repository-safe dataset では未知 resource 属性として保持され、必須検証には含めない。PII / 組織属性の収集健全性は local monitor 側（loopback 既定表示）でのみ観察する。
+
+`trace_id` は Resource Attribute ではなく source trace reference である。参照整合性のため欠落時に collection health row を出力してよいが、Resource Attribute 必須検証とは別枠で扱う。
 
 Recommended `client.kind` values:
 

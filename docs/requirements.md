@@ -120,9 +120,9 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 Span 名は client 実装や version により変化し得るため、特定 span 名だけには依存しない。
 正規化後は、agent invocation、LLM call、tool call、permission / approval、file operation、shell command、error、user interaction などの論理カテゴリで扱う。
 
-## 6. Resource Attributes
+## 6. Expected Resource Attributes
 
-必須 Resource Attributes:
+Expected collection metadata（収集期待 Resource Attributes）:
 
 ```text
 user.id
@@ -133,7 +133,14 @@ client.kind
 experiment.id
 ```
 
-Repository-safe 成果物（measurement dataset / dashboard dataset / static dashboard）は PII と組織属性を保持しない。そのため repository-safe 成果物の collection-health で**必須属性として検証するのは `experiment.id` と `client.kind` のみ**とし、`user.id` / `user.email` / `team.id` / `department` は検証対象外とする。これら PII / 組織属性の収集健全性は、raw / PII を含む local monitor 側（loopback 既定表示）でのみ観察する。`team.id` / `department` は PII ではないが、repository-safe dataset では未知 resource 属性として保持され、必須検証には含めない。
+Repository-safe automatic missing-attribute validation is narrower than this collection metadata list. It checks only `client.kind` and `experiment.id`.
+
+**2層モデル:**
+
+- **収集レイヤー**: 上記 6 属性は、live telemetry 設定時の expected collection metadata として維持する。telemetry source はこれらの属性を Resource に設定することが期待される。
+- **repository-safe 検証レイヤー**: 自動欠落検証（dashboard dataset の `missing-required-attribute` health row）は `client.kind` と `experiment.id` のみを対象とする。`user.id` / `user.email` / `team.id` / `department` は取得できる場合に保持してよいが、これらが欠落しても `missing-required-attribute` health row は生成しない。これら PII / 組織属性の収集健全性は、raw / PII を含む local monitor 側（loopback 既定表示）でのみ観察する。`team.id` / `department` は PII ではないが、repository-safe dataset では未知 resource 属性として保持され、必須検証には含めない。
+
+`trace_id` は Resource Attribute ではなく **source trace reference** である。参照整合性のため、欠落時は collection health row（`missing-required-attribute`）を出力してよいが、Resource Attribute の必須検証とは別枠で扱う。
 
 `client.kind` の推奨値:
 

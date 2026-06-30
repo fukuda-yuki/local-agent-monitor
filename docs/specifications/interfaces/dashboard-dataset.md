@@ -118,7 +118,7 @@ Purpose:
 - unknown span / attribute counts。
 - normalization, mapping, and candidate generation failures。
 
-Required-attribute gaps in this repository-safe table are reported only for `trace_id`, `client_kind`, and `experiment_id`. `user_id` / `user_email` columns are display / filter context (see Allowed Identity Fields) and are not validated as required attributes here; `team.id` / `department` are not columns in this table and are not validated as required in repository-safe outputs. PII / organization attribute collection health is observable only on the local monitor side.
+Repository-safe Resource Attribute 必須検証対象は `client_kind` と `experiment_id` のみである。`trace_id` は Resource Attribute ではなく source trace reference であり、参照整合性のため欠落時に同じ `missing-required-attribute` health_check_kind で health row を出力するが、Resource Attribute 必須検証とは概念上別枠である。`user_id` / `user_email` columns are display / filter context (see Allowed Identity Fields) and are not validated as required attributes here; `team.id` / `department` are not columns in this table and are not validated as required in repository-safe outputs. PII / organization attribute collection health is observable only on the local monitor side.
 
 ## Allowed Identity Fields
 
