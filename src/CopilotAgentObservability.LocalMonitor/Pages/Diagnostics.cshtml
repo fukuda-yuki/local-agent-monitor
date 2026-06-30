@@ -2,76 +2,82 @@
 @model DiagnosticsModel
 
 @{
-    var statusClass = Model.Readiness.Status switch
+    var (statusLabel, statusClass) = Model.Readiness.Status switch
     {
-        "Healthy" => "success",
-        "Degraded" => "warning",
-        _ => "error"
+        "Healthy" => ("正常", "success"),
+        "Degraded" => ("劣化", "warning"),
+        _ => ("異常", "error"),
     };
     var degradedReasons = Model.Readiness.DegradedReasons?.ToList() ?? new List<string>();
+
+    string Ok(bool value) => value ? "OK" : "FAIL";
+    string OkClass(bool value) => value ? "success" : "error";
 }
 
 <section class="monitor-section">
-    <h2>health/ready</h2>
+    <h2 class="monitor-page-title">診断</h2>
+    <p class="monitor-subtle"><code>GET /health/ready</code> の評価結果</p>
 
     @if (degradedReasons.Count > 0)
     {
         var bannerClass = Model.Readiness.Status == "Unhealthy" ? "error" : "warning";
         <div class="monitor-banner @bannerClass">
-            <strong>@Model.Readiness.Status:</strong> @string.Join("; ", degradedReasons)
+            <strong>@statusLabel:</strong> @string.Join("; ", degradedReasons)
         </div>
     }
 
-    <div class="monitor-metrics">
-        <div class="monitor-metric-panel">
-            <div class="metric-label">Status</div>
-            <div class="metric-value monitor-status @statusClass">@Model.Readiness.Status</div>
+    <div class="metric-grid">
+        <div class="metric-card metric-card-@statusClass">
+            <div class="metric-label">ステータス</div>
+            <div class="metric-value monitor-status @statusClass">@statusLabel</div>
         </div>
-        <div class="monitor-metric-panel">
-            <div class="metric-label">Loopback Bound</div>
-            <div class="metric-value monitor-status @(Model.Readiness.LoopbackBound ? "success" : "error")">@Model.Readiness.LoopbackBound</div>
+        <div class="metric-card">
+            <div class="metric-label">ループバックバインド</div>
+            <div class="metric-value monitor-status @OkClass(Model.Readiness.LoopbackBound)">@(Model.Readiness.LoopbackBound ? "有効" : "無効")</div>
         </div>
-        <div class="monitor-metric-panel">
-            <div class="metric-label">Projection Lag</div>
-            <div class="metric-value">@(Model.Readiness.ProjectionLagSeconds)s</div>
+        <div class="metric-card">
+            <div class="metric-label">プロジェクション遅延</div>
+            <div class="metric-value">@(Model.Readiness.ProjectionLagSeconds) 秒</div>
         </div>
-        <div class="monitor-metric-panel">
-            <div class="metric-label">Projection Backlog</div>
+        <div class="metric-card">
+            <div class="metric-label">プロジェクション残</div>
             <div class="metric-value">@Model.Readiness.ProjectionBacklog</div>
         </div>
     </div>
 
-    <h3>Component Checks</h3>
-    <div class="monitor-table-wrapper">
-    <table class="monitor-table">
-        <thead>
-            <tr>
-                <th>Component</th>
-                <th>Status</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td>DbOpen</td>
-                <td><span class="monitor-badge @(Model.Readiness.DbOpen ? "success" : "error")">@(Model.Readiness.DbOpen ? "OK" : "FAIL")</span></td>
-            </tr>
-            <tr>
-                <td>MigrationComplete</td>
-                <td><span class="monitor-badge @(Model.Readiness.MigrationComplete ? "success" : "error")">@(Model.Readiness.MigrationComplete ? "OK" : "FAIL")</span></td>
-            </tr>
-            <tr>
-                <td>WriterRunning</td>
-                <td><span class="monitor-badge @(Model.Readiness.WriterRunning ? "success" : "error")">@(Model.Readiness.WriterRunning ? "OK" : "FAIL")</span></td>
-            </tr>
-            <tr>
-                <td>ProjectionWorkerRunning</td>
-                <td><span class="monitor-badge @(Model.Readiness.ProjectionWorkerRunning ? "success" : "error")">@(Model.Readiness.ProjectionWorkerRunning ? "OK" : "FAIL")</span></td>
-            </tr>
-            <tr>
-                <td>IngestionAccepting</td>
-                <td><span class="monitor-badge @(Model.Readiness.IngestionAccepting ? "success" : "error")">@(Model.Readiness.IngestionAccepting ? "OK" : "FAIL")</span></td>
-            </tr>
-        </tbody>
-    </table>
+    <h3 class="monitor-section-title">コンポーネント確認</h3>
+    <div class="panel">
+        <div class="monitor-table-wrapper">
+            <table class="monitor-table">
+                <thead>
+                    <tr>
+                        <th>コンポーネント</th>
+                        <th>状態</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>DbOpen</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.DbOpen)">@Ok(Model.Readiness.DbOpen)</span></td>
+                    </tr>
+                    <tr>
+                        <td>MigrationComplete</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.MigrationComplete)">@Ok(Model.Readiness.MigrationComplete)</span></td>
+                    </tr>
+                    <tr>
+                        <td>WriterRunning</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.WriterRunning)">@Ok(Model.Readiness.WriterRunning)</span></td>
+                    </tr>
+                    <tr>
+                        <td>ProjectionWorkerRunning</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.ProjectionWorkerRunning)">@Ok(Model.Readiness.ProjectionWorkerRunning)</span></td>
+                    </tr>
+                    <tr>
+                        <td>IngestionAccepting</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.IngestionAccepting)">@Ok(Model.Readiness.IngestionAccepting)</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </section>

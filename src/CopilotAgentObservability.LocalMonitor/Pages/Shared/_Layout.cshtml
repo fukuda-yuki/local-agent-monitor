@@ -1,32 +1,25 @@
 <!DOCTYPE html>
-<html lang="en" class="monitor-root">
+<html lang="ja" class="monitor-root">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Local Ingestion Monitor</title>
+    <title>ローカルモニター</title>
     <link rel=stylesheet href=/monitor.css />
 </head>
 <body>
     <header class="monitor-header">
-        <nav class="monitor-nav" aria-label="Monitor navigation">
-            <span class="monitor-brand">Local Ingestion Monitor</span>
-            <a href="/" class="@(Context.Request.Path == "/" ? "active" : "")" aria-current="@(Context.Request.Path == "/" ? "page" : null)">Overview</a>
-            <a href="/ingestions" class="@(Context.Request.Path.StartsWithSegments("/ingestions") ? "active" : "")" aria-current="@(Context.Request.Path.StartsWithSegments("/ingestions") ? "page" : null)">Ingestions</a>
-            <a href="/traces" class="@(Context.Request.Path.StartsWithSegments("/traces") ? "active" : "")" aria-current="@(Context.Request.Path.StartsWithSegments("/traces") ? "page" : null)">Traces</a>
-            <a href="/diagnostics" class="@(Context.Request.Path == "/diagnostics" ? "active" : "")" aria-current="@(Context.Request.Path == "/diagnostics" ? "page" : null)">Diagnostics</a>
-            <span class="monitor-nav-status" id="monitor-status-dot" title="Checking…" aria-label="Monitor status: checking"></span>
+        <nav class="nav" aria-label="モニターナビゲーション">
+            <span class="nav-brand"><span class="nav-logo" aria-hidden="true"></span>ローカルモニター</span>
+            <a href="/" class="nav-link @(Context.Request.Path == "/" ? "active" : "")" aria-current="@(Context.Request.Path == "/" ? "page" : null)">📊 ダッシュボード</a>
+            <a href="/traces" class="nav-link @(Context.Request.Path.StartsWithSegments("/traces") ? "active" : "")" aria-current="@(Context.Request.Path.StartsWithSegments("/traces") ? "page" : null)">🔍 トレース</a>
+            <a href="/diagnostics" class="nav-link @(Context.Request.Path == "/diagnostics" ? "active" : "")" aria-current="@(Context.Request.Path == "/diagnostics" ? "page" : null)">⚙️ 診断</a>
+            <span class="nav-dot" id="monitor-status-dot" title="確認中…" aria-label="モニター状態: 確認中"></span>
         </nav>
     </header>
     <main class="monitor-content">
         @RenderBody()
     </main>
     <script src=/monitor.js defer></script>
-    @if (string.Equals(ViewContext.RouteData.Values["page"]?.ToString(), "/TraceDetail", StringComparison.Ordinal))
-    {
-        <script src=/vendor/cytoscape.min.js defer></script>
-        <script src=/vendor/dagre.min.js defer></script>
-        <script src=/vendor/cytoscape-dagre.js defer></script>
-    }
     <script src=/monitor-views.js defer></script>
 </body>
 </html>

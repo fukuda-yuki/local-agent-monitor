@@ -11,54 +11,82 @@ public class MonitorUiTests
         EnsureSchema(temp);
         await using var host = await StartHostAsync(temp);
 
-        foreach (var path in new[] { "/", "/ingestions", "/traces", "/diagnostics" })
+        foreach (var path in new[] { "/", "/traces", "/diagnostics" })
         {
             var response = await host.Client.GetAsync(path);
             var body = await response.Content.ReadAsStringAsync();
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             Assert.Equal("text/html", response.Content.Headers.ContentType?.MediaType);
-            Assert.Contains("Local Ingestion Monitor", body);
+            Assert.Contains("ローカルモニター", body);
         }
     }
 
     [Fact]
-    public async Task OverviewAndDiagnostics_RenderReadinessWithoutRawContent()
+    public async Task IngestionsRoute_IsRetired_Returns404()
     {
+        using var temp = new MonitorTempDirectory();
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp);
+
+        var response = await host.Client.GetAsync("/ingestions");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Dashboard_ShowsPromptByDefault_ButNotToolArgsOrPii()
+    {
+        // D032: the dashboard labels traces with the user prompt by default
+        // (raw-bearing), but surfaces ONLY the prompt — never tool arguments or PII.
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
         await using var host = await StartHostAsync(temp);
 
         var overview = await host.Client.GetStringAsync("/");
+
+        Assert.Contains("ダッシュボード", overview);
+        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", overview);
+        Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", overview);
+        Assert.DoesNotContain("leak-marker@example.com", overview);
+    }
+
+    [Fact]
+    public async Task Diagnostics_RendersReadinessWithoutRawOrPii()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedRawWithSensitiveMarkers(temp);
+        await using var host = await StartHostAsync(temp);
+
         var diagnostics = await host.Client.GetStringAsync("/diagnostics");
 
-        Assert.Contains("status", overview);
         Assert.Contains("health/ready", diagnostics);
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", overview);
+        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", diagnostics);
         Assert.DoesNotContain("leak-marker@example.com", diagnostics);
     }
 
     [Fact]
-    public async Task ListPages_LinkRawByDefaultAndHideUnderSanitizedOnly()
+    public async Task Dashboard_LinksRawAndShowsPromptByDefault_HidesBothUnderSanitizedOnly()
     {
         using var temp = new MonitorTempDirectory();
         var rawRecordId = SeedRawWithSensitiveMarkers(temp);
 
         await using var defaultHost = await StartHostAsync(temp);
-        var defaultIngestions = await defaultHost.Client.GetStringAsync("/ingestions");
-        Assert.Contains($"/traces/{rawRecordId}/raw", defaultIngestions);
-        // Raw is reachable by default, but the list itself stays sanitized; raw is a link only.
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", defaultIngestions);
-        Assert.DoesNotContain("leak-marker@example.com", defaultIngestions);
+        var defaultDashboard = await defaultHost.Client.GetStringAsync("/");
+        // Raw is shown by default: the ingestion list links the raw record and the
+        // trace is labelled by its prompt (D032).
+        Assert.Contains($"/traces/{rawRecordId}/raw", defaultDashboard);
+        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", defaultDashboard);
+        Assert.DoesNotContain("leak-marker@example.com", defaultDashboard);
 
         await using var sanitizedHost = await StartHostAsync(temp, sanitizedOnly: true);
-        var sanitizedIngestions = await sanitizedHost.Client.GetStringAsync("/ingestions");
-        Assert.DoesNotContain($"/traces/{rawRecordId}/raw", sanitizedIngestions);
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", sanitizedIngestions);
+        var sanitizedDashboard = await sanitizedHost.Client.GetStringAsync("/");
+        Assert.DoesNotContain($"/traces/{rawRecordId}/raw", sanitizedDashboard);
+        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", sanitizedDashboard);
     }
 
     [Fact]
-    public async Task TracesPage_RendersSanitizedRowsAndNoRawContent()
+    public async Task TracesPage_ShowsPromptByDefault_ButNotToolArgsOrPii()
     {
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
@@ -66,23 +94,37 @@ public class MonitorUiTests
 
         var traces = await host.Client.GetStringAsync("/traces");
 
+        // The trace id is still shown (shortened) and the prompt labels the card (D032),
+        // but only the prompt is surfaced — never tool arguments or PII.
         Assert.Contains("trace-ui", traces);
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", traces);
+        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", traces);
         Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", traces);
         Assert.DoesNotContain("leak-marker@example.com", traces);
     }
 
     [Fact]
-    public async Task ListPages_RejectNegativeAfterCursorWith400()
+    public async Task TracesPage_OmitsPromptUnderSanitizedOnly()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedRawWithSensitiveMarkers(temp);
+        await using var host = await StartHostAsync(temp, sanitizedOnly: true);
+
+        var traces = await host.Client.GetStringAsync("/traces");
+
+        Assert.Contains("trace-ui", traces);
+        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", traces);
+        Assert.DoesNotContain("leak-marker@example.com", traces);
+    }
+
+    [Fact]
+    public async Task TracesPage_RejectsNegativeAfterCursorWith400()
     {
         using var temp = new MonitorTempDirectory();
         EnsureSchema(temp);
         await using var host = await StartHostAsync(temp);
 
-        var ingestions = await host.Client.GetAsync("/ingestions?after=-1");
         var traces = await host.Client.GetAsync("/traces?after=-1");
 
-        Assert.Equal(HttpStatusCode.BadRequest, ingestions.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, traces.StatusCode);
     }
 
@@ -131,20 +173,21 @@ public class MonitorUiTests
     [InlineData("/vendor/cytoscape.min.js")]
     [InlineData("/vendor/dagre.min.js")]
     [InlineData("/vendor/cytoscape-dagre.js")]
-    public async Task GraphVendorScript_IsServedAsJavaScript(string path)
+    public async Task GraphVendorScripts_AreRemoved_Return404(string path)
     {
+        // D033: the Cytoscape / dagre vendored graph dependency is removed; the
+        // Flow Chart / Span Tree are now plain DOM.
         using var temp = new MonitorTempDirectory();
         EnsureSchema(temp);
         await using var host = await StartHostAsync(temp);
 
         var response = await host.Client.GetAsync(path);
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("text/javascript", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
-    public async Task TracesPage_RendersRowExpandDisclosure()
+    public async Task TracesPage_RendersTraceCards()
     {
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
@@ -152,9 +195,9 @@ public class MonitorUiTests
 
         var traces = await host.Client.GetStringAsync("/traces");
 
-        // Progressive disclosure: a per-row toggle and a collapsed detail row.
-        Assert.Contains("row-toggle", traces);
-        Assert.Contains("trace-extra", traces);
+        // The redesigned list renders one card per trace with metric chips.
+        Assert.Contains("trace-card", traces);
+        Assert.Contains("trace-card-chips", traces);
     }
 
     [Fact]
@@ -169,8 +212,8 @@ public class MonitorUiTests
 
         // Fonts are referenced from the local vendor path, never a CDN (D028).
         Assert.Contains("/vendor/fonts/", css);
-        Assert.Contains("--monitor-bg: oklch(0.19 0 0)", css);
-        Assert.Contains("--monitor-accent: oklch(0.54 0.17 255)", css);
+        Assert.Contains("--monitor-bg: oklch(0.15 0.012 264)", css);
+        Assert.Contains("--monitor-accent: oklch(0.65 0.16 255)", css);
         foreach (var cdn in new[] { "googleapis.com", "gstatic.com", "cdn.jsdelivr.net", "unpkg.com" })
         {
             Assert.DoesNotContain(cdn, css);
@@ -259,6 +302,12 @@ public class MonitorUiTests
             record.ReceivedAt,
             MonitorProjectionBuilder.Build(record),
             DateTimeOffset.UnixEpoch.AddMinutes(2));
+        // Span projection links the raw record to the trace, which is what the
+        // dashboard / trace-list prompt extraction reads (ListRawRecordsByTraceId).
+        store.ApplySpanProjection(
+            id,
+            MonitorSpanProjectionBuilder.Build(record),
+            DateTimeOffset.UnixEpoch.AddMinutes(3));
         return id;
     }
 

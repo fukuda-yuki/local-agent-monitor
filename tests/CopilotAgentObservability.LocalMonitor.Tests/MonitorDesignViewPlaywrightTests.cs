@@ -31,15 +31,15 @@ public class MonitorDesignViewPlaywrightTests
         }
 
         Assert.Equal(
-            "oklch(0.19 0 0)",
+            "oklch(0.15 0.012 264)",
             await page.Locator("body").EvaluateAsync<string>("element => getComputedStyle(element).getPropertyValue('--monitor-bg').trim()"));
         Assert.Equal("true", await page.Locator("#tab-summary").GetAttributeAsync("aria-selected"));
 
         await page.Locator("#tab-timeline").ClickAsync();
         await Expect(page.Locator("#tab-timeline")).ToHaveAttributeAsync("aria-selected", "true");
-        await Expect(page.Locator("#timeline-count")).ToContainTextAsync("5 of 5 spans");
+        await Expect(page.Locator("#timeline-count")).ToContainTextAsync("5 / 5 スパン");
         await page.Locator("#timeline-errors-only").CheckAsync();
-        await Expect(page.Locator("#timeline-count")).ToContainTextAsync("1 of 5 spans");
+        await Expect(page.Locator("#timeline-count")).ToContainTextAsync("1 / 5 スパン");
         await Expect(page.Locator("#timeline-rows tr")).ToHaveCountAsync(1);
         await Expect(page.Locator("#timeline-rows")).ToContainTextAsync("tool_failure");
 
@@ -48,11 +48,20 @@ public class MonitorDesignViewPlaywrightTests
         await Expect(page.Locator("#timeline-rows tr").First).ToContainTextAsync("chat");
         await Expect(page.Locator("#timeline-rows tr").First).ToContainTextAsync("300 / 150 / 450");
 
-        await page.Locator("#tab-flow").ClickAsync();
-        await Expect(page.Locator("#tab-flow")).ToHaveAttributeAsync("aria-selected", "true");
-        await Expect(page.Locator("#flow-status")).ToContainTextAsync("5 spans");
-        await Expect(page.Locator("#flow-chart canvas").First).ToBeVisibleAsync();
-        Assert.True(await FlowChartHasDrawnPixelsAsync(page), "Flow Chart canvas should contain rendered graph pixels.");
+        // Span Tree + Flow (D033: plain DOM, no Cytoscape canvas).
+        await page.Locator("#tab-tree").ClickAsync();
+        await Expect(page.Locator("#tab-tree")).ToHaveAttributeAsync("aria-selected", "true");
+        await Expect(page.Locator("#spantree-status")).ToContainTextAsync("5 スパン");
+        await Expect(page.Locator("#spantree-view table.span-table tbody tr")).ToHaveCountAsync(5);
+        await Expect(page.Locator("#spantree-view")).ToBeVisibleAsync();
+        // Toggle to the DOM flow view.
+        await page.Locator("#view-flow-btn").ClickAsync();
+        await Expect(page.Locator("#flow-view")).ToBeVisibleAsync();
+        await Expect(page.Locator("#flow-view .flow-node").First).ToBeVisibleAsync();
+        await Expect(page.Locator("#spantree-view")).ToBeHiddenAsync();
+        // No Cytoscape canvas exists anymore.
+        await Expect(page.Locator("#spantree-view canvas")).ToHaveCountAsync(0);
+        await Expect(page.Locator("#flow-view canvas")).ToHaveCountAsync(0);
 
         await page.Locator("#tab-cache").ClickAsync();
         await Expect(page.Locator("#tab-cache")).ToHaveAttributeAsync("aria-selected", "true");
@@ -64,47 +73,6 @@ public class MonitorDesignViewPlaywrightTests
 
         Assert.Contains(requestedUrls, url => url.Contains($"/api/monitor/traces/{TraceId}/spans", StringComparison.Ordinal));
         Assert.DoesNotContain(requestedUrls, url => url.Contains("/raw", StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static async Task<bool> FlowChartHasDrawnPixelsAsync(IPage page)
-    {
-        try
-        {
-            await page.WaitForFunctionAsync(
-            """
-            () => {
-                const element = document.querySelector('#flow-chart');
-                if (!element) {
-                    return false;
-                }
-
-                for (const canvas of element.querySelectorAll('canvas')) {
-                    const context = canvas.getContext('2d');
-                    if (!context || canvas.width === 0 || canvas.height === 0) {
-                        continue;
-                    }
-
-                    const sampleWidth = Math.min(canvas.width, 400);
-                    const sampleHeight = Math.min(canvas.height, 300);
-                    const data = context.getImageData(0, 0, sampleWidth, sampleHeight).data;
-                    for (let i = 3; i < data.length; i += 4) {
-                        if (data[i] !== 0) {
-                            return true;
-                        }
-                    }
-                }
-
-                return false;
-            }
-            """,
-                null,
-                new PageWaitForFunctionOptions { Timeout = 5_000, PollingInterval = 100 });
-            return true;
-        }
-        catch (Exception ex) when (ex.GetType().Name.Contains("Timeout", StringComparison.Ordinal))
-        {
-            return false;
-        }
     }
 
     private static long SeedProjectedTrace(MonitorTempDirectory temp)

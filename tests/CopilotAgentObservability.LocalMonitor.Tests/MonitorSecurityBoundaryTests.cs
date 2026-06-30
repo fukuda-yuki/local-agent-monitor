@@ -33,15 +33,18 @@ public class MonitorSecurityBoundaryTests
     private const string SanitizationProbeTraceId = "trace-probe";
 
     [Fact]
-    public async Task DefaultSurfaces_NeverReturnRawOrPii_EvenWithRawShownByDefault()
+    public async Task SanitizedSurfaces_NeverReturnRawOrPii_EvenWithRawShownByDefault()
     {
+        // The JSON APIs, the SSE stream, and diagnostics carry sanitized metadata
+        // only — never raw or PII — even with raw shown by default. (The dashboard
+        // and trace list surface the prompt label by design; see the D032 tests.)
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
         await using var host = await StartReadOnlyHostAsync(temp);
 
         foreach (var path in new[]
                  {
-                     "/", "/ingestions", "/traces", "/diagnostics",
+                     "/diagnostics",
                      "/api/monitor/ingestions", "/api/monitor/traces",
                  })
         {
@@ -50,6 +53,76 @@ public class MonitorSecurityBoundaryTests
             {
                 Assert.DoesNotContain(marker, body);
             }
+        }
+    }
+
+    [Fact]
+    public async Task DashboardAndTraceList_ShowPromptByDefault_ButNeverToolArgsOrPii()
+    {
+        // D032: the dashboard and trace list label traces with the user prompt by
+        // default (raw-bearing), surfacing ONLY the prompt — never tool arguments
+        // or PII, and never via /api/monitor/* (server-rendered pages only).
+        using var temp = new MonitorTempDirectory();
+        SeedSensitiveProjectedRecord(temp);
+        await using var host = await StartReadOnlyHostAsync(temp);
+
+        foreach (var path in new[] { "/", "/traces" })
+        {
+            var body = await host.Client.GetStringAsync(path);
+            Assert.Contains("SECRET_PROMPT_TEXT_MARKER", body);
+            Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", body);
+            Assert.DoesNotContain("leak-marker@example.com", body);
+        }
+    }
+
+    [Fact]
+    public async Task DashboardAndTraceList_OmitPromptUnderSanitizedOnly()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedSensitiveProjectedRecord(temp);
+        await using var host = await StartReadOnlyHostAsync(temp, sanitizedOnly: true);
+
+        foreach (var path in new[] { "/", "/traces" })
+        {
+            var body = await host.Client.GetStringAsync(path);
+            foreach (var marker in Markers)
+            {
+                Assert.DoesNotContain(marker, body);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DashboardAndTraceList_CrossOriginIsForbidden_WhenRawShown()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedSensitiveProjectedRecord(temp);
+        await using var host = await StartReadOnlyHostAsync(temp);
+
+        foreach (var path in new[] { "/", "/traces" })
+        {
+            using var crossSite = new HttpRequestMessage(HttpMethod.Get, path);
+            crossSite.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "cross-site");
+            Assert.Equal(HttpStatusCode.Forbidden, (await host.Client.SendAsync(crossSite)).StatusCode);
+
+            using var foreignOrigin = new HttpRequestMessage(HttpMethod.Get, path);
+            foreignOrigin.Headers.TryAddWithoutValidation("Origin", "http://evil.example.com");
+            Assert.Equal(HttpStatusCode.Forbidden, (await host.Client.SendAsync(foreignOrigin)).StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task DashboardAndTraceList_SetNoStore_WhenRawShown()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedSensitiveProjectedRecord(temp);
+        await using var host = await StartReadOnlyHostAsync(temp);
+
+        foreach (var path in new[] { "/", "/traces" })
+        {
+            var response = await host.Client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.True(response.Headers.CacheControl?.NoStore, $"{path} must send Cache-Control: no-store when raw is shown.");
         }
     }
 
@@ -285,6 +358,12 @@ public class MonitorSecurityBoundaryTests
             record.ReceivedAt,
             MonitorProjectionBuilder.Build(record),
             DateTimeOffset.UnixEpoch.AddMinutes(2));
+        // Span projection links the raw record to the trace so the dashboard /
+        // trace-list prompt extraction (ListRawRecordsByTraceId) can read it.
+        store.ApplySpanProjection(
+            id,
+            MonitorSpanProjectionBuilder.Build(record),
+            DateTimeOffset.UnixEpoch.AddMinutes(3));
         return id;
     }
 

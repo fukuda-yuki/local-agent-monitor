@@ -1,10 +1,10 @@
 // Local Ingestion Monitor — view interactions (Sprint10 A3 / M3 / M4 / M5).
 //
-// Vanilla JS plus the locally vendored Cytoscape/dagre files on TraceDetail
-// (D025). Presentation only: this script reads sanitized monitor JSON and
-// already-rendered DOM. It never fetches a raw-bearing route and never inserts
-// payload markup. Event delegation keeps it inert on pages without the relevant
-// controls (Overview / Ingestions / Diagnostics), so it is safe to load globally.
+// Vanilla JS, no external libraries. Presentation only: this script reads
+// sanitized monitor JSON and already-rendered DOM. It never fetches a raw-bearing
+// route and never inserts payload markup. Event delegation keeps it inert on pages
+// without the relevant controls (Overview / Ingestions / Diagnostics), so it is
+// safe to load globally.
 (() => {
     "use strict";
 
@@ -40,7 +40,7 @@
         next.focus();
     }
 
-    // ── TraceDetail Flow Chart ─────────────────────────────────────────────
+    // ── Span API fetch ─────────────────────────────────────────────────────
     async function fetchAllSpans(traceId) {
         const spans = [];
         let after = 0;
@@ -63,11 +63,30 @@
         }
     }
 
-    function displayName(span) {
-        const specific = span.tool_name || span.mcp_tool_name || span.agent_name || span.response_model || span.request_model;
-        return specific ? `${span.operation || span.category}\n${specific}` : (span.operation || span.category || "span");
+    // ── Formatting helpers ─────────────────────────────────────────────────
+    function formatTokensNumber(n) {
+        if (n === null || n === undefined) {
+            return "—";
+        }
+        return new Intl.NumberFormat("en-US").format(n);
     }
 
+    function formatDuration(ms) {
+        if (ms === null || ms === undefined) {
+            return "—";
+        }
+        if (ms < 1000) {
+            return `${ms} ms`;
+        }
+        if (ms < 60000) {
+            return `${(ms / 1000).toFixed(1)} 秒`;
+        }
+        const minutes = Math.floor(ms / 60000);
+        const seconds = Math.round((ms % 60000) / 1000);
+        return `${minutes}分 ${seconds}秒`;
+    }
+
+    // ── Shared helpers ─────────────────────────────────────────────────────
     function categoryClass(category) {
         switch (category) {
             case "agent_invocation":
@@ -83,43 +102,32 @@
         }
     }
 
-    function elementsFromSpans(spans) {
-        const bySpanId = new Map();
-        for (const span of spans) {
-            if (span.span_id) {
-                bySpanId.set(span.span_id, span);
-            }
+    function categoryIcon(category) {
+        switch (category) {
+            case "agent_invocation":
+                return "🤖"; // 🤖
+            case "llm_call":
+                return "💬"; // 💬
+            case "tool_call":
+                return "🔧"; // 🔧
+            case "hook":
+                return "⚡"; // ⚡
+            default:
+                return "○"; // ○
         }
+    }
 
-        const elements = [];
-        for (const span of spans) {
-            const id = String(span.id);
-            elements.push({
-                group: "nodes",
-                data: {
-                    id,
-                    label: displayName(span),
-                    spanRowId: id,
-                    tokens: span.total_tokens ?? 0,
-                    durationMs: span.duration_ms ?? 0,
-                },
-                classes: [categoryClass(span.category), span.error_type ? "span-error" : ""].filter(Boolean).join(" "),
-            });
+    function spanOperationLabel(span) {
+        return span.tool_name || span.mcp_tool_name || span.agent_name || span.operation || span.category || "span";
+    }
 
-            const parent = span.parent_span_id ? bySpanId.get(span.parent_span_id) : null;
-            if (parent) {
-                elements.push({
-                    group: "edges",
-                    data: {
-                        id: `${parent.id}-${span.id}`,
-                        source: String(parent.id),
-                        target: id,
-                    },
-                });
-            }
-        }
+    function formatModel(span) {
+        const m = span.response_model || span.request_model;
+        return m || "—";
+    }
 
-        return elements;
+    function isErrorSpan(span) {
+        return span.status === "error" || Boolean(span.error_type);
     }
 
     function highlightTimelineRow(spanRowId) {
@@ -141,6 +149,424 @@
         row.scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
+    // ── Span tree build ────────────────────────────────────────────────────
+    function buildParentChildMap(spans) {
+        const bySpanId = new Map();
+        for (const span of spans) {
+            if (span.span_id) {
+                bySpanId.set(span.span_id, span);
+            }
+        }
+
+        const childrenOf = new Map();
+        const roots = [];
+
+        for (const span of spans) {
+            const parent = span.parent_span_id ? bySpanId.get(span.parent_span_id) : null;
+            if (parent) {
+                if (!childrenOf.has(parent.span_id)) {
+                    childrenOf.set(parent.span_id, []);
+                }
+                childrenOf.get(parent.span_id).push(span);
+            } else {
+                roots.push(span);
+            }
+        }
+
+        return { bySpanId, childrenOf, roots };
+    }
+
+    function compareSpanOrder(a, b) {
+        if (a.start_time && b.start_time && a.start_time !== b.start_time) {
+            return String(a.start_time).localeCompare(String(b.start_time));
+        }
+        if (a.start_time && !b.start_time) return -1;
+        if (!a.start_time && b.start_time) return 1;
+        const ordinal = (a.span_ordinal ?? 0) - (b.span_ordinal ?? 0);
+        return ordinal !== 0 ? ordinal : (a.id ?? 0) - (b.id ?? 0);
+    }
+
+    function computeWaterfallRange(spans) {
+        let minMs = Infinity;
+        let maxMs = -Infinity;
+
+        for (const span of spans) {
+            if (span.start_time) {
+                const t = Date.parse(span.start_time);
+                if (!Number.isNaN(t)) {
+                    minMs = Math.min(minMs, t);
+                }
+            }
+            if (span.end_time) {
+                const t = Date.parse(span.end_time);
+                if (!Number.isNaN(t)) {
+                    maxMs = Math.max(maxMs, t);
+                }
+            }
+        }
+
+        const valid = minMs !== Infinity && maxMs !== -Infinity && maxMs > minMs;
+        return valid ? { minMs, totalMs: maxMs - minMs } : null;
+    }
+
+    function makeWaterfallCell(span, range) {
+        const cell = document.createElement("td");
+        cell.className = "waterfall-cell";
+
+        const track = document.createElement("div");
+        track.className = "waterfall-track";
+
+        const bar = document.createElement("div");
+        bar.className = "waterfall-bar " + categoryClass(span.category);
+
+        if (range && span.start_time) {
+            const startMs = Date.parse(span.start_time);
+            const endMs = span.end_time ? Date.parse(span.end_time) : startMs + (span.duration_ms ?? 0);
+            if (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs >= startMs) {
+                const leftPct = ((startMs - range.minMs) / range.totalMs) * 100;
+                const widthPct = Math.max(0.5, ((endMs - startMs) / range.totalMs) * 100);
+                bar.style.left = `${leftPct.toFixed(2)}%`;
+                bar.style.width = `${widthPct.toFixed(2)}%`;
+            } else {
+                bar.style.left = "0%";
+                bar.style.width = "2%";
+            }
+        } else {
+            bar.style.left = "0%";
+            bar.style.width = "2%";
+        }
+
+        track.appendChild(bar);
+        cell.appendChild(track);
+        return cell;
+    }
+
+    function makeSpanRow(span, depth, hasChildren, isExpanded, range, toggleCallback) {
+        const row = document.createElement("tr");
+        row.dataset.spanRowId = String(span.id);
+        row.dataset.spanId = span.span_id || "";
+        row.dataset.depth = String(depth);
+        if (!isExpanded && depth > 0) {
+            // rows themselves are shown/hidden by parent collapse state; start visible
+        }
+
+        // Name cell with indentation + connectors
+        const nameCell = document.createElement("td");
+        nameCell.className = "span-name-cell";
+
+        const inner = document.createElement("div");
+        inner.className = "span-name-inner";
+
+        // Leading spacer for depth=0 (no parent connector)
+        if (depth === 0) {
+            const spacer = document.createElement("span");
+            spacer.style.width = "14px";
+            spacer.style.flex = "none";
+            inner.appendChild(spacer);
+        } else {
+            // For each ancestor level add a connector segment
+            for (let d = 1; d <= depth; d++) {
+                const connector = document.createElement("span");
+                connector.className = "span-connector";
+                if (d < depth) {
+                    // vertical continuation line only
+                    const v = document.createElement("span");
+                    v.className = "span-connector-v";
+                    connector.appendChild(v);
+                } else {
+                    // last level: vertical + horizontal elbow
+                    const v = document.createElement("span");
+                    v.className = "span-connector-v";
+                    const h = document.createElement("span");
+                    h.className = "span-connector-h";
+                    connector.appendChild(v);
+                    connector.appendChild(h);
+                }
+                inner.appendChild(connector);
+            }
+        }
+
+        const label = document.createElement("span");
+        label.className = "span-label";
+
+        // Toggle button
+        const toggle = document.createElement("span");
+        toggle.className = "span-toggle";
+        if (hasChildren) {
+            toggle.textContent = isExpanded ? "▾" : "▸"; // ▾ / ▸
+            toggle.style.cursor = "pointer";
+            toggle.addEventListener("click", (e) => {
+                e.stopPropagation();
+                toggleCallback(row, toggle);
+            });
+        } else {
+            toggle.textContent = "·"; // ·
+        }
+        label.appendChild(toggle);
+
+        // Category icon
+        const icon = document.createElement("span");
+        icon.textContent = categoryIcon(span.category);
+        label.appendChild(icon);
+
+        // Operation name
+        const opName = document.createElement("span");
+        opName.className = "span-mono";
+        opName.textContent = spanOperationLabel(span);
+        label.appendChild(opName);
+
+        inner.appendChild(label);
+        nameCell.appendChild(inner);
+        row.appendChild(nameCell);
+
+        // Model
+        const modelCell = document.createElement("td");
+        modelCell.className = "span-model";
+        modelCell.textContent = formatModel(span);
+        row.appendChild(modelCell);
+
+        // Tokens
+        const tokensCell = document.createElement("td");
+        tokensCell.className = "span-num";
+        tokensCell.textContent = formatTokensNumber(span.total_tokens);
+        row.appendChild(tokensCell);
+
+        // Duration
+        const durationCell = document.createElement("td");
+        durationCell.className = "span-num";
+        durationCell.textContent = formatDuration(span.duration_ms);
+        row.appendChild(durationCell);
+
+        // Status
+        const statusCell = document.createElement("td");
+        statusCell.className = "span-status";
+        const badge = document.createElement("span");
+        const hasError = isErrorSpan(span);
+        badge.className = "status-badge " + (hasError ? "status-error" : "status-ok");
+        badge.textContent = hasError ? (span.error_type || span.status || "error") : (span.status || "ok");
+        statusCell.appendChild(badge);
+        row.appendChild(statusCell);
+
+        // Waterfall
+        row.appendChild(makeWaterfallCell(span, range));
+
+        // Click to highlight timeline row
+        row.addEventListener("click", () => {
+            highlightTimelineRow(span.id);
+        });
+
+        return row;
+    }
+
+    function renderSpanTree(spans, _traceId) {
+        const container = document.getElementById("spantree-view");
+        if (!container) {
+            return;
+        }
+
+        const { childrenOf, roots } = buildParentChildMap(spans);
+        const range = computeWaterfallRange(spans);
+
+        const table = document.createElement("table");
+        table.className = "span-table";
+
+        const thead = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        for (const [label, extra] of [
+            ["スパン", ""], // スパン
+            ["モデル", ""], // モデル
+            ["トークン", "text-align:right"], // トークン
+            ["所要時間", "text-align:right"], // 所要時間
+            ["状態", ""], // 状態
+            ["タイムライン", "min-width:240px"], // タイムライン
+        ]) {
+            const th = document.createElement("th");
+            th.textContent = label;
+            if (extra) {
+                th.setAttribute("style", extra);
+            }
+            headRow.appendChild(th);
+        }
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+
+        const tbody = document.createElement("tbody");
+
+        // Collapse state: map from span_id -> Set of descendant row elements
+        const descendantsOf = new Map();
+
+        // DFS in start_time order
+        function dfs(span, depth) {
+            const children = (childrenOf.get(span.span_id) || []).slice().sort(compareSpanOrder);
+            const hasChildren = children.length > 0;
+            // agent_invocation rows expanded by default; others too (fully expanded initial state)
+            const isExpanded = true;
+
+            const makeToggle = (row, toggleEl) => {
+                const expanded = row.dataset.expanded !== "false";
+                const nowCollapsed = expanded;
+                row.dataset.expanded = nowCollapsed ? "false" : "true";
+                toggleEl.textContent = nowCollapsed ? "▸" : "▾";
+
+                // Gather all descendant rows
+                const desc = descendantsOf.get(span.span_id) || [];
+                for (const descRow of desc) {
+                    descRow.hidden = nowCollapsed;
+                }
+            };
+
+            const row = makeSpanRow(span, depth, hasChildren, isExpanded, range, makeToggle);
+            row.dataset.expanded = "true";
+            tbody.appendChild(row);
+
+            const allDescendants = [];
+            for (const child of children) {
+                const childRow = dfs(child, depth + 1);
+                if (childRow) {
+                    allDescendants.push(childRow);
+                    // Also gather child's descendants
+                    const grandDesc = descendantsOf.get(child.span_id) || [];
+                    allDescendants.push(...grandDesc);
+                }
+            }
+            descendantsOf.set(span.span_id, allDescendants);
+
+            return row;
+        }
+
+        const sortedRoots = roots.slice().sort(compareSpanOrder);
+        for (const root of sortedRoots) {
+            dfs(root, 0);
+        }
+
+        table.appendChild(tbody);
+        container.replaceChildren(table);
+    }
+
+    // ── Flow view ──────────────────────────────────────────────────────────
+    function renderFlowView(spans, _traceId) {
+        const container = document.getElementById("flow-view");
+        if (!container) {
+            return;
+        }
+
+        const sorted = spans.slice().sort(compareSpanOrder);
+        const wrapper = document.createElement("div");
+        wrapper.style.display = "flex";
+        wrapper.style.flexDirection = "column";
+        wrapper.style.alignItems = "flex-start";
+        wrapper.style.padding = "24px 22px";
+        wrapper.style.minWidth = "380px";
+
+        for (let i = 0; i < sorted.length; i++) {
+            const span = sorted[i];
+
+            const node = document.createElement("div");
+            node.className = "flow-node " + categoryClass(span.category);
+
+            const topLabel = document.createElement("div");
+            topLabel.className = "flow-node-toplabel";
+            topLabel.textContent = categoryIcon(span.category) + " " + (span.category || "unknown");
+            node.appendChild(topLabel);
+
+            const title = document.createElement("div");
+            title.className = "flow-node-title";
+            title.textContent = spanOperationLabel(span);
+            node.appendChild(title);
+
+            const sub = document.createElement("div");
+            sub.className = "flow-node-sub";
+            const subParts = [];
+            const model = formatModel(span);
+            if (model !== "—") {
+                subParts.push(model);
+            }
+            subParts.push(formatDuration(span.duration_ms));
+            if (isErrorSpan(span)) {
+                subParts.push(span.error_type || "error");
+            }
+            sub.textContent = subParts.join(" · ");
+            node.appendChild(sub);
+
+            wrapper.appendChild(node);
+
+            if (i < sorted.length - 1) {
+                const connector = document.createElement("div");
+                connector.className = "flow-connector-line";
+                wrapper.appendChild(connector);
+            }
+        }
+
+        container.replaceChildren(wrapper);
+    }
+
+    // ── Tree & Flow driver ─────────────────────────────────────────────────
+    async function renderTreeAndFlow() {
+        const spantreeView = document.getElementById("spantree-view");
+        if (!spantreeView) {
+            return;
+        }
+
+        const traceId = spantreeView.dataset.spantreeTraceId;
+        const status = document.getElementById("spantree-status");
+
+        if (!traceId) {
+            if (status) {
+                status.textContent = "Trace id is unavailable.";
+            }
+            return;
+        }
+
+        // Wire view toggle buttons
+        const treeBtn = document.getElementById("view-tree-btn");
+        const flowBtn = document.getElementById("view-flow-btn");
+        const flowView = document.getElementById("flow-view");
+
+        function showTree() {
+            spantreeView.hidden = false;
+            if (flowView) flowView.hidden = true;
+            if (treeBtn) treeBtn.classList.add("active");
+            if (flowBtn) flowBtn.classList.remove("active");
+        }
+
+        function showFlow() {
+            spantreeView.hidden = true;
+            if (flowView) flowView.hidden = false;
+            if (treeBtn) treeBtn.classList.remove("active");
+            if (flowBtn) flowBtn.classList.add("active");
+        }
+
+        if (treeBtn) {
+            treeBtn.addEventListener("click", showTree);
+        }
+        if (flowBtn) {
+            flowBtn.addEventListener("click", showFlow);
+        }
+
+        try {
+            const spans = await fetchAllSpans(traceId);
+
+            if (spans.length === 0) {
+                if (status) {
+                    status.textContent = "このトレースにスパンがありません。";
+                }
+                return;
+            }
+
+            if (status) {
+                status.textContent = `${spans.length} スパン`;
+            }
+
+            renderSpanTree(spans, traceId);
+            renderFlowView(spans, traceId);
+        } catch {
+            if (status) {
+                status.textContent = "スパンツリーを読み込めませんでした。";
+            }
+        }
+    }
+
+    // ── Timeline helpers ───────────────────────────────────────────────────
     function textOrDash(value) {
         return value === null || value === undefined || value === "" ? "-" : String(value);
     }
@@ -150,16 +576,12 @@
         return parts.length > 0 ? parts.join(" / ") : "-";
     }
 
-    function formatModel(span) {
+    function formatModelTimeline(span) {
         return textOrDash(span.response_model || span.request_model);
     }
 
     function formatTokens(span) {
         return `${textOrDash(span.input_tokens)} / ${textOrDash(span.output_tokens)} / ${textOrDash(span.total_tokens)}`;
-    }
-
-    function isErrorSpan(span) {
-        return span.status === "error" || Boolean(span.error_type);
     }
 
     function formatStatus(span) {
@@ -217,7 +639,7 @@
             .sort(selectedTimelineSort() === "tokens" ? compareTimelineTokens : compareTimelineTime);
 
         if (count) {
-            count.textContent = `${filtered.length} of ${spans.length} spans`;
+            count.textContent = `${filtered.length} / ${spans.length} スパン`;
         }
 
         if (empty) {
@@ -231,7 +653,7 @@
             appendCell(row, textOrDash(span.operation));
             appendCell(row, textOrDash(span.category));
             appendCell(row, formatSpanSubject(span));
-            appendCell(row, formatModel(span));
+            appendCell(row, formatModelTimeline(span));
             appendCell(row, formatTokens(span));
             appendCell(row, formatStatus(span), isErrorSpan(span) ? "status-error" : "status-ok");
             appendCell(row, textOrDash(span.duration_ms));
@@ -276,7 +698,7 @@
         }
     }
 
-    // -- TraceDetail Cache Explorer -----------------------------------------
+    // ── Cache Explorer ─────────────────────────────────────────────────────
     function isChatTurn(span) {
         return span.operation === "chat" || span.category === "llm_call";
     }
@@ -336,7 +758,7 @@
     }
 
     function modelLabel(spans) {
-        const models = [...new Set(spans.map(formatModel).filter((model) => model !== "-"))];
+        const models = [...new Set(spans.map(formatModelTimeline).filter((model) => model !== "-"))];
         if (models.length === 0) {
             return "-";
         }
@@ -367,7 +789,7 @@
         for (const turn of turns) {
             const row = document.createElement("tr");
             appendCell(row, formatTime(turn.start_time));
-            appendCell(row, formatModel(turn));
+            appendCell(row, formatModelTimeline(turn));
             appendCell(row, percentOrDash(turn.cache_read_tokens, turn.input_tokens));
             appendCell(row, formatCacheTokens(turn));
             appendCell(row, formatTokens(turn));
@@ -476,7 +898,7 @@
             const groups = cacheGroupsFromSpans(spans);
             if (status) {
                 status.textContent = groups.length === 0
-                    ? "No chat turns with cache metrics are available for this trace."
+                    ? "このトレースには LLM 呼び出しがないため、キャッシュ指標はありません。"
                     : `${groups.length} request group${groups.length === 1 ? "" : "s"}; ${groups.reduce((sum, group) => sum + group.turns.length, 0)} chat turn${groups.reduce((sum, group) => sum + group.turns.length, 0) === 1 ? "" : "s"}`;
             }
 
@@ -489,116 +911,6 @@
         } catch {
             if (status) {
                 status.textContent = "Cache Explorer could not be loaded.";
-            }
-        }
-    }
-
-    async function renderFlowChart() {
-        const graph = document.getElementById("flow-chart");
-        if (!graph) {
-            return;
-        }
-
-        const status = document.getElementById("flow-status");
-        const traceId = graph.dataset.flowChartTraceId;
-        if (!traceId) {
-            if (status) {
-                status.textContent = "Trace id is unavailable.";
-            }
-            return;
-        }
-
-        if (!window.cytoscape) {
-            if (status) {
-                status.textContent = "Flow Chart library is unavailable.";
-            }
-            return;
-        }
-
-        if (window.cytoscapeDagre && !window.cytoscape("layout", "dagre")) {
-            window.cytoscape.use(window.cytoscapeDagre);
-        }
-
-        try {
-            const spans = await fetchAllSpans(traceId);
-            if (spans.length === 0) {
-                if (status) {
-                    status.textContent = "No spans available for this trace.";
-                }
-                return;
-            }
-
-            if (status) {
-                status.textContent = `${spans.length} spans`;
-            }
-
-            const cy = window.cytoscape({
-                container: graph,
-                elements: elementsFromSpans(spans),
-                minZoom: 0.2,
-                maxZoom: 2.5,
-                wheelSensitivity: 0.2,
-                layout: {
-                    name: "dagre",
-                    rankDir: "TB",
-                    nodeSep: 30,
-                    rankSep: 70,
-                },
-                style: [
-                    {
-                        selector: "node",
-                        style: {
-                            "background-color": "#4daafc",
-                            "border-width": 1,
-                            "border-color": "#8cc8ff",
-                            color: "#d4d4d4",
-                            "font-family": "Noto Sans JP, Segoe UI, sans-serif",
-                            "font-size": 11,
-                            label: "data(label)",
-                            "min-zoomed-font-size": 7,
-                            "text-halign": "center",
-                            "text-valign": "bottom",
-                            "text-margin-y": 8,
-                            "text-wrap": "wrap",
-                            "text-max-width": 120,
-                            width: 38,
-                            height: 38,
-                        },
-                    },
-                    { selector: ".category-agent", style: { "background-color": "#c586c0", "border-color": "#dcb6d8" } },
-                    { selector: ".category-llm", style: { "background-color": "#4ec9b0", "border-color": "#8ee6d5" } },
-                    { selector: ".category-tool", style: { "background-color": "#dcdcaa", "border-color": "#fff2bd" } },
-                    { selector: ".category-hook", style: { "background-color": "#cca700", "border-color": "#ead36f" } },
-                    { selector: ".category-unknown", style: { "background-color": "#858585", "border-color": "#b0b0b0" } },
-                    { selector: ".span-error", style: { "border-width": 3, "border-color": "#f48771" } },
-                    {
-                        selector: "edge",
-                        style: {
-                            width: 2,
-                            "line-color": "#5a5a5a",
-                            "target-arrow-color": "#5a5a5a",
-                            "target-arrow-shape": "triangle",
-                            "curve-style": "bezier",
-                        },
-                    },
-                    {
-                        selector: "node:selected",
-                        style: {
-                            "border-width": 4,
-                            "border-color": "#ffffff",
-                        },
-                    },
-                ],
-            });
-
-            cy.on("tap", "node", (event) => {
-                highlightTimelineRow(event.target.data("spanRowId"));
-            });
-
-            cy.fit(undefined, 24);
-        } catch {
-            if (status) {
-                status.textContent = "Flow Chart could not be loaded.";
             }
         }
     }
@@ -631,6 +943,6 @@
 
     document.addEventListener("keydown", onTabKeydown);
     renderTimeline();
-    renderFlowChart();
+    renderTreeAndFlow();
     renderCacheExplorer();
 })();

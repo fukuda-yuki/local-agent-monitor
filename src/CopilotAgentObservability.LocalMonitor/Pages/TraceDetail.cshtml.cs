@@ -26,6 +26,14 @@ public sealed class TraceDetailModel : PageModel
 
     internal bool RawAvailable { get; private set; }
 
+    /// <summary>
+    /// Representative user prompt for the breadcrumb / page title, extracted
+    /// server-side from this trace's raw OTLP payload (D032). Null under
+    /// <c>--sanitized-only</c> or when no prompt is present, in which case the view
+    /// falls back to a shortened TraceId.
+    /// </summary>
+    internal string? PromptLabel { get; private set; }
+
     internal IReadOnlyList<RawRecordPreview> RawRecords { get; private set; } = Array.Empty<RawRecordPreview>();
 
     public IActionResult OnGet(string traceId)
@@ -79,6 +87,11 @@ public sealed class TraceDetailModel : PageModel
 
         Trace = trace;
         RawRecords = RawAvailable ? rawRecords.Select(ToPreview).ToList() : Array.Empty<RawRecordPreview>();
+        PromptLabel = RawAvailable
+            ? rawRecords
+                .Select(record => MonitorPromptExtractor.ExtractPromptLabel(record.PayloadJson, traceId))
+                .FirstOrDefault(prompt => prompt is not null)
+            : null;
 
         return Page();
     }

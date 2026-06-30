@@ -34,19 +34,19 @@ public class MonitorTraceDetailTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.True(response.Headers.CacheControl?.NoStore);
 
-        // Sanitized sections present.
-        Assert.Contains("Summary", body);
-        Assert.Contains("Timeline", body);
-        Assert.Contains("Errors only", body);
+        // Sanitized sections present (Japanese UI).
+        Assert.Contains("概要", body);
+        Assert.Contains("タイムライン", body);
+        Assert.Contains("エラーのみ", body);
         Assert.Contains("read_file", body);
 
         // Raw body shown inline by default.
-        Assert.Contains("Raw OTLP payload", body);
+        Assert.Contains("Raw OTLP ペイロード", body);
         Assert.Contains("SECRET_PROMPT_TEXT_MARKER", body);
     }
 
     [Fact]
-    public async Task TraceDetail_RendersFlowChartContainerAndTimelineShell()
+    public async Task TraceDetail_RendersSpanTreeContainerAndTimelineShell()
     {
         using var temp = new MonitorTempDirectory();
         SeedProjectedTrace(temp);
@@ -54,17 +54,19 @@ public class MonitorTraceDetailTests
 
         var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
 
-        // M4 keeps Summary server-rendered, adds JS-rendered Timeline/Flow
-        // containers, and lets monitor-views.js create stable Timeline row targets.
+        // Summary stays server-rendered; monitor-views.js fills the JS-rendered
+        // Timeline / Span Tree+Flow / Cache containers (D033, plain DOM, no Cytoscape).
         Assert.Contains("role=\"tablist\"", body);
-        Assert.Contains("Flow Chart", body);
-        Assert.Contains("Cache", body);
-        Assert.Contains("panel-flow", body);
-        Assert.Contains("id=\"flow-chart\"", body);
-        Assert.Contains("id=\"flow-status\"", body);
-        Assert.Contains("data-flow-chart-trace-id=\"trace-detail\"", body);
+        Assert.Contains("ツリー / フロー", body);
+        Assert.Contains("キャッシュ", body);
+        Assert.Contains("panel-tree", body);
+        Assert.Contains("id=\"spantree-view\"", body);
+        Assert.Contains("id=\"spantree-status\"", body);
+        Assert.Contains("data-spantree-trace-id=\"trace-detail\"", body);
+        Assert.Contains("id=\"flow-view\"", body);
+        Assert.Contains("id=\"view-tree-btn\"", body);
+        Assert.Contains("id=\"view-flow-btn\"", body);
         Assert.Contains("id=\"timeline-rows\"", body);
-        Assert.DoesNotContain("Flow Chart is not yet available", body);
         Assert.Contains("panel-cache", body);
     }
 
@@ -78,7 +80,7 @@ public class MonitorTraceDetailTests
         var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
 
         Assert.Contains("id=\"timeline-errors-only\"", body);
-        Assert.Contains("Errors only", body);
+        Assert.Contains("エラーのみ", body);
         Assert.Contains("name=\"timeline-sort\"", body);
         Assert.Contains("value=\"time\"", body);
         Assert.Contains("value=\"tokens\"", body);
@@ -103,18 +105,20 @@ public class MonitorTraceDetailTests
     }
 
     [Fact]
-    public async Task TraceDetail_LoadsGraphVendorScriptsLocally()
+    public async Task TraceDetail_DoesNotLoadGraphVendorScripts_AndHasNoCdn()
     {
+        // D033: the Cytoscape / dagre vendored graph dependency is removed; the
+        // page is driven by monitor-views.js (plain DOM) with no CDN.
         using var temp = new MonitorTempDirectory();
         SeedProjectedTrace(temp);
         await using var host = await StartHostAsync(temp);
 
         var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
 
-        Assert.Contains("/vendor/cytoscape.min.js", body);
-        Assert.Contains("/vendor/dagre.min.js", body);
-        Assert.Contains("/vendor/cytoscape-dagre.js", body);
         Assert.Contains("/monitor-views.js", body);
+        Assert.DoesNotContain("/vendor/cytoscape.min.js", body);
+        Assert.DoesNotContain("/vendor/dagre.min.js", body);
+        Assert.DoesNotContain("/vendor/cytoscape-dagre.js", body);
         foreach (var cdn in new[] { "googleapis.com", "gstatic.com", "cdn.jsdelivr.net", "unpkg.com" })
         {
             Assert.DoesNotContain(cdn, body);
@@ -134,12 +138,12 @@ public class MonitorTraceDetailTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.True(response.Headers.CacheControl?.NoStore);
         Assert.Contains("role=\"tablist\"", body);
-        Assert.Contains("Summary", body);
-        Assert.Contains("Timeline", body);
-        Assert.Contains("Flow Chart", body);
-        Assert.Contains("Cache", body);
+        Assert.Contains("概要", body);
+        Assert.Contains("タイムライン", body);
+        Assert.Contains("ツリー / フロー", body);
+        Assert.Contains("キャッシュ", body);
         Assert.Contains("data-timeline-trace-id=\"trace-detail\"", body);
-        Assert.DoesNotContain("Raw OTLP payload", body);
+        Assert.DoesNotContain("Raw OTLP ペイロード", body);
         Assert.DoesNotContain("/raw", body);
         Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", body);
         Assert.DoesNotContain("leak-marker@example.com", body);
@@ -217,7 +221,7 @@ public class MonitorTraceDetailTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Contains($"/traces/{rawRecordId}/raw", body);
-        Assert.Contains("Raw preview truncated", body);
+        Assert.Contains("raw プレビューは省略されています", body);
         Assert.DoesNotContain("FULL_RAW_MARKER_AFTER_PREVIEW", body);
     }
 
