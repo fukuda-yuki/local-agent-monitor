@@ -1,0 +1,47 @@
+name: LocalMonitor Release ZIP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-monitor-release
+  cancel-in-progress: false
+
+jobs:
+  build-test-package:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build CopilotAgentObservability.slnx
+
+      - name: Install Playwright Chromium
+        shell: pwsh
+        run: pwsh scripts\test\install-playwright-chromium.ps1
+
+      - name: Test
+        shell: pwsh
+        run: dotnet test CopilotAgentObservability.slnx
+
+      - name: Package LocalMonitor
+        shell: pwsh
+        run: pwsh scripts\local-monitor\package-release.ps1 -Configuration Release -RuntimeIdentifier win-x64 -Version "${{ github.sha }}"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-monitor-win-x64
+          path: artifacts\local-monitor-release\local-monitor-win-x64.zip
+          if-no-files-found: error

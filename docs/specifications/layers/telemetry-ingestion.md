@@ -420,9 +420,9 @@ Default task behavior:
 - task name: `CopilotAgentObservability LocalMonitor`.
 - trigger: current user logon.
 - principal: current user, interactive logon, least privileges.
-- action: PowerShell script wrapper that starts
+- action: PowerShell script wrapper that starts either the repository-local
   `dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db <db>
-  --url http://127.0.0.1:4320`.
+  --url http://127.0.0.1:4320` path or the installed published executable.
 - multiple instances: ignore new.
 - restart on failure: short bounded retry.
 - network availability is not required.
@@ -433,8 +433,15 @@ Scheduled startup defaults:
 ```text
 URL: http://127.0.0.1:4320
 DB:  %LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\raw-store.db
-Logs/state: %LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\
+Install root: %LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\app\
+Logs/state:  %LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\
 ```
+
+Startup registration is never implied by install. Users can install the
+published app without registering a task, start it immediately without enabling
+logon startup, or register/enable/disable/unregister the task later. Task
+registration remains current-user only and must not write VS Code, Copilot CLI,
+or Codex routing settings.
 
 The startup wrapper must preserve the Local Monitor run boundary:
 
@@ -451,11 +458,42 @@ The startup wrapper must preserve the Local Monitor run boundary:
 Validation:
 
 - automated tests cover script existence, PowerShell parsing, stable defaults,
-  generated task settings, and log-boundary string checks.
+  generated task settings, status output, published-mode command construction,
+  and log-boundary string checks.
 - Windows integration validation should cover start/status/stop, duplicate
   start prevention, non-loopback URL rejection, occupied-port diagnostics, dry-run
   task registration output, actual task registration, logon trigger behavior,
   uninstall, and trace receipt from VS Code / Copilot Chat.
+
+## Local Ingestion Monitor Release ZIP
+
+The Local Ingestion Monitor may be distributed as a Windows x64 Release ZIP.
+This is a packaging and startup surface for the same monitor process; it does
+not add telemetry inputs, schemas, endpoints, API fields, raw routes, or a shared
+service boundary.
+
+Release ZIP requirements:
+
+- GitHub Actions creates `local-monitor-win-x64.zip` through
+  `scripts/local-monitor/package-release.ps1`.
+- publish mode is `win-x64` self-contained folder publish. Initial support does
+  not require single-file publish.
+- the ZIP contains `app/`, `scripts/`, `README.md`, `manifest.json`, and notices.
+- the ZIP excludes runtime DB, logs, state, raw OTLP payloads, real user data,
+  generated monitor output, credentials, and repository-forbidden data.
+- using the ZIP on a user machine must not require `dotnet run`, `dotnet build`,
+  `dotnet restore`, .NET SDK, .NET Runtime, or ASP.NET Core Runtime.
+- install is per-user by default and copies the app to
+  `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\app\`.
+- runtime DB / logs / state remain under
+  `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` and are separate from
+  the app install root.
+- uninstall removes the installed app and task/state by default, but keeps DB
+  and logs unless the user passes the explicit remove-data option.
+
+Status output must report installed/not installed, running/stopped,
+health/readiness, URL, DB path, log path, install root, app version, startup
+registered/enabled state, task name, and sanitized-only mode.
 
 ## Resource Attributes
 

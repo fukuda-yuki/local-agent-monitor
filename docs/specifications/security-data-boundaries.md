@@ -110,6 +110,12 @@ Default posture:
   DB, logs, pid/state files, and task-generated local state live under
   `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` by default and must
   not be committed.
+- Release ZIP distribution is a packaging surface for the same local monitor
+  process. The ZIP and its GitHub Actions logs/artifacts may contain the
+  published app, scripts, manifest, and notices only; they must not contain raw
+  store files, runtime DB, logs, state, raw OTLP payloads, raw prompt/response
+  bodies, tool arguments/results, PII, credentials, tokens, local sensitive
+  paths, or generated monitor output.
 
 Accepted out of scope (explicit accepted risk):
 

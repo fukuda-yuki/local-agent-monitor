@@ -2,6 +2,7 @@ param(
     [string] $TaskName = 'CopilotAgentObservability LocalMonitor',
     [string] $Url = 'http://127.0.0.1:4320',
     [string] $DbPath,
+    [string] $InstallRoot,
     [ValidateSet('DotnetRun', 'Published')]
     [string] $Mode = 'DotnetRun',
     [switch] $SanitizedOnly,
@@ -14,6 +15,10 @@ param(
 
 if ([string]::IsNullOrWhiteSpace($DbPath)) {
     $DbPath = $script:DefaultDbPath
+}
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Get-LocalMonitorDefaultInstallRoot
 }
 
 if (-not (Test-LocalMonitorLoopbackUrl -Url $Url)) {
@@ -42,6 +47,8 @@ $startArgs = @(
     ('"{0}"' -f $DbPath),
     '-Mode',
     $Mode,
+    '-InstallRoot',
+    ('"{0}"' -f $InstallRoot),
     '-NoBrowser',
     '-WaitReady'
 )
@@ -77,7 +84,7 @@ if ($null -eq $registered) {
 
 Write-Output "installed"
 if ($StartNow) {
-    & $startScript -Url $Url -DbPath $DbPath -Mode $Mode -SanitizedOnly:$SanitizedOnly.IsPresent -NoBrowser -WaitReady
+    & $startScript -Url $Url -DbPath $DbPath -InstallRoot $InstallRoot -Mode $Mode -SanitizedOnly:$SanitizedOnly.IsPresent -NoBrowser -WaitReady
     exit $LASTEXITCODE
 }
 

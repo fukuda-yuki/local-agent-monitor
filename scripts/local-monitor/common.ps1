@@ -3,10 +3,16 @@ Set-StrictMode -Version Latest
 $script:DefaultTaskName = 'CopilotAgentObservability LocalMonitor'
 $script:DefaultUrl = 'http://127.0.0.1:4320'
 $script:RuntimeRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CopilotAgentObservability\LocalMonitor'
+$script:DefaultInstallRoot = Join-Path $script:RuntimeRoot 'app'
 $script:DefaultDbPath = Join-Path $script:RuntimeRoot 'raw-store.db'
 $script:LogDirectory = Join-Path $script:RuntimeRoot 'logs'
 $script:StatePath = Join-Path $script:RuntimeRoot 'local-monitor.state.json'
 $script:PidPath = Join-Path $script:RuntimeRoot 'local-monitor.pid'
+$script:PublishedExeName = 'CopilotAgentObservability.LocalMonitor.exe'
+
+function Get-LocalMonitorDefaultInstallRoot {
+    return $script:DefaultInstallRoot
+}
 
 function Get-LocalMonitorRepoRoot {
     $scriptDirectory = Split-Path -Parent $PSCommandPath
@@ -16,6 +22,32 @@ function Get-LocalMonitorRepoRoot {
 function Get-LocalMonitorProjectPath {
     $repoRoot = Get-LocalMonitorRepoRoot
     return Join-Path $repoRoot 'src\CopilotAgentObservability.LocalMonitor\CopilotAgentObservability.LocalMonitor.csproj'
+}
+
+function Get-LocalMonitorPublishedExePath {
+    param(
+        [string] $InstallRoot = $script:DefaultInstallRoot
+    )
+
+    return Join-Path $InstallRoot $script:PublishedExeName
+}
+
+function Get-LocalMonitorAppVersion {
+    param(
+        [string] $InstallRoot = $script:DefaultInstallRoot
+    )
+
+    $exePath = Get-LocalMonitorPublishedExePath -InstallRoot $InstallRoot
+    if (-not (Test-Path -LiteralPath $exePath)) {
+        return ''
+    }
+
+    try {
+        return [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exePath).ProductVersion
+    }
+    catch {
+        return ''
+    }
 }
 
 function Initialize-LocalMonitorRuntime {
@@ -122,8 +154,11 @@ function Save-LocalMonitorState {
         [Parameter(Mandatory)]
         [string] $Mode,
 
-        [Parameter(Mandatory)]
-        [string] $RepoRoot,
+        [string] $RepoRoot = '',
+
+        [string] $InstallRoot = $script:DefaultInstallRoot,
+
+        [string] $ExecutablePath = '',
 
         [bool] $SanitizedOnly
     )
@@ -136,6 +171,9 @@ function Save-LocalMonitorState {
         db_path = $DbPath
         mode = $Mode
         repo_root = $RepoRoot
+        install_root = $InstallRoot
+        executable_path = $ExecutablePath
+        app_version = Get-LocalMonitorAppVersion -InstallRoot $InstallRoot
         sanitized_only = $SanitizedOnly
     }
     $state | ConvertTo-Json -Depth 3 | Set-Content -Path $script:StatePath -Encoding UTF8
@@ -155,9 +193,51 @@ function Get-LocalMonitorState {
     }
 }
 
+function Get-LocalMonitorStateValue {
+    param(
+        $State,
+
+        [Parameter(Mandatory)]
+        [string] $Name,
+
+        $DefaultValue = $null
+    )
+
+    if ($null -eq $State) {
+        return $DefaultValue
+    }
+
+    $property = $State.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return $DefaultValue
+    }
+
+    return $property.Value
+}
+
 function Remove-LocalMonitorState {
     Remove-Item -LiteralPath $script:StatePath -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $script:PidPath -ErrorAction SilentlyContinue
+}
+
+function Remove-LocalMonitorInstall {
+    param(
+        [string] $InstallRoot = $script:DefaultInstallRoot,
+
+        [switch] $AllowExternal
+    )
+
+    if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+        throw 'install_root_required'
+    }
+
+    $resolvedRuntimeRoot = [System.IO.Path]::GetFullPath($script:RuntimeRoot)
+    $resolvedInstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+    if (-not $AllowExternal -and -not $resolvedInstallRoot.StartsWith($resolvedRuntimeRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'install_root_outside_runtime_root'
+    }
+
+    Remove-Item -LiteralPath $resolvedInstallRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 function Test-LocalMonitorProcess {
