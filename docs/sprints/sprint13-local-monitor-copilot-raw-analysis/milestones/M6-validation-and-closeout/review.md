@@ -28,13 +28,17 @@ Results:
 
 ## Live validation
 
-Not run in this environment. It requires a GitHub Copilot app/CLI runtime that
-can run the GA .NET GitHub Copilot SDK and a signed-in Copilot session.
+Partially run in this environment. Evidence:
+[live-validation.md](live-validation.md).
+
+Confirmed:
+
+- Local Monitor loopback startup, synthetic trace ingestion, TraceDetail
+  availability, analysis run creation, and repository-safe summary raw-marker /
+  PII exclusion.
 
 Remaining live checks:
 
-- record the .NET SDK package/runtime version.
-- invoke analysis with each internal raw/summary tool available to the SDK.
-- confirm raw tool data reaches Copilot only through the Local Monitor process.
-- confirm repository-safe summary remains raw-free when used outside Local
-  Monitor.
+- Confirm a signed-in Copilot SDK session returns a model analysis result.
+- Invoke analysis with each internal raw/summary tool available to the SDK.
+- Confirm raw tool data reaches Copilot only through the Local Monitor process.
