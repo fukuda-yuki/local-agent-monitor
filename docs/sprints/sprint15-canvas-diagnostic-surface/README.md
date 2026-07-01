@@ -169,6 +169,9 @@ Claude Code environment has none of these tools. All implementation and
 automated testing for children A–D is done without them. Do not delegate
 implementation work to GitHub Copilot — only this final verification step.
 
+The self-contained handoff prompt for that GitHub Copilot app session is
+`milestones/M6-live-validation-handoff/prompt.md`.
+
 ## Tech-debt prerequisite (F8)
 
 `docs/task.md` records tech-debt F8: the Canvas contract test is
@@ -201,7 +204,7 @@ in the parent Issue and carried by D036.
 | M4 Dashboard card (child B remainder) | Canvas-owned `GET /api/summary` proxy + "Local Monitor 概要" card. See `milestones/M4-dashboard-card/plan.md` and `review.md`. | Implemented; automated tests + self-review done (13/13 JS smoke, +1 contract-test fact). |
 | M5 Raw preview (child D) | `GET /raw-preview/:traceId/:spanId` page-navigation route + helper-page link. See `milestones/M5-raw-preview/plan.md` and `review.md`. | Implemented; automated tests + self-review done (17/17 JS smoke, +1 contract-test fact). |
 | Child E correlation | N/A | Dropped (D037) — no implementation planned. |
-| Live validation handoff | All of A–D's Canvas runtime behavior, verified together in one GitHub Copilot app session. | Not started — the only work delegated outside Claude (D038). |
+| Live validation handoff | All of A–D's Canvas runtime behavior, verified together in one GitHub Copilot app session. See `milestones/M6-live-validation-handoff/prompt.md`. | Handoff prompt written; the verification itself is not started — the only work delegated outside Claude (D038). |
 
 ## Validation
 
