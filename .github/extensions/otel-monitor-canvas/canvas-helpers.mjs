@@ -364,6 +364,87 @@ export function traceDetailSummary({ trace, cacheHitRate }) {
     };
 }
 
+// --------------- raw preview (Sprint15 M5 / child D, D038) ---------------
+
+// Extracts the substring between the FIRST "<pre>" and the LAST "</pre>" in
+// the Local Monitor's fixed-format raw route response
+// (`<!DOCTYPE html>...<pre>{HtmlEncoder.Default.Encode(payload)}</pre>...`).
+// Because the payload is already HTML-encoded server-side, the only literal
+// "<"/">" in the whole response belong to the fixed template tags, so this
+// substring extraction is unambiguous. The result MUST be re-embedded
+// verbatim (no decode, no re-encode) — see D038 / security-data-boundaries.md.
+// Returns null if the expected <pre>...</pre> shape is not found (fail loudly
+// rather than embed something unexpected).
+export function extractRawPreviewFragment(html) {
+    if (typeof html !== "string") {
+        return null;
+    }
+
+    const openTag = "<pre>";
+    const closeTag = "</pre>";
+    const start = html.indexOf(openTag);
+    const end = html.lastIndexOf(closeTag);
+    if (start === -1 || end === -1 || end <= start) {
+        return null;
+    }
+
+    return html.slice(start + openTag.length, end);
+}
+
+// Renders the Canvas-owned raw-preview page. `fragment` is embedded verbatim
+// (no escapeHtml call) because it is already HTML-encoded by the Local
+// Monitor; `traceId`/`spanId`/`token` come from the URL and are escaped. This
+// page is reached only via a real page-navigation link click — it introduces
+// no client-side script that fetches raw content as JSON.
+export function renderRawPreviewHtml({ traceId, spanId, fragment, token }) {
+    const escapedTraceId = escapeHtml(traceId);
+    const escapedSpanId = escapeHtml(spanId);
+    const escapedToken = escapeHtml(token);
+
+    return `<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>生データプレビュー — Canvas</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 24px; background: #ffffff; color: #1f2328; }
+    h1 { font-size: 1.1rem; margin-bottom: 4px; }
+    p.meta { color: #656d76; margin-bottom: 16px; }
+    pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 4px; padding: 12px; overflow: auto; font-size: 12px; line-height: 1.4; white-space: pre-wrap; word-break: break-all; }
+    a { color: #0969da; }
+  </style>
+</head>
+<body>
+  <h1>生データプレビュー</h1>
+  <p class="meta">trace: <code>${escapedTraceId}</code> / span: <code>${escapedSpanId}</code></p>
+  <p><a href="/?t=${escapedToken}">← ヘルパーページに戻る</a></p>
+  <pre>${fragment}</pre>
+</body>
+</html>`;
+}
+
+// Small fixed error/status page for the raw-preview route (invalid input,
+// span or raw record not found, or raw unavailable). No dynamic content
+// besides the (already known-safe, caller-chosen) message text and the token.
+export function renderRawPreviewMessageHtml({ heading, message, token }) {
+    const escapedHeading = escapeHtml(heading);
+    const escapedMessage = escapeHtml(message);
+    const escapedToken = escapeHtml(token);
+
+    return `<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>${escapedHeading} — Canvas</title>
+</head>
+<body>
+  <h1>${escapedHeading}</h1>
+  <p>${escapedMessage}</p>
+  <p><a href="/?t=${escapedToken}">← ヘルパーページに戻る</a></p>
+</body>
+</html>`;
+}
+
 // --------------- analysis prompt ---------------
 
 export function buildAnalysisPrompt({ traceId, spanId, focus }) {
@@ -608,6 +689,7 @@ ${focusOptionsHtml}
     </div>
     <button id="analyze" ${ready ? "" : "disabled"}>Copilotでこのトレースを分析</button>
     <div id="result"></div>
+    <p class="row"><a id="raw-preview-link" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">生データを表示（新しいタブ）</a></p>
   </div>
 
   <div class="card">
@@ -740,9 +822,26 @@ ${focusOptionsHtml}
         })
         .catch(function (e) { setResult("トレースの読み込みに失敗しました: " + e.message, false); });
 
+      var rawPreviewLink = document.getElementById("raw-preview-link");
+
+      function updateRawPreviewLink() {
+        var traceId = traceSel.value;
+        var spanId = spanInput.value.trim();
+        if (traceId && spanId) {
+          rawPreviewLink.href = "/raw-preview/" + encodeURIComponent(traceId) + "/" + encodeURIComponent(spanId) + "?t=" + encodeURIComponent(token);
+          rawPreviewLink.style.display = "";
+        } else {
+          rawPreviewLink.removeAttribute("href");
+          rawPreviewLink.style.display = "none";
+        }
+      }
+
       traceSel.addEventListener("change", function () {
         loadTraceDetail(traceSel.value);
+        updateRawPreviewLink();
       });
+
+      spanInput.addEventListener("input", updateRawPreviewLink);
 
       btn.addEventListener("click", function () {
         var traceId = traceSel.value;

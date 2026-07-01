@@ -40,6 +40,9 @@ import {
     formatTraceLine,
     formatTokens,
     traceDetailSummary,
+    extractRawPreviewFragment,
+    renderRawPreviewHtml,
+    renderRawPreviewMessageHtml,
     MAX_CACHE_TURNS,
 } from "./canvas-helpers.mjs";
 
@@ -268,6 +271,79 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
             } catch (err) {
                 const code = err instanceof CanvasError ? err.code : "analyze_failed";
                 sendJson(res, 500, { error: code, message: err.message });
+            }
+            return;
+        }
+
+        // Sprint15 M5 (child D, D038): page-navigation-only raw preview.
+        // HTML end to end — no JSON error branch here, this route is reached
+        // only by a real <a href> link click, never by client-side fetch().
+        if (req.method === "GET" && path.startsWith("/raw-preview/")) {
+            res.setHeader("Content-Type", "text/html; charset=utf-8");
+            res.setHeader("Cache-Control", "no-store");
+
+            const segments = path.slice("/raw-preview/".length).split("/");
+            if (segments.length !== 2) {
+                res.statusCode = 400;
+                res.end(renderRawPreviewMessageHtml({ heading: "不正なリクエスト", message: "trace id と span id を指定してください。", token }));
+                return;
+            }
+
+            const previewTraceId = decodeURIComponent(segments[0]);
+            const previewSpanId = decodeURIComponent(segments[1]);
+            if (!matchesTraceId(previewTraceId) || !matchesTraceId(previewSpanId)) {
+                res.statusCode = 400;
+                res.end(renderRawPreviewMessageHtml({ heading: "不正なリクエスト", message: "trace id または span id の形式が正しくありません。", token }));
+                return;
+            }
+
+            try {
+                if (!isLoopbackUrl(monitorUrl)) {
+                    res.statusCode = 400;
+                    res.end(renderRawPreviewMessageHtml({ heading: "設定エラー", message: "Monitor URL がループバックではありません。", token }));
+                    return;
+                }
+
+                const spans = await fetchHelperSpans(monitorUrl, previewTraceId);
+                const span = spans.find((s) => s.span_id === previewSpanId);
+                if (!span || span.raw_record_id === undefined || span.raw_record_id === null) {
+                    res.statusCode = 404;
+                    res.end(renderRawPreviewMessageHtml({ heading: "見つかりません", message: "指定した span が見つかりません。", token }));
+                    return;
+                }
+
+                const { response, body } = await fetchTextWithTimeout(monitorApiUrl(monitorUrl, `/traces/${span.raw_record_id}/raw`));
+                if (!response.ok) {
+                    if (typeof body === "string" && body.includes("raw_record_not_found")) {
+                        res.statusCode = 404;
+                        res.end(renderRawPreviewMessageHtml({ heading: "見つかりません", message: "指定した raw レコードが見つかりません。", token }));
+                        return;
+                    }
+                    res.statusCode = 502;
+                    res.end(renderRawPreviewMessageHtml({
+                        heading: "raw を取得できません",
+                        message: "raw を取得できませんでした（Local Monitor 側で raw が無効になっているか、一時的に利用できません）。",
+                        token,
+                    }));
+                    return;
+                }
+
+                const fragment = extractRawPreviewFragment(body);
+                if (fragment === null) {
+                    res.statusCode = 502;
+                    res.end(renderRawPreviewMessageHtml({ heading: "表示できません", message: "Local Monitor の raw レスポンス形式を認識できませんでした。", token }));
+                    return;
+                }
+
+                res.statusCode = 200;
+                res.end(renderRawPreviewHtml({ traceId: previewTraceId, spanId: previewSpanId, fragment, token }));
+            } catch {
+                res.statusCode = 502;
+                res.end(renderRawPreviewMessageHtml({
+                    heading: "raw を取得できません",
+                    message: "raw を取得できませんでした（Local Monitor 側で raw が無効になっているか、一時的に利用できません）。",
+                    token,
+                }));
             }
             return;
         }

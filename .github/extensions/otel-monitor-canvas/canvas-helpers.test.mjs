@@ -17,6 +17,8 @@ import {
     buildAnalysisPrompt,
     compactTrace,
     traceDetailSummary,
+    extractRawPreviewFragment,
+    renderRawPreviewHtml,
 } from "./canvas-helpers.mjs";
 
 const SAMPLE_TRACE_ROW = {
@@ -49,7 +51,11 @@ test("renderHelperHtml: ready state has Japanese button/heading, Japanese focus 
         assert.match(html, new RegExp(`<option value="${value}">${label}</option>`));
     }
 
-    assert.doesNotMatch(html, /\/raw/);
+    // Sprint15 M5 (D038) intentionally introduces "/raw-preview" (the
+    // authorized raw-preview page-navigation link); any OTHER "/raw"
+    // reference (e.g. a JSON fetch of the raw-bearing route) is still
+    // forbidden here.
+    assert.doesNotMatch(html, /\/raw(?!-preview)/);
     assert.doesNotMatch(html, /payload_json/);
     assert.doesNotMatch(html, /console\.log/);
 });
@@ -190,7 +196,11 @@ test("renderHelperHtml: contains the trace detail summary card heading and no ra
 
     assert.match(html, /選択したトレースの要約/);
     assert.match(html, /Local Monitorで詳細を見る/);
-    assert.doesNotMatch(html, /\/raw/);
+    // Sprint15 M5 (D038) intentionally introduces "/raw-preview" (the
+    // authorized raw-preview page-navigation link); any OTHER "/raw"
+    // reference (e.g. a JSON fetch of the raw-bearing route) is still
+    // forbidden here.
+    assert.doesNotMatch(html, /\/raw(?!-preview)/);
     assert.doesNotMatch(html, /payload_json/);
 });
 
@@ -207,6 +217,54 @@ test("renderHelperHtml: contains the Local Monitor 概要 dashboard card and fet
 
     assert.match(html, /Local Monitor 概要/);
     assert.match(html, /fetch\("\/api\/summary\?t=/);
-    assert.doesNotMatch(html, /\/raw/);
+    // Sprint15 M5 (D038) intentionally introduces "/raw-preview" (the
+    // authorized raw-preview page-navigation link); any OTHER "/raw"
+    // reference (e.g. a JSON fetch of the raw-bearing route) is still
+    // forbidden here.
+    assert.doesNotMatch(html, /\/raw(?!-preview)/);
     assert.doesNotMatch(html, /payload_json/);
+});
+
+test("extractRawPreviewFragment: extracts the encoded payload between the first <pre> and the last </pre>", () => {
+    const encodedFragment = "{&quot;a&quot;:&quot;&lt;script&gt;alert(1)&lt;/script&gt;&quot;}";
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Raw record 42</title></head><body><pre>${encodedFragment}</pre></body></html>`;
+    assert.equal(extractRawPreviewFragment(html), encodedFragment);
+});
+
+test("extractRawPreviewFragment: returns null when no <pre>...</pre> pair is present", () => {
+    assert.equal(extractRawPreviewFragment("<html><body>no pre here</body></html>"), null);
+    assert.equal(extractRawPreviewFragment(""), null);
+    assert.equal(extractRawPreviewFragment(null), null);
+    assert.equal(extractRawPreviewFragment(undefined), null);
+});
+
+test("renderRawPreviewHtml: embeds the fragment verbatim (byte-for-byte, no re-encode/decode), escapes traceId/spanId, and introduces no client-side raw fetch", () => {
+    const encodedFragment = "{&quot;a&quot;:&quot;&lt;script&gt;alert(1)&lt;/script&gt;&quot;}";
+    const html = renderRawPreviewHtml({
+        traceId: "trace-<1>",
+        spanId: "span-&2",
+        fragment: encodedFragment,
+        token: "token-1",
+    });
+
+    assert.ok(html.includes(encodedFragment), "expected the exact encoded fragment to appear byte-for-byte in the output");
+    assert.match(html, /trace-&lt;1&gt;/);
+    assert.match(html, /span-&amp;2/);
+    assert.doesNotMatch(html, /<script>/);
+    assert.doesNotMatch(html, /fetch\(/);
+});
+
+test("renderHelperHtml: contains the raw-preview link's Japanese text and does not client-side fetch() /raw-preview", () => {
+    const html = renderHelperHtml({
+        instanceId: "inst-1",
+        monitorUrl: "http://127.0.0.1:4320",
+        healthState: "ready",
+        statusCode: 200,
+        healthBody: "{\"status\":\"ready\"}",
+        error: null,
+        token: "token-1",
+    });
+
+    assert.match(html, /生データを表示（新しいタブ）/);
+    assert.doesNotMatch(html, /fetch\("\/raw-preview/);
 });

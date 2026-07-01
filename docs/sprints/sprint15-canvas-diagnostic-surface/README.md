@@ -199,7 +199,7 @@ in the parent Issue and carried by D036.
 | M2 Dashboard summary (child B, endpoint) | `GET /api/monitor/summary`, shared `MonitorSummaryService`, Index PageModel refactor. See `milestones/M2-dashboard-summary/plan.md` and `review.md`. | Implemented; automated tests + self-review done (302 LocalMonitor tests passing, +9 new). |
 | M3 Trace detail card (child C) | Canvas-owned `GET /api/trace-detail/:traceId` route, helper-page summary card. See `milestones/M3-trace-detail-card/plan.md` and `review.md`. | Implemented; automated tests + self-review done (12/12 JS smoke, +1 contract-test fact). |
 | M4 Dashboard card (child B remainder) | Canvas-owned `GET /api/summary` proxy + "Local Monitor 概要" card. See `milestones/M4-dashboard-card/plan.md` and `review.md`. | Implemented; automated tests + self-review done (13/13 JS smoke, +1 contract-test fact). |
-| M5 Raw preview (child D) | `GET /raw-preview/:traceId/:spanId` page-navigation route + helper-page link. See `milestones/M5-raw-preview/plan.md`. | Planned this turn (D038) — next Claude session implements. |
+| M5 Raw preview (child D) | `GET /raw-preview/:traceId/:spanId` page-navigation route + helper-page link. See `milestones/M5-raw-preview/plan.md` and `review.md`. | Implemented; automated tests + self-review done (17/17 JS smoke, +1 contract-test fact). |
 | Child E correlation | N/A | Dropped (D037) — no implementation planned. |
 | Live validation handoff | All of A–D's Canvas runtime behavior, verified together in one GitHub Copilot app session. | Not started — the only work delegated outside Claude (D038). |
 

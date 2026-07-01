@@ -43,7 +43,7 @@ public class CanvasExtensionContractTests
         Assert.Contains("/api/monitor/traces", script);
         Assert.Contains("/spans", script);
         Assert.Contains("limit=${MAX_SPAN_PAGE_SIZE}", script);
-        Assert.DoesNotContain("/raw", script);
+        AssertNoRawReferenceOtherThanAuthorizedPreview(script);
         Assert.DoesNotContain("payload_json", script);
         Assert.DoesNotContain("console.log", script);
     }
@@ -93,7 +93,7 @@ public class CanvasExtensionContractTests
         Assert.Contains("must not contain raw telemetry or PII", script);
 
         // Boundary invariants preserved.
-        Assert.DoesNotContain("/raw", script);
+        AssertNoRawReferenceOtherThanAuthorizedPreview(script);
         Assert.DoesNotContain("console.log", script);
     }
 
@@ -163,7 +163,7 @@ public class CanvasExtensionContractTests
         Assert.Contains("x-canvas-token", script);
         Assert.Contains("/api/monitor/traces", script);
         Assert.Contains("/spans", script);
-        Assert.DoesNotContain("/raw", script);
+        AssertNoRawReferenceOtherThanAuthorizedPreview(script);
         Assert.DoesNotContain("payload_json", script);
         Assert.DoesNotContain("console.log", script);
     }
@@ -184,9 +184,59 @@ public class CanvasExtensionContractTests
         // The proxy must not bypass the existing per-route token check or
         // introduce a new Local Monitor endpoint / raw field category.
         Assert.Contains("x-canvas-token", script);
-        Assert.DoesNotContain("/raw", script);
+        AssertNoRawReferenceOtherThanAuthorizedPreview(script);
         Assert.DoesNotContain("payload_json", script);
         Assert.DoesNotContain("console.log", script);
+    }
+
+    [Fact]
+    public void Extension_DeclaresRawPreviewSurface()
+    {
+        var script = ReadExtension();
+
+        // Sprint15 M5 (child D, D038): the ONLY authorized raw-bearing
+        // route. Page-navigation only, gated by the same x-canvas-token as
+        // every other route, and never fetched as JSON from client-side JS.
+        Assert.Contains("/raw-preview/", script);
+        Assert.Contains("extractRawPreviewFragment", script);
+        Assert.Contains("renderRawPreviewHtml", script);
+        Assert.Contains("生データを表示", script);
+        Assert.Contains("Cache-Control", script);
+        Assert.Contains("no-store", script);
+
+        // Page-navigation only: the helper page's client-side <script> must
+        // never fetch() the raw-preview route (that would turn it into a
+        // JSON-fetch-of-raw surface, which D038 explicitly forbids).
+        Assert.DoesNotContain("fetch(\"/raw-preview", script);
+        Assert.DoesNotContain("fetch('/raw-preview", script);
+
+        // Every other surface (the 5 Canvas actions, the M3 trace-detail
+        // route, the M4 summary proxy) must still be raw-free; only
+        // "/raw-preview" itself and the server-to-server fetch of Local
+        // Monitor's existing raw route are authorized.
+        Assert.Contains("x-canvas-token", script);
+        Assert.DoesNotContain("payload_json", script);
+        Assert.DoesNotContain("console.log", script);
+    }
+
+    // Sprint15 M5 (child D, D038) is the one deliberate exception to the
+    // otherwise-blanket "no /raw reference" contract enforced by the facts
+    // above. Rather than deleting those pre-existing checks (which would
+    // weaken the boundary for the 5 Canvas actions, the M3 trace-detail
+    // route, and the M4 summary proxy), this scopes them precisely by
+    // stripping the two "/raw" substrings D038 explicitly authorizes — the
+    // "/raw-preview" route path itself, and the server-to-server fetch
+    // target template literal `/traces/${...}/raw` (which always ends the
+    // literal immediately after "/raw" with a closing backtick) — before
+    // asserting no "/raw" remains. Both authorized substrings are
+    // independently pinned as present by Extension_DeclaresRawPreviewSurface
+    // above, so stripping them here does not hide their absence.
+    private static void AssertNoRawReferenceOtherThanAuthorizedPreview(string script)
+    {
+        var withoutAuthorizedRawPreviewReferences = script
+            .Replace("/raw-preview", string.Empty)
+            .Replace("/raw`", string.Empty);
+        Assert.DoesNotContain("/raw", withoutAuthorizedRawPreviewReferences);
     }
 
     [Fact]
