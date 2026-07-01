@@ -81,13 +81,21 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
   範囲内、`limit` 既定 50、cursor pagination なし）を追加し、Razor ダッシュボードと
   Canvas で共用する（D037）。Canvas ヘルパーページには選択したトレースの要約カード
   （状態・主要モデル・トークン合計・所要時間・cache hit rate、bounded DTO のみ、
-  span tree / cache 明細は含まない）を追加する（D037）。Canvas raw preview は、
-  実装するとすれば Local Monitor の既存 raw-bearing route 群と同じ制御
-  （server-rendered のみ・escaped inert text・JS は raw を受け取らない・
-  same-origin・`Cache-Control: no-store`・明示操作必須）に従う設計を確定したが、
-  実装には別途利用者の明示的な go-ahead を要する（D037）。session-to-trace
+  span tree / cache 明細は含まない）を追加する（D037）。Canvas ヘルパーページの
+  「Local Monitor 概要」カードは、新規拡張所有ルート `GET /api/summary`
+  経由で `GET /api/monitor/summary` を bounded にプロキシし、per-model /
+  per-client-kind 集計と latest / top-token / error トレースを表示する
+  （D038）。Canvas raw preview は、既存の raw-bearing route
+  `GET /traces/{rawRecordId}/raw`（固定フォーマットの HTML エンコード済み
+  `<pre>`）から server-to-server で取得し再デコードせずそのまま埋め込む方式で
+  実装する。新規ページ遷移ルート `GET /raw-preview/:traceId/:spanId`
+  （拡張所有・token 認証・`Cache-Control: no-store`）として提供し、
+  クライアント側 JS は raw を JSON として受け取らない（D038）。session-to-trace
   correlation は、OTel 取り込み側に対応する安定識別子が存在しないため見送り、
-  trace は引き続き手動選択とする（D037）。
+  trace は引き続き手動選択とする（D037）。実装（コード作成・自動テスト検証）は
+  Claude が行い、GitHub Copilot Canvas runtime ツール
+  （`extensions_manage`/`open_canvas`/`invoke_canvas_action`）を要する
+  ライブ検証のみ、実装完了後の別工程として GitHub Copilot へ委譲する（D038）。
 - Grafana JSON dashboard fallback。
 
 参考のみ:

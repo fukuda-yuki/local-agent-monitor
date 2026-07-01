@@ -94,6 +94,11 @@ full resolved contract.
 
 Feasibility: medium–high (confirmed).
 
+**Remainder — Canvas-side consumer (D038, implemented this turn — M4):** a
+"Local Monitor 概要" card in the helper page, backed by a new Canvas-owned
+proxy route `GET /api/summary` (same token gate as `/api/traces`) that
+forwards `GET /api/monitor/summary`. No new Local Monitor endpoint.
+
 ### C. Canvas trace detail view — **design confirmed (D037), implemented this sprint (M3)**
 
 Scoped down from "render the full trace detail" to a **minimal summary card**:
@@ -109,19 +114,23 @@ path. This avoids reimplementing the Local Monitor's tree/timeline/cache tab UI
 
 Feasibility: medium (confirmed; scope reduced from original proposal).
 
-### D. Canvas raw preview boundary — **design confirmed (D037), implementation NOT started**
+### D. Canvas raw preview — **implementation authorized (D038), implemented this turn (M5)**
 
-Resolved design: if built, raw preview is **server-rendered only** inside the
-Canvas-owned loopback helper page — the extension fetches raw server-to-server
-from the Local Monitor's existing raw-bearing route and embeds it as
-`escapeHtml`-escaped inert text; the helper page's client-side JS never
-receives raw as JSON (mirrors D020/D023/D032's "JS does not fetch raw" rule).
-Same-origin, `Cache-Control: no-store`, and an explicit per-trace user action
-apply; no raw by default. Canvas action responses stay bounded DTOs regardless.
-**This is a design template, not an implementation go-ahead** — building it
-requires a separate, explicit user decision to start a future milestone.
+New page-navigation route `GET /raw-preview/:traceId/:spanId` on the
+Canvas-owned loopback server (same token gate as every other route). Resolves
+`spanId` to a `raw_record_id` via the existing sanitized spans response,
+fetches Local Monitor's existing `GET /traces/{rawRecordId}/raw` (a fixed
+`<pre>{HtmlEncoder-encoded payload}</pre>` HTML page) server-to-server, and
+re-embeds the already-encoded fragment verbatim (no decode/re-encode) into its
+own `Cache-Control: no-store` HTML page. Reached only via an explicit link
+click (real page navigation, not `fetch()` + `innerHTML`) — client-side JS
+never receives raw as JSON. The server-to-server fetch sends no
+`Origin`/`Sec-Fetch-Site` headers, so it passes `IsCrossSiteRequest` the same
+way any same-local-user process would — within the already-accepted "same
+local user, different process" risk, not a new one. No new Local Monitor
+endpoint. See D038 for the full resolved design.
 
-Feasibility: medium (design confirmed; implementation deferred pending explicit go-ahead).
+Feasibility: medium (confirmed and implemented).
 
 ### E. Session-to-trace correlation — **dropped (D037)**
 
@@ -139,11 +148,26 @@ selection mechanism.
 
 ## Recommended implementation order
 
-A → B/C (parallel) → D → E(dropped). A changed no display boundary and shipped
-first. B and C touch disjoint file sets (Local Monitor C# vs. the Canvas
-extension) and were implemented in parallel once their designs were confirmed
-(D037). D is design-confirmed but implementation is gated on an explicit future
-go-ahead. E is dropped — no further work planned.
+A → B(endpoint)/C (parallel) → B(canvas consumer, M4)/D (M5, sequential —
+both touch `extension.mjs`/`canvas-helpers.mjs`) → E(dropped) → live
+validation handoff (single, final, cross-cutting step, all children
+together). A shipped first with no display-boundary change. B's Local Monitor
+endpoint and C touched disjoint file sets (Local Monitor C# vs. the Canvas
+extension) and were implemented in parallel. B's Canvas-side consumer (M4)
+and D (M5) both touch the same Canvas extension files, so implement them
+sequentially, not as parallel subagents, to avoid merge conflicts. E is
+dropped — no further work planned.
+
+## Live validation handoff (D038)
+
+Per D038, live Canvas runtime verification — `extensions_manage` (extension
+discovery), `open_canvas` (helper-page rendering, including the M2/M4 summary
+card, M3 trace-detail card, and M5 raw-preview link), and
+`invoke_canvas_action` (the 5 bounded actions) — is **one consolidated final
+step**, not a per-child task. It requires a GitHub Copilot app session; this
+Claude Code environment has none of these tools. All implementation and
+automated testing for children A–D is done without them. Do not delegate
+implementation work to GitHub Copilot — only this final verification step.
 
 ## Tech-debt prerequisite (F8)
 
@@ -171,11 +195,13 @@ in the parent Issue and carried by D036.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
-| M1 Helper UX (child A) | F8 smoke scaffold (A0), decision-supporting trace line, Japanese focus / button / heading, concrete health/error guidance, collapsed health response, contract-test update. Display boundary unchanged. | Implemented; automated tests + self-review done. Live Canvas runtime validation pending (human-gated). |
-| M2 Dashboard summary (child B) | `GET /api/monitor/summary`, shared `MonitorSummaryService`, Index PageModel refactor. See `milestones/M2-dashboard-summary/plan.md` and `review.md`. | Implemented; automated tests + self-review done (302 LocalMonitor tests passing, +9 new). No Canvas-side consumer yet — endpoint only. |
-| M3 Trace detail card (child C) | Canvas-owned `GET /api/trace-detail/:traceId` route, helper-page summary card. See `milestones/M3-trace-detail-card/plan.md` and `review.md`. | Implemented; automated tests + self-review done (12/12 JS smoke, +1 contract-test fact). Live Canvas runtime rendering of the new card pending (human-gated). |
-| Child D raw preview | Design confirmed (D037); no code change. | Not started — needs a separate explicit go-ahead. |
+| M1 Helper UX (child A) | F8 smoke scaffold (A0), decision-supporting trace line, Japanese focus / button / heading, concrete health/error guidance, collapsed health response, contract-test update. Display boundary unchanged. | Implemented; automated tests + self-review done. Live Canvas runtime validation folded into the single Live validation handoff (D038). |
+| M2 Dashboard summary (child B, endpoint) | `GET /api/monitor/summary`, shared `MonitorSummaryService`, Index PageModel refactor. See `milestones/M2-dashboard-summary/plan.md` and `review.md`. | Implemented; automated tests + self-review done (302 LocalMonitor tests passing, +9 new). |
+| M3 Trace detail card (child C) | Canvas-owned `GET /api/trace-detail/:traceId` route, helper-page summary card. See `milestones/M3-trace-detail-card/plan.md` and `review.md`. | Implemented; automated tests + self-review done (12/12 JS smoke, +1 contract-test fact). |
+| M4 Dashboard card (child B remainder) | Canvas-owned `GET /api/summary` proxy + "Local Monitor 概要" card. See `milestones/M4-dashboard-card/plan.md`. | Planned this turn (D038) — next Claude session implements. |
+| M5 Raw preview (child D) | `GET /raw-preview/:traceId/:spanId` page-navigation route + helper-page link. See `milestones/M5-raw-preview/plan.md`. | Planned this turn (D038) — next Claude session implements. |
 | Child E correlation | N/A | Dropped (D037) — no implementation planned. |
+| Live validation handoff | All of A–D's Canvas runtime behavior, verified together in one GitHub Copilot app session. | Not started — the only work delegated outside Claude (D038). |
 
 ## Validation
 

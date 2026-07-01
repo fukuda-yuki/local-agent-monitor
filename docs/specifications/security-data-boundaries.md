@@ -363,25 +363,51 @@ Sprint15 child B/C/D/E resolution (D037):
   Returns `compactTrace` fields plus `cache_hit_rate` and `primary_model` only.
   Does not return span trees, per-turn cache detail, or any field not already
   exposed by the existing bounded actions. No raw prompt/response.
-- **Child D — raw preview, design confirmed, NOT implemented.** If built, the
-  Canvas-owned loopback helper page may show raw prompt/response content only
-  as **server-rendered, escaped inert text** fetched server-to-server from the
-  Local Monitor's existing raw-bearing route (e.g. `GET /traces/{rawRecordId}/raw`)
-  at render time — never as JSON returned to the helper page's client-side JS
-  (mirrors the "JS does not fetch raw" rule from D020/D023/D032). The same
-  raw-bearing controls apply: same-origin, `Cache-Control: no-store`, and an
-  explicit per-trace user action (no raw shown by default). Canvas **action**
-  responses (`get_trace_summary` etc., invoked by the agent via
-  `invoke_canvas_action`) stay bounded DTOs regardless; raw preview, if ever
-  built, is confined to the helper page's own server-rendered HTML and never
-  flows into an action response, a Copilot prompt, or a log. `sanitizeDto()`'s
-  forbidden-key filter continues to apply unchanged to all action DTOs — raw
-  preview would be a separate code path, not a loosening of that filter.
-  Implementation requires a separate, explicit user go-ahead; this entry
-  records the confirmed design only.
+- **Child D — raw preview, implementation authorized (D038).** New page-
+  navigation route `GET /raw-preview/:traceId/:spanId` on the Canvas-owned
+  loopback server (token-gated the same way as every other route on that
+  server). The handler resolves `spanId` to a `raw_record_id` via the
+  existing sanitized `/api/monitor/traces/{traceId}/spans` response (which
+  already includes `raw_record_id` per span), then fetches
+  `GET {monitorUrl}/traces/{rawRecordId}/raw` server-to-server. That Local
+  Monitor route returns a fixed-format HTML page
+  (`<pre>{HtmlEncoder.Default.Encode(payload)}</pre>`) — the extension
+  extracts the substring between the first `<pre>` and the last `</pre>` and
+  re-embeds it **verbatim** (no decode, no re-encode) into its own page. This
+  is safe specifically because the source is already HTML-encoded by
+  `HtmlEncoder.Default` server-side. The response is a full HTML page
+  (`Cache-Control: no-store`), reached only via an explicit link click (a
+  real page navigation, not a `fetch()` + `innerHTML`) — the helper page's
+  client-side JS never receives raw as JSON, mirroring the "JS does not
+  fetch raw" rule from D020/D023/D032. The server-to-server fetch (no
+  `Origin`/`Sec-Fetch-Site` headers from a Node `fetch()`) passes
+  `MonitorHost.IsCrossSiteRequest` the same way any other same-local-user
+  process would — this stays within the already-accepted "another process
+  running as the same local user reading raw via loopback" risk (see
+  "Accepted out of scope" above), not a new risk category. Canvas **action**
+  responses (`get_trace_summary` etc., invoked via `invoke_canvas_action`)
+  are unchanged — raw preview is confined to this one page-navigation route
+  and never flows into an action response, a Copilot prompt, or a log.
+  `sanitizeDto()`'s forbidden-key filter is unaffected (this route doesn't go
+  through it — it's a separate code path, not a loosening of the filter). No
+  new Local Monitor endpoint is added.
+- **Child B remainder — `GET /api/summary` (Canvas-owned proxy, D038).** New
+  route on the Canvas-owned loopback server (same token gate as `/api/traces`)
+  that proxies `GET /api/monitor/summary` (already sanitized per the child B
+  entry above) into a "Local Monitor 概要" card in the helper page. No new
+  Local Monitor endpoint; no field beyond what `/api/monitor/summary` already
+  returns.
 - **Child E — dropped.** No implementation. No new resource/span attribute is
   added to the OTel ingestion schema. The Canvas helper page's manual trace
   dropdown (child A) remains the permanent trace-selection mechanism.
+- **Live Canvas runtime verification is a separate, final, cross-cutting step
+  (D038), not part of any child's implementation scope.** It requires
+  `extensions_manage`/`open_canvas`/`invoke_canvas_action`, which this Claude
+  Code environment does not have. All code for children A–D is written and
+  automated-tested (`node --check`/`node --test`/`dotnet build`/`dotnet test`)
+  entirely without those tools; only the final live rendering/invocation
+  check is delegated to a GitHub Copilot app session, once, covering every
+  child together.
 
 Sprint12 UX redesign (prompt identification + DOM views, boundary controls
 reused):
