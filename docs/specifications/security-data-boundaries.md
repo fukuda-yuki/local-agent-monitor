@@ -409,8 +409,7 @@ Sprint15 child B/C/D/E resolution (D037):
   check is delegated to a GitHub Copilot app session, once, covering every
   child together.
 
-Sprint15 continuation — prompt-aware trace selection (D039, design confirmed,
-implementation not yet started):
+Sprint15 continuation — prompt-aware trace selection (D039, implemented, M7):
 
 - **New raw-bearing JSON route, `GET /traces/{traceId}/prompt-label`.** Not
   part of the `/api/monitor/*` sanitized family (D032's "no `/api/monitor/*`/
@@ -450,9 +449,9 @@ implementation not yet started):
   new exposure category. See D039 in `docs/decisions.md` for the full
   discussion and rationale.
 - Implementation (Local Monitor endpoint, Canvas-side consumption, and
-  contract tests) requires an explicit user go-ahead before starting, per the
-  same two-stage (design confirmed → implementation authorized) process
-  D037/D038 already used.
+  contract tests) is complete (Sprint15 M7), following the same two-stage
+  (design confirmed → implementation authorized) process D037/D038 already
+  used.
 
 Sprint12 UX redesign (prompt identification + DOM views, boundary controls
 reused):

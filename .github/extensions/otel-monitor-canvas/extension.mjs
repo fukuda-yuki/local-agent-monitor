@@ -132,6 +132,29 @@ async function fetchHelperSummary(monitorUrl, limitQuery) {
     return fetchTextWithTimeout(monitorApiUrl(monitorUrl, path));
 }
 
+// Fetch one trace's prompt label (D039), proxied server-to-server from the
+// Local Monitor's own /traces/{traceId}/prompt-label. Unlike
+// fetchHelperTraceRows/fetchHelperSpans, this never throws: both a non-OK
+// response (e.g. a 404 when the Local Monitor route is absent) and any
+// thrown error (network failure, timeout) resolve to null. This is
+// deliberate — the /api/traces route below fetches a label per trace in
+// parallel via Promise.all, and a single trace's label lookup failing must
+// not take down the whole trace list (that would defeat D039's "additive,
+// gracefully degrading" intent).
+async function fetchHelperPromptLabel(monitorUrl, traceId) {
+    try {
+        const encodedTraceId = encodeURIComponent(traceId);
+        const { response, body } = await fetchTextWithTimeout(monitorApiUrl(monitorUrl, `/traces/${encodedTraceId}/prompt-label`));
+        if (!response.ok) {
+            return null;
+        }
+        const parsed = body ? parseJsonBody(body) : null;
+        return parsed && typeof parsed.prompt_label === "string" ? parsed.prompt_label : null;
+    } catch {
+        return null;
+    }
+}
+
 function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session }) {
     const server = createServer(async (req, res) => {
         const url = new URL(req.url, "http://127.0.0.1");
@@ -165,7 +188,11 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
                     // only from compactTrace fields (Sprint15 A1).
                     return { ...trace, line: formatTraceLine(trace) };
                 });
-                sendJson(res, 200, { items, count: items.length });
+                // `prompt_label` (D039) is fetched per trace in parallel and
+                // merged in additively — `line` above is unchanged.
+                const promptLabels = await Promise.all(items.map((item) => fetchHelperPromptLabel(monitorUrl, item.trace_id)));
+                const itemsWithPromptLabel = items.map((item, i) => ({ ...item, prompt_label: promptLabels[i] }));
+                sendJson(res, 200, { items: itemsWithPromptLabel, count: itemsWithPromptLabel.length });
             } catch (err) {
                 const code = err instanceof CanvasError ? err.code : "monitor_unavailable";
                 sendJson(res, 502, { error: code, message: err.message });

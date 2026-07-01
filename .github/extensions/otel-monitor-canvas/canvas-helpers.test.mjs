@@ -9,6 +9,7 @@ import {
     FOCUS_OPTIONS,
     renderHelperHtml,
     formatTraceLine,
+    dropdownOptionLabel,
     statusLabel,
     formatTokens,
     formatDuration,
@@ -106,6 +107,27 @@ test("formatTraceLine: renders the error status label when error_count > 0", () 
     const trace = compactTrace({ ...SAMPLE_TRACE_ROW, error_count: 1 });
     assert.equal(statusLabel(trace.status), "エラーあり");
     assert.match(formatTraceLine(trace), /^エラーあり \//);
+});
+
+test("dropdownOptionLabel: prepends the prompt label with an em-dash separator when present", () => {
+    assert.equal(
+        dropdownOptionLabel({ line: "OK / gpt-5 / 12 spans", prompt_label: "What does this function do?" }),
+        "What does this function do? — OK / gpt-5 / 12 spans",
+    );
+});
+
+test("dropdownOptionLabel: falls back to line alone when prompt_label is absent", () => {
+    assert.equal(
+        dropdownOptionLabel({ line: "OK / gpt-5 / 12 spans", prompt_label: null }),
+        "OK / gpt-5 / 12 spans",
+    );
+});
+
+test("dropdownOptionLabel: returns just the prompt label with the separator when line is empty", () => {
+    assert.equal(
+        dropdownOptionLabel({ line: "", prompt_label: "What does this function do?" }),
+        "What does this function do? — ",
+    );
 });
 
 test("formatTokens / formatDuration / formatClock / shortTraceId: individual formatter behavior", () => {

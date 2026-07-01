@@ -415,6 +415,38 @@ internal static class MonitorHost
                 await context.Response.WriteAsync(
                     $"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Raw record {rawRecordId}</title></head><body><pre>{encodedPayload}</pre></body></html>");
             });
+
+            // A raw prompt-label surface (D039), alongside the raw-detail view above.
+            // --sanitized-only removes it (route absent → 404). Same-origin enforced,
+            // no-store, and no trace-id format validation (matches D035's
+            // /traces/{traceId}/analysis/... precedent: an unknown/malformed id
+            // simply yields prompt_label: null, which is a normal outcome).
+            app.MapGet("/traces/{traceId}/prompt-label", async (string traceId, HttpContext context) =>
+            {
+                if (IsCrossSiteRequest(context))
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden", "The prompt label is same-origin only.");
+                    return;
+                }
+
+                IReadOnlyList<RawTelemetryRecord> records;
+                try
+                {
+                    records = projectionStore.ListRawRecordsByTraceId(traceId, 1);
+                }
+                catch (PersistenceBusyException)
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                    return;
+                }
+
+                var label = records.Count > 0
+                    ? MonitorPromptExtractor.ExtractPromptLabel(records[0].PayloadJson, traceId)
+                    : null;
+
+                context.Response.Headers["Cache-Control"] = "no-store";
+                await WriteJsonAsync(context, new { trace_id = traceId, prompt_label = label });
+            });
         }
 
         app.MapPost(TracePath, async context =>

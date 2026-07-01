@@ -189,8 +189,9 @@ dropdown shows the prompt label alongside the existing line. See D039 in
 continuation" section for the full rationale, and
 `milestones/M7-prompt-aware-trace-selection/plan.md` for the implementation
 plan. Per the same two-stage process D037→D038 used, design confirmation and
-implementation authorization are separate steps — implementation has not
-started as of this design.
+implementation authorization were separate steps; implementation is now
+complete — see `milestones/M7-prompt-aware-trace-selection/review.md` for
+the self-review record.
 
 ## Tech-debt prerequisite (F8)
 
@@ -225,7 +226,7 @@ in the parent Issue and carried by D036.
 | M5 Raw preview (child D) | `GET /raw-preview/:traceId/:spanId` page-navigation route + helper-page link. See `milestones/M5-raw-preview/plan.md` and `review.md`. | Implemented; automated tests + self-review done (17/17 JS smoke, +1 contract-test fact). |
 | Child E correlation | N/A | Dropped (D037) — no implementation planned. |
 | Live validation handoff | All of A–D's Canvas runtime behavior, verified together in one GitHub Copilot app session. See `milestones/M6-live-validation-handoff/prompt.md`. | Handoff prompt written; the verification itself is not started — the only work delegated outside Claude (D038). |
-| M7 Prompt-aware trace selection | New Local Monitor `GET /traces/{traceId}/prompt-label` (D035-pattern JSON raw-bearing route) + Canvas `/api/traces` fetches it per trace + dropdown shows the prompt label alongside the existing decision-supporting line. See `milestones/M7-prompt-aware-trace-selection/plan.md` and D039. | Design confirmed (D039); implementation requires an explicit user go-ahead before starting (same two-stage process as D037→D038). |
+| M7 Prompt-aware trace selection | New Local Monitor `GET /traces/{traceId}/prompt-label` (D035-pattern JSON raw-bearing route) + Canvas `/api/traces` fetches it per trace + dropdown shows the prompt label alongside the existing decision-supporting line. See `milestones/M7-prompt-aware-trace-selection/plan.md`, `review.md`, and D039. | Implemented; automated tests + self-review done (21/21 JS smoke, +1 contract-test fact). |
 
 ## Validation
 

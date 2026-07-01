@@ -1154,7 +1154,10 @@ sanitized な決定支援ラインのみ（状態 / モデル / span 数 / tool 
   - レスポンス形: `{ "trace_id": "...", "prompt_label": "..." | null }`。
     `prompt_label` が `null` になるのはエラーではなく「抽出できなかった」
     正常系（fallback は呼び出し側が担当）。
-  - trace id の形式が不正な場合は `400`。DB busy は既存の `persistence_busy`
+  - trace id の形式検証は行わない。D035 の `/traces/{traceId}/analysis/...`
+    と同じく `traceId` を無制約の文字列として扱い、不正・未知の id は単に
+    ストアから 0 件のレコードが返るだけなので `200` / `prompt_label: null`
+    となる（エラーではなく正常系）。DB busy は既存の `persistence_busy`
     `503` パターンを踏襲する。
 - Canvas 拡張の own server（`extension.mjs`）の `/api/traces` ルート
   （Canvas action ではなく helper page 専用ルート。既に `sanitizeDto()` を

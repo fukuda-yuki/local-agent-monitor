@@ -219,6 +219,20 @@ public class CanvasExtensionContractTests
         Assert.DoesNotContain("console.log", script);
     }
 
+    [Fact]
+    public void Extension_DeclaresPromptLabelSurface()
+    {
+        var script = ReadExtension();
+
+        // Sprint15 M7 (D039): the /api/traces helper-page route fetches each
+        // trace's prompt label server-to-server from the Local Monitor's own
+        // /traces/{traceId}/prompt-label and merges it in additively.
+        Assert.Contains("/prompt-label", script);
+        Assert.Contains("fetchHelperPromptLabel", script);
+        Assert.DoesNotContain("payload_json", script);
+        Assert.DoesNotContain("console.log", script);
+    }
+
     // Sprint15 M5 (child D, D038) is the one deliberate exception to the
     // otherwise-blanket "no /raw reference" contract enforced by the facts
     // above. Rather than deleting those pre-existing checks (which would

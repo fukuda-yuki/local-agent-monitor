@@ -139,6 +139,18 @@ export function formatTraceLine(trace) {
     return parts.join(" / ");
 }
 
+// Composes a trace's prompt label (D039, helper-page surface only) with its
+// existing decision-supporting line for the trace-selection dropdown. Not
+// called from extension.mjs — /api/traces keeps `prompt_label` and `line` as
+// separate additive fields — but kept as an exported pure function so
+// `node --test` can pin the exact composition/separator format; the inline
+// (non-module) client script in renderHelperHtml duplicates this same
+// one-liner logic since it cannot `import` from this ES module.
+export function dropdownOptionLabel(item) {
+    const line = item.line ?? "";
+    return item.prompt_label ? `${item.prompt_label} — ${line}` : line;
+}
+
 // --------------- sanitized projection helpers ---------------
 
 export function statusFromTrace(row) {
@@ -831,7 +843,7 @@ ${focusOptionsHtml}
           (data.items || []).forEach(function (t) {
             var opt = document.createElement("option");
             opt.value = t.trace_id;
-            opt.textContent = t.line || t.trace_id;
+            opt.textContent = (t.prompt_label ? t.prompt_label + " — " : "") + (t.line || t.trace_id);
             traceSel.appendChild(opt);
           });
           if (!traceSel.options.length) { setResult("最近のトレースが見つかりませんでした。", true); }

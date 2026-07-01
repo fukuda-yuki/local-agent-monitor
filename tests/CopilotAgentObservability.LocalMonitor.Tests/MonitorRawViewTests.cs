@@ -110,6 +110,65 @@ public class MonitorRawViewTests
         }
     }
 
+    [Fact]
+    public async Task PromptLabel_AbsentUnderSanitizedOnly_Returns404()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedRawRecordWithPrompt(temp, "trace-with-prompt", "What does this function do?");
+        await using var host = await StartHostAsync(temp, sanitizedOnly: true);
+
+        var response = await host.Client.GetAsync("/traces/trace-with-prompt/prompt-label");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PromptLabel_ByDefault_ReturnsExtractedLabelWithNoStore()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedRawRecordWithPrompt(temp, "trace-with-prompt", "What does this function do?");
+        await using var host = await StartHostAsync(temp);
+
+        var response = await host.Client.GetAsync("/traces/trace-with-prompt/prompt-label");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Contains("\"trace_id\":\"trace-with-prompt\"", body);
+        Assert.Contains("\"prompt_label\":\"What does this function do?\"", body);
+    }
+
+    [Fact]
+    public async Task PromptLabel_CrossSiteFetchIsForbidden()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedRawRecordWithPrompt(temp, "trace-with-prompt", "What does this function do?");
+        await using var host = await StartHostAsync(temp);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/traces/trace-with-prompt/prompt-label");
+        request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "cross-site");
+
+        var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Contains("cross_origin_forbidden", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task PromptLabel_UnknownTraceId_ReturnsNullLabelNot404()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedRawRecordWithPrompt(temp, "trace-with-prompt", "What does this function do?");
+        await using var host = await StartHostAsync(temp);
+
+        var response = await host.Client.GetAsync("/traces/unknown-trace-id/prompt-label");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"trace_id\":\"unknown-trace-id\"", body);
+        Assert.Contains("\"prompt_label\":null", body);
+    }
+
     private static long SeedRawRecord(MonitorTempDirectory temp)
     {
         var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
@@ -126,6 +185,26 @@ public class MonitorRawViewTests
         return id;
     }
 
+    private static long SeedRawRecordWithPrompt(MonitorTempDirectory temp, string traceId, string promptText)
+    {
+        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        var payloadJson = PromptPayloadTemplate
+            .Replace("TRACE_ID_PLACEHOLDER", traceId)
+            .Replace("PROMPT_TEXT_PLACEHOLDER", promptText);
+        var record = new RawTelemetryRecord(
+            Id: null,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: traceId,
+            ReceivedAt: DateTimeOffset.UnixEpoch.AddMinutes(1),
+            ResourceAttributesJson: null,
+            PayloadJson: payloadJson);
+        var id = store.Insert(record);
+        store.ApplyProjection(id, record.Source, record.ReceivedAt, MonitorProjectionBuilder.Build(record), DateTimeOffset.UnixEpoch.AddMinutes(2));
+        store.ApplySpanProjection(id, MonitorSpanProjectionBuilder.Build(record), DateTimeOffset.UnixEpoch.AddMinutes(3));
+        return id;
+    }
+
     private static Task<RunningMonitorHost> StartHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false) =>
         MonitorTestHost.StartAsync(
             temp,
@@ -138,6 +217,19 @@ public class MonitorRawViewTests
           {"key":"user.email","value":{"stringValue":"leak-marker@example.com"}}
         ]},"scopeSpans":[{"spans":[
           {"traceId":"trace-raw","spanId":"1111111111111111","name":"<script>alert(1)</script>"}
+        ]}]}]}
+        """;
+
+    private const string PromptPayloadTemplate = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"TRACE_ID_PLACEHOLDER","spanId":"1000","name":"chat gpt-4o",
+           "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000001000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+             {"key":"gen_ai.prompt","value":{"stringValue":"PROMPT_TEXT_PLACEHOLDER"}}
+           ]}
         ]}]}]}
         """;
 
