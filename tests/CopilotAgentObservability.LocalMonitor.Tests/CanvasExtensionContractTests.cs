@@ -1,9 +1,101 @@
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public class CanvasExtensionContractTests
 {
+    [Fact]
+    public void ExtensionDistributionPackage_DeclaresStableMetadataAndPreview()
+    {
+        var directory = ExtensionDirectory();
+        var manifestPath = Path.Combine(directory, "canvas.json");
+
+        Assert.True(File.Exists(manifestPath), "canvas.json must exist in the copyable extension folder.");
+
+        using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        var root = manifest.RootElement;
+
+        Assert.Equal(1, root.GetProperty("schema_version").GetInt32());
+        Assert.Equal("otel-monitor-canvas", root.GetProperty("id").GetString());
+        Assert.Equal("otel-monitor", root.GetProperty("canvas_id").GetString());
+        Assert.Equal("OTel Monitor", root.GetProperty("display_name").GetString());
+        Assert.Equal("0.1.0", root.GetProperty("version").GetString());
+        Assert.Equal("extension.mjs", root.GetProperty("entry").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(root.GetProperty("description").GetString()));
+        Assert.True(root.GetProperty("keywords").GetArrayLength() >= 3);
+
+        var screenshots = root.GetProperty("screenshots");
+        Assert.Equal(JsonValueKind.Array, screenshots.ValueKind);
+        Assert.Single(screenshots.EnumerateArray());
+        var screenshot = screenshots[0];
+        Assert.Equal("assets/preview.png", screenshot.GetProperty("path").GetString());
+        Assert.Equal("Synthetic OTel Monitor Canvas helper preview", screenshot.GetProperty("alt").GetString());
+
+        AssertPathResolvesInside(directory, root.GetProperty("entry").GetString()!);
+        var previewPath = AssertPathResolvesInside(directory, screenshot.GetProperty("path").GetString()!);
+        Assert.True(File.Exists(previewPath), "assets/preview.png must exist.");
+
+        var previewBytes = File.ReadAllBytes(previewPath);
+        Assert.True(previewBytes.Length > 8, "preview.png must not be empty.");
+        Assert.True(previewBytes.Length <= 500_000, "preview.png must stay small enough to remain a lightweight repository asset.");
+        Assert.Equal(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }, previewBytes.Take(8).ToArray());
+    }
+
+    [Fact]
+    public void ExtensionDistributionPackage_DoesNotAddDependenciesMirrorsOrUnsafeArtifacts()
+    {
+        var directory = ExtensionDirectory();
+        var forbiddenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "package.json",
+            "package-lock.json",
+            "npm-shrinkwrap.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "bun.lockb",
+            "node_modules",
+        };
+
+        foreach (var path in Directory.EnumerateFileSystemEntries(directory, "*", SearchOption.AllDirectories))
+        {
+            var name = Path.GetFileName(path);
+            Assert.DoesNotContain(name, forbiddenNames);
+        }
+
+        var extensionEntrypoints = Directory.EnumerateFiles(directory, "extension.mjs", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(directory, path).Replace('\\', '/'))
+            .ToArray();
+        Assert.Equal(new[] { "extension.mjs" }, extensionEntrypoints);
+
+        var rawFixtureFiles = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(directory, path).Replace('\\', '/'))
+            .Where(path => path.Contains("raw", StringComparison.OrdinalIgnoreCase)
+                && !path.Equals("extension.mjs", StringComparison.OrdinalIgnoreCase)
+                && !path.Equals("canvas-helpers.mjs", StringComparison.OrdinalIgnoreCase)
+                && !path.Equals("canvas-helpers.test.mjs", StringComparison.OrdinalIgnoreCase)
+                && !path.Equals("README.md", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        Assert.Empty(rawFixtureFiles);
+
+        foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(directory, path).Replace('\\', '/');
+            if (IsBinaryFile(path))
+            {
+                AssertBinaryDoesNotContainUnsafeText(path, relative);
+                continue;
+            }
+
+            var text = File.ReadAllText(path);
+            Assert.DoesNotContain("console.log", text);
+            Assert.DoesNotMatch(@"(?i)(api[_-]?key|secret|password|credential|bearer)\s*[:=]\s*[""'][^""']+[""']", text);
+            Assert.DoesNotMatch(@"(?i)(C:\\Users\\|/Users/|/home/)", text);
+            Assert.DoesNotMatch(@"(?i)authorization:\s*basic\s+[A-Za-z0-9+/=]{12,}", text);
+            Assert.DoesNotMatch(@"(?i)authorization:\s*bearer\s+[A-Za-z0-9._~+/=-]{12,}", text);
+        }
+    }
+
     [Fact]
     public void Extension_DeclaresM3AndM4CanvasActions()
     {
@@ -282,6 +374,35 @@ public class CanvasExtensionContractTests
     {
         var repoRoot = FindRepoRoot();
         return Path.Combine(repoRoot, ".github", "extensions", "otel-monitor-canvas");
+    }
+
+    private static string AssertPathResolvesInside(string directory, string relativePath)
+    {
+        Assert.False(Path.IsPathRooted(relativePath), $"{relativePath} must be relative to the extension directory.");
+        var fullPath = Path.GetFullPath(Path.Combine(directory, relativePath));
+        var root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        Assert.StartsWith(root, fullPath, StringComparison.OrdinalIgnoreCase);
+        return fullPath;
+    }
+
+    private static bool IsBinaryFile(string path)
+    {
+        var extension = Path.GetExtension(path);
+        return extension.Equals(".png", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AssertBinaryDoesNotContainUnsafeText(string path, string relativePath)
+    {
+        var ascii = System.Text.Encoding.ASCII.GetString(File.ReadAllBytes(path));
+        Assert.DoesNotContain("C:\\Users\\", ascii, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/Users/", ascii, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/home/", ascii, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("authorization", ascii, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("password", ascii, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", ascii, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("token", ascii, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("raw OTLP", ascii, StringComparison.OrdinalIgnoreCase);
     }
 
     private static (int ExitCode, string Output, string Error) RunNode(string workingDirectory, params string[] arguments)
