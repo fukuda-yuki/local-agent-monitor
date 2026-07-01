@@ -38,6 +38,7 @@ import {
     cacheTurn,
     sanitizeDto,
     formatTraceLine,
+    formatTokens,
     traceDetailSummary,
     MAX_CACHE_TURNS,
 } from "./canvas-helpers.mjs";
@@ -113,6 +114,18 @@ async function fetchHelperSpans(monitorUrl, traceId) {
     return Array.isArray(page.items) ? page.items : [];
 }
 
+// Fetch the sanitized dashboard summary (Sprint15 M4 / child B remainder,
+// D038), proxied as-is from GET /api/monitor/summary (already the bounded
+// D037 contract — no reshaping here).
+async function fetchHelperSummary(monitorUrl, limitQuery) {
+    const path = limitQuery ? `/api/monitor/summary?${limitQuery}` : "/api/monitor/summary";
+    const { response, body } = await fetchTextWithTimeout(monitorApiUrl(monitorUrl, path));
+    if (!response.ok) {
+        throw new CanvasError("monitor_unavailable", `The Local Monitor returned HTTP ${response.status}.`);
+    }
+    return body ? parseJsonBody(body) : {};
+}
+
 function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session }) {
     const server = createServer(async (req, res) => {
         const url = new URL(req.url, "http://127.0.0.1");
@@ -147,6 +160,39 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
                     return { ...trace, line: formatTraceLine(trace) };
                 });
                 sendJson(res, 200, { items, count: items.length });
+            } catch (err) {
+                const code = err instanceof CanvasError ? err.code : "monitor_unavailable";
+                sendJson(res, 502, { error: code, message: err.message });
+            }
+            return;
+        }
+
+        if (req.method === "GET" && path === "/api/summary") {
+            try {
+                if (!isLoopbackUrl(monitorUrl)) {
+                    sendJson(res, 400, { error: "invalid_monitor_url" });
+                    return;
+                }
+                const limitQuery = url.searchParams.has("limit")
+                    ? `limit=${encodeURIComponent(url.searchParams.get("limit"))}`
+                    : "";
+                const summary = await fetchHelperSummary(monitorUrl, limitQuery);
+                // Additive-only enrichment mirroring /api/traces' own `line`
+                // field: every existing D037/D038 field is preserved
+                // unchanged, only a derived, already-sanitized display string
+                // is appended (Sprint15 M4 / D038).
+                const withLine = (trace) => (trace ? { ...trace, line: formatTraceLine(trace) } : null);
+                const withTokensFormatted = (rows) => (Array.isArray(rows)
+                    ? rows.map((row) => ({ ...row, total_tokens_formatted: formatTokens(row.total_tokens) }))
+                    : rows);
+                sendJson(res, 200, {
+                    ...summary,
+                    latest_trace: withLine(summary.latest_trace),
+                    top_token_trace: withLine(summary.top_token_trace),
+                    error_trace: withLine(summary.error_trace),
+                    per_model_summary: withTokensFormatted(summary.per_model_summary),
+                    per_client_kind_summary: withTokensFormatted(summary.per_client_kind_summary),
+                });
             } catch (err) {
                 const code = err instanceof CanvasError ? err.code : "monitor_unavailable";
                 sendJson(res, 502, { error: code, message: err.message });

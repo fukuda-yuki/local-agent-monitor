@@ -169,6 +169,27 @@ public class CanvasExtensionContractTests
     }
 
     [Fact]
+    public void Extension_DeclaresDashboardSummaryCardSurface()
+    {
+        var script = ReadExtension();
+
+        // Sprint15 M4 (child B remainder, D038): Canvas-owned /api/summary
+        // proxy route + "Local Monitor 概要" card, gated by the same
+        // x-canvas-token as every other route.
+        Assert.Contains("/api/summary", script);
+        Assert.Contains("fetchHelperSummary", script);
+        Assert.Contains("/api/monitor/summary", script);
+        Assert.Contains("Local Monitor 概要", script);
+
+        // The proxy must not bypass the existing per-route token check or
+        // introduce a new Local Monitor endpoint / raw field category.
+        Assert.Contains("x-canvas-token", script);
+        Assert.DoesNotContain("/raw", script);
+        Assert.DoesNotContain("payload_json", script);
+        Assert.DoesNotContain("console.log", script);
+    }
+
+    [Fact]
     public void CanvasHelperJsPassesSyntaxCheckAndUnitSmoke()
     {
         // Sprint15 M1 A0 (F8 prerequisite): executable JS smoke wired into the

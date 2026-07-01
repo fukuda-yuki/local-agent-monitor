@@ -193,3 +193,20 @@ test("renderHelperHtml: contains the trace detail summary card heading and no ra
     assert.doesNotMatch(html, /\/raw/);
     assert.doesNotMatch(html, /payload_json/);
 });
+
+test("renderHelperHtml: contains the Local Monitor 概要 dashboard card and fetches /api/summary, with no raw fields", () => {
+    const html = renderHelperHtml({
+        instanceId: "inst-1",
+        monitorUrl: "http://127.0.0.1:4320",
+        healthState: "ready",
+        statusCode: 200,
+        healthBody: "{\"status\":\"ready\"}",
+        error: null,
+        token: "token-1",
+    });
+
+    assert.match(html, /Local Monitor 概要/);
+    assert.match(html, /fetch\("\/api\/summary\?t=/);
+    assert.doesNotMatch(html, /\/raw/);
+    assert.doesNotMatch(html, /payload_json/);
+});

@@ -479,6 +479,9 @@ export function renderHelperHtml({ instanceId, monitorUrl, healthState, statusCo
       margin-bottom: 16px;
     }
     .card h2 { font-size: 1rem; margin-bottom: 8px; }
+    .card h3 { font-size: 0.9rem; margin: 12px 0 4px; color: var(--muted); }
+    .card ul { margin: 0 0 0 1.2em; }
+    .card li { margin-bottom: 4px; }
     .kv { display: grid; grid-template-columns: 200px 1fr; gap: 4px 12px; }
     .kv dt { color: var(--muted); font-weight: 500; }
     .status-ok { color: var(--success); font-weight: 600; }
@@ -551,6 +554,27 @@ export function renderHelperHtml({ instanceId, monitorUrl, healthState, statusCo
   ${guidanceHtml}
 
   ${healthDetailsHtml}
+
+  <div class="card">
+    <h2>Local Monitor 概要</h2>
+    <p class="muted" id="summary-loading">読み込み中…</p>
+    <p class="err" id="summary-error" style="display:none;"></p>
+    <div id="summary-content" style="display:none;">
+      <p id="summary-scope" class="muted"></p>
+      <div>
+        <h3>モデル別</h3>
+        <ul id="summary-models"></ul>
+      </div>
+      <div>
+        <h3>クライアント種別</h3>
+        <ul id="summary-clients"></ul>
+      </div>
+      <div>
+        <h3>注目トレース</h3>
+        <ul id="summary-highlights"></ul>
+      </div>
+    </div>
+  </div>
 
   <div class="card">
     <h2>選択したトレースの要約</h2>
@@ -652,7 +676,53 @@ ${focusOptionsHtml}
           .catch(function (e) { showTraceDetailEmpty("要約の取得に失敗しました: " + e.message); });
       }
 
+      var summaryLoading = document.getElementById("summary-loading");
+      var summaryError = document.getElementById("summary-error");
+      var summaryContent = document.getElementById("summary-content");
+      var summaryScope = document.getElementById("summary-scope");
+      var summaryModels = document.getElementById("summary-models");
+      var summaryClients = document.getElementById("summary-clients");
+      var summaryHighlights = document.getElementById("summary-highlights");
+
+      function showSummaryError(msg) {
+        summaryLoading.style.display = "none";
+        summaryContent.style.display = "none";
+        summaryError.textContent = msg;
+        summaryError.style.display = "";
+      }
+
+      function appendLine(el, text) {
+        var li = document.createElement("li");
+        li.textContent = text;
+        el.appendChild(li);
+      }
+
       if (!token) { setResult("起動トークンがありません。", false); return; }
+
+      fetch("/api/summary?t=" + encodeURIComponent(token), { headers: { "x-canvas-token": token } })
+        .then(function (r) { return r.json().then(function (b) { return { status: r.status, body: b }; }); })
+        .then(function (out) {
+          if (out.status !== 200) {
+            showSummaryError("概要を取得できませんでした: " + (out.body && out.body.error || ("HTTP " + out.status)));
+            return;
+          }
+          var s = out.body;
+          var traceCount = s.scope && s.scope.trace_count != null ? s.scope.trace_count : "—";
+          summaryScope.textContent = "直近 " + traceCount + " 件のトレースを集計";
+          (s.per_model_summary || []).slice(0, 5).forEach(function (m) {
+            appendLine(summaryModels, m.model + " / " + m.trace_count + " 件 / " + (m.total_tokens_formatted || "0") + " tokens / エラー " + m.error_count);
+          });
+          (s.per_client_kind_summary || []).slice(0, 5).forEach(function (c) {
+            appendLine(summaryClients, c.client_kind + " / " + c.trace_count + " 件 / " + (c.total_tokens_formatted || "0") + " tokens / エラー " + c.error_count);
+          });
+          [["最新", s.latest_trace], ["最大トークン", s.top_token_trace], ["エラー", s.error_trace]].forEach(function (pair) {
+            if (!pair[1]) { return; }
+            appendLine(summaryHighlights, pair[0] + ": " + (pair[1].line || pair[1].trace_id));
+          });
+          summaryLoading.style.display = "none";
+          summaryContent.style.display = "";
+        })
+        .catch(function (e) { showSummaryError("概要を取得できませんでした: " + e.message); });
 
       fetch("/api/traces?t=" + encodeURIComponent(token), { headers: { "x-canvas-token": token } })
         .then(function (r) {
