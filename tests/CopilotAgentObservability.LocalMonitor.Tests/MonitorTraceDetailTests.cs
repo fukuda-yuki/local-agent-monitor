@@ -38,6 +38,8 @@ public class MonitorTraceDetailTests
         Assert.Contains("概要", body);
         Assert.Contains("タイムライン", body);
         Assert.Contains("エラーのみ", body);
+        Assert.Contains("失敗と遅延を見る", body);
+        Assert.Contains("実行の流れを見る", body);
         Assert.Contains("read_file", body);
 
         // Raw body shown inline by default.
@@ -113,10 +115,11 @@ public class MonitorTraceDetailTests
 
         var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
 
-        Assert.Contains("Analyze raw trace with Copilot", body);
+        Assert.Contains("Copilot raw 解析", body);
         Assert.Contains("id=\"analysis-focus\"", body);
         Assert.Contains("value=\"tool-usage\"", body);
         Assert.Contains("value=\"agent-flow\"", body);
+        Assert.Contains("解析を開始", body);
         Assert.Contains("data-analysis-trace-id=\"trace-detail\"", body);
         Assert.Contains("x-monitor-csrf", body);
     }
@@ -161,7 +164,7 @@ public class MonitorTraceDetailTests
         Assert.Contains("キャッシュ", body);
         Assert.Contains("data-timeline-trace-id=\"trace-detail\"", body);
         Assert.DoesNotContain("Raw OTLP ペイロード", body);
-        Assert.DoesNotContain("Analyze raw trace with Copilot", body);
+        Assert.DoesNotContain("Copilot raw 解析", body);
         Assert.DoesNotContain("/raw", body);
         Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", body);
         Assert.DoesNotContain("leak-marker@example.com", body);

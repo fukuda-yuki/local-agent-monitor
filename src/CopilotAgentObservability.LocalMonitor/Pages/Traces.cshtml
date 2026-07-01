@@ -4,8 +4,19 @@
     string Label(string? traceId) => Model.PromptFor(traceId) ?? MonitorViewFormat.ShortTraceId(traceId);
 }
 
-<section class="monitor-section">
-    <h2 class="monitor-page-title">トレース一覧</h2>
+<section class="monitor-section traces-page">
+    <div class="page-header">
+        <div>
+            <p class="page-kicker">Trace Explorer</p>
+            <h2 class="monitor-page-title">トレース一覧</h2>
+        </div>
+        <a class="monitor-btn" href="/">ダッシュボード</a>
+    </div>
+
+    <div class="list-summary-bar">
+        <span>表示中 <strong class="monitor-mono">@MonitorViewFormat.Count(Model.Result.Items.Count)</strong> 件</span>
+        <span>プロンプトまたは TraceId、モデル、エラー、トークンで trace を見分けます。</span>
+    </div>
 
     <div class="trace-card-list">
         @if (Model.Result.Items.Count == 0)
@@ -15,23 +26,25 @@
         @foreach (var row in Model.Result.Items)
         {
             var hasError = (row.ErrorCount ?? 0) > 0;
+            var statusText = hasError ? $"{MonitorViewFormat.Count(row.ErrorCount)} エラー" : "正常";
             <a href="/traces/@row.TraceId" class="trace-card @(hasError ? "err" : "ok")">
+                <div class="trace-status @(hasError ? "error" : "success")">
+                    <span class="trace-status-dot" aria-hidden="true"></span>
+                    <span>@statusText</span>
+                </div>
                 <div class="trace-card-main" title="TraceId: @row.TraceId">
                     <div class="trace-card-title">@Label(row.TraceId)</div>
-                    <div class="trace-card-sub monitor-mono">@MonitorViewFormat.ShortTraceId(row.TraceId) · @(string.IsNullOrEmpty(row.PrimaryModel) ? "—" : row.PrimaryModel)</div>
+                    <div class="trace-card-sub monitor-mono">@MonitorViewFormat.ShortTraceId(row.TraceId)</div>
                 </div>
-                <div class="trace-card-chips">
-                    <span class="chip"><span class="chip-icon chip-icon-llm">◷</span><span class="monitor-mono">@MonitorViewFormat.Tokens(row.TotalTokens)</span> tok</span>
-                    <span class="chip">🔧 <span class="monitor-mono">@MonitorViewFormat.Count(row.ToolCallCount)</span></span>
-                    <span class="chip">↻ <span class="monitor-mono">@MonitorViewFormat.Count(row.TurnCount)</span> ターン</span>
-                    @if (hasError)
-                    {
-                        <span class="chip chip-err-on">⚠ @row.ErrorCount エラー</span>
-                    }
-                    else
-                    {
-                        <span class="chip chip-muted">エラーなし</span>
-                    }
+                <div class="trace-card-facts">
+                    <span>@(string.IsNullOrEmpty(row.PrimaryModel) ? "モデル不明" : row.PrimaryModel)</span>
+                    <span>@MonitorViewFormat.RelativeTime(row.LastSeenAt)</span>
+                    <span>@MonitorViewFormat.Duration(row.DurationMs)</span>
+                </div>
+                <div class="trace-card-chips" aria-label="トレース指標">
+                    <span class="chip"><span class="chip-label">tokens</span><span class="monitor-mono">@MonitorViewFormat.Tokens(row.TotalTokens)</span></span>
+                    <span class="chip"><span class="chip-label">tools</span><span class="monitor-mono">@MonitorViewFormat.Count(row.ToolCallCount)</span></span>
+                    <span class="chip"><span class="chip-label">turns</span><span class="monitor-mono">@MonitorViewFormat.Count(row.TurnCount)</span></span>
                 </div>
             </a>
         }
@@ -39,6 +52,6 @@
 
     @if (Model.Result.HasMore && Model.Result.Items.Count > 0)
     {
-        <p class="monitor-pagination"><a href="/traces?after=@Model.Result.Items[^1].Id">次へ →</a></p>
+        <p class="monitor-pagination"><a href="/traces?after=@Model.Result.Items[^1].Id">次へ</a></p>
     }
 </section>

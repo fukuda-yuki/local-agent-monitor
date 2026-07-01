@@ -3,20 +3,31 @@
 @{
     var title = Model.PromptLabel ?? $"Trace {MonitorViewFormat.ShortTraceId(Model.TraceId)}";
     var spanCount = Model.Trace.SpanCount;
+    var hasError = (Model.Trace.ErrorCount ?? 0) > 0;
+    var traceStatusLabel = hasError ? "要確認" : "正常";
+    var traceStatusClass = hasError ? "error" : "success";
 }
 
-<section class="monitor-section">
+<section class="monitor-section trace-detail-page">
     <nav class="breadcrumb" aria-label="パンくず">
         <a href="/">ダッシュボード</a><span class="breadcrumb-sep">›</span>
         <a href="/traces">トレース</a><span class="breadcrumb-sep">›</span>
         <span class="breadcrumb-current">@title</span>
     </nav>
 
-    <h2 class="monitor-page-title trace-detail-title">@title</h2>
-    <div class="trace-detail-id monitor-mono">TraceId: @Model.TraceId</div>
+    <div class="trace-hero">
+        <div class="trace-hero-main">
+            <p class="page-kicker">Trace Detail</p>
+            <h2 class="monitor-page-title trace-detail-title">@title</h2>
+            <div class="trace-detail-id monitor-mono">TraceId: @Model.TraceId</div>
+        </div>
+        <div class="trace-health-pill @traceStatusClass">
+            <span class="trace-status-dot" aria-hidden="true"></span>
+            <span>@traceStatusLabel</span>
+        </div>
+    </div>
 
-    @* Metric cards (server-rendered from the sanitized trace projection). *@
-    <div class="metric-grid">
+    <div class="metric-grid trace-metric-grid">
         <div class="metric-card metric-card-llm">
             <div class="metric-label">トークン</div>
             <div class="metric-value">@MonitorViewFormat.Tokens(Model.Trace.TotalTokens)</div>
@@ -27,10 +38,10 @@
             <div class="metric-value">@MonitorViewFormat.Duration(Model.Trace.DurationMs)</div>
             <div class="metric-sub">@MonitorViewFormat.Count(spanCount) スパン</div>
         </div>
-        <div class="metric-card @((Model.Trace.ErrorCount ?? 0) > 0 ? "metric-card-error" : "metric-card-ok")">
+        <div class="metric-card @(hasError ? "metric-card-error" : "metric-card-ok")">
             <div class="metric-label">エラー</div>
             <div class="metric-value">@MonitorViewFormat.Count(Model.Trace.ErrorCount)</div>
-            <div class="metric-sub">件</div>
+            <div class="metric-sub">タイムラインで絞り込み可能</div>
         </div>
         <div class="metric-card metric-card-agent">
             <div class="metric-label">ターン数</div>
@@ -39,8 +50,21 @@
         </div>
     </div>
 
-    @* Sanitized tab shell. Summary is server-rendered; Timeline / Tree+Flow /
-       Cache are filled by monitor-views.js from the sanitized spans API. *@
+    <div class="trace-action-grid" aria-label="このトレースで見る観点">
+        <button class="trace-action-card" type="button" data-open-tab="tab-timeline">
+            <span class="trace-action-label">失敗と遅延を見る</span>
+            <span class="trace-action-copy">span を時刻順または tokens 順で確認</span>
+        </button>
+        <button class="trace-action-card" type="button" data-open-tab="tab-tree">
+            <span class="trace-action-label">実行の流れを見る</span>
+            <span class="trace-action-copy">親子関係と waterfall を確認</span>
+        </button>
+        <button class="trace-action-card" type="button" data-open-tab="tab-cache">
+            <span class="trace-action-label">キャッシュを見る</span>
+            <span class="trace-action-copy">cache hit rate と token breakdown を確認</span>
+        </button>
+    </div>
+
     <div class="monitor-tabs tabs" role="tablist" aria-label="トレースビュー">
         <button class="monitor-tab tab" type="button" role="tab" id="tab-summary" aria-controls="panel-summary" aria-selected="true" tabindex="0">概要</button>
         <button class="monitor-tab tab" type="button" role="tab" id="tab-timeline" aria-controls="panel-timeline" aria-selected="false" tabindex="-1">タイムライン<span class="tab-badge tab-badge-gray">@MonitorViewFormat.Count(spanCount)</span></button>
@@ -49,8 +73,10 @@
     </div>
 
     <div class="monitor-tab-content tab-panel" id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
-        <details class="detail-extra" open>
-            <summary>補足情報</summary>
+        <div class="summary-panel">
+            <div class="panel-head">
+                <span class="panel-title">基本情報</span>
+            </div>
             <div class="monitor-table-wrapper">
                 <table class="monitor-table">
                     <tbody>
@@ -63,7 +89,7 @@
                     </tbody>
                 </table>
             </div>
-        </details>
+        </div>
     </div>
 
     <div class="monitor-tab-content tab-panel" id="panel-timeline" role="tabpanel" aria-labelledby="tab-timeline" hidden>
@@ -107,8 +133,8 @@
     <div class="monitor-tab-content tab-panel" id="panel-tree" role="tabpanel" aria-labelledby="tab-tree" hidden>
         <div class="view-toolbar">
             <div class="toggle-group" role="group" aria-label="表示切替">
-                <button id="view-tree-btn" class="toggle-btn active" type="button" data-view="tree">🌳 ツリー</button>
-                <button id="view-flow-btn" class="toggle-btn" type="button" data-view="flow">🔀 フローチャート</button>
+                <button id="view-tree-btn" class="toggle-btn active" type="button" data-view="tree">ツリー</button>
+                <button id="view-flow-btn" class="toggle-btn" type="button" data-view="flow">フロー</button>
             </div>
             <div class="view-legend" aria-hidden="true">
                 <span class="legend-item"><span class="legend-dot legend-agent"></span>agent</span>
@@ -130,18 +156,23 @@
     @if (Model.RawAvailable)
     {
         <section class="monitor-analysis-panel" data-analysis-trace-id="@Model.TraceId">
-            <h3>Analyze raw trace with Copilot</h3>
+            <div class="panel-head">
+                <div>
+                    <h3>Copilot raw 解析</h3>
+                    <p class="monitor-subtle">選択した trace の raw record をローカルで解析します。</p>
+                </div>
+            </div>
             <div class="analysis-controls">
-                <label for="analysis-focus">Focus</label>
+                <label for="analysis-focus">解析の観点</label>
                 <select id="analysis-focus">
-                    <option value="latency">latency</option>
-                    <option value="tokens">tokens</option>
-                    <option value="cache">cache</option>
-                    <option value="errors">errors</option>
-                    <option value="tool-usage">tool-usage</option>
-                    <option value="agent-flow">agent-flow</option>
+                    <option value="latency">遅延</option>
+                    <option value="tokens">トークン</option>
+                    <option value="cache">キャッシュ</option>
+                    <option value="errors">エラー</option>
+                    <option value="tool-usage">ツール利用</option>
+                    <option value="agent-flow">エージェントの流れ</option>
                 </select>
-                <button id="analysis-start" type="button">Analyze raw trace with Copilot</button>
+                <button id="analysis-start" type="button">解析を開始</button>
             </div>
             <pre id="analysis-result" class="monitor-analysis-result" aria-live="polite"></pre>
         </section>
@@ -155,7 +186,7 @@
                 var result = document.getElementById("analysis-result");
                 start.addEventListener("click", function () {
                     start.disabled = true;
-                    result.textContent = "Starting raw analysis...";
+                    result.textContent = "raw 解析を開始しています...";
                     fetch("/traces/" + encodeURIComponent(traceId) + "/analysis", {
                         method: "POST",
                         headers: {
@@ -167,14 +198,14 @@
                         .then(function (response) { return response.json().then(function (body) { return { response: response, body: body }; }); })
                         .then(function (out) {
                             if (!out.response.ok) {
-                                result.textContent = "Analysis start failed: " + (out.body.error || out.response.status);
+                                result.textContent = "解析の開始に失敗しました: " + (out.body.error || out.response.status);
                                 return;
                             }
 
-                            result.textContent = "Queued analysis run " + out.body.run_id + ". Waiting for .NET Copilot SDK result...";
+                            result.textContent = "解析 run " + out.body.run_id + " を作成しました。.NET Copilot SDK の結果を待っています...";
                             poll(out.body.run_id);
                         })
-                        .catch(function (error) { result.textContent = "Analysis start failed: " + error.message; })
+                        .catch(function (error) { result.textContent = "解析の開始に失敗しました: " + error.message; })
                         .finally(function () { start.disabled = false; });
                 });
 
@@ -183,19 +214,19 @@
                         .then(function (response) { return response.json().then(function (body) { return { response: response, body: body }; }); })
                         .then(function (out) {
                             if (!out.response.ok) {
-                                result.textContent = "Analysis status failed: " + (out.body.error || out.response.status);
+                                result.textContent = "解析状態の取得に失敗しました: " + (out.body.error || out.response.status);
                                 return;
                             }
 
                             if (out.body.status === "queued" || out.body.status === "running") {
-                                result.textContent = "Analysis run " + runId + " is " + out.body.status + "...";
+                                result.textContent = "解析 run " + runId + " は " + out.body.status + " です...";
                                 window.setTimeout(function () { poll(runId); }, 1500);
                                 return;
                             }
 
-                            result.textContent = out.body.result_markdown || out.body.error_message || ("Analysis run " + runId + " ended with " + out.body.status + ".");
+                            result.textContent = out.body.result_markdown || out.body.error_message || ("解析 run " + runId + " は " + out.body.status + " で終了しました。");
                         })
-                        .catch(function (error) { result.textContent = "Analysis status failed: " + error.message; });
+                        .catch(function (error) { result.textContent = "解析状態の取得に失敗しました: " + error.message; });
                 }
             })();
         </script>

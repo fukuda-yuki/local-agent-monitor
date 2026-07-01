@@ -46,6 +46,9 @@ public class MonitorUiTests
         var overview = await host.Client.GetStringAsync("/");
 
         Assert.Contains("ダッシュボード", overview);
+        Assert.Contains("現在の状態", overview);
+        Assert.Contains("今すぐ開く", overview);
+        Assert.Contains("取り込み履歴", overview);
         Assert.Contains("SECRET_PROMPT_TEXT_MARKER", overview);
         Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", overview);
         Assert.DoesNotContain("leak-marker@example.com", overview);
@@ -61,6 +64,9 @@ public class MonitorUiTests
         var diagnostics = await host.Client.GetStringAsync("/diagnostics");
 
         Assert.Contains("health/ready", diagnostics);
+        Assert.Contains("Readiness", diagnostics);
+        Assert.Contains("コンポーネント確認", diagnostics);
+        Assert.Contains("Loopback bind", diagnostics);
         Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", diagnostics);
         Assert.DoesNotContain("leak-marker@example.com", diagnostics);
     }
@@ -197,6 +203,8 @@ public class MonitorUiTests
 
         // The redesigned list renders one card per trace with metric chips.
         Assert.Contains("trace-card", traces);
+        Assert.Contains("trace-status", traces);
+        Assert.Contains("Trace Explorer", traces);
         Assert.Contains("trace-card-chips", traces);
     }
 

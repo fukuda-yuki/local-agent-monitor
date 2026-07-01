@@ -10,10 +10,13 @@
     <header class="monitor-header">
         <nav class="nav" aria-label="モニターナビゲーション">
             <span class="nav-brand"><span class="nav-logo" aria-hidden="true"></span>ローカルモニター</span>
-            <a href="/" class="nav-link @(Context.Request.Path == "/" ? "active" : "")" aria-current="@(Context.Request.Path == "/" ? "page" : null)">📊 ダッシュボード</a>
-            <a href="/traces" class="nav-link @(Context.Request.Path.StartsWithSegments("/traces") ? "active" : "")" aria-current="@(Context.Request.Path.StartsWithSegments("/traces") ? "page" : null)">🔍 トレース</a>
-            <a href="/diagnostics" class="nav-link @(Context.Request.Path == "/diagnostics" ? "active" : "")" aria-current="@(Context.Request.Path == "/diagnostics" ? "page" : null)">⚙️ 診断</a>
-            <span class="nav-dot" id="monitor-status-dot" title="確認中…" aria-label="モニター状態: 確認中"></span>
+            <a href="/" class="nav-link @(Context.Request.Path == "/" ? "active" : "")" aria-current="@(Context.Request.Path == "/" ? "page" : null)">ダッシュボード</a>
+            <a href="/traces" class="nav-link @(Context.Request.Path.StartsWithSegments("/traces") ? "active" : "")" aria-current="@(Context.Request.Path.StartsWithSegments("/traces") ? "page" : null)">トレース</a>
+            <a href="/diagnostics" class="nav-link @(Context.Request.Path == "/diagnostics" ? "active" : "")" aria-current="@(Context.Request.Path == "/diagnostics" ? "page" : null)">診断</a>
+            <span class="nav-status" title="確認中…" aria-label="モニター状態: 確認中">
+                <span class="nav-dot" id="monitor-status-dot" aria-hidden="true"></span>
+                <span id="monitor-status-text">確認中</span>
+            </span>
         </nav>
     </header>
     <main class="monitor-content">

@@ -105,15 +105,15 @@
     function categoryIcon(category) {
         switch (category) {
             case "agent_invocation":
-                return "🤖"; // 🤖
+                return "agent";
             case "llm_call":
-                return "💬"; // 💬
+                return "llm";
             case "tool_call":
-                return "🔧"; // 🔧
+                return "tool";
             case "hook":
-                return "⚡"; // ⚡
+                return "hook";
             default:
-                return "○"; // ○
+                return "span";
         }
     }
 
@@ -512,7 +512,7 @@
 
         if (!traceId) {
             if (status) {
-                status.textContent = "Trace id is unavailable.";
+                status.textContent = "Trace id を取得できません。";
             }
             return;
         }
@@ -673,7 +673,7 @@
         const count = document.getElementById("timeline-count");
         if (!traceId) {
             if (count) {
-                count.textContent = "Trace id is unavailable.";
+                count.textContent = "Trace id を取得できません。";
             }
             return;
         }
@@ -693,7 +693,7 @@
             refresh();
         } catch {
             if (count) {
-                count.textContent = "Timeline could not be loaded.";
+                count.textContent = "タイムラインを読み込めませんでした。";
             }
         }
     }
@@ -888,7 +888,7 @@
         const traceId = groupsContainer.dataset.cacheTraceId;
         if (!traceId) {
             if (status) {
-                status.textContent = "Trace id is unavailable.";
+                status.textContent = "Trace id を取得できません。";
             }
             return;
         }
@@ -910,7 +910,7 @@
             groupsContainer.replaceChildren(fragment);
         } catch {
             if (status) {
-                status.textContent = "Cache Explorer could not be loaded.";
+                status.textContent = "キャッシュを読み込めませんでした。";
             }
         }
     }
@@ -929,6 +929,17 @@
     }
 
     document.addEventListener("click", (event) => {
+        const opener = event.target.closest("[data-open-tab]");
+        if (opener) {
+            const tab = document.getElementById(opener.getAttribute("data-open-tab"));
+            if (tab) {
+                activateTab(tab);
+                tab.focus({ preventScroll: true });
+                document.getElementById(tab.getAttribute("aria-controls"))?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+            return;
+        }
+
         const tab = event.target.closest(".tab");
         if (tab) {
             activateTab(tab);

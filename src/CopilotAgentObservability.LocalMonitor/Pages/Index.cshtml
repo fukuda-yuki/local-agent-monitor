@@ -3,119 +3,181 @@
 @{
     var (statusLabel, statusClass) = Model.Readiness.Status switch
     {
-        "Healthy" => ("正常", "success"),
-        "Degraded" => ("劣化", "warning"),
+        "ready" => ("受信できます", "success"),
+        "degraded" => ("注意が必要", "warning"),
         _ => ("異常", "error"),
     };
+    var statusCopy = Model.Readiness.Status switch
+    {
+        "ready" => "新しい telemetry を受け取り、projection も追いついています。",
+        "degraded" => "受信はできますが、projection の遅延または backlog があります。",
+        _ => "受信または projection のどこかで停止しています。診断を確認してください。",
+    };
+    var primaryHref = Model.Readiness.Status == "not_ready" ? "/diagnostics" : "/traces";
+    var primaryLabel = Model.Readiness.Status == "not_ready" ? "診断を開く" : "トレースを見る";
 
     string Label(string? traceId) => Model.PromptFor(traceId) ?? MonitorViewFormat.ShortTraceId(traceId);
 }
 
-<section class="monitor-section">
-    <h2 class="monitor-page-title">ダッシュボード</h2>
-
-    <div class="dashboard-grid">
-        <div class="dashboard-rail">
-            <div class="status-card status-@statusClass">
-                <div class="status-card-head">
-                    <span class="status-card-dot"></span>
-                    <span class="status-card-label">@statusLabel</span>
-                </div>
-                <div class="status-card-row">
-                    <span>プロジェクション残</span>
-                    <span class="monitor-mono">@MonitorViewFormat.Count(Model.Readiness.ProjectionBacklog) 件</span>
-                </div>
-                <div class="status-card-row">
-                    <span>遅延</span>
-                    <span class="monitor-mono">@Model.Readiness.ProjectionLagSeconds 秒</span>
-                </div>
-            </div>
-
-            @if (Model.LatestTrace is { } latest)
-            {
-                <a href="/traces/@latest.TraceId" class="highlight-card highlight-latest">
-                    <div class="highlight-card-head">🕐 最新トレース</div>
-                    <div class="highlight-card-title">@Label(latest.TraceId)</div>
-                    <div class="highlight-card-metric"><span class="highlight-card-value">@MonitorViewFormat.Tokens(latest.TotalTokens)</span> <span class="highlight-card-unit">tokens · @MonitorViewFormat.RelativeTime(latest.LastSeenAt)</span></div>
-                    <div class="highlight-card-id monitor-mono">@MonitorViewFormat.ShortTraceId(latest.TraceId)</div>
-                </a>
-            }
-
-            @if (Model.TopTokenTrace is { } topToken)
-            {
-                <a href="/traces/@topToken.TraceId" class="highlight-card highlight-tokens">
-                    <div class="highlight-card-head">📈 最大トークン</div>
-                    <div class="highlight-card-title">@Label(topToken.TraceId)</div>
-                    <div class="highlight-card-metric"><span class="highlight-card-value">@MonitorViewFormat.Tokens(topToken.TotalTokens)</span> <span class="highlight-card-unit">tokens · @MonitorViewFormat.RelativeTime(topToken.LastSeenAt)</span></div>
-                    <div class="highlight-card-id monitor-mono">@MonitorViewFormat.ShortTraceId(topToken.TraceId)</div>
-                </a>
-            }
-
-            @if (Model.ErrorTrace is { } errorTrace)
-            {
-                <a href="/traces/@errorTrace.TraceId" class="highlight-card highlight-error">
-                    <div class="highlight-card-head">⚠️ エラーあり</div>
-                    <div class="highlight-card-title">@Label(errorTrace.TraceId)</div>
-                    <div class="highlight-card-metric"><span class="highlight-card-value">@MonitorViewFormat.Count(errorTrace.ErrorCount)</span> <span class="highlight-card-unit">件のエラー · @MonitorViewFormat.RelativeTime(errorTrace.LastSeenAt)</span></div>
-                    <div class="highlight-card-id monitor-mono">@MonitorViewFormat.ShortTraceId(errorTrace.TraceId)</div>
-                </a>
-            }
+<section class="monitor-section dashboard-page">
+    <div class="page-header">
+        <div>
+            <p class="page-kicker">Local Ingestion Monitor</p>
+            <h2 class="monitor-page-title">ダッシュボード</h2>
         </div>
+        <a class="monitor-btn monitor-btn-primary" href="@primaryHref">@primaryLabel</a>
+    </div>
 
-        <div class="panel">
-            <div class="panel-head">
-                <span class="panel-title">最近の取り込み</span>
-                <span class="panel-meta monitor-mono">直近 @Model.RecentIngestions.Count 件</span>
+    <div class="dashboard-command status-@statusClass">
+        <div class="dashboard-command-main">
+            <div class="dashboard-command-kicker">現在の状態</div>
+            <div class="dashboard-command-title">
+                <span class="status-card-dot" aria-hidden="true"></span>
+                <span>@statusLabel</span>
             </div>
-            <div class="monitor-table-wrapper">
-                <table class="ing-table">
-                    <thead>
+            <p>@statusCopy</p>
+        </div>
+        <div class="dashboard-command-metrics" aria-label="モニター指標">
+            <div class="command-metric">
+                <span>取り込み履歴</span>
+                <strong class="monitor-mono">@MonitorViewFormat.Count(Model.RecentIngestions.Count)</strong>
+            </div>
+            <div class="command-metric">
+                <span>最近のトレース</span>
+                <strong class="monitor-mono">@MonitorViewFormat.Count(Model.RecentTraces.Count)</strong>
+            </div>
+            <div class="command-metric">
+                <span>プロジェクション残</span>
+                <strong class="monitor-mono">@MonitorViewFormat.Count(Model.Readiness.ProjectionBacklog)</strong>
+            </div>
+            <div class="command-metric">
+                <span>遅延</span>
+                <strong class="monitor-mono">@Model.Readiness.ProjectionLagSeconds 秒</strong>
+            </div>
+        </div>
+    </div>
+
+    <div class="decision-grid">
+        @if (Model.LatestTrace is { } latest)
+        {
+            <a href="/traces/@latest.TraceId" class="decision-card decision-primary">
+                <span class="decision-kicker">今すぐ開く</span>
+                <span class="decision-title">@Label(latest.TraceId)</span>
+                <span class="decision-meta">
+                    <span class="monitor-mono">@MonitorViewFormat.Tokens(latest.TotalTokens)</span> tokens
+                    <span>@MonitorViewFormat.RelativeTime(latest.LastSeenAt)</span>
+                </span>
+                <span class="decision-id monitor-mono">@MonitorViewFormat.ShortTraceId(latest.TraceId)</span>
+            </a>
+        }
+        else
+        {
+            <div class="decision-card decision-empty">
+                <span class="decision-kicker">今すぐ開く</span>
+                <span class="decision-title">まだトレースがありません</span>
+                <span class="decision-meta">VS Code / Copilot からの受信を待っています。</span>
+            </div>
+        }
+
+        @if (Model.ErrorTrace is { } errorTrace)
+        {
+            <a href="/traces/@errorTrace.TraceId" class="decision-card decision-error">
+                <span class="decision-kicker">エラー確認</span>
+                <span class="decision-title">@Label(errorTrace.TraceId)</span>
+                <span class="decision-meta">
+                    <span class="monitor-mono">@MonitorViewFormat.Count(errorTrace.ErrorCount)</span> 件のエラー
+                    <span>@MonitorViewFormat.RelativeTime(errorTrace.LastSeenAt)</span>
+                </span>
+                <span class="decision-id monitor-mono">@MonitorViewFormat.ShortTraceId(errorTrace.TraceId)</span>
+            </a>
+        }
+        else
+        {
+            <div class="decision-card decision-ok">
+                <span class="decision-kicker">エラー確認</span>
+                <span class="decision-title">直近の表示範囲にエラーはありません</span>
+                <span class="decision-meta">問題のある trace はここに出ます。</span>
+            </div>
+        }
+
+        @if (Model.TopTokenTrace is { } topToken)
+        {
+            <a href="/traces/@topToken.TraceId" class="decision-card decision-tokens">
+                <span class="decision-kicker">トークン確認</span>
+                <span class="decision-title">@Label(topToken.TraceId)</span>
+                <span class="decision-meta">
+                    <span class="monitor-mono">@MonitorViewFormat.Tokens(topToken.TotalTokens)</span> tokens
+                    <span>@MonitorViewFormat.RelativeTime(topToken.LastSeenAt)</span>
+                </span>
+                <span class="decision-id monitor-mono">@MonitorViewFormat.ShortTraceId(topToken.TraceId)</span>
+            </a>
+        }
+        else
+        {
+            <div class="decision-card decision-empty">
+                <span class="decision-kicker">トークン確認</span>
+                <span class="decision-title">トークン集計はまだありません</span>
+                <span class="decision-meta">LLM call が projection されると表示されます。</span>
+            </div>
+        }
+    </div>
+
+    <div class="panel ingestion-panel">
+        <div class="panel-head">
+            <div>
+                <span class="panel-title">取り込み履歴</span>
+                <span class="panel-description">受信した raw record と紐づく trace</span>
+            </div>
+            <span class="panel-meta monitor-mono">直近 @Model.RecentIngestions.Count 件</span>
+        </div>
+        <div class="monitor-table-wrapper">
+            <table class="ing-table">
+                <thead>
+                    <tr>
+                        <th>レコードID</th>
+                        <th>受信</th>
+                        <th>トレース</th>
+                        <th class="monitor-text-right">スパン</th>
+                        @if (Model.RawAvailable)
+                        {
+                            <th>Raw</th>
+                        }
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (Model.RecentIngestions.Count == 0)
+                    {
                         <tr>
-                            <th>レコードID</th>
-                            <th>受信</th>
-                            <th>トレース</th>
-                            <th class="monitor-text-right">スパン</th>
+                            <td colspan="@(Model.RawAvailable ? 5 : 4)" class="empty-state">まだ取り込みがありません。</td>
+                        </tr>
+                    }
+                    @foreach (var row in Model.RecentIngestions)
+                    {
+                        <tr>
+                            <td class="monitor-mono">@row.RawRecordId</td>
+                            <td class="monitor-nowrap">@MonitorViewFormat.RelativeTime(row.ReceivedAt)</td>
+                            <td>
+                                @if (row.TraceId is { Length: > 0 } traceId)
+                                {
+                                    <a href="/traces/@traceId" class="ing-trace-link">
+                                        <span class="ing-trace-label">@Label(traceId)</span>
+                                        <span class="ing-trace-id monitor-mono">@MonitorViewFormat.ShortTraceId(traceId)</span>
+                                    </a>
+                                }
+                                else
+                                {
+                                    <span class="monitor-mono">—</span>
+                                }
+                            </td>
+                            <td class="monitor-text-right monitor-mono">@MonitorViewFormat.Count(row.SpanCount)</td>
                             @if (Model.RawAvailable)
                             {
-                                <th>Raw</th>
+                                <td><a href="/traces/@row.RawRecordId/raw">raw</a></td>
                             }
                         </tr>
-                    </thead>
-                    <tbody>
-                        @if (Model.RecentIngestions.Count == 0)
-                        {
-                            <tr>
-                                <td colspan="@(Model.RawAvailable ? 5 : 4)" class="empty-state">まだ取り込みがありません。</td>
-                            </tr>
-                        }
-                        @foreach (var row in Model.RecentIngestions)
-                        {
-                            <tr>
-                                <td class="monitor-mono">@row.RawRecordId</td>
-                                <td class="monitor-nowrap">@MonitorViewFormat.RelativeTime(row.ReceivedAt)</td>
-                                <td>
-                                    @if (row.TraceId is { Length: > 0 } traceId)
-                                    {
-                                        <a href="/traces/@traceId" class="ing-trace-link">
-                                            <span class="ing-trace-label">@Label(traceId)</span>
-                                            <span class="ing-trace-id monitor-mono">@MonitorViewFormat.ShortTraceId(traceId)</span>
-                                        </a>
-                                    }
-                                    else
-                                    {
-                                        <span class="monitor-mono">—</span>
-                                    }
-                                </td>
-                                <td class="monitor-text-right monitor-mono">@MonitorViewFormat.Count(row.SpanCount)</td>
-                                @if (Model.RawAvailable)
-                                {
-                                    <td><a href="/traces/@row.RawRecordId/raw">raw</a></td>
-                                }
-                            </tr>
-                        }
-                    </tbody>
-                </table>
-            </div>
+                    }
+                </tbody>
+            </table>
         </div>
     </div>
 </section>

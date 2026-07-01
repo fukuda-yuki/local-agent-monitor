@@ -45,6 +45,7 @@
 
   async function updateStatusDot() {
     const dot = document.getElementById("monitor-status-dot");
+    const text = document.getElementById("monitor-status-text");
     if (!dot) return;
 
     dot.classList.remove("healthy", "degraded", "unhealthy");
@@ -58,22 +59,26 @@
 
       if (status === "ready") {
         dot.classList.add("healthy");
-        dot.title = "Healthy";
-        dot.setAttribute("aria-label", "Monitor status: healthy");
+        dot.title = "受信できます";
+        if (text) text.textContent = "受信可";
+        if (dot.parentElement) dot.parentElement.setAttribute("aria-label", "モニター状態: 受信できます");
       } else if (status === "degraded") {
         dot.classList.add("degraded");
-        dot.title = "Degraded";
-        dot.setAttribute("aria-label", "Monitor status: degraded");
+        dot.title = "注意が必要";
+        if (text) text.textContent = "注意";
+        if (dot.parentElement) dot.parentElement.setAttribute("aria-label", "モニター状態: 注意が必要");
       } else {
         // `not_ready` or any unexpected status.
         dot.classList.add("unhealthy");
-        dot.title = "Unhealthy";
-        dot.setAttribute("aria-label", "Monitor status: unhealthy");
+        dot.title = "異常";
+        if (text) text.textContent = "異常";
+        if (dot.parentElement) dot.parentElement.setAttribute("aria-label", "モニター状態: 異常");
       }
     } catch {
       dot.classList.add("unhealthy");
-      dot.title = "Unreachable";
-      dot.setAttribute("aria-label", "Monitor status: unreachable");
+      dot.title = "到達できません";
+      if (text) text.textContent = "未接続";
+      if (dot.parentElement) dot.parentElement.setAttribute("aria-label", "モニター状態: 到達できません");
     }
   }
 

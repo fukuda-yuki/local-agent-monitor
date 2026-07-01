@@ -4,76 +4,135 @@
 @{
     var (statusLabel, statusClass) = Model.Readiness.Status switch
     {
-        "Healthy" => ("正常", "success"),
-        "Degraded" => ("劣化", "warning"),
+        "ready" => ("受信できます", "success"),
+        "degraded" => ("注意が必要", "warning"),
         _ => ("異常", "error"),
     };
     var degradedReasons = Model.Readiness.DegradedReasons?.ToList() ?? new List<string>();
+    var statusCopy = Model.Readiness.Status switch
+    {
+        "ready" => "readiness の必須条件を満たしています。",
+        "degraded" => "短時間の backlog または遅延があります。増え続ける場合は component を確認してください。",
+        _ => "probe は not_ready を返します。停止している component または閾値超過を確認してください。",
+    };
 
     string Ok(bool value) => value ? "OK" : "FAIL";
     string OkClass(bool value) => value ? "success" : "error";
+    string ReasonLabel(string reason) => reason switch
+    {
+        "ingestion_backpressure" => "一時的に受信キューが詰まっています。",
+        "projection_lag" => "projection が少し遅れています。",
+        "span_projection_backlog" => "span projection の backlog があります。",
+        "ingestion_stalled" => "受信が継続的に詰まっています。",
+        "projection_lag_exceeded" => "projection 遅延が閾値を超えています。",
+        "projection_worker_missing" => "projection worker が起動していません。",
+        "projection_status_unknown" => "projection 状態がまだ確認できていません。",
+        "db_unavailable" => "DB を開けません。",
+        "migration_failed" => "DB migration に失敗しています。",
+        "writer_not_running" => "書き込み worker が停止しています。",
+        "loopback_unbound" => "loopback bind が確認できません。",
+        "fatal_error" => "致命的なエラーが記録されています。",
+        _ => "詳細は readiness body を確認してください。",
+    };
 }
 
-<section class="monitor-section">
-    <h2 class="monitor-page-title">診断</h2>
-    <p class="monitor-subtle"><code>GET /health/ready</code> の評価結果</p>
+<section class="monitor-section diagnostics-page">
+    <div class="page-header">
+        <div>
+            <p class="page-kicker">Readiness</p>
+            <h2 class="monitor-page-title">診断</h2>
+        </div>
+        <a class="monitor-btn" href="/health/ready">health/ready JSON</a>
+    </div>
+
+    <div class="dashboard-command diagnostics-command status-@statusClass">
+        <div class="dashboard-command-main">
+            <div class="dashboard-command-kicker">GET /health/ready</div>
+            <div class="dashboard-command-title">
+                <span class="status-card-dot" aria-hidden="true"></span>
+                <span>@statusLabel</span>
+            </div>
+            <p>@statusCopy</p>
+        </div>
+        <div class="dashboard-command-metrics" aria-label="readiness 指標">
+            <div class="command-metric">
+                <span>projection 残</span>
+                <strong class="monitor-mono">@Model.Readiness.ProjectionBacklog</strong>
+            </div>
+            <div class="command-metric">
+                <span>projection 遅延</span>
+                <strong class="monitor-mono">@Model.Readiness.ProjectionLagSeconds 秒</strong>
+            </div>
+            <div class="command-metric">
+                <span>span 残</span>
+                <strong class="monitor-mono">@Model.Readiness.SpanProjectionBacklog</strong>
+            </div>
+            <div class="command-metric">
+                <span>失敗回数</span>
+                <strong class="monitor-mono">@Model.Readiness.ProjectionFailureCount</strong>
+            </div>
+        </div>
+    </div>
 
     @if (degradedReasons.Count > 0)
     {
-        var bannerClass = Model.Readiness.Status == "Unhealthy" ? "error" : "warning";
-        <div class="monitor-banner @bannerClass">
-            <strong>@statusLabel:</strong> @string.Join("; ", degradedReasons)
+        <div class="reason-panel">
+            <div class="panel-head">
+                <span class="panel-title">理由</span>
+                <span class="panel-meta monitor-mono">@degradedReasons.Count 件</span>
+            </div>
+            <div class="reason-list">
+                @foreach (var reason in degradedReasons)
+                {
+                    <div class="reason-item">
+                        <code>@reason</code>
+                        <span>@ReasonLabel(reason)</span>
+                    </div>
+                }
+            </div>
         </div>
     }
-
-    <div class="metric-grid">
-        <div class="metric-card metric-card-@statusClass">
-            <div class="metric-label">ステータス</div>
-            <div class="metric-value monitor-status @statusClass">@statusLabel</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">ループバックバインド</div>
-            <div class="metric-value monitor-status @OkClass(Model.Readiness.LoopbackBound)">@(Model.Readiness.LoopbackBound ? "有効" : "無効")</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">プロジェクション遅延</div>
-            <div class="metric-value">@(Model.Readiness.ProjectionLagSeconds) 秒</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">プロジェクション残</div>
-            <div class="metric-value">@Model.Readiness.ProjectionBacklog</div>
-        </div>
-    </div>
 
     <h3 class="monitor-section-title">コンポーネント確認</h3>
     <div class="panel">
         <div class="monitor-table-wrapper">
-            <table class="monitor-table">
+            <table class="monitor-table component-table">
                 <thead>
                     <tr>
                         <th>コンポーネント</th>
+                        <th>役割</th>
                         <th>状態</th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr>
-                        <td>DbOpen</td>
+                        <td>Loopback bind</td>
+                        <td>ローカルだけで待ち受けているか</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.LoopbackBound)">@Ok(Model.Readiness.LoopbackBound)</span></td>
+                    </tr>
+                    <tr>
+                        <td>DB</td>
+                        <td>raw store を開けているか</td>
                         <td><span class="monitor-badge @OkClass(Model.Readiness.DbOpen)">@Ok(Model.Readiness.DbOpen)</span></td>
                     </tr>
                     <tr>
-                        <td>MigrationComplete</td>
+                        <td>Migration</td>
+                        <td>monitor schema の準備が完了しているか</td>
                         <td><span class="monitor-badge @OkClass(Model.Readiness.MigrationComplete)">@Ok(Model.Readiness.MigrationComplete)</span></td>
                     </tr>
                     <tr>
-                        <td>WriterRunning</td>
+                        <td>Writer</td>
+                        <td>受信データを書き込めるか</td>
                         <td><span class="monitor-badge @OkClass(Model.Readiness.WriterRunning)">@Ok(Model.Readiness.WriterRunning)</span></td>
                     </tr>
                     <tr>
-                        <td>ProjectionWorkerRunning</td>
+                        <td>Projection worker</td>
+                        <td>raw record から表示用 projection を作れるか</td>
                         <td><span class="monitor-badge @OkClass(Model.Readiness.ProjectionWorkerRunning)">@Ok(Model.Readiness.ProjectionWorkerRunning)</span></td>
                     </tr>
                     <tr>
-                        <td>IngestionAccepting</td>
+                        <td>Ingestion queue</td>
+                        <td>新しい受信を受け付けられるか</td>
                         <td><span class="monitor-badge @OkClass(Model.Readiness.IngestionAccepting)">@Ok(Model.Readiness.IngestionAccepting)</span></td>
                     </tr>
                 </tbody>
