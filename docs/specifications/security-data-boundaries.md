@@ -272,7 +272,8 @@ unchanged):
 
 - The Canvas adapter is a thin project-scoped extension over the existing Local
   Monitor. It does not add telemetry input, schema, API field, raw-bearing route,
-  repository-stored monitor output, or a replacement monitor UI.
+  repository-stored monitor output, or a replacement monitor UI, except for the
+  Sprint16 scoped sanitized repository metadata fields recorded below (D040).
 - The Canvas adapter may be used with the normal raw-default Local Monitor.
   Canvas surfaces may link to Local Monitor pages that show raw-bearing
   server-rendered UI under the Local Monitor's existing loopback, same-origin,
@@ -452,6 +453,29 @@ Sprint15 continuation — prompt-aware trace selection (D039, implemented, M7):
   contract tests) is complete (Sprint15 M7), following the same two-stage
   (design confirmed → implementation authorized) process D037/D038 already
   used.
+
+Sprint16 Canvas cross-repo adapter metadata (D040):
+
+- `.github/extensions/otel-monitor-canvas/` is the only copyable Canvas
+  extension distribution unit for this sprint. No mirror folder, package
+  manifest, lockfile, `node_modules`, or new runtime/development dependency is
+  introduced.
+- The Local Monitor may project only these sanitized repository metadata fields
+  from existing OTLP Resource Attributes: `repository_name` from `repo.name`,
+  `workspace_label` from `workspace.name`, and `repo_snapshot` from
+  `repo.snapshot`.
+- These fields may appear in sanitized `/api/monitor/*` responses, Canvas
+  helper routes, and bounded Canvas action DTOs after the monitor projection
+  sanitizer accepts them. They remain display metadata, not raw content.
+- Values that look like raw prompt / response body, tool arguments / results,
+  PII, credentials, tokens, local sensitive paths, raw OTLP payload fragments,
+  or other unsafe free-form content are dropped rather than emitted.
+- Existing projected rows are not automatically backfilled. Missing metadata is
+  represented as `NULL` on the Local Monitor API, and the Canvas helper renders
+  `unknown repository` when it cannot derive a repository label.
+- No `repository_full_name`, `workspace_hash`, `git_branch`, `git_commit_sha`,
+  `source_kind`, current-repository auto-match, raw endpoint, raw JSON API, or
+  Canvas action raw payload is added in Sprint16.
 
 Sprint12 UX redesign (prompt identification + DOM views, boundary controls
 reused):
