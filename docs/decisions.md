@@ -1245,3 +1245,33 @@ output へ返す禁止は維持する。
 新規 ingestion または明示的な DB 再生成で埋まる。Canvas helper は metadata 欠落時
 `unknown repository` を表示する。`repository_full_name`、`workspace_hash`、
 `git_branch`、`git_commit_sha`、`source_kind` は、この sprint では追加しない。
+
+## D041: Canvas analysis UX は session.send の requested controls として扱う
+
+Status: Accepted
+
+Sprint17 では Canvas helper の既存 `POST /analyze` → `session.send({ prompt })`
+経路を維持する。Canvas helper は Local Monitor Copilot raw analysis runner を
+起動せず、`/traces/{traceId}/analysis` も呼ばない。
+
+決定事項:
+
+- Local Monitor は sanitized `GET /api/analysis/options` で profile / model /
+  reasoning / timeout hint metadata を提供してよい。
+- Canvas helper はこの metadata を token-gated proxy で取得し、UI controls、
+  generated prompt、dispatch metadata に使う。
+- `model`、`reasoning effort`、`timeout` は per-message execution control ではなく
+  requested values とする。`session.send()` が実行モデル・reasoning・実行 timeout
+  を強制したとは UI / response / docs で主張しない。
+- `sendAndWait` は Sprint17 では採用しない。idle 待機 timeout は in-flight agent
+  work を abort しないため、analysis execution timeout と誤解されやすい。
+- 最終分析結果 metadata は、後続 OTel telemetry から安全に相関できる設計ができる
+  まで scope 外とする。
+
+不変:
+
+- Canvas action responses / logs / committed outputs / static artifacts には raw
+  prompt / response body、tool arguments / results、PII、credential、token、local
+  sensitive path、raw OTLP payload を返さない。
+- Local Monitor raw analysis runner は引き続き Local Monitor 本体の raw-default
+  local surface であり、Canvas helper analysis UX とは別経路である。

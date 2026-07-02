@@ -21,6 +21,21 @@ export const BOUNDARY_NOTE =
 export const MAX_TOP_SPANS = 10;
 export const MAX_TREE_NODES = 50;
 export const MAX_CACHE_TURNS = 50;
+export const PROMPT_TEMPLATE_VERSION = "canvas-analysis-requested-options-v1";
+
+export const DEFAULT_ANALYSIS_OPTIONS = {
+    default_profile: "standard",
+    default_model: "gpt-5",
+    reasoning_efforts: ["low", "medium", "high"],
+    profiles: [
+        { id: "fast", display_name: "Fast", timeout_seconds: 60, default_reasoning_effort: "low" },
+        { id: "standard", display_name: "Standard", timeout_seconds: 180, default_reasoning_effort: "medium" },
+        { id: "deep", display_name: "Deep", timeout_seconds: 600, default_reasoning_effort: "high" },
+    ],
+    models: [
+        { id: "gpt-5", display_name: "GPT-5", provider: "copilot", supports_reasoning_effort: true, is_default: true },
+    ],
+};
 
 // Focus options. The `value` (enum) and action wiring are unchanged; only the
 // displayed `label` is Japanese (Sprint15 A2 / Issue §5).
@@ -45,6 +60,88 @@ export function escapeHtml(value) {
 
 export function numberOrZero(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+export function normalizeAnalysisOptions(options) {
+    const source = options && typeof options === "object" ? options : DEFAULT_ANALYSIS_OPTIONS;
+    const profiles = Array.isArray(source.profiles) && source.profiles.length > 0
+        ? source.profiles
+        : DEFAULT_ANALYSIS_OPTIONS.profiles;
+    const models = Array.isArray(source.models) && source.models.length > 0
+        ? source.models
+        : DEFAULT_ANALYSIS_OPTIONS.models;
+    const reasoningEfforts = Array.isArray(source.reasoning_efforts) && source.reasoning_efforts.length > 0
+        ? source.reasoning_efforts
+        : DEFAULT_ANALYSIS_OPTIONS.reasoning_efforts;
+    const defaultProfile = profiles.some((profile) => profile.id === source.default_profile)
+        ? source.default_profile
+        : profiles[0].id;
+    const defaultModel = models.some((model) => model.id === source.default_model)
+        ? source.default_model
+        : models[0].id;
+
+    return {
+        default_profile: defaultProfile,
+        default_model: defaultModel,
+        reasoning_efforts: reasoningEfforts,
+        profiles,
+        models,
+    };
+}
+
+export function selectedAnalysisOption(options, selection = {}) {
+    const normalized = normalizeAnalysisOptions(options);
+    const profile = normalized.profiles.find((candidate) => candidate.id === selection.profile)
+        ?? normalized.profiles.find((candidate) => candidate.id === normalized.default_profile)
+        ?? normalized.profiles[0];
+    const model = normalized.models.find((candidate) => candidate.id === selection.requestedModel)
+        ?? normalized.models.find((candidate) => candidate.id === normalized.default_model)
+        ?? normalized.models[0];
+    const requestedReasoningEffort = model.supports_reasoning_effort === false
+        ? null
+        : (normalized.reasoning_efforts.includes(selection.requestedReasoningEffort)
+            ? selection.requestedReasoningEffort
+            : profile.default_reasoning_effort);
+
+    return {
+        profile,
+        model,
+        requested_reasoning_effort: requestedReasoningEffort,
+        requested_timeout_seconds: profile.timeout_seconds,
+    };
+}
+
+export function formatTimeoutHint(seconds) {
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
+        return "—";
+    }
+
+    return seconds >= 60 && seconds % 60 === 0
+        ? `${seconds / 60}分 (${seconds}s)`
+        : `${seconds}s`;
+}
+
+export function dispatchPhaseText(phase, elapsedMs, selection) {
+    const elapsedSeconds = Math.max(0, Math.round(numberOrZero(elapsedMs) / 1000));
+    const timeout = formatTimeoutHint(selection?.requested_timeout_seconds);
+    const model = selection?.model?.display_name ?? selection?.model?.id ?? "—";
+    const profile = selection?.profile?.display_name ?? selection?.profile?.id ?? "—";
+    const reasoning = selection?.requested_reasoning_effort ?? "未指定";
+    const labels = {
+        options_loaded: "分析オプションを読み込みました。",
+        preparing: "bounded Canvas action 用の Copilot 指示を準備しています。",
+        sending: "Copilot に分析指示を送信しています。",
+        dispatched: "Copilot に分析指示を送信しました。結果は Copilot チャットを確認してください。",
+        canceled: "ローカルの送信待機をキャンセルしました。",
+    };
+    return `${labels[phase] ?? labels.preparing}\nProfile: ${profile}\n希望モデル: ${model}\n推奨 reasoning: ${reasoning}\nTimeout hint: ${timeout}\nElapsed: ${elapsedSeconds}s`;
+}
+
+export function longRunningDispatchNotice(elapsedMs, timeoutSeconds) {
+    const thresholdMs = Math.min(Math.max(numberOrZero(timeoutSeconds) * 1000, 15000), 60000);
+    return numberOrZero(elapsedMs) >= thresholdMs
+        ? "送信待機が長くなっています。これは Local Monitor raw analysis runner の実行待ちではありません。分析結果は Copilot チャット側に表示されます。"
+        : null;
 }
 
 // --------------- presentation formatters (Sprint15 A1) ---------------
@@ -532,7 +629,15 @@ export function renderRawPreviewMessageHtml({ heading, message, token }) {
 
 // --------------- analysis prompt ---------------
 
-export function buildAnalysisPrompt({ traceId, spanId, focus }) {
+export function buildAnalysisPrompt({
+    traceId,
+    spanId,
+    focus,
+    profile = null,
+    requestedModel = null,
+    requestedReasoningEffort = null,
+    requestedTimeoutSeconds = null,
+}) {
     const focusActions = {
         latency: ["get_trace_summary", "get_trace_span_tree"],
         tokens: ["get_trace_summary", "get_cache_summary"],
@@ -541,11 +646,25 @@ export function buildAnalysisPrompt({ traceId, spanId, focus }) {
     };
     const actions = focusActions[focus] ?? ["get_trace_summary"];
     const spanLine = spanId ? `Selected span id: ${spanId}\n` : "";
+    const profileLine = profile ? `Requested analysis profile: ${profile}.` : "Requested analysis profile: not specified.";
+    const modelLine = requestedModel ? `Requested model / Copilot instruction: ${requestedModel}.` : "Requested model / Copilot instruction: not specified.";
+    const reasoningLine = requestedReasoningEffort
+        ? `Requested reasoning depth: ${requestedReasoningEffort}. Use deeper reasoning if the current Copilot session and selected model support it.`
+        : "Requested reasoning depth: not specified or unsupported by the selected model.";
+    const timeoutLine = requestedTimeoutSeconds
+        ? `Requested timeout hint: ${requestedTimeoutSeconds} seconds. This is a helper display/wait hint, not a model execution abort.`
+        : "Requested timeout hint: not specified.";
     return [
         `Analyze the selected Local Ingestion Monitor trace using bounded Canvas actions.`,
+        `Prompt template version: ${PROMPT_TEMPLATE_VERSION}.`,
         `Trace id: ${traceId}`,
         spanLine,
         `Analysis focus: ${focus}.`,
+        profileLine,
+        modelLine,
+        reasoningLine,
+        timeoutLine,
+        `Do not claim the requested model, reasoning depth, or timeout was enforced as a per-message execution setting.`,
         ``,
         `Call the following monitor actions via invoke_canvas_action on the open otel-monitor canvas instance to gather bounded data:`,
         ...actions.map((a) => `  - ${a}({ traceId: "${traceId}" })`),
@@ -760,6 +879,7 @@ export function renderHelperHtml({ instanceId, monitorUrl, healthState, statusCo
   <div class="card">
     <h2>Copilotでこのトレースを分析</h2>
     <p style="margin-bottom:12px;color:var(--muted);">トレースと観点を選んで Copilot 分析を実行します。Copilot は bounded な monitor action を使い、このヘルパーから raw な monitor payload を受け取りません。</p>
+    <p class="muted" id="analysis-option-status">分析オプションを読み込み中…</p>
     <div class="row">
       <label for="repository-filter">リポジトリ / ワークスペース</label>
       <select id="repository-filter" ${ready ? "" : "disabled"}>
@@ -777,11 +897,31 @@ ${focusOptionsHtml}
       </select>
     </div>
     <div class="row">
+      <label for="analysis-profile">分析プロファイル</label>
+      <select id="analysis-profile" ${ready ? "" : "disabled"}></select>
+    </div>
+    <div class="row">
+      <label for="requested-model">希望モデル</label>
+      <select id="requested-model" ${ready ? "" : "disabled"}></select>
+      <p class="muted">実際の実行モデルは現在の Copilot セッション設定に依存します。</p>
+    </div>
+    <div class="row">
+      <label for="requested-reasoning">推奨 reasoning</label>
+      <select id="requested-reasoning" ${ready ? "" : "disabled"}></select>
+      <p class="muted">Copilot セッション / モデルが対応する場合のみ反映されます。</p>
+    </div>
+    <div class="row">
+      <label>Timeout hint</label>
+      <p id="timeout-hint" class="muted">—</p>
+    </div>
+    <div class="row">
       <label for="span">span id（任意）</label>
       <input type="text" id="span" placeholder="任意の span id" ${ready ? "" : "disabled"} />
     </div>
     <button id="analyze" ${ready ? "" : "disabled"}>Copilotでこのトレースを分析</button>
+    <button id="cancel-dispatch" type="button" style="display:none;background:#6e7781;">送信待機をキャンセル</button>
     <div id="result"></div>
+    <pre id="dispatch-progress" style="display:none;"></pre>
     <p class="row"><a id="raw-preview-link" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">生データを表示（新しいタブ）</a></p>
   </div>
 
@@ -803,9 +943,20 @@ ${focusOptionsHtml}
       var repositoryFilter = document.getElementById("repository-filter");
       var traceSel = document.getElementById("trace");
       var focusSel = document.getElementById("focus");
+      var profileSel = document.getElementById("analysis-profile");
+      var modelSel = document.getElementById("requested-model");
+      var reasoningSel = document.getElementById("requested-reasoning");
+      var timeoutHint = document.getElementById("timeout-hint");
+      var analysisOptionStatus = document.getElementById("analysis-option-status");
       var spanInput = document.getElementById("span");
       var btn = document.getElementById("analyze");
+      var cancelDispatch = document.getElementById("cancel-dispatch");
       var result = document.getElementById("result");
+      var dispatchProgress = document.getElementById("dispatch-progress");
+      var dispatchAbortController = null;
+      var dispatchStartedAt = 0;
+      var dispatchTimer = null;
+      var analysisOptions = null;
       var tdEmpty = document.getElementById("trace-detail-empty");
       var tdKv = document.getElementById("trace-detail-kv");
       var tdLink = document.getElementById("trace-detail-link");
@@ -819,6 +970,79 @@ ${focusOptionsHtml}
       function setResult(msg, ok) {
         result.textContent = msg;
         result.className = ok ? "ok" : "err";
+      }
+
+      function formatTimeoutHint(seconds) {
+        if (typeof seconds !== "number" || !isFinite(seconds) || seconds <= 0) { return "—"; }
+        return seconds >= 60 && seconds % 60 === 0 ? String(seconds / 60) + "分 (" + seconds + "s)" : seconds + "s";
+      }
+
+      function currentProfile() {
+        if (!analysisOptions || !analysisOptions.profiles) { return null; }
+        return analysisOptions.profiles.find(function (p) { return p.id === profileSel.value; }) || analysisOptions.profiles[0] || null;
+      }
+
+      function currentModel() {
+        if (!analysisOptions || !analysisOptions.models) { return null; }
+        return analysisOptions.models.find(function (m) { return m.id === modelSel.value; }) || analysisOptions.models[0] || null;
+      }
+
+      function updateReasoningState() {
+        var model = currentModel();
+        var profile = currentProfile();
+        var supported = !model || model.supports_reasoning_effort !== false;
+        reasoningSel.disabled = !supported || ${ready ? "false" : "true"};
+        if (!supported) {
+          reasoningSel.value = "";
+        } else if (profile && !reasoningSel.value) {
+          reasoningSel.value = profile.default_reasoning_effort || "medium";
+        }
+        timeoutHint.textContent = profile ? formatTimeoutHint(profile.timeout_seconds) : "—";
+      }
+
+      function currentAnalysisSelection() {
+        var profile = currentProfile();
+        var model = currentModel();
+        return {
+          profile: profile ? profile.id : null,
+          requestedModel: model ? model.id : null,
+          requestedReasoningEffort: model && model.supports_reasoning_effort === false ? null : (reasoningSel.value || null),
+          requestedTimeoutSeconds: profile ? profile.timeout_seconds : null,
+          profileLabel: profile ? profile.display_name || profile.id : "—",
+          modelLabel: model ? model.display_name || model.id : "—"
+        };
+      }
+
+      function setDispatchProgress(phase) {
+        var selected = currentAnalysisSelection();
+        var elapsedMs = dispatchStartedAt ? Date.now() - dispatchStartedAt : 0;
+        var lines = [];
+        var phaseText = {
+          options_loaded: "分析オプションを読み込みました。",
+          preparing: "bounded Canvas action 用の Copilot 指示を準備しています。",
+          sending: "Copilot に分析指示を送信しています。",
+          dispatched: "Copilot に分析指示を送信しました。結果は Copilot チャットを確認してください。",
+          canceled: "ローカルの送信待機をキャンセルしました。"
+        }[phase] || "bounded Canvas action 用の Copilot 指示を準備しています。";
+        lines.push(phaseText);
+        lines.push("Profile: " + selected.profileLabel);
+        lines.push("希望モデル: " + selected.modelLabel);
+        lines.push("推奨 reasoning: " + (selected.requestedReasoningEffort || "未指定"));
+        lines.push("Timeout hint: " + formatTimeoutHint(selected.requestedTimeoutSeconds));
+        lines.push("Elapsed: " + Math.round(elapsedMs / 1000) + "s");
+        if (elapsedMs >= Math.min(Math.max((selected.requestedTimeoutSeconds || 60) * 1000, 15000), 60000)) {
+          lines.push("");
+          lines.push("送信待機が長くなっています。これは Local Monitor raw analysis runner の実行待ちではありません。分析結果は Copilot チャット側に表示されます。");
+        }
+        dispatchProgress.textContent = lines.join("\\n");
+        dispatchProgress.style.display = "";
+      }
+
+      function stopDispatchTimer() {
+        if (dispatchTimer) {
+          clearInterval(dispatchTimer);
+          dispatchTimer = null;
+        }
       }
 
       function showTraceDetailEmpty(msg) {
@@ -931,6 +1155,63 @@ ${focusOptionsHtml}
 
       if (!token) { setResult("起動トークンがありません。", false); return; }
 
+      function renderAnalysisOptions(options) {
+        analysisOptions = options || {};
+        var profiles = Array.isArray(analysisOptions.profiles) && analysisOptions.profiles.length ? analysisOptions.profiles : [];
+        var models = Array.isArray(analysisOptions.models) && analysisOptions.models.length ? analysisOptions.models : [];
+        var reasoningEfforts = Array.isArray(analysisOptions.reasoning_efforts) && analysisOptions.reasoning_efforts.length ? analysisOptions.reasoning_efforts : ["low", "medium", "high"];
+        profileSel.textContent = "";
+        profiles.forEach(function (profile) {
+          var opt = document.createElement("option");
+          opt.value = profile.id;
+          opt.textContent = (profile.display_name || profile.id) + " / " + formatTimeoutHint(profile.timeout_seconds);
+          profileSel.appendChild(opt);
+        });
+        modelSel.textContent = "";
+        models.forEach(function (model) {
+          var opt = document.createElement("option");
+          opt.value = model.id;
+          opt.textContent = (model.display_name || model.id) + " / " + (model.provider || "provider unknown") + (model.supports_reasoning_effort === false ? " / reasoning 非対応" : "");
+          modelSel.appendChild(opt);
+        });
+        reasoningSel.textContent = "";
+        var emptyOpt = document.createElement("option");
+        emptyOpt.value = "";
+        emptyOpt.textContent = "未指定";
+        reasoningSel.appendChild(emptyOpt);
+        reasoningEfforts.forEach(function (effort) {
+          var opt = document.createElement("option");
+          opt.value = effort;
+          opt.textContent = effort;
+          reasoningSel.appendChild(opt);
+        });
+        profileSel.value = analysisOptions.default_profile || (profiles[0] && profiles[0].id) || "";
+        modelSel.value = analysisOptions.default_model || (models[0] && models[0].id) || "";
+        var profile = currentProfile();
+        reasoningSel.value = profile ? profile.default_reasoning_effort || "medium" : "";
+        updateReasoningState();
+        analysisOptionStatus.textContent = "分析オプションを読み込みました。選択値は Copilot への指示・dispatch metadata として扱われます。";
+        setDispatchProgress("options_loaded");
+      }
+
+      profileSel.addEventListener("change", function () {
+        var profile = currentProfile();
+        reasoningSel.value = profile ? profile.default_reasoning_effort || "medium" : "";
+        updateReasoningState();
+      });
+      modelSel.addEventListener("change", updateReasoningState);
+
+      fetch("/api/analysis/options?t=" + encodeURIComponent(token), { headers: { "x-canvas-token": token } })
+        .then(function (r) {
+          if (!r.ok) { throw new Error("HTTP " + r.status); }
+          return r.json();
+        })
+        .then(renderAnalysisOptions)
+        .catch(function (e) {
+          analysisOptionStatus.textContent = "分析オプションの取得に失敗しました: " + e.message;
+          analysisOptionStatus.className = "err";
+        });
+
       fetch("/api/summary?t=" + encodeURIComponent(token), { headers: { "x-canvas-token": token } })
         .then(function (r) { return r.json().then(function (b) { return { status: r.status, body: b }; }); })
         .then(function (out) {
@@ -993,26 +1274,69 @@ ${focusOptionsHtml}
       });
 
       spanInput.addEventListener("input", updateRawPreviewLink);
+      cancelDispatch.addEventListener("click", function () {
+        if (dispatchAbortController) {
+          dispatchAbortController.abort();
+        }
+        stopDispatchTimer();
+        setDispatchProgress("canceled");
+        cancelDispatch.style.display = "none";
+        btn.disabled = false;
+      });
 
       btn.addEventListener("click", function () {
         var traceId = traceSel.value;
         if (!traceId) { setResult("先にトレースを選択してください。", false); return; }
         var focus = focusSel.value;
         var spanId = spanInput.value.trim();
+        var selected = currentAnalysisSelection();
+        if (!selected.profile || !selected.requestedModel) {
+          setResult("分析オプションを読み込めていません。", false);
+          return;
+        }
         btn.disabled = true;
-        setResult("送信中…", true);
+        cancelDispatch.style.display = "";
+        dispatchAbortController = new AbortController();
+        dispatchStartedAt = Date.now();
+        setResult("Copilot に分析指示を送信しています。", true);
+        setDispatchProgress("preparing");
+        stopDispatchTimer();
+        dispatchTimer = setInterval(function () { setDispatchProgress("sending"); }, 1000);
         fetch("/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json", "x-canvas-token": token },
-          body: JSON.stringify({ traceId: traceId, spanId: spanId || undefined, focus: focus })
+          signal: dispatchAbortController.signal,
+          body: JSON.stringify({
+            traceId: traceId,
+            spanId: spanId || undefined,
+            focus: focus,
+            profile: selected.profile,
+            requestedModel: selected.requestedModel,
+            requestedReasoningEffort: selected.requestedReasoningEffort || undefined,
+            requestedTimeoutSeconds: selected.requestedTimeoutSeconds
+          })
         })
           .then(function (r) { return r.json().then(function (b) { return { status: r.status, body: b }; }); })
           .then(function (out) {
-            if (out.status === 200) { setResult("Copilot に分析を送信しました。Copilot チャットを確認してください。", true); }
+            if (out.status === 200) {
+              setDispatchProgress("dispatched");
+              setResult("Copilot に分析指示を送信しました。Copilot チャットを確認してください。", true);
+            }
             else { setResult("失敗しました: " + (out.body && out.body.error || ("HTTP " + out.status)), false); }
           })
-          .catch(function (e) { setResult("失敗しました: " + e.message, false); })
-          .finally(function () { btn.disabled = false; });
+          .catch(function (e) {
+            if (e.name === "AbortError") {
+              setResult("ローカルの送信待機をキャンセルしました。", false);
+            } else {
+              setResult("失敗しました: " + e.message, false);
+            }
+          })
+          .finally(function () {
+            stopDispatchTimer();
+            dispatchAbortController = null;
+            cancelDispatch.style.display = "none";
+            btn.disabled = false;
+          });
       });
     })();
   </script>

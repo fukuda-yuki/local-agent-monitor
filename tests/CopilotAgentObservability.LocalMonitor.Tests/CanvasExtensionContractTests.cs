@@ -171,6 +171,7 @@ public class CanvasExtensionContractTests
         Assert.Contains("randomUUID", script);
         Assert.Contains("x-canvas-token", script);
         Assert.Contains("/api/traces", script);
+        Assert.Contains("/api/analysis/options", script);
         Assert.Contains("/analyze", script);
 
         // Focus enum unchanged by Sprint15 A2's Japanese label change.
@@ -186,6 +187,31 @@ public class CanvasExtensionContractTests
 
         // Boundary invariants preserved.
         AssertNoRawReferenceOtherThanAuthorizedPreview(script);
+        Assert.DoesNotContain("/analysis/runs", script);
+        Assert.DoesNotContain("console.log", script);
+    }
+
+    [Fact]
+    public void Extension_DeclaresSprint17RequestedAnalysisOptionsWithoutRawRunner()
+    {
+        var script = ReadExtension();
+
+        Assert.Contains("希望モデル", script);
+        Assert.Contains("推奨 reasoning", script);
+        Assert.Contains("Timeout hint", script);
+        Assert.Contains("requested_model", script);
+        Assert.Contains("requested_reasoning_effort", script);
+        Assert.Contains("requested_timeout_seconds", script);
+        Assert.Contains("analysis_trigger_id", script);
+        Assert.Contains("prompt_template_version", script);
+        Assert.Contains("message_id", script);
+        Assert.Contains("session.send({ prompt })", script);
+
+        Assert.DoesNotContain("sendAndWait", script);
+        Assert.DoesNotContain("/analysis/runs", script);
+        Assert.DoesNotContain("/traces/{traceId}/analysis", script);
+        AssertNoRawReferenceOtherThanAuthorizedPreview(script);
+        Assert.DoesNotContain("payload_json", script);
         Assert.DoesNotContain("console.log", script);
     }
 

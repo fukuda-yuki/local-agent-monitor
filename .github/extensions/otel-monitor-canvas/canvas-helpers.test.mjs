@@ -26,6 +26,11 @@ import {
     summaryTraceLine,
     extractRawPreviewFragment,
     renderRawPreviewHtml,
+    normalizeAnalysisOptions,
+    selectedAnalysisOption,
+    formatTimeoutHint,
+    dispatchPhaseText,
+    longRunningDispatchNotice,
 } from "./canvas-helpers.mjs";
 
 const SAMPLE_TRACE_ROW = {
@@ -150,11 +155,24 @@ test("formatTokens / formatDuration / formatClock / shortTraceId: individual for
 });
 
 test("buildAnalysisPrompt: contains the raw/PII boundary constraint lines", () => {
-    const prompt = buildAnalysisPrompt({ traceId: "abc123", spanId: null, focus: "latency" });
+    const prompt = buildAnalysisPrompt({
+        traceId: "abc123",
+        spanId: null,
+        focus: "latency",
+        profile: "deep",
+        requestedModel: "gpt-5.5",
+        requestedReasoningEffort: "high",
+        requestedTimeoutSeconds: 600,
+    });
 
     assert.match(prompt, /Do not copy raw prompt bodies, raw response bodies, tool arguments, tool results, PII, credentials, tokens, or local sensitive paths/);
     assert.match(prompt, /bounded DTOs from existing Local Monitor APIs/);
     assert.match(prompt, /Trace id: abc123/);
+    assert.match(prompt, /Requested analysis profile: deep/);
+    assert.match(prompt, /Requested model \/ Copilot instruction: gpt-5\.5/);
+    assert.match(prompt, /Requested reasoning depth: high/);
+    assert.match(prompt, /Requested timeout hint: 600 seconds/);
+    assert.match(prompt, /Do not claim the requested model, reasoning depth, or timeout was enforced/);
 });
 
 test("compactTrace: exposes the expected sanitized field set and no raw key", () => {
@@ -374,4 +392,71 @@ test("renderHelperHtml: contains the raw-preview link's Japanese text and does n
 
     assert.match(html, /生データを表示（新しいタブ）/);
     assert.doesNotMatch(html, /fetch\("\/raw-preview/);
+});
+
+test("renderHelperHtml: contains requested analysis option controls and dispatch-oriented wording", () => {
+    const html = renderHelperHtml({
+        instanceId: "inst-1",
+        monitorUrl: "http://127.0.0.1:4320",
+        healthState: "ready",
+        statusCode: 200,
+        healthBody: "{\"status\":\"ready\"}",
+        error: null,
+        token: "token-1",
+    });
+
+    assert.match(html, /分析プロファイル/);
+    assert.match(html, /希望モデル/);
+    assert.match(html, /推奨 reasoning/);
+    assert.match(html, /Timeout hint/);
+    assert.match(html, /実際の実行モデルは現在の Copilot セッション設定に依存します。/);
+    assert.match(html, /\/api\/analysis\/options/);
+    assert.match(html, /Local Monitor raw analysis runner の実行待ちではありません/);
+    assert.doesNotMatch(html, /Waiting for model response/);
+});
+
+test("normalizeAnalysisOptions and selectedAnalysisOption: use configured defaults and disable unsupported reasoning", () => {
+    const options = normalizeAnalysisOptions({
+        default_profile: "deep",
+        default_model: "glm-5.2",
+        reasoning_efforts: ["low", "medium", "high"],
+        profiles: [
+            { id: "standard", display_name: "Standard", timeout_seconds: 180, default_reasoning_effort: "medium" },
+            { id: "deep", display_name: "Deep", timeout_seconds: 600, default_reasoning_effort: "high" },
+        ],
+        models: [
+            { id: "gpt-5.5", display_name: "GPT-5.5", provider: "openai", supports_reasoning_effort: true },
+            { id: "glm-5.2", display_name: "GLM-5.2", provider: "opencode-go", supports_reasoning_effort: false },
+        ],
+    });
+    const selection = selectedAnalysisOption(options, {
+        profile: "deep",
+        requestedModel: "glm-5.2",
+        requestedReasoningEffort: "high",
+    });
+
+    assert.equal(options.default_profile, "deep");
+    assert.equal(options.default_model, "glm-5.2");
+    assert.equal(selection.profile.id, "deep");
+    assert.equal(selection.model.id, "glm-5.2");
+    assert.equal(selection.requested_reasoning_effort, null);
+    assert.equal(selection.requested_timeout_seconds, 600);
+});
+
+test("formatTimeoutHint and dispatch phase helpers: render timeout, elapsed, and long-running notice", () => {
+    assert.equal(formatTimeoutHint(180), "3分 (180s)");
+    assert.equal(formatTimeoutHint(45), "45s");
+    assert.equal(formatTimeoutHint(null), "—");
+
+    const phase = dispatchPhaseText("sending", 42000, {
+        profile: { id: "deep", display_name: "Deep" },
+        model: { id: "gpt-5.5", display_name: "GPT-5.5" },
+        requested_reasoning_effort: "high",
+        requested_timeout_seconds: 600,
+    });
+    assert.match(phase, /Copilot に分析指示を送信しています。/);
+    assert.match(phase, /希望モデル: GPT-5\.5/);
+    assert.match(phase, /推奨 reasoning: high/);
+    assert.match(phase, /Elapsed: 42s/);
+    assert.equal(longRunningDispatchNotice(61000, 600), "送信待機が長くなっています。これは Local Monitor raw analysis runner の実行待ちではありません。分析結果は Copilot チャット側に表示されます。");
 });

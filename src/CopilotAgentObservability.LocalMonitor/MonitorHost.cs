@@ -38,7 +38,14 @@ internal static class MonitorHost
 
         // Local Monitor is a local runtime tool, so read Secret Manager explicitly.
         // API key values must not reach logs, diagnostics, or repository-safe output.
-        builder.Configuration.AddUserSecrets(typeof(MonitorHost).Assembly, optional: true, reloadOnChange: false);
+        if (testOptions?.UseUserSecrets ?? true)
+        {
+            builder.Configuration.AddUserSecrets(typeof(MonitorHost).Assembly, optional: true, reloadOnChange: false);
+        }
+        if (testOptions?.ConfigurationValues is not null)
+        {
+            builder.Configuration.AddInMemoryCollection(testOptions.ConfigurationValues);
+        }
 
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls(options.Url);
@@ -269,6 +276,31 @@ internal static class MonitorHost
             {
                 await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
             }
+        });
+        app.MapGet("/api/analysis/options", async context =>
+        {
+            var analysisOptions = CopilotAnalysisOptions.From(app.Configuration);
+            await WriteJsonAsync(context, new
+            {
+                default_profile = analysisOptions.DefaultProfile,
+                default_model = analysisOptions.DefaultModel,
+                reasoning_efforts = analysisOptions.ReasoningEfforts,
+                profiles = analysisOptions.Profiles.Select(profile => new
+                {
+                    id = profile.Id,
+                    display_name = profile.DisplayName,
+                    timeout_seconds = profile.TimeoutSeconds,
+                    default_reasoning_effort = profile.DefaultReasoningEffort,
+                }),
+                models = analysisOptions.Models.Select(model => new
+                {
+                    id = model.Id,
+                    display_name = model.DisplayName,
+                    provider = model.Provider,
+                    supports_reasoning_effort = model.SupportsReasoningEffort,
+                    is_default = model.IsDefault,
+                }),
+            });
         });
         app.MapGet("/events", async context =>
         {
@@ -793,6 +825,10 @@ internal sealed class MonitorHostTestOptions
     public bool StartProjectionWorker { get; init; } = true;
 
     public TimeSpan? ProjectionPollInterval { get; init; }
+
+    public IReadOnlyDictionary<string, string?>? ConfigurationValues { get; init; }
+
+    public bool UseUserSecrets { get; init; } = true;
 }
 
 internal sealed record AnalysisStartPayload(string? Focus, long? RawRecordId, string? SpanId);

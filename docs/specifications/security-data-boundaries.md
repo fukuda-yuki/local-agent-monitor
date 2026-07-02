@@ -477,6 +477,30 @@ Sprint16 Canvas cross-repo adapter metadata (D040):
   `source_kind`, current-repository auto-match, raw endpoint, raw JSON API, or
   Canvas action raw payload is added in Sprint16.
 
+Sprint17 Canvas analysis requested options:
+
+- The Canvas helper's "analyze" button remains a `session.send()` trigger that
+  instructs Copilot to use existing bounded Canvas actions. It does not invoke
+  the Local Monitor raw analysis runner, does not call
+  `/traces/{traceId}/analysis`, and does not wait for or store final raw-derived
+  analysis results.
+- `GET /api/analysis/options` is sanitized configuration metadata. It may return
+  profile ids/display names, timeout hints, reasoning effort labels, model ids,
+  model display names, provider display names, and whether the model supports
+  reasoning controls. It must not return provider API keys, provider base URLs,
+  SDK state directories, local paths, raw telemetry, raw prompts/responses, tool
+  arguments/results, PII, credentials, tokens, or raw OTLP payloads.
+- Canvas helper `POST /analyze` dispatch metadata may include trace/span ids,
+  focus, requested profile/model/reasoning/timeout, prompt template version,
+  dispatch timestamp, and SDK message id when available. These are requested
+  values only. The helper UI must not claim per-message model, reasoning, or
+  execution-timeout enforcement unless a future SDK-supported and verified
+  mechanism exists.
+- Dispatch progress UI describes local preparation and handoff to Copilot chat.
+  It must not present a fake model-response wait state or imply that cancelling
+  the helper UI cancels in-flight Copilot agent work after `session.send()`
+  succeeds.
+
 Sprint12 UX redesign (prompt identification + DOM views, boundary controls
 reused):
 

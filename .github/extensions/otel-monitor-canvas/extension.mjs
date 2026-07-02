@@ -45,6 +45,7 @@ import {
     renderRawPreviewHtml,
     renderRawPreviewMessageHtml,
     extensionScopeFromModuleUrl,
+    PROMPT_TEMPLATE_VERSION,
     MAX_CACHE_TURNS,
 } from "./canvas-helpers.mjs";
 
@@ -133,6 +134,10 @@ async function fetchHelperSummary(monitorUrl, limitQuery) {
     return fetchTextWithTimeout(monitorApiUrl(monitorUrl, path));
 }
 
+async function fetchHelperAnalysisOptions(monitorUrl) {
+    return fetchTextWithTimeout(monitorApiUrl(monitorUrl, "/api/analysis/options"));
+}
+
 // Fetch one trace's prompt label (D039), proxied server-to-server from the
 // Local Monitor's own /traces/{traceId}/prompt-label. Unlike
 // fetchHelperTraceRows/fetchHelperSpans, this never throws: both a non-OK
@@ -154,6 +159,44 @@ async function fetchHelperPromptLabel(monitorUrl, traceId) {
     } catch {
         return null;
     }
+}
+
+function validateAnalysisSelection(options, payload) {
+    const profiles = Array.isArray(options?.profiles) ? options.profiles : [];
+    const models = Array.isArray(options?.models) ? options.models : [];
+    const efforts = Array.isArray(options?.reasoning_efforts) ? options.reasoning_efforts : [];
+    const profile = profiles.find((candidate) => candidate.id === payload.profile);
+    if (!profile) {
+        throw new CanvasError("invalid_profile", "Analysis profile is not configured by the Local Monitor.");
+    }
+
+    const model = models.find((candidate) => candidate.id === payload.requestedModel);
+    if (!model) {
+        throw new CanvasError("invalid_model", "Requested analysis model is not configured by the Local Monitor.");
+    }
+
+    let requestedReasoningEffort = payload.requestedReasoningEffort ?? null;
+    if (model.supports_reasoning_effort === false) {
+        requestedReasoningEffort = null;
+    } else if (!requestedReasoningEffort) {
+        requestedReasoningEffort = profile.default_reasoning_effort ?? null;
+    }
+
+    if (requestedReasoningEffort !== null && !efforts.includes(requestedReasoningEffort)) {
+        throw new CanvasError("invalid_reasoning_effort", "Requested reasoning effort is not configured by the Local Monitor.");
+    }
+
+    const requestedTimeoutSeconds = Number(payload.requestedTimeoutSeconds);
+    if (!Number.isFinite(requestedTimeoutSeconds) || requestedTimeoutSeconds !== profile.timeout_seconds) {
+        throw new CanvasError("invalid_timeout", "Requested timeout hint must match the selected analysis profile.");
+    }
+
+    return {
+        profile,
+        model,
+        requestedReasoningEffort,
+        requestedTimeoutSeconds,
+    };
 }
 
 function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session, extensionScope }) {
@@ -254,6 +297,31 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
             return;
         }
 
+        if (req.method === "GET" && path === "/api/analysis/options") {
+            try {
+                if (!isLoopbackUrl(monitorUrl)) {
+                    sendJson(res, 400, { error: "invalid_monitor_url" });
+                    return;
+                }
+                const { response, body } = await fetchHelperAnalysisOptions(monitorUrl);
+                if (!response.ok) {
+                    let parsedError = null;
+                    try {
+                        parsedError = body ? JSON.parse(body) : null;
+                    } catch {
+                        parsedError = null;
+                    }
+                    sendJson(res, response.status, parsedError ?? { error: "monitor_unavailable", message: `The Local Monitor returned HTTP ${response.status}.` });
+                    return;
+                }
+                sendJson(res, 200, body ? parseJsonBody(body) : {});
+            } catch (err) {
+                const code = err instanceof CanvasError ? err.code : "monitor_unavailable";
+                sendJson(res, 502, { error: code, message: err.message });
+            }
+            return;
+        }
+
         if (req.method === "GET" && path.startsWith("/api/trace-detail/")) {
             const traceId = decodeURIComponent(path.slice("/api/trace-detail/".length));
             if (!matchesTraceId(traceId)) {
@@ -316,12 +384,46 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
                     sendJson(res, 400, { error: "invalid_focus" });
                     return;
                 }
-                const prompt = buildAnalysisPrompt({ traceId, spanId: spanId || null, focus });
-                await session.send({ prompt });
-                sendJson(res, 200, { ok: true, dispatched: true });
+                if (!isLoopbackUrl(monitorUrl)) {
+                    sendJson(res, 400, { error: "invalid_monitor_url" });
+                    return;
+                }
+                const { response, body } = await fetchHelperAnalysisOptions(monitorUrl);
+                if (!response.ok) {
+                    sendJson(res, 502, { error: "monitor_unavailable", message: `The Local Monitor returned HTTP ${response.status}.` });
+                    return;
+                }
+                const options = body ? parseJsonBody(body) : {};
+                const selection = validateAnalysisSelection(options, payload);
+                const prompt = buildAnalysisPrompt({
+                    traceId,
+                    spanId: spanId || null,
+                    focus,
+                    profile: selection.profile.id,
+                    requestedModel: selection.model.id,
+                    requestedReasoningEffort: selection.requestedReasoningEffort,
+                    requestedTimeoutSeconds: selection.requestedTimeoutSeconds,
+                });
+                const sent = await session.send({ prompt });
+                sendJson(res, 200, {
+                    ok: true,
+                    dispatched: true,
+                    analysis_trigger_id: randomUUID(),
+                    trace_id: traceId,
+                    span_id: spanId || null,
+                    focus,
+                    requested_profile: selection.profile.id,
+                    requested_model: selection.model.id,
+                    requested_reasoning_effort: selection.requestedReasoningEffort,
+                    requested_timeout_seconds: selection.requestedTimeoutSeconds,
+                    prompt_template_version: PROMPT_TEMPLATE_VERSION,
+                    dispatched_at: new Date().toISOString(),
+                    message_id: sent?.id ?? sent?.messageId ?? null,
+                });
             } catch (err) {
                 const code = err instanceof CanvasError ? err.code : "analyze_failed";
-                sendJson(res, 500, { error: code, message: err.message });
+                const status = err instanceof CanvasError && code.startsWith("invalid_") ? 400 : 500;
+                sendJson(res, status, { error: code, message: err.message });
             }
             return;
         }
