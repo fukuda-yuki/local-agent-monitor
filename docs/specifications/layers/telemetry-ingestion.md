@@ -602,6 +602,39 @@ absence must not create collection-health failures. Missing values remain null
 in `/api/monitor/*`; Canvas helper UI displays `unknown repository` when it
 cannot derive a repository label.
 
+## Canvas Analysis Options
+
+Sprint17 keeps the Canvas helper analysis trigger on the existing
+`session.send()` path. The helper does not start the Local Monitor Copilot raw
+analysis runner and does not call `/traces/{traceId}/analysis`.
+
+Local Monitor exposes `GET /api/analysis/options` as sanitized configuration for
+the Canvas helper. It returns analysis profiles, configured model metadata,
+default profile/model, reasoning effort values, and timeout hints. Initial
+profiles are:
+
+| Profile | Timeout hint | Default reasoning |
+| --- | ---: | --- |
+| `fast` | 60s | `low` |
+| `standard` | 180s | `medium` |
+| `deep` | 600s | `high` |
+
+Model metadata is derived from local `CopilotAnalysis:Models:*` configuration
+and includes only id, display name, provider display name,
+`supports_reasoning_effort`, and `is_default`. The endpoint must not return API
+keys, provider base URLs, local SDK state paths, raw telemetry, PII, prompt or
+response bodies, tool arguments/results, credentials, or tokens.
+
+The Canvas helper proxies this endpoint through its token-gated
+`GET /api/analysis/options` route. `POST /analyze` accepts requested
+`profile`, `requestedModel`, `requestedReasoningEffort`, and
+`requestedTimeoutSeconds`, validates them against the options response, includes
+them in the generated bounded Copilot instruction, and returns dispatch metadata
+only. These fields are requested controls; because `session.send()` has no
+per-message model/reasoning/execution-timeout control, the UI and response must
+not claim they were enforced. Final result metadata is out of scope unless a
+later feature safely correlates it from observed telemetry.
+
 ## Codex App Boundary
 
 Codex App / app-server OTel routing config belongs in user-level `~/.codex/config.toml`.
