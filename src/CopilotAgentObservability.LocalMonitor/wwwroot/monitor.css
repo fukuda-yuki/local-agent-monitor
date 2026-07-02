@@ -1,6 +1,8 @@
 /* Local Ingestion Monitor visual foundation.
-   Redesign: OKLCH dark theme (hue ~264 base, blue/teal/purple accents).
-   Presentation only: routes, APIs, raw boundaries, and sanitized JSON remain unchanged. */
+   Sprint18 redesign (D042): blue-tinted dark theme, hex tokens per the design
+   handoff §10 (hex is authoritative — see DESIGN.md). Console IA: 208px sidebar
+   + master-detail. Presentation only: routes, APIs, raw boundaries, and
+   sanitized JSON remain unchanged. */
 
 /* ── Vendor fonts (exact filenames preserved verbatim) ── */
 @font-face {
@@ -56,48 +58,72 @@
     src: url(/vendor/fonts/noto-sans-mono-latin-400-normal.woff2) format('woff2');
 }
 
-/* ── Design tokens ── */
+/* ── Design tokens (handoff §10 hex, authoritative) ── */
 :root {
     color-scheme: dark;
 
-    /* Required tokens (Playwright test reads these) */
-    --monitor-bg: oklch(0.15 0.012 264);
-    --monitor-accent: oklch(0.65 0.16 255);
+    /* Surface */
+    --monitor-bg: #14171e;
+    --monitor-sidebar-bg: #11141a;
+    --monitor-surface: #1a1e28;
+    --monitor-surface-card: #1a1e28;
+    --monitor-surface-inset: #12151c;
+    --monitor-surface-panel: #161a22;
+    --monitor-surface-alt: #212736;
+    --monitor-surface-input: #12151c;
+    --monitor-selected-bg: #1c2a3d;
+    --monitor-segment-active: #2a3141;
+    --monitor-row-hover: #212736;
+    --monitor-popover-bg: #1a1f2a;
 
-    /* Surface hierarchy */
-    --monitor-surface: oklch(0.21 0.014 264);
-    --monitor-surface-card: oklch(0.20 0.014 264);
-    --monitor-surface-alt: oklch(0.24 0.014 264);
-    --monitor-surface-input: oklch(0.18 0.012 264);
+    /* Border */
+    --monitor-border: #2a3141;
+    --monitor-border-divider: #232a38;
+    --monitor-border-row: #1c212c;
+    --monitor-border-strong: #2f4a68;
+    --monitor-border-subtle: #232a38;
 
-    /* Borders */
-    --monitor-border: oklch(0.30 0.016 264);
-    --monitor-border-subtle: oklch(0.24 0.014 264);
+    /* Ink */
+    --monitor-ink: #e5e9f2;
+    --monitor-ink-subtle: #9aa4b8;
+    --monitor-ink-dim: #9aa4b8;
+    --monitor-muted: #697487;
 
-    /* Text */
-    --monitor-ink: oklch(0.92 0.005 264);
-    --monitor-ink-subtle: oklch(0.82 0.008 264);
-    --monitor-ink-dim: oklch(0.70 0.01 264);
-    --monitor-muted: oklch(0.58 0.01 264);
-
-    /* Accent variants */
-    --monitor-accent-hover: oklch(0.70 0.16 255);
-    --monitor-accent-muted: oklch(0.28 0.06 255);
+    /* Accent */
+    --monitor-accent: #4da3e8;
+    --monitor-accent-hover: #8f8ffa;
+    --monitor-accent-muted: #1c2a3d;
+    --monitor-accent-contrast: #0c1420;
 
     /* Semantic */
-    --monitor-success: oklch(0.74 0.13 160);
-    --monitor-warning: oklch(0.78 0.12 95);
-    --monitor-error: oklch(0.65 0.19 25);
-    --monitor-success-bg: oklch(0.22 0.04 160);
-    --monitor-warning-bg: oklch(0.22 0.04 95);
-    --monitor-error-bg: oklch(0.28 0.08 25);
+    --monitor-token-gold: #e0aa4e;
+    --monitor-success: #4cc38f;
+    --monitor-success-dim: #2c5844;
+    --monitor-warning: #d9a942;
+    --monitor-error: #e05e50;
+    --monitor-success-bg: rgba(76, 195, 143, 0.12);
+    --monitor-warning-bg: rgba(217, 169, 66, 0.12);
+    --monitor-error-bg: rgba(224, 94, 80, 0.12);
 
-    /* Category accent colors */
-    --cat-agent: oklch(0.68 0.15 300);
-    --cat-llm: oklch(0.74 0.12 200);
-    --cat-tool: oklch(0.80 0.13 75);
-    --cat-hook: oklch(0.82 0.12 95);
-    --cat-unknown: oklch(0.62 0.01 264);
+    /* Agent / parallel / connector */
+    --monitor-agent: #9d7bf0;
+    --monitor-parallel: #56c8d8;
+    --monitor-parallel-dim: #2e7d8c;
+    --monitor-elbow: #2a3a4e;
+
+    /* Copilot */
+    --monitor-copilot-ink: #c0b6f2;
+    --monitor-copilot-bg: #2b2340;
+    --monitor-copilot-border: #4a4080;
+    --monitor-copilot-border-dim: #3d3560;
+    --monitor-copilot-border-hover: #8f8ffa;
+
+    /* Category accent colors (span kinds) */
+    --cat-agent: #9d7bf0;
+    --cat-llm: #4da3e8;
+    --cat-tool: #e0aa4e;
+    --cat-hook: #d9a942;
+    --cat-unknown: #697487;
 
     /* Typography */
     --monitor-font-sans: 'Noto Sans JP', 'Segoe UI', system-ui, -apple-system, sans-serif;
@@ -186,7 +212,7 @@ a:hover {
 }
 
 a:visited {
-    color: oklch(0.55 0.12 290);
+    color: var(--monitor-accent);
 }
 
 code,
@@ -201,7 +227,7 @@ button {
 }
 
 ::selection {
-    background: oklch(0.45 0.12 255 / 0.5);
+    background: rgba(77, 163, 232, 0.35);
     color: var(--monitor-ink);
 }
 
@@ -215,118 +241,241 @@ button {
     /* intentionally light; the visual is applied via body and child elements */
 }
 
-/* ── Navigation ── */
-.monitor-header {
+/* ── Shell: 208px sidebar + main pane (handoff §5) ── */
+body {
+    display: flex;
+    align-items: stretch;
+}
+
+.monitor-sidebar {
     position: sticky;
     top: 0;
-    z-index: var(--monitor-z-sticky);
-    background: var(--monitor-surface);
-    border-bottom: 1px solid var(--monitor-border);
+    display: flex;
+    flex-direction: column;
+    width: 208px;
+    min-width: 208px;
+    height: 100vh;
+    padding: 16px 12px;
+    background: var(--monitor-sidebar-bg);
+    border-right: 1px solid var(--monitor-border-divider);
 }
 
-/* .nav is the element used by the layout (matches mockup) */
-.nav {
+.sidebar-brand {
     display: flex;
     align-items: center;
-    gap: 2px;
-    min-height: 44px;
-    padding: 0 var(--monitor-space-4);
-    background: var(--monitor-surface);
-    border-bottom: 1px solid var(--monitor-border);
-}
-
-.nav-brand {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    margin-right: 14px;
-    font-size: var(--monitor-text-base);
-    font-weight: var(--monitor-weight-semibold);
-    color: var(--monitor-ink-subtle);
+    gap: 8px;
+    padding: 2px 10px 14px;
+    font-size: 14px;
+    font-weight: var(--monitor-weight-bold);
+    color: var(--monitor-ink);
     white-space: nowrap;
 }
 
-.nav-logo {
-    width: 16px;
-    height: 16px;
+.sidebar-logo {
+    width: 10px;
+    height: 10px;
     flex: none;
-    border-radius: 5px;
-    background: linear-gradient(135deg, var(--monitor-accent), var(--cat-agent));
+    border-radius: 3px;
+    background: var(--monitor-accent);
 }
 
-.nav-link {
-    display: inline-flex;
+.sidebar-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.sidebar-link {
+    display: flex;
     align-items: center;
-    gap: 6px;
-    height: 44px;
-    padding: 0 14px;
-    font-size: var(--monitor-text-sm);
-    color: var(--monitor-muted);
-    text-decoration: none;
-    box-shadow: inset 0 -2px 0 transparent;
-    transition: color 150ms ease-out, box-shadow 150ms ease-out, background 150ms ease-out;
-}
-
-.nav-link:hover {
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: var(--monitor-text-base);
     color: var(--monitor-ink-subtle);
-    background: var(--monitor-surface-alt);
+    text-decoration: none;
+    transition: background 150ms ease-out, color 150ms ease-out;
+}
+
+.sidebar-link:hover {
+    color: var(--monitor-ink);
+    background: var(--monitor-row-hover);
     text-decoration: none;
 }
 
-.nav-link.active,
-.nav-link[aria-current="page"] {
+.sidebar-link.active,
+.sidebar-link[aria-current="page"] {
     color: var(--monitor-ink);
-    box-shadow: inset 0 -2px 0 var(--monitor-accent);
+    font-weight: var(--monitor-weight-bold);
+    background: var(--monitor-selected-bg);
 }
 
-/* Status dot in the nav */
-.nav-dot {
+.sidebar-link .nav-count {
+    margin-left: auto;
+    font-family: var(--monitor-font-mono);
+    font-size: 11px;
+    color: var(--monitor-muted);
+}
+
+/* Bottom of the sidebar: receive-status badge + endpoint label */
+.sidebar-footer {
+    margin-top: auto;
+    padding-top: 12px;
+    border-top: 1px solid var(--monitor-border-divider);
+}
+
+.status-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--monitor-border);
+    border-radius: 7px;
+    background: var(--monitor-surface-panel);
+    color: var(--monitor-ink-subtle);
+    font-size: 12px;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: border-color 150ms ease-out;
+}
+
+.status-badge:hover {
+    border-color: var(--monitor-border-strong);
+}
+
+.status-badge .badge-caret {
+    margin-left: auto;
+    color: var(--monitor-muted);
+}
+
+.status-dot {
     width: 8px;
     height: 8px;
     flex: none;
-    margin-left: auto;
     border-radius: 50%;
-    background: var(--monitor-success);
-    box-shadow: 0 0 8px oklch(0.74 0.13 160 / 0.6);
+    background: var(--monitor-muted);
 }
 
-.nav-dot.healthy {
-    background: var(--monitor-success);
-    box-shadow: 0 0 8px oklch(0.74 0.13 160 / 0.6);
+.status-dot.healthy { background: var(--monitor-success); }
+.status-dot.degraded { background: var(--monitor-warning); }
+.status-dot.unhealthy { background: var(--monitor-error); }
+
+.status-badge.degraded { border-color: var(--monitor-warning); color: var(--monitor-warning); }
+.status-badge.unhealthy { border-color: var(--monitor-error); color: var(--monitor-error); }
+
+.sidebar-endpoint {
+    display: block;
+    padding: 8px 10px 0;
+    font-family: var(--monitor-font-mono);
+    font-size: 11px;
+    color: var(--monitor-muted);
 }
 
-.nav-dot.degraded {
-    background: var(--monitor-warning);
-    box-shadow: 0 0 8px oklch(0.78 0.12 95 / 0.6);
+/* Status popover (diagnostics entry, handoff §5) */
+.status-popover {
+    position: absolute;
+    bottom: 76px;
+    left: 12px;
+    z-index: var(--monitor-z-overlay);
+    width: 340px;
+    padding: 14px;
+    background: var(--monitor-popover-bg);
+    border: 1px solid var(--monitor-border-strong);
+    border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
 }
 
-.nav-dot.unhealthy {
-    background: var(--monitor-error);
-    box-shadow: 0 0 8px oklch(0.65 0.19 25 / 0.6);
+.status-popover[hidden] {
+    display: none;
 }
 
-.nav-status {
+.popover-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--monitor-border-divider);
+    font-size: 12.5px;
+    font-weight: var(--monitor-weight-bold);
+    color: var(--monitor-ink);
+}
+
+.popover-head .popover-endpoint {
+    margin-left: auto;
+    font-family: var(--monitor-font-mono);
+    font-size: 10.5px;
+    font-weight: var(--monitor-weight-normal);
+    color: var(--monitor-muted);
+}
+
+.popover-pipeline {
+    margin: 0;
+    padding: 8px 0;
+    list-style: none;
+    border-bottom: 1px solid var(--monitor-border-divider);
+}
+
+.popover-pipeline li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+    font-size: 12px;
+    color: var(--monitor-ink-subtle);
+}
+
+.popover-pipeline .pipeline-state {
+    margin-left: auto;
+    font-size: 11.5px;
+    font-weight: var(--monitor-weight-bold);
+    color: var(--monitor-success);
+}
+
+.popover-pipeline .pipeline-state.degraded { color: var(--monitor-warning); }
+.popover-pipeline .pipeline-state.unhealthy { color: var(--monitor-error); }
+
+.popover-reason {
+    margin: 8px 0 0;
+    font-size: 11.5px;
+    color: var(--monitor-warning);
+}
+
+.popover-actions {
+    display: flex;
+    gap: 8px;
+    padding-top: 10px;
+}
+
+.popover-actions a {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    min-height: 28px;
-    margin-left: auto;
-    padding: 0 10px;
+    padding: 6px 10px;
     border: 1px solid var(--monitor-border);
-    border-radius: var(--monitor-radius-xs);
-    color: var(--monitor-ink-dim);
-    font-size: var(--monitor-text-xs);
-    white-space: nowrap;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--monitor-ink-subtle);
+    text-decoration: none;
 }
 
-.nav-status .nav-dot {
-    margin-left: 0;
+.popover-actions a:hover {
+    border-color: var(--monitor-border-strong);
+    color: var(--monitor-ink);
+    text-decoration: none;
+}
+
+.popover-actions a.primary {
+    color: var(--monitor-accent);
+    border-color: var(--monitor-border-strong);
 }
 
 /* ── Main content area ── */
 .monitor-content {
-    width: 100%;
-    padding: var(--monitor-space-5) var(--monitor-space-5);
+    flex: 1;
+    min-width: 0;
+    padding: 18px 24px 24px;
+    background: var(--monitor-bg);
 }
 
 .monitor-section,
@@ -2173,27 +2322,6 @@ td.status-error {
 @media (max-width: 720px) {
     .monitor-content {
         padding: var(--monitor-space-3);
-    }
-
-    .nav {
-        flex-wrap: wrap;
-        min-height: unset;
-        padding: var(--monitor-space-2) var(--monitor-space-3);
-    }
-
-    .nav-brand {
-        width: 100%;
-        margin-bottom: var(--monitor-space-1);
-    }
-
-    .nav-link {
-        height: 36px;
-        padding: 0 10px;
-    }
-
-    .nav-status {
-        margin-left: 0;
-        min-height: 32px;
     }
 
     .metric-grid {

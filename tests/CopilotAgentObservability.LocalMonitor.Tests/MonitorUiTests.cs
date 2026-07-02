@@ -219,9 +219,10 @@ public class MonitorUiTests
         var css = await host.Client.GetStringAsync("/monitor.css");
 
         // Fonts are referenced from the local vendor path, never a CDN (D028).
+        // Tokens are the Sprint18 handoff §10 hex values (D042 C2).
         Assert.Contains("/vendor/fonts/", css);
-        Assert.Contains("--monitor-bg: oklch(0.15 0.012 264)", css);
-        Assert.Contains("--monitor-accent: oklch(0.65 0.16 255)", css);
+        Assert.Contains("--monitor-bg: #14171e", css);
+        Assert.Contains("--monitor-accent: #4da3e8", css);
         foreach (var cdn in new[] { "googleapis.com", "gstatic.com", "cdn.jsdelivr.net", "unpkg.com" })
         {
             Assert.DoesNotContain(cdn, css);

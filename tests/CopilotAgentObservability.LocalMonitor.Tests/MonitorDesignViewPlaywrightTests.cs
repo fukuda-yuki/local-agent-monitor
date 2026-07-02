@@ -31,7 +31,7 @@ public class MonitorDesignViewPlaywrightTests
         }
 
         Assert.Equal(
-            "oklch(0.15 0.012 264)",
+            "#14171e",
             await page.Locator("body").EvaluateAsync<string>("element => getComputedStyle(element).getPropertyValue('--monitor-bg').trim()"));
         Assert.Equal("true", await page.Locator("#tab-summary").GetAttributeAsync("aria-selected"));
 
