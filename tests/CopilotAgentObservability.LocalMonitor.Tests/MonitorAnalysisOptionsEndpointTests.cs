@@ -65,6 +65,41 @@ public class MonitorAnalysisOptionsEndpointTests
     }
 
     [Fact]
+    public async Task AnalysisOptions_GuardsUnsafeConfiguredMetadata()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(
+            temp,
+            new Dictionary<string, string?>
+            {
+                ["CopilotAnalysis:DefaultModel"] = "secret-model",
+                ["CopilotAnalysis:Provider:Type"] = "https://provider.example.test/v1",
+                ["CopilotAnalysis:Models:safe-model:DisplayName"] = @"C:\Users\someone\model.txt",
+                ["CopilotAnalysis:Models:safe-model:Provider"] = "https://provider.example.test/v1",
+                ["CopilotAnalysis:Models:safe-model:SupportsReasoningEffort"] = "true",
+                ["CopilotAnalysis:Models:secret-model:DisplayName"] = "secret model",
+                ["CopilotAnalysis:Models:secret-model:Provider"] = "secret-provider",
+            });
+
+        var response = await host.Client.GetAsync("/api/analysis/options");
+        var body = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(body);
+        var root = document.RootElement;
+        var models = root.GetProperty("models").EnumerateArray().ToArray();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("safe-model", root.GetProperty("default_model").GetString());
+        Assert.Single(models);
+        Assert.Equal("safe-model", models[0].GetProperty("id").GetString());
+        Assert.Equal("safe-model", models[0].GetProperty("display_name").GetString());
+        Assert.Equal("copilot", models[0].GetProperty("provider").GetString());
+        Assert.DoesNotContain("secret-model", body);
+        Assert.DoesNotContain("secret-provider", body);
+        Assert.DoesNotContain("provider.example.test", body);
+        Assert.DoesNotContain(@"C:\Users", body);
+    }
+
+    [Fact]
     public async Task AnalysisOptions_IsAvailableUnderSanitizedOnly()
     {
         using var temp = new MonitorTempDirectory();

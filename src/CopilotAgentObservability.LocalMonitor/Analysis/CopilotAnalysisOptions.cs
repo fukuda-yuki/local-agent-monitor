@@ -1,3 +1,4 @@
+using CopilotAgentObservability.Telemetry;
 using Microsoft.Extensions.Configuration;
 
 namespace CopilotAgentObservability.LocalMonitor.Analysis;
@@ -22,9 +23,11 @@ internal sealed record CopilotAnalysisOptions(
             defaultProfile = "standard";
         }
 
-        var configuredDefaultModel = ReadNonEmpty(section["DefaultModel"], ReadNonEmpty(section["Model"], "gpt-5"));
+        var configuredDefaultModel = SanitizeCanvasOptionValue(
+            ReadNonEmpty(section["DefaultModel"], ReadNonEmpty(section["Model"], "gpt-5")),
+            "gpt-5");
         var defaultModel = models.Any(model => string.Equals(model.Id, configuredDefaultModel, StringComparison.Ordinal))
-            ? configuredDefaultModel
+            ? configuredDefaultModel ?? models[0].Id
             : models[0].Id;
         var normalizedModels = models
             .Select(model => model with { IsDefault = string.Equals(model.Id, defaultModel, StringComparison.Ordinal) })
@@ -82,15 +85,24 @@ internal sealed record CopilotAnalysisOptions(
         var models = modelsSection.GetChildren()
             .Select(child =>
             {
-                var id = child.Key;
-                var displayName = ReadNonEmpty(child["DisplayName"], id);
-                var provider = ReadNonEmpty(child["Provider"], ReadNonEmpty(section["Provider:Type"], "copilot"));
+                var id = SanitizeCanvasOptionValue(child.Key, fallback: null);
+                if (id is null)
+                {
+                    return null;
+                }
+
+                var displayName = SanitizeCanvasOptionValue(
+                    ReadNonEmpty(child["DisplayName"], id),
+                    id) ?? id;
+                var provider = SanitizeCanvasOptionValue(
+                    ReadNonEmpty(child["Provider"], ReadNonEmpty(section["Provider:Type"], "copilot")),
+                    "copilot") ?? "copilot";
                 var supportsReasoning = bool.TryParse(child["SupportsReasoningEffort"], out var parsed)
                     ? parsed
                     : true;
                 return new CopilotAnalysisModelOption(id, displayName, provider, supportsReasoning, IsDefault: false);
             })
-            .Where(model => !string.IsNullOrWhiteSpace(model.Id))
+            .OfType<CopilotAnalysisModelOption>()
             .ToArray();
 
         if (models.Length > 0)
@@ -98,13 +110,15 @@ internal sealed record CopilotAnalysisOptions(
             return models;
         }
 
-        var defaultModel = ReadNonEmpty(section["DefaultModel"], ReadNonEmpty(section["Model"], "gpt-5"));
+        var defaultModel = SanitizeCanvasOptionValue(
+            ReadNonEmpty(section["DefaultModel"], ReadNonEmpty(section["Model"], "gpt-5")),
+            "gpt-5") ?? "gpt-5";
         return
         [
             new CopilotAnalysisModelOption(
                 defaultModel,
                 defaultModel,
-                ReadNonEmpty(section["Provider:Type"], "copilot"),
+                SanitizeCanvasOptionValue(ReadNonEmpty(section["Provider:Type"], "copilot"), "copilot") ?? "copilot",
                 SupportsReasoningEffort: true,
                 IsDefault: true),
         ];
@@ -112,6 +126,27 @@ internal sealed record CopilotAnalysisOptions(
 
     private static string ReadNonEmpty(string? value, string fallback) =>
         string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+
+    private static string? SanitizeCanvasOptionValue(string? value, string? fallback)
+    {
+        var candidate = MeasurementSanitizer.SanitizeFreeFormName(value);
+        if (candidate is not null && !IsAbsoluteUri(candidate))
+        {
+            return candidate;
+        }
+
+        if (fallback is null)
+        {
+            return null;
+        }
+
+        var sanitizedFallback = MeasurementSanitizer.SanitizeFreeFormName(fallback);
+        return sanitizedFallback is null || IsAbsoluteUri(sanitizedFallback) ? null : sanitizedFallback;
+    }
+
+    private static bool IsAbsoluteUri(string value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri)
+        && !string.IsNullOrWhiteSpace(uri.Scheme);
 }
 
 internal sealed record CopilotAnalysisProfileOption(
