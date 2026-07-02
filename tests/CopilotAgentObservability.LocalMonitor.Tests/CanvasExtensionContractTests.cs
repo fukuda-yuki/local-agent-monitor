@@ -325,6 +325,47 @@ public class CanvasExtensionContractTests
         Assert.DoesNotContain("console.log", script);
     }
 
+    [Fact]
+    public void Extension_DeclaresCrossRepoHelperLabelAndFilterSurface()
+    {
+        var script = ReadExtension();
+
+        Assert.Contains("repository_name", script);
+        Assert.Contains("workspace_label", script);
+        Assert.Contains("repo_snapshot", script);
+        Assert.Contains("unknown repository", script);
+        Assert.Contains("repositoryLabel", script);
+        Assert.Contains("workspaceLabel", script);
+        Assert.Contains("repositoryFilterKey", script);
+        Assert.Contains("repositoryFilterOptions", script);
+        Assert.Contains("extensionScopeFromModuleUrl", script);
+        Assert.Contains("リポジトリ / ワークスペース", script);
+        Assert.Contains("拡張スコープ", script);
+
+        Assert.DoesNotContain("process.cwd", script);
+        Assert.DoesNotMatch(@"(?i)(C:\\Users\\|/Users/|/home/)", script);
+        AssertNoRawReferenceOtherThanAuthorizedPreview(script);
+        Assert.DoesNotContain("payload_json", script);
+        Assert.DoesNotContain("console.log", script);
+    }
+
+    [Fact]
+    public void Extension_DoesNotSendRepositoryMetadataInAnalysisPrompt()
+    {
+        var script = ReadExtension();
+        var promptStart = script.IndexOf("export function buildAnalysisPrompt", StringComparison.Ordinal);
+        var promptEnd = script.IndexOf("// --------------- helper page", StringComparison.Ordinal);
+        Assert.True(promptStart >= 0, "buildAnalysisPrompt must be present.");
+        Assert.True(promptEnd > promptStart, "helper page section must follow buildAnalysisPrompt.");
+        var promptScript = script[promptStart..promptEnd];
+
+        Assert.DoesNotContain("repository_name", promptScript);
+        Assert.DoesNotContain("workspace_label", promptScript);
+        Assert.DoesNotContain("repo_snapshot", promptScript);
+        Assert.Contains("Trace id: ${traceId}", promptScript);
+        Assert.Contains("Selected span id: ${spanId}", promptScript);
+    }
+
     // Sprint15 M5 (child D, D038) is the one deliberate exception to the
     // otherwise-blanket "no /raw reference" contract enforced by the facts
     // above. Rather than deleting those pre-existing checks (which would

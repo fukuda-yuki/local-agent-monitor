@@ -98,11 +98,65 @@ export function shortTraceId(traceId) {
     return traceId.length > 8 ? `#${traceId.slice(0, 8)}…` : `#${traceId}`;
 }
 
+export function repositoryLabel(trace) {
+    const repository = typeof trace?.repository_name === "string" && trace.repository_name.trim()
+        ? trace.repository_name.trim()
+        : null;
+    if (!repository) {
+        return "unknown repository";
+    }
+
+    const snapshot = typeof trace?.repo_snapshot === "string" && trace.repo_snapshot.trim()
+        ? trace.repo_snapshot.trim()
+        : null;
+    return snapshot ? `${repository} @ ${snapshot}` : repository;
+}
+
+export function workspaceLabel(trace) {
+    return typeof trace?.workspace_label === "string" && trace.workspace_label.trim()
+        ? trace.workspace_label.trim()
+        : null;
+}
+
+export function repositoryFilterKey(trace) {
+    return `${repositoryLabel(trace)}\u001f${workspaceLabel(trace) ?? ""}`;
+}
+
+export function repositoryFilterOptions(traces) {
+    const seen = new Map();
+    for (const trace of traces ?? []) {
+        const key = repositoryFilterKey(trace);
+        if (seen.has(key)) {
+            continue;
+        }
+
+        const workspace = workspaceLabel(trace);
+        const label = workspace ? `${repositoryLabel(trace)} / ${workspace}` : repositoryLabel(trace);
+        seen.set(key, { key, label });
+    }
+
+    return [...seen.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
+export function extensionScopeFromModuleUrl(moduleUrl) {
+    const value = String(moduleUrl ?? "").toLowerCase();
+    if (value.includes("/.github/extensions/otel-monitor-canvas/")) {
+        return "project";
+    }
+
+    if (value.includes("/extensions/otel-monitor-canvas/")) {
+        return "user";
+    }
+
+    return "unknown";
+}
+
 // One-line, decision-supporting trace label built from sanitized compactTrace
 // fields only (Sprint15 A1 / Issue §4). Example:
 //   エラーあり / gpt-5 / 12 spans / 3 tools / 8,420 tokens / 14:32 / 18.2s / #abc12345…
 export function formatTraceLine(trace) {
     const parts = [statusLabel(trace.status)];
+    parts.push(repositoryLabel(trace));
 
     if (trace.primary_model) {
         parts.push(String(trace.primary_model));
@@ -203,6 +257,9 @@ export function compactTrace(row) {
         agent_invocation_count: row.agent_invocation_count ?? null,
         duration_ms: row.duration_ms ?? null,
         primary_model: row.primary_model ?? null,
+        repository_name: row.repository_name ?? null,
+        workspace_label: row.workspace_label ?? null,
+        repo_snapshot: row.repo_snapshot ?? null,
         first_seen_at: row.first_seen_at ?? null,
         last_seen_at: row.last_seen_at ?? null,
     };
@@ -504,7 +561,7 @@ export function buildAnalysisPrompt({ traceId, spanId, focus }) {
 // --------------- helper page (Sprint15 A1–A6) ---------------
 
 // healthState is one of "ready" | "not_ready" | "unreachable" (Sprint15 A4).
-export function renderHelperHtml({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token }) {
+export function renderHelperHtml({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, extensionScope = "unknown" }) {
     const ready = healthState === "ready";
     const base = String(monitorUrl ?? "").replace(/\/$/, "");
     const healthUrl = `${base}/health/ready`;
@@ -515,6 +572,7 @@ export function renderHelperHtml({ instanceId, monitorUrl, healthState, statusCo
     const escapedError = escapeHtml(error ?? "");
     const escapedToken = escapeHtml(token);
     const escapedHealthUrl = escapeHtml(healthUrl);
+    const normalizedScope = ["project", "user", "unknown"].includes(extensionScope) ? extensionScope : "unknown";
 
     const connectionLabel = ready
         ? "接続済み（ready）"
@@ -654,6 +712,7 @@ export function renderHelperHtml({ instanceId, monitorUrl, healthState, statusCo
   <div class="card">
     <h2>接続状態</h2>
     <dl class="kv">
+      <dt>拡張スコープ</dt><dd><code>${escapeHtml(normalizedScope)}</code></dd>
       <dt>Monitor URL</dt><dd><code>${escapedUrl}</code></dd>
       <dt>インスタンス</dt><dd><code>${escapedInstance}</code></dd>
       <dt>状態</dt><dd><span class="${ready ? "status-ok" : "status-err"}">${escapeHtml(connectionLabel)}</span></dd>
@@ -702,6 +761,12 @@ export function renderHelperHtml({ instanceId, monitorUrl, healthState, statusCo
     <h2>Copilotでこのトレースを分析</h2>
     <p style="margin-bottom:12px;color:var(--muted);">トレースと観点を選んで Copilot 分析を実行します。Copilot は bounded な monitor action を使い、このヘルパーから raw な monitor payload を受け取りません。</p>
     <div class="row">
+      <label for="repository-filter">リポジトリ / ワークスペース</label>
+      <select id="repository-filter" ${ready ? "" : "disabled"}>
+        <option value="">すべて</option>
+      </select>
+    </div>
+    <div class="row">
       <label for="trace">トレース</label>
       <select id="trace" ${ready ? "" : "disabled"}></select>
     </div>
@@ -735,6 +800,7 @@ ${focusOptionsHtml}
     (function () {
       var token = ${JSON.stringify(escapedToken)};
       var monitorUrlBase = ${JSON.stringify(String(monitorUrl ?? "").replace(/\/$/, ""))};
+      var repositoryFilter = document.getElementById("repository-filter");
       var traceSel = document.getElementById("trace");
       var focusSel = document.getElementById("focus");
       var spanInput = document.getElementById("span");
@@ -807,6 +873,62 @@ ${focusOptionsHtml}
         el.appendChild(li);
       }
 
+      function repositoryLabel(trace) {
+        var repository = trace && typeof trace.repository_name === "string" && trace.repository_name.trim() ? trace.repository_name.trim() : null;
+        if (!repository) { return "unknown repository"; }
+        var snapshot = trace && typeof trace.repo_snapshot === "string" && trace.repo_snapshot.trim() ? trace.repo_snapshot.trim() : null;
+        return snapshot ? repository + " @ " + snapshot : repository;
+      }
+
+      function workspaceLabel(trace) {
+        return trace && typeof trace.workspace_label === "string" && trace.workspace_label.trim() ? trace.workspace_label.trim() : null;
+      }
+
+      function repositoryFilterKey(trace) {
+        return repositoryLabel(trace) + "\\u001f" + (workspaceLabel(trace) || "");
+      }
+
+      function repositoryFilterOptionLabel(trace) {
+        var workspace = workspaceLabel(trace);
+        return workspace ? repositoryLabel(trace) + " / " + workspace : repositoryLabel(trace);
+      }
+
+      function dropdownOptionLabel(item) {
+        var line = item.line || item.trace_id;
+        return (item.prompt_label ? item.prompt_label + " — " : "") + line;
+      }
+
+      function renderTraceOptions(items) {
+        traceSel.textContent = "";
+        items.forEach(function (t) {
+          var opt = document.createElement("option");
+          opt.value = t.trace_id;
+          opt.textContent = dropdownOptionLabel(t);
+          traceSel.appendChild(opt);
+        });
+        if (traceSel.value) {
+          loadTraceDetail(traceSel.value);
+        } else {
+          showTraceDetailEmpty("トレースを選択すると要約が表示されます。");
+        }
+        updateRawPreviewLink();
+      }
+
+      function renderRepositoryFilterOptions(items) {
+        var seen = new Map();
+        items.forEach(function (t) {
+          var key = repositoryFilterKey(t);
+          if (seen.has(key)) { return; }
+          seen.set(key, repositoryFilterOptionLabel(t));
+        });
+        Array.from(seen.keys()).sort(function (a, b) { return seen.get(a).localeCompare(seen.get(b)); }).forEach(function (key) {
+          var opt = document.createElement("option");
+          opt.value = key;
+          opt.textContent = seen.get(key);
+          repositoryFilter.appendChild(opt);
+        });
+      }
+
       if (!token) { setResult("起動トークンがありません。", false); return; }
 
       fetch("/api/summary?t=" + encodeURIComponent(token), { headers: { "x-canvas-token": token } })
@@ -840,11 +962,12 @@ ${focusOptionsHtml}
           return r.json();
         })
         .then(function (data) {
-          (data.items || []).forEach(function (t) {
-            var opt = document.createElement("option");
-            opt.value = t.trace_id;
-            opt.textContent = (t.prompt_label ? t.prompt_label + " — " : "") + (t.line || t.trace_id);
-            traceSel.appendChild(opt);
+          var allTraces = data.items || [];
+          renderRepositoryFilterOptions(allTraces);
+          renderTraceOptions(allTraces);
+          repositoryFilter.addEventListener("change", function () {
+            var selected = repositoryFilter.value;
+            renderTraceOptions(selected ? allTraces.filter(function (t) { return repositoryFilterKey(t) === selected; }) : allTraces);
           });
           if (!traceSel.options.length) { setResult("最近のトレースが見つかりませんでした。", true); }
         })

@@ -62,7 +62,7 @@ sanitized, existing source for those fields.
 | M1 Spec and metadata contract | Promote the cross-repo distribution and sanitized metadata contract into current docs/specs/decisions before code changes. | Implemented |
 | M2 Monitor metadata projection | Add schema version 3, sanitized metadata extraction, DTO exposure, and Local Monitor tests. | Implemented |
 | M3 Canvas distribution package | Add `canvas.json`, extension README, synthetic preview asset, and package/metadata contract tests. | Implemented |
-| M4 Helper cross-repo UX | Add extension scope display, repository/workspace labels, manual filter, and updated helper tests without changing Canvas action boundaries. | Planned |
+| M4 Helper cross-repo UX | Add extension scope display, repository/workspace labels, manual filter, and updated helper tests without changing Canvas action boundaries. | Implemented |
 | M5 Validation and closeout | Run targeted/full validation, perform or record live Canvas runtime validation, self-review, and sprint closeout. | Planned |
 
 ## Implementation order
