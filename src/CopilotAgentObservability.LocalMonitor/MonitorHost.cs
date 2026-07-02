@@ -640,6 +640,9 @@ internal static class MonitorHost
         agent_invocation_count = row.AgentInvocationCount,
         duration_ms = row.DurationMs,
         primary_model = row.PrimaryModel,
+        repository_name = row.RepositoryName,
+        workspace_label = row.WorkspaceLabel,
+        repo_snapshot = row.RepoSnapshot,
     };
 
     private static object ToRunDto(MonitorAnalysisRun run, bool includeRawResult) => new

@@ -38,7 +38,10 @@ internal sealed record MonitorTraceRow(
     int? TurnCount,
     int? AgentInvocationCount,
     double? DurationMs,
-    string? PrimaryModel);
+    string? PrimaryModel,
+    string? RepositoryName,
+    string? WorkspaceLabel,
+    string? RepoSnapshot);
 
 /// <summary>Backlog and the oldest unprocessed ingestion time, for projection-lag readiness.</summary>
 internal sealed record MonitorProjectionStatus(

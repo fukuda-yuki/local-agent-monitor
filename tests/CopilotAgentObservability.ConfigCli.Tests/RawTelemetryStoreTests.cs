@@ -235,6 +235,9 @@ public class RawTelemetryStoreTests
                 "agent_invocation_count",
                 "duration_ms",
                 "primary_model",
+                "repository_name",
+                "workspace_label",
+                "repo_snapshot",
             ],
             ReadColumns(connection, "monitor_traces"));
         // Verify monitor_spans table exists with the idempotency key columns.

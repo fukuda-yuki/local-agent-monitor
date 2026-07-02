@@ -657,6 +657,8 @@ Sprint11 の Canvas adapter は Local Monitor の任意表示統合であり、L
   response body、tool arguments / results、PII、credential、token、local sensitive path、
   raw OTLP payload を返さない。
 - Canvas adapter は新たな telemetry input / schema / API field / raw endpoint を追加しない。
+- Sprint16 で追加する sanitized repository metadata（D040）は、この禁止の
+  scoped exception として扱う。raw endpoint や新規 telemetry input は追加しない。
 - Local Monitor の raw-bearing server-rendered route は引き続き D020 / D023 の
   loopback、same-origin、`Cache-Control: no-store`、inert text rendering 境界に従う。
 
@@ -721,6 +723,8 @@ server-rendered で表示する。これにより両ページは trace-detail pa
 
 - loopback-only bind、`Host` header 検証、CORS 無効、state-changing action の CSRF + same-origin。
 - `/api/monitor/*` と SSE は sanitized metadata のみ。projection schema / API field は追加しない。
+- Sprint16 の sanitized repository metadata（D040）は、この不変条件を
+  raw / PII 非送出のまま保つ scoped exception として扱う。
 - raw / PII を log、repository-safe outputs、static dashboard、GitHub Pages snapshot に書かない。
 - captured content は escaped inert text で描画。追加の CSP / sanitizer / XSS payload-matrix
   機構は設けない（AGENTS.md Local-First Risk Posture / D020）。
@@ -1211,3 +1215,33 @@ sanitized な決定支援ラインのみ（状態 / モデル / span 数 / tool 
 
 本決定は設計の確定であり、コード実装は利用者の明示的な go-ahead を得てから
 着手する（D037→D038 と同じ二段階の手順を踏む）。
+
+## D040: Canvas cross-repo adapter の配布単位と sanitized repository metadata contract を固定する
+
+Sprint16 では GitHub Copilot app Canvas adapter を他 repository へコピー可能な
+extension distribution unit として整理する。配布の source of truth は
+`.github/extensions/otel-monitor-canvas/` のみとし、mirror folder は作らない。
+この sprint では runtime / development dependency、`package.json`、lockfile、
+`node_modules` を追加しない。
+
+Local Monitor projection と Canvas helper が repository / workspace を識別する
+ため、既存の推奨 OTLP Resource Attributes だけを source にした sanitized
+metadata を新規 trace から投影してよい。
+
+| Projected / Canvas field | Source attribute | Boundary |
+| --- | --- | --- |
+| `repository_name` | `repo.name` | sanitized display label |
+| `workspace_label` | `workspace.name` | sanitized display label; not an absolute path |
+| `repo_snapshot` | `repo.snapshot` | sanitized branch / commit / snapshot label when present |
+
+これらは D030 / D032 の「Canvas adapter は新たな schema / API field を追加しない」
+という過去の不変条件に対する scoped exception である。許可範囲は sanitized
+`/api/monitor/*`、Canvas helper routes、bounded Canvas action DTO に限る。
+raw prompt / response body、tool arguments / results、PII、credential、token、
+local sensitive path、raw OTLP payload を Canvas action / logs / repository-safe
+output へ返す禁止は維持する。
+
+既存 projected rows は自動 backfill しない。新しい nullable projection columns は
+新規 ingestion または明示的な DB 再生成で埋まる。Canvas helper は metadata 欠落時
+`unknown repository` を表示する。`repository_full_name`、`workspace_hash`、
+`git_branch`、`git_commit_sha`、`source_kind` は、この sprint では追加しない。

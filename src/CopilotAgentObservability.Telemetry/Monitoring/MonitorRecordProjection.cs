@@ -28,4 +28,7 @@ internal sealed record MonitorTraceContribution(
     string? PromptVersion,
     int SpanCount,
     int ToolCallCount,
-    int ErrorCount);
+    int ErrorCount,
+    string? RepositoryName,
+    string? WorkspaceLabel,
+    string? RepoSnapshot);

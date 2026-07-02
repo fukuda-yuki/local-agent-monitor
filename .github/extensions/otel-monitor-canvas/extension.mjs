@@ -44,6 +44,7 @@ import {
     extractRawPreviewFragment,
     renderRawPreviewHtml,
     renderRawPreviewMessageHtml,
+    extensionScopeFromModuleUrl,
     MAX_CACHE_TURNS,
 } from "./canvas-helpers.mjs";
 
@@ -155,7 +156,7 @@ async function fetchHelperPromptLabel(monitorUrl, traceId) {
     }
 }
 
-function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session }) {
+function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session, extensionScope }) {
     const server = createServer(async (req, res) => {
         const url = new URL(req.url, "http://127.0.0.1");
         const path = url.pathname;
@@ -171,7 +172,7 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
 
         if (req.method === "GET" && path === "/") {
             res.setHeader("Content-Type", "text/html; charset=utf-8");
-            res.end(renderHelperHtml({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token }));
+            res.end(renderHelperHtml({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, extensionScope }));
             return;
         }
 
@@ -403,8 +404,8 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
     return server;
 }
 
-async function startHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session }) {
-    const server = createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session });
+async function startHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session, extensionScope }) {
+    const server = createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session, extensionScope });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : 0;
@@ -782,6 +783,7 @@ const session = await joinSession({
                 // and the "Copilotでこのトレースを分析" trigger. The trigger is
                 // disabled when the monitor is not ready.
                 const token = randomUUID();
+                const extensionScope = extensionScopeFromModuleUrl(import.meta.url);
                 const entry = await startHelperServer({
                     instanceId: ctx.instanceId,
                     monitorUrl,
@@ -791,6 +793,7 @@ const session = await joinSession({
                     error: health.error,
                     token,
                     session,
+                    extensionScope,
                 });
                 servers.set(ctx.instanceId, entry);
                 return {

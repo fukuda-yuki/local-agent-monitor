@@ -59,11 +59,11 @@ sanitized, existing source for those fields.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
-| M1 Spec and metadata contract | Promote the cross-repo distribution and sanitized metadata contract into current docs/specs/decisions before code changes. | Planned |
-| M2 Monitor metadata projection | Add schema version 3, sanitized metadata extraction, DTO exposure, and Local Monitor tests. | Planned |
-| M3 Canvas distribution package | Add `canvas.json`, extension README, synthetic preview asset, and package/metadata contract tests. | Planned |
-| M4 Helper cross-repo UX | Add extension scope display, repository/workspace labels, manual filter, and updated helper tests without changing Canvas action boundaries. | Planned |
-| M5 Validation and closeout | Run targeted/full validation, perform or record live Canvas runtime validation, self-review, and sprint closeout. | Planned |
+| M1 Spec and metadata contract | Promote the cross-repo distribution and sanitized metadata contract into current docs/specs/decisions before code changes. | Implemented |
+| M2 Monitor metadata projection | Add schema version 3, sanitized metadata extraction, DTO exposure, and Local Monitor tests. | Implemented |
+| M3 Canvas distribution package | Add `canvas.json`, extension README, synthetic preview asset, and package/metadata contract tests. | Implemented |
+| M4 Helper cross-repo UX | Add extension scope display, repository/workspace labels, manual filter, and updated helper tests without changing Canvas action boundaries. | Implemented |
+| M5 Validation and closeout | Run targeted/full validation, perform or record live Canvas runtime validation, self-review, and sprint closeout. | Implemented |
 
 ## Implementation order
 
@@ -124,7 +124,7 @@ dotnet test CopilotAgentObservability.slnx
 
 - Sprint11 Canvas adapter PoC.
 - Sprint15 Canvas Diagnostic Surface.
-- D020, D023, D030, D036, D037, D038, D039 in `docs/decisions.md`.
+- D020, D023, D030, D036, D037, D038, D039, D040 in `docs/decisions.md`.
 - `docs/specifications/security-data-boundaries.md`.
 - `docs/specifications/layers/telemetry-ingestion.md`.
 - `docs/specifications/layers/raw-store-normalization.md`.

@@ -338,7 +338,9 @@ Monitor read API (sanitized, cursor pagination):
 
 `/api/monitor/traces` rows include the rollup columns added by Sprint9:
 `input_tokens`, `output_tokens`, `total_tokens`, `turn_count`,
-`agent_invocation_count`, `duration_ms`, `primary_model` (see
+`agent_invocation_count`, `duration_ms`, `primary_model`, plus the Sprint16
+repository metadata fields `repository_name`, `workspace_label`, and
+`repo_snapshot` when present (see
 [raw-store-normalization.md](raw-store-normalization.md) for the full schema).
 
 `/api/monitor/traces/{traceId}/spans` returns sanitized per-span rows from
@@ -370,6 +372,11 @@ documented actions are `monitor_health()`,
 `1..50` for Canvas action output. Sprint11 adds no telemetry input, SQLite
 schema, projection column, endpoint, query parameter, response field, raw route,
 normalized dataset field, candidate record field, or dashboard contract.
+Sprint16 supersedes only the schema / projection / response-field part of that
+statement for the three sanitized repository metadata fields
+`repository_name`, `workspace_label`, and `repo_snapshot`; it does not add a
+new telemetry input, raw route, query parameter, normalized dataset field,
+candidate record field, or dashboard contract.
 `--sanitized-only` remains an optional Local Monitor metadata-only mode, not a
 Canvas requirement.
 
@@ -586,6 +593,14 @@ skill.version
 mcp.profile
 cli.wrapper.version
 ```
+
+Sprint16 uses only the existing recommended attributes `repo.name`,
+`workspace.name`, and `repo.snapshot` as optional sources for the Local Monitor
+projection fields `repository_name`, `workspace_label`, and `repo_snapshot`.
+These attributes are not required for repository-safe datasets, and their
+absence must not create collection-health failures. Missing values remain null
+in `/api/monitor/*`; Canvas helper UI displays `unknown repository` when it
+cannot derive a repository label.
 
 ## Codex App Boundary
 

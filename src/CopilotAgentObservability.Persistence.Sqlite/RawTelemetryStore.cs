@@ -11,7 +11,7 @@ internal sealed class RawTelemetryStore
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
     }
 
-    public const int MonitorSchemaVersion = 2;
+    public const int MonitorSchemaVersion = 3;
 
     public void CreateSchema()
     {
@@ -124,7 +124,10 @@ internal sealed class RawTelemetryStore
                 turn_count INTEGER NULL,
                 agent_invocation_count INTEGER NULL,
                 duration_ms REAL NULL,
-                primary_model TEXT NULL
+                primary_model TEXT NULL,
+                repository_name TEXT NULL,
+                workspace_label TEXT NULL,
+                repo_snapshot TEXT NULL
             );
             """);
         ExecuteNonQuery(
@@ -181,6 +184,9 @@ internal sealed class RawTelemetryStore
         AddColumnIfMissing(connection, "monitor_traces", "agent_invocation_count", "INTEGER NULL");
         AddColumnIfMissing(connection, "monitor_traces", "duration_ms", "REAL NULL");
         AddColumnIfMissing(connection, "monitor_traces", "primary_model", "TEXT NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "repository_name", "TEXT NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "workspace_label", "TEXT NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "repo_snapshot", "TEXT NULL");
 
         ExecuteNonQuery(
             connection,
@@ -360,9 +366,11 @@ internal sealed class RawTelemetryStore
                 """
                 INSERT INTO monitor_traces
                     (trace_id, client_kind, experiment_id, task_id, task_category, agent_variant, prompt_version,
-                     span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at)
+                     span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at,
+                     repository_name, workspace_label, repo_snapshot)
                 VALUES ($trace_id, $client_kind, $experiment_id, $task_id, $task_category, $agent_variant, $prompt_version,
-                     $span_count, $tool_call_count, $error_count, $seen_at, $seen_at, $projected_at)
+                     $span_count, $tool_call_count, $error_count, $seen_at, $seen_at, $projected_at,
+                     $repository_name, $workspace_label, $repo_snapshot)
                 ON CONFLICT(trace_id) DO UPDATE SET
                     span_count = COALESCE(span_count, 0) + excluded.span_count,
                     tool_call_count = COALESCE(tool_call_count, 0) + excluded.tool_call_count,
@@ -375,6 +383,9 @@ internal sealed class RawTelemetryStore
                     task_category = COALESCE(task_category, excluded.task_category),
                     agent_variant = COALESCE(agent_variant, excluded.agent_variant),
                     prompt_version = COALESCE(prompt_version, excluded.prompt_version),
+                    repository_name = COALESCE(repository_name, excluded.repository_name),
+                    workspace_label = COALESCE(workspace_label, excluded.workspace_label),
+                    repo_snapshot = COALESCE(repo_snapshot, excluded.repo_snapshot),
                     projected_at = excluded.projected_at;
                 """;
             AddParameter(upsert, "$trace_id", contribution.TraceId);
@@ -389,6 +400,9 @@ internal sealed class RawTelemetryStore
             AddParameter(upsert, "$error_count", contribution.ErrorCount);
             AddParameter(upsert, "$seen_at", receivedAtText);
             AddParameter(upsert, "$projected_at", projectedAtText);
+            AddParameter(upsert, "$repository_name", contribution.RepositoryName);
+            AddParameter(upsert, "$workspace_label", contribution.WorkspaceLabel);
+            AddParameter(upsert, "$repo_snapshot", contribution.RepoSnapshot);
             upsert.ExecuteNonQuery();
         }
 
@@ -467,7 +481,8 @@ internal sealed class RawTelemetryStore
             """
             SELECT id, trace_id, client_kind, experiment_id, task_id, task_category, agent_variant, prompt_version,
                    span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at,
-                   input_tokens, output_tokens, total_tokens, turn_count, agent_invocation_count, duration_ms, primary_model
+                   input_tokens, output_tokens, total_tokens, turn_count, agent_invocation_count, duration_ms, primary_model,
+                   repository_name, workspace_label, repo_snapshot
             FROM monitor_traces
             WHERE id > $after
             ORDER BY id
@@ -501,7 +516,10 @@ internal sealed class RawTelemetryStore
                 TurnCount: reader.IsDBNull(17) ? null : reader.GetInt32(17),
                 AgentInvocationCount: reader.IsDBNull(18) ? null : reader.GetInt32(18),
                 DurationMs: reader.IsDBNull(19) ? null : reader.GetDouble(19),
-                PrimaryModel: reader.IsDBNull(20) ? null : reader.GetString(20)));
+                PrimaryModel: reader.IsDBNull(20) ? null : reader.GetString(20),
+                RepositoryName: reader.IsDBNull(21) ? null : reader.GetString(21),
+                WorkspaceLabel: reader.IsDBNull(22) ? null : reader.GetString(22),
+                RepoSnapshot: reader.IsDBNull(23) ? null : reader.GetString(23)));
         }
 
         return BuildPage(items, limit);
@@ -519,7 +537,8 @@ internal sealed class RawTelemetryStore
             """
             SELECT id, trace_id, client_kind, experiment_id, task_id, task_category, agent_variant, prompt_version,
                    span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at,
-                   input_tokens, output_tokens, total_tokens, turn_count, agent_invocation_count, duration_ms, primary_model
+                   input_tokens, output_tokens, total_tokens, turn_count, agent_invocation_count, duration_ms, primary_model,
+                   repository_name, workspace_label, repo_snapshot
             FROM monitor_traces
             WHERE trace_id = $trace_id;
             """;
@@ -552,7 +571,10 @@ internal sealed class RawTelemetryStore
             TurnCount: reader.IsDBNull(17) ? null : reader.GetInt32(17),
             AgentInvocationCount: reader.IsDBNull(18) ? null : reader.GetInt32(18),
             DurationMs: reader.IsDBNull(19) ? null : reader.GetDouble(19),
-            PrimaryModel: reader.IsDBNull(20) ? null : reader.GetString(20));
+            PrimaryModel: reader.IsDBNull(20) ? null : reader.GetString(20),
+            RepositoryName: reader.IsDBNull(21) ? null : reader.GetString(21),
+            WorkspaceLabel: reader.IsDBNull(22) ? null : reader.GetString(22),
+            RepoSnapshot: reader.IsDBNull(23) ? null : reader.GetString(23));
     }
 
     /// <summary>Fetches one raw record by id for the opt-in raw-detail route; null if not found.</summary>

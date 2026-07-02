@@ -92,6 +92,21 @@ public class MonitorProjectionApiTests
     }
 
     [Fact]
+    public async Task Traces_ExposeSanitizedRepositoryMetadata()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedRawAndProject(temp, "trace-repo", RepositoryMetadataJson);
+        await using var host = await StartReadOnlyHostAsync(temp);
+
+        var traces = await GetJsonAsync(host, "/api/monitor/traces");
+        var item = Assert.Single(traces.RootElement.GetProperty("items").EnumerateArray());
+
+        Assert.Equal("repo-api", item.GetProperty("repository_name").GetString());
+        Assert.Equal("workspace-api", item.GetProperty("workspace_label").GetString());
+        Assert.Equal("snapshot-api", item.GetProperty("repo_snapshot").GetString());
+    }
+
+    [Fact]
     public async Task Apis_NeverReturnRawContentOrPii()
     {
         using var temp = new MonitorTempDirectory();
@@ -102,7 +117,7 @@ public class MonitorProjectionApiTests
         var traces = await GetStringAsync(host, "/api/monitor/traces");
         var spans = await GetStringAsync(host, "/api/monitor/traces/trace-pii/spans");
 
-        foreach (var marker in new[] { "SECRET_PROMPT_TEXT_MARKER", "SECRET_TOOL_ARGS_MARKER", "USER-ID-SECRET-MARKER", "leak-marker@example.com" })
+        foreach (var marker in new[] { "SECRET_PROMPT_TEXT_MARKER", "SECRET_TOOL_ARGS_MARKER", "USER-ID-SECRET-MARKER", "leak-marker@example.com", @"C:\Users\person\secret", "Bearer token-marker" })
         {
             Assert.DoesNotContain(marker, ingestions);
             Assert.DoesNotContain(marker, traces);
@@ -279,12 +294,26 @@ public class MonitorProjectionApiTests
         {"resourceSpans":[{"resource":{"attributes":[
           {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
           {"key":"user.id","value":{"stringValue":"USER-ID-SECRET-MARKER"}},
-          {"key":"user.email","value":{"stringValue":"leak-marker@example.com"}}
+          {"key":"user.email","value":{"stringValue":"leak-marker@example.com"}},
+          {"key":"repo.name","value":{"stringValue":"leak-marker@example.com"}},
+          {"key":"workspace.name","value":{"stringValue":"C:\\Users\\person\\secret"}},
+          {"key":"repo.snapshot","value":{"stringValue":"Bearer token-marker"}}
         ]},"scopeSpans":[{"spans":[
           {"traceId":"trace-pii","spanId":"1111111111111111","name":"chat gpt-4o","attributes":[
             {"key":"gen_ai.prompt","value":{"stringValue":"SECRET_PROMPT_TEXT_MARKER"}},
             {"key":"gen_ai.tool.arguments","value":{"stringValue":"SECRET_TOOL_ARGS_MARKER"}}
           ]}
+        ]}]}]}
+        """;
+
+    private const string RepositoryMetadataJson = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
+          {"key":"repo.name","value":{"stringValue":"repo-api"}},
+          {"key":"workspace.name","value":{"stringValue":"workspace-api"}},
+          {"key":"repo.snapshot","value":{"stringValue":"snapshot-api"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-repo","spanId":"1111111111111111","name":"chat gpt-4o"}
         ]}]}]}
         """;
 

@@ -10,6 +10,11 @@ import {
     renderHelperHtml,
     formatTraceLine,
     dropdownOptionLabel,
+    repositoryLabel,
+    workspaceLabel,
+    repositoryFilterKey,
+    repositoryFilterOptions,
+    extensionScopeFromModuleUrl,
     statusLabel,
     formatTokens,
     formatDuration,
@@ -33,6 +38,9 @@ const SAMPLE_TRACE_ROW = {
     duration_ms: 18200,
     primary_model: "gpt-5",
     last_seen_at: "2026-07-01T14:32:07.123Z",
+    repository_name: "copilot-agent-observability",
+    workspace_label: "main workspace",
+    repo_snapshot: "feature/sprint16",
 };
 
 test("renderHelperHtml: ready state has Japanese button/heading, Japanese focus labels with unchanged enum values, and no raw fields", () => {
@@ -99,7 +107,7 @@ test("formatTraceLine: renders the expected one-line decision-supporting label f
     const trace = compactTrace(SAMPLE_TRACE_ROW);
     assert.equal(
         formatTraceLine(trace),
-        "OK / gpt-5 / 12 spans / 3 tools / 8,420 tokens / 14:32 / 18.2s / #abc12345…",
+        "OK / copilot-agent-observability @ feature/sprint16 / gpt-5 / 12 spans / 3 tools / 8,420 tokens / 14:32 / 18.2s / #abc12345…",
     );
 });
 
@@ -165,6 +173,9 @@ test("compactTrace: exposes the expected sanitized field set and no raw key", ()
         "agent_invocation_count",
         "duration_ms",
         "primary_model",
+        "repository_name",
+        "workspace_label",
+        "repo_snapshot",
         "first_seen_at",
         "last_seen_at",
     ];
@@ -173,6 +184,46 @@ test("compactTrace: exposes the expected sanitized field set and no raw key", ()
     for (const key of Object.keys(trace)) {
         assert.doesNotMatch(key, /raw|payload|prompt|content|argument|result|credential|secret/i);
     }
+});
+
+test("repository label helpers: render sanitized labels and unknown fallback", () => {
+    const trace = compactTrace(SAMPLE_TRACE_ROW);
+
+    assert.equal(repositoryLabel(trace), "copilot-agent-observability @ feature/sprint16");
+    assert.equal(workspaceLabel(trace), "main workspace");
+    assert.equal(repositoryLabel({ repository_name: null, repo_snapshot: "feature/sprint16" }), "unknown repository");
+    assert.equal(workspaceLabel({ workspace_label: null }), null);
+});
+
+test("repositoryFilterOptions: deduplicates repository/workspace pairs and keeps unknown repository", () => {
+    const options = repositoryFilterOptions([
+        compactTrace(SAMPLE_TRACE_ROW),
+        compactTrace({ ...SAMPLE_TRACE_ROW, trace_id: "def456", workspace_label: "main workspace" }),
+        compactTrace({ ...SAMPLE_TRACE_ROW, trace_id: "ghi789", workspace_label: "scratch workspace", repo_snapshot: null }),
+        compactTrace({ ...SAMPLE_TRACE_ROW, trace_id: "jkl012", repository_name: null, workspace_label: null, repo_snapshot: null }),
+    ]);
+
+    assert.deepEqual(options, [
+        {
+            key: "copilot-agent-observability @ feature/sprint16\u001fmain workspace",
+            label: "copilot-agent-observability @ feature/sprint16 / main workspace",
+        },
+        {
+            key: "copilot-agent-observability\u001fscratch workspace",
+            label: "copilot-agent-observability / scratch workspace",
+        },
+        {
+            key: "unknown repository\u001f",
+            label: "unknown repository",
+        },
+    ]);
+    assert.equal(repositoryFilterKey({ repository_name: null, workspace_label: null }), "unknown repository\u001f");
+});
+
+test("extensionScopeFromModuleUrl: classifies project/user scopes without exposing paths", () => {
+    assert.equal(extensionScopeFromModuleUrl("file:///repo/.github/extensions/otel-monitor-canvas/extension.mjs"), "project");
+    assert.equal(extensionScopeFromModuleUrl("file:///copilot-home/extensions/otel-monitor-canvas/extension.mjs"), "user");
+    assert.equal(extensionScopeFromModuleUrl("file:///tmp/otel-monitor-canvas/extension.mjs"), "unknown");
 });
 
 test("BOUNDARY_NOTE: pins the raw/PII invariant sentence", () => {
@@ -246,6 +297,32 @@ test("renderHelperHtml: contains the Local Monitor 概要 dashboard card and fet
     // forbidden here.
     assert.doesNotMatch(html, /\/raw(?!-preview)/);
     assert.doesNotMatch(html, /payload_json/);
+});
+
+test("renderHelperHtml: contains cross-repo scope and filter surfaces without leaking local paths", () => {
+    const html = renderHelperHtml({
+        instanceId: "inst-1",
+        monitorUrl: "http://127.0.0.1:4320",
+        healthState: "ready",
+        statusCode: 200,
+        healthBody: "{\"status\":\"ready\"}",
+        error: null,
+        token: "token-1",
+        extensionScope: "project",
+    });
+
+    assert.match(html, /拡張スコープ/);
+    assert.match(html, /project/);
+    assert.match(html, /リポジトリ \/ ワークスペース/);
+    assert.match(html, /unknown repository/);
+    assert.match(html, /repositoryFilterKey/);
+    assert.doesNotMatch(html, /process\.cwd/);
+    assert.doesNotMatch(html, /C:\\Users\\/);
+    assert.doesNotMatch(html, /\/Users\//);
+    assert.doesNotMatch(html, /\/home\//);
+    assert.doesNotMatch(html, /\\.github\/extensions\/otel-monitor-canvas/);
+    assert.doesNotMatch(html, /payload_json/);
+    assert.doesNotMatch(html, /console\.log/);
 });
 
 test("summaryTraceLine: derives status from error_count, since /api/monitor/summary's highlight traces (MonitorHost.ToTraceDto shape) carry error_count but no precomputed status field", () => {

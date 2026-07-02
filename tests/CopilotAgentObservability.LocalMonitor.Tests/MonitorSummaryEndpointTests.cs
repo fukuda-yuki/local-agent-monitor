@@ -68,6 +68,23 @@ public class MonitorSummaryEndpointTests
     }
 
     [Fact]
+    public async Task Summary_HighlightTraceObjectsExposeRepositoryMetadata()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        InsertAndProject(store, "trace-repo-summary", RepositoryMetadataJson, minute: 1);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
+
+        var summary = await GetJsonAsync(host, "/api/monitor/summary");
+        var latestTrace = summary.RootElement.GetProperty("latest_trace");
+
+        Assert.Equal("repo-summary", latestTrace.GetProperty("repository_name").GetString());
+        Assert.Equal("workspace-summary", latestTrace.GetProperty("workspace_label").GetString());
+        Assert.Equal("snapshot-summary", latestTrace.GetProperty("repo_snapshot").GetString());
+    }
+
+    [Fact]
     public async Task Summary_NullModelAndClientKind_GroupIntoUnknownBucket()
     {
         using var temp = new MonitorTempDirectory();
@@ -159,7 +176,10 @@ public class MonitorSummaryEndpointTests
                 TurnCount: 1,
                 AgentInvocationCount: 0,
                 DurationMs: 100,
-                PrimaryModel: null),
+                PrimaryModel: null,
+                RepositoryName: null,
+                WorkspaceLabel: null,
+                RepoSnapshot: null),
         };
         var store = new FakeProjectionStore(rows);
         var service = new MonitorSummaryService(store);
@@ -257,6 +277,17 @@ public class MonitorSummaryEndpointTests
             {"key":"gen_ai.prompt","value":{"stringValue":"SECRET_PROMPT_TEXT_MARKER"}},
             {"key":"gen_ai.tool.arguments","value":{"stringValue":"SECRET_TOOL_ARGS_MARKER"}}
           ]}
+        ]}]}]}
+        """;
+
+    private const string RepositoryMetadataJson = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
+          {"key":"repo.name","value":{"stringValue":"repo-summary"}},
+          {"key":"workspace.name","value":{"stringValue":"workspace-summary"}},
+          {"key":"repo.snapshot","value":{"stringValue":"snapshot-summary"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-repo-summary","spanId":"1111111111111111","name":"chat gpt-4o"}
         ]}]}]}
         """;
 

@@ -26,6 +26,51 @@ public class MonitorProjectionBuilderTests
         Assert.Equal(3, contribution.SpanCount);
         Assert.Equal(1, contribution.ToolCallCount);
         Assert.Equal(1, contribution.ErrorCount);
+        Assert.Equal("copilot-agent-observability", contribution.RepositoryName);
+        Assert.Equal("codex-workspace", contribution.WorkspaceLabel);
+        Assert.Equal("sprint16-m2", contribution.RepoSnapshot);
+    }
+
+    [Fact]
+    public void Build_MissingRepositoryMetadataProjectsNulls()
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-no-metadata","spanId":"1111111111111111","name":"chat gpt-4o"}
+        ]}]}]}
+        """;
+        var record = Record("trace-no-metadata", payload);
+
+        var projection = MonitorProjectionBuilder.Build(record);
+
+        var contribution = Assert.Single(projection.TraceContributions);
+        Assert.Null(contribution.RepositoryName);
+        Assert.Null(contribution.WorkspaceLabel);
+        Assert.Null(contribution.RepoSnapshot);
+    }
+
+    [Fact]
+    public void Build_DropsUnsafeRepositoryMetadataValues()
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"repo.name","value":{"stringValue":"leak@example.com"}},
+          {"key":"workspace.name","value":{"stringValue":"C:\\Users\\person\\secret"}},
+          {"key":"repo.snapshot","value":{"stringValue":"Bearer token-marker"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-unsafe","spanId":"1111111111111111","name":"chat gpt-4o"}
+        ]}]}]}
+        """;
+        var record = Record("trace-unsafe", payload);
+
+        var projection = MonitorProjectionBuilder.Build(record);
+
+        var contribution = Assert.Single(projection.TraceContributions);
+        Assert.Null(contribution.RepositoryName);
+        Assert.Null(contribution.WorkspaceLabel);
+        Assert.Null(contribution.RepoSnapshot);
     }
 
     [Fact]
@@ -73,7 +118,10 @@ public class MonitorProjectionBuilderTests
     {
         var payload = """
         {"resourceSpans":[{"resource":{"attributes":[
-          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}}
+          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
+          {"key":"repo.name","value":{"stringValue":"shared-repository"}},
+          {"key":"workspace.name","value":{"stringValue":"shared-workspace"}},
+          {"key":"repo.snapshot","value":{"stringValue":"shared-snapshot"}}
         ]},"scopeSpans":[{"spans":[
           {"traceId":"trace-1","spanId":"1111111111111111","name":"chat gpt-4o"},
           {"traceId":"trace-1","spanId":"2222222222222222","name":"execute_tool"},
@@ -91,6 +139,12 @@ public class MonitorProjectionBuilderTests
         Assert.Equal(2, first.SpanCount);
         Assert.Equal(1, first.ToolCallCount);
         Assert.Equal(1, second.SpanCount);
+        Assert.Equal("shared-repository", first.RepositoryName);
+        Assert.Equal("shared-workspace", first.WorkspaceLabel);
+        Assert.Equal("shared-snapshot", first.RepoSnapshot);
+        Assert.Equal("shared-repository", second.RepositoryName);
+        Assert.Equal("shared-workspace", second.WorkspaceLabel);
+        Assert.Equal("shared-snapshot", second.RepoSnapshot);
     }
 
     [Fact]
@@ -128,7 +182,10 @@ public class MonitorProjectionBuilderTests
           {"key":"task.id","value":{"stringValue":"task-1"}},
           {"key":"task.category","value":{"stringValue":"refactor"}},
           {"key":"agent.variant","value":{"stringValue":"v2"}},
-          {"key":"prompt.version","value":{"stringValue":"p3"}}
+          {"key":"prompt.version","value":{"stringValue":"p3"}},
+          {"key":"repo.name","value":{"stringValue":"copilot-agent-observability"}},
+          {"key":"workspace.name","value":{"stringValue":"codex-workspace"}},
+          {"key":"repo.snapshot","value":{"stringValue":"sprint16-m2"}}
         ]},"scopeSpans":[{"spans":[
           {"traceId":"trace-a","spanId":"1111111111111111","name":"chat gpt-4o"},
           {"traceId":"trace-a","spanId":"2222222222222222","name":"execute_tool"},

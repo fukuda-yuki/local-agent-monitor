@@ -24,8 +24,8 @@ public class MonitorSpanProjectionStoreTests
         var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
 
-        // Verify schema_version = 2.
-        Assert.Equal(2, RawTelemetryStore.MonitorSchemaVersion);
+        // Verify schema_version = 3.
+        Assert.Equal(3, RawTelemetryStore.MonitorSchemaVersion);
 
         // Now run span projection directly (simulate worker phase 2).
         var records = store.ListUnprocessedForSpanProjection(100);
@@ -327,7 +327,8 @@ public class MonitorSpanProjectionStoreTests
                     ClientKind: "vscode-copilot-chat",
                     ExperimentId: null, TaskId: null, TaskCategory: null,
                     AgentVariant: null, PromptVersion: null,
-                    SpanCount: spanCount, ToolCallCount: 0, ErrorCount: 0),
+                    SpanCount: spanCount, ToolCallCount: 0, ErrorCount: 0,
+                    RepositoryName: null, WorkspaceLabel: null, RepoSnapshot: null),
             ]);
 
     /// <summary>

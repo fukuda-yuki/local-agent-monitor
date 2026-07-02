@@ -12,7 +12,7 @@ internal static class MonitorProjectionBuilder
     public static MonitorRecordProjection Build(RawTelemetryRecord record)
     {
         var rows = RawMeasurementNormalizer.Normalize(record.PayloadJson);
-        var (totalSpans, spansByTrace) = CountSpans(record.PayloadJson);
+        var (totalSpans, spansByTrace, metadataByTrace) = CountSpansAndMetadata(record.PayloadJson);
 
         var contributions = new List<MonitorTraceContribution>();
         foreach (var row in rows)
@@ -24,6 +24,7 @@ internal static class MonitorProjectionBuilder
                 continue;
             }
 
+            metadataByTrace.TryGetValue(row.TraceId, out var metadata);
             contributions.Add(new MonitorTraceContribution(
                 TraceId: row.TraceId,
                 ClientKind: row.ClientKind,
@@ -34,7 +35,10 @@ internal static class MonitorProjectionBuilder
                 PromptVersion: row.PromptVersion,
                 SpanCount: spansByTrace.TryGetValue(row.TraceId, out var spanCount) ? spanCount : 0,
                 ToolCallCount: row.ToolCallCount ?? 0,
-                ErrorCount: row.ErrorCount ?? 0));
+                ErrorCount: row.ErrorCount ?? 0,
+                RepositoryName: metadata?.RepositoryName,
+                WorkspaceLabel: metadata?.WorkspaceLabel,
+                RepoSnapshot: metadata?.RepoSnapshot));
         }
 
         var primary = contributions.FirstOrDefault(c => string.Equals(c.TraceId, record.TraceId, StringComparison.Ordinal))
@@ -47,9 +51,10 @@ internal static class MonitorProjectionBuilder
             TraceContributions: contributions);
     }
 
-    private static (int Total, Dictionary<string, int> ByTrace) CountSpans(string payloadJson)
+    private static (int Total, Dictionary<string, int> ByTrace, Dictionary<string, TraceRepositoryMetadata> MetadataByTrace) CountSpansAndMetadata(string payloadJson)
     {
         var byTrace = new Dictionary<string, int>(StringComparer.Ordinal);
+        var metadataByTrace = new Dictionary<string, TraceRepositoryMetadata>(StringComparer.Ordinal);
         var total = 0;
 
         using var document = JsonDocument.Parse(payloadJson);
@@ -58,11 +63,17 @@ internal static class MonitorProjectionBuilder
             || !root.TryGetProperty("resourceSpans", out var resourceSpans)
             || resourceSpans.ValueKind != JsonValueKind.Array)
         {
-            return (0, byTrace);
+            return (0, byTrace, metadataByTrace);
         }
 
         foreach (var resourceSpan in resourceSpans.EnumerateArray())
         {
+            var resourceAttributes = OtlpSpanReader.ReadResourceAttributes(resourceSpan);
+            var resourceMetadata = new TraceRepositoryMetadata(
+                RepositoryName: MeasurementSanitizer.SanitizeFreeFormName(OtlpSpanReader.ReadString(resourceAttributes, "repo.name")),
+                WorkspaceLabel: MeasurementSanitizer.SanitizeFreeFormName(OtlpSpanReader.ReadString(resourceAttributes, "workspace.name")),
+                RepoSnapshot: MeasurementSanitizer.SanitizeFreeFormName(OtlpSpanReader.ReadString(resourceAttributes, "repo.snapshot")));
+
             foreach (var scopeSpan in OtlpSpanReader.EnumerateArrayProperty(resourceSpan, "scopeSpans"))
             {
                 foreach (var span in OtlpSpanReader.EnumerateArrayProperty(scopeSpan, "spans"))
@@ -75,12 +86,27 @@ internal static class MonitorProjectionBuilder
                         if (!string.IsNullOrWhiteSpace(traceId))
                         {
                             byTrace[traceId] = byTrace.TryGetValue(traceId, out var count) ? count + 1 : 1;
+                            metadataByTrace[traceId] = metadataByTrace.TryGetValue(traceId, out var existing)
+                                ? existing.FillNulls(resourceMetadata)
+                                : resourceMetadata;
                         }
                     }
                 }
             }
         }
 
-        return (total, byTrace);
+        return (total, byTrace, metadataByTrace);
+    }
+
+    private sealed record TraceRepositoryMetadata(
+        string? RepositoryName,
+        string? WorkspaceLabel,
+        string? RepoSnapshot)
+    {
+        public TraceRepositoryMetadata FillNulls(TraceRepositoryMetadata next) =>
+            new(
+                RepositoryName ?? next.RepositoryName,
+                WorkspaceLabel ?? next.WorkspaceLabel,
+                RepoSnapshot ?? next.RepoSnapshot);
     }
 }
