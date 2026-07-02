@@ -3,9 +3,9 @@
 ## Scope reviewed
 
 Sprint16 M5 validates the completed M1-M4 cross-repo Canvas adapter work and
-records the remaining live Canvas runtime validation blocker. No production
-code, public interface, projection schema, security policy, dependency, package
-manifest, or lockfile changed in this milestone.
+records live Canvas runtime validation evidence. No production code, public
+interface, projection schema, security policy, dependency, package manifest, or
+lockfile changed in this milestone.
 
 ## Automated validation
 
@@ -56,12 +56,11 @@ test failures.
 
 ## Unverified scope
 
-Live Canvas runtime validation is still unverified in this session because the
-required GitHub Copilot Canvas runtime tool/session was not available here.
-Automated tests are not treated as a replacement. The remaining live checks are
-recorded in `live-validation-blocker.md`.
+No Sprint16 M5 validation scope remains unverified. GitHub Copilot completed
+the user-scope and project-scope live Canvas runtime checks after the automated
+validation pass; evidence is recorded in `live-validation.md`.
 
 ## Outcome
 
-Automated validation and self-review for Sprint16 M5 passed. Sprint16 remains
-blocked on user-scope and project-scope live Canvas runtime validation.
+Automated validation, self-review, and live Canvas runtime validation passed.
+Sprint16 is complete.
