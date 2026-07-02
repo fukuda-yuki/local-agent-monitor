@@ -422,5 +422,23 @@ public class MonitorTraceDetailTests
 
         public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) =>
             throw new NotSupportedException();
+
+        public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
+            throw new NotSupportedException();
+
+        public IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) =>
+            throw new NotSupportedException();
+
+        public IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) =>
+            throw new NotSupportedException();
+
+        public IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) =>
+            throw new NotSupportedException();
+
+        public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) =>
+            throw new NotSupportedException();
+
+        public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) =>
+            throw new NotSupportedException();
     }
 }

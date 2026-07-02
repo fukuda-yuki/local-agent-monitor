@@ -47,6 +47,18 @@ internal interface IMonitorProjectionStore
     RawTelemetryRecord? GetRawRecordById(long id);
 
     IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit);
+
+    MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive);
+
+    IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive);
+
+    IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive);
+
+    IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit);
+
+    IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit);
+
+    MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query);
 }
 
 internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
@@ -104,6 +116,24 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
 
     public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) =>
         Guard(() => store.ListRawRecordsByTraceId(traceId, limit));
+
+    public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
+        Guard(() => store.GetPeriodSummary(startInclusive, endExclusive));
+
+    public IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) =>
+        Guard(() => store.GetPerModelPeriodSummary(startInclusive, endExclusive));
+
+    public IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) =>
+        Guard(() => store.GetHourlyTokenDistribution(startInclusive, endExclusive));
+
+    public IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) =>
+        Guard(() => store.ListTopTokenTraces(startInclusive, endExclusive, limit));
+
+    public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) =>
+        Guard(() => store.ListRecentMonitorTraces(limit));
+
+    public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) =>
+        Guard(() => store.ListMonitorTracesFiltered(query));
 
     private static T Guard<T>(Func<T> operation)
     {

@@ -24,8 +24,8 @@ public class MonitorSpanProjectionStoreTests
         var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
 
-        // Verify schema_version = 3.
-        Assert.Equal(3, RawTelemetryStore.MonitorSchemaVersion);
+        // Verify schema_version = 4 (Sprint18 D044).
+        Assert.Equal(4, RawTelemetryStore.MonitorSchemaVersion);
 
         // Now run span projection directly (simulate worker phase 2).
         var records = store.ListUnprocessedForSpanProjection(100);

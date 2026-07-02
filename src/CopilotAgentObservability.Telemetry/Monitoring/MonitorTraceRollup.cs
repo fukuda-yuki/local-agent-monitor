@@ -7,7 +7,18 @@ internal sealed record MonitorTraceRollup(
     int TurnCount,
     int AgentInvocationCount,
     double? DurationMs,
-    string? PrimaryModel);
+    string? PrimaryModel,
+    int? CacheReadTokens,
+    int? CacheCreationTokens,
+    string TraceStatus);
+
+/// <summary>Wire values for the Sprint18 (D044) trace_status rollup column.</summary>
+internal static class MonitorTraceStatus
+{
+    public const string Ok = "ok";
+    public const string Recovered = "recovered";
+    public const string Unrecovered = "unrecovered";
+}
 
 internal static class MonitorTraceRollupBuilder
 {
@@ -26,10 +37,14 @@ internal static class MonitorTraceRollupBuilder
         long? rootInputSum = null;
         long? rootOutputSum = null;
         long? rootTotalSum = null;
+        long? rootCacheReadSum = null;
+        long? rootCacheCreationSum = null;
         bool hasRootInvokeAgentUsage = false;
         long? chatInputSum = null;
         long? chatOutputSum = null;
         long? chatTotalSum = null;
+        long? chatCacheReadSum = null;
+        long? chatCacheCreationSum = null;
 
         var spanIds = spans
             .Select(span => span.SpanId)
@@ -49,6 +64,8 @@ internal static class MonitorTraceRollupBuilder
                     rootInputSum = AddNullable(rootInputSum, span.InputTokens);
                     rootOutputSum = AddNullable(rootOutputSum, span.OutputTokens);
                     rootTotalSum = AddNullable(rootTotalSum, spanTotal);
+                    rootCacheReadSum = AddNullable(rootCacheReadSum, span.CacheReadTokens);
+                    rootCacheCreationSum = AddNullable(rootCacheCreationSum, span.CacheCreationTokens);
                     hasRootInvokeAgentUsage = true;
                 }
             }
@@ -60,6 +77,8 @@ internal static class MonitorTraceRollupBuilder
                 chatInputSum = AddNullable(chatInputSum, span.InputTokens);
                 chatOutputSum = AddNullable(chatOutputSum, span.OutputTokens);
                 chatTotalSum = AddNullable(chatTotalSum, spanTotal);
+                chatCacheReadSum = AddNullable(chatCacheReadSum, span.CacheReadTokens);
+                chatCacheCreationSum = AddNullable(chatCacheCreationSum, span.CacheCreationTokens);
 
                 var model = span.ResponseModel ?? span.RequestModel;
                 if (model is not null)
@@ -89,18 +108,25 @@ internal static class MonitorTraceRollupBuilder
 
         // No-double-count: prefer root invoke_agent token sums; otherwise use
         // chat/LLM sums. Child invoke_agent usage is never promoted to the trace
-        // headline unless the root/parent agent emitted that aggregate.
+        // headline unless the root/parent agent emitted that aggregate. Cache
+        // token sums follow the same branch (D044).
+        int? cacheReadTokens;
+        int? cacheCreationTokens;
         if (hasRootInvokeAgentUsage)
         {
             inputTokens = ToTokenCount(rootInputSum);
             outputTokens = ToTokenCount(rootOutputSum);
             totalTokens = ToTokenCount(rootTotalSum);
+            cacheReadTokens = ToTokenCount(rootCacheReadSum);
+            cacheCreationTokens = ToTokenCount(rootCacheCreationSum);
         }
         else
         {
             inputTokens = ToTokenCount(chatInputSum);
             outputTokens = ToTokenCount(chatOutputSum);
             totalTokens = ToTokenCount(chatTotalSum);
+            cacheReadTokens = ToTokenCount(chatCacheReadSum);
+            cacheCreationTokens = ToTokenCount(chatCacheCreationSum);
         }
 
         totalTokens ??= AddTokenCounts(inputTokens, outputTokens);
@@ -122,7 +148,47 @@ internal static class MonitorTraceRollupBuilder
             TurnCount: turnCount,
             AgentInvocationCount: agentInvocationCount,
             DurationMs: durationMs,
-            PrimaryModel: primaryModel);
+            PrimaryModel: primaryModel,
+            CacheReadTokens: cacheReadTokens,
+            CacheCreationTokens: cacheCreationTokens,
+            TraceStatus: ComputeTraceStatus(spans));
+    }
+
+    /// <summary>
+    /// D044: no error spans → ok; the trace's last span (by StartTime, falling back
+    /// to SpanOrdinal when StartTime is missing or tied) is an error → unrecovered;
+    /// any other error position → recovered (a later span succeeded after it).
+    /// </summary>
+    private static string ComputeTraceStatus(IReadOnlyList<MonitorSpanProjection> spans)
+    {
+        if (!spans.Any(IsErrorSpan))
+        {
+            return MonitorTraceStatus.Ok;
+        }
+
+        var lastSpan = spans
+            .OrderBy(span => ParseStartMs(span) ?? long.MinValue)
+            .ThenBy(span => span.SpanOrdinal)
+            .LastOrDefault();
+
+        return lastSpan is not null && IsErrorSpan(lastSpan)
+            ? MonitorTraceStatus.Unrecovered
+            : MonitorTraceStatus.Recovered;
+    }
+
+    private static bool IsErrorSpan(MonitorSpanProjection span) =>
+        string.Equals(span.Status, "error", StringComparison.Ordinal);
+
+    private static long? ParseStartMs(MonitorSpanProjection span)
+    {
+        if (span.StartTime is null)
+        {
+            return null;
+        }
+
+        return DateTimeOffset.TryParse(span.StartTime, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var start)
+            ? start.ToUnixTimeMilliseconds()
+            : null;
     }
 
     private static long? AddNullable(long? current, int? value)

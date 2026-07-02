@@ -41,7 +41,10 @@ internal sealed record MonitorTraceRow(
     string? PrimaryModel,
     string? RepositoryName,
     string? WorkspaceLabel,
-    string? RepoSnapshot);
+    string? RepoSnapshot,
+    int? CacheReadTokens,
+    int? CacheCreationTokens,
+    string? TraceStatus);
 
 /// <summary>Backlog and the oldest unprocessed ingestion time, for projection-lag readiness.</summary>
 internal sealed record MonitorProjectionStatus(
@@ -103,3 +106,58 @@ internal sealed record MonitorTraceRollupRow(
     int? AgentInvocationCount,
     double? DurationMs,
     string? PrimaryModel);
+
+/// <summary>
+/// Sanitized aggregate over the <c>monitor_traces</c> rows whose
+/// <c>last_seen_at</c> falls in a [start, end) window (Sprint18 overview, D044).
+/// Sums are numeric-only. <see cref="CacheAwareInputTokens"/> is the input-token
+/// sum restricted to rows with non-NULL cache columns so pre-v4 rows are excluded
+/// from cache-rate denominators (D044 no-backfill rule).
+/// </summary>
+internal sealed record MonitorPeriodSummaryRow(
+    int TraceCount,
+    int ErrorTraceCount,
+    long TotalTokens,
+    long InputTokens,
+    long OutputTokens,
+    long CacheReadTokens,
+    long CacheCreationTokens,
+    long CacheAwareInputTokens);
+
+/// <summary>Per-model slice of <see cref="MonitorPeriodSummaryRow"/> (model is NULL for rows without a projected primary_model).</summary>
+internal sealed record MonitorModelPeriodSummaryRow(
+    string? Model,
+    int TraceCount,
+    int ErrorTraceCount,
+    long TotalTokens,
+    long InputTokens,
+    long OutputTokens,
+    long CacheReadTokens,
+    long CacheCreationTokens,
+    long CacheAwareInputTokens);
+
+/// <summary>Token sum per UTC hour-of-day (00–23) over a [start, end) window; the service shifts to local hours.</summary>
+internal sealed record MonitorHourlyTokensRow(
+    int UtcHour,
+    long TotalTokens);
+
+/// <summary>
+/// Filter/sort/paging query for the Sprint18 trace-list endpoint. TraceIdSearch
+/// is a TraceId substring only (never prompt text, D042 C8). Status is one of
+/// ok / recovered / unrecovered / unknown (unknown = NULL trace_status rows).
+/// Sort is a whitelisted key: tokens / time / duration.
+/// </summary>
+internal sealed record MonitorTraceListQuery(
+    string? TraceIdSearch,
+    string? Model,
+    string? Status,
+    string? StartInclusive,
+    string? EndExclusive,
+    string Sort,
+    int Offset,
+    int Limit);
+
+/// <summary>An offset page of trace rows plus the total row count matching the same filters.</summary>
+internal sealed record MonitorTraceListPage(
+    IReadOnlyList<MonitorTraceRow> Items,
+    int TotalMatched);

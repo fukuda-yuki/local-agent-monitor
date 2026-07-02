@@ -82,6 +82,8 @@ internal static class MonitorHost
         builder.Services.AddSingleton(projectionStore);
         var summaryService = new MonitorSummaryService(projectionStore);
         builder.Services.AddSingleton(summaryService);
+        var overviewService = new MonitorOverviewService(projectionStore, testOptions?.TimeProvider);
+        builder.Services.AddSingleton(overviewService);
         var analysisStore = testOptions?.AnalysisStore ?? new SqliteMonitorAnalysisStore(options.DatabasePath);
         analysisStore.CreateSchema();
         builder.Services.AddSingleton(analysisStore);
@@ -270,6 +272,91 @@ internal static class MonitorHost
                         total_tokens = c.TotalTokens,
                         error_count = c.ErrorCount,
                     }),
+                });
+            }
+            catch (PersistenceBusyException)
+            {
+                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+            }
+        });
+        app.MapGet("/api/monitor/overview", async context =>
+        {
+            var period = context.Request.Query["period"].ToString();
+            if (string.IsNullOrEmpty(period))
+            {
+                period = "today";
+            }
+
+            if (!MonitorOverviewService.IsSupportedPeriod(period))
+            {
+                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_query", "period must be today, 7d, or 30d.");
+                return;
+            }
+
+            try
+            {
+                var overview = overviewService.BuildOverview(period);
+                await WriteJsonAsync(context, new
+                {
+                    period = overview.Period.Period,
+                    range = new
+                    {
+                        start = MonitorOverviewService.FormatUtc(overview.Period.Start),
+                        end = MonitorOverviewService.FormatUtc(overview.Period.End),
+                    },
+                    kpi = new
+                    {
+                        tokens_total = overview.Kpi.TokensTotal,
+                        tokens_previous_period = overview.Kpi.TokensPreviousPeriod,
+                        tokens_change_pct = overview.Kpi.TokensChangePct,
+                        effective_input_tokens = overview.Kpi.EffectiveInputTokens,
+                        cache_compression_pct = overview.Kpi.CacheCompressionPct,
+                        cache_read_rate_pct = overview.Kpi.CacheReadRatePct,
+                        error_trace_count = overview.Kpi.ErrorTraceCount,
+                        trace_count = overview.Kpi.TraceCount,
+                    },
+                    per_model = overview.PerModel.Select(model => new
+                    {
+                        model = model.Model,
+                        trace_count = model.TraceCount,
+                        error_trace_count = model.ErrorTraceCount,
+                        total_tokens = model.TotalTokens,
+                        input_tokens = model.InputTokens,
+                        output_tokens = model.OutputTokens,
+                        cache_read_tokens = model.CacheReadTokens,
+                        cache_creation_tokens = model.CacheCreationTokens,
+                        cache_read_rate_pct = model.CacheReadRatePct,
+                    }),
+                    hourly_tokens = overview.HourlyTokens.Select(hour => new
+                    {
+                        hour = hour.Hour,
+                        total_tokens = hour.TotalTokens,
+                    }),
+                });
+            }
+            catch (PersistenceBusyException)
+            {
+                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+            }
+        });
+        app.MapGet("/api/monitor/trace-list", async context =>
+        {
+            if (!TryParseTraceListQuery(context, overviewService, out var query))
+            {
+                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_query", "trace-list query parameters are invalid.");
+                return;
+            }
+
+            try
+            {
+                var page = projectionStore.ListMonitorTracesFiltered(query);
+                var items = page.Items.Select(ToTraceListDto);
+                await WriteJsonAsync(context, new
+                {
+                    items,
+                    total_matched = page.TotalMatched,
+                    offset = query.Offset,
+                    limit = query.Limit,
                 });
             }
             catch (PersistenceBusyException)
@@ -677,6 +764,107 @@ internal static class MonitorHost
         repo_snapshot = row.RepoSnapshot,
     };
 
+    /// <summary>
+    /// Sprint18 trace-list item: the compactTrace fields plus the v4 cache rollup
+    /// and trace_status (D044). This is a **new** endpoint's shape — the existing
+    /// <see cref="ToTraceDto"/> consumers (`/api/monitor/traces`, `/api/monitor/summary`)
+    /// keep their pinned shape/ordering (D042 C6).
+    /// </summary>
+    private static object ToTraceListDto(MonitorTraceRow row) => new
+    {
+        id = row.Id,
+        trace_id = row.TraceId,
+        client_kind = row.ClientKind,
+        experiment_id = row.ExperimentId,
+        task_id = row.TaskId,
+        task_category = row.TaskCategory,
+        agent_variant = row.AgentVariant,
+        prompt_version = row.PromptVersion,
+        span_count = row.SpanCount,
+        tool_call_count = row.ToolCallCount,
+        error_count = row.ErrorCount,
+        first_seen_at = row.FirstSeenAt,
+        last_seen_at = row.LastSeenAt,
+        projected_at = row.ProjectedAt,
+        input_tokens = row.InputTokens,
+        output_tokens = row.OutputTokens,
+        total_tokens = row.TotalTokens,
+        turn_count = row.TurnCount,
+        agent_invocation_count = row.AgentInvocationCount,
+        duration_ms = row.DurationMs,
+        primary_model = row.PrimaryModel,
+        repository_name = row.RepositoryName,
+        workspace_label = row.WorkspaceLabel,
+        repo_snapshot = row.RepoSnapshot,
+        cache_read_tokens = row.CacheReadTokens,
+        cache_creation_tokens = row.CacheCreationTokens,
+        trace_status = row.TraceStatus,
+    };
+
+    private static bool TryParseTraceListQuery(HttpContext context, MonitorOverviewService overviewService, out MonitorTraceListQuery query)
+    {
+        query = null!;
+
+        var search = context.Request.Query["q"].ToString();
+        var model = context.Request.Query["model"].ToString();
+
+        var status = context.Request.Query["status"].ToString();
+        if (!string.IsNullOrEmpty(status)
+            && status is not ("ok" or "recovered" or "unrecovered" or "unknown"))
+        {
+            return false;
+        }
+
+        string? startInclusive = null;
+        string? endExclusive = null;
+        var period = context.Request.Query["period"].ToString();
+        if (!string.IsNullOrEmpty(period) && !string.Equals(period, "all", StringComparison.Ordinal))
+        {
+            if (!MonitorOverviewService.IsSupportedPeriod(period))
+            {
+                return false;
+            }
+
+            var resolved = overviewService.ResolvePeriod(period);
+            startInclusive = MonitorOverviewService.FormatUtc(resolved.Start);
+            endExclusive = MonitorOverviewService.FormatUtc(resolved.End);
+        }
+
+        var sort = context.Request.Query["sort"].ToString();
+        if (string.IsNullOrEmpty(sort))
+        {
+            sort = "tokens";
+        }
+        else if (sort is not ("tokens" or "time" or "duration"))
+        {
+            return false;
+        }
+
+        var offset = 0;
+        var offsetValue = context.Request.Query["offset"].ToString();
+        if (!string.IsNullOrEmpty(offsetValue)
+            && (!int.TryParse(offsetValue, NumberStyles.None, CultureInfo.InvariantCulture, out offset) || offset < 0))
+        {
+            return false;
+        }
+
+        if (!TryParseLimitQuery(context, out var limit))
+        {
+            return false;
+        }
+
+        query = new MonitorTraceListQuery(
+            TraceIdSearch: string.IsNullOrWhiteSpace(search) ? null : search.Trim(),
+            Model: string.IsNullOrWhiteSpace(model) ? null : model,
+            Status: string.IsNullOrEmpty(status) ? null : status,
+            StartInclusive: startInclusive,
+            EndExclusive: endExclusive,
+            Sort: sort,
+            Offset: offset,
+            Limit: limit);
+        return true;
+    }
+
     private static object ToRunDto(MonitorAnalysisRun run, bool includeRawResult) => new
     {
         id = run.Id,
@@ -823,6 +1011,8 @@ internal sealed class MonitorHostTestOptions
     public IMonitorAnalysisRunner? AnalysisRunner { get; init; }
 
     public bool StartProjectionWorker { get; init; } = true;
+
+    public TimeProvider? TimeProvider { get; init; }
 
     public TimeSpan? ProjectionPollInterval { get; init; }
 

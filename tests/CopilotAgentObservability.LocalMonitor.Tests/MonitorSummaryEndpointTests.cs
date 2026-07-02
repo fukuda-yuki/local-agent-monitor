@@ -179,7 +179,10 @@ public class MonitorSummaryEndpointTests
                 PrimaryModel: null,
                 RepositoryName: null,
                 WorkspaceLabel: null,
-                RepoSnapshot: null),
+                RepoSnapshot: null,
+                CacheReadTokens: null,
+                CacheCreationTokens: null,
+                TraceStatus: null),
         };
         var store = new FakeProjectionStore(rows);
         var service = new MonitorSummaryService(store);
@@ -326,5 +329,17 @@ public class MonitorSummaryEndpointTests
         public RawTelemetryRecord? GetRawRecordById(long id) => null;
 
         public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) => [];
+
+        public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) => new(0, 0, 0, 0, 0, 0, 0, 0);
+
+        public IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) => [];
+
+        public IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) => [];
+
+        public IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) => [];
+
+        public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => traces.ToList();
+
+        public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => new([], 0);
     }
 }

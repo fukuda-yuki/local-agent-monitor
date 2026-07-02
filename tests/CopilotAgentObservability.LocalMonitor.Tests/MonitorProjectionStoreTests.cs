@@ -106,7 +106,7 @@ public class MonitorProjectionStoreTests
         var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
 
-        Assert.Equal(3, RawTelemetryStore.MonitorSchemaVersion);
+        Assert.Equal(4, RawTelemetryStore.MonitorSchemaVersion);
         var trace = Assert.Single(store.ListMonitorTraces(0, 100).Items);
         Assert.Equal("legacy-trace", trace.TraceId);
         Assert.Null(trace.RepositoryName);
@@ -221,6 +221,7 @@ public class MonitorProjectionStoreTests
                 "PromptVersion", "SpanCount", "ToolCallCount", "ErrorCount", "FirstSeenAt", "LastSeenAt", "ProjectedAt",
                 "InputTokens", "OutputTokens", "TotalTokens", "TurnCount", "AgentInvocationCount", "DurationMs", "PrimaryModel",
                 "RepositoryName", "WorkspaceLabel", "RepoSnapshot",
+                "CacheReadTokens", "CacheCreationTokens", "TraceStatus",
             },
             trace);
 

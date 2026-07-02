@@ -1,6 +1,6 @@
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class RawTelemetryStore
+internal sealed partial class RawTelemetryStore
 {
     private readonly string databasePath;
     private readonly RawTelemetryStoreConnectionOptions connectionOptions;
@@ -11,7 +11,7 @@ internal sealed class RawTelemetryStore
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
     }
 
-    public const int MonitorSchemaVersion = 3;
+    public const int MonitorSchemaVersion = 4;
 
     public void CreateSchema()
     {
@@ -127,7 +127,10 @@ internal sealed class RawTelemetryStore
                 primary_model TEXT NULL,
                 repository_name TEXT NULL,
                 workspace_label TEXT NULL,
-                repo_snapshot TEXT NULL
+                repo_snapshot TEXT NULL,
+                cache_read_tokens INTEGER NULL,
+                cache_creation_tokens INTEGER NULL,
+                trace_status TEXT NULL
             );
             """);
         ExecuteNonQuery(
@@ -187,6 +190,11 @@ internal sealed class RawTelemetryStore
         AddColumnIfMissing(connection, "monitor_traces", "repository_name", "TEXT NULL");
         AddColumnIfMissing(connection, "monitor_traces", "workspace_label", "TEXT NULL");
         AddColumnIfMissing(connection, "monitor_traces", "repo_snapshot", "TEXT NULL");
+        // v4 (Sprint18, D044): cache token rollup + trace_status. Additive only;
+        // existing rows keep NULL (no backfill) and read as "unknown".
+        AddColumnIfMissing(connection, "monitor_traces", "cache_read_tokens", "INTEGER NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "cache_creation_tokens", "INTEGER NULL");
+        AddColumnIfMissing(connection, "monitor_traces", "trace_status", "TEXT NULL");
 
         ExecuteNonQuery(
             connection,
@@ -482,7 +490,7 @@ internal sealed class RawTelemetryStore
             SELECT id, trace_id, client_kind, experiment_id, task_id, task_category, agent_variant, prompt_version,
                    span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at,
                    input_tokens, output_tokens, total_tokens, turn_count, agent_invocation_count, duration_ms, primary_model,
-                   repository_name, workspace_label, repo_snapshot
+                   repository_name, workspace_label, repo_snapshot, cache_read_tokens, cache_creation_tokens, trace_status
             FROM monitor_traces
             WHERE id > $after
             ORDER BY id
@@ -519,7 +527,10 @@ internal sealed class RawTelemetryStore
                 PrimaryModel: reader.IsDBNull(20) ? null : reader.GetString(20),
                 RepositoryName: reader.IsDBNull(21) ? null : reader.GetString(21),
                 WorkspaceLabel: reader.IsDBNull(22) ? null : reader.GetString(22),
-                RepoSnapshot: reader.IsDBNull(23) ? null : reader.GetString(23)));
+                RepoSnapshot: reader.IsDBNull(23) ? null : reader.GetString(23),
+                CacheReadTokens: reader.IsDBNull(24) ? null : reader.GetInt32(24),
+                CacheCreationTokens: reader.IsDBNull(25) ? null : reader.GetInt32(25),
+                TraceStatus: reader.IsDBNull(26) ? null : reader.GetString(26)));
         }
 
         return BuildPage(items, limit);
@@ -538,7 +549,7 @@ internal sealed class RawTelemetryStore
             SELECT id, trace_id, client_kind, experiment_id, task_id, task_category, agent_variant, prompt_version,
                    span_count, tool_call_count, error_count, first_seen_at, last_seen_at, projected_at,
                    input_tokens, output_tokens, total_tokens, turn_count, agent_invocation_count, duration_ms, primary_model,
-                   repository_name, workspace_label, repo_snapshot
+                   repository_name, workspace_label, repo_snapshot, cache_read_tokens, cache_creation_tokens, trace_status
             FROM monitor_traces
             WHERE trace_id = $trace_id;
             """;
@@ -574,7 +585,10 @@ internal sealed class RawTelemetryStore
             PrimaryModel: reader.IsDBNull(20) ? null : reader.GetString(20),
             RepositoryName: reader.IsDBNull(21) ? null : reader.GetString(21),
             WorkspaceLabel: reader.IsDBNull(22) ? null : reader.GetString(22),
-            RepoSnapshot: reader.IsDBNull(23) ? null : reader.GetString(23));
+            RepoSnapshot: reader.IsDBNull(23) ? null : reader.GetString(23),
+            CacheReadTokens: reader.IsDBNull(24) ? null : reader.GetInt32(24),
+            CacheCreationTokens: reader.IsDBNull(25) ? null : reader.GetInt32(25),
+            TraceStatus: reader.IsDBNull(26) ? null : reader.GetString(26));
     }
 
     /// <summary>Fetches one raw record by id for the opt-in raw-detail route; null if not found.</summary>
@@ -778,7 +792,8 @@ internal sealed class RawTelemetryStore
                     """
                     SELECT trace_id, span_id, parent_span_id, span_ordinal,
                            operation, category, input_tokens, output_tokens, total_tokens,
-                           request_model, response_model, start_time, end_time
+                           request_model, response_model, start_time, end_time,
+                           cache_read_tokens, cache_creation_tokens, status
                     FROM monitor_spans
                     WHERE trace_id = $trace_id
                     ORDER BY raw_record_id, span_ordinal;
@@ -805,9 +820,9 @@ internal sealed class RawTelemetryStore
                         OutputTokens: sr.IsDBNull(7) ? null : sr.GetInt32(7),
                         TotalTokens: sr.IsDBNull(8) ? null : sr.GetInt32(8),
                         ReasoningTokens: null,
-                        CacheReadTokens: null,
-                        CacheCreationTokens: null,
-                        Status: null,
+                        CacheReadTokens: sr.IsDBNull(13) ? null : sr.GetInt32(13),
+                        CacheCreationTokens: sr.IsDBNull(14) ? null : sr.GetInt32(14),
+                        Status: sr.IsDBNull(15) ? null : sr.GetString(15),
                         ErrorType: null,
                         FinishReasons: null,
                         ConversationId: null,
@@ -826,7 +841,9 @@ internal sealed class RawTelemetryStore
                 UPDATE monitor_traces
                 SET input_tokens = $it, output_tokens = $ot, total_tokens = $tt,
                     turn_count = $turn, agent_invocation_count = $aic,
-                    duration_ms = $dur, primary_model = $pm
+                    duration_ms = $dur, primary_model = $pm,
+                    cache_read_tokens = $crt, cache_creation_tokens = $cct,
+                    trace_status = $ts
                 WHERE trace_id = $trace_id;
                 """;
             AddParameter(updateTrace, "$it", rollup.InputTokens);
@@ -836,6 +853,9 @@ internal sealed class RawTelemetryStore
             AddParameter(updateTrace, "$aic", rollup.AgentInvocationCount);
             AddParameter(updateTrace, "$dur", rollup.DurationMs);
             AddParameter(updateTrace, "$pm", rollup.PrimaryModel);
+            AddParameter(updateTrace, "$crt", rollup.CacheReadTokens);
+            AddParameter(updateTrace, "$cct", rollup.CacheCreationTokens);
+            AddParameter(updateTrace, "$ts", rollup.TraceStatus);
             AddParameter(updateTrace, "$trace_id", traceId!);
             updateTrace.ExecuteNonQuery();
         }
