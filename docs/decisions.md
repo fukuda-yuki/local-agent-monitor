@@ -1275,3 +1275,116 @@ Sprint17 では Canvas helper の既存 `POST /analyze` → `session.send({ prom
   sensitive path、raw OTLP payload を返さない。
 - Local Monitor raw analysis runner は引き続き Local Monitor 本体の raw-default
   local surface であり、Canvas helper analysis UX とは別経路である。
+
+## D042: Local Monitor UI は Sprint18 デザインハンドオフの Console 型 IA / hex トークン / 7 画面へ再設計する
+
+Status: Accepted
+
+Sprint18 では Local Ingestion Monitor の UI を
+`.claude/design_handoff_local_monitor/README.md`（2026-07-03 確定版）に従い
+全面再設計する。開発者を最優先ユーザー、token コストの把握・削減を最重要
+シナリオとし、Console 型 IA（208px 左サイドバー + master-detail）を採用する。
+
+決定事項:
+
+- ナビゲーションは **2 項目のみ**（概要 / トレース。トレースに件数バッジ）。
+  「診断」はナビから外し、サイドバー最下部の受信ステータスバッジ →
+  ポップオーバー → 「詳細診断を開く」の段階的動線とする。`/diagnostics` への
+  直接 URL アクセスは引き続き機能する。診断ページ自身でもナビは 2 項目とする
+  （確定 IA テキストがカンバス A4 の 3 項目サイドバーより優先。C1）。
+- 実装対象画面は 7 つ: 概要ダッシュボード / トレース一覧（master-detail）/
+  トレース詳細（フロー・waterfall 切替 + キャッシュ列）/ スパンインスペクタ
+  （詳細画面内パネル）/ エラー解析モード（詳細画面バリアント）/ Copilot 解析
+  ドロワー / 診断。インスペクタ・エラーモード・ドロワーは route を増やさず
+  トレース詳細ページ内の状態とする。
+- デザイントークンはハンドオフ §10 の **hex 実測値を正**とし、`monitor.css`
+  `:root` を OKLCH から hex リテラルへ書き換える。`DESIGN.md` も hex を
+  authoritative と宣言する（ピクセル忠実再現の指示による。C2）。
+- トレース詳細のタブ（Summary / Timeline / Flow Chart / Cache）は**廃止**し、
+  フロー | waterfall セグメント切替 + 常設キャッシュ列の 1 画面構成にする（C3）。
+- トレース一覧はカードリストからテーブル + 右プレビューパネル（392px）の
+  master-detail へ変更する。route `/traces` は不変（C4）。
+- 取り込み履歴は新 route を作らず、診断ページ下部の折りたたみセクション
+  （既存 `GET /api/monitor/ingestions` を使用）とし、ポップオーバーの
+  「取り込み履歴」ボタンは `/diagnostics#ingestion-history` へリンクする（C5）。
+- 既存 public routes（`/api/monitor/*`、`/health/*`、`/events`、`/v1/traces`、
+  既存 raw-bearing routes）は shape / ordering を変えない。新規需要はすべて
+  **新規 endpoint** で満たす。`CanvasExtensionContractTests.cs` は無変更のまま
+  green を維持する（C6）。
+- Noto フォントの weight 600 は vendored されていないため、デザインの 600 は
+  CSS 上 700 へマップする（記録済みの accepted deviation。C7）。
+- プロンプト検索は server 側 TraceId 部分一致 + client 側での読み込み済み行の
+  prompt label フィルタに限定する。全コーパスの prompt 全文検索は scope 外
+  （documented limitation、`docs/task.md` の follow-up。C8）。
+
+不変:
+
+- sanitized / raw 境界（D020 / D023 / D032 / D035 / D039)、loopback bind、
+  Host-header 検証、same-origin / no-store / `--sanitized-only` 除去、
+  `createElement` / `textContent` による DOM 生成（`innerHTML` 不使用）、
+  vendored fonts（CDN 不可）は維持する。
+- readiness contract（既定しきい値、単位、設定名、HTTP status mapping、
+  機械可読 body）は変更しない。
+
+## D043: スパンインスペクタ用に raw-bearing JSON route `GET /traces/{traceId}/spans/{spanId}/detail` を追加する
+
+Status: Accepted
+
+Sprint18 のスパンインスペクタ（整形 / raw タブ）は span 単位の raw 由来
+詳細（tool 呼出引数・結果末尾、llm メッセージ構成・プレビュー、OTLP span
+JSON 全文）を必要とする。既存の `/api/monitor/*` は sanitized-only を維持
+するため、D032 / D035 / D039 と同じ route-boundary パターンで **新規
+raw-bearing JSON route** を追加する。
+
+- `GET /traces/{traceId}/spans/{spanId}/detail` は `/api/monitor/*` 外の
+  raw-bearing route とし、`!options.SanitizedOnly` ブロック内でのみ登録する
+  （`--sanitized-only` 時は route 不在 = `404`）。
+- `MonitorHost.IsCrossSiteRequest` による same-origin 強制（cross-site は
+  `403`）と `Cache-Control: no-store` を適用する。未知の trace / span id は
+  `404`。
+- 抽出は新設 `SpanDetailExtractor`（`MonitorPromptExtractor` と同じく pure /
+  exception-safe / best-effort）が行い、整形抽出が失敗しても raw span JSON
+  は常に返す（raw タブは常に機能する）。
+- 実ペイロードのキー名は live 検証まで未確定のため、抽出は defensive に実装し
+  live-validation caveat を残す（D032 の prompt extractor と同じ扱い）。
+- `/api/monitor/*` と SSE は引き続き raw / PII を返さない。
+
+## D044: monitor projection schema v4 で cache token rollup と trace_status を追加する
+
+Status: Accepted
+
+Sprint18 の概要 KPI（実効入力換算、キャッシュ読取率）とトレース一覧
+（cache% 列、状態フィルタ）は trace 単位の cache token 集計と回復状態を
+必要とする。`monitor_traces` に additive migration（v3 → v4）で以下を追加
+する。
+
+- `cache_read_tokens INTEGER NULL` / `cache_creation_tokens INTEGER NULL`:
+  既存 token 集計と同じ root-invoke-agent-else-chat の二重計上防止規則で
+  合算する。
+- `trace_status TEXT NULL`（`ok` | `recovered` | `unrecovered`）: エラー span
+  なし → `ok`、最終 span（StartTime、同値時 SpanOrdinal fallback）がエラー →
+  `unrecovered`、それ以外 → `recovered`。
+- 既存行は backfill しない（D040 前例）。NULL は率計算から除外し、一覧の
+  状態フィルタでは「unknown」として中立マーカー扱いする（documented
+  limitation）。
+- `MonitorSchemaVersion` を 3 から 4 へ上げる。migration は
+  `AddColumnIfMissing` による additive-only とする。
+
+## D045: Copilot ドロワーの追い質問は履歴再送（history resend）方式とする
+
+Status: Accepted
+
+Sprint18 の Copilot 解析ドロワーはチャット形式の追い質問を提供するが、
+server 側に会話 session 状態を持たない。
+
+- 各追い質問は**新規 analysis run** を作成し、その prompt に過去の Q&A
+  transcript を埋め込んで再送する（history resend）。
+- transcript はクライアント（ドロワー JS、trace 単位）が保持する。
+  `monitor_analysis_runs` schema は変更しない。履歴は server 側へ永続化
+  しない。
+- `AnalysisStartPayload` に optional `Question` と `History`（Q&A turn の
+  list）を追加し、runner の prompt 組み立てで既存 focus 指示に履歴ブロック +
+  追い質問を追記する。raw の取り扱い・route 境界・CSRF / same-origin /
+  no-store / `--sanitized-only` 無効化は D035 のまま変更しない。
+- ドロワーには「ローカル SDK 経由 · raw はローカルから出ません」の
+  データ境界コピーを必須表示する。

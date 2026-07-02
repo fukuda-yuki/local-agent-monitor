@@ -501,6 +501,45 @@ Sprint17 Canvas analysis requested options:
   the helper UI cancels in-flight Copilot agent work after `session.send()`
   succeeds.
 
+Sprint18 Local Monitor UI redesign (D042/D043/D044/D045):
+
+- **New raw-bearing JSON route, `GET /traces/{traceId}/spans/{spanId}/detail`
+  (D043).** Serves the span inspector's formatted / raw tabs. Follows the same
+  route-boundary pattern as D035/D039: not part of `/api/monitor/*`, registered
+  only inside the `!options.SanitizedOnly` block (route absent → `404` under
+  `--sanitized-only`), `MonitorHost.IsCrossSiteRequest` same-origin check
+  (`403` on cross-site), and `Cache-Control: no-store`. Unknown trace / span id
+  returns `404`. The response may contain tool call arguments, tool result tail
+  lines, per-role message previews, response previews, and the raw OTLP span
+  JSON — all of which are local runtime data for the single trusted local user
+  and must never appear in logs or repository-committed outputs. Extraction is
+  best-effort (`SpanDetailExtractor`, pure / exception-safe); the raw span JSON
+  is always returned even when formatted extraction fails.
+- **New sanitized endpoints `GET /api/monitor/overview` and
+  `GET /api/monitor/trace-list` (D044).** Both stay inside the sanitized
+  `/api/monitor/*` boundary: numeric aggregates, model names (already
+  sanitizer-guarded), enum-like `trace_status`, timestamps, and opaque trace
+  ids only. No prompt text, raw payload, tool arguments/results, or PII. The
+  trace-list `q` parameter matches TraceId substrings server-side only; prompt
+  search happens client-side over prompt labels the raw-bearing pages already
+  loaded (D042 C8) and never adds a prompt field to `/api/monitor/*`.
+- **Schema v4 rollup columns (D044)** (`cache_read_tokens`,
+  `cache_creation_tokens`, `trace_status` on `monitor_traces`) are numeric /
+  enum-like sanitized projection metadata, additive-only, no backfill.
+- **Copilot drawer follow-up chat = history resend (D045).** The analysis start
+  payload gains optional `question` / `history` (prior Q&A turns held by the
+  drawer client, per trace). Each follow-up creates a new local analysis run;
+  no server-side chat session state and no `monitor_analysis_runs` schema
+  change. The existing analysis route boundary is unchanged: CSRF + same-origin
+  on start, `no-store` on results, routes removed under `--sanitized-only`,
+  results are local runtime data. The submitted question / history become part
+  of the local analysis run's raw-derived local data and must not leak into
+  logs or repository-safe summaries.
+- The redesigned UI keeps the existing rendering invariants: server-rendered
+  raw-bearing content stays escaped inert text; client-side JS builds DOM via
+  `createElement` / `textContent` only (no `innerHTML`), and sanitized-context
+  pages never fetch raw-bearing routes.
+
 Sprint12 UX redesign (prompt identification + DOM views, boundary controls
 reused):
 
