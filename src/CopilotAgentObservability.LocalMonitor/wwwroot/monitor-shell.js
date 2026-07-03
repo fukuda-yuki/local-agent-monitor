@@ -3,7 +3,7 @@
 // Sanitized boundary: this script reads only /health/ready and the sanitized
 // /api/monitor/* JSON. It never fetches a raw-bearing route and never inserts
 // raw payloads or PII into the DOM. All DOM nodes are built with
-// createElement / textContent (no innerHTML).
+// createElement / textContent; no markup strings are ever injected.
 (() => {
   "use strict";
 

@@ -6,7 +6,7 @@
 // (GET /traces/{id}/prompt-label), and only when the server rendered the page
 // in the raw-default posture (data-raw-available="true"); under
 // --sanitized-only the route is absent and this script never calls it. All DOM
-// nodes are built with createElement / textContent (no innerHTML).
+// nodes are built with createElement / textContent; no markup strings are ever injected.
 (() => {
   "use strict";
 

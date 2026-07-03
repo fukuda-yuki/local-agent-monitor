@@ -2,155 +2,134 @@
 @model TraceDetailModel
 @{
     var title = Model.PromptLabel ?? $"Trace {MonitorViewFormat.ShortTraceId(Model.TraceId)}";
-    var spanCount = Model.Trace.SpanCount;
-    var hasError = (Model.Trace.ErrorCount ?? 0) > 0;
-    var traceStatusLabel = hasError ? "要確認" : "正常";
-    var traceStatusClass = hasError ? "error" : "success";
+    var (statusLabel, statusClass) = Model.Trace.TraceStatus switch
+    {
+        "ok" => ("正常 · 完了", "status-ok"),
+        "recovered" => ("エラー · 回復済み", "status-recovered"),
+        "unrecovered" => ("エラー · 異常終了", "status-unrecovered"),
+        _ => ((Model.Trace.ErrorCount ?? 0) > 0 ? ("エラーあり", "status-recovered") : ("状態不明", "status-unknown")),
+    };
+    var cacheRead = (long)(Model.Trace.CacheReadTokens ?? 0);
+    var uncachedInput = Math.Max(0L, (Model.Trace.InputTokens ?? 0) - cacheRead);
+    var output = (long)(Model.Trace.OutputTokens ?? 0);
+    var isErrorTrace = Model.Trace.TraceStatus is "recovered" or "unrecovered" || (Model.Trace.ErrorCount ?? 0) > 0;
 }
 
-<section class="monitor-section trace-detail-page">
-    <nav class="breadcrumb" aria-label="パンくず">
-        <a href="/">ダッシュボード</a><span class="breadcrumb-sep">›</span>
+<section class="trace-detail-page" id="trace-detail-root"
+         data-trace-id="@Model.TraceId"
+         data-raw-available="@(Model.RawAvailable ? "true" : "false")"
+         data-trace-status="@(Model.Trace.TraceStatus ?? "")"
+         data-error-trace="@(isErrorTrace ? "true" : "false")">
+    <nav class="breadcrumb detail-breadcrumb" aria-label="パンくず">
+        <a href="/">概要</a><span class="breadcrumb-sep">›</span>
         <a href="/traces">トレース</a><span class="breadcrumb-sep">›</span>
         <span class="breadcrumb-current">@title</span>
+        <span class="breadcrumb-actions">
+            @if (Model.RawAvailable)
+            {
+                <button type="button" class="copilot-open-btn" id="copilot-open" aria-haspopup="dialog">
+                    <svg class="copilot-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="4" width="11" height="8" rx="2.5"/><circle cx="6" cy="8" r="0.9" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="0.9" fill="currentColor" stroke="none"/><path d="M8 4V2.2"/></svg>
+                    Copilot で解析
+                </button>
+            }
+            @if (Model.PrevTraceId is { } prev)
+            {
+                <a class="nav-adjacent" href="/traces/@prev">← 前</a>
+            }
+            else
+            {
+                <span class="nav-adjacent disabled">← 前</span>
+            }
+            @if (Model.NextTraceId is { } next)
+            {
+                <a class="nav-adjacent" href="/traces/@next">次 →</a>
+            }
+            else
+            {
+                <span class="nav-adjacent disabled">次 →</span>
+            }
+        </span>
     </nav>
 
-    <div class="trace-hero">
-        <div class="trace-hero-main">
-            <p class="page-kicker">Trace Detail</p>
-            <h2 class="monitor-page-title trace-detail-title">@title</h2>
-            <div class="trace-detail-id monitor-mono">TraceId: @Model.TraceId</div>
-        </div>
-        <div class="trace-health-pill @traceStatusClass">
-            <span class="trace-status-dot" aria-hidden="true"></span>
-            <span>@traceStatusLabel</span>
-        </div>
-    </div>
-
-    <div class="metric-grid trace-metric-grid">
-        <div class="metric-card metric-card-llm">
-            <div class="metric-label">トークン</div>
-            <div class="metric-value">@MonitorViewFormat.Tokens(Model.Trace.TotalTokens)</div>
-            <div class="metric-sub">入力 @MonitorViewFormat.Tokens(Model.Trace.InputTokens) / 出力 @MonitorViewFormat.Tokens(Model.Trace.OutputTokens)</div>
-        </div>
-        <div class="metric-card metric-card-accent">
-            <div class="metric-label">所要時間</div>
-            <div class="metric-value">@MonitorViewFormat.Duration(Model.Trace.DurationMs)</div>
-            <div class="metric-sub">@MonitorViewFormat.Count(spanCount) スパン</div>
-        </div>
-        <div class="metric-card @(hasError ? "metric-card-error" : "metric-card-ok")">
-            <div class="metric-label">エラー</div>
-            <div class="metric-value">@MonitorViewFormat.Count(Model.Trace.ErrorCount)</div>
-            <div class="metric-sub">タイムラインで絞り込み可能</div>
-        </div>
-        <div class="metric-card metric-card-agent">
-            <div class="metric-label">ターン数</div>
-            <div class="metric-value">@MonitorViewFormat.Count(Model.Trace.TurnCount)</div>
-            <div class="metric-sub">エージェント呼出 @MonitorViewFormat.Count(Model.Trace.AgentInvocationCount)</div>
-        </div>
-    </div>
-
-    <div class="trace-action-grid" aria-label="このトレースで見る観点">
-        <button class="trace-action-card" type="button" data-open-tab="tab-timeline">
-            <span class="trace-action-label">失敗と遅延を見る</span>
-            <span class="trace-action-copy">span を時刻順または tokens 順で確認</span>
-        </button>
-        <button class="trace-action-card" type="button" data-open-tab="tab-tree">
-            <span class="trace-action-label">実行の流れを見る</span>
-            <span class="trace-action-copy">親子関係と waterfall を確認</span>
-        </button>
-        <button class="trace-action-card" type="button" data-open-tab="tab-cache">
-            <span class="trace-action-label">キャッシュを見る</span>
-            <span class="trace-action-copy">cache hit rate と token breakdown を確認</span>
-        </button>
-    </div>
-
-    <div class="monitor-tabs tabs" role="tablist" aria-label="トレースビュー">
-        <button class="monitor-tab tab" type="button" role="tab" id="tab-summary" aria-controls="panel-summary" aria-selected="true" tabindex="0">概要</button>
-        <button class="monitor-tab tab" type="button" role="tab" id="tab-timeline" aria-controls="panel-timeline" aria-selected="false" tabindex="-1">タイムライン<span class="tab-badge tab-badge-gray">@MonitorViewFormat.Count(spanCount)</span></button>
-        <button class="monitor-tab tab" type="button" role="tab" id="tab-tree" aria-controls="panel-tree" aria-selected="false" tabindex="-1">ツリー / フロー<span class="tab-badge tab-badge-blue">@MonitorViewFormat.Count(spanCount)</span></button>
-        <button class="monitor-tab tab" type="button" role="tab" id="tab-cache" aria-controls="panel-cache" aria-selected="false" tabindex="-1">キャッシュ</button>
-    </div>
-
-    <div class="monitor-tab-content tab-panel" id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
-        <div class="summary-panel">
-            <div class="panel-head">
-                <span class="panel-title">基本情報</span>
+    <div class="detail-head">
+        <div class="detail-head-main">
+            <h2 class="detail-title">@title</h2>
+            <div class="detail-title-row">
+                <span class="status-pill @statusClass"><span class="trace-status-dot @statusClass" aria-hidden="true"></span>@statusLabel</span>
             </div>
-            <div class="monitor-table-wrapper">
-                <table class="monitor-table">
-                    <tbody>
-                        <tr><th>クライアント</th><td>@(string.IsNullOrEmpty(Model.Trace.ClientKind) ? "—" : Model.Trace.ClientKind)</td></tr>
-                        <tr><th>モデル</th><td>@(string.IsNullOrEmpty(Model.Trace.PrimaryModel) ? "—" : Model.Trace.PrimaryModel)</td></tr>
-                        <tr><th>エージェント呼出</th><td>@MonitorViewFormat.Count(Model.Trace.AgentInvocationCount)</td></tr>
-                        <tr><th>ツール呼出</th><td>@MonitorViewFormat.Count(Model.Trace.ToolCallCount)</td></tr>
-                        <tr><th>スパン数</th><td>@MonitorViewFormat.Count(spanCount)</td></tr>
-                        <tr><th>初回 / 最終</th><td>@MonitorViewFormat.RelativeTime(Model.Trace.FirstSeenAt) / @MonitorViewFormat.RelativeTime(Model.Trace.LastSeenAt)</td></tr>
-                    </tbody>
-                </table>
+            <p class="detail-meta">
+                <span class="monitor-mono">@MonitorViewFormat.ShortTraceId(Model.TraceId)</span>
+                <span>@(Model.Trace.PrimaryModel ?? "モデル不明")</span>
+                @if (!string.IsNullOrEmpty(Model.Trace.ClientKind))
+                {
+                    <span>@Model.Trace.ClientKind</span>
+                }
+                <span>@MonitorViewFormat.Count(Model.Trace.TurnCount) ターン · @MonitorViewFormat.Count(Model.Trace.ToolCallCount) ツール呼出</span>
+                <span>@MonitorViewFormat.RelativeTime(Model.Trace.FirstSeenAt) 開始 · @MonitorViewFormat.Duration(Model.Trace.DurationMs)</span>
+            </p>
+        </div>
+        <div class="token-total-card">
+            <span class="token-total-label">トークン合計</span>
+            <span class="token-total-value monitor-mono">@MonitorViewFormat.Tokens(Model.Trace.TotalTokens)</span>
+            <div class="preview-token-bar token-total-bar">
+                <span class="bar-seg seg-cache" style="flex-grow: @cacheRead"></span>
+                <span class="bar-seg seg-input" style="flex-grow: @uncachedInput"></span>
+                <span class="bar-seg seg-output" style="flex-grow: @output"></span>
             </div>
+            <span class="token-total-legend">
+                <span class="legend-item"><span class="legend-swatch swatch-cache" aria-hidden="true"></span>キャッシュ @MonitorViewFormat.CompactTokens(Model.Trace.CacheReadTokens is null ? null : cacheRead)</span>
+                <span class="legend-item"><span class="legend-swatch swatch-input" aria-hidden="true"></span>入力 @MonitorViewFormat.CompactTokens(uncachedInput)</span>
+                <span class="legend-item"><span class="legend-swatch swatch-output" aria-hidden="true"></span>出力 @MonitorViewFormat.CompactTokens(output)</span>
+            </span>
         </div>
     </div>
 
-    <div class="monitor-tab-content tab-panel" id="panel-timeline" role="tabpanel" aria-labelledby="tab-timeline" hidden>
-        <div class="timeline-toolbar" data-timeline-trace-id="@Model.TraceId">
-            <label class="timeline-filter">
-                <input id="timeline-errors-only" type="checkbox" />
-                エラーのみ
-            </label>
-            <fieldset class="segmented-control" aria-label="タイムライン並び替え">
-                <legend>並び替え</legend>
-                <label>
-                    <input type="radio" name="timeline-sort" value="time" checked />
-                    <span>時刻</span>
+    <div class="error-strip" id="error-strip" hidden>
+        <span class="error-strip-icon" aria-hidden="true">!</span>
+        <span class="error-strip-text" id="error-strip-text"></span>
+        <span class="error-strip-actions">
+            <button type="button" id="error-first-btn">最初のエラーへ</button>
+            <button type="button" id="errors-only-strip-btn">エラーのみ表示中</button>
+        </span>
+    </div>
+
+    <div class="detail-body">
+        <div class="panel flow-card" id="flow-card">
+            <div class="panel-head flow-card-head">
+                <span class="panel-title">実行の流れ</span>
+                <div class="view-toggle" id="view-toggle" role="group" aria-label="ビュー切替">
+                    <button type="button" class="view-btn active" data-view="flow">フロー</button>
+                    <button type="button" class="view-btn" data-view="waterfall">waterfall</button>
+                </div>
+                <span class="flow-legend" aria-hidden="true">
+                    <span class="legend-item"><span class="legend-swatch swatch-input" ></span>llm</span>
+                    <span class="legend-item"><span class="legend-swatch swatch-output"></span>tool</span>
+                    <span class="legend-item parallel-legend">⑂ 並行分岐</span>
+                </span>
+                <label class="errors-only-label">
+                    <input type="checkbox" id="errors-only" />
+                    エラーのみ
                 </label>
-                <label>
-                    <input type="radio" name="timeline-sort" value="tokens" />
-                    <span>トークン</span>
-                </label>
-            </fieldset>
-            <span id="timeline-count" class="timeline-count" role="status">スパンを読み込み中…</span>
-        </div>
-        <p id="timeline-empty" class="timeline-empty empty-state" hidden>フィルター条件に一致するスパンがありません。</p>
-        <div class="monitor-table-wrapper table-scroll">
-            <table class="monitor-table timeline-table">
-                <thead>
-                    <tr>
-                        <th>操作</th>
-                        <th>カテゴリ</th>
-                        <th>ツール / MCP / エージェント</th>
-                        <th>モデル</th>
-                        <th>トークン (入 / 出 / 合計)</th>
-                        <th>状態</th>
-                        <th>所要時間 (ms)</th>
-                    </tr>
-                </thead>
-                <tbody id="timeline-rows" data-timeline-trace-id="@Model.TraceId"></tbody>
-            </table>
-        </div>
-    </div>
-
-    <div class="monitor-tab-content tab-panel" id="panel-tree" role="tabpanel" aria-labelledby="tab-tree" hidden>
-        <div class="view-toolbar">
-            <div class="toggle-group" role="group" aria-label="表示切替">
-                <button id="view-tree-btn" class="toggle-btn active" type="button" data-view="tree">ツリー</button>
-                <button id="view-flow-btn" class="toggle-btn" type="button" data-view="flow">フロー</button>
             </div>
-            <div class="view-legend" aria-hidden="true">
-                <span class="legend-item"><span class="legend-dot legend-agent"></span>agent</span>
-                <span class="legend-item"><span class="legend-dot legend-llm"></span>llm</span>
-                <span class="legend-item"><span class="legend-dot legend-tool"></span>tool</span>
-                <span class="legend-item"><span class="legend-dot legend-hook"></span>hook</span>
-            </div>
+            <div class="flow-status" id="flow-status" role="status">実行の流れを読み込み中…</div>
+            <div class="flow-view" id="flow-view" data-view="flow"></div>
+            <div class="waterfall-view" id="waterfall-view" data-view="waterfall" hidden></div>
         </div>
-        <div id="spantree-status" class="spantree-status" role="status">スパンツリーを読み込み中…</div>
-        <div id="spantree-view" class="spantree-view" data-spantree-trace-id="@Model.TraceId"></div>
-        <div id="flow-view" class="flow-view" hidden></div>
-    </div>
 
-    <div class="monitor-tab-content tab-panel" id="panel-cache" role="tabpanel" aria-labelledby="tab-cache" hidden>
-        <div id="cache-status" class="cache-status" role="status">キャッシュを読み込み中…</div>
-        <div id="cache-groups" class="cache-groups" data-cache-trace-id="@Model.TraceId"></div>
+        <aside class="detail-side" id="detail-side">
+            <div id="cache-column">
+                <div class="panel cache-panel" id="cache-overview-card">
+                    <div class="panel-head"><span class="panel-title">キャッシュの観点</span></div>
+                    <div id="cache-overview"></div>
+                </div>
+                <div class="panel cache-panel" id="cache-turns-card">
+                    <div class="panel-head"><span class="panel-title">ターン別キャッシュ読取率</span></div>
+                    <div id="cache-turns"></div>
+                </div>
+            </div>
+            <div id="error-panel" hidden></div>
+            <div id="span-inspector" hidden></div>
+        </aside>
     </div>
 
     @if (Model.RawAvailable)
@@ -253,3 +232,6 @@
         </details>
     }
 </section>
+<script src="/monitor-waterfall.js" defer></script>
+<script src="/monitor-cache-panel.js" defer></script>
+<script src="/monitor-flow.js" defer></script>

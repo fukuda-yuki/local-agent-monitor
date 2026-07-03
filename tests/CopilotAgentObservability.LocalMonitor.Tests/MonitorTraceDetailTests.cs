@@ -10,11 +10,13 @@ using System.Net;
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 /// <summary>
-/// Trace-detail page (/traces/{traceId}) — the agent-execution view. It renders the
-/// sanitized Summary + sub-agent tree + per-turn tokens and, by default, inlines
-/// the raw OTLP payload. It enforces same-origin + no-store. Under
-/// --sanitized-only, the sanitized tab shell remains available and the raw section
-/// is absent. The full negative matrix is M6.
+/// Trace-detail page (/traces/{traceId}) — Sprint18 §6.3. Server renders the
+/// breadcrumb / status pill / meta / token-total card and the flow | waterfall
+/// + cache-column shells that monitor-flow.js / monitor-waterfall.js /
+/// monitor-cache-panel.js fill from the sanitized spans API. By default the
+/// page inlines the raw OTLP payload. It enforces same-origin + no-store.
+/// Under --sanitized-only, the sanitized shell remains available and the raw
+/// section is absent.
 /// </summary>
 public class MonitorTraceDetailTests
 {
@@ -35,12 +37,10 @@ public class MonitorTraceDetailTests
         Assert.True(response.Headers.CacheControl?.NoStore);
 
         // Sanitized sections present (Japanese UI).
-        Assert.Contains("概要", body);
-        Assert.Contains("タイムライン", body);
+        Assert.Contains("実行の流れ", body);
         Assert.Contains("エラーのみ", body);
-        Assert.Contains("失敗と遅延を見る", body);
-        Assert.Contains("実行の流れを見る", body);
-        Assert.Contains("read_file", body);
+        Assert.Contains("キャッシュの観点", body);
+        Assert.Contains("ターン別キャッシュ読取率", body);
 
         // Raw body shown inline by default.
         Assert.Contains("Raw OTLP ペイロード", body);
@@ -48,7 +48,7 @@ public class MonitorTraceDetailTests
     }
 
     [Fact]
-    public async Task TraceDetail_RendersSpanTreeContainerAndTimelineShell()
+    public async Task TraceDetail_RendersFlowWaterfallAndCacheColumnShell()
     {
         using var temp = new MonitorTempDirectory();
         SeedProjectedTrace(temp);
@@ -56,24 +56,26 @@ public class MonitorTraceDetailTests
 
         var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
 
-        // Summary stays server-rendered; monitor-views.js fills the JS-rendered
-        // Timeline / Span Tree+Flow / Cache containers (D033, plain DOM, no Cytoscape).
-        Assert.Contains("role=\"tablist\"", body);
-        Assert.Contains("ツリー / フロー", body);
-        Assert.Contains("キャッシュ", body);
-        Assert.Contains("panel-tree", body);
-        Assert.Contains("id=\"spantree-view\"", body);
-        Assert.Contains("id=\"spantree-status\"", body);
-        Assert.Contains("data-spantree-trace-id=\"trace-detail\"", body);
+        // Sprint18 §6.3: tabs are gone — one screen with the フロー | waterfall
+        // segment toggle, errors-only filter, and the standing cache column.
+        Assert.DoesNotContain("role=\"tablist\"", body);
+        Assert.DoesNotContain("id=\"tab-summary\"", body);
+        Assert.Contains("id=\"view-toggle\"", body);
+        Assert.Contains("data-view=\"flow\"", body);
+        Assert.Contains("data-view=\"waterfall\"", body);
+        Assert.Contains("id=\"errors-only\"", body);
         Assert.Contains("id=\"flow-view\"", body);
-        Assert.Contains("id=\"view-tree-btn\"", body);
-        Assert.Contains("id=\"view-flow-btn\"", body);
-        Assert.Contains("id=\"timeline-rows\"", body);
-        Assert.Contains("panel-cache", body);
+        Assert.Contains("id=\"waterfall-view\"", body);
+        Assert.Contains("id=\"cache-overview\"", body);
+        Assert.Contains("id=\"cache-turns\"", body);
+        Assert.Contains("data-trace-id=\"trace-detail\"", body);
+        Assert.Contains("/monitor-flow.js", body);
+        Assert.Contains("/monitor-waterfall.js", body);
+        Assert.Contains("/monitor-cache-panel.js", body);
     }
 
     [Fact]
-    public async Task TraceDetail_RendersTimelineFilterSortShell()
+    public async Task TraceDetail_RendersHeaderWithTokenTotalCardAndAdjacentNav()
     {
         using var temp = new MonitorTempDirectory();
         SeedProjectedTrace(temp);
@@ -81,29 +83,12 @@ public class MonitorTraceDetailTests
 
         var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
 
-        Assert.Contains("id=\"timeline-errors-only\"", body);
-        Assert.Contains("エラーのみ", body);
-        Assert.Contains("name=\"timeline-sort\"", body);
-        Assert.Contains("value=\"time\"", body);
-        Assert.Contains("value=\"tokens\"", body);
-        Assert.Contains("id=\"timeline-rows\"", body);
-        Assert.Contains("data-timeline-trace-id=\"trace-detail\"", body);
-        Assert.Contains("id=\"timeline-count\"", body);
-    }
-
-    [Fact]
-    public async Task TraceDetail_RendersCacheExplorerShell()
-    {
-        using var temp = new MonitorTempDirectory();
-        SeedProjectedTrace(temp);
-        await using var host = await StartHostAsync(temp);
-
-        var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
-
-        Assert.Contains("id=\"cache-status\"", body);
-        Assert.Contains("id=\"cache-groups\"", body);
-        Assert.Contains("data-cache-trace-id=\"trace-detail\"", body);
-        Assert.DoesNotContain("Cache Explorer is not yet available in this build.", body);
+        Assert.Contains("token-total-card", body);
+        Assert.Contains("トークン合計", body);
+        Assert.Contains("status-pill", body);
+        Assert.Contains("← 前", body);
+        Assert.Contains("次 →", body);
+        Assert.Contains("Copilot で解析", body);
     }
 
     [Fact]
@@ -127,15 +112,16 @@ public class MonitorTraceDetailTests
     [Fact]
     public async Task TraceDetail_DoesNotLoadGraphVendorScripts_AndHasNoCdn()
     {
-        // D033: the Cytoscape / dagre vendored graph dependency is removed; the
-        // page is driven by monitor-views.js (plain DOM) with no CDN.
+        // D033/D042: no vendored graph runtime and no CDN; the page is driven by
+        // the plain-DOM Sprint18 modules.
         using var temp = new MonitorTempDirectory();
         SeedProjectedTrace(temp);
         await using var host = await StartHostAsync(temp);
 
         var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
 
-        Assert.Contains("/monitor-views.js", body);
+        Assert.Contains("/monitor-flow.js", body);
+        Assert.DoesNotContain("/monitor-views.js", body);
         Assert.DoesNotContain("/vendor/cytoscape.min.js", body);
         Assert.DoesNotContain("/vendor/dagre.min.js", body);
         Assert.DoesNotContain("/vendor/cytoscape-dagre.js", body);
@@ -157,12 +143,10 @@ public class MonitorTraceDetailTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.True(response.Headers.CacheControl?.NoStore);
-        Assert.Contains("role=\"tablist\"", body);
-        Assert.Contains("概要", body);
-        Assert.Contains("タイムライン", body);
-        Assert.Contains("ツリー / フロー", body);
-        Assert.Contains("キャッシュ", body);
-        Assert.Contains("data-timeline-trace-id=\"trace-detail\"", body);
+        Assert.Contains("実行の流れ", body);
+        Assert.Contains("キャッシュの観点", body);
+        Assert.Contains("data-trace-id=\"trace-detail\"", body);
+        Assert.Contains("data-raw-available=\"false\"", body);
         Assert.DoesNotContain("Raw OTLP ペイロード", body);
         Assert.DoesNotContain("Copilot raw 解析", body);
         Assert.DoesNotContain("/raw", body);

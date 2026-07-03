@@ -43,6 +43,126 @@ internal static class MonitorTestHealth
     }
 }
 
+/// <summary>
+/// Sprint18 rich trace fixture (reused M5–M8): an agent root, three chat turns
+/// with cache usage, a parallel tool trio on turn 1, a failed tool + later
+/// successful retry on turn 2 (recovered pair), and — when
+/// <c>unrecovered: true</c> — a terminal failing tool after turn 3 so the trace
+/// rolls up as unrecovered.
+/// </summary>
+internal static class MonitorRichTrace
+{
+    public const string TraceId = "trace-rich";
+
+    public static long Seed(MonitorTempDirectory temp, bool unrecovered = false)
+    {
+        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        var payload = unrecovered
+            ? Payload.Replace("__TERMINAL__", TerminalErrorSpan)
+            : Payload.Replace("__TERMINAL__", string.Empty);
+        var record = new RawTelemetryRecord(
+            Id: null,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: TraceId,
+            ReceivedAt: DateTimeOffset.UnixEpoch.AddMinutes(1),
+            ResourceAttributesJson: null,
+            PayloadJson: payload);
+        var id = store.Insert(record);
+        store.ApplyProjection(id, record.Source, record.ReceivedAt, MonitorProjectionBuilder.Build(record), DateTimeOffset.UnixEpoch.AddMinutes(2));
+        store.ApplySpanProjection(id, MonitorSpanProjectionBuilder.Build(record), DateTimeOffset.UnixEpoch.AddMinutes(3));
+        return id;
+    }
+
+    private const string TerminalErrorSpan = """
+        ,{"traceId":"trace-rich","spanId":"x301","parentSpanId":"t300","name":"execute_tool run_tests",
+         "startTimeUnixNano":"1751500041000000000","endTimeUnixNano":"1751500045000000000",
+         "status":{"code":"STATUS_CODE_ERROR"},
+         "attributes":[
+           {"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},
+           {"key":"gen_ai.tool.name","value":{"stringValue":"run_tests"}},
+           {"key":"error.type","value":{"stringValue":"test_failure"}}
+         ]}
+        """;
+
+    private const string Payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
+          {"key":"user.email","value":{"stringValue":"leak-marker@example.com"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-rich","spanId":"a000","name":"invoke_agent copilot",
+           "startTimeUnixNano":"1751500000000000000","endTimeUnixNano":"1751500060000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},
+             {"key":"gen_ai.agent.name","value":{"stringValue":"copilot"}}
+           ]},
+          {"traceId":"trace-rich","spanId":"t100","name":"chat gpt-4o",
+           "startTimeUnixNano":"1751500001000000000","endTimeUnixNano":"1751500008000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+             {"key":"gen_ai.response.model","value":{"stringValue":"gpt-4o"}},
+             {"key":"gen_ai.prompt","value":{"stringValue":"SECRET_PROMPT_TEXT_MARKER"}},
+             {"key":"gen_ai.usage.input_tokens","value":{"intValue":"8000"}},
+             {"key":"gen_ai.usage.output_tokens","value":{"intValue":"600"}},
+             {"key":"gen_ai.usage.cache_read.input_tokens","value":{"intValue":"5000"}},
+             {"key":"gen_ai.usage.cache_creation.input_tokens","value":{"intValue":"300"}}
+           ]},
+          {"traceId":"trace-rich","spanId":"p101","parentSpanId":"t100","name":"execute_tool read_file",
+           "startTimeUnixNano":"1751500008000000000","endTimeUnixNano":"1751500010000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},
+             {"key":"gen_ai.tool.name","value":{"stringValue":"read_file"}}
+           ]},
+          {"traceId":"trace-rich","spanId":"p102","parentSpanId":"t100","name":"execute_tool grep_search",
+           "startTimeUnixNano":"1751500008500000000","endTimeUnixNano":"1751500011000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},
+             {"key":"gen_ai.tool.name","value":{"stringValue":"grep_search"}}
+           ]},
+          {"traceId":"trace-rich","spanId":"p103","parentSpanId":"t100","name":"execute_tool glob_files",
+           "startTimeUnixNano":"1751500009000000000","endTimeUnixNano":"1751500012000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},
+             {"key":"gen_ai.tool.name","value":{"stringValue":"glob_files"}}
+           ]},
+          {"traceId":"trace-rich","spanId":"t200","name":"chat gpt-4o",
+           "startTimeUnixNano":"1751500013000000000","endTimeUnixNano":"1751500020000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+             {"key":"gen_ai.response.model","value":{"stringValue":"gpt-4o"}},
+             {"key":"gen_ai.usage.input_tokens","value":{"intValue":"9000"}},
+             {"key":"gen_ai.usage.output_tokens","value":{"intValue":"700"}},
+             {"key":"gen_ai.usage.cache_read.input_tokens","value":{"intValue":"6500"}},
+             {"key":"gen_ai.usage.cache_creation.input_tokens","value":{"intValue":"100"}}
+           ]},
+          {"traceId":"trace-rich","spanId":"f201","parentSpanId":"t200","name":"execute_tool str_replace",
+           "startTimeUnixNano":"1751500020000000000","endTimeUnixNano":"1751500022000000000",
+           "status":{"code":"STATUS_CODE_ERROR"},
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},
+             {"key":"gen_ai.tool.name","value":{"stringValue":"str_replace"}},
+             {"key":"error.type","value":{"stringValue":"tool_failure"}}
+           ]},
+          {"traceId":"trace-rich","spanId":"r202","parentSpanId":"t200","name":"execute_tool str_replace",
+           "startTimeUnixNano":"1751500023000000000","endTimeUnixNano":"1751500025000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},
+             {"key":"gen_ai.tool.name","value":{"stringValue":"str_replace"}}
+           ]},
+          {"traceId":"trace-rich","spanId":"t300","name":"chat gpt-4o",
+           "startTimeUnixNano":"1751500026000000000","endTimeUnixNano":"1751500040000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+             {"key":"gen_ai.response.model","value":{"stringValue":"gpt-4o"}},
+             {"key":"gen_ai.usage.input_tokens","value":{"intValue":"9500"}},
+             {"key":"gen_ai.usage.output_tokens","value":{"intValue":"800"}},
+             {"key":"gen_ai.usage.cache_read.input_tokens","value":{"intValue":"7000"}},
+             {"key":"gen_ai.usage.cache_creation.input_tokens","value":{"intValue":"50"}}
+           ]}__TERMINAL__
+        ]}]}]}
+        """;
+}
+
 internal static class MonitorTestHost
 {
     public static async Task<RunningMonitorHost> StartAsync(

@@ -240,60 +240,57 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task MonitorViewsScript_UsesOnlySanitizedSpanApiForFlowChart()
+    public async Task FlowScript_UsesOnlySanitizedSpanApi()
     {
         using var temp = new MonitorTempDirectory();
         EnsureSchema(temp);
         await using var host = await StartHostAsync(temp);
 
-        var script = await host.Client.GetStringAsync("/monitor-views.js");
+        var script = await host.Client.GetStringAsync("/monitor-flow.js");
 
         Assert.Contains("/api/monitor/traces/", script);
         Assert.Contains("next_cursor", script);
         Assert.Contains("parent_span_id", script);
-        Assert.Contains("if (parent)", script);
+        Assert.Contains("textContent", script);
         Assert.DoesNotContain("/raw", script);
         Assert.DoesNotContain("Html.Raw", script);
         Assert.DoesNotContain("innerHTML", script);
     }
 
     [Fact]
-    public async Task MonitorViewsScript_UsesSanitizedSpanFieldsForTimelineFilterSort()
+    public async Task WaterfallAndCachePanelScripts_AreSanitizedRenderers()
     {
         using var temp = new MonitorTempDirectory();
         EnsureSchema(temp);
         await using var host = await StartHostAsync(temp);
 
-        var script = await host.Client.GetStringAsync("/monitor-views.js");
+        var waterfall = await host.Client.GetStringAsync("/monitor-waterfall.js");
+        var cachePanel = await host.Client.GetStringAsync("/monitor-cache-panel.js");
 
-        Assert.Contains("timeline-errors-only", script);
-        Assert.Contains("timeline-sort", script);
-        Assert.Contains("status", script);
-        Assert.Contains("error_type", script);
-        Assert.Contains("total_tokens", script);
-        Assert.Contains("start_time", script);
-        Assert.Contains("textContent", script);
-        Assert.DoesNotContain("/raw", script);
-        Assert.DoesNotContain("innerHTML", script);
+        Assert.Contains("total_tokens", waterfall);
+        Assert.Contains("textContent", waterfall);
+        Assert.Contains("cache_read_tokens", cachePanel);
+        Assert.Contains("cache_creation_tokens", cachePanel);
+        Assert.Contains("input_tokens", cachePanel);
+        Assert.Contains("textContent", cachePanel);
+        foreach (var script in new[] { waterfall, cachePanel })
+        {
+            Assert.DoesNotContain("fetch(", script);
+            Assert.DoesNotContain("/raw", script);
+            Assert.DoesNotContain("innerHTML", script);
+        }
     }
 
     [Fact]
-    public async Task MonitorViewsScript_UsesSanitizedSpanFieldsForCacheExplorer()
+    public async Task MonitorViewsScript_IsRetired_Returns404()
     {
         using var temp = new MonitorTempDirectory();
         EnsureSchema(temp);
         await using var host = await StartHostAsync(temp);
 
-        var script = await host.Client.GetStringAsync("/monitor-views.js");
+        var response = await host.Client.GetAsync("/monitor-views.js");
 
-        Assert.Contains("renderCacheExplorer", script);
-        Assert.Contains("cache_read_tokens", script);
-        Assert.Contains("cache_creation_tokens", script);
-        Assert.Contains("input_tokens", script);
-        Assert.Contains("parent_span_id", script);
-        Assert.Contains("textContent", script);
-        Assert.DoesNotContain("/raw", script);
-        Assert.DoesNotContain("innerHTML", script);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     private static void EnsureSchema(MonitorTempDirectory temp)
