@@ -92,7 +92,7 @@ public class MonitorTraceDetailTests
     }
 
     [Fact]
-    public async Task TraceDetail_RendersRawAnalysisActionUnderRawDefault()
+    public async Task TraceDetail_RendersCopilotDrawerUnderRawDefault()
     {
         using var temp = new MonitorTempDirectory();
         SeedProjectedTrace(temp);
@@ -100,13 +100,16 @@ public class MonitorTraceDetailTests
 
         var body = await host.Client.GetStringAsync($"/traces/{TraceId}");
 
-        Assert.Contains("Copilot raw 解析", body);
-        Assert.Contains("id=\"analysis-focus\"", body);
+        // Sprint18 §6.6: the analysis surface is the Copilot drawer, with the
+        // mandatory data-boundary copy.
+        Assert.Contains("id=\"copilot-drawer\"", body);
+        Assert.Contains("GitHub Copilot で解析", body);
+        Assert.Contains("ローカル SDK 経由 · raw はローカルから出ません", body);
+        Assert.Contains("id=\"drawer-focus\"", body);
         Assert.Contains("value=\"tool-usage\"", body);
         Assert.Contains("value=\"agent-flow\"", body);
-        Assert.Contains("解析を開始", body);
-        Assert.Contains("data-analysis-trace-id=\"trace-detail\"", body);
-        Assert.Contains("x-monitor-csrf", body);
+        Assert.Contains("さらに質問…", body);
+        Assert.Contains("/monitor-drawer.js", body);
     }
 
     [Fact]
@@ -148,7 +151,8 @@ public class MonitorTraceDetailTests
         Assert.Contains("data-trace-id=\"trace-detail\"", body);
         Assert.Contains("data-raw-available=\"false\"", body);
         Assert.DoesNotContain("Raw OTLP ペイロード", body);
-        Assert.DoesNotContain("Copilot raw 解析", body);
+        Assert.DoesNotContain("copilot-drawer", body);
+        Assert.DoesNotContain("Copilot で解析", body);
         Assert.DoesNotContain("/raw", body);
         Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", body);
         Assert.DoesNotContain("leak-marker@example.com", body);

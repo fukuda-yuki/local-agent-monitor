@@ -151,12 +151,43 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 Description = description,
             });
 
-    private static string BuildPrompt(MonitorAnalysisContext context) =>
-        $"""
-        Analyze Local Monitor trace {context.TraceId} with focus {context.Focus.ToWireValue()}.
-        Use the available tools to inspect the trace. For raw evidence, cite trace/span/raw-record ids instead of copying long raw bodies.
-        Return concise findings, likely causes, and recommended next checks.
-        """;
+    /// <summary>
+    /// Base analysis instruction, plus — for drawer follow-ups (D045) — the prior
+    /// Q&amp;A transcript block and the follow-up question. Internal for tests.
+    /// </summary>
+    internal static string BuildPrompt(MonitorAnalysisContext context)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine($"Analyze Local Monitor trace {context.TraceId} with focus {context.Focus.ToWireValue()}.");
+        builder.AppendLine("Use the available tools to inspect the trace. For raw evidence, cite trace/span/raw-record ids instead of copying long raw bodies.");
+        builder.AppendLine("Return concise findings, likely causes, and recommended next checks.");
+
+        if (context.History is { Count: > 0 })
+        {
+            builder.AppendLine();
+            builder.AppendLine("Prior Q&A from this local analysis chat (context only; the transcript lives on the client):");
+            foreach (var turn in context.History)
+            {
+                if (!string.IsNullOrWhiteSpace(turn.Question))
+                {
+                    builder.AppendLine($"Q: {turn.Question}");
+                }
+
+                if (!string.IsNullOrWhiteSpace(turn.Answer))
+                {
+                    builder.AppendLine($"A: {turn.Answer}");
+                }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(context.Question))
+        {
+            builder.AppendLine();
+            builder.AppendLine($"Follow-up question: {context.Question}");
+        }
+
+        return builder.ToString().TrimEnd();
+    }
 
     private static string Serialize(object? value) =>
         JsonSerializer.Serialize(value, new JsonSerializerOptions(JsonSerializerDefaults.Web)

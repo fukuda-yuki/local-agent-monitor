@@ -2664,6 +2664,233 @@ a.kpi-card:hover {
     color: var(--monitor-muted);
 }
 
+/* ── Copilot analysis drawer (Sprint18 §6.6) ── */
+.copilot-drawer {
+    position: fixed;
+    top: 18px;
+    right: 24px;
+    bottom: 18px;
+    z-index: var(--monitor-z-overlay);
+    display: flex;
+    flex-direction: column;
+    width: 472px;
+    max-width: calc(100vw - 260px);
+    padding: 16px;
+    background: var(--monitor-surface-inset);
+    border: 1px solid var(--monitor-copilot-border);
+    border-left-width: 2px;
+    border-radius: 12px;
+    box-shadow: -24px 0 64px rgba(0, 0, 0, 0.55);
+}
+
+.dimmed-behind-drawer {
+    opacity: 0.55;
+}
+
+.drawer-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--monitor-border-divider);
+}
+
+.drawer-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--monitor-copilot-bg);
+    border: 1px solid var(--monitor-copilot-border);
+}
+
+.drawer-titles {
+    flex: 1;
+    min-width: 0;
+}
+
+.drawer-title {
+    display: block;
+    font-size: 13px;
+    font-weight: var(--monitor-weight-bold);
+    color: var(--monitor-ink);
+}
+
+.drawer-boundary {
+    display: block;
+    margin-top: 2px;
+    font-size: 10.5px;
+    color: var(--monitor-copilot-ink);
+}
+
+.drawer-trace-chip {
+    padding: 2px 8px;
+    border: 1px solid var(--monitor-border);
+    border-radius: 99px;
+    font-size: 10px;
+    color: var(--monitor-muted);
+}
+
+.drawer-close {
+    padding: 2px 8px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--monitor-muted);
+    font-size: 13px;
+}
+
+.drawer-close:hover {
+    color: var(--monitor-ink);
+    background: var(--monitor-row-hover);
+}
+
+.drawer-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 0;
+    font-size: 11.5px;
+    color: var(--monitor-ink-subtle);
+}
+
+.drawer-controls select {
+    flex: 1;
+    padding: 6px 10px;
+    border: 1px solid var(--monitor-border);
+    border-radius: 7px;
+    background: var(--monitor-bg);
+    color: var(--monitor-ink);
+    font-size: 12px;
+    font-family: var(--monitor-font-sans);
+}
+
+.drawer-controls button {
+    padding: 6px 14px;
+    border: 1px solid var(--monitor-copilot-border);
+    border-radius: 7px;
+    background: var(--monitor-copilot-bg);
+    color: var(--monitor-copilot-ink);
+    font-size: 12px;
+}
+
+.drawer-controls button:hover {
+    border-color: var(--monitor-copilot-border-hover);
+}
+
+.drawer-log {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 4px 0;
+}
+
+.drawer-run-chip {
+    align-self: flex-start;
+    padding: 4px 10px;
+    border: 1px solid var(--monitor-copilot-border-dim);
+    border-radius: 99px;
+    background: var(--monitor-copilot-bg);
+    color: var(--monitor-copilot-ink);
+    font-size: 10.5px;
+}
+
+.drawer-question-bubble {
+    align-self: flex-end;
+    max-width: 85%;
+    padding: 8px 12px;
+    border-radius: 10px 10px 3px 10px;
+    background: var(--monitor-selected-bg);
+    color: var(--monitor-ink);
+    font-size: 12px;
+}
+
+.drawer-answer {
+    align-self: stretch;
+    padding: 10px 12px;
+    border: 1px solid var(--monitor-border);
+    border-radius: 10px;
+    background: var(--monitor-surface);
+}
+
+.drawer-answer-text {
+    margin: 0;
+    font-family: var(--monitor-font-sans);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--monitor-ink);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.drawer-show-span {
+    margin-top: 8px;
+    padding: 4px 10px;
+    border: 1px solid var(--monitor-copilot-border-dim);
+    border-radius: 99px;
+    background: transparent;
+    color: var(--monitor-copilot-ink);
+    font-size: 10.5px;
+}
+
+.drawer-show-span:hover {
+    border-color: var(--monitor-copilot-border-hover);
+}
+
+.drawer-suggests {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 0;
+}
+
+.suggest-chip {
+    padding: 4px 10px;
+    border: 1px solid var(--monitor-copilot-border-dim);
+    border-radius: 99px;
+    background: transparent;
+    color: var(--monitor-copilot-ink);
+    font-size: 10.5px;
+}
+
+.suggest-chip:hover {
+    border-color: var(--monitor-copilot-border-hover);
+}
+
+.drawer-input-row {
+    display: flex;
+    gap: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--monitor-border-divider);
+}
+
+.drawer-input-row input {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid var(--monitor-border);
+    border-radius: 7px;
+    background: var(--monitor-bg);
+    color: var(--monitor-ink);
+    font-size: 12px;
+    font-family: var(--monitor-font-sans);
+}
+
+.drawer-input-row button {
+    width: 34px;
+    border: 0;
+    border-radius: 7px;
+    background: var(--monitor-accent);
+    color: var(--monitor-accent-contrast);
+    font-size: 14px;
+    font-weight: var(--monitor-weight-bold);
+}
+
 /* ── Error analysis mode (Sprint18 §6.5) ── */
 .tool-card.tool-unrecovered {
     border-color: var(--monitor-error);

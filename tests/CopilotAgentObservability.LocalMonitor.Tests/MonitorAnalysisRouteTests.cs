@@ -120,6 +120,81 @@ public class MonitorAnalysisRouteTests
         return id;
     }
 
+    [Fact]
+    public async Task StartRun_CapturesQuestionAndHistoryForTheRunner()
+    {
+        // D045 (history resend): the drawer's follow-up chat sends question +
+        // prior Q&A with each new run; the runner receives them in the context
+        // and no chat state is persisted server-side.
+        using var temp = new MonitorTempDirectory();
+        SeedProjectedTrace(temp);
+        var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath);
+        var runner = new CompletingAnalysisRunner(analysisStore);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+            AnalysisStore = analysisStore,
+            AnalysisRunner = runner,
+        });
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/traces/{TraceId}/analysis")
+        {
+            Content = JsonContent.Create(new
+            {
+                focus = "tokens",
+                question = "FOLLOWUP_QUESTION_MARKER",
+                history = new[]
+                {
+                    new { question = "PRIOR_Q_MARKER", answer = "PRIOR_A_MARKER" },
+                },
+            }),
+        };
+        request.Headers.TryAddWithoutValidation("x-monitor-csrf", "local-monitor");
+        var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var context = Assert.Single(runner.Contexts);
+        Assert.Equal("FOLLOWUP_QUESTION_MARKER", context.Question);
+        var turn = Assert.Single(context.History!);
+        Assert.Equal("PRIOR_Q_MARKER", turn.Question);
+        Assert.Equal("PRIOR_A_MARKER", turn.Answer);
+    }
+
+    [Fact]
+    public void BuildPrompt_EmbedsHistoryAndFollowUpQuestion()
+    {
+        var context = new MonitorAnalysisContext(
+            RunId: 1,
+            TraceId: "trace-x",
+            RawRecordId: null,
+            SpanId: null,
+            Focus: MonitorAnalysisFocus.Tokens,
+            Question: "FOLLOWUP_QUESTION_MARKER",
+            History:
+            [
+                new AnalysisHistoryTurn("PRIOR_Q_MARKER", "PRIOR_A_MARKER"),
+            ]);
+
+        var prompt = DotNetCopilotRawAnalysisRunner.BuildPrompt(context);
+
+        Assert.Contains("trace-x", prompt);
+        Assert.Contains("Q: PRIOR_Q_MARKER", prompt);
+        Assert.Contains("A: PRIOR_A_MARKER", prompt);
+        Assert.Contains("Follow-up question: FOLLOWUP_QUESTION_MARKER", prompt);
+    }
+
+    [Fact]
+    public void BuildPrompt_WithoutQuestion_OmitsChatBlocks()
+    {
+        var context = new MonitorAnalysisContext(1, "trace-x", null, null, MonitorAnalysisFocus.Cache);
+
+        var prompt = DotNetCopilotRawAnalysisRunner.BuildPrompt(context);
+
+        Assert.DoesNotContain("Prior Q&A", prompt);
+        Assert.DoesNotContain("Follow-up question", prompt);
+    }
+
     private static Task<RunningMonitorHost> StartHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false)
     {
         var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath);
@@ -144,8 +219,11 @@ public class MonitorAnalysisRouteTests
             this.analysisStore = analysisStore;
         }
 
+        public List<MonitorAnalysisContext> Contexts { get; } = new();
+
         public Task StartAsync(MonitorAnalysisContext context, CancellationToken cancellationToken)
         {
+            Contexts.Add(context);
             analysisStore.MarkRunning(context.RunId, DateTimeOffset.UnixEpoch.AddMinutes(4));
             analysisStore.CompleteRun(
                 context.RunId,

@@ -134,81 +134,41 @@
 
     @if (Model.RawAvailable)
     {
-        <section class="monitor-analysis-panel" data-analysis-trace-id="@Model.TraceId">
-            <div class="panel-head">
-                <div>
-                    <h3>Copilot raw 解析</h3>
-                    <p class="monitor-subtle">選択した trace の raw record をローカルで解析します。</p>
+        <div class="copilot-drawer" id="copilot-drawer" role="dialog" aria-label="GitHub Copilot で解析" hidden>
+            <div class="drawer-head">
+                <span class="drawer-icon" aria-hidden="true">
+                    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="#c0b6f2" stroke-width="1.4"><rect x="2.5" y="4" width="11" height="8" rx="2.5"/><circle cx="6" cy="8" r="0.9" fill="#c0b6f2" stroke="none"/><circle cx="10" cy="8" r="0.9" fill="#c0b6f2" stroke="none"/><path d="M8 4V2.2"/></svg>
+                </span>
+                <div class="drawer-titles">
+                    <span class="drawer-title">GitHub Copilot で解析</span>
+                    <span class="drawer-boundary">ローカル SDK 経由 · raw はローカルから出ません</span>
                 </div>
+                <span class="drawer-trace-chip monitor-mono">@MonitorViewFormat.ShortTraceId(Model.TraceId)</span>
+                <button type="button" class="drawer-close" id="drawer-close" aria-label="ドロワーを閉じる">✕</button>
             </div>
-            <div class="analysis-controls">
-                <label for="analysis-focus">解析の観点</label>
-                <select id="analysis-focus">
-                    <option value="latency">遅延</option>
+            <div class="drawer-controls">
+                <label for="drawer-focus">観点</label>
+                <select id="drawer-focus">
                     <option value="tokens">トークン</option>
                     <option value="cache">キャッシュ</option>
                     <option value="errors">エラー</option>
+                    <option value="latency">遅延</option>
                     <option value="tool-usage">ツール利用</option>
                     <option value="agent-flow">エージェントの流れ</option>
                 </select>
-                <button id="analysis-start" type="button">解析を開始</button>
+                <button type="button" id="drawer-run">解析を実行</button>
             </div>
-            <pre id="analysis-result" class="monitor-analysis-result" aria-live="polite"></pre>
-        </section>
-        <script>
-            (function () {
-                var panel = document.querySelector("[data-analysis-trace-id]");
-                if (!panel) return;
-                var traceId = panel.getAttribute("data-analysis-trace-id");
-                var focus = document.getElementById("analysis-focus");
-                var start = document.getElementById("analysis-start");
-                var result = document.getElementById("analysis-result");
-                start.addEventListener("click", function () {
-                    start.disabled = true;
-                    result.textContent = "raw 解析を開始しています...";
-                    fetch("/traces/" + encodeURIComponent(traceId) + "/analysis", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            "x-monitor-csrf": "local-monitor"
-                        },
-                        body: JSON.stringify({ focus: focus.value })
-                    })
-                        .then(function (response) { return response.json().then(function (body) { return { response: response, body: body }; }); })
-                        .then(function (out) {
-                            if (!out.response.ok) {
-                                result.textContent = "解析の開始に失敗しました: " + (out.body.error || out.response.status);
-                                return;
-                            }
-
-                            result.textContent = "解析 run " + out.body.run_id + " を作成しました。.NET Copilot SDK の結果を待っています...";
-                            poll(out.body.run_id);
-                        })
-                        .catch(function (error) { result.textContent = "解析の開始に失敗しました: " + error.message; })
-                        .finally(function () { start.disabled = false; });
-                });
-
-                function poll(runId) {
-                    fetch("/traces/" + encodeURIComponent(traceId) + "/analysis/runs/" + encodeURIComponent(runId))
-                        .then(function (response) { return response.json().then(function (body) { return { response: response, body: body }; }); })
-                        .then(function (out) {
-                            if (!out.response.ok) {
-                                result.textContent = "解析状態の取得に失敗しました: " + (out.body.error || out.response.status);
-                                return;
-                            }
-
-                            if (out.body.status === "queued" || out.body.status === "running") {
-                                result.textContent = "解析 run " + runId + " は " + out.body.status + " です...";
-                                window.setTimeout(function () { poll(runId); }, 1500);
-                                return;
-                            }
-
-                            result.textContent = out.body.result_markdown || out.body.error_message || ("解析 run " + runId + " は " + out.body.status + " で終了しました。");
-                        })
-                        .catch(function (error) { result.textContent = "解析状態の取得に失敗しました: " + error.message; });
-                }
-            })();
-        </script>
+            <div class="drawer-log" id="drawer-log" aria-live="polite"></div>
+            <div class="drawer-suggests" id="drawer-suggests">
+                <button type="button" class="suggest-chip">このトレースの削減余地は?</button>
+                <button type="button" class="suggest-chip">キャッシュ作成を増やすべき?</button>
+                <button type="button" class="suggest-chip">似た傾向の trace を探す</button>
+            </div>
+            <div class="drawer-input-row">
+                <input type="text" id="drawer-question" placeholder="さらに質問…" aria-label="Copilot への追い質問" />
+                <button type="button" id="drawer-send" aria-label="送信">↑</button>
+            </div>
+        </div>
 
         <details class="raw-section">
             <summary><h3 class="raw-section-title">Raw OTLP ペイロード</h3></summary>
@@ -236,4 +196,5 @@
 <script src="/monitor-cache-panel.js" defer></script>
 <script src="/monitor-inspector.js" defer></script>
 <script src="/monitor-error-mode.js" defer></script>
+<script src="/monitor-drawer.js" defer></script>
 <script src="/monitor-flow.js" defer></script>

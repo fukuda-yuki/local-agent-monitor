@@ -22,12 +22,25 @@ internal enum MonitorAnalysisStatus
 
 internal sealed record MonitorAnalysisStartResult(long RunId);
 
+/// <summary>One prior Q&amp;A turn of the drawer chat, re-sent with each follow-up (history resend, D045).</summary>
+internal sealed record AnalysisHistoryTurn(
+    string? Question,
+    string? Answer);
+
+/// <summary>
+/// Per-run analysis input. <see cref="Question"/> / <see cref="History"/> carry
+/// the drawer's follow-up chat (D045): the client holds the transcript and each
+/// follow-up creates a new run whose prompt embeds the prior Q&amp;A. Nothing is
+/// persisted server-side beyond the run row itself.
+/// </summary>
 internal sealed record MonitorAnalysisContext(
     long RunId,
     string TraceId,
     long? RawRecordId,
     string? SpanId,
-    MonitorAnalysisFocus Focus);
+    MonitorAnalysisFocus Focus,
+    string? Question = null,
+    IReadOnlyList<AnalysisHistoryTurn>? History = null);
 
 internal interface IMonitorAnalysisRunner
 {

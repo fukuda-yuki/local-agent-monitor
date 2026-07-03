@@ -450,7 +450,16 @@ internal static class MonitorHost
                     focus,
                     DateTimeOffset.UtcNow);
                 await analysisRunner.StartAsync(
-                    new MonitorAnalysisContext(start.RunId, traceId, payload?.RawRecordId, payload?.SpanId, focus),
+                    new MonitorAnalysisContext(
+                        start.RunId,
+                        traceId,
+                        payload?.RawRecordId,
+                        payload?.SpanId,
+                        focus,
+                        Question: payload?.Question,
+                        History: payload?.History
+                            ?.Select(turn => new AnalysisHistoryTurn(turn.Question, turn.Answer))
+                            .ToList()),
                     context.RequestAborted);
                 context.Response.Headers["Cache-Control"] = "no-store";
                 await WriteJsonAsync(context, new
@@ -1113,4 +1122,12 @@ internal sealed class MonitorHostTestOptions
     public bool UseUserSecrets { get; init; } = true;
 }
 
-internal sealed record AnalysisStartPayload(string? Focus, long? RawRecordId, string? SpanId);
+internal sealed record AnalysisStartPayload(
+    string? Focus,
+    long? RawRecordId,
+    string? SpanId,
+    string? Question = null,
+    IReadOnlyList<AnalysisHistoryTurnPayload>? History = null);
+
+/// <summary>Wire shape of one prior drawer-chat turn (history resend, D045).</summary>
+internal sealed record AnalysisHistoryTurnPayload(string? Question, string? Answer);
