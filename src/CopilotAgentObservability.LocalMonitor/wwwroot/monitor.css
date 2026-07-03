@@ -2664,6 +2664,142 @@ a.kpi-card:hover {
     color: var(--monitor-muted);
 }
 
+/* ── Error analysis mode (Sprint18 §6.5) ── */
+.tool-card.tool-unrecovered {
+    border-color: var(--monitor-error);
+    background: rgba(224, 94, 80, 0.07);
+    box-shadow: 0 0 0 3px rgba(224, 94, 80, 0.08);
+}
+
+.recovery-pill {
+    align-self: flex-start;
+    margin-top: 2px;
+    padding: 1px 8px;
+    border-radius: 99px;
+    font-size: 10px;
+    font-weight: var(--monitor-weight-bold);
+}
+
+.recovery-pill.pill-recovered {
+    background: var(--monitor-warning-bg);
+    color: var(--monitor-warning);
+}
+
+.recovery-pill.pill-unrecovered {
+    background: var(--monitor-error-bg);
+    color: var(--monitor-error);
+}
+
+#error-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.error-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.error-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "dot name pill" "dot sub pill";
+    align-items: center;
+    column-gap: 8px;
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid var(--monitor-border);
+    border-radius: 6px;
+    background: var(--monitor-surface);
+    color: var(--monitor-ink);
+    text-align: left;
+}
+
+.error-row:hover {
+    border-color: var(--monitor-border-strong);
+}
+
+.error-row.selected {
+    border-color: var(--monitor-error);
+    background: rgba(224, 94, 80, 0.07);
+}
+
+.error-row .trace-status-dot { grid-area: dot; }
+
+.error-row .error-name {
+    grid-area: name;
+    font-size: 11px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.error-row .error-sub {
+    grid-area: sub;
+    font-size: 10px;
+    color: var(--monitor-muted);
+}
+
+.error-row .recovery-pill {
+    grid-area: pill;
+    align-self: center;
+    margin-top: 0;
+}
+
+.error-detail-meta {
+    margin-bottom: 8px;
+}
+
+.error-message-block {
+    margin: 0 0 10px;
+    padding: 10px;
+    border: 1px solid #4a2a2a;
+    border-radius: 6px;
+    background: rgba(224, 94, 80, 0.07);
+    color: var(--monitor-error);
+    font-family: var(--monitor-font-mono);
+    font-size: 10.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 140px;
+    overflow-y: auto;
+}
+
+.token-trend-chart {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    height: 90px;
+    padding: 4px 0;
+    overflow: hidden;
+}
+
+.token-limit-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    border-top: 1px dashed var(--monitor-error);
+    opacity: 0.8;
+}
+
+.token-trend-bar {
+    flex: 1;
+    min-height: 2px;
+    border-radius: 2px 2px 0 0;
+    background: var(--monitor-border-strong);
+}
+
+.token-trend-bar.over-limit {
+    background: var(--monitor-error);
+}
+
 /* ── Span inspector (Sprint18 §6.4) ── */
 .inspector-panel {
     padding: 14px;

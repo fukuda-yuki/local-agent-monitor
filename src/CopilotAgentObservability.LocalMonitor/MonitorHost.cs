@@ -622,6 +622,7 @@ internal static class MonitorHost
                             response_token_estimate = llm.ResponseTokenEstimate,
                         }
                         : (object?)null,
+                    error_message = detail?.ErrorMessage,
                     raw_span_json = detail?.RawSpanJson,
                 });
             });

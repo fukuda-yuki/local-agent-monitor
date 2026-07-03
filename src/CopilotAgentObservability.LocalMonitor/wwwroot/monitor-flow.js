@@ -179,7 +179,27 @@
       turn.matchesFilter = turn.hasError;
     }
 
-    return { traceId, spans, byId, range, turns, agentSpans, orphanTools };
+    // §9: an error is recovered when a same-kind operation succeeds later
+    // (same tool label for tools; any later successful turn for llm calls).
+    const errorSpans = [];
+    for (const turn of turns) {
+      if (turn.span.isError) {
+        const laterTurnOk = turns.some((candidate) => candidate.index > turn.index && !candidate.span.isError);
+        errorSpans.push({ span: turn.span, turn, recovered: laterTurnOk });
+      }
+      for (const tool of turn.tools) {
+        if (!tool.isError) continue;
+        const retry = toolSpans.find((candidate) => !candidate.isError
+          && candidate.label === tool.label
+          && (candidate.startMs ?? 0) > (tool.startMs ?? 0));
+        tool.recovered = Boolean(retry);
+        tool.recoveredBy = retry ?? null;
+        errorSpans.push({ span: tool, turn, recovered: tool.recovered });
+      }
+    }
+    errorSpans.sort((a, b) => ((a.span.startMs ?? 0) - (b.span.startMs ?? 0)) || (a.span.span_ordinal - b.span.span_ordinal));
+
+    return { traceId, spans, byId, range, turns, agentSpans, orphanTools, errorSpans };
   }
 
   /* ── Flow rendering ── */
@@ -232,12 +252,21 @@
     head.append(mark, name, durationNode);
     card.append(head);
 
+    if (tool.isError && !tool.recovered) card.classList.add("tool-unrecovered");
+
     const sub = document.createElement("span");
     sub.className = `tool-sub${tool.isError ? " sub-error" : " sub-ok"}`;
     sub.textContent = tool.isError
       ? `✕ 失敗${tool.error_type ? ` · ${tool.error_type}` : ""}`
       : "成功";
     card.append(sub);
+
+    if (tool.isError) {
+      const pill = document.createElement("span");
+      pill.className = `recovery-pill ${tool.recovered ? "pill-recovered" : "pill-unrecovered"}`;
+      pill.textContent = tool.recovered ? "回復済み → 再試行あり" : "未回復";
+      card.append(pill);
+    }
     return card;
   }
 

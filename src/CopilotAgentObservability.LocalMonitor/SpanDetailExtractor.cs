@@ -23,11 +23,13 @@ internal sealed record SpanDetailLlmInfo(
 /// <summary>
 /// Raw span detail for the inspector route (D043): the raw OTLP span JSON plus
 /// whatever formatted tool / llm sections could be extracted.
+/// ErrorMessage is the raw status/exception message (§6.5 error detail card).
 /// </summary>
 internal sealed record SpanDetail(
     string RawSpanJson,
     SpanDetailToolInfo? Tool,
-    SpanDetailLlmInfo? Llm);
+    SpanDetailLlmInfo? Llm,
+    string? ErrorMessage);
 
 /// <summary>
 /// Extracts the span inspector's raw-bearing detail (D043) from a raw OTLP
@@ -107,7 +109,8 @@ internal static class SpanDetailExtractor
                 return new SpanDetail(
                     RawSpanJson: span.GetRawText(),
                     Tool: ExtractTool(span),
-                    Llm: ExtractLlm(span));
+                    Llm: ExtractLlm(span),
+                    ErrorMessage: ExtractErrorMessage(span));
             }
 
             return null;
@@ -220,6 +223,21 @@ internal static class SpanDetailExtractor
             Messages: messages,
             ResponsePreview: Truncate(response, PreviewMaxChars),
             ResponseTokenEstimate: response is null ? null : Math.Max(1, response.Length / 4));
+    }
+
+    /// <summary>OTLP status message, falling back to an exception.message attribute.</summary>
+    private static string? ExtractErrorMessage(JsonElement span)
+    {
+        if (span.TryGetProperty("status", out var status)
+            && status.ValueKind == JsonValueKind.Object
+            && status.TryGetProperty("message", out var message)
+            && message.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(message.GetString()))
+        {
+            return Truncate(message.GetString(), PreviewMaxChars);
+        }
+
+        return Truncate(FirstAttributeString(span, ["exception.message", "error.message"]), PreviewMaxChars);
     }
 
     private static string? FirstAttributeString(JsonElement span, IReadOnlyList<string> keys)

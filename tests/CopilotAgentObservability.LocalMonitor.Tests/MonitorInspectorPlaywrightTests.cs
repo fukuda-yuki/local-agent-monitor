@@ -34,13 +34,16 @@ public class MonitorInspectorPlaywrightTests
         page.PageError += (_, error) => pageErrors.Add(error);
 
         await page.GotoAsync($"{host.Url}/traces/{MonitorRichTrace.TraceId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        // The rich trace contains a recovered error, so the error panel (M7)
+        // occupies the side column; the inspector swaps with it.
+        await Expect(page.Locator("#error-panel")).ToBeVisibleAsync();
         await page.Locator("#errors-only").UncheckAsync();
-        await Expect(page.Locator("#cache-column")).ToBeVisibleAsync();
         await Expect(page.Locator("#span-inspector")).ToBeHiddenAsync();
 
-        // Click the recovered-error tool span: inspector replaces the cache column.
+        // Click the recovered-error tool span: inspector replaces the side panel.
         await page.Locator("#flow-view .tool-card.tool-error").ClickAsync();
         await Expect(page.Locator("#span-inspector")).ToBeVisibleAsync();
+        await Expect(page.Locator("#error-panel")).ToBeHiddenAsync();
         await Expect(page.Locator("#cache-column")).ToBeHiddenAsync();
         await Expect(page.Locator(".inspector-name")).ToContainTextAsync("str_replace");
         // 整形 is the default tab.
@@ -66,23 +69,23 @@ public class MonitorInspectorPlaywrightTests
             await Expect(page.Locator(".inspector-raw-json")).ToContainTextAsync("f201");
         }
 
-        // Esc closes the inspector and restores the cache column.
+        // Esc closes the inspector and restores the error panel.
         await page.Keyboard.PressAsync("Escape");
         Assert.True(pageErrors.Count == 0, string.Join(" | ", pageErrors));
         await Expect(page.Locator("#span-inspector")).ToBeHiddenAsync();
-        await Expect(page.Locator("#cache-column")).ToBeVisibleAsync();
+        await Expect(page.Locator("#error-panel")).ToBeVisibleAsync();
 
         // Re-clicking the same span opens, clicking it again closes.
         await page.Locator("#flow-view .tool-card.tool-error").ClickAsync();
         await Expect(page.Locator("#span-inspector")).ToBeVisibleAsync();
         await page.Locator("#flow-view .tool-card.tool-error").ClickAsync();
         await Expect(page.Locator("#span-inspector")).ToBeHiddenAsync();
-        await Expect(page.Locator("#cache-column")).ToBeVisibleAsync();
+        await Expect(page.Locator("#error-panel")).ToBeVisibleAsync();
 
         // ✕ also closes.
         await page.Locator("#flow-view .tool-card.tool-error").ClickAsync();
         await page.Locator(".inspector-close").ClickAsync();
         await Expect(page.Locator("#span-inspector")).ToBeHiddenAsync();
-        await Expect(page.Locator("#cache-column")).ToBeVisibleAsync();
+        await Expect(page.Locator("#error-panel")).ToBeVisibleAsync();
     }
 }
