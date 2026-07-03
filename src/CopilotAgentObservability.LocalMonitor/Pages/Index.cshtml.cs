@@ -1,4 +1,3 @@
-using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
@@ -10,43 +9,41 @@ using Microsoft.Extensions.DependencyInjection;
 namespace CopilotAgentObservability.LocalMonitor.Pages;
 
 /// <summary>
-/// Dashboard: readiness, highlight cards (latest / top-token / has-error), and the
-/// recent ingestion list (folded in from the retired /ingestions page). When raw is
-/// available it labels each trace with the user prompt extracted server-side from
-/// the raw OTLP payload (D032), which makes the page a raw-bearing surface: it then
-/// enforces same-origin and <c>no-store</c>. Under <c>--sanitized-only</c> no prompt
-/// is shown and a shortened TraceId is used instead.
+/// Overview dashboard (Sprint18 §6.1, D042): token-cost KPIs, per-model
+/// breakdown, cache efficiency, top-token TOP5, hourly distribution, and the 5
+/// most recent traces. The initial "today" aggregates are server-rendered from
+/// <see cref="MonitorOverviewService"/>; monitor-overview.js refreshes them from
+/// the sanitized `GET /api/monitor/overview` when the period toggle changes.
+/// When raw is available the TOP5 / recent rows are labelled with the user
+/// prompt extracted server-side (D032), which makes the page a raw-bearing
+/// surface: it then enforces same-origin and <c>no-store</c>. Under
+/// <c>--sanitized-only</c> no prompt is shown and a shortened TraceId is used.
 /// </summary>
 public sealed class IndexModel : PageModel
 {
-    private const int RecentLimit = 10;
+    private const int TopTraceLimit = 5;
+    private const int RecentTraceLimit = 5;
 
     private readonly Dictionary<string, string?> promptByTraceId = new(StringComparer.Ordinal);
 
-    internal MonitorReadiness Readiness { get; private set; } = null!;
+    internal MonitorOverview Overview { get; private set; } = null!;
 
-    internal IReadOnlyList<MonitorIngestionRow> RecentIngestions { get; private set; } = [];
+    internal IReadOnlyList<MonitorTraceRow> TopTraces { get; private set; } = [];
 
     internal IReadOnlyList<MonitorTraceRow> RecentTraces { get; private set; } = [];
 
     internal bool RawAvailable { get; private set; }
 
-    internal MonitorTraceRow? LatestTrace { get; private set; }
-
-    internal MonitorTraceRow? TopTokenTrace { get; private set; }
-
-    internal MonitorTraceRow? ErrorTrace { get; private set; }
-
     public IActionResult OnGet()
     {
-        var health = HttpContext.RequestServices.GetRequiredService<MonitorHealthState>();
         var store = HttpContext.RequestServices.GetRequiredService<IMonitorProjectionStore>();
         var options = HttpContext.RequestServices.GetRequiredService<MonitorOptions>();
+        var overviewService = HttpContext.RequestServices.GetRequiredService<MonitorOverviewService>();
 
         RawAvailable = !options.SanitizedOnly;
         if (RawAvailable)
         {
-            // The dashboard becomes a raw-bearing surface when it shows prompt
+            // The overview becomes a raw-bearing surface when it shows prompt
             // labels (D032): keep raw out of the browser cache and refuse a
             // cross-site / foreign-origin browser read.
             Response.Headers["Cache-Control"] = "no-store";
@@ -56,25 +53,20 @@ public sealed class IndexModel : PageModel
             }
         }
 
-        Readiness = health.Evaluate(options.IngestionStallThresholdSeconds, options.ProjectionLagThresholdSeconds);
-
         try
         {
-            RecentIngestions = store.ListMonitorIngestions(0, RecentLimit).Items;
-            RecentTraces = store.ListMonitorTraces(0, RecentLimit).Items;
+            Overview = overviewService.BuildOverview("today");
+            var range = overviewService.ResolvePeriod("today");
+            TopTraces = store.ListTopTokenTraces(
+                MonitorOverviewService.FormatUtc(range.Start),
+                MonitorOverviewService.FormatUtc(range.End),
+                TopTraceLimit);
+            RecentTraces = store.ListRecentMonitorTraces(RecentTraceLimit);
         }
         catch (PersistenceBusyException)
         {
             return PersistenceBusy();
         }
-
-        // Highlight cards: derived server-side from the same bounded window via the
-        // shared summary service (also used by GET /api/monitor/summary, D037 child B).
-        var summaryService = HttpContext.RequestServices.GetRequiredService<MonitorSummaryService>();
-        var summary = summaryService.BuildSummary(RecentLimit);
-        LatestTrace = summary.LatestTrace;
-        TopTokenTrace = summary.TopTokenTrace;
-        ErrorTrace = summary.ErrorTrace;
 
         if (RawAvailable)
         {
@@ -90,11 +82,10 @@ public sealed class IndexModel : PageModel
 
     private void PopulatePrompts(IMonitorProjectionStore store)
     {
-        var traceIds = RecentTraces
+        var traceIds = TopTraces
             .Select(trace => trace.TraceId)
-            .Concat(RecentIngestions.Select(ingestion => ingestion.TraceId))
+            .Concat(RecentTraces.Select(trace => trace.TraceId))
             .Where(traceId => !string.IsNullOrEmpty(traceId))
-            .Select(traceId => traceId!)
             .Distinct(StringComparer.Ordinal);
 
         foreach (var traceId in traceIds)
@@ -121,7 +112,7 @@ public sealed class IndexModel : PageModel
     {
         StatusCode = StatusCodes.Status403Forbidden,
         ContentType = "application/json",
-        Content = "{\"accepted\":false,\"error\":\"cross_origin_forbidden\",\"message\":\"The dashboard is same-origin only.\"}",
+        Content = "{\"accepted\":false,\"error\":\"cross_origin_forbidden\",\"message\":\"The overview is same-origin only.\"}",
     };
 
     private static ContentResult PersistenceBusy() => new()

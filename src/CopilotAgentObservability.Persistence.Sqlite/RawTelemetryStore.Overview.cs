@@ -179,6 +179,11 @@ internal sealed partial class RawTelemetryStore
             {
                 conditions.Add("trace_status IS NULL");
             }
+            else if (string.Equals(query.Status, "error", StringComparison.Ordinal))
+            {
+                // "error" = any error trace, recovered or not (overview KPI link).
+                conditions.Add("trace_status IN ('recovered', 'unrecovered')");
+            }
             else
             {
                 conditions.Add("trace_status = $status");

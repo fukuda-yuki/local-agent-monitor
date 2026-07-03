@@ -31,6 +31,27 @@ internal static class MonitorViewFormat
     internal static string Count(int? value) =>
         value is null ? Dash : value.Value.ToString("N0", CultureInfo.InvariantCulture);
 
+    /// <summary>Compact token count for KPI values: <c>412.6K</c> / <c>1.2M</c> / <c>987</c>.</summary>
+    internal static string CompactTokens(long? value)
+    {
+        if (value is null)
+        {
+            return Dash;
+        }
+
+        var tokens = value.Value;
+        return Math.Abs(tokens) switch
+        {
+            >= 1_000_000 => (tokens / 1_000_000d).ToString("0.#", CultureInfo.InvariantCulture) + "M",
+            >= 1_000 => (tokens / 1_000d).ToString("0.#", CultureInfo.InvariantCulture) + "K",
+            _ => tokens.ToString(CultureInfo.InvariantCulture),
+        };
+    }
+
+    /// <summary>Percentage with at most one decimal (e.g. <c>72%</c>), or a dash for null.</summary>
+    internal static string Percent(double? value) =>
+        value is null ? Dash : value.Value.ToString("0.#", CultureInfo.InvariantCulture) + "%";
+
     /// <summary>Human duration: <c>618 ms</c> / <c>2.3 秒</c> / <c>1分 12秒</c>.</summary>
     internal static string Duration(double? milliseconds)
     {

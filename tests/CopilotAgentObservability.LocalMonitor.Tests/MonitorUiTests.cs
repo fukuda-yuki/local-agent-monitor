@@ -35,9 +35,9 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task Dashboard_ShowsPromptByDefault_ButNotToolArgsOrPii()
+    public async Task Overview_ShowsPromptByDefault_ButNotToolArgsOrPii()
     {
-        // D032: the dashboard labels traces with the user prompt by default
+        // D032: the overview labels traces with the user prompt by default
         // (raw-bearing), but surfaces ONLY the prompt — never tool arguments or PII.
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
@@ -45,10 +45,10 @@ public class MonitorUiTests
 
         var overview = await host.Client.GetStringAsync("/");
 
-        Assert.Contains("ダッシュボード", overview);
-        Assert.Contains("現在の状態", overview);
-        Assert.Contains("今すぐ開く", overview);
-        Assert.Contains("取り込み履歴", overview);
+        Assert.Contains("概要", overview);
+        Assert.Contains("高コスト trace TOP5", overview);
+        Assert.Contains("最近のトレース", overview);
+        Assert.Contains("時間帯別トークン", overview);
         Assert.Contains("SECRET_PROMPT_TEXT_MARKER", overview);
         Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", overview);
         Assert.DoesNotContain("leak-marker@example.com", overview);
@@ -72,23 +72,24 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task Dashboard_LinksRawAndShowsPromptByDefault_HidesBothUnderSanitizedOnly()
+    public async Task Overview_ShowsPromptByDefault_HidesItUnderSanitizedOnly()
     {
+        // D032/D042: the overview's prompt labels are server-rendered raw-bearing
+        // content; --sanitized-only falls back to a shortened TraceId. (The raw
+        // record link moved off this page in the Sprint18 redesign — the raw-detail
+        // route is reached from the trace-detail page.)
         using var temp = new MonitorTempDirectory();
-        var rawRecordId = SeedRawWithSensitiveMarkers(temp);
+        SeedRawWithSensitiveMarkers(temp);
 
         await using var defaultHost = await StartHostAsync(temp);
-        var defaultDashboard = await defaultHost.Client.GetStringAsync("/");
-        // Raw is shown by default: the ingestion list links the raw record and the
-        // trace is labelled by its prompt (D032).
-        Assert.Contains($"/traces/{rawRecordId}/raw", defaultDashboard);
-        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", defaultDashboard);
-        Assert.DoesNotContain("leak-marker@example.com", defaultDashboard);
+        var defaultOverview = await defaultHost.Client.GetStringAsync("/");
+        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", defaultOverview);
+        Assert.DoesNotContain("leak-marker@example.com", defaultOverview);
 
         await using var sanitizedHost = await StartHostAsync(temp, sanitizedOnly: true);
-        var sanitizedDashboard = await sanitizedHost.Client.GetStringAsync("/");
-        Assert.DoesNotContain($"/traces/{rawRecordId}/raw", sanitizedDashboard);
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", sanitizedDashboard);
+        var sanitizedOverview = await sanitizedHost.Client.GetStringAsync("/");
+        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", sanitizedOverview);
+        Assert.Contains("trace-ui", sanitizedOverview);
     }
 
     [Fact]

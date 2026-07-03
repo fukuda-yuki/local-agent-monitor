@@ -810,7 +810,7 @@ internal static class MonitorHost
 
         var status = context.Request.Query["status"].ToString();
         if (!string.IsNullOrEmpty(status)
-            && status is not ("ok" or "recovered" or "unrecovered" or "unknown"))
+            && status is not ("ok" or "recovered" or "unrecovered" or "unknown" or "error"))
         {
             return false;
         }
