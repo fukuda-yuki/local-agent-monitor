@@ -9,10 +9,15 @@ using Microsoft.Extensions.DependencyInjection;
 namespace CopilotAgentObservability.LocalMonitor.Pages;
 
 /// <summary>
-/// Trace list. When raw is available it labels each trace with the user prompt
-/// extracted server-side from the raw OTLP payload (D032), which makes the page a
-/// raw-bearing surface: it then enforces same-origin and <c>no-store</c>. Under
-/// <c>--sanitized-only</c> no prompt is shown and a shortened TraceId is used.
+/// Trace list master-detail (Sprint18 §6.2, D042 C4): toolbar filters, a
+/// token-sorted table, offset paging, and a selection-driven preview panel.
+/// The initial page is server-rendered through the same filtered query the
+/// sanitized `GET /api/monitor/trace-list` endpoint uses; monitor-tracelist.js
+/// refetches on filter changes and appends further pages. When raw is available
+/// each row is labelled with the user prompt extracted server-side (D032),
+/// which makes the page a raw-bearing surface: it then enforces same-origin and
+/// <c>no-store</c>. Under <c>--sanitized-only</c> no prompt is shown and a
+/// shortened TraceId is used.
 /// </summary>
 public sealed class TracesModel : PageModel
 {
@@ -21,30 +26,53 @@ public sealed class TracesModel : PageModel
     private readonly Dictionary<string, string?> promptByTraceId = new(StringComparer.Ordinal);
 
     [BindProperty(SupportsGet = true)]
-    public long After { get; set; }
+    public string? Q { get; set; }
 
     [BindProperty(SupportsGet = true)]
-    public string? ClientKind { get; set; }
+    public string? Model { get; set; }
 
     [BindProperty(SupportsGet = true)]
     public string? Status { get; set; }
 
     [BindProperty(SupportsGet = true)]
-    public string? TraceId { get; set; }
+    public string? Period { get; set; }
 
-    internal MonitorProjectionPage<MonitorTraceRow> Result { get; private set; } = null!;
+    [BindProperty(SupportsGet = true)]
+    public string? Sort { get; set; }
+
+    internal MonitorTraceListPage Result { get; private set; } = null!;
+
+    internal IReadOnlyList<string> ModelOptions { get; private set; } = [];
 
     internal bool RawAvailable { get; private set; }
 
+    internal string EffectivePeriod { get; private set; } = "today";
+
+    internal string EffectiveSort { get; private set; } = "tokens";
+
     public IActionResult OnGet()
     {
-        if (After < 0)
+        var store = HttpContext.RequestServices.GetRequiredService<IMonitorProjectionStore>();
+        var options = HttpContext.RequestServices.GetRequiredService<MonitorOptions>();
+        var overviewService = HttpContext.RequestServices.GetRequiredService<MonitorOverviewService>();
+
+        EffectivePeriod = string.IsNullOrEmpty(Period) ? "today" : Period;
+        if (EffectivePeriod != "all" && !MonitorOverviewService.IsSupportedPeriod(EffectivePeriod))
         {
             return BadRequest();
         }
 
-        var store = HttpContext.RequestServices.GetRequiredService<IMonitorProjectionStore>();
-        var options = HttpContext.RequestServices.GetRequiredService<MonitorOptions>();
+        EffectiveSort = string.IsNullOrEmpty(Sort) ? "tokens" : Sort;
+        if (EffectiveSort is not ("tokens" or "time" or "duration"))
+        {
+            return BadRequest();
+        }
+
+        if (!string.IsNullOrEmpty(Status)
+            && Status is not ("ok" or "recovered" or "unrecovered" or "unknown" or "error"))
+        {
+            return BadRequest();
+        }
 
         RawAvailable = !options.SanitizedOnly;
         if (RawAvailable)
@@ -59,9 +87,38 @@ public sealed class TracesModel : PageModel
             }
         }
 
+        string? startInclusive = null;
+        string? endExclusive = null;
+        if (EffectivePeriod != "all")
+        {
+            var range = overviewService.ResolvePeriod(EffectivePeriod);
+            startInclusive = MonitorOverviewService.FormatUtc(range.Start);
+            endExclusive = MonitorOverviewService.FormatUtc(range.End);
+        }
+
         try
         {
-            Result = store.ListMonitorTraces(After, PageSize);
+            Result = store.ListMonitorTracesFiltered(new MonitorTraceListQuery(
+                TraceIdSearch: string.IsNullOrWhiteSpace(Q) ? null : Q.Trim(),
+                Model: string.IsNullOrWhiteSpace(Model) ? null : Model,
+                Status: string.IsNullOrEmpty(Status) ? null : Status,
+                StartInclusive: startInclusive,
+                EndExclusive: endExclusive,
+                Sort: EffectiveSort,
+                Offset: 0,
+                Limit: PageSize));
+
+            // Model filter options come from the all-time per-model aggregate so a
+            // filtered page still offers every known model.
+            ModelOptions = store
+                .GetPerModelPeriodSummary(
+                    MonitorOverviewService.FormatUtc(DateTimeOffset.UnixEpoch),
+                    MonitorOverviewService.FormatUtc(DateTimeOffset.UtcNow.AddDays(2)))
+                .Select(model => model.Model)
+                .Where(model => !string.IsNullOrEmpty(model))
+                .Select(model => model!)
+                .ToList();
+
             if (RawAvailable)
             {
                 PopulatePrompts(store);

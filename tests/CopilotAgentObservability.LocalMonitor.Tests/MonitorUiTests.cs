@@ -99,9 +99,9 @@ public class MonitorUiTests
         SeedRawWithSensitiveMarkers(temp);
         await using var host = await StartHostAsync(temp);
 
-        var traces = await host.Client.GetStringAsync("/traces");
+        var traces = await host.Client.GetStringAsync("/traces?period=all");
 
-        // The trace id is still shown (shortened) and the prompt labels the card (D032),
+        // The trace id is still shown (shortened) and the prompt labels the row (D032),
         // but only the prompt is surfaced — never tool arguments or PII.
         Assert.Contains("trace-ui", traces);
         Assert.Contains("SECRET_PROMPT_TEXT_MARKER", traces);
@@ -116,21 +116,24 @@ public class MonitorUiTests
         SeedRawWithSensitiveMarkers(temp);
         await using var host = await StartHostAsync(temp, sanitizedOnly: true);
 
-        var traces = await host.Client.GetStringAsync("/traces");
+        var traces = await host.Client.GetStringAsync("/traces?period=all");
 
         Assert.Contains("trace-ui", traces);
         Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", traces);
         Assert.DoesNotContain("leak-marker@example.com", traces);
     }
 
-    [Fact]
-    public async Task TracesPage_RejectsNegativeAfterCursorWith400()
+    [Theory]
+    [InlineData("/traces?period=90d")]
+    [InlineData("/traces?sort=prompt")]
+    [InlineData("/traces?status=broken")]
+    public async Task TracesPage_RejectsInvalidFilterValuesWith400(string path)
     {
         using var temp = new MonitorTempDirectory();
         EnsureSchema(temp);
         await using var host = await StartHostAsync(temp);
 
-        var traces = await host.Client.GetAsync("/traces?after=-1");
+        var traces = await host.Client.GetAsync(path);
 
         Assert.Equal(HttpStatusCode.BadRequest, traces.StatusCode);
     }
@@ -194,19 +197,24 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task TracesPage_RendersTraceCards()
+    public async Task TracesPage_RendersMasterDetailTableWithToolbarAndPreview()
     {
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
         await using var host = await StartHostAsync(temp);
 
-        var traces = await host.Client.GetStringAsync("/traces");
+        var traces = await host.Client.GetStringAsync("/traces?period=all");
 
-        // The redesigned list renders one card per trace with metric chips.
-        Assert.Contains("trace-card", traces);
-        Assert.Contains("trace-status", traces);
-        Assert.Contains("Trace Explorer", traces);
-        Assert.Contains("trace-card-chips", traces);
+        // Sprint18 §6.2: toolbar filters, grid table with token column, and the
+        // selection-driven preview panel.
+        Assert.Contains("trace-list-table", traces);
+        Assert.Contains("trace-search", traces);
+        Assert.Contains("tracelist-toolbar", traces);
+        Assert.Contains("trace-preview", traces);
+        Assert.Contains("trace-row", traces);
+        Assert.Contains("token-heat", traces);
+        // Default sort is tokens-descending (the sortable token header is marked).
+        Assert.Contains("data-sort-key=\"tokens\" aria-sort=\"descending\"", traces);
     }
 
     [Fact]

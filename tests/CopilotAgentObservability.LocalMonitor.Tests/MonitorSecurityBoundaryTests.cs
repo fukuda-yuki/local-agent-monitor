@@ -66,7 +66,9 @@ public class MonitorSecurityBoundaryTests
         SeedSensitiveProjectedRecord(temp);
         await using var host = await StartReadOnlyHostAsync(temp);
 
-        foreach (var path in new[] { "/", "/traces" })
+        // period=all keeps the epoch-seeded fixture rows visible on the Sprint18
+        // trace list (its default period filter is "today").
+        foreach (var path in new[] { "/", "/traces?period=all" })
         {
             var body = await host.Client.GetStringAsync(path);
             Assert.Contains("SECRET_PROMPT_TEXT_MARKER", body);

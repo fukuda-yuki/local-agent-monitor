@@ -355,6 +355,7 @@ internal static class MonitorHost
                 {
                     items,
                     total_matched = page.TotalMatched,
+                    total_matched_tokens = page.TotalMatchedTokens,
                     offset = query.Offset,
                     limit = query.Limit,
                 });

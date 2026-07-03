@@ -157,7 +157,8 @@ internal sealed record MonitorTraceListQuery(
     int Offset,
     int Limit);
 
-/// <summary>An offset page of trace rows plus the total row count matching the same filters.</summary>
+/// <summary>An offset page of trace rows plus the total row count and token sum matching the same filters.</summary>
 internal sealed record MonitorTraceListPage(
     IReadOnlyList<MonitorTraceRow> Items,
-    int TotalMatched);
+    int TotalMatched,
+    long TotalMatchedTokens);

@@ -340,6 +340,6 @@ public class MonitorSummaryEndpointTests
 
         public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => traces.ToList();
 
-        public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => new([], 0);
+        public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => new([], 0, 0);
     }
 }

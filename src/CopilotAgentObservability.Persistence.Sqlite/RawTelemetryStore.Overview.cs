@@ -215,15 +215,19 @@ internal sealed partial class RawTelemetryStore
         using var connection = OpenConnection();
 
         int totalMatched;
+        long totalMatchedTokens;
         using (var countCommand = connection.CreateCommand())
         {
-            countCommand.CommandText = $"SELECT COUNT(*) FROM monitor_traces {whereClause};";
+            countCommand.CommandText = $"SELECT COUNT(*), COALESCE(SUM(total_tokens), 0) FROM monitor_traces {whereClause};";
             foreach (var (name, value) in parameters)
             {
                 AddParameter(countCommand, name, value);
             }
 
-            totalMatched = Convert.ToInt32((long)countCommand.ExecuteScalar()!, CultureInfo.InvariantCulture);
+            using var countReader = countCommand.ExecuteReader();
+            countReader.Read();
+            totalMatched = countReader.GetInt32(0);
+            totalMatchedTokens = countReader.GetInt64(1);
         }
 
         using var command = connection.CreateCommand();
@@ -243,7 +247,7 @@ internal sealed partial class RawTelemetryStore
         AddParameter(command, "$limit", query.Limit);
         AddParameter(command, "$offset", query.Offset);
 
-        return new MonitorTraceListPage(ReadTraceRows(command), totalMatched);
+        return new MonitorTraceListPage(ReadTraceRows(command), totalMatched, totalMatchedTokens);
     }
 
     private const string TraceRowColumns =
