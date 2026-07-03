@@ -157,6 +157,40 @@ public class MonitorSecurityBoundaryTests
     }
 
     [Fact]
+    public async Task SpanDetailRoute_IsAbsentUnderSanitizedOnly()
+    {
+        // Sprint18 D043: the span-detail route follows the same raw-route boundary.
+        using var temp = new MonitorTempDirectory();
+        SeedSensitiveProjectedRecord(temp);
+        await using var host = await StartReadOnlyHostAsync(temp, sanitizedOnly: true);
+
+        var response = await host.Client.GetAsync("/traces/55555555555555555555555555555555/spans/6666666666666666/detail");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task SpanDetailRoute_CrossOriginIsForbidden_AndSendsNoStore()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedSensitiveProjectedRecord(temp);
+        await using var host = await StartReadOnlyHostAsync(temp);
+        const string path = "/traces/55555555555555555555555555555555/spans/6666666666666666/detail";
+
+        using var crossSite = new HttpRequestMessage(HttpMethod.Get, path);
+        crossSite.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "cross-site");
+        Assert.Equal(HttpStatusCode.Forbidden, (await host.Client.SendAsync(crossSite)).StatusCode);
+
+        using var foreignOrigin = new HttpRequestMessage(HttpMethod.Get, path);
+        foreignOrigin.Headers.TryAddWithoutValidation("Origin", "http://evil.example.com");
+        Assert.Equal(HttpStatusCode.Forbidden, (await host.Client.SendAsync(foreignOrigin)).StatusCode);
+
+        var sameOrigin = await host.Client.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, sameOrigin.StatusCode);
+        Assert.True(sameOrigin.Headers.CacheControl?.NoStore);
+    }
+
+    [Fact]
     public async Task Events_DoesNotAcceptCrossOriginPost()
     {
         using var temp = new MonitorTempDirectory();

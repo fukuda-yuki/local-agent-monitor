@@ -2664,6 +2664,226 @@ a.kpi-card:hover {
     color: var(--monitor-muted);
 }
 
+/* ── Span inspector (Sprint18 §6.4) ── */
+.inspector-panel {
+    padding: 14px;
+    border: 1px solid var(--monitor-border-strong);
+    border-radius: 10px;
+    background: var(--monitor-surface-inset);
+}
+
+.inspector-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.inspector-mark {
+    width: 8px;
+    height: 8px;
+    flex: none;
+    border-radius: 2px;
+    background: var(--monitor-muted);
+}
+
+.inspector-mark.mark-llm { background: var(--monitor-accent); border-radius: 50%; }
+.inspector-mark.mark-tool { background: var(--monitor-token-gold); }
+.inspector-mark.mark-agent { background: var(--monitor-agent); border-radius: 50%; }
+
+.inspector-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 12.5px;
+    font-weight: var(--monitor-weight-bold);
+    color: var(--monitor-ink);
+}
+
+.inspector-close {
+    padding: 2px 8px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--monitor-muted);
+    font-size: 13px;
+}
+
+.inspector-close:hover {
+    color: var(--monitor-ink);
+    background: var(--monitor-row-hover);
+}
+
+.inspector-sub {
+    margin: 6px 0 10px;
+    font-size: 11px;
+    color: var(--monitor-muted);
+}
+
+.inspector-tabs {
+    display: inline-flex;
+    margin-bottom: 12px;
+    padding: 2px;
+    border: 1px solid var(--monitor-border);
+    border-radius: 7px;
+    background: var(--monitor-bg);
+}
+
+.inspector-tab {
+    padding: 4px 14px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--monitor-ink-subtle);
+    font-size: 11.5px;
+}
+
+.inspector-tab.active {
+    background: var(--monitor-segment-active);
+    color: var(--monitor-ink);
+    font-weight: var(--monitor-weight-bold);
+}
+
+.inspector-section-title {
+    display: block;
+    margin: 12px 0 6px;
+    font-size: 11px;
+    font-weight: var(--monitor-weight-bold);
+    color: var(--monitor-ink-subtle);
+}
+
+.inspector-mono-block {
+    margin: 0;
+    padding: 10px;
+    border: 1px solid var(--monitor-border);
+    border-radius: 6px;
+    background: var(--monitor-bg);
+    font-family: var(--monitor-font-mono);
+    font-size: 10.5px;
+    line-height: 1.5;
+    color: var(--monitor-ink);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.inspector-raw-json {
+    max-height: 420px;
+}
+
+.inspector-note {
+    margin: 6px 0 0;
+    font-size: 10.5px;
+    color: var(--monitor-muted);
+}
+
+.inspector-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.inspector-message {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border: 1px solid var(--monitor-border);
+    border-radius: 6px;
+    background: var(--monitor-surface);
+    font-size: 11px;
+}
+
+.role-chip {
+    flex: none;
+    padding: 1px 8px;
+    border-radius: 99px;
+    font-size: 10px;
+    font-weight: var(--monitor-weight-bold);
+}
+
+.role-chip.role-system { background: var(--monitor-copilot-bg); color: var(--monitor-copilot-ink); }
+.role-chip.role-user { background: var(--monitor-selected-bg); color: var(--monitor-accent); }
+.role-chip.role-tool { background: rgba(224, 170, 78, 0.12); color: var(--monitor-token-gold); }
+.role-chip.role-assistant,
+.role-chip.role-asst { background: var(--monitor-success-bg); color: var(--monitor-success); }
+
+.message-preview {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: var(--monitor-ink-subtle);
+}
+
+.message-size {
+    flex: none;
+    font-size: 10px;
+    color: var(--monitor-muted);
+}
+
+.inspector-meta {
+    display: flex;
+    flex-direction: column;
+}
+
+.inspector-meta-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--monitor-border-row);
+    font-size: 10.5px;
+    color: var(--monitor-muted);
+}
+
+.inspector-meta-row .monitor-mono {
+    color: var(--monitor-ink-subtle);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.inspector-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+.inspector-ask-copilot {
+    flex: 1;
+    padding: 7px 10px;
+    border: 1px solid var(--monitor-copilot-border);
+    border-radius: 7px;
+    background: var(--monitor-copilot-bg);
+    color: var(--monitor-copilot-ink);
+    font-size: 11.5px;
+}
+
+.inspector-ask-copilot:hover {
+    border-color: var(--monitor-copilot-border-hover);
+}
+
+.inspector-open-raw,
+.inspector-copy-json {
+    padding: 7px 12px;
+    border: 1px solid var(--monitor-border);
+    border-radius: 7px;
+    background: var(--monitor-surface);
+    color: var(--monitor-ink-subtle);
+    font-size: 11.5px;
+}
+
+.inspector-open-raw:hover,
+.inspector-copy-json:hover {
+    border-color: var(--monitor-border-strong);
+    color: var(--monitor-ink);
+}
+
 /* ── Responsive ── */
 @media (max-width: 1100px) {
     .kpi-grid,

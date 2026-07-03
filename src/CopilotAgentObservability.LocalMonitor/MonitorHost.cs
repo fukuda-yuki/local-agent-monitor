@@ -536,6 +536,96 @@ internal static class MonitorHost
                     $"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Raw record {rawRecordId}</title></head><body><pre>{encodedPayload}</pre></body></html>");
             });
 
+            // A raw span-detail surface for the Sprint18 span inspector (D043).
+            // Same route-boundary pattern as D035/D039: registered only in the
+            // raw-default posture (route absent → 404 under --sanitized-only),
+            // same-origin enforced, no-store, 404 for unknown trace/span ids.
+            app.MapGet("/traces/{traceId}/spans/{spanId}/detail", async (string traceId, string spanId, HttpContext context) =>
+            {
+                if (IsCrossSiteRequest(context))
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden", "The span detail is same-origin only.");
+                    return;
+                }
+
+                MonitorSpanRow? spanRow;
+                RawTelemetryRecord? record = null;
+                try
+                {
+                    spanRow = projectionStore.GetMonitorSpan(traceId, spanId);
+                    if (spanRow is not null)
+                    {
+                        record = projectionStore.GetRawRecordById(spanRow.RawRecordId);
+                    }
+                }
+                catch (PersistenceBusyException)
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                    return;
+                }
+
+                if (spanRow is null || record is null)
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "span_not_found", "No span exists for that trace and span id.");
+                    return;
+                }
+
+                // Best-effort formatted extraction; the raw span JSON always works.
+                var detail = SpanDetailExtractor.Extract(record.PayloadJson, traceId, spanId);
+
+                context.Response.Headers["Cache-Control"] = "no-store";
+                await WriteJsonAsync(context, new
+                {
+                    trace_id = traceId,
+                    span_id = spanId,
+                    span = new
+                    {
+                        operation = spanRow.Operation,
+                        category = spanRow.Category,
+                        tool_name = spanRow.ToolName,
+                        mcp_tool_name = spanRow.McpToolName,
+                        agent_name = spanRow.AgentName,
+                        request_model = spanRow.RequestModel,
+                        response_model = spanRow.ResponseModel,
+                        parent_span_id = spanRow.ParentSpanId,
+                        status = spanRow.Status,
+                        error_type = spanRow.ErrorType,
+                        input_tokens = spanRow.InputTokens,
+                        output_tokens = spanRow.OutputTokens,
+                        total_tokens = spanRow.TotalTokens,
+                        cache_read_tokens = spanRow.CacheReadTokens,
+                        cache_creation_tokens = spanRow.CacheCreationTokens,
+                        duration_ms = spanRow.DurationMs,
+                        start_time = spanRow.StartTime,
+                        end_time = spanRow.EndTime,
+                    },
+                    tool = detail?.Tool is { } tool
+                        ? new
+                        {
+                            arguments = tool.Arguments,
+                            result_tail = tool.ResultTail,
+                            result_token_estimate = tool.ResultTokenEstimate,
+                            exit_code = tool.ExitCode,
+                        }
+                        : (object?)null,
+                    llm = detail?.Llm is { } llm
+                        ? new
+                        {
+                            messages = llm.Messages.Select(message => new
+                            {
+                                role = message.Role,
+                                size_chars = message.SizeChars,
+                                token_estimate = message.TokenEstimate,
+                                preview = message.Preview,
+                            }),
+                            response_preview = llm.ResponsePreview,
+                            response_token_estimate = llm.ResponseTokenEstimate,
+                        }
+                        : (object?)null,
+                    raw_span_json = detail?.RawSpanJson,
+                });
+            });
+
             // A raw prompt-label surface (D039), alongside the raw-detail view above.
             // --sanitized-only removes it (route absent → 404). Same-origin enforced,
             // no-store, and no trace-id format validation (matches D035's

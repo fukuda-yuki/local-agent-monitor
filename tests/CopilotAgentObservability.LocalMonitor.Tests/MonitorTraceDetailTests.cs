@@ -424,5 +424,8 @@ public class MonitorTraceDetailTests
 
         public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) =>
             throw new NotSupportedException();
+
+        public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) =>
+            throw new NotSupportedException();
     }
 }

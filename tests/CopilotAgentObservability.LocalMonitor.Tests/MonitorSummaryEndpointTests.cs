@@ -341,5 +341,7 @@ public class MonitorSummaryEndpointTests
         public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => traces.ToList();
 
         public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => new([], 0, 0);
+
+        public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) => null;
     }
 }

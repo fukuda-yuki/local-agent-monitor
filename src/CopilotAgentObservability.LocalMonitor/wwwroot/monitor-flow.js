@@ -464,6 +464,11 @@
     }
   });
 
+  // External modules (inspector ✕) can clear the current selection.
+  document.addEventListener("cao-span-deselect", () => {
+    if (state.selectedSpanId !== null) selectSpan(state.selectedSpanId);
+  });
+
   // External modules (error list, drawer) can request a span highlight.
   document.addEventListener("cao-span-highlight", (event) => {
     const spanId = event.detail?.spanId;

@@ -250,6 +250,65 @@ internal sealed partial class RawTelemetryStore
         return new MonitorTraceListPage(ReadTraceRows(command), totalMatched, totalMatchedTokens);
     }
 
+    /// <summary>Single sanitized span row by trace + span id (Sprint18 inspector route, D043); null when absent.</summary>
+    public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, raw_record_id, trace_id, span_id, parent_span_id, span_ordinal,
+                   operation, category, tool_name, tool_type, mcp_tool_name, mcp_server_hash,
+                   agent_name, request_model, response_model, input_tokens, output_tokens,
+                   total_tokens, reasoning_tokens, cache_read_tokens, cache_creation_tokens,
+                   status, error_type, finish_reasons, conversation_id, duration_ms,
+                   start_time, end_time, projected_at
+            FROM monitor_spans
+            WHERE trace_id = $trace_id AND span_id = $span_id
+            ORDER BY id
+            LIMIT 1;
+            """;
+        AddParameter(command, "$trace_id", traceId);
+        AddParameter(command, "$span_id", spanId);
+
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new MonitorSpanRow(
+            Id: reader.GetInt64(0),
+            RawRecordId: reader.GetInt64(1),
+            TraceId: reader.GetString(2),
+            SpanId: reader.IsDBNull(3) ? null : reader.GetString(3),
+            ParentSpanId: reader.IsDBNull(4) ? null : reader.GetString(4),
+            SpanOrdinal: reader.GetInt32(5),
+            Operation: reader.IsDBNull(6) ? null : reader.GetString(6),
+            Category: reader.IsDBNull(7) ? null : reader.GetString(7),
+            ToolName: reader.IsDBNull(8) ? null : reader.GetString(8),
+            ToolType: reader.IsDBNull(9) ? null : reader.GetString(9),
+            McpToolName: reader.IsDBNull(10) ? null : reader.GetString(10),
+            McpServerHash: reader.IsDBNull(11) ? null : reader.GetString(11),
+            AgentName: reader.IsDBNull(12) ? null : reader.GetString(12),
+            RequestModel: reader.IsDBNull(13) ? null : reader.GetString(13),
+            ResponseModel: reader.IsDBNull(14) ? null : reader.GetString(14),
+            InputTokens: reader.IsDBNull(15) ? null : reader.GetInt32(15),
+            OutputTokens: reader.IsDBNull(16) ? null : reader.GetInt32(16),
+            TotalTokens: reader.IsDBNull(17) ? null : reader.GetInt32(17),
+            ReasoningTokens: reader.IsDBNull(18) ? null : reader.GetInt32(18),
+            CacheReadTokens: reader.IsDBNull(19) ? null : reader.GetInt32(19),
+            CacheCreationTokens: reader.IsDBNull(20) ? null : reader.GetInt32(20),
+            Status: reader.IsDBNull(21) ? null : reader.GetString(21),
+            ErrorType: reader.IsDBNull(22) ? null : reader.GetString(22),
+            FinishReasons: reader.IsDBNull(23) ? null : reader.GetString(23),
+            ConversationId: reader.IsDBNull(24) ? null : reader.GetString(24),
+            DurationMs: reader.IsDBNull(25) ? null : reader.GetDouble(25),
+            StartTime: reader.IsDBNull(26) ? null : reader.GetString(26),
+            EndTime: reader.IsDBNull(27) ? null : reader.GetString(27),
+            ProjectedAt: reader.GetString(28));
+    }
+
     private const string TraceRowColumns =
         """
         id, trace_id, client_kind, experiment_id, task_id, task_category, agent_variant, prompt_version,
