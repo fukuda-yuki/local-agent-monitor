@@ -63,10 +63,18 @@ public class MonitorUiTests
 
         var diagnostics = await host.Client.GetStringAsync("/diagnostics");
 
+        // Sprint18 §6.7: readiness heading + probe link, 4-stage pipeline,
+        // component table, thresholds, and the C5 ingestion-history section —
+        // all sanitized (no prompt / PII).
         Assert.Contains("health/ready", diagnostics);
-        Assert.Contains("Readiness", diagnostics);
+        Assert.Contains("① 受信", diagnostics);
+        Assert.Contains("④ 表示", diagnostics);
         Assert.Contains("コンポーネント確認", diagnostics);
+        Assert.Contains("問題があった時だけ読む場所", diagnostics);
         Assert.Contains("Loopback bind", diagnostics);
+        Assert.Contains("しきい値", diagnostics);
+        Assert.Contains("id=\"ingestion-history\"", diagnostics);
+        Assert.Contains("/monitor-diagnostics.js", diagnostics);
         Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", diagnostics);
         Assert.DoesNotContain("leak-marker@example.com", diagnostics);
     }

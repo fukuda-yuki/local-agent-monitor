@@ -2,21 +2,15 @@
 @model DiagnosticsModel
 
 @{
-    var (statusLabel, statusClass) = Model.Readiness.Status switch
+    var (statusLabel, statusClass, httpStatus) = Model.Readiness.Status switch
     {
-        "ready" => ("受信できます", "success"),
-        "degraded" => ("注意が必要", "warning"),
-        _ => ("異常", "error"),
+        "ready" => ("受信できます — ready", "status-ok", "200"),
+        "degraded" => ("注意 — degraded", "status-recovered", "200"),
+        _ => ("受信できません — not_ready", "status-unrecovered", "503"),
     };
     var degradedReasons = Model.Readiness.DegradedReasons?.ToList() ?? new List<string>();
-    var statusCopy = Model.Readiness.Status switch
-    {
-        "ready" => "readiness の必須条件を満たしています。",
-        "degraded" => "短時間の backlog または遅延があります。増え続ける場合は component を確認してください。",
-        _ => "probe は not_ready を返します。停止している component または閾値超過を確認してください。",
-    };
 
-    string Ok(bool value) => value ? "OK" : "FAIL";
+    string Ok(bool value) => value ? "OK" : "NG";
     string OkClass(bool value) => value ? "success" : "error";
     string ReasonLabel(string reason) => reason switch
     {
@@ -34,43 +28,51 @@
         "fatal_error" => "致命的なエラーが記録されています。",
         _ => "詳細は readiness body を確認してください。",
     };
+
+    var receiveOk = Model.Readiness.LoopbackBound && Model.Readiness.IngestionAccepting;
+    var writeOk = Model.Readiness.WriterRunning;
+    var projectionOk = Model.Readiness.ProjectionWorkerRunning;
+    var serveOk = Model.Readiness.DbOpen && Model.Readiness.MigrationComplete;
 }
 
-<section class="monitor-section diagnostics-page">
-    <div class="page-header">
-        <div>
-            <p class="page-kicker">Readiness</p>
-            <h2 class="monitor-page-title">診断</h2>
-        </div>
-        <a class="monitor-btn" href="/health/ready">health/ready JSON</a>
+<section class="diagnostics-page">
+    <div class="diagnostics-head">
+        <h2 class="overview-title">診断</h2>
+        <span class="status-pill @statusClass"><span class="trace-status-dot @statusClass" aria-hidden="true"></span>@statusLabel</span>
+        <a class="diagnostics-probe monitor-mono" href="/health/ready">GET /health/ready → @httpStatus</a>
     </div>
 
-    <div class="dashboard-command diagnostics-command status-@statusClass">
-        <div class="dashboard-command-main">
-            <div class="dashboard-command-kicker">GET /health/ready</div>
-            <div class="dashboard-command-title">
-                <span class="status-card-dot" aria-hidden="true"></span>
-                <span>@statusLabel</span>
-            </div>
-            <p>@statusCopy</p>
+    <div class="pipeline-grid" aria-label="取り込みパイプライン">
+        <div class="pipeline-card">
+            <span class="pipeline-title">① 受信</span>
+            <span class="pipeline-sub">OTLP/HTTP</span>
+            <span class="monitor-badge @OkClass(receiveOk)">@Ok(receiveOk)</span>
+            <span class="pipeline-metric monitor-mono">loopback @(Model.Readiness.LoopbackBound ? "bound" : "unbound")</span>
+            <span class="pipeline-metric monitor-mono">queue @(Model.Readiness.IngestionAccepting ? "accepting" : "stalled")</span>
         </div>
-        <div class="dashboard-command-metrics" aria-label="readiness 指標">
-            <div class="command-metric">
-                <span>projection 残</span>
-                <strong class="monitor-mono">@Model.Readiness.ProjectionBacklog</strong>
-            </div>
-            <div class="command-metric">
-                <span>projection 遅延</span>
-                <strong class="monitor-mono">@Model.Readiness.ProjectionLagSeconds 秒</strong>
-            </div>
-            <div class="command-metric">
-                <span>span 残</span>
-                <strong class="monitor-mono">@Model.Readiness.SpanProjectionBacklog</strong>
-            </div>
-            <div class="command-metric">
-                <span>失敗回数</span>
-                <strong class="monitor-mono">@Model.Readiness.ProjectionFailureCount</strong>
-            </div>
+        <span class="pipeline-arrow" aria-hidden="true">→</span>
+        <div class="pipeline-card">
+            <span class="pipeline-title">② 書き込み</span>
+            <span class="pipeline-sub">キュー → raw store</span>
+            <span class="monitor-badge @OkClass(writeOk)">@Ok(writeOk)</span>
+            <span class="pipeline-metric monitor-mono">writer @(Model.Readiness.WriterRunning ? "running" : "stopped")</span>
+            <span class="pipeline-metric monitor-mono">失敗 @Model.Readiness.ProjectionFailureCount 回</span>
+        </div>
+        <span class="pipeline-arrow" aria-hidden="true">→</span>
+        <div class="pipeline-card">
+            <span class="pipeline-title">③ Projection</span>
+            <span class="pipeline-sub">raw → 表示用データ</span>
+            <span class="monitor-badge @OkClass(projectionOk)">@Ok(projectionOk)</span>
+            <span class="pipeline-metric monitor-mono">残 @Model.Readiness.ProjectionBacklog · 遅延 @Model.Readiness.ProjectionLagSeconds s</span>
+            <span class="pipeline-metric monitor-mono">span 残 @Model.Readiness.SpanProjectionBacklog</span>
+        </div>
+        <span class="pipeline-arrow" aria-hidden="true">→</span>
+        <div class="pipeline-card">
+            <span class="pipeline-title">④ 表示</span>
+            <span class="pipeline-sub">UI / API 提供</span>
+            <span class="monitor-badge @OkClass(serveOk)">@Ok(serveOk)</span>
+            <span class="pipeline-metric monitor-mono">db @(Model.Readiness.DbOpen ? "open" : "closed")</span>
+            <span class="pipeline-metric monitor-mono">migration @(Model.Readiness.MigrationComplete ? "complete" : "pending")</span>
         </div>
     </div>
 
@@ -93,8 +95,11 @@
         </div>
     }
 
-    <h3 class="monitor-section-title">コンポーネント確認</h3>
     <div class="panel">
+        <div class="panel-head">
+            <span class="panel-title">コンポーネント確認</span>
+            <span class="panel-meta">問題があった時だけ読む場所 — 正常時は全行 OK</span>
+        </div>
         <div class="monitor-table-wrapper">
             <table class="monitor-table component-table">
                 <thead>
@@ -139,4 +144,35 @@
             </table>
         </div>
     </div>
+
+    <div class="panel">
+        <div class="panel-head">
+            <span class="panel-title">しきい値（設定値）</span>
+            <span class="panel-meta">readiness contract の実効値</span>
+        </div>
+        <div class="threshold-list">
+            <div class="inspector-meta-row"><span>受信 stall</span><span class="monitor-mono">&lt; @Model.IngestionStallThresholdSeconds s</span></div>
+            <div class="inspector-meta-row"><span>projection 遅延</span><span class="monitor-mono">&lt; @Model.ProjectionLagThresholdSeconds s</span></div>
+        </div>
+    </div>
+
+    <details class="raw-section" id="ingestion-history">
+        <summary><h3 class="raw-section-title">取り込み履歴</h3></summary>
+        <p class="monitor-subtle">受信した raw record と紐づく trace（sanitized metadata のみ）。</p>
+        <div class="monitor-table-wrapper">
+            <table class="monitor-table" id="ingestion-history-table">
+                <thead>
+                    <tr>
+                        <th>レコードID</th>
+                        <th>受信</th>
+                        <th>ソース</th>
+                        <th>トレース</th>
+                        <th>スパン</th>
+                    </tr>
+                </thead>
+                <tbody id="ingestion-history-rows"></tbody>
+            </table>
+        </div>
+    </details>
 </section>
+<script src="/monitor-diagnostics.js" defer></script>

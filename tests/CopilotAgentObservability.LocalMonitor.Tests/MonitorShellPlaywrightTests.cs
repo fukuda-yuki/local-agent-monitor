@@ -57,11 +57,20 @@ public class MonitorShellPlaywrightTests
         await page.Keyboard.PressAsync("Escape");
         await Expect(page.Locator("#status-popover")).ToBeHiddenAsync();
 
-        // 詳細診断を開く navigates to /diagnostics; the sidebar still has 2 items there (C1).
+        // 詳細診断を開く navigates to /diagnostics; the sidebar still has 2 items
+        // there (C1) and the §6.7 pipeline summary renders.
         await page.Locator("#status-badge").ClickAsync();
         await page.Locator("#status-popover a.primary").ClickAsync();
         await page.WaitForURLAsync($"{host.Url}/diagnostics");
         await Expect(page.Locator(".sidebar-nav .sidebar-link")).ToHaveCountAsync(2);
+        await Expect(page.Locator(".pipeline-card")).ToHaveCountAsync(4);
+        await Expect(page.Locator("#ingestion-history")).ToHaveCountAsync(1);
+
+        // The popover's 取り込み履歴 link opens the history section via the fragment.
+        await page.Locator("#status-badge").ClickAsync();
+        await page.Locator("#status-popover a", new PageLocatorOptions { HasTextString = "取り込み履歴" }).ClickAsync();
+        await page.WaitForURLAsync($"{host.Url}/diagnostics#ingestion-history");
+        await Expect(page.Locator("#ingestion-history")).ToHaveAttributeAsync("open", "");
 
         // The shell never fetches raw-bearing routes, in either posture.
         Assert.DoesNotContain(requestedUrls, url => url.Contains("/raw", StringComparison.OrdinalIgnoreCase));
