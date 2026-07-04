@@ -35,7 +35,7 @@ jobs:
 
       - name: Install Playwright Chromium
         shell: pwsh
-        run: pwsh tests/CopilotAgentObservability.LocalMonitor.Tests/bin/Debug/net10.0/playwright.ps1 install --with-deps chromium
+        run: pwsh scripts/test/install-playwright-chromium.ps1 -WithDeps
 
       - name: Test
         run: dotnet test CopilotAgentObservability.slnx
