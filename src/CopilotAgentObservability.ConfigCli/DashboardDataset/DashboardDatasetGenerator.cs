@@ -89,7 +89,7 @@ internal static class DashboardDatasetGenerator
             timeBucketGranularity,
             row.TraceId,
             row.TraceId,
-            measurement.SourceRecordRef,
+            SanitizeDashboardRef(measurement.SourceRecordRef),
             FirstUserId(operations),
             FirstUserEmail(operations),
             row.ClientKind,
@@ -217,7 +217,7 @@ internal static class DashboardDatasetGenerator
                 proposedChangeKind: null,
                 candidateStatus: candidate.CandidateStatus,
                 decisionStatus: null,
-                evidenceRef: SanitizeEvidenceRef(candidate.EvidenceRef),
+                evidenceRef: SanitizeDashboardRef(candidate.EvidenceRef),
                 sensitiveBundlePresent: !string.IsNullOrWhiteSpace(candidate.SensitiveBundlePath));
         }));
         rows.AddRange(improvementCandidates.Select(candidate =>
@@ -241,7 +241,7 @@ internal static class DashboardDatasetGenerator
                 proposedChangeKind: candidate.ProposedChangeKind,
                 candidateStatus: candidate.CandidateStatus,
                 decisionStatus: null,
-                evidenceRef: SanitizeEvidenceRef(candidate.EvidenceRef),
+                evidenceRef: SanitizeDashboardRef(candidate.EvidenceRef),
                 sensitiveBundlePresent: !string.IsNullOrWhiteSpace(candidate.SensitiveBundlePath));
         }));
         rows.AddRange(autoDecisions.Select(decision =>
@@ -372,7 +372,7 @@ internal static class DashboardDatasetGenerator
                     0,
                     0,
                     1,
-                    measurement.SourceRecordRef));
+                    SanitizeDashboardRef(measurement.SourceRecordRef)));
             }
 
             var unknownSpanCount = row.UnknownSpansJson?.Count;
@@ -392,7 +392,7 @@ internal static class DashboardDatasetGenerator
                     0,
                     0,
                     1,
-                    measurement.SourceRecordRef));
+                    SanitizeDashboardRef(measurement.SourceRecordRef)));
             }
         }
 
@@ -443,7 +443,7 @@ internal static class DashboardDatasetGenerator
             SchemaVersion,
             BucketStart([], timeBucketGranularity, fallbackTimestampUtc),
             timeBucketGranularity,
-            measurement.SourceRecordRef,
+            SanitizeDashboardRef(measurement.SourceRecordRef),
             row.TraceId,
             null,
             null,
@@ -617,14 +617,14 @@ internal static class DashboardDatasetGenerator
         return sortedValues[index];
     }
 
-    private static string? SanitizeEvidenceRef(string? evidenceRef)
+    private static string? SanitizeDashboardRef(string? reference)
     {
-        if (string.IsNullOrWhiteSpace(evidenceRef))
+        if (string.IsNullOrWhiteSpace(reference))
         {
             return null;
         }
 
-        var trimmed = evidenceRef.Trim();
+        var trimmed = reference.Trim();
 
         // Reject obvious local filesystem paths so a sensitive bundle path (or
         // any other local path) placed in evidence_ref cannot leak into the

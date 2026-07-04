@@ -149,6 +149,15 @@ public class DashboardDatasetGenerationTests
         Assert.DoesNotContain(tempDirectory.Path.Replace('\\', '/'), output.Replace('\\', '/'));
         Assert.DoesNotContain("sensitive-bundle", output);
         Assert.DoesNotContain("sensitive_bundle_path", output);
+
+        using var document = JsonDocument.Parse(output);
+        Assert.All(document.RootElement.GetProperty("dashboard_run_summary").EnumerateArray(), row =>
+            Assert.Equal(JsonValueKind.Null, row.GetProperty("measurement_record_ref").ValueKind));
+        Assert.All(document.RootElement.GetProperty("dashboard_collection_health").EnumerateArray(), row =>
+        {
+            Assert.Equal(JsonValueKind.Null, row.GetProperty("input_ref").ValueKind);
+            Assert.Equal(JsonValueKind.Null, row.GetProperty("details_ref").ValueKind);
+        });
     }
 
     [Fact]
