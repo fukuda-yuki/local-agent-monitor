@@ -131,201 +131,127 @@ CDN 不使用。
 
 ## 2. Components
 
-### 2.1 Navigation
+### 2.1 Shell（サイドバー + メインペイン）
 
 ```
-┌──────────────────────────────────────────────────────┐
-│ [Overview]  [Traces]  [Ingestions]  [Diagnostics]  ● │
-└──────────────────────────────────────────────────────┘
+┌──────────┬──────────────────────────────────────────┐
+│ ■ Local  │  メインペイン (#14171e, padding 18-24px)  │
+│  Monitor │                                          │
+│  概要     │                                          │
+│  トレース  n│                                          │
+│          │                                          │
+│ [● 正常 · │                                          │
+│  受信中 ▸]│                                          │
+│ 127.0.0.1│                                          │
+└──────────┴──────────────────────────────────────────┘
 ```
 
-- タブ型水平ナビゲーション。画面幅いっぱい。
-- アクティブタブ: `--monitor-accent` の下線（2px） + テキスト色 `--monitor-ink`。
-- 非アクティブ: `--monitor-muted`、ホバーで `--monitor-ink-subtle`。
-- 右端にステータスインジケータ（●）: `--monitor-success` / `--monitor-warning` / `--monitor-error`。
-- 高さ: 36px（`--monitor-space-4` + テキスト）。
+- サイドバー: 幅 208px 固定、背景 `--monitor-sidebar-bg`、右境界 1px
+  `--monitor-border-divider`、padding 16px 12px。
+- ロゴ行: 10×10px 角丸 3px の青四角 `--monitor-accent` + 「Local Monitor」14px/700。
+- ナビは **2 項目のみ**（概要 / トレース。トレースに件数バッジ Mono 11px）。
+  アクティブ: 背景 `--monitor-selected-bg`、文字 `--monitor-ink`/700。
+  「診断」はナビに置かず、最下部の受信ステータスバッジ → ポップオーバー →
+  「詳細診断を開く」の段階的動線とする（D042 C1）。
+- ステータスポップオーバー: 幅 340px、背景 `--monitor-popover-bg`、境界
+  `--monitor-border-strong`、角丸 12px、影 `0 16px 48px rgba(0,0,0,0.6)`。
+  パイプライン 4 行 + フッター 2 ボタン。Esc / 外側クリックで閉じる。
 
-### 2.2 Filter Bar
+### 2.2 セグメントコントロール / 期間・ビュー切替
 
-```
-┌──────────────────────────────────────────────────────┐
-│ [ClientKind ▼] [Status ▼] [Search...        ] [Reset]│
-└──────────────────────────────────────────────────────┘
-```
+- 外枠: 境界 `--monitor-border`、角丸 7px、背景 `--monitor-surface-inset`、padding 2px。
+- アクティブ: 背景 `--monitor-segment-active`、文字 `--monitor-ink`/700。
+- 使用箇所: 概要の期間（今日/7日/30日）、詳細のフロー | waterfall、
+  インスペクタの整形 | raw。
 
-- 背景: `--monitor-surface`。border-bottom: 1px `--monitor-border`。
-- `<select>` / `<input>` 要素: `--monitor-input-bg` 背景、border: 1px `--monitor-border`。
-- フォーカス: `--monitor-accent` の 2px outline（inner）。
-- 高さ: 32px の要素。パディング: `--monitor-space-4` 水平、`--monitor-space-2` 垂直。
+### 2.3 KPI / パネルカード
 
-### 2.3 Metric Panels (Overview)
+- カード: 背景 `--monitor-surface`、境界 `--monitor-border`、角丸 10px、
+  padding 14-18px。カード間 gap 12-14px。
+- KPI 値: Mono 28px/700（トークン金 `--monitor-token-gold`、エラー赤
+  `--monitor-error`）。
+- 積み上げバー配色: キャッシュ `--monitor-success-dim` / 入力
+  `--monitor-accent` / 出力 `--monitor-token-gold`。
 
-```
-┌──────────┐ ┌──────────────┐ ┌────────────────┐
-│ Status   │ │ Proj Backlog │ │ Proj Lag       │
-│ Healthy  │ │ 0            │ │ 2.3s           │
-└──────────┘ └──────────────┘ └────────────────┘
-```
+### 2.4 トレース一覧テーブル（master-detail）
 
-- `display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: --monitor-space-3`。
-- 各パネル: `--monitor-surface` 背景、border: 1px `--monitor-border`、border-radius: 4px。
-- パディング: `--monitor-space-4`。
-- ラベル: `--monitor-text-sm`、`--monitor-muted`。
-- 値: `--monitor-text-3xl`、`--monitor-weight-semibold`、`--monitor-ink`。
+- grid `minmax(0,1fr) 128px 148px 64px 64px 56px`
+  （プロンプト / モデル / トークン / cache% / 所要 / 時刻）。
+- 行 padding 9px 16px、行境界 `--monitor-border-row`、hover
+  `--monitor-row-hover`、選択行 `--monitor-selected-bg`。
+- トークン列: 5px 高の金ヒートバー + 値。既定はトークン降順（▼）。
+- 右に 392px プレビューパネル（背景 `--monitor-surface-panel`）。
+  行選択で遷移なしに更新し、「詳細を開く」primary ボタン
+  （`--monitor-accent` 地 × `--monitor-accent-contrast` 文字/700）で詳細へ。
 
-### 2.4 Data Tables
+### 2.5 トレース詳細（フロー / waterfall + キャッシュ列）
 
-```css
-.monitor-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--monitor-text-base);
-}
-
-.monitor-table th {
-  position: sticky;
-  top: 0;
-  background: var(--monitor-surface);
-  color: var(--monitor-muted);
-  font-weight: var(--monitor-weight-medium);
-  font-size: var(--monitor-text-sm);
-  text-transform: none;              /* VS Code convention: no uppercase */
-  letter-spacing: normal;
-  padding: var(--monitor-space-2) var(--monitor-space-3);
-  border-bottom: 1px solid var(--monitor-border);
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;                   /* sortable */
-}
-
-.monitor-table td {
-  padding: var(--monitor-space-2) var(--monitor-space-3);
-  border-bottom: 1px solid var(--monitor-border-subtle);
-  color: var(--monitor-ink);
-  font-variant-numeric: tabular-nums; /* 数値整列 */
-  white-space: nowrap;
-}
-
-.monitor-table tr:hover td {
-  background: var(--monitor-surface-alt);
-}
-```
-
-- ソート矢印: `th` 内の `::after` 擬似要素。非ソート時は非表示、昇順 `▲`、降順 `▼`。
-- 行ホバー: `--monitor-surface-alt`（oklch(0.25 0 0)）。
-- テーブルラッパー: `overflow-x: auto`。横スクロール可能。
-
-### 2.5 Tabs (TraceDetail)
-
-```
-┌──────────────────────────────────────────────────────┐
-│ [Summary]  [Timeline]  [Flow Chart]  [Cache]          │
-├──────────────────────────────────────────────────────┤
-│  (JS-rendered sanitized content)                     │
-└──────────────────────────────────────────────────────┘
-```
-
-- ナビゲーションタブと同じスタイルだが副次的階層のため少し小さく: フォント `--monitor-text-sm`。
-- アクティブタブ: `--monitor-accent` 下線。
-- コンテンツ領域: `--monitor-surface` 背景、border: 1px `--monitor-border`、border-top: none。
-- パディング: `--monitor-space-4`。
+- タブは廃止。1 画面に「実行の流れ」カード（flex:1）+ 右列 360px。
+- フロー: 左レール 2px `--monitor-border-divider`（left 31px）。
+  LLM ターン行 = ● 青 + カード（背景 `--monitor-selected-bg`、境界
+  `--monitor-border-strong`、角丸 7px）。ツール分岐はエルボーコネクタ
+  （2px `--monitor-elbow`、左下角丸 8px）。並行呼出は
+  「⑂ 並行 N 件」（`--monitor-parallel`）+ 横並びカード（max-width 340px）。
+- waterfall: grid `280px 1fr 76px 64px` + 25% 目盛。並行子行は
+  prefix `├─`/`└─`（`--monitor-parallel-dim`）+ 開始位置揃え +
+  左端 1px ティール影。tokens 列は llm のみ。
+- 選択スパン: 境界 `--monitor-accent` +
+  `box-shadow: 0 0 0 3px rgba(77,163,232,0.12)`、他要素 opacity 0.6。
+- スパンインスペクタ: 右列に入替表示（幅は右列、背景
+  `--monitor-surface-inset`、境界 `--monitor-border-strong`、角丸 10px）。
+  整形タブ既定、raw タブで OTLP span JSON 全文。
+- エラー解析モード: エラー要約ストリップ（背景 rgba(224,94,80,0.07)、境界
+  #4a2a2a）、回復済み = 琥珀カード、未回復 = 赤カード + glow、右列は
+  エラー一覧 / エラー詳細 / 入力トークン推移（128K 赤破線）の 3 カード。
+- Copilot ドロワー: 幅 472px、右側スライドイン、背景
+  `--monitor-surface-inset`、境界 `--monitor-copilot-border`、影
+  `-24px 0 64px rgba(0,0,0,0.55)`。背面フローは opacity 0.55。
+  必須コピー「ローカル SDK 経由 · raw はローカルから出ません」。
 
 ### 2.6 Status Indicators
 
-| 状態 | ドット | テキスト色 | 用途 |
-|------|--------|-----------|------|
-| Success / Healthy | `--monitor-success` | `--monitor-success` | 正常、成功 |
-| Warning / Degraded | `--monitor-warning` | `--monitor-warning` | 警告、低下 |
-| Error / Unhealthy | `--monitor-error` | `--monitor-error` | エラー、異常 |
+| 状態 | 記号 | 色 | 用途 |
+|------|------|----|------|
+| 正常 / 成功 | ● + ピル | `--monitor-success` | ok、完了 |
+| 回復済みエラー | ● + ピル | `--monitor-warning` | recovered |
+| 未回復エラー | ✕ + ピル | `--monitor-error` | unrecovered、異常終了 |
+| 実行中 / agent | ◆ | `--monitor-agent` | 開始マーカー、agent span |
+| 並行分岐 | ⑂ / ├─ └─ | `--monitor-parallel` | 並行ツール呼出 |
 
-- ドット: `width: 8px; height: 8px; border-radius: 50%; display: inline-block;`。
-- テキストは色 + 太字（`--monitor-weight-semibold`）で強調。
-- テーブルセル内ではテキスト色のみ（ドット省略、密度優先）。
+- 状態は色 + 記号 + テキストの 3 点セット（色のみ禁止）。
+- ピル背景は `rgba(色, 0.12)` 系（`--monitor-success-bg` など）。
 
-### 2.7 Links
+### 2.7 Raw Preview / Mono ブロック
 
-```css
-a {
-  color: var(--monitor-accent);
-  text-decoration: none;
-}
-a:hover {
-  text-decoration: underline;
-  color: var(--monitor-accent-hover);
-}
-a:visited {
-  color: oklch(0.50 0.12 290); /* 訪問済み紫（VS Code convention） */
-}
-```
-
-### 2.8 Raw Preview
-
-```css
-.monitor-raw-preview {
-  background: var(--monitor-input-bg);
-  border: 1px solid var(--monitor-border);
-  border-radius: 4px;
-  padding: var(--monitor-space-3);
-  font-family: var(--monitor-font-mono);
-  font-size: var(--monitor-text-sm);
-  line-height: var(--monitor-leading-normal);
-  color: var(--monitor-ink);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 400px;
-  overflow-y: auto;
-}
-```
+- `.monitor-raw-preview` / `.inspector-mono-block`: 背景
+  `--monitor-bg` / `--monitor-surface-input`、境界 `--monitor-border`、
+  Mono 10.5-12px、`white-space: pre-wrap`、max-height + overflow-y。
+- captured content は常に escaped inert text（`Html.Raw` 不使用、JS は
+  `createElement` / `textContent` のみ）。
 
 ## 3. Layout Principles
 
-### 3.1 Page Structure
-
-```
-┌─ Navigation (sticky top) ────────────────────────────┐
-├─ Context Bar (filter/search, sticky) ─────────────────┤
-├─ Content ─────────────────────────────────────────────┤
-│  ┌─ Metric Panels ──────────────────────────────────┐│
-│  ├─ Data Table ─────────────────────────────────────┤│
-│  └─ ...                                             ┘│
-└──────────────────────────────────────────────────────┘
-```
-
-- ナビゲーション + コンテキストバー: `position: sticky; top: 0; z-index: 10`。
-- コンテンツ: 縦スクロール。水平方向はテーブルラッパーでスクロール。
-- ページマージン: `--monitor-space-5`（24px）水平、`--monitor-space-4`（12px）垂直。
-- 最大幅: 制限なし（全幅使用。データ密度優先）。
-
-### 3.2 Responsive
-
-- 画面幅 < 720px: ナビゲーションタブのパディング縮小（`--monitor-text-sm`）。
-- テーブル: 横スクロールで対応（`overflow-x: auto`）。列の折りたたみは行わない。
-- メトリクスパネル: `auto-fit, minmax(160px, 1fr)` で自動折り返し。
-- フィルターバー: `auto-fit, minmax(140px, 1fr)` で自動折り返し。
-
-### 3.3 Z-Index Scale
-
-```css
---monitor-z-dropdown:  100;  /* select dropdown */
---monitor-z-sticky:    200;  /* sticky nav, sticky th */
---monitor-z-overlay:   300;  /* row-expand overlay */
---monitor-z-tooltip:   400;  /* tooltip */
-```
+- デスクトップ 1440px 基準。最大幅制限なし（データ密度優先）。
+- 8px グリッド準拠（カード padding 14-18px、gap 12-14px、ペイン
+  padding 18-24px）。
+- Radius: カード 10px / ポップオーバー・ドロワー 12px / 行カード・ボタン
+  6-7px / バー 3-4px / ピル 99px。
+- Elevation: ドロワー `-24px 0 64px rgba(0,0,0,0.55)` / ポップオーバー
+  `0 16px 48px rgba(0,0,0,0.6)` / 選択 glow `0 0 0 3px rgba(色,0.08〜0.12)`。
+- URL 状態: 詳細は `?view=flow|waterfall&span=<id>`、一覧は
+  `?q&model&status&period&sort` を `history.replaceState` で反映。
 
 ## 4. Motion
 
-- トランジション持続時間: 150ms（基本）、200ms（タブ切替）。
-- イージング: `ease-out`（基本）。
-- アニメーション対象: 行ホバー、タブ切替、ソート矢印回転、フィルター反映。
-- ページロード時の演出なし。データは即時表示。
-- `@media (prefers-reduced-motion: reduce)` で全トランジションを `0ms` に。
+- トランジション 150ms ease-out（基本）。ドロワー / ポップオーバーは 200ms。
+- ページロード演出なし。データは即時表示。
+- `@media (prefers-reduced-motion: reduce)` で全トランジション 0ms。
 
 ## 5. Accessibility
 
-- WCAG AA 相当を確保。
-- コントラスト: 本文 ≥ 4.5:1（実測 ≥ 7:1 を目標）、ラージテキスト ≥ 3:1。
-- キーボード: タブナビゲーション、テーブルソート（Enter/Space）、フィルター選択。
-- フォーカスインジケータ: `--monitor-accent` の 2px outline。`outline-offset: 1px`。
-- ステータスは色 + テキスト/アイコンで伝達（色のみに依存しない）。
-- `prefers-reduced-motion` 対応。
-- フォントサイズは固定 rem。ブラウザズーム対応（200% まで）。
+- WCAG AA。本文 ≥4.5:1、大文字 ≥3:1（§1.1 の Ink はダーク地で充足）。
+- 状態は色 + 記号（● ■ ◆ ✓ ✕ ⑂ ├└）+ テキストで冗長化。
+- キーボード: Esc（インスペクタ / ドロワー / ポップオーバーを閉じる）、
+  Tab / Enter / Space でテーブル行・ソート・フィルター操作。
+- フォーカスリング: `--monitor-accent` 2px outline、offset 2px。
+- `prefers-reduced-motion` 対応。フォントサイズ固定 px/rem、ズーム 200% 対応。
