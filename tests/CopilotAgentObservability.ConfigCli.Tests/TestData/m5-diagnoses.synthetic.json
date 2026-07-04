@@ -1,0 +1,22 @@
+{
+  "diagnoses": [
+    {
+      "trace_id": "11111111111111111111111111111111",
+      "task_id": "maint-bug-001",
+      "task_category": "bug-investigation",
+      "client_kind": "copilot-cli",
+      "comparison_id": "",
+      "experiment_id": "baseline",
+      "experiment_condition": "baseline",
+      "prompt_version": "v1",
+      "agent_variant": "default",
+      "task_run_index": 3,
+      "failure_category_id": "F-MEASURE",
+      "anti_pattern_id": "AP-SCHEMA-DRIFT",
+      "severity": "minor",
+      "evidence_summary": "Sanitized measurement row shows error_count and tool_call_count available for human review.",
+      "recommended_improvement_target": "workflow",
+      "review_status": "accepted-for-proposal"
+    }
+  ]
+}

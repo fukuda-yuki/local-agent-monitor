@@ -1,0 +1,28 @@
+{
+  "proposals": [
+    {
+      "proposal_id": "proposal-0001",
+      "source_diagnosis_index": 2,
+      "trace_id": "trace-diagnosis-001",
+      "task_id": "maint-bug-001",
+      "task_category": "bug-investigation",
+      "client_kind": "copilot-cli",
+      "comparison_id": "",
+      "experiment_id": "baseline",
+      "experiment_condition": "baseline",
+      "prompt_version": "v1",
+      "agent_variant": "baseline",
+      "task_run_index": 1,
+      "failure_category_id": "F-TRACE",
+      "anti_pattern_id": "",
+      "severity": "minor",
+      "improvement_target": "workflow",
+      "evidence_summary": "Sanitized observation summary did not cite the checked span family.",
+      "proposal_title": "Review workflow improvement for F-TRACE",
+      "proposal_summary": "A minor diagnosis for F-TRACE was accepted for proposal. Evidence: Sanitized observation summary did not cite the checked span family.",
+      "proposed_change": "Prepare a human-reviewed workflow improvement that addresses F-TRACE using only the sanitized evidence summary.",
+      "acceptance_check": "A human reviewer can confirm the workflow proposal addresses F-TRACE without automatic adoption, repository edits, patches, diffs, or sensitive material exposure.",
+      "human_review_status": "needs-human-review"
+    }
+  ]
+}

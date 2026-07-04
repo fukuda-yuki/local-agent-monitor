@@ -1,0 +1,115 @@
+@page "/traces"
+@model TracesModel
+@{
+    string Label(string? traceId) => Model.PromptFor(traceId) ?? MonitorViewFormat.ShortTraceId(traceId);
+    string StatusClass(string? traceStatus) => traceStatus switch
+    {
+        "ok" => "status-ok",
+        "recovered" => "status-recovered",
+        "unrecovered" => "status-unrecovered",
+        _ => "status-unknown",
+    };
+    double? CachePct(MonitorTraceRow row) =>
+        row.CacheReadTokens is { } cacheRead && row.InputTokens is { } input && input > 0
+            ? Math.Round(cacheRead * 100d / input, 0)
+            : null;
+    var maxTokens = Model.Result.Items.Count > 0 ? Math.Max(1L, Model.Result.Items.Max(t => (long)(t.TotalTokens ?? 0))) : 1L;
+    var remaining = Math.Max(0, Model.Result.TotalMatched - Model.Result.Items.Count);
+    string Selected(string option, string? current) => string.Equals(option, current ?? "", StringComparison.Ordinal) ? "selected" : null!;
+}
+
+<section class="tracelist-page" id="tracelist-root"
+         data-raw-available="@(Model.RawAvailable ? "true" : "false")"
+         data-period="@Model.EffectivePeriod"
+         data-sort="@Model.EffectiveSort"
+         data-status="@(Model.Status ?? "")"
+         data-model="@(Model.Model ?? "")"
+         data-q="@(Model.Q ?? "")"
+         data-page-size="50">
+    <div class="tracelist-toolbar">
+        <input type="search" id="trace-search" class="trace-search" placeholder="⌕ プロンプト・TraceId で検索" value="@Model.Q" aria-label="プロンプト・TraceId で検索" />
+        <select id="filter-model" aria-label="モデルで絞り込み">
+            <option value="">モデル: すべて</option>
+            @foreach (var modelOption in Model.ModelOptions)
+            {
+                <option value="@modelOption" selected="@Selected(modelOption, Model.Model)">@modelOption</option>
+            }
+        </select>
+        <select id="filter-status" aria-label="状態で絞り込み">
+            <option value="">状態: すべて</option>
+            <option value="ok" selected="@Selected("ok", Model.Status)">正常</option>
+            <option value="error" selected="@Selected("error", Model.Status)">エラー（すべて）</option>
+            <option value="recovered" selected="@Selected("recovered", Model.Status)">回復済みエラー</option>
+            <option value="unrecovered" selected="@Selected("unrecovered", Model.Status)">異常終了</option>
+            <option value="unknown" selected="@Selected("unknown", Model.Status)">不明</option>
+        </select>
+        <select id="filter-period" aria-label="期間で絞り込み">
+            <option value="today" selected="@Selected("today", Model.EffectivePeriod)">今日</option>
+            <option value="7d" selected="@Selected("7d", Model.EffectivePeriod)">7日</option>
+            <option value="30d" selected="@Selected("30d", Model.EffectivePeriod)">30日</option>
+            <option value="all" selected="@Selected("all", Model.EffectivePeriod)">すべて</option>
+        </select>
+        <span class="tracelist-summary" id="tracelist-summary"><span class="monitor-mono">@MonitorViewFormat.Count(Model.Result.TotalMatched)</span> 件 · 合計 <span class="monitor-mono">@MonitorViewFormat.CompactTokens(Model.Result.TotalMatchedTokens)</span> tokens</span>
+    </div>
+
+    <div class="tracelist-body">
+        <div class="tracelist-main">
+            <table class="trace-list-table" id="trace-list-table">
+                <thead>
+                    <tr>
+                        <th class="col-prompt">プロンプト</th>
+                        <th class="col-model">モデル</th>
+                        <th class="col-tokens th-sortable" data-sort-key="tokens" aria-sort="@(Model.EffectiveSort == "tokens" ? "descending" : null)">トークン @(Model.EffectiveSort == "tokens" ? "▼" : "")</th>
+                        <th class="col-cache">cache%</th>
+                        <th class="col-duration th-sortable" data-sort-key="duration" aria-sort="@(Model.EffectiveSort == "duration" ? "descending" : null)">所要 @(Model.EffectiveSort == "duration" ? "▼" : "")</th>
+                        <th class="col-time th-sortable" data-sort-key="time" aria-sort="@(Model.EffectiveSort == "time" ? "descending" : null)">時刻 @(Model.EffectiveSort == "time" ? "▼" : "")</th>
+                    </tr>
+                </thead>
+                <tbody id="trace-rows">
+                    @if (Model.Result.Items.Count == 0)
+                    {
+                        <tr class="empty-row"><td colspan="6" class="empty-state">条件に一致するトレースがありません。</td></tr>
+                    }
+                    @foreach (var row in Model.Result.Items)
+                    {
+                        <tr class="trace-row" tabindex="0"
+                            data-trace-id="@row.TraceId"
+                            data-label="@Label(row.TraceId)"
+                            data-status="@(row.TraceStatus ?? "")"
+                            data-model="@(row.PrimaryModel ?? "")"
+                            data-client="@(row.ClientKind ?? "")"
+                            data-tokens="@(row.TotalTokens ?? 0)"
+                            data-input="@(row.InputTokens ?? 0)"
+                            data-output="@(row.OutputTokens ?? 0)"
+                            data-cache-read="@(row.CacheReadTokens?.ToString() ?? "")"
+                            data-cache-creation="@(row.CacheCreationTokens?.ToString() ?? "")"
+                            data-duration-ms="@(row.DurationMs?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "")"
+                            data-turns="@(row.TurnCount?.ToString() ?? "")"
+                            data-tools="@(row.ToolCallCount?.ToString() ?? "")"
+                            data-last-seen="@(row.LastSeenAt ?? "")">
+                            <td class="col-prompt">
+                                <span class="trace-status-dot @StatusClass(row.TraceStatus)" aria-hidden="true"></span>
+                                <span class="row-label">@Label(row.TraceId)</span>
+                            </td>
+                            <td class="col-model monitor-mono">@(row.PrimaryModel ?? "—")</td>
+                            <td class="col-tokens">
+                                <span class="token-heat"><span class="token-heat-fill" style="width: @(Math.Clamp((row.TotalTokens ?? 0) * 100d / maxTokens, 0d, 100d).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture))%"></span></span>
+                                <span class="token-value monitor-mono">@MonitorViewFormat.CompactTokens(row.TotalTokens)</span>
+                            </td>
+                            <td class="col-cache monitor-mono">@(CachePct(row) is { } pct ? $"{pct:0}%" : "—")</td>
+                            <td class="col-duration monitor-mono">@MonitorViewFormat.Duration(row.DurationMs)</td>
+                            <td class="col-time">@MonitorViewFormat.RelativeTime(row.LastSeenAt)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+            <button type="button" class="load-more" id="load-more" data-remaining="@remaining" hidden="@(remaining == 0)">さらに読み込む（残り @remaining 件）</button>
+        </div>
+
+        <aside class="trace-preview" id="trace-preview" aria-label="トレースプレビュー">
+            <p class="empty-state" id="preview-empty">行を選択するとプレビューを表示します。</p>
+            <div id="preview-body" hidden></div>
+        </aside>
+    </div>
+</section>
+<script src="/monitor-tracelist.js" defer></script>

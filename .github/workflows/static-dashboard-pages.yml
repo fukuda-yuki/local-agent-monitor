@@ -1,0 +1,116 @@
+name: Static Dashboard Pages
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: static-dashboard-pages
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build CopilotAgentObservability.slnx
+
+      - name: Install Playwright Chromium
+        shell: pwsh
+        run: pwsh scripts/test/install-playwright-chromium.ps1 -WithDeps
+
+      - name: Test
+        run: dotnet test CopilotAgentObservability.slnx
+
+      - name: Generate dashboard artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $snapshotDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd")
+          $buildDir = "tmp/static-dashboard-build"
+          $publicDir = "tmp/static-dashboard-public"
+          $artifactDir = "tmp/static-dashboard-pages-artifact"
+          $inputDir = "artifacts/dashboard-input"
+          New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git ls-remote --exit-code --heads origin gh-pages | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            git fetch origin gh-pages --depth=1
+            git worktree add -B gh-pages $publicDir origin/gh-pages
+          } else {
+            git worktree add --detach $publicDir HEAD
+            git -C $publicDir checkout --orphan gh-pages
+            git -C $publicDir rm -r --ignore-unmatch .
+          }
+
+          $measurements = Join-Path $inputDir "measurements.json"
+          $raw = Join-Path $inputDir "raw-otlp.json"
+          $diagnosisCandidates = Join-Path $inputDir "diagnosis-candidates.json"
+          $improvementCandidates = Join-Path $inputDir "improvement-candidates.json"
+          $autoDecisions = Join-Path $inputDir "auto-decisions.json"
+          $dashboardDataset = Join-Path $buildDir "dashboard.json"
+
+          if (Test-Path $measurements) {
+            $datasetArgs = @("run", "--project", "src/CopilotAgentObservability.ConfigCli", "--", "generate-dashboard-dataset", $measurements, "--json", $dashboardDataset)
+            if (Test-Path $raw) { $datasetArgs += @("--raw", $raw) }
+            if (Test-Path $diagnosisCandidates) { $datasetArgs += @("--diagnosis-candidates", $diagnosisCandidates) }
+            if (Test-Path $improvementCandidates) { $datasetArgs += @("--improvement-candidates", $improvementCandidates) }
+            if (Test-Path $autoDecisions) { $datasetArgs += @("--auto-decisions", $autoDecisions) }
+            dotnet @datasetArgs
+          } else {
+            $previewMeasurements = Join-Path $buildDir "preview-measurements.json"
+            dotnet run --project src/CopilotAgentObservability.ConfigCli -- normalize-raw tests/CopilotAgentObservability.ConfigCli.Tests/TestData/raw-otlp.synthetic.json --json $previewMeasurements
+            dotnet run --project src/CopilotAgentObservability.ConfigCli -- generate-dashboard-dataset $previewMeasurements --raw tests/CopilotAgentObservability.ConfigCli.Tests/TestData/raw-otlp.synthetic.json --json $dashboardDataset
+          }
+
+          $latestDir = Join-Path $publicDir "latest"
+          $snapshotDir = Join-Path $publicDir $snapshotDate
+          dotnet run --project src/CopilotAgentObservability.ConfigCli -- generate-static-dashboard $dashboardDataset --out-dir $latestDir --snapshot-date $snapshotDate
+          New-Item -ItemType Directory -Force -Path $snapshotDir | Out-Null
+          Copy-Item -Path (Join-Path $latestDir "*") -Destination $snapshotDir -Recurse -Force
+
+          git -C $publicDir add latest $snapshotDate
+          git -C $publicDir diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "No dashboard snapshot changes to commit."
+          } else {
+            git -C $publicDir commit -m "Update static dashboard snapshot $snapshotDate"
+            git -C $publicDir push origin HEAD:gh-pages
+          }
+
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          Get-ChildItem -Path $publicDir -Force |
+            Where-Object { $_.Name -ne ".git" } |
+            Copy-Item -Destination $artifactDir -Recurse -Force
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: tmp/static-dashboard-pages-artifact
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

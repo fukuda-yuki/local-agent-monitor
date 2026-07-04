@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "otel-monitor-canvas",
+  "canvas_id": "otel-monitor",
+  "display_name": "OTel Monitor",
+  "version": "0.1.0",
+  "entry": "extension.mjs",
+  "description": "Copyable GitHub Copilot app Canvas adapter for the Local Ingestion Monitor. It opens a loopback helper page and exposes bounded diagnostic actions over existing sanitized monitor APIs.",
+  "keywords": [
+    "local-monitor",
+    "opentelemetry",
+    "diagnostics",
+    "canvas",
+    "copilot"
+  ],
+  "screenshots": [
+    {
+      "path": "assets/preview.png",
+      "alt": "Synthetic OTel Monitor Canvas helper preview"
+    }
+  ]
+}

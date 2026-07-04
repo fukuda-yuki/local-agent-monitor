@@ -1,0 +1,178 @@
+@page "/diagnostics"
+@model DiagnosticsModel
+
+@{
+    var (statusLabel, statusClass, httpStatus) = Model.Readiness.Status switch
+    {
+        "ready" => ("受信できます — ready", "status-ok", "200"),
+        "degraded" => ("注意 — degraded", "status-recovered", "200"),
+        _ => ("受信できません — not_ready", "status-unrecovered", "503"),
+    };
+    var degradedReasons = Model.Readiness.DegradedReasons?.ToList() ?? new List<string>();
+
+    string Ok(bool value) => value ? "OK" : "NG";
+    string OkClass(bool value) => value ? "success" : "error";
+    string ReasonLabel(string reason) => reason switch
+    {
+        "ingestion_backpressure" => "一時的に受信キューが詰まっています。",
+        "projection_lag" => "projection が少し遅れています。",
+        "span_projection_backlog" => "span projection の backlog があります。",
+        "ingestion_stalled" => "受信が継続的に詰まっています。",
+        "projection_lag_exceeded" => "projection 遅延が閾値を超えています。",
+        "projection_worker_missing" => "projection worker が起動していません。",
+        "projection_status_unknown" => "projection 状態がまだ確認できていません。",
+        "db_unavailable" => "DB を開けません。",
+        "migration_failed" => "DB migration に失敗しています。",
+        "writer_not_running" => "書き込み worker が停止しています。",
+        "loopback_unbound" => "loopback bind が確認できません。",
+        "fatal_error" => "致命的なエラーが記録されています。",
+        _ => "詳細は readiness body を確認してください。",
+    };
+
+    var receiveOk = Model.Readiness.LoopbackBound && Model.Readiness.IngestionAccepting;
+    var writeOk = Model.Readiness.WriterRunning;
+    var projectionOk = Model.Readiness.ProjectionWorkerRunning;
+    var serveOk = Model.Readiness.DbOpen && Model.Readiness.MigrationComplete;
+}
+
+<section class="diagnostics-page">
+    <div class="diagnostics-head">
+        <h2 class="overview-title">診断</h2>
+        <span class="status-pill @statusClass"><span class="trace-status-dot @statusClass" aria-hidden="true"></span>@statusLabel</span>
+        <a class="diagnostics-probe monitor-mono" href="/health/ready">GET /health/ready → @httpStatus</a>
+    </div>
+
+    <div class="pipeline-grid" aria-label="取り込みパイプライン">
+        <div class="pipeline-card">
+            <span class="pipeline-title">① 受信</span>
+            <span class="pipeline-sub">OTLP/HTTP</span>
+            <span class="monitor-badge @OkClass(receiveOk)">@Ok(receiveOk)</span>
+            <span class="pipeline-metric monitor-mono">loopback @(Model.Readiness.LoopbackBound ? "bound" : "unbound")</span>
+            <span class="pipeline-metric monitor-mono">queue @(Model.Readiness.IngestionAccepting ? "accepting" : "stalled")</span>
+        </div>
+        <span class="pipeline-arrow" aria-hidden="true">→</span>
+        <div class="pipeline-card">
+            <span class="pipeline-title">② 書き込み</span>
+            <span class="pipeline-sub">キュー → raw store</span>
+            <span class="monitor-badge @OkClass(writeOk)">@Ok(writeOk)</span>
+            <span class="pipeline-metric monitor-mono">writer @(Model.Readiness.WriterRunning ? "running" : "stopped")</span>
+            <span class="pipeline-metric monitor-mono">失敗 @Model.Readiness.ProjectionFailureCount 回</span>
+        </div>
+        <span class="pipeline-arrow" aria-hidden="true">→</span>
+        <div class="pipeline-card">
+            <span class="pipeline-title">③ Projection</span>
+            <span class="pipeline-sub">raw → 表示用データ</span>
+            <span class="monitor-badge @OkClass(projectionOk)">@Ok(projectionOk)</span>
+            <span class="pipeline-metric monitor-mono">残 @Model.Readiness.ProjectionBacklog · 遅延 @Model.Readiness.ProjectionLagSeconds s</span>
+            <span class="pipeline-metric monitor-mono">span 残 @Model.Readiness.SpanProjectionBacklog</span>
+        </div>
+        <span class="pipeline-arrow" aria-hidden="true">→</span>
+        <div class="pipeline-card">
+            <span class="pipeline-title">④ 表示</span>
+            <span class="pipeline-sub">UI / API 提供</span>
+            <span class="monitor-badge @OkClass(serveOk)">@Ok(serveOk)</span>
+            <span class="pipeline-metric monitor-mono">db @(Model.Readiness.DbOpen ? "open" : "closed")</span>
+            <span class="pipeline-metric monitor-mono">migration @(Model.Readiness.MigrationComplete ? "complete" : "pending")</span>
+        </div>
+    </div>
+
+    @if (degradedReasons.Count > 0)
+    {
+        <div class="reason-panel">
+            <div class="panel-head">
+                <span class="panel-title">理由</span>
+                <span class="panel-meta monitor-mono">@degradedReasons.Count 件</span>
+            </div>
+            <div class="reason-list">
+                @foreach (var reason in degradedReasons)
+                {
+                    <div class="reason-item">
+                        <code>@reason</code>
+                        <span>@ReasonLabel(reason)</span>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+
+    <div class="panel">
+        <div class="panel-head">
+            <span class="panel-title">コンポーネント確認</span>
+            <span class="panel-meta">問題があった時だけ読む場所 — 正常時は全行 OK</span>
+        </div>
+        <div class="monitor-table-wrapper">
+            <table class="monitor-table component-table">
+                <thead>
+                    <tr>
+                        <th>コンポーネント</th>
+                        <th>役割</th>
+                        <th>状態</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Loopback bind</td>
+                        <td>ローカルだけで待ち受けているか</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.LoopbackBound)">@Ok(Model.Readiness.LoopbackBound)</span></td>
+                    </tr>
+                    <tr>
+                        <td>DB</td>
+                        <td>raw store を開けているか</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.DbOpen)">@Ok(Model.Readiness.DbOpen)</span></td>
+                    </tr>
+                    <tr>
+                        <td>Migration</td>
+                        <td>monitor schema の準備が完了しているか</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.MigrationComplete)">@Ok(Model.Readiness.MigrationComplete)</span></td>
+                    </tr>
+                    <tr>
+                        <td>Writer</td>
+                        <td>受信データを書き込めるか</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.WriterRunning)">@Ok(Model.Readiness.WriterRunning)</span></td>
+                    </tr>
+                    <tr>
+                        <td>Projection worker</td>
+                        <td>raw record から表示用 projection を作れるか</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.ProjectionWorkerRunning)">@Ok(Model.Readiness.ProjectionWorkerRunning)</span></td>
+                    </tr>
+                    <tr>
+                        <td>Ingestion queue</td>
+                        <td>新しい受信を受け付けられるか</td>
+                        <td><span class="monitor-badge @OkClass(Model.Readiness.IngestionAccepting)">@Ok(Model.Readiness.IngestionAccepting)</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-head">
+            <span class="panel-title">しきい値（設定値）</span>
+            <span class="panel-meta">readiness contract の実効値</span>
+        </div>
+        <div class="threshold-list">
+            <div class="inspector-meta-row"><span>受信 stall</span><span class="monitor-mono">&lt; @Model.IngestionStallThresholdSeconds s</span></div>
+            <div class="inspector-meta-row"><span>projection 遅延</span><span class="monitor-mono">&lt; @Model.ProjectionLagThresholdSeconds s</span></div>
+        </div>
+    </div>
+
+    <details class="raw-section" id="ingestion-history">
+        <summary><h3 class="raw-section-title">取り込み履歴</h3></summary>
+        <p class="monitor-subtle">受信した raw record と紐づく trace（sanitized metadata のみ）。</p>
+        <div class="monitor-table-wrapper">
+            <table class="monitor-table" id="ingestion-history-table">
+                <thead>
+                    <tr>
+                        <th>レコードID</th>
+                        <th>受信</th>
+                        <th>ソース</th>
+                        <th>トレース</th>
+                        <th>スパン</th>
+                    </tr>
+                </thead>
+                <tbody id="ingestion-history-rows"></tbody>
+            </table>
+        </div>
+    </details>
+</section>
+<script src="/monitor-diagnostics.js" defer></script>

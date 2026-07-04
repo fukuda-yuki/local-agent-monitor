@@ -1,0 +1,117 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "client.kind",
+            "value": { "stringValue": "vscode-copilot-chat" }
+          },
+          {
+            "key": "user.email",
+            "value": { "stringValue": "demo-user@example.invalid" }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "demo-trace-rich-ok",
+              "spanId": "k000",
+              "name": "invoke_agent copilot-dev-agent",
+              "startTimeUnixNano": "1782896600000000000",
+              "endTimeUnixNano": "1782896655000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "invoke_agent" } },
+                { "key": "gen_ai.agent.name", "value": { "stringValue": "copilot-dev-agent" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich-ok",
+              "spanId": "k100",
+              "name": "chat gpt-4o",
+              "startTimeUnixNano": "1782896601000000000",
+              "endTimeUnixNano": "1782896607000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.response.model", "value": { "stringValue": "gpt-4o" } },
+                { "key": "gen_ai.prompt", "value": { "stringValue": "API レスポンスが遅いエンドポイントを特定して、キャッシュ戦略の改善案をまとめて" } },
+                { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "7500" } },
+                { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "500" } },
+                { "key": "gen_ai.usage.cache_read.input_tokens", "value": { "intValue": "4800" } },
+                { "key": "gen_ai.usage.cache_creation.input_tokens", "value": { "intValue": "400" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich-ok",
+              "spanId": "k101",
+              "parentSpanId": "k100",
+              "name": "execute_tool read_file",
+              "startTimeUnixNano": "1782896607000000000",
+              "endTimeUnixNano": "1782896609000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "execute_tool" } },
+                { "key": "gen_ai.tool.name", "value": { "stringValue": "read_file" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich-ok",
+              "spanId": "k102",
+              "parentSpanId": "k100",
+              "name": "execute_tool grep_search",
+              "startTimeUnixNano": "1782896607500000000",
+              "endTimeUnixNano": "1782896610000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "execute_tool" } },
+                { "key": "gen_ai.tool.name", "value": { "stringValue": "grep_search" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich-ok",
+              "spanId": "k200",
+              "name": "chat gpt-4o",
+              "startTimeUnixNano": "1782896611000000000",
+              "endTimeUnixNano": "1782896619000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.response.model", "value": { "stringValue": "gpt-4o" } },
+                { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "8600" } },
+                { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "650" } },
+                { "key": "gen_ai.usage.cache_read.input_tokens", "value": { "intValue": "6600" } },
+                { "key": "gen_ai.usage.cache_creation.input_tokens", "value": { "intValue": "120" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich-ok",
+              "spanId": "k201",
+              "parentSpanId": "k200",
+              "name": "execute_tool run_in_terminal",
+              "startTimeUnixNano": "1782896619000000000",
+              "endTimeUnixNano": "1782896622000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "execute_tool" } },
+                { "key": "gen_ai.tool.name", "value": { "stringValue": "run_in_terminal" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich-ok",
+              "spanId": "k300",
+              "name": "chat gpt-4o",
+              "startTimeUnixNano": "1782896623000000000",
+              "endTimeUnixNano": "1782896635000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.response.model", "value": { "stringValue": "gpt-4o" } },
+                { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "9200" } },
+                { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "750" } },
+                { "key": "gen_ai.usage.cache_read.input_tokens", "value": { "intValue": "7400" } },
+                { "key": "gen_ai.usage.cache_creation.input_tokens", "value": { "intValue": "80" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

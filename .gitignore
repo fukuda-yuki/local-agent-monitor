@@ -1,0 +1,177 @@
+# ============================================================
+# Local environment and secrets
+# ============================================================
+
+.env
+.env.*
+!.env.example
+
+*.local
+*.secret
+*.secrets
+secrets.json
+
+# User-specific config
+*.user
+*.userosscache
+*.suo
+*.rsuser
+*.DotSettings.user
+
+# ============================================================
+# .NET / C# build outputs
+# ============================================================
+
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+
+# .NET publish outputs
+publish/
+artifacts/*
+!artifacts/dashboard-input/
+artifacts/dashboard-input/*
+!artifacts/dashboard-input/README.md
+artifacts-*/
+artifacts_*/
+
+# NuGet
+*.nupkg
+*.snupkg
+*.symbols.nupkg
+packages/
+.nuget/packages/
+project.lock.json
+project.assets.json
+
+# MSBuild / Visual Studio intermediate files
+*.cache
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.VC.VC.opendb
+*.pidb
+*.svclog
+*.scc
+*.tmp
+*.log
+
+# Test results / coverage
+TestResults/
+[Tt]est[Rr]esult*/
+coverage/
+coverage.xml
+coverage.cobertura.xml
+coverage.opencover.xml
+*.coverage
+*.coveragexml
+*.trx
+
+# BenchmarkDotNet
+BenchmarkDotNet.Artifacts/
+
+# ============================================================
+# ASP.NET / Aspire / local application runtime
+# ============================================================
+
+appsettings.Local.json
+appsettings.*.Local.json
+appsettings.Development.local.json
+
+# Aspire local state / generated runtime artifacts
+.aspire/
+AppHost/.aspire/
+**/AppHost/.aspire/
+
+# Local diagnostic artifacts
+/out/
+/outputs/
+/debug/
+/logs/
+/assets/
+/manifest.json
+/result.md
+
+*.db
+*.db-shm
+*.db-wal
+*.binlog
+*.log
+!tests/**/*.log
+
+# ============================================================
+# Docker / local infrastructure
+# ============================================================
+
+docker-compose.override.yml
+docker-compose.*.override.yml
+
+# Keep example compose files
+!docker-compose.example.yml
+!docker-compose.*.example.yml
+
+# Local volumes
+.volumes/
+data/
+tmp/
+temp/
+.worktrees/
+
+# Langfuse / OTel / observability local data
+langfuse-data/
+clickhouse-data/
+postgres-data/
+redis-data/
+otel-data/
+grafana-data/
+tempo-data/
+loki-data/
+
+# ============================================================
+# IDE / editor
+# ============================================================
+
+.vs/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+.idea/
+*.swp
+*.swo
+*~
+
+# Rider
+.idea/
+*.sln.iml
+
+# ============================================================
+# OS generated files
+# ============================================================
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+
+# ============================================================
+# PowerShell
+# ============================================================
+
+*.ps1xml
+*.pssc
+*.psrc

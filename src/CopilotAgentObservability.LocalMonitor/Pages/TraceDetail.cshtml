@@ -1,0 +1,200 @@
+@page "/traces/{traceId}"
+@model TraceDetailModel
+@{
+    var title = Model.PromptLabel ?? $"Trace {MonitorViewFormat.ShortTraceId(Model.TraceId)}";
+    var (statusLabel, statusClass) = Model.Trace.TraceStatus switch
+    {
+        "ok" => ("正常 · 完了", "status-ok"),
+        "recovered" => ("エラー · 回復済み", "status-recovered"),
+        "unrecovered" => ("エラー · 異常終了", "status-unrecovered"),
+        _ => ((Model.Trace.ErrorCount ?? 0) > 0 ? ("エラーあり", "status-recovered") : ("状態不明", "status-unknown")),
+    };
+    var cacheRead = (long)(Model.Trace.CacheReadTokens ?? 0);
+    var uncachedInput = Math.Max(0L, (Model.Trace.InputTokens ?? 0) - cacheRead);
+    var output = (long)(Model.Trace.OutputTokens ?? 0);
+    var isErrorTrace = Model.Trace.TraceStatus is "recovered" or "unrecovered" || (Model.Trace.ErrorCount ?? 0) > 0;
+}
+
+<section class="trace-detail-page" id="trace-detail-root"
+         data-trace-id="@Model.TraceId"
+         data-raw-available="@(Model.RawAvailable ? "true" : "false")"
+         data-trace-status="@(Model.Trace.TraceStatus ?? "")"
+         data-error-trace="@(isErrorTrace ? "true" : "false")">
+    <nav class="breadcrumb detail-breadcrumb" aria-label="パンくず">
+        <a href="/">概要</a><span class="breadcrumb-sep">›</span>
+        <a href="/traces">トレース</a><span class="breadcrumb-sep">›</span>
+        <span class="breadcrumb-current">@title</span>
+        <span class="breadcrumb-actions">
+            @if (Model.RawAvailable)
+            {
+                <button type="button" class="copilot-open-btn" id="copilot-open" aria-haspopup="dialog">
+                    <svg class="copilot-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="4" width="11" height="8" rx="2.5"/><circle cx="6" cy="8" r="0.9" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="0.9" fill="currentColor" stroke="none"/><path d="M8 4V2.2"/></svg>
+                    Copilot で解析
+                </button>
+            }
+            @if (Model.PrevTraceId is { } prev)
+            {
+                <a class="nav-adjacent" href="/traces/@prev">← 前</a>
+            }
+            else
+            {
+                <span class="nav-adjacent disabled">← 前</span>
+            }
+            @if (Model.NextTraceId is { } next)
+            {
+                <a class="nav-adjacent" href="/traces/@next">次 →</a>
+            }
+            else
+            {
+                <span class="nav-adjacent disabled">次 →</span>
+            }
+        </span>
+    </nav>
+
+    <div class="detail-head">
+        <div class="detail-head-main">
+            <h2 class="detail-title">@title</h2>
+            <div class="detail-title-row">
+                <span class="status-pill @statusClass"><span class="trace-status-dot @statusClass" aria-hidden="true"></span>@statusLabel</span>
+            </div>
+            <p class="detail-meta">
+                <span class="monitor-mono">@MonitorViewFormat.ShortTraceId(Model.TraceId)</span>
+                <span>@(Model.Trace.PrimaryModel ?? "モデル不明")</span>
+                @if (!string.IsNullOrEmpty(Model.Trace.ClientKind))
+                {
+                    <span>@Model.Trace.ClientKind</span>
+                }
+                <span>@MonitorViewFormat.Count(Model.Trace.TurnCount) ターン · @MonitorViewFormat.Count(Model.Trace.ToolCallCount) ツール呼出</span>
+                <span>@MonitorViewFormat.RelativeTime(Model.Trace.FirstSeenAt) 開始 · @MonitorViewFormat.Duration(Model.Trace.DurationMs)</span>
+            </p>
+        </div>
+        <div class="token-total-card">
+            <span class="token-total-label">トークン合計</span>
+            <span class="token-total-value monitor-mono">@MonitorViewFormat.Tokens(Model.Trace.TotalTokens)</span>
+            <div class="preview-token-bar token-total-bar">
+                <span class="bar-seg seg-cache" style="flex-grow: @cacheRead"></span>
+                <span class="bar-seg seg-input" style="flex-grow: @uncachedInput"></span>
+                <span class="bar-seg seg-output" style="flex-grow: @output"></span>
+            </div>
+            <span class="token-total-legend">
+                <span class="legend-item"><span class="legend-swatch swatch-cache" aria-hidden="true"></span>キャッシュ @MonitorViewFormat.CompactTokens(Model.Trace.CacheReadTokens is null ? null : cacheRead)</span>
+                <span class="legend-item"><span class="legend-swatch swatch-input" aria-hidden="true"></span>入力 @MonitorViewFormat.CompactTokens(uncachedInput)</span>
+                <span class="legend-item"><span class="legend-swatch swatch-output" aria-hidden="true"></span>出力 @MonitorViewFormat.CompactTokens(output)</span>
+            </span>
+        </div>
+    </div>
+
+    <div class="error-strip" id="error-strip" hidden>
+        <span class="error-strip-icon" aria-hidden="true">!</span>
+        <span class="error-strip-text" id="error-strip-text"></span>
+        <span class="error-strip-actions">
+            <button type="button" id="error-first-btn">最初のエラーへ</button>
+            <button type="button" id="errors-only-strip-btn">エラーのみ表示中</button>
+        </span>
+    </div>
+
+    <div class="detail-body">
+        <div class="panel flow-card" id="flow-card">
+            <div class="panel-head flow-card-head">
+                <span class="panel-title">実行の流れ</span>
+                <div class="view-toggle" id="view-toggle" role="group" aria-label="ビュー切替">
+                    <button type="button" class="view-btn active" data-view="flow">フロー</button>
+                    <button type="button" class="view-btn" data-view="waterfall">waterfall</button>
+                </div>
+                <span class="flow-legend" aria-hidden="true">
+                    <span class="legend-item"><span class="legend-swatch swatch-input" ></span>llm</span>
+                    <span class="legend-item"><span class="legend-swatch swatch-output"></span>tool</span>
+                    <span class="legend-item parallel-legend">⑂ 並行分岐</span>
+                </span>
+                <label class="errors-only-label">
+                    <input type="checkbox" id="errors-only" />
+                    エラーのみ
+                </label>
+            </div>
+            <div class="flow-status" id="flow-status" role="status">実行の流れを読み込み中…</div>
+            <div class="flow-view" id="flow-view" data-view="flow"></div>
+            <div class="waterfall-view" id="waterfall-view" data-view="waterfall" hidden></div>
+        </div>
+
+        <aside class="detail-side" id="detail-side">
+            <div id="cache-column">
+                <div class="panel cache-panel" id="cache-overview-card">
+                    <div class="panel-head"><span class="panel-title">キャッシュの観点</span></div>
+                    <div id="cache-overview"></div>
+                </div>
+                <div class="panel cache-panel" id="cache-turns-card">
+                    <div class="panel-head"><span class="panel-title">ターン別キャッシュ読取率</span></div>
+                    <div id="cache-turns"></div>
+                </div>
+            </div>
+            <div id="error-panel" hidden></div>
+            <div id="span-inspector" hidden></div>
+        </aside>
+    </div>
+
+    @if (Model.RawAvailable)
+    {
+        <div class="copilot-drawer" id="copilot-drawer" role="dialog" aria-label="GitHub Copilot で解析" hidden>
+            <div class="drawer-head">
+                <span class="drawer-icon" aria-hidden="true">
+                    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="#c0b6f2" stroke-width="1.4"><rect x="2.5" y="4" width="11" height="8" rx="2.5"/><circle cx="6" cy="8" r="0.9" fill="#c0b6f2" stroke="none"/><circle cx="10" cy="8" r="0.9" fill="#c0b6f2" stroke="none"/><path d="M8 4V2.2"/></svg>
+                </span>
+                <div class="drawer-titles">
+                    <span class="drawer-title">GitHub Copilot で解析</span>
+                    <span class="drawer-boundary">ローカル SDK 経由 · raw はローカルから出ません</span>
+                </div>
+                <span class="drawer-trace-chip monitor-mono">@MonitorViewFormat.ShortTraceId(Model.TraceId)</span>
+                <button type="button" class="drawer-close" id="drawer-close" aria-label="ドロワーを閉じる">✕</button>
+            </div>
+            <div class="drawer-controls">
+                <label for="drawer-focus">観点</label>
+                <select id="drawer-focus">
+                    <option value="tokens">トークン</option>
+                    <option value="cache">キャッシュ</option>
+                    <option value="errors">エラー</option>
+                    <option value="latency">遅延</option>
+                    <option value="tool-usage">ツール利用</option>
+                    <option value="agent-flow">エージェントの流れ</option>
+                </select>
+                <button type="button" id="drawer-run">解析を実行</button>
+            </div>
+            <div class="drawer-log" id="drawer-log" aria-live="polite"></div>
+            <div class="drawer-suggests" id="drawer-suggests">
+                <button type="button" class="suggest-chip">このトレースの削減余地は?</button>
+                <button type="button" class="suggest-chip">キャッシュ作成を増やすべき?</button>
+                <button type="button" class="suggest-chip">似た傾向の trace を探す</button>
+            </div>
+            <div class="drawer-input-row">
+                <input type="text" id="drawer-question" placeholder="さらに質問…" aria-label="Copilot への追い質問" />
+                <button type="button" id="drawer-send" aria-label="送信">↑</button>
+            </div>
+        </div>
+
+        <details class="raw-section">
+            <summary><h3 class="raw-section-title">Raw OTLP ペイロード</h3></summary>
+            @if (Model.RawRecords.Count == 0)
+            {
+                <p class="empty-state">このトレースに raw レコードはありません。</p>
+            }
+            else
+            {
+                @foreach (var record in Model.RawRecords)
+                {
+                    <h4 class="raw-record-title">Raw レコード @record.Id</h4>
+                    <p><a href="/traces/@record.Id/raw">完全な raw レコードを開く</a>（@record.PayloadLength 文字）</p>
+                    @if (record.IsTruncated)
+                    {
+                        <p class="monitor-subtle">raw プレビューは省略されています。</p>
+                    }
+                    <pre class="monitor-raw-preview">@record.Preview</pre>
+                }
+            }
+        </details>
+    }
+</section>
+<script src="/monitor-waterfall.js" defer></script>
+<script src="/monitor-cache-panel.js" defer></script>
+<script src="/monitor-inspector.js" defer></script>
+<script src="/monitor-error-mode.js" defer></script>
+<script src="/monitor-drawer.js" defer></script>
+<script src="/monitor-flow.js" defer></script>

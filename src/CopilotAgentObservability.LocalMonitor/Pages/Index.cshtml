@@ -1,0 +1,191 @@
+@page "/"
+@model IndexModel
+@{
+    var kpi = Model.Overview.Kpi;
+    var perModel = Model.Overview.PerModel;
+    var hourly = Model.Overview.HourlyTokens;
+    var maxModelTokens = perModel.Count > 0 ? Math.Max(1L, perModel.Max(m => m.TotalTokens)) : 1L;
+    var maxTopTokens = Model.TopTraces.Count > 0 ? Math.Max(1L, Model.TopTraces.Max(t => (long)(t.TotalTokens ?? 0))) : 1L;
+    var maxHourTokens = hourly.Count > 0 ? Math.Max(1L, hourly.Max(h => h.TotalTokens)) : 1L;
+    var today = Model.Overview.Period.Start.ToString("yyyy年M月d日 (ddd)", new System.Globalization.CultureInfo("ja-JP"));
+
+    string Label(string? traceId) => Model.PromptFor(traceId) ?? MonitorViewFormat.ShortTraceId(traceId);
+    string StatusClass(string? traceStatus) => traceStatus switch
+    {
+        "ok" => "status-ok",
+        "recovered" => "status-recovered",
+        "unrecovered" => "status-unrecovered",
+        _ => "status-unknown",
+    };
+    string BarWidth(long value, long max) => $"{Math.Clamp(value * 100d / max, 0d, 100d).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}%";
+    var lowCacheModel = perModel
+        .Where(m => m.CacheReadRatePct is not null)
+        .OrderBy(m => m.CacheReadRatePct)
+        .FirstOrDefault(m => m.CacheReadRatePct < 30);
+}
+
+<section class="overview-page" id="overview-root" data-raw-available="@(Model.RawAvailable ? "true" : "false")">
+    <div class="overview-head">
+        <div>
+            <h2 class="overview-title">概要</h2>
+            <span class="overview-date">@today</span>
+        </div>
+        <div class="period-toggle" id="period-toggle" role="group" aria-label="集計期間">
+            <button type="button" class="period-btn active" data-period="today">今日</button>
+            <button type="button" class="period-btn" data-period="7d">7日</button>
+            <button type="button" class="period-btn" data-period="30d">30日</button>
+        </div>
+    </div>
+
+    <div class="kpi-grid">
+        <a class="kpi-card" id="kpi-tokens-card" href="/traces?period=today">
+            <span class="kpi-label" id="kpi-tokens-label">今日のトークン</span>
+            <span class="kpi-value kpi-gold" id="kpi-tokens-value">@MonitorViewFormat.CompactTokens(kpi.TokensTotal)</span>
+            <span class="kpi-note" id="kpi-tokens-compare">前期間 @MonitorViewFormat.CompactTokens(kpi.TokensPreviousPeriod)@(kpi.TokensChangePct is { } change ? $" {(change >= 0 ? "+" : "")}{change.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}%" : "")</span>
+        </a>
+        <div class="kpi-card">
+            <span class="kpi-label">実効入力換算（読取=0.1×）</span>
+            <span class="kpi-value" id="kpi-effective-value">@MonitorViewFormat.CompactTokens(kpi.EffectiveInputTokens)</span>
+            <span class="kpi-note kpi-green" id="kpi-effective-note">@(kpi.CacheCompressionPct is { } compression ? $"キャッシュで −{compression.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}% 圧縮" : "キャッシュ集計はまだありません")</span>
+        </div>
+        <div class="kpi-card">
+            <span class="kpi-label">キャッシュ読取率</span>
+            <span class="kpi-value" id="kpi-cache-rate-value">@MonitorViewFormat.Percent(kpi.CacheReadRatePct)</span>
+            <span class="kpi-bar-track"><span class="kpi-bar-fill" id="kpi-cache-rate-bar" style="width: @(kpi.CacheReadRatePct is { } rate ? BarWidth((long)Math.Round(rate), 100) : "0%")"></span></span>
+        </div>
+        <a class="kpi-card" id="kpi-error-card" href="/traces?status=error&period=today">
+            <span class="kpi-label">エラー trace</span>
+            <span class="kpi-value kpi-red" id="kpi-error-value">@MonitorViewFormat.Count(kpi.ErrorTraceCount)</span>
+            <span class="kpi-note" id="kpi-error-note">/ @MonitorViewFormat.Count(kpi.TraceCount) 中 · 確認する →</span>
+        </a>
+    </div>
+
+    <div class="overview-mid">
+        <div class="panel" id="model-breakdown-card">
+            <div class="panel-head">
+                <span class="panel-title">モデル別トークン内訳</span>
+                <span class="panel-legend">
+                    <span class="legend-item"><span class="legend-swatch swatch-cache" aria-hidden="true"></span>キャッシュ</span>
+                    <span class="legend-item"><span class="legend-swatch swatch-input" aria-hidden="true"></span>入力</span>
+                    <span class="legend-item"><span class="legend-swatch swatch-output" aria-hidden="true"></span>出力</span>
+                </span>
+            </div>
+            <div class="model-breakdown" id="model-breakdown">
+                @if (perModel.Count == 0)
+                {
+                    <p class="empty-state">この期間のトレースはまだありません。</p>
+                }
+                @foreach (var m in perModel)
+                {
+                    var uncachedInput = Math.Max(0L, m.InputTokens - m.CacheReadTokens);
+                    <div class="model-row">
+                        <div class="model-row-head">
+                            <span class="model-name monitor-mono">@m.Model</span>
+                            <span class="model-total monitor-mono">@MonitorViewFormat.CompactTokens(m.TotalTokens) · @MonitorViewFormat.Count(m.TraceCount) traces</span>
+                        </div>
+                        <div class="model-bar" style="width: @BarWidth(m.TotalTokens, maxModelTokens)">
+                            <span class="bar-seg seg-cache" style="flex-grow: @m.CacheReadTokens"></span>
+                            <span class="bar-seg seg-input" style="flex-grow: @uncachedInput"></span>
+                            <span class="bar-seg seg-output" style="flex-grow: @m.OutputTokens"></span>
+                        </div>
+                    </div>
+                }
+            </div>
+        </div>
+
+        <div class="panel" id="cache-efficiency-card">
+            <div class="panel-head">
+                <span class="panel-title">キャッシュ効率（モデル別）</span>
+            </div>
+            <div class="cache-efficiency" id="cache-efficiency">
+                @if (perModel.Count == 0)
+                {
+                    <p class="empty-state">この期間のトレースはまだありません。</p>
+                }
+                @foreach (var m in perModel)
+                {
+                    <div class="cache-row">
+                        <div class="cache-row-head">
+                            <span class="model-name monitor-mono">@m.Model</span>
+                            <span class="cache-rate">@MonitorViewFormat.Percent(m.CacheReadRatePct)</span>
+                        </div>
+                        <span class="cache-bar-track"><span class="cache-bar-fill" style="width: @(m.CacheReadRatePct is { } r ? BarWidth((long)Math.Round(r), 100) : "0%")"></span></span>
+                        <span class="cache-note">読取 @MonitorViewFormat.CompactTokens(m.CacheReadTokens) / 作成 @MonitorViewFormat.CompactTokens(m.CacheCreationTokens)</span>
+                    </div>
+                }
+            </div>
+            @if (lowCacheModel is not null)
+            {
+                <p class="cache-remark" id="cache-remark">@lowCacheModel.Model はキャッシュ読取率が低く、作成コストを回収できていない可能性があります。</p>
+            }
+        </div>
+
+        <div class="panel" id="top-traces-card">
+            <div class="panel-head">
+                <span class="panel-title">高コスト trace TOP5</span>
+                <a class="panel-link" id="top-all-link" href="/traces?period=today">すべて →</a>
+            </div>
+            <ol class="top-traces" id="top-traces">
+                @if (Model.TopTraces.Count == 0)
+                {
+                    <li class="empty-state">この期間のトークン集計はまだありません。</li>
+                }
+                @for (var i = 0; i < Model.TopTraces.Count; i++)
+                {
+                    var trace = Model.TopTraces[i];
+                    <li class="top-trace-row">
+                        <a href="/traces/@trace.TraceId">
+                            <span class="top-rank monitor-mono">@(i + 1)</span>
+                            <span class="top-body">
+                                <span class="top-label">@Label(trace.TraceId)</span>
+                                <span class="top-bar-track"><span class="top-bar-fill" style="width: @BarWidth(trace.TotalTokens ?? 0, maxTopTokens)"></span></span>
+                            </span>
+                            <span class="top-total monitor-mono">@MonitorViewFormat.CompactTokens(trace.TotalTokens)</span>
+                        </a>
+                    </li>
+                }
+            </ol>
+        </div>
+    </div>
+
+    <div class="overview-low">
+        <div class="panel" id="hourly-card">
+            <div class="panel-head">
+                <span class="panel-title">時間帯別トークン</span>
+            </div>
+            <div class="hourly-chart" id="hourly-chart" role="img" aria-label="時間帯別トークン分布">
+                @foreach (var hour in hourly)
+                {
+                    <span class="hour-bar" style="height: @BarWidth(hour.TotalTokens, maxHourTokens)" title="@(hour.Hour)時 @MonitorViewFormat.CompactTokens(hour.TotalTokens) tokens"></span>
+                }
+            </div>
+            <div class="hourly-axis" aria-hidden="true"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>
+        </div>
+
+        <div class="panel" id="recent-traces-card">
+            <div class="panel-head">
+                <span class="panel-title">最近のトレース</span>
+                <a class="panel-link" href="/traces?sort=time&period=all">すべて →</a>
+            </div>
+            <ul class="recent-traces" id="recent-traces">
+                @if (Model.RecentTraces.Count == 0)
+                {
+                    <li class="empty-state">まだトレースがありません。VS Code / Copilot からの受信を待っています。</li>
+                }
+                @foreach (var trace in Model.RecentTraces)
+                {
+                    <li class="recent-trace-row">
+                        <a href="/traces/@trace.TraceId">
+                            <span class="trace-status-dot @StatusClass(trace.TraceStatus)" aria-hidden="true"></span>
+                            <span class="recent-label">@Label(trace.TraceId)</span>
+                            <span class="recent-model monitor-mono">@(trace.PrimaryModel ?? "—")</span>
+                            <span class="recent-tokens monitor-mono">@MonitorViewFormat.CompactTokens(trace.TotalTokens)</span>
+                            <span class="recent-time">@MonitorViewFormat.RelativeTime(trace.LastSeenAt)</span>
+                        </a>
+                    </li>
+                }
+            </ul>
+        </div>
+    </div>
+</section>
+<script src="/monitor-overview.js" defer></script>

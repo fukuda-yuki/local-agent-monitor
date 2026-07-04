@@ -1,0 +1,27 @@
+namespace CopilotAgentObservability.Telemetry;
+
+internal sealed record MeasurementRow(
+    [property: JsonPropertyName("trace_id")] string? TraceId,
+    [property: JsonPropertyName("experiment_id")] string? ExperimentId,
+    [property: JsonPropertyName("client_kind")] string? ClientKind,
+    [property: JsonPropertyName("task_id")] string? TaskId,
+    [property: JsonPropertyName("task_category")] string? TaskCategory,
+    [property: JsonPropertyName("task_run_index")] int? TaskRunIndex,
+    [property: JsonPropertyName("experiment_condition")] string? ExperimentCondition,
+    [property: JsonPropertyName("prompt_version")] string? PromptVersion,
+    [property: JsonPropertyName("agent_variant")] string? AgentVariant,
+    [property: JsonPropertyName("repo_snapshot")] string? RepoSnapshot,
+    [property: JsonPropertyName("input_tokens")] int? InputTokens,
+    [property: JsonPropertyName("output_tokens")] int? OutputTokens,
+    [property: JsonPropertyName("total_tokens")] int? TotalTokens,
+    [property: JsonPropertyName("turn_count")] int? TurnCount,
+    [property: JsonPropertyName("tool_call_count")] int? ToolCallCount,
+    [property: JsonPropertyName("duration_ms")] int? DurationMs,
+    [property: JsonPropertyName("error_count")] int? ErrorCount,
+    [property: JsonPropertyName("success_status")] string SuccessStatus,
+    [property: JsonPropertyName("evaluator_id")] string? EvaluatorId,
+    [property: JsonPropertyName("evaluation_notes")] string? EvaluationNotes,
+    [property: JsonPropertyName("evaluated_at")] string? EvaluatedAt,
+    [property: JsonPropertyName("unknown_spans_json")] JsonArray? UnknownSpansJson,
+    [property: JsonPropertyName("unknown_attributes_json")] JsonObject? UnknownAttributesJson,
+    [property: JsonPropertyName("aggregation_notes")] string? AggregationNotes);

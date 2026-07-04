@@ -1,0 +1,51 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "client.kind",
+            "value": { "stringValue": "vscode-copilot-chat" }
+          },
+          {
+            "key": "user.email",
+            "value": { "stringValue": "demo-user@example.invalid" }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "demo-trace-varied-3",
+              "spanId": "a000",
+              "name": "invoke_agent reasoning-agent",
+              "startTimeUnixNano": "1782898800000000000",
+              "endTimeUnixNano": "1782898805000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "invoke_agent" } },
+                { "key": "gen_ai.agent.name", "value": { "stringValue": "reasoning-agent" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-varied-3",
+              "spanId": "t100",
+              "name": "chat o3-mini",
+              "startTimeUnixNano": "1782898801000000000",
+              "endTimeUnixNano": "1782898804000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.response.model", "value": { "stringValue": "o3-mini" } },
+                { "key": "gen_ai.prompt", "value": { "stringValue": "typo fix: README のコマンド例が古いので直して" } },
+                { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "50" } },
+                { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "10" } },
+                { "key": "gen_ai.usage.cache_read.input_tokens", "value": { "intValue": "0" } },
+                { "key": "gen_ai.usage.cache_creation.input_tokens", "value": { "intValue": "0" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "client.kind",
+            "value": { "stringValue": "vscode-copilot-chat" }
+          },
+          {
+            "key": "user.email",
+            "value": { "stringValue": "demo-user@example.invalid" }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "demo-trace-overview",
+              "spanId": "1111",
+              "name": "chat gpt-4o",
+              "startTimeUnixNano": "1782899401000000000",
+              "endTimeUnixNano": "1782899407000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.response.model", "value": { "stringValue": "gpt-4o" } },
+                { "key": "gen_ai.prompt", "value": { "stringValue": "直近のインシデント対応のまとめを書いて、再発防止策を3つ提案して" } },
+                { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "1200" } },
+                { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "300" } },
+                { "key": "gen_ai.usage.cache_read.input_tokens", "value": { "intValue": "800" } },
+                { "key": "gen_ai.usage.cache_creation.input_tokens", "value": { "intValue": "60" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

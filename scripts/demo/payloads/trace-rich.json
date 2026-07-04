@@ -1,0 +1,143 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "client.kind",
+            "value": { "stringValue": "vscode-copilot-chat" }
+          },
+          {
+            "key": "user.email",
+            "value": { "stringValue": "demo-user@example.invalid" }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "demo-trace-rich",
+              "spanId": "a000",
+              "name": "invoke_agent copilot-dev-agent",
+              "startTimeUnixNano": "1782896400000000000",
+              "endTimeUnixNano": "1782896460000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "invoke_agent" } },
+                { "key": "gen_ai.agent.name", "value": { "stringValue": "copilot-dev-agent" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich",
+              "spanId": "t100",
+              "name": "chat gpt-4o",
+              "startTimeUnixNano": "1782896401000000000",
+              "endTimeUnixNano": "1782896408000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.response.model", "value": { "stringValue": "gpt-4o" } },
+                { "key": "gen_ai.prompt", "value": { "stringValue": "nightly build が断続的に失敗する原因を調査して、直近のログとテスト結果を確認しながら根本原因を切り分けたい" } },
+                { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "8000" } },
+                { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "600" } },
+                { "key": "gen_ai.usage.cache_read.input_tokens", "value": { "intValue": "5000" } },
+                { "key": "gen_ai.usage.cache_creation.input_tokens", "value": { "intValue": "300" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich",
+              "spanId": "p101",
+              "parentSpanId": "t100",
+              "name": "execute_tool read_file",
+              "startTimeUnixNano": "1782896408000000000",
+              "endTimeUnixNano": "1782896410000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "execute_tool" } },
+                { "key": "gen_ai.tool.name", "value": { "stringValue": "read_file" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich",
+              "spanId": "p102",
+              "parentSpanId": "t100",
+              "name": "execute_tool grep_search",
+              "startTimeUnixNano": "1782896408500000000",
+              "endTimeUnixNano": "1782896411000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "execute_tool" } },
+                { "key": "gen_ai.tool.name", "value": { "stringValue": "grep_search" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich",
+              "spanId": "p103",
+              "parentSpanId": "t100",
+              "name": "execute_tool glob_files",
+              "startTimeUnixNano": "1782896409000000000",
+              "endTimeUnixNano": "1782896412000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "execute_tool" } },
+                { "key": "gen_ai.tool.name", "value": { "stringValue": "glob_files" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich",
+              "spanId": "t200",
+              "name": "chat gpt-4o",
+              "startTimeUnixNano": "1782896413000000000",
+              "endTimeUnixNano": "1782896420000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.response.model", "value": { "stringValue": "gpt-4o" } },
+                { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "9000" } },
+                { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "700" } },
+                { "key": "gen_ai.usage.cache_read.input_tokens", "value": { "intValue": "6500" } },
+                { "key": "gen_ai.usage.cache_creation.input_tokens", "value": { "intValue": "100" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich",
+              "spanId": "f201",
+              "parentSpanId": "t200",
+              "name": "execute_tool str_replace",
+              "startTimeUnixNano": "1782896420000000000",
+              "endTimeUnixNano": "1782896422000000000",
+              "status": { "code": "STATUS_CODE_ERROR" },
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "execute_tool" } },
+                { "key": "gen_ai.tool.name", "value": { "stringValue": "str_replace" } },
+                { "key": "error.type", "value": { "stringValue": "tool_failure" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich",
+              "spanId": "r202",
+              "parentSpanId": "t200",
+              "name": "execute_tool str_replace",
+              "startTimeUnixNano": "1782896423000000000",
+              "endTimeUnixNano": "1782896425000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "execute_tool" } },
+                { "key": "gen_ai.tool.name", "value": { "stringValue": "str_replace" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-rich",
+              "spanId": "t300",
+              "name": "chat gpt-4o",
+              "startTimeUnixNano": "1782896426000000000",
+              "endTimeUnixNano": "1782896440000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.response.model", "value": { "stringValue": "gpt-4o" } },
+                { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "9500" } },
+                { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "800" } },
+                { "key": "gen_ai.usage.cache_read.input_tokens", "value": { "intValue": "7000" } },
+                { "key": "gen_ai.usage.cache_creation.input_tokens", "value": { "intValue": "50" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

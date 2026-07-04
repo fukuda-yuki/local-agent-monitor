@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ja" class="monitor-root">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ローカルモニター</title>
+    <link rel=stylesheet href=/monitor.css />
+</head>
+<body>
+    <aside class="monitor-sidebar">
+        <span class="sidebar-brand"><span class="sidebar-logo" aria-hidden="true"></span>Local Monitor</span>
+        <nav class="sidebar-nav" aria-label="モニターナビゲーション">
+            <a href="/" class="sidebar-link @(Context.Request.Path == "/" ? "active" : "")" aria-current="@(Context.Request.Path == "/" ? "page" : null)">概要</a>
+            <a href="/traces" class="sidebar-link @(Context.Request.Path.StartsWithSegments("/traces") ? "active" : "")" aria-current="@(Context.Request.Path.StartsWithSegments("/traces") ? "page" : null)">トレース<span class="nav-count" id="sidebar-trace-count" aria-label="トレース件数"></span></a>
+        </nav>
+        <div class="sidebar-footer">
+            <button type="button" class="status-badge" id="status-badge" aria-haspopup="dialog" aria-expanded="false" aria-controls="status-popover">
+                <span class="status-dot" id="status-badge-dot" aria-hidden="true"></span>
+                <span id="status-badge-text">確認中…</span>
+                <span class="badge-caret" aria-hidden="true">▸</span>
+            </button>
+            <span class="sidebar-endpoint" id="sidebar-endpoint"></span>
+        </div>
+        <div class="status-popover" id="status-popover" role="dialog" aria-label="受信ステータス" hidden>
+            <div class="popover-head">
+                <span class="status-dot" id="popover-dot" aria-hidden="true"></span>
+                <span id="popover-title">確認中…</span>
+                <span class="popover-endpoint" id="popover-endpoint"></span>
+            </div>
+            <ul class="popover-pipeline" id="popover-pipeline"></ul>
+            <p class="popover-reason" id="popover-reason" hidden></p>
+            <div class="popover-actions">
+                <a href="/diagnostics" class="primary">詳細診断を開く</a>
+                <a href="/diagnostics#ingestion-history">取り込み履歴</a>
+            </div>
+        </div>
+    </aside>
+    <main class="monitor-content">
+        @RenderBody()
+    </main>
+    <script src=/monitor.js defer></script>
+    <script src=/monitor-shell.js defer></script>
+</body>
+</html>

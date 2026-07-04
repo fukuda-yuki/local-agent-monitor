@@ -1,0 +1,34 @@
+# Repository-scoped template. Verify how your Codex surface loads project config before relying on
+# this file as an effective runtime configuration.
+
+model = "gpt-5.5"
+
+# 通常時。実装・修正・テスト実行などはこちら。
+model_reasoning_effort = "medium"
+
+# Plan mode 専用。設計・実装計画だけ重く考えさせる。
+plan_mode_reasoning_effort = "high"
+
+# 人間への承認要求で停止しない
+approval_policy = "never"
+
+# リポジトリ内では自由に読み書き・コマンド実行を許可
+sandbox_mode = "workspace-write"
+
+[agents]
+max_threads = 24
+max_depth = 1
+job_max_runtime_seconds = 3600
+
+[features]
+fast_mode = true
+multi_agent = true
+
+# restore、npm install、Web APIなどの外部通信を許可
+[sandbox_workspace_write]
+network_access = true
+
+# Windowsでは強い隔離方式を使用
+[windows]
+sandbox = "elevated"
+sandbox_private_desktop = true

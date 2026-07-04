@@ -1,0 +1,51 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "client.kind",
+            "value": { "stringValue": "copilot-cli" }
+          },
+          {
+            "key": "user.email",
+            "value": { "stringValue": "demo-user@example.invalid" }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "demo-trace-varied-2",
+              "spanId": "a000",
+              "name": "invoke_agent cli-agent",
+              "startTimeUnixNano": "1782898500000000000",
+              "endTimeUnixNano": "1782898510000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "invoke_agent" } },
+                { "key": "gen_ai.agent.name", "value": { "stringValue": "cli-agent" } }
+              ]
+            },
+            {
+              "traceId": "demo-trace-varied-2",
+              "spanId": "t100",
+              "name": "chat gpt-4.1",
+              "startTimeUnixNano": "1782898501000000000",
+              "endTimeUnixNano": "1782898509000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.response.model", "value": { "stringValue": "gpt-4.1" } },
+                { "key": "gen_ai.prompt", "value": { "stringValue": "monorepo 全体のリポジトリ構造を要約して、依存関係が複雑なモジュールを洗い出して" } },
+                { "key": "gen_ai.usage.input_tokens", "value": { "intValue": "52000" } },
+                { "key": "gen_ai.usage.output_tokens", "value": { "intValue": "1200" } },
+                { "key": "gen_ai.usage.cache_read.input_tokens", "value": { "intValue": "40000" } },
+                { "key": "gen_ai.usage.cache_creation.input_tokens", "value": { "intValue": "500" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
