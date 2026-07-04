@@ -46,7 +46,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-vscode-e
 code .
 ```
 
-VS Code で Copilot Chat に質問すると、ブラウザの `/ingestions` と `/traces` に受信結果が表示されます。
+VS Code で Copilot Chat に質問すると、ブラウザの `http://127.0.0.1:4320/`（概要）と `/traces`（トレース一覧）に受信結果が表示されます。
 
 詳細は [Local Ingestion Monitor ユーザーガイド](user-guide/local-monitor.md) を参照する。
 
