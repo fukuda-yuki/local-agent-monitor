@@ -230,6 +230,18 @@ projection schema version 4, D044):
 | `cache_creation_tokens` | INTEGER NULL | trace-level cache-creation sum; same branch rule |
 | `trace_status` | TEXT NULL | `ok` (no error spans) / `unrecovered` (last span by `start_time`, fallback `span_ordinal`, is an error) / `recovered` (an error occurred but a later span succeeded) |
 
+Two display-side constants the Sprint18 monitor UI derives from these columns
+(client-side presentation only; no schema or API field):
+
+- **Effective-input conversion**: the overview KPI and the trace-detail cache
+  column show an "実効入力換算" figure computed as
+  `cache_read_tokens x 0.1 + uncached input tokens` (cache reads are weighted at
+  0.1x as a cost approximation).
+- **Input-token guideline line**: the error-analysis-mode "入力トークンの推移"
+  chart draws a dashed guideline at **128K input tokens** per turn; bars that
+  exceed it are highlighted. This is a fixed display guideline, not a
+  configurable threshold and not part of the readiness contract.
+
 Per-field sanitization policy:
 
 - **free-form name fields** (`tool_name`, `mcp_tool_name`, `agent_name`, span
