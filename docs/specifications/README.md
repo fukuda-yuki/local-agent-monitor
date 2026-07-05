@@ -22,6 +22,7 @@
 | Candidate records | [interfaces/candidate-records.md](interfaces/candidate-records.md) |
 | Human-review records | [interfaces/human-review-records.md](interfaces/human-review-records.md) |
 | Dashboard dataset | [interfaces/dashboard-dataset.md](interfaces/dashboard-dataset.md) |
+| Instruction diagnosis analysis | [interfaces/instruction-diagnosis-analysis.md](interfaces/instruction-diagnosis-analysis.md) |
 | Security and data boundaries | [security-data-boundaries.md](security-data-boundaries.md) |
 
 ## Change Rule

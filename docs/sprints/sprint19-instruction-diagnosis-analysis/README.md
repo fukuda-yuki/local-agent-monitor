@@ -1,6 +1,6 @@
 # Sprint19 - Instruction Diagnosis Analysis (Issue #46 Phase 1)
 
-Status: Planned.
+Status: In progress (M1 done).
 
 Sprint19 implements Phase 1 of
 [Issue #46](https://github.com/fukuda-yuki/copilot-agent-observability/issues/46):
@@ -53,7 +53,7 @@ workflow) is considered.
 
 | Milestone | Summary | Status |
 | --- | --- | --- |
-| M1 | Specs and decision record | Planned |
+| M1 | Specs and decision record | Done |
 | M2 | Focus value and prompt template | Planned |
 | M3 | Drawer UI exposure | Planned |
 | M4 | Regression validation | Planned |
@@ -96,6 +96,9 @@ workflow) is considered.
 - Verify `--sanitized-only` still removes the entire raw analysis surface
   including the new focus (existing tests or one added assertion).
 - Update the Playwright smoke test only if it asserts the drawer focus list.
+- Update the drawer focus list in `docs/user-guide/local-monitor.md` (the
+  guide documents shipped behavior, so this lands with the UI change, not
+  in M1).
 
 ### M4 - Regression validation
 

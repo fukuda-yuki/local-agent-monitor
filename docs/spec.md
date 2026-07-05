@@ -68,6 +68,7 @@ GitHub Pages publish は private repository と明示的な access control を�
 | Candidate record interfaces | [specifications/interfaces/candidate-records.md](specifications/interfaces/candidate-records.md) |
 | Human-review record interfaces | [specifications/interfaces/human-review-records.md](specifications/interfaces/human-review-records.md) |
 | Dashboard dataset interface | [specifications/interfaces/dashboard-dataset.md](specifications/interfaces/dashboard-dataset.md) |
+| Instruction diagnosis analysis interface | [specifications/interfaces/instruction-diagnosis-analysis.md](specifications/interfaces/instruction-diagnosis-analysis.md) |
 | Contributor workflow | [contributor-guide.md](contributor-guide.md) |
 
 ## Public Interfaces

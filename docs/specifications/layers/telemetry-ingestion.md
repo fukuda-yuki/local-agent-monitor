@@ -424,7 +424,12 @@ not change existing sanitized `/api/monitor/*` or SSE contracts.
 Routes:
 
 - `POST /traces/{traceId}/analysis` starts a local run. It accepts focus values
-  `latency`, `tokens`, `cache`, `errors`, `tool-usage`, and `agent-flow`. The
+  `latency`, `tokens`, `cache`, `errors`, `tool-usage`, `agent-flow`, and
+  `instruction-diagnosis`. The `instruction-diagnosis` focus applies the
+  taxonomy and fixed per-finding output contract defined in
+  [instruction diagnosis analysis](../interfaces/instruction-diagnosis-analysis.md)
+  and is exposed in the Local Monitor drawer only (the Canvas helper focus
+  set, D036, is unchanged). The
   request is same-origin and CSRF protected and does not contain raw payload.
   The monitor dispatches the run to the in-process .NET GitHub Copilot SDK
   analysis service.

@@ -1388,3 +1388,43 @@ server 側に会話 session 状態を持たない。
   no-store / `--sanitized-only` 無効化は D035 のまま変更しない。
 - ドロワーには「ローカル SDK 経由 · raw はローカルから出ません」の
   データ境界コピーを必須表示する。
+
+## D046: Copilot raw analysis に指示診断（instruction-diagnosis）focus を additive に追加する
+
+Status: Accepted
+
+Issue #46 Phase 1（Sprint19）として、既存 Local Monitor Copilot raw
+analysis に、利用者が agent へ与えた実装指示を trace 証拠に基づいて
+診断する analysis focus を 1 つ追加する。目的は「trace 由来の指示
+フィードバックは一般的な prompt アドバイスに勝る」という Phase 1 の
+価値仮説の検証である。
+
+- additive な focus 拡張のみ: `MonitorAnalysisFocus` に新値 1 つと
+  prompt template branch を追加する（`tool-usage` / `agent-flow` の
+  D035 前例に従う）。新規 route / schema / API field は追加しない。
+- wire value は `instruction-diagnosis`、ドロワーの日本語ラベルは
+  「指示診断」とする（既存の短い名詞ラベル慣例に合わせる）。
+- 証拠は trace 内部のみ: 追い指示・言い換え turn、error span、
+  失敗 / 再試行 tool call、token 浪費。GitHub issue / commit /
+  test evidence との相関はしない（D037 の trace 手動選択方針を踏襲）。
+- 表示はドロワーのみ: Canvas helper focus set（`latency` / `tokens` /
+  `cache` / `errors`、D036）は拡張しない。memory candidate 生成、
+  採用ワークフロー、新規 repository-safe export も追加しない。
+- taxonomy v1 は 5 分類（goal clarity / ambiguity / missing
+  acceptance criteria / task size・split / missing
+  context・constraints）とし、「分類は対応する trace 内証拠パターンと
+  セットでのみ存在できる」を規律とする。正本は
+  `docs/specifications/interfaces/instruction-diagnosis-analysis.md`。
+- finding は固定 4 点形式: 分類 / trace 証拠引用（span、turn）/
+  ギャップ説明 / 次回向け改善指示文。引用可能な証拠のない finding は
+  出力禁止。finding ゼロは有効な結果であり、その旨を明示出力する。
+- prompt-only で開始する: raw trace を既存 runner に投入し、prompt が
+  span / turn 引用を要求する。実証済み証拠パターンの deterministic
+  pre-extractor 化は後続 phase とする。引用ハルシネーションの持続は
+  M5 gate 失敗であり、Phase 2 前に pre-extraction が必要という
+  シグナルとして扱う。
+- 不変: `--sanitized-only` は新 focus を含む raw analysis 面全体を
+  無効化したままとする。D045 の履歴再送追い質問は新 focus でも機能
+  する。raw / route 境界（D035、security-data-boundaries.md）は変更
+  しない。`CanvasExtensionContractTests.cs` は無変更で green を維持
+  する。
