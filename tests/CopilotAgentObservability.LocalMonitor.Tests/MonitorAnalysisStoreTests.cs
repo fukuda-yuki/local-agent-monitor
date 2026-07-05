@@ -49,6 +49,26 @@ public class MonitorAnalysisStoreTests
         Assert.Null(settings.Provider);
     }
 
+    [Theory]
+    [InlineData(null, 60)]
+    [InlineData("600", 600)]
+    [InlineData("0", 60)]
+    [InlineData("-5", 60)]
+    [InlineData("not-a-number", 60)]
+    public void CopilotAnalysisSettings_ReadsTimeoutSeconds(string? configured, int expected)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["CopilotAnalysis:TimeoutSeconds"] = configured,
+            })
+            .Build();
+
+        var settings = CopilotAnalysisSettings.From(configuration);
+
+        Assert.Equal(expected, settings.TimeoutSeconds);
+    }
+
     [Fact]
     public void CopilotAnalysisSettings_RejectsUnsupportedWireApi()
     {

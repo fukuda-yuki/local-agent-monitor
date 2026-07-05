@@ -518,6 +518,15 @@ dotnet user-secrets set "CopilotAnalysis:Provider:ApiKey" "<api-key>" --project 
 temporary local directory を Copilot SDK runtime state として使います。API key は
 analysis events、UI、repository-safe summary には出力しません。
 
+`CopilotAnalysis:TimeoutSeconds`（既定 `60`）は 1 回の解析実行に許容する SDK
+send/wait タイムアウト秒です。実際の Copilot CLI トレースは raw payload が
+大きく、reasoning 系 BYOK モデルでは既定 60 秒で完走しないことがあります。
+その場合は例えば `600` を設定してください:
+
+```powershell
+dotnet user-secrets set "CopilotAnalysis:TimeoutSeconds" "600" --project src\CopilotAgentObservability.LocalMonitor
+```
+
 ### 出力境界
 
 - Raw analysis result は local runtime data です。

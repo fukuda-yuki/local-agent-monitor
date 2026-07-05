@@ -132,7 +132,10 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         });
 
         analysisStore.AppendEvent(context.RunId, "sdk_phase", "sending_message", DateTimeOffset.UtcNow);
-        await session.SendAndWaitAsync(new MessageOptions { Prompt = BuildPrompt(context) });
+        await session.SendAndWaitAsync(
+            new MessageOptions { Prompt = BuildPrompt(context) },
+            TimeSpan.FromSeconds(settings.TimeoutSeconds),
+            cancellationToken);
         done.TrySetResult();
         await done.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
         analysisStore.AppendEvent(context.RunId, "sdk_phase", "session_completed", DateTimeOffset.UtcNow);
@@ -173,7 +176,8 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         3. Gap explanation: what the instruction lacked, tied to the cited evidence.
         4. Improved next-time instruction: a concrete rewrite the user could give next time.
         Rules: a finding without a citable evidence reference is forbidden. Citations must refer to spans/turns present in the analyzed trace. Zero findings is a valid result and must be stated explicitly.
-        Write the findings, including the improved next-time instructions, in Japanese.
+        Output language rule: the entire final report - headings, findings, gap explanations, improved next-time instructions, and the assessment of non-applicable categories - must be written in Japanese. Do not write the report in Chinese or English. 最終レポート全体（見出し・所見・改善指示・非該当カテゴリの評価を含む）は必ず日本語で書くこと。
+        Respond with the final markdown report only; do not narrate tool usage before it.
         """;
 
     /// <summary>
@@ -250,7 +254,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
     }
 }
 
-internal sealed record CopilotAnalysisSettings(bool Enabled, string Model, string BaseDirectory, ProviderConfig? Provider)
+internal sealed record CopilotAnalysisSettings(bool Enabled, string Model, int TimeoutSeconds, string BaseDirectory, ProviderConfig? Provider)
 {
     public static CopilotAnalysisSettings From(IConfiguration configuration)
     {
@@ -260,6 +264,11 @@ internal sealed record CopilotAnalysisSettings(bool Enabled, string Model, strin
         if (string.IsNullOrWhiteSpace(model))
         {
             model = "gpt-5";
+        }
+
+        if (!int.TryParse(section["TimeoutSeconds"], out var timeoutSeconds) || timeoutSeconds <= 0)
+        {
+            timeoutSeconds = 60;
         }
 
         var baseDirectory = section["BaseDirectory"];
@@ -280,7 +289,7 @@ internal sealed record CopilotAnalysisSettings(bool Enabled, string Model, strin
             && string.IsNullOrWhiteSpace(baseUrl)
             && string.IsNullOrWhiteSpace(apiKey))
         {
-            return new CopilotAnalysisSettings(enabled, model, baseDirectory, Provider: null);
+            return new CopilotAnalysisSettings(enabled, model, timeoutSeconds, baseDirectory, Provider: null);
         }
 
         if (string.IsNullOrWhiteSpace(type)
@@ -304,6 +313,7 @@ internal sealed record CopilotAnalysisSettings(bool Enabled, string Model, strin
         return new CopilotAnalysisSettings(
             enabled,
             model,
+            timeoutSeconds,
             baseDirectory,
             new ProviderConfig
             {
