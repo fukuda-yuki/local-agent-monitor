@@ -195,6 +195,82 @@ public class MonitorAnalysisRouteTests
         Assert.DoesNotContain("Follow-up question", prompt);
     }
 
+    [Fact]
+    public void BuildPrompt_InstructionDiagnosis_EmbedsTaxonomyAndFindingContract()
+    {
+        var context = new MonitorAnalysisContext(1, "trace-x", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
+
+        var prompt = DotNetCopilotRawAnalysisRunner.BuildPrompt(context);
+
+        Assert.Contains("focus instruction-diagnosis", prompt);
+        Assert.Contains(DotNetCopilotRawAnalysisRunner.InstructionDiagnosisPromptBlock, prompt);
+        Assert.Contains("trace-internal evidence only", prompt);
+        Assert.Contains("goal-clarity", prompt);
+        Assert.Contains("ambiguity", prompt);
+        Assert.Contains("missing-acceptance-criteria", prompt);
+        Assert.Contains("task-size-split", prompt);
+        Assert.Contains("missing-context-constraints", prompt);
+        Assert.Contains("exactly these four parts", prompt);
+        Assert.Contains("a finding without a citable evidence reference is forbidden", prompt);
+        Assert.Contains("Zero findings is a valid result and must be stated explicitly", prompt);
+        Assert.Contains("in Japanese", prompt);
+        Assert.DoesNotContain("Return concise findings, likely causes, and recommended next checks.", prompt);
+    }
+
+    [Fact]
+    public void BuildPrompt_ExistingFocuses_KeepGenericPromptWithoutTaxonomy()
+    {
+        MonitorAnalysisFocus[] existingFocuses =
+        [
+            MonitorAnalysisFocus.Latency,
+            MonitorAnalysisFocus.Tokens,
+            MonitorAnalysisFocus.Cache,
+            MonitorAnalysisFocus.Errors,
+            MonitorAnalysisFocus.ToolUsage,
+            MonitorAnalysisFocus.AgentFlow,
+        ];
+
+        foreach (var focus in existingFocuses)
+        {
+            var context = new MonitorAnalysisContext(1, "trace-x", null, null, focus);
+
+            var prompt = DotNetCopilotRawAnalysisRunner.BuildPrompt(context);
+
+            var expected =
+                $"Analyze Local Monitor trace trace-x with focus {focus.ToWireValue()}.{Environment.NewLine}" +
+                $"Use the available tools to inspect the trace. For raw evidence, cite trace/span/raw-record ids instead of copying long raw bodies.{Environment.NewLine}" +
+                "Return concise findings, likely causes, and recommended next checks.";
+            Assert.Equal(expected, prompt);
+        }
+    }
+
+    [Fact]
+    public void BuildPrompt_InstructionDiagnosis_KeepsHistoryAndFollowUpBlocks()
+    {
+        var context = new MonitorAnalysisContext(
+            RunId: 1,
+            TraceId: "trace-x",
+            RawRecordId: null,
+            SpanId: null,
+            Focus: MonitorAnalysisFocus.InstructionDiagnosis,
+            Question: "FOLLOWUP_QUESTION_MARKER",
+            History:
+            [
+                new AnalysisHistoryTurn("PRIOR_Q_MARKER", "PRIOR_A_MARKER"),
+            ]);
+
+        var prompt = DotNetCopilotRawAnalysisRunner.BuildPrompt(context);
+
+        Assert.Contains("goal-clarity", prompt);
+        Assert.Contains("Q: PRIOR_Q_MARKER", prompt);
+        Assert.Contains("A: PRIOR_A_MARKER", prompt);
+        Assert.Contains("Follow-up question: FOLLOWUP_QUESTION_MARKER", prompt);
+        Assert.True(
+            prompt.IndexOf("goal-clarity", StringComparison.Ordinal)
+                < prompt.IndexOf("Prior Q&A", StringComparison.Ordinal),
+            "The taxonomy block must precede the D045 chat blocks.");
+    }
+
     private static Task<RunningMonitorHost> StartHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false)
     {
         var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath);

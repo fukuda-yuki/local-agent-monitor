@@ -152,7 +152,34 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
             });
 
     /// <summary>
-    /// Base analysis instruction, plus — for drawer follow-ups (D045) — the prior
+    /// Instruction-diagnosis prompt block (D046): taxonomy v1 with the
+    /// category=evidence coupling, the fixed 4-part finding format, and the
+    /// no-evidence-no-finding rule, mirroring
+    /// docs/specifications/interfaces/instruction-diagnosis-analysis.md.
+    /// Internal for tests.
+    /// </summary>
+    internal const string InstructionDiagnosisPromptBlock =
+        """
+        Diagnose the implementation instructions the user gave the agent in this trace, using trace-internal evidence only (follow-up or rephrased instruction turns, error spans, failed or retried tool calls, token waste).
+        Classify each finding into exactly one taxonomy v1 category:
+        - goal-clarity: the instruction does not state the intended outcome. Evidence: user follow-up turns that redirect or redefine the goal after work started; discarded or redone agent output (rework turns, tokens spent on abandoned work).
+        - ambiguity: the instruction admits multiple readings. Evidence: a rephrased or clarified instruction in a later user turn; agent clarifying-question turns; divergent exploration before the user disambiguates.
+        - missing-acceptance-criteria: the instruction has no verifiable done-condition. Evidence: user correction turns after the agent declares completion; extra user-initiated verification turns.
+        - task-size-split: the instruction bundles too much work for one run. Evidence: a long multi-goal trace with mid-trace error spans or retries; token totals concentrated in retried segments; follow-up turns re-scoping the work to a subset.
+        - missing-context-constraints: the instruction omits environment facts or constraints the agent needed. Evidence: failed or retried tool calls, or error spans, that resolve only after a user turn supplies the missing information. (Distinguished from ambiguity by evidence type: execution failure resolved by supplied information, not instruction rephrasing.)
+        Report each finding with exactly these four parts:
+        1. Category: exactly one taxonomy category id.
+        2. Evidence citation: span id(s) and/or turn number(s) that exist in the analyzed trace, with a short factual descriptor. Do not copy long raw bodies.
+        3. Gap explanation: what the instruction lacked, tied to the cited evidence.
+        4. Improved next-time instruction: a concrete rewrite the user could give next time.
+        Rules: a finding without a citable evidence reference is forbidden. Citations must refer to spans/turns present in the analyzed trace. Zero findings is a valid result and must be stated explicitly.
+        Write the findings, including the improved next-time instructions, in Japanese.
+        """;
+
+    /// <summary>
+    /// Base analysis instruction (per-focus output block: D046 instruction
+    /// diagnosis gets its taxonomy/contract block, every other focus keeps the
+    /// generic findings line), plus — for drawer follow-ups (D045) — the prior
     /// Q&amp;A transcript block and the follow-up question. Internal for tests.
     /// </summary>
     internal static string BuildPrompt(MonitorAnalysisContext context)
@@ -160,7 +187,14 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         var builder = new StringBuilder();
         builder.AppendLine($"Analyze Local Monitor trace {context.TraceId} with focus {context.Focus.ToWireValue()}.");
         builder.AppendLine("Use the available tools to inspect the trace. For raw evidence, cite trace/span/raw-record ids instead of copying long raw bodies.");
-        builder.AppendLine("Return concise findings, likely causes, and recommended next checks.");
+        if (context.Focus == MonitorAnalysisFocus.InstructionDiagnosis)
+        {
+            builder.AppendLine(InstructionDiagnosisPromptBlock);
+        }
+        else
+        {
+            builder.AppendLine("Return concise findings, likely causes, and recommended next checks.");
+        }
 
         if (context.History is { Count: > 0 })
         {

@@ -1,6 +1,6 @@
 # Sprint19 - Instruction Diagnosis Analysis (Issue #46 Phase 1)
 
-Status: In progress (M1 done).
+Status: In progress (M1-M2 done).
 
 Sprint19 implements Phase 1 of
 [Issue #46](https://github.com/fukuda-yuki/copilot-agent-observability/issues/46):
@@ -54,7 +54,7 @@ workflow) is considered.
 | Milestone | Summary | Status |
 | --- | --- | --- |
 | M1 | Specs and decision record | Done |
-| M2 | Focus value and prompt template | Planned |
+| M2 | Focus value and prompt template | Done |
 | M3 | Drawer UI exposure | Planned |
 | M4 | Regression validation | Planned |
 | M5 | BYOK live validation and Phase 2 gate (human-gated) | Planned |

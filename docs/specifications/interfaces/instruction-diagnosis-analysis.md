@@ -70,6 +70,9 @@ Rules:
   Sprint19 M5 live-validation gate checks citation existence and
   trace-specificity.
 - Zero findings is a valid result and must be stated explicitly.
+- Findings, including the improved next-time instruction, are written in
+  Japanese, so the rewrite is usable verbatim as the user's next
+  instruction. Other focuses stay language-unpinned.
 - The result is markdown inside the existing analysis run result and remains
   local runtime data. No new schema.
 

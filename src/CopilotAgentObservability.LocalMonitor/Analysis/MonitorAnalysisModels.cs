@@ -8,6 +8,7 @@ internal enum MonitorAnalysisFocus
     Errors,
     ToolUsage,
     AgentFlow,
+    InstructionDiagnosis,
 }
 
 internal enum MonitorAnalysisStatus
@@ -76,6 +77,7 @@ internal static class MonitorAnalysisWire
             MonitorAnalysisFocus.Errors => "errors",
             MonitorAnalysisFocus.ToolUsage => "tool-usage",
             MonitorAnalysisFocus.AgentFlow => "agent-flow",
+            MonitorAnalysisFocus.InstructionDiagnosis => "instruction-diagnosis",
             _ => throw new ArgumentOutOfRangeException(nameof(focus)),
         };
 
@@ -101,9 +103,11 @@ internal static class MonitorAnalysisWire
             "errors" => MonitorAnalysisFocus.Errors,
             "tool-usage" => MonitorAnalysisFocus.ToolUsage,
             "agent-flow" => MonitorAnalysisFocus.AgentFlow,
+            "instruction-diagnosis" => MonitorAnalysisFocus.InstructionDiagnosis,
             _ => default,
         };
-        return value is "latency" or "tokens" or "cache" or "errors" or "tool-usage" or "agent-flow";
+        return value is "latency" or "tokens" or "cache" or "errors" or "tool-usage" or "agent-flow"
+            or "instruction-diagnosis";
     }
 
     public static bool TryParseTerminalStatus(string? value, out MonitorAnalysisStatus status)
