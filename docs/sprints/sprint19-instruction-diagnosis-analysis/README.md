@@ -57,7 +57,7 @@ workflow) is considered.
 | M2 | Focus value and prompt template | Done |
 | M3 | Drawer UI exposure | Done |
 | M4 | Regression validation | Done ([record](milestones/M4-regression-validation.md)) |
-| M5 | BYOK live validation and Phase 2 gate (human-gated) | Planned |
+| M5 | BYOK live validation and Phase 2 gate (human-gated) | Done ([record](milestones/M5-live-validation/live-validation.md)) |
 
 ### M1 - Specs and decision record
 
