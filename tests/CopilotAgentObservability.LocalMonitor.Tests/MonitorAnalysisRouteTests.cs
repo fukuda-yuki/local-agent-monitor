@@ -21,9 +21,13 @@ public class MonitorAnalysisRouteTests
         var start = await host.Client.PostAsJsonAsync(
             $"/traces/{TraceId}/analysis",
             new { focus = "latency" });
+        var instructionDiagnosis = await host.Client.PostAsJsonAsync(
+            $"/traces/{TraceId}/analysis",
+            new { focus = "instruction-diagnosis" });
         var result = await host.Client.GetAsync($"/traces/{TraceId}/analysis/runs/1");
 
         Assert.Equal(HttpStatusCode.NotFound, start.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, instructionDiagnosis.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, result.StatusCode);
     }
 

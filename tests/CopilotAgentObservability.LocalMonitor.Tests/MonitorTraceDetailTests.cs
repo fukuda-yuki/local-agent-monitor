@@ -108,6 +108,8 @@ public class MonitorTraceDetailTests
         Assert.Contains("id=\"drawer-focus\"", body);
         Assert.Contains("value=\"tool-usage\"", body);
         Assert.Contains("value=\"agent-flow\"", body);
+        Assert.Contains("value=\"instruction-diagnosis\"", body);
+        Assert.Contains("指示診断", body);
         Assert.Contains("さらに質問…", body);
         Assert.Contains("/monitor-drawer.js", body);
     }
