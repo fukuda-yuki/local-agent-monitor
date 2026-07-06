@@ -2,6 +2,8 @@
 
 Status: Planned.
 
+Milestone/task breakdown: [Plan.md](Plan.md).
+
 Sprint20 implements the first Phase 2 step of
 [Issue #46](https://github.com/fukuda-yuki/copilot-agent-observability/issues/46),
 following the Phase 1 scope item 5 roadmap ("prompt-only first, migrate proven
