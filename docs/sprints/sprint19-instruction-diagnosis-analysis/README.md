@@ -1,6 +1,6 @@
 # Sprint19 - Instruction Diagnosis Analysis (Issue #46 Phase 1)
 
-Status: In progress (M1-M4 done).
+Status: Done (M1-M5 done; Phase 2 verdict GO recorded on Issue #46).
 
 Sprint19 implements Phase 1 of
 [Issue #46](https://github.com/fukuda-yuki/copilot-agent-observability/issues/46):
