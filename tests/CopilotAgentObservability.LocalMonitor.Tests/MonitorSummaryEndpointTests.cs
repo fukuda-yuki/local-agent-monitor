@@ -343,5 +343,7 @@ public class MonitorSummaryEndpointTests
         public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => new([], 0, 0);
 
         public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) => null;
+
+        public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) => [];
     }
 }

@@ -61,6 +61,8 @@ internal interface IMonitorProjectionStore
     MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query);
 
     MonitorSpanRow? GetMonitorSpan(string traceId, string spanId);
+
+    IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId);
 }
 
 internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
@@ -139,6 +141,9 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
 
     public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) =>
         Guard(() => store.GetMonitorSpan(traceId, spanId));
+
+    public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) =>
+        Guard(() => store.ListConversationTraces(conversationId));
 
     private static T Guard<T>(Func<T> operation)
     {

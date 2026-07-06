@@ -95,6 +95,14 @@ internal sealed record MonitorSpanRow(
     string ProjectedAt);
 
 /// <summary>
+/// Sanitized sibling-trace metadata for one <c>conversation_id</c>
+/// (Sprint20, D047). Metadata only — trace id and earliest span start time.
+/// </summary>
+internal sealed record MonitorConversationTraceRow(
+    string TraceId,
+    string? FirstStartTime);
+
+/// <summary>
 /// Sanitized read DTO for the rollup columns on a <c>monitor_traces</c> row
 /// (Sprint9 additive columns).
 /// </summary>

@@ -206,6 +206,33 @@ public class MonitorProjectionStoreTests
     }
 
     [Fact]
+    public void ListConversationTraces_ReturnsSiblingsOrderedByFirstStartTime()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = NewStore(temp);
+        // trace-b has two spans; MIN(start_time) must win. trace-c has no conversation id.
+        SeedSpans(store, "trace-b", "conv-1", "2026-07-01T00:07:00.000+00:00", "2026-07-01T00:05:00.000+00:00");
+        SeedSpans(store, "trace-a", "conv-1", "2026-07-01T00:01:00.000+00:00");
+        SeedSpans(store, "trace-c", conversationId: null, "2026-07-01T00:00:00.000+00:00");
+
+        var rows = store.ListConversationTraces("conv-1");
+
+        Assert.Equal(new[] { "trace-a", "trace-b" }, rows.Select(r => r.TraceId).ToArray());
+        Assert.Equal("2026-07-01T00:01:00.000+00:00", rows[0].FirstStartTime);
+        Assert.Equal("2026-07-01T00:05:00.000+00:00", rows[1].FirstStartTime);
+    }
+
+    [Fact]
+    public void ListConversationTraces_UnknownConversation_ReturnsEmpty()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = NewStore(temp);
+        SeedSpans(store, "trace-a", "conv-1", "2026-07-01T00:01:00.000+00:00");
+
+        Assert.Empty(store.ListConversationTraces("missing"));
+    }
+
+    [Fact]
     public void ProjectionRowDtos_ExposeOnlyAllowlistMembers()
     {
         var ingestion = typeof(MonitorIngestionRow).GetProperties().Select(p => p.Name).ToHashSet();
@@ -277,6 +304,25 @@ public class MonitorProjectionStoreTests
             RepositoryName: repository,
             WorkspaceLabel: workspace,
             RepoSnapshot: snapshot);
+
+    private static void SeedSpans(RawTelemetryStore store, string traceId, string? conversationId, params string[] startTimes)
+    {
+        var id = store.Insert(Raw(traceId, T(1)));
+        store.ApplyProjection(id, Source, T(1), Projection(traceId, startTimes.Length, Trace(traceId, span: startTimes.Length)), T(10));
+        var spans = startTimes
+            .Select((startTime, ordinal) => new MonitorSpanProjection(
+                TraceId: traceId, SpanId: null, ParentSpanId: null, SpanOrdinal: ordinal,
+                Operation: "chat", Category: "llm_call",
+                ToolName: null, ToolType: null, McpToolName: null, McpServerHash: null,
+                AgentName: null, RequestModel: null, ResponseModel: null,
+                InputTokens: null, OutputTokens: null, TotalTokens: null,
+                ReasoningTokens: null, CacheReadTokens: null, CacheCreationTokens: null,
+                Status: "ok", ErrorType: null, FinishReasons: null,
+                ConversationId: conversationId, DurationMs: null,
+                StartTime: startTime, EndTime: null))
+            .ToList();
+        store.ApplySpanProjection(id, spans, T(10));
+    }
 
     private static SqliteConnection OpenConnection(string databasePath)
     {

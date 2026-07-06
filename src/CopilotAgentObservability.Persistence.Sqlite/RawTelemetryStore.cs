@@ -1017,6 +1017,36 @@ internal sealed partial class RawTelemetryStore
         return rows;
     }
 
+    /// <summary>
+    /// Sibling traces sharing one <c>conversation_id</c>, ordered by earliest span
+    /// start time then trace id (deterministic; Sprint20, D047). Metadata only.
+    /// </summary>
+    public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT trace_id, MIN(start_time) AS first_start_time
+            FROM monitor_spans
+            WHERE conversation_id = $conversation_id
+            GROUP BY trace_id
+            ORDER BY MIN(start_time), trace_id;
+            """;
+        AddParameter(command, "$conversation_id", conversationId);
+
+        using var reader = command.ExecuteReader();
+        var rows = new List<MonitorConversationTraceRow>();
+        while (reader.Read())
+        {
+            rows.Add(new MonitorConversationTraceRow(
+                TraceId: reader.GetString(0),
+                FirstStartTime: reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        return rows;
+    }
+
     /// <summary>Rollup columns for a single trace_id; null if trace not found.</summary>
     public MonitorTraceRollupRow? GetTraceRollup(string traceId)
     {

@@ -433,5 +433,8 @@ public class MonitorTraceDetailTests
 
         public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) =>
             throw new NotSupportedException();
+
+        public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) =>
+            throw new NotSupportedException();
     }
 }

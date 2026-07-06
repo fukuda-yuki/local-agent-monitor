@@ -132,7 +132,7 @@ git commit -m "Instruction Evidence Extractor: docs: add D047 and extractor outp
 **Interfaces:**
 - Produces: `IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId)`; `MonitorConversationTraceRow(string TraceId, string? FirstStartTime)` ordered by earliest span `start_time` then `TraceId`. Consumed by Task 3.1.
 
-- [ ] **Step 1: Write the failing store test** (follow the existing seeding helpers in `MonitorProjectionStoreTests.cs`):
+- [x] **Step 1: Write the failing store test** (follow the existing seeding helpers in `MonitorProjectionStoreTests.cs`):
 
 ```csharp
 [Fact]
@@ -151,8 +151,8 @@ public void ListConversationTraces_UnknownConversation_ReturnsEmpty()
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~ListConversationTraces` — expect compile error (method missing).
-- [ ] **Step 3: Implement.** DTO in `MonitorProjectionRows.cs`:
+- [x] **Step 2: Run to verify failure** — `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~ListConversationTraces` — expect compile error (method missing).
+- [x] **Step 3: Implement.** DTO in `MonitorProjectionRows.cs`:
 
 ```csharp
 /// <summary>Sanitized sibling-trace metadata for one conversation_id (Sprint20, D047). Metadata only.</summary>
@@ -172,8 +172,8 @@ ORDER BY MIN(start_time), trace_id;
 ```
 
 Add the interface member and the `Guard(...)` delegating implementation in `RawTelemetryStoreProjectionStore`.
-- [ ] **Step 4: Run the filter above** — expect PASS.
-- [ ] **Step 5: Commit** — `Instruction Evidence Extractor: feat: add ListConversationTraces read query (Sprint20 M2)`.
+- [x] **Step 4: Run the filter above** — expect PASS. Result: 2/2 pass. Note: the interface addition also required the three test fake stores (`MonitorSummaryEndpointTests`, `MonitorTraceDetailTests`, `ProjectionWorkerTests`) to implement the new member.
+- [x] **Step 5: Commit** — `Instruction Evidence Extractor: feat: add ListConversationTraces read query (Sprint20 M2)`.
 
 ### Task 2.2: Extractor skeleton + error spans, retry chains, turn tokens
 
