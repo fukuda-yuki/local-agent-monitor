@@ -157,10 +157,12 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
             });
 
     /// <summary>
-    /// Instruction-diagnosis prompt block (D046): taxonomy v1 with the
-    /// category=evidence coupling, the fixed 4-part finding format, and the
-    /// no-evidence-no-finding rule, mirroring
-    /// docs/specifications/interfaces/instruction-diagnosis-analysis.md.
+    /// Instruction-diagnosis prompt block (D046 + D047, prompt template v3):
+    /// taxonomy v1 with the category=evidence coupling, the per-category
+    /// required-evidence rules grounding each finding in the
+    /// <c>get_instruction_evidence</c> output (with a raw-verified escape hatch),
+    /// the fixed 4-part finding format, and the no-evidence-no-finding rule,
+    /// mirroring docs/specifications/interfaces/instruction-diagnosis-analysis.md.
     /// Internal for tests.
     /// </summary>
     internal const string InstructionDiagnosisPromptBlock =
@@ -172,6 +174,12 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         - missing-acceptance-criteria: the instruction has no verifiable done-condition. Evidence: user correction turns after the agent declares completion; extra user-initiated verification turns.
         - task-size-split: the instruction bundles too much work for one run. Evidence: a long multi-goal trace with mid-trace error spans or retries; token totals concentrated in retried segments; follow-up turns re-scoping the work to a subset.
         - missing-context-constraints: the instruction omits environment facts or constraints the agent needed. Evidence: failed or retried tool calls, or error spans, that resolve only after a user turn supplies the missing information. (Distinguished from ambiguity by evidence type: execution failure resolved by supplied information, not instruction rephrasing.)
+        Evidence grounding rules (v3): call get_instruction_evidence first. It returns deterministic, code-extracted evidence: error_spans, retry_chains, turn_tokens, user_instruction, conversation. Each finding must ground its category in that output as follows:
+        - missing-context-constraints: cite at least one error_spans or retry_chains entry by span id.
+        - task-size-split: cite both a multi-goal user_instruction descriptor and a turn_tokens concentration (name the concentrated turns).
+        - ambiguity: cite user rephrase evidence - conversation sibling metadata plus the corrective wording inside the analyzed trace.
+        - goal-clarity and missing-acceptance-criteria: cite turn-level evidence of the analyzed trace (turn_tokens entries and/or spans you verified through the raw tools).
+        - Escape hatch: a finding grounded outside the extractor output is allowed only with a raw-verified span id you explicitly checked through the raw tools in this session; state that raw-verified citation in the finding. Discovery of evidence the extractor cannot see stays possible through this hatch.
         Report each finding with exactly these four parts:
         1. Category: exactly one taxonomy category id.
         2. Evidence citation: span id(s) and/or turn number(s) that exist in the analyzed trace, with a short factual descriptor. Do not copy long raw bodies.

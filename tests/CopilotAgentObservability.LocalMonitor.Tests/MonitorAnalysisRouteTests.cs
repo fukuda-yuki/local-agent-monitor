@@ -346,6 +346,25 @@ public class MonitorAnalysisRouteTests
     }
 
     [Fact]
+    public void BuildPrompt_InstructionDiagnosis_EmbedsEvidenceGroundingRules()
+    {
+        // Sprint20 M3 (D047 / prompt template v3): the instruction-diagnosis block
+        // must direct the model to get_instruction_evidence and pin the per-category
+        // coupling plus the raw-verified escape hatch.
+        var context = new MonitorAnalysisContext(1, "trace-x", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
+
+        var prompt = DotNetCopilotRawAnalysisRunner.BuildPrompt(context);
+
+        Assert.Contains("get_instruction_evidence", prompt);
+        Assert.Contains("error_spans", prompt);
+        Assert.Contains("retry_chains", prompt);
+        Assert.Contains("turn_tokens", prompt);
+        Assert.Contains("user_instruction", prompt);
+        Assert.Contains("conversation", prompt);
+        Assert.Contains("raw-verified", prompt);
+    }
+
+    [Fact]
     public void BuildPrompt_ExistingFocuses_KeepGenericPromptWithoutTaxonomy()
     {
         MonitorAnalysisFocus[] existingFocuses =
