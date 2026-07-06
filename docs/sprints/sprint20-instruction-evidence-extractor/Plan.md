@@ -236,16 +236,17 @@ internal sealed record InstructionEvidenceConversation(
 - Modify: `src/CopilotAgentObservability.LocalMonitor/Analysis/InstructionEvidenceExtractor.cs`
 - Modify: `tests/CopilotAgentObservability.LocalMonitor.Tests/InstructionEvidenceExtractorTests.cs`
 
-- [ ] **Step 1: Write failing tests:**
+- [x] **Step 1: Write failing tests:**
   - `Extract_UserInstruction_ResolvesFirstChatSpanAndDescriptor` (synthetic raw payload containing the attribute path decided in Task 1.1; asserts span id, raw record id, descriptor truncation at 160 chars with `"..."`).
-  - `Extract_UserInstruction_NoChatSpanOrNoPrompt_ReturnsNull`.
+  - `Extract_UserInstruction_TakesFirstLineOnly` (JSON-escaped newline → first line only). Added beyond the plan list to pin the first-line rule.
+  - `Extract_UserInstruction_NoChatSpanOrNoPrompt_ReturnsNull` (also covers missing-record and malformed-JSON → null, no throw).
   - `Extract_Conversation_OrdersSiblingsAndLocatesAnalyzedTrace` (pass three `MonitorConversationTraceRow`s; asserts order preserved, `TraceCount == 3`, `AnalyzedTraceIndex` is the 1-based position of `traceId`).
   - `Extract_Conversation_MissingConversationId_ReturnsNull` (spans without `ConversationId` and empty sibling list).
   - `Extract_SingleSpanTrace_ProducesConsistentOutput` (one chat span only — README risk fixture).
-- [ ] **Step 2: Run** — expect FAIL.
-- [ ] **Step 3: Implement** per the M1 contract: user-instruction parsing reads only the analyzed chat span's raw record (`RawRecordId` join into `rawRecords`), tolerates malformed JSON by returning null (no throw), and never emits more than the descriptor cap.
-- [ ] **Step 4: Run** — expect PASS. Also run the whole test class once more for the determinism test.
-- [ ] **Step 5: Commit** — `Instruction Evidence Extractor: feat: add user-instruction and conversation evidence fields (Sprint20 M2)`.
+- [x] **Step 2: Run** — expect FAIL.
+- [x] **Step 3: Implement** per the M1 contract: user-instruction parsing reads only the analyzed chat span's raw record (`RawRecordId` join into `rawRecords`), tolerates malformed JSON by returning null (no throw), and never emits more than the descriptor cap. Note: a private OTLP parser mirroring `SpanDetailExtractor` was added (its `Truncate` uses `…`, but D047 requires a literal `"..."`, so the marker was not reused).
+- [x] **Step 4: Run** — expect PASS. Result: 13/13 in the class (incl. determinism).
+- [x] **Step 5: Commit** — `Instruction Evidence Extractor: feat: add user-instruction and conversation evidence fields (Sprint20 M2)`.
 
 ---
 

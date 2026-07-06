@@ -17,6 +17,10 @@ internal static class InstructionEvidenceExtractor
 {
     private const string ErrorStatus = "error";
     private const string UnknownErrorKind = "unknown";
+    private const string ChatOperation = "chat";
+    private const string PromptAttributeKey = "gen_ai.prompt";
+    private const int UserInstructionMaxChars = 160;
+    private const string TruncationMarker = "...";
 
     public static InstructionEvidence Extract(
         string traceId,
@@ -35,8 +39,8 @@ internal static class InstructionEvidenceExtractor
             ErrorSpans: ExtractErrorSpans(ordered),
             RetryChains: ExtractRetryChains(ordered),
             TurnTokens: ExtractTurnTokens(ordered),
-            UserInstruction: null,
-            Conversation: null);
+            UserInstruction: ExtractUserInstruction(ordered, rawRecords),
+            Conversation: ExtractConversation(traceId, ordered, conversationTraces));
     }
 
     private static IReadOnlyList<InstructionEvidenceErrorSpan> ExtractErrorSpans(
@@ -123,6 +127,206 @@ internal static class InstructionEvidenceExtractor
                 InputTokens: span.InputTokens ?? 0,
                 OutputTokens: span.OutputTokens ?? 0))
             .ToList();
+
+    private static InstructionEvidenceUserInstruction? ExtractUserInstruction(
+        IReadOnlyList<MonitorSpanRow> ordered,
+        IReadOnlyList<RawTelemetryRecord> rawRecords)
+    {
+        var chatSpan = ordered.FirstOrDefault(span => span.Operation == ChatOperation);
+        if (chatSpan is null)
+        {
+            return null;
+        }
+
+        var record = rawRecords.FirstOrDefault(raw => raw.Id == chatSpan.RawRecordId);
+        if (record is null)
+        {
+            return null;
+        }
+
+        var descriptor = BuildInstructionDescriptor(record.PayloadJson, chatSpan.TraceId, chatSpan.SpanId);
+        if (descriptor is null)
+        {
+            return null;
+        }
+
+        return new InstructionEvidenceUserInstruction(
+            SpanId: chatSpan.SpanId,
+            RawRecordId: chatSpan.RawRecordId,
+            Descriptor: descriptor);
+    }
+
+    private static string? BuildInstructionDescriptor(string? payloadJson, string traceId, string? spanId)
+    {
+        var prompt = ReadPromptText(payloadJson, traceId, spanId);
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            return null;
+        }
+
+        var firstLine = prompt.Split('\n', 2)[0].Trim();
+        if (firstLine.Length == 0)
+        {
+            return null;
+        }
+
+        return firstLine.Length <= UserInstructionMaxChars
+            ? firstLine
+            : firstLine[..UserInstructionMaxChars] + TruncationMarker;
+    }
+
+    private static InstructionEvidenceConversation? ExtractConversation(
+        string traceId,
+        IReadOnlyList<MonitorSpanRow> ordered,
+        IReadOnlyList<MonitorConversationTraceRow> conversationTraces)
+    {
+        var conversationId = ordered
+            .Select(span => span.ConversationId)
+            .FirstOrDefault(id => !string.IsNullOrEmpty(id));
+        if (string.IsNullOrEmpty(conversationId))
+        {
+            return null;
+        }
+
+        var traceIds = conversationTraces.Select(trace => trace.TraceId).ToList();
+
+        return new InstructionEvidenceConversation(
+            ConversationId: conversationId,
+            TraceIds: traceIds,
+            TraceCount: traceIds.Count,
+            AnalyzedTraceIndex: traceIds.IndexOf(traceId) + 1);
+    }
+
+    // Span-targeted gen_ai.prompt lookup over the raw OTLP payload, modeled on
+    // SpanDetailExtractor: pure, exception-safe. When the span row carries a span
+    // id, only that span node matches (trace-guarded); otherwise the first
+    // prompt-bearing span for the trace is used.
+    private static string? ReadPromptText(string? payloadJson, string traceId, string? spanId)
+    {
+        if (string.IsNullOrEmpty(payloadJson))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            foreach (var span in EnumerateSpans(document.RootElement))
+            {
+                if (!MatchesSpan(span, traceId, spanId))
+                {
+                    continue;
+                }
+
+                var prompt = ReadPromptAttribute(span);
+                if (prompt is not null)
+                {
+                    return prompt;
+                }
+
+                // A specific span id targets exactly one node; do not scan others.
+                if (spanId is not null)
+                {
+                    return null;
+                }
+            }
+
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static IEnumerable<JsonElement> EnumerateSpans(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("resourceSpans", out var resourceSpans)
+            || resourceSpans.ValueKind != JsonValueKind.Array)
+        {
+            yield break;
+        }
+
+        foreach (var resourceSpan in resourceSpans.EnumerateArray())
+        {
+            if (resourceSpan.ValueKind != JsonValueKind.Object
+                || !resourceSpan.TryGetProperty("scopeSpans", out var scopeSpans)
+                || scopeSpans.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (var scopeSpan in scopeSpans.EnumerateArray())
+            {
+                if (scopeSpan.ValueKind != JsonValueKind.Object
+                    || !scopeSpan.TryGetProperty("spans", out var spans)
+                    || spans.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (var span in spans.EnumerateArray())
+                {
+                    if (span.ValueKind == JsonValueKind.Object)
+                    {
+                        yield return span;
+                    }
+                }
+            }
+        }
+    }
+
+    private static bool MatchesSpan(JsonElement span, string traceId, string? spanId)
+    {
+        // A payload can hold spans from multiple traces; a span that names a
+        // different trace never matches. Spans without a trace id still match.
+        if (span.TryGetProperty("traceId", out var traceIdElement)
+            && traceIdElement.ValueKind == JsonValueKind.String
+            && !string.Equals(traceIdElement.GetString(), traceId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (spanId is null)
+        {
+            return true;
+        }
+
+        return span.TryGetProperty("spanId", out var spanIdElement)
+            && spanIdElement.ValueKind == JsonValueKind.String
+            && string.Equals(spanIdElement.GetString(), spanId, StringComparison.Ordinal);
+    }
+
+    private static string? ReadPromptAttribute(JsonElement span)
+    {
+        if (!span.TryGetProperty("attributes", out var attributes)
+            || attributes.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var attribute in attributes.EnumerateArray())
+        {
+            if (attribute.ValueKind == JsonValueKind.Object
+                && attribute.TryGetProperty("key", out var keyElement)
+                && keyElement.ValueKind == JsonValueKind.String
+                && string.Equals(keyElement.GetString(), PromptAttributeKey, StringComparison.Ordinal)
+                && attribute.TryGetProperty("value", out var valueElement)
+                && valueElement.ValueKind == JsonValueKind.Object
+                && valueElement.TryGetProperty("stringValue", out var stringValue)
+                && stringValue.ValueKind == JsonValueKind.String)
+            {
+                var text = stringValue.GetString();
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    return text;
+                }
+            }
+        }
+
+        return null;
+    }
 
     private static bool IsError(MonitorSpanRow span) =>
         string.Equals(span.Status, ErrorStatus, StringComparison.Ordinal);
