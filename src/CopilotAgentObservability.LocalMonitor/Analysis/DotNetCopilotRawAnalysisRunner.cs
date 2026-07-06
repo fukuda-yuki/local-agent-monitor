@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.Persistence.Sqlite;
 using GitHub.Copilot;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
@@ -98,6 +99,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 DefineTool("get_trace_summary", "Return the sanitized trace summary for this Local Monitor analysis run.", () => Serialize(data.TraceSummary)),
                 DefineTool("get_trace_span_tree", "Return the sanitized span tree for this Local Monitor analysis run.", () => Serialize(data.TraceSpanTree)),
                 DefineTool("get_cache_summary", "Return the sanitized cache summary for this Local Monitor analysis run.", () => Serialize(data.CacheSummary)),
+                DefineTool("get_instruction_evidence", "Return deterministic, code-extracted instruction evidence (error spans, retry chains, turn tokens, user instruction, conversation metadata) for this Local Monitor analysis run.", () => Serialize(data.InstructionEvidence)),
             ],
             SystemMessage = new SystemMessageConfig
             {
@@ -331,7 +333,8 @@ internal sealed record MonitorAnalysisToolData(
     object? RawSpanContext,
     object? TraceSummary,
     object TraceSpanTree,
-    object CacheSummary)
+    object CacheSummary,
+    InstructionEvidence InstructionEvidence)
 {
     public static MonitorAnalysisToolData Create(
         IMonitorProjectionStore projectionStore,
@@ -347,6 +350,21 @@ internal sealed record MonitorAnalysisToolData(
             : spans.FirstOrDefault(row => string.Equals(row.SpanId, context.SpanId, StringComparison.Ordinal));
         var trace = projectionStore.GetMonitorTrace(context.TraceId);
         var turns = spans.Where(span => span.Operation == "chat" || span.Category == "llm_call").ToList();
+
+        // Sprint20 (D047): deterministic instruction-evidence pre-extraction.
+        // Resolve sibling traces only when the analyzed trace carries a
+        // conversation id; otherwise the conversation field stays null.
+        var conversationId = spans
+            .Select(span => span.ConversationId)
+            .FirstOrDefault(id => !string.IsNullOrEmpty(id));
+        var conversationTraces = string.IsNullOrEmpty(conversationId)
+            ? Array.Empty<MonitorConversationTraceRow>()
+            : projectionStore.ListConversationTraces(conversationId);
+        var instructionEvidence = InstructionEvidenceExtractor.Extract(
+            context.TraceId,
+            spans,
+            rawRecords,
+            conversationTraces);
 
         return new MonitorAnalysisToolData(
             RawTrace: new
@@ -413,6 +431,7 @@ internal sealed record MonitorAnalysisToolData(
                     cache_read_tokens = turns.Sum(span => span.CacheReadTokens ?? 0),
                     cache_creation_tokens = turns.Sum(span => span.CacheCreationTokens ?? 0),
                 },
-            });
+            },
+            InstructionEvidence: instructionEvidence);
     }
 }

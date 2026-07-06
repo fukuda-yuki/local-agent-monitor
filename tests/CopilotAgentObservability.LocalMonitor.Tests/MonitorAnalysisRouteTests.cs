@@ -86,6 +86,50 @@ public class MonitorAnalysisRouteTests
         Assert.Contains("repository_safe", summary);
     }
 
+    [Fact]
+    public void MonitorAnalysisToolData_Create_PopulatesInstructionEvidence()
+    {
+        // Sprint20 M3 (D047): Create runs the deterministic extractor and resolves
+        // siblings through ListConversationTraces using the analyzed trace's
+        // conversation_id. The analyzed trace (start 00:02) shares conversation
+        // conv-ie with an earlier sibling (start 00:01), so the sibling sorts first
+        // and the analyzed trace is position 2 of 2.
+        using var temp = new MonitorTempDirectory();
+        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        SeedEvidenceTrace(store, "trace-ie", conversationId: "conv-ie", startTime: "2026-07-01T00:02:00.000+00:00", withError: true);
+        SeedEvidenceTrace(store, "trace-sib", conversationId: "conv-ie", startTime: "2026-07-01T00:01:00.000+00:00", withError: false);
+        var projectionStore = new RawTelemetryStoreProjectionStore(store);
+        var context = new MonitorAnalysisContext(1, "trace-ie", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
+
+        var data = MonitorAnalysisToolData.Create(projectionStore, context);
+
+        var errorSpan = Assert.Single(data.InstructionEvidence.ErrorSpans);
+        Assert.Equal("trace-ie-span-err", errorSpan.SpanId);
+        var conversation = data.InstructionEvidence.Conversation;
+        Assert.NotNull(conversation);
+        Assert.Equal("conv-ie", conversation!.ConversationId);
+        Assert.Equal(new[] { "trace-sib", "trace-ie" }, conversation.TraceIds.ToArray());
+        Assert.Equal(2, conversation.TraceCount);
+        Assert.Equal(2, conversation.AnalyzedTraceIndex);
+    }
+
+    [Fact]
+    public void MonitorAnalysisToolData_Create_NoConversationId_ProducesNullConversation()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        SeedEvidenceTrace(store, "trace-nc", conversationId: null, startTime: "2026-07-01T00:02:00.000+00:00", withError: true);
+        var projectionStore = new RawTelemetryStoreProjectionStore(store);
+        var context = new MonitorAnalysisContext(1, "trace-nc", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
+
+        var data = MonitorAnalysisToolData.Create(projectionStore, context);
+
+        Assert.Single(data.InstructionEvidence.ErrorSpans);
+        Assert.Null(data.InstructionEvidence.Conversation);
+    }
+
     private static async Task<long> StartRunAsync(RunningMonitorHost host)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/traces/{TraceId}/analysis")
@@ -123,6 +167,86 @@ public class MonitorAnalysisRouteTests
             DateTimeOffset.UnixEpoch.AddMinutes(3));
         return id;
     }
+
+    private static void SeedEvidenceTrace(
+        RawTelemetryStore store,
+        string traceId,
+        string? conversationId,
+        string startTime,
+        bool withError)
+    {
+        var received = DateTimeOffset.UnixEpoch.AddMinutes(1);
+        var record = new RawTelemetryRecord(
+            Id: null,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: traceId,
+            ReceivedAt: received,
+            ResourceAttributesJson: null,
+            PayloadJson: "{}");
+        var id = store.Insert(record);
+        var spanCount = withError ? 2 : 1;
+        store.ApplyProjection(
+            id,
+            record.Source,
+            received,
+            new MonitorRecordProjection(
+                TraceId: traceId,
+                ClientKind: "vscode-copilot-chat",
+                SpanCount: spanCount,
+                TraceContributions:
+                [
+                    new MonitorTraceContribution(
+                        TraceId: traceId,
+                        ClientKind: "vscode-copilot-chat",
+                        ExperimentId: null,
+                        TaskId: null,
+                        TaskCategory: null,
+                        AgentVariant: null,
+                        PromptVersion: null,
+                        SpanCount: spanCount,
+                        ToolCallCount: withError ? 1 : 0,
+                        ErrorCount: withError ? 1 : 0,
+                        RepositoryName: null,
+                        WorkspaceLabel: null,
+                        RepoSnapshot: null),
+                ]),
+            DateTimeOffset.UnixEpoch.AddMinutes(2));
+
+        var spans = new List<MonitorSpanProjection>
+        {
+            EvidenceSpan(traceId, $"{traceId}-span-chat", ordinal: 0, operation: "chat", category: "llm_call",
+                toolName: null, status: "ok", errorType: null, conversationId, startTime),
+        };
+        if (withError)
+        {
+            spans.Add(EvidenceSpan(traceId, $"{traceId}-span-err", ordinal: 1, operation: "execute_tool", category: "tool",
+                toolName: "read_file", status: "error", errorType: "io_error", conversationId, startTime));
+        }
+
+        store.ApplySpanProjection(id, spans, DateTimeOffset.UnixEpoch.AddMinutes(3));
+    }
+
+    private static MonitorSpanProjection EvidenceSpan(
+        string traceId,
+        string spanId,
+        int ordinal,
+        string operation,
+        string category,
+        string? toolName,
+        string status,
+        string? errorType,
+        string? conversationId,
+        string startTime) =>
+        new(
+            TraceId: traceId, SpanId: spanId, ParentSpanId: null, SpanOrdinal: ordinal,
+            Operation: operation, Category: category,
+            ToolName: toolName, ToolType: null, McpToolName: null, McpServerHash: null,
+            AgentName: null, RequestModel: null, ResponseModel: null,
+            InputTokens: null, OutputTokens: null, TotalTokens: null,
+            ReasoningTokens: null, CacheReadTokens: null, CacheCreationTokens: null,
+            Status: status, ErrorType: errorType, FinishReasons: null,
+            ConversationId: conversationId, DurationMs: null,
+            StartTime: startTime, EndTime: null);
 
     [Fact]
     public async Task StartRun_CapturesQuestionAndHistoryForTheRunner()
