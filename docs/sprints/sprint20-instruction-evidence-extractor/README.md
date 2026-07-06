@@ -1,8 +1,9 @@
 # Sprint20 - Instruction Evidence Extractor (Issue #46 Phase 2, step 1)
 
-Status: Planned.
+Status: M1-M4 complete; M5 (human-gated A/B live validation) pending.
 
 Milestone/task breakdown: [Plan.md](Plan.md).
+M4 regression evidence: [milestones/M4-regression-validation.md](milestones/M4-regression-validation.md).
 
 Sprint20 implements the first Phase 2 step of
 [Issue #46](https://github.com/fukuda-yuki/copilot-agent-observability/issues/46),
@@ -73,10 +74,10 @@ and hallucination exposure), lower token use.
 
 | Milestone | Summary | Status |
 | --- | --- | --- |
-| M1 | Specs and decision record | Planned |
-| M2 | Extractor and unit tests | Planned |
-| M3 | Tool exposure and prompt template v3 | Planned |
-| M4 | Regression validation | Planned |
+| M1 | Specs and decision record | Done |
+| M2 | Extractor and unit tests | Done |
+| M3 | Tool exposure and prompt template v3 | Done |
+| M4 | Regression validation | Done |
 | M5 | A/B live validation vs Sprint19 M5 and Issue #46 update (human-gated) | Planned |
 
 ### M1 - Specs and decision record

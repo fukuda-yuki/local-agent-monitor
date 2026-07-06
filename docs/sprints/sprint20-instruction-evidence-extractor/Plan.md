@@ -326,7 +326,7 @@ Evidence grounding rules (v3): call get_instruction_evidence first. It returns d
 
 ### Task 4.1: Run the pinned suite and record evidence
 
-- [ ] **Step 1:**
+- [x] **Step 1:**
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
@@ -334,10 +334,10 @@ pwsh scripts\test\install-playwright-chromium.ps1
 dotnet test CopilotAgentObservability.slnx
 ```
 
-Expected: build succeeds; test run reports 0 failed, total >= 700 + new tests. If any command fails, stop and fix; do not substitute a different command (AGENTS.md).
-- [ ] **Step 2:** Self-review the full sprint diff against `docs/requirements.md`, `docs/spec.md`, the two updated specification files, and D047. Confirm: no route/schema/API-field change, six existing tools untouched, `CanvasExtensionContractTests.cs` unmodified and green, no raw/PII in any committed file.
-- [ ] **Step 3:** Write `docs/sprints/sprint20-instruction-evidence-extractor/milestones/M4-regression-validation.md` with: commands run + result counts, review scope and findings (or "no blocking issues"), residual risks (M5 pending; extractor over-fit risk covered by edge fixtures), unverified scope (live BYOK path — M5).
-- [ ] **Step 4:** Update the Sprint20 README milestone table (M1-M4 -> Done) and **commit** — `Instruction Evidence Extractor: docs: record Sprint20 M4 regression validation`.
+Expected: build succeeds; test run reports 0 failed, total >= 700 + new tests. If any command fails, stop and fix; do not substitute a different command (AGENTS.md). Result: build 0 warnings / 0 errors; Playwright install exit 0 (Chromium already cached); `dotnet test` **718 passing** (ConfigCli 301 + LocalMonitor 417), 0 failed / 0 skipped. Collector config check not run (no `infra\otel-collector\` changes).
+- [x] **Step 2:** Self-review the full sprint diff against `docs/requirements.md`, `docs/spec.md`, the two updated specification files, and D047. Confirm: no route/schema/API-field change, six existing tools untouched, `CanvasExtensionContractTests.cs` unmodified and green, no raw/PII in any committed file. Result: all confirmed (parent-session recorded self-review; subagent not used per AGENTS.md). No blocking issues.
+- [x] **Step 3:** Write `docs/sprints/sprint20-instruction-evidence-extractor/milestones/M4-regression-validation.md` with: commands run + result counts, review scope and findings (or "no blocking issues"), residual risks (M5 pending; extractor over-fit risk covered by edge fixtures), unverified scope (live BYOK path — M5).
+- [x] **Step 4:** Update the Sprint20 README milestone table (M1-M4 -> Done) and **commit** — `Instruction Evidence Extractor: docs: record Sprint20 M4 regression validation`.
 
 ---
 
