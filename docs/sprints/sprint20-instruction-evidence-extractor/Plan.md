@@ -61,8 +61,8 @@
 **Interfaces:**
 - Produces: the decided payload attribute path for the user instruction text and the descriptor rule, written into the M1 spec update (Task 1.2). M2 Task 2.3 consumes this decision verbatim.
 
-- [ ] **Step 1:** Read how `MonitorSpanProjectionBuilder` identifies `operation == "chat"` spans and which payload attributes carry prompt content; note the exact attribute key(s).
-- [ ] **Step 2:** Decide and write down the descriptor rule (proposed: first line of the user instruction, truncated to 160 chars, marker `"..."` when truncated; empty/missing prompt -> `user_instruction` omitted). Record the chosen attribute path and rule for Task 1.2.
+- [x] **Step 1:** Read how `MonitorSpanProjectionBuilder` identifies `operation == "chat"` spans and which payload attributes carry prompt content; note the exact attribute key(s). Result: prompt text lives only in the raw payload attribute `gen_ai.prompt` (stringValue); it is deliberately never projected, so the extractor resolves the first projected `operation == "chat"` span by ordinal, then reads `gen_ai.prompt` from that span's raw record `payload_json`.
+- [x] **Step 2:** Decide and write down the descriptor rule (proposed: first line of the user instruction, truncated to 160 chars, marker `"..."` when truncated; empty/missing prompt -> `user_instruction` omitted). Record the chosen attribute path and rule for Task 1.2. Result: proposal adopted as-is; malformed payload JSON also omits the field (no throw).
 
 ### Task 1.2: Write D047 and the spec updates
 
@@ -71,14 +71,14 @@
 - Modify: `docs/specifications/interfaces/instruction-diagnosis-analysis.md`
 - Modify: `docs/specifications/layers/telemetry-ingestion.md`
 
-- [ ] **Step 1:** Append D047 to `docs/decisions.md` (match D046's Japanese style and bullet structure). Required content:
+- [x] **Step 1:** Append D047 to `docs/decisions.md` (match D046's Japanese style and bullet structure). Required content:
   - Deterministic pre-extraction step for the instruction-diagnosis focus (Issue #46 Phase 2 step 1, Sprint19 M5 GO verdict + two design inputs as motivation).
   - Extractor field set: `error_spans[]`, `retry_chains[]`, `turn_tokens[]`, `user_instruction`, `conversation` — exactly as defined in the Extractor Output Contract (Task 1.2 Step 2).
   - Additive tool `get_instruction_evidence` alongside the existing six; existing tools unchanged.
   - One new read-only projection-store query `ListConversationTraces(conversationId)` over existing `monitor_spans.conversation_id`; no schema change, no route, no API field.
   - Per-category required-evidence coupling rules + raw-verified-citation escape hatch (discovery stays possible).
   - M5 A/B gate: Sprint19 three criteria + "every finding grounded in extractor fields or an explicitly raw-verified span citation"; Sprint19 B1 findings 3/4 must not recur in equivalent form.
-- [ ] **Step 2:** In `instruction-diagnosis-analysis.md`, add two sections:
+- [x] **Step 2:** In `instruction-diagnosis-analysis.md`, add two sections:
   - **Evidence Extractor Output Contract** — for each field: source columns (allowlist projection columns only), inclusion rule, ordering rule, and the no-long-raw-bodies rule. Use this contract (field semantics also drive M2 tests):
     - `error_spans[]`: spans with `status == "error"`, ordered by span ordinal; each entry = span id, tool name, error kind (`error_type`, `"unknown"` when null), short factual descriptor built only from allowlist columns (operation/tool/error kind — never payload text).
     - `retry_chains[]`: per tool name, spans ordered by span ordinal; a chain starts at an error span of that tool and extends through subsequent spans of the same tool; emitted only when length >= 2; final outcome `recovered` (last span ok) or `unrecovered` (last span error). Ordered by first span ordinal.
@@ -92,7 +92,7 @@
     - `ambiguity`: must cite user rephrase evidence — `conversation` sibling metadata plus the corrective wording inside the analyzed trace.
     - `goal-clarity`, `missing-acceptance-criteria`: must cite turn-level evidence of the analyzed trace (`turn_tokens` entries and/or spans verified through the raw tools).
     - Escape hatch: a finding grounded outside the extractor output is allowed only with a span id citation explicitly verified through the raw tools, stated as such in the finding.
-- [ ] **Step 3:** In `telemetry-ingestion.md`, add `get_instruction_evidence` to the process-internal tool list (six -> seven) with a one-line description mirroring the other entries.
+- [x] **Step 3:** In `telemetry-ingestion.md`, add `get_instruction_evidence` to the process-internal tool list (six -> seven) with a one-line description mirroring the other entries.
 
 ### Task 1.3: Review shipped-behavior wording and commit
 
@@ -100,9 +100,9 @@
 - Read: `docs/requirements.md`, `docs/spec.md` (raw analysis bullets)
 - Modify: only if wording pins "six tools" or prompt-v2-only behavior.
 
-- [ ] **Step 1:** Search both files for the raw-analysis / instruction-diagnosis bullets (`get_raw_trace`, `instruction-diagnosis`, tool counts). Update only stale shipped-behavior wording; otherwise leave untouched and note "no change needed" in the commit body.
-- [ ] **Step 2:** Recorded self-review (docs-only): scope, files checked, consistency of field names across D047 / interface spec / layer spec, no product behavior invented outside the Sprint20 README scope.
-- [ ] **Step 3:** Commit:
+- [x] **Step 1:** Search both files for the raw-analysis / instruction-diagnosis bullets (`get_raw_trace`, `instruction-diagnosis`, tool counts). Update only stale shipped-behavior wording; otherwise leave untouched and note "no change needed" in the commit body. Result: `docs/spec.md` enumerated the six tool names (stale) — `get_instruction_evidence` added; `docs/requirements.md` wording is generic — no change needed.
+- [x] **Step 2:** Recorded self-review (docs-only): scope, files checked, consistency of field names across D047 / interface spec / layer spec, no product behavior invented outside the Sprint20 README scope.
+- [x] **Step 3:** Commit:
 
 ```powershell
 git add docs/decisions.md docs/specifications/interfaces/instruction-diagnosis-analysis.md docs/specifications/layers/telemetry-ingestion.md docs/requirements.md docs/spec.md

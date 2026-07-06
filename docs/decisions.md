@@ -1428,3 +1428,49 @@ analysis に、利用者が agent へ与えた実装指示を trace 証拠に基
   する。raw / route 境界（D035、security-data-boundaries.md）は変更
   しない。`CanvasExtensionContractTests.cs` は無変更で green を維持
   する。
+
+## D047: 指示診断に deterministic な証拠事前抽出を additive に追加する
+
+Status: Accepted
+
+Issue #46 Phase 2 step 1（Sprint20）として、`instruction-diagnosis`
+focus に、解析開始時にコードで決定的（deterministic）に証拠を事前
+抽出し、構造化された検証可能な証拠を LLM に渡す仕組みを追加する。
+動機は Sprint19 M5 の GO 判定と 2 つの設計インプット、すなわち
+「分類=証拠結合が最弱の契約要素だった（9 finding 中 2 件が実在証拠を
+引用しつつ分類定義を拡大解釈した）」および「解析は trace 単位である
+一方、Copilot CLI は起動ごとに 1 trace を発行し conversation id が
+兄弟 trace を繋ぐ」である。
+
+- extractor field set は `error_spans[]` / `retry_chains[]` /
+  `turn_tokens[]` / `user_instruction` / `conversation` の 5 つと
+  する。各 field の意味・包含規則・順序規則・決定性規則の正本は
+  `docs/specifications/interfaces/instruction-diagnosis-analysis.md`
+  の Evidence Extractor Output Contract とする。
+- additive な process-internal tool `get_instruction_evidence` を
+  既存 6 tool（`get_raw_trace` ほか、D035）の隣に 1 つ追加する。
+  既存 6 tool は無変更で維持する（モデルによる検証経路として残す）。
+- 読み取り専用の projection store query
+  `ListConversationTraces(conversationId)` を 1 つ追加する。既存
+  `monitor_spans.conversation_id` 列への read のみで、schema 変更・
+  projection migration・新規 route・新規 API field は伴わない
+  （additive 境界の黙約的拡張とならないようここに明記する）。
+- prompt template v3: taxonomy 分類ごとに extractor field の引用を
+  必須化する（per-category required-evidence 規則。正本は同 interface
+  spec の Per-Category Required Evidence）。extractor 出力の外に
+  根拠を持つ finding は、raw tool で明示検証した span id 引用が
+  あり、その旨を finding 内に明記した場合のみ許可する
+  （escape hatch。extractor が見えない証拠の発見可能性は維持する）。
+- M5 A/B gate: Sprint19 の 3 基準（引用実在・trace 固有性・
+  no-evidence-no-finding）に「全 finding が extractor field または
+  明示 raw 検証済み span 引用に接地している」を加えた 4 基準とする。
+  Sprint19 B1 finding 3 / 4 と等価形の再発は gate 失敗とする。有効
+  finding 数が同一 trace 群で Sprint19 より実質的に減る場合は結合
+  規則が強すぎるシグナルとして記録し、緩和を反復する。
+- 不変: `--sanitized-only` は raw analysis 面全体を無効化したまま
+  とする。D045 履歴ブロック、固定 4 点形式、no-evidence-no-finding
+  規則、日本語出力規則（D046）は変更しない。Canvas focus set
+  （D036）は拡張せず、`CanvasExtensionContractTests.cs` は無変更で
+  green を維持する。extractor 出力に長い raw 本文を含めない（raw
+  由来は上限付き `user_instruction` descriptor のみで、raw analysis
+  面と共に `--sanitized-only` で消える）。

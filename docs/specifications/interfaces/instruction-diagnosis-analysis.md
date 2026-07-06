@@ -15,9 +15,14 @@ evidence only, and reports findings in a fixed per-finding format.
   correlation (traces stay manually selected, D037).
 - No memory candidate generation, no adoption workflow, and no new
   repository-safe export.
-- Prompt-only in v1: the raw trace is fed through the existing analysis
-  runner and the prompt requires span/turn citations. Migration of proven
-  evidence patterns to deterministic pre-extractors is a later phase.
+- Prompt-only in v1; deterministic pre-extraction since prompt template v3
+  (D047, Issue #46 Phase 2 step 1): a code extractor runs at analysis start
+  and its output is exposed through the process-internal tool
+  `get_instruction_evidence`. Prompt template v3 requires per-category
+  citations of that output (see Evidence Extractor Output Contract and
+  Per-Category Required Evidence below). The raw trace is still fed through
+  the existing analysis runner, and the existing six raw tools stay
+  available unchanged as the verification path.
 - The focus value rides the existing `POST /traces/{traceId}/analysis`
   payload. No new routes, no schema change, and no new API fields.
 
@@ -50,6 +55,69 @@ information versus instruction rephrasing.
 
 Category ids are prompt-template and output vocabulary. They are not API
 fields and not schema.
+
+## Evidence Extractor Output Contract
+
+A deterministic extractor (D047) computes the following structured evidence
+from the projection rows and raw records already loaded for the analysis
+run, plus sibling-trace metadata resolved through the read-only
+projection-store query `ListConversationTraces(conversationId)` over the
+existing `monitor_spans.conversation_id` column. The serialized output is
+returned by the process-internal tool `get_instruction_evidence` (tool
+list: [telemetry ingestion](../layers/telemetry-ingestion.md)).
+
+Sources are allowlist projection columns only, with one exception:
+`user_instruction` reads the `gen_ai.prompt` attribute out of the chat
+span's raw record payload. No field contains long raw bodies; the only
+raw-derived content is the capped `user_instruction` descriptor, which is
+reachable only through the raw analysis surface and is removed with it
+under `--sanitized-only`.
+
+- `error_spans[]`: spans with `status == "error"`, ordered by span ordinal.
+  Entry: span id, tool name, error kind (`error_type`, `"unknown"` when
+  null), and a short factual descriptor built only from allowlist columns
+  (operation / tool / error kind — never payload text).
+- `retry_chains[]`: per tool name, spans ordered by span ordinal; a chain
+  starts at an error span of that tool and extends through subsequent spans
+  of the same tool; emitted only when the chain length is >= 2; final
+  outcome is `recovered` (last span ok) or `unrecovered` (last span error).
+  Chains are ordered by first span ordinal.
+- `turn_tokens[]`: spans with `operation == "chat"` or
+  `category == "llm_call"` (the same filter as the existing cache summary),
+  ordered by span ordinal. Entry: 1-based turn index, span id, input tokens
+  and output tokens (null → 0).
+- `user_instruction`: the first chat-operation span by span ordinal. Entry:
+  span id, raw record id, and a descriptor derived from the `gen_ai.prompt`
+  attribute of that span's raw record — the first line of the prompt text,
+  truncated to 160 characters with a `"..."` marker when truncated. Omitted
+  when there is no chat span or no resolvable prompt text (missing
+  attribute, empty text, or malformed payload JSON; malformed payloads must
+  not throw).
+- `conversation`: the analyzed trace's `conversation_id` (from its spans),
+  sibling trace ids ordered by earliest span start time (tie-break: trace
+  id), the trace count, and the analyzed trace's 1-based position. Metadata
+  only, no bodies. Omitted when the trace has no conversation id.
+
+Determinism rule: the same inputs produce byte-identical serialized output;
+every ordering above is explicit.
+
+## Per-Category Required Evidence (Prompt Template v3)
+
+Prompt template v3 requires each finding to ground its category in
+extractor output as follows:
+
+| Category id | Required extractor evidence |
+| --- | --- |
+| `goal-clarity` | Turn-level evidence of the analyzed trace: `turn_tokens` entries and/or spans verified through the raw tools. |
+| `ambiguity` | User rephrase evidence: `conversation` sibling metadata plus the corrective wording inside the analyzed trace. |
+| `missing-acceptance-criteria` | Turn-level evidence of the analyzed trace: `turn_tokens` entries and/or spans verified through the raw tools. |
+| `task-size-split` | Both a multi-goal `user_instruction` descriptor and a `turn_tokens` concentration (the concentrated turns must be named). |
+| `missing-context-constraints` | At least one `error_spans` or `retry_chains` entry cited by span id. |
+
+Escape hatch: a finding grounded outside the extractor output is allowed
+only with a span id citation explicitly verified through the raw tools in
+the same session, and the finding must state that verification. Discovery
+of evidence the extractor cannot see stays possible through this hatch.
 
 ## Per-Finding Output Contract
 
@@ -99,6 +167,8 @@ unchanged:
   parse tests together.
 - Output-contract changes must update this specification, the prompt
   template, and `docs/requirements.md` together.
+- Extractor-field or per-category coupling-rule changes must update this
+  specification, decision D047, and the prompt template together.
 
 ## Related Specifications
 
