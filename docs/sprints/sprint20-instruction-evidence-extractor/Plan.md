@@ -217,7 +217,7 @@ internal sealed record InstructionEvidenceConversation(
     string ConversationId, IReadOnlyList<string> TraceIds, int TraceCount, int AnalyzedTraceIndex);
 ```
 
-- [ ] **Step 1: Write failing tests** using a fixture builder (synthetic `MonitorSpanRow` factory with defaults; only override what each test needs). Required cases, all per the M1 contract:
+- [x] **Step 1: Write failing tests** using a fixture builder (synthetic `MonitorSpanRow` factory with defaults; only override what each test needs). Required cases, all per the M1 contract:
   - `Extract_ErrorSpans_ListsErrorStatusSpansInOrdinalOrder` (mixed ok/error spans; asserts span ids, `ErrorKind == "unknown"` for null `ErrorType`, descriptor contains no payload text).
   - `Extract_RetryChains_FailureThenSameToolRetry_Recovered` (tool X: error then ok -> one chain, outcome `recovered`).
   - `Extract_RetryChains_FailureWithoutRecovery_Unrecovered` (tool X: error, error -> outcome `unrecovered`).
@@ -225,10 +225,10 @@ internal sealed record InstructionEvidenceConversation(
   - `Extract_TurnTokens_UsesChatAndLlmCallSpansWithNullTokensAsZero`.
   - `Extract_EmptyTrace_ReturnsEmptyCollectionsAndNulls` (no spans, no raw records).
   - `Extract_IsDeterministic_SameInputTwiceGivesEqualSerializedOutput` (serialize both with `JsonSerializerDefaults.Web`, assert string equality).
-- [ ] **Step 2: Run** `dotnet test ... --filter FullyQualifiedName~InstructionEvidenceExtractorTests` — expect FAIL (type missing).
-- [ ] **Step 3: Implement** the three collection fields as pure LINQ over `spans` ordered by `SpanOrdinal`; no I/O, no clock, no randomness. Retry-chain algorithm: group spans with non-null `ToolName` by tool; walk each group in ordinal order; open a chain at an error span, append subsequent same-tool spans, close at first ok (recovered) or group end (unrecovered); emit chains with >= 2 spans, ordered by first span ordinal.
-- [ ] **Step 4: Run the filter** — expect PASS.
-- [ ] **Step 5: Commit** — `Instruction Evidence Extractor: feat: add extractor error/retry/turn fields (Sprint20 M2)`.
+- [x] **Step 2: Run** `dotnet test ... --filter FullyQualifiedName~InstructionEvidenceExtractorTests` — expect FAIL (type missing).
+- [x] **Step 3: Implement** the three collection fields as pure LINQ over `spans` ordered by `(RawRecordId, SpanOrdinal)` (matches the store's deterministic read order and disambiguates ordinals across multi-record traces); no I/O, no clock, no randomness. Retry-chain algorithm: group spans with non-null `ToolName` by tool; walk each group in ordinal order; open a chain at an error span, append subsequent same-tool spans, close at first ok (recovered) or group end (unrecovered); emit chains with >= 2 spans, ordered by first span ordinal.
+- [x] **Step 4: Run the filter** — expect PASS. Result: 7/7 pass.
+- [x] **Step 5: Commit** — `Instruction Evidence Extractor: feat: add extractor error/retry/turn fields (Sprint20 M2)`.
 
 ### Task 2.3: User instruction and conversation fields
 
