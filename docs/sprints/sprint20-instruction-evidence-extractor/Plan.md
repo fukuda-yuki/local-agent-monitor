@@ -270,13 +270,13 @@ internal sealed record InstructionEvidenceConversation(
 - Consumes: `InstructionEvidenceExtractor.Extract(...)` (Task 2.2/2.3), `ListConversationTraces` (Task 2.1).
 - Produces: `MonitorAnalysisToolData.InstructionEvidence` (type `InstructionEvidence`) and tool name `get_instruction_evidence`.
 
-- [ ] **Step 1: Write failing tests** (same style as the existing tool-data tests in `MonitorAnalysisRouteTests.cs`):
+- [x] **Step 1: Write failing tests** (same style as the existing tool-data tests in `MonitorAnalysisRouteTests.cs`): both seeded through a real `RawTelemetryStore` wrapped in `RawTelemetryStoreProjectionStore`, so the new `Create` → `ListConversationTraces` wiring is exercised end-to-end (not a hand-rolled fake).
   - `MonitorAnalysisToolData_Create_PopulatesInstructionEvidence` (fake/seeded projection store; asserts error spans and conversation metadata appear for a seeded trace).
   - `MonitorAnalysisToolData_Create_NoConversationId_ProducesNullConversation`.
-- [ ] **Step 2: Run** `--filter FullyQualifiedName~MonitorAnalysisRouteTests` — expect FAIL.
-- [ ] **Step 3: Implement:**
+- [x] **Step 2: Run** `--filter FullyQualifiedName~MonitorAnalysisToolData_Create` — expect FAIL. Result: CS1061 (`MonitorAnalysisToolData` has no `InstructionEvidence`).
+- [x] **Step 3: Implement:**
   - Extend the record: `internal sealed record MonitorAnalysisToolData(..., object CacheSummary, InstructionEvidence InstructionEvidence)`.
-  - In `Create`: take the first non-null `ConversationId` from `spans`; call `projectionStore.ListConversationTraces(...)` when present (else empty list); call `InstructionEvidenceExtractor.Extract(context.TraceId, spans, rawRecords, conversationTraces)`.
+  - In `Create`: take the first non-null `ConversationId` from `spans`; call `projectionStore.ListConversationTraces(...)` when present (else empty list); call `InstructionEvidenceExtractor.Extract(context.TraceId, spans, rawRecords, conversationTraces)`. Note: added `using CopilotAgentObservability.Persistence.Sqlite;` for the `Array.Empty<MonitorConversationTraceRow>()` no-conversation branch.
   - Add the tool in `RunCopilotSessionAsync`, after the existing six:
 
 ```csharp
@@ -286,8 +286,8 @@ DefineTool(
     () => Serialize(data.InstructionEvidence)),
 ```
 
-- [ ] **Step 4: Run the filter** — expect PASS (including all pre-existing tests in the class).
-- [ ] **Step 5: Commit** — `Instruction Evidence Extractor: feat: expose get_instruction_evidence tool (Sprint20 M3)`.
+- [x] **Step 4: Run the filter** — expect PASS (including all pre-existing tests in the class). Result: 12/12 pass in `MonitorAnalysisRouteTests`.
+- [x] **Step 5: Commit** — `Instruction Evidence Extractor: feat: expose get_instruction_evidence tool (Sprint20 M3)` (1f32ad0).
 
 ### Task 3.2: Prompt template v3
 
@@ -295,11 +295,11 @@ DefineTool(
 - Modify: `src/CopilotAgentObservability.LocalMonitor/Analysis/DotNetCopilotRawAnalysisRunner.cs` (`InstructionDiagnosisPromptBlock`)
 - Test: `tests/CopilotAgentObservability.LocalMonitor.Tests/MonitorAnalysisRouteTests.cs`
 
-- [ ] **Step 1: Write failing tests:**
-  - `BuildPrompt_InstructionDiagnosis_EmbedsEvidenceGroundingRules` — asserts the v3 block names `get_instruction_evidence` and contains the per-category rule lines (assert on stable substrings: `error_spans`, `retry_chains`, `turn_tokens`, `raw-verified`).
+- [x] **Step 1: Write failing tests:**
+  - `BuildPrompt_InstructionDiagnosis_EmbedsEvidenceGroundingRules` — asserts the v3 block names `get_instruction_evidence` and contains the per-category rule lines (assert on stable substrings: `error_spans`, `retry_chains`, `turn_tokens`, `raw-verified`). Also asserts `user_instruction` and `conversation`.
   - Keep `BuildPrompt_InstructionDiagnosis_EmbedsTaxonomyAndFindingContract`, `BuildPrompt_InstructionDiagnosis_KeepsHistoryAndFollowUpBlocks`, and `BuildPrompt_ExistingFocuses_KeepGenericPromptWithoutTaxonomy` green without weakening their assertions.
-- [ ] **Step 2: Run** — expect the new test to FAIL.
-- [ ] **Step 3: Implement** — extend `InstructionDiagnosisPromptBlock` (keep taxonomy v1 list, 4-part format, no-evidence-no-finding rule, Japanese rule, final markdown-only rule) by inserting an evidence-grounding section after the taxonomy list, transcribed from the M1 spec table. Draft wording (final wording = M1 spec):
+- [x] **Step 2: Run** — expect the new test to FAIL. Result: FAIL (`get_instruction_evidence` not found in prompt).
+- [x] **Step 3: Implement** — extend `InstructionDiagnosisPromptBlock` (keep taxonomy v1 list, 4-part format, no-evidence-no-finding rule, Japanese rule, final markdown-only rule) by inserting an evidence-grounding section after the taxonomy list, transcribed from the M1 spec table. Escape-hatch line uses the `raw-verified` token (D047 gate vocabulary). Draft wording (final wording = M1 spec):
 
 ```text
 Evidence grounding rules (v3): call get_instruction_evidence first. It returns deterministic, code-extracted evidence: error_spans, retry_chains, turn_tokens, user_instruction, conversation.
@@ -310,8 +310,8 @@ Evidence grounding rules (v3): call get_instruction_evidence first. It returns d
 - A finding grounded outside the extractor output is allowed only with a span id you explicitly verified through the raw tools in this session; state that verification in the finding.
 ```
 
-- [ ] **Step 4: Run the full test class** — expect PASS.
-- [ ] **Step 5: Update the XML doc comment** on the constant (D046 -> D046+D047, prompt v3) and **commit** — `Instruction Evidence Extractor: feat: prompt template v3 with per-category evidence rules (Sprint20 M3)`.
+- [x] **Step 4: Run the full test class** — expect PASS. Result: 13/13 pass in `MonitorAnalysisRouteTests`.
+- [x] **Step 5: Update the XML doc comment** on the constant (D046 -> D046+D047, prompt v3) and **commit** — `Instruction Evidence Extractor: feat: prompt template v3 with per-category evidence rules (Sprint20 M3)` (254f3d2).
 
 ---
 
