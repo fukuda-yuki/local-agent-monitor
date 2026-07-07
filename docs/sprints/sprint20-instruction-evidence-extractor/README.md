@@ -1,9 +1,10 @@
 # Sprint20 - Instruction Evidence Extractor (Issue #46 Phase 2, step 1)
 
-Status: M1-M4 complete; M5 (human-gated A/B live validation) pending.
+Status: M1-M4 complete; M5 attempted and blocked on large-trace BYOK timeout.
 
 Milestone/task breakdown: [Plan.md](Plan.md).
 M4 regression evidence: [milestones/M4-regression-validation.md](milestones/M4-regression-validation.md).
+M5 A/B evidence: [milestones/M5-ab-validation/ab-validation.md](milestones/M5-ab-validation/ab-validation.md).
 
 Sprint20 implements the first Phase 2 step of
 [Issue #46](https://github.com/fukuda-yuki/copilot-agent-observability/issues/46),
@@ -78,7 +79,7 @@ and hallucination exposure), lower token use.
 | M2 | Extractor and unit tests | Done |
 | M3 | Tool exposure and prompt template v3 | Done |
 | M4 | Regression validation | Done |
-| M5 | A/B live validation vs Sprint19 M5 and Issue #46 update (human-gated) | Planned |
+| M5 | A/B live validation vs Sprint19 M5 and Issue #46 update (human-gated) | Blocked |
 
 ### M1 - Specs and decision record
 
@@ -131,12 +132,18 @@ and hallucination exposure), lower token use.
   each iteration and verdict.
 - Save sanitized A/B evidence under `milestones/M5-ab-validation/`; append
   the outcome to Issue #46.
+- 2026-07-07 result: A1/A2/B1/B2 completed under the Sprint20 prompt/extractor
+  path, but C1/C2 timed out after the revised 900-second BYOK timeout. M5 is
+  blocked and no Issue #46 GO update has been posted.
 
 ## User-provided live validation inputs (M5)
 
 - The preserved Sprint19 M5 monitor DB and BYOK provider configuration
   (glm-5.2 on the OpenCode Go endpoint, `CopilotAnalysis:TimeoutSeconds`
   600, validated 2026-07-06).
+- Sprint20 validation raised `CopilotAnalysis:TimeoutSeconds` to 900 seconds
+  after B1 timed out at 600 seconds. B1 then completed, but C1/C2 still timed
+  out at 900 seconds.
 - Human judgment on the trace-specificity and coupling criteria.
 
 ## Risks
