@@ -4,10 +4,10 @@
 model = "gpt-5.5"
 
 # 通常時。実装・修正・テスト実行などはこちら。
-model_reasoning_effort = "medium"
+# model_reasoning_effort = "medium"
 
 # Plan mode 専用。設計・実装計画だけ重く考えさせる。
-plan_mode_reasoning_effort = "high"
+# plan_mode_reasoning_effort = "high"
 
 # 人間への承認要求で停止しない
 approval_policy = "never"
