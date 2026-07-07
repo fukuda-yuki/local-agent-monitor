@@ -353,20 +353,20 @@ Expected: build succeeds; test run reports 0 failed, total >= 700 + new tests. I
 
 ### Task 5.1: Precondition check
 
-- [ ] **Step 1:** Verify `artifacts\sprint19-live-validation\monitor-live.db` exists. If lost, fall back to generating fresh traces and record the deviation explicitly in the M5 evidence (README risk 3 — never a silent switch).
-- [ ] **Step 2:** Confirm with the user that the BYOK provider secrets are configured and they are ready to gate the run (human-gated milestone; do not start it unattended).
+- [x] **Step 1:** Verify `artifacts\sprint19-live-validation\monitor-live.db` exists. If lost, fall back to generating fresh traces and record the deviation explicitly in the M5 evidence (README risk 3 — never a silent switch). Result: preserved DB present and reused for all six traces; no fallback needed.
+- [x] **Step 2:** Confirm with the user that the BYOK provider secrets are configured and they are ready to gate the run (human-gated milestone; do not start it unattended). Result: user gated the run; BYOK secrets configured for A1/A2/B1/B2.
 
 ### Task 5.2: A/B run and comparison
 
-- [ ] **Step 1:** For each of the six trace ids, run the instruction-diagnosis analysis through the monitor against the preserved DB; save each report (local runtime data — reports themselves stay out of the repository).
-- [ ] **Step 2:** Build the A/B comparison table (per trace: finding count, categories, citation validity, grounding source extractor/raw-verified, coupling verdict) against the Sprint19 M5 results in `../sprint19-instruction-diagnosis-analysis/milestones/M5-live-validation/live-validation.md`.
-- [ ] **Step 3:** Apply the gate with the user (criteria 2 and coupling equivalence are human judgment). On failure: iterate prompt v3 wording first, extractor field definitions second; append every iteration + verdict to the evidence file; re-run only the affected traces.
+- [x] **Step 1:** For each of the six trace ids, run the instruction-diagnosis analysis through the monitor against the preserved DB; save each report (local runtime data — reports themselves stay out of the repository). Result: A1/A2/B1/B2 completed under BYOK (glm-5.2); C1/C2 timed out at 900s under BYOK and were completed under the SDK default (no-BYOK) provider (runs 23-24), run as the Local Monitor .NET process from `bin\Debug\net10.0`. The C1/C2 provider switch is a recorded deviation (not a silent switch) documented in `ab-validation.md`.
+- [x] **Step 2:** Build the A/B comparison table (per trace: finding count, categories, citation validity, grounding source extractor/raw-verified, coupling verdict) against the Sprint19 M5 results in `../sprint19-instruction-diagnosis-analysis/milestones/M5-live-validation/live-validation.md`. Result: A/B run table recorded in `ab-validation.md`.
+- [x] **Step 3:** Apply the gate with the user (criteria 2 and coupling equivalence are human judgment). On failure: iterate prompt v3 wording first, extractor field definitions second; append every iteration + verdict to the evidence file; re-run only the affected traces. Result: **conditional pass** — implementation/prompt v3/extractor grounding validated on the completed runs (C1 grounded finding; C2 correct no-finding; no recurrence of Sprint19 B1 deviations), but provider parity (same BYOK path across all six) is not met, so the official gate stays open pending a BYOK re-run of C1/C2. No prompt v3 / extractor iteration was required.
 
 ### Task 5.3: Evidence, Issue #46, closeout
 
-- [ ] **Step 1:** Write `milestones/M5-ab-validation/ab-validation.md` — sanitized only: trace/span id references, verdict table, iteration log, gate outcome. No prompts, no report bodies, no PII.
-- [ ] **Step 2:** Draft the Issue #46 comment (A/B outcome, gate verdict, next-step recommendation) and post it after user confirmation.
-- [ ] **Step 3:** Update the Sprint20 README status/milestone table and `docs/task.md` (Sprint20 outcome, Phase 2 next-step status). **Commit** — `Instruction Evidence Extractor: docs: record Sprint20 M5 A/B validation and Issue #46 update`.
+- [x] **Step 1:** Write `milestones/M5-ab-validation/ab-validation.md` — sanitized only: trace/span id references, verdict table, iteration log, gate outcome. No prompts, no report bodies, no PII. Result: file records the six-trace A/B table, iteration log (incl. runs 21-24), root-cause section, gate assessment, and the held Issue #46 draft; sanitized.
+- [x] **Step 2:** Draft the Issue #46 comment (A/B outcome, gate verdict, next-step recommendation) and post it after user confirmation. Result: **hold** comment drafted in `ab-validation.md` (conditional pass, GO held pending BYOK C1/C2 re-run); **not posted** (user chose to hold; posting/push not performed).
+- [x] **Step 3:** Update the Sprint20 README status/milestone table and `docs/task.md` (Sprint20 outcome, Phase 2 next-step status). **Commit** — `Instruction Evidence Extractor: docs: record Sprint20 M5 no-BYOK C1/C2 completion and conditional pass`. Result: README status line + milestone table (M5 → Conditional pass, GO held), `docs/task.md` Sprint20 row, and this Plan updated; commit pending final review.
 
 ---
 
