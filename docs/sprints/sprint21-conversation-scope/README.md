@@ -83,9 +83,9 @@ not an unbounded conversation transcript.
 | Milestone | Summary | Status |
 | --- | --- | --- |
 | M1 | Source-of-truth specs and D048 decision for bounded conversation context. | Done |
-| M2 | Deterministic bounded conversation-context extraction and tests. | Planned |
-| M3 | Tool data wiring and prompt template v4 with sibling-evidence rules. | Planned |
-| M4 | Regression validation and self-review. | Planned |
+| M2 | Deterministic bounded conversation-context extraction and tests. | Done |
+| M3 | Tool data wiring and prompt template v4 with sibling-evidence rules. | Done |
+| M4 | Regression validation and self-review. | Done |
 | M5 | Live validation against preserved Sprint19/Sprint20 traces plus conversation-window cases; repository-safe Issue #46 update draft. | Planned |
 
 ## Recommended Implementation Order

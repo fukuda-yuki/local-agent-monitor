@@ -1,5 +1,9 @@
 # Sprint21 Conversation Scope - Implementation Plan
 
+Status: M1-M4 complete. M5 live validation is prepared separately and remains
+user-controlled because it requires preserved/local trace data and provider
+execution.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Subagent dispatch is allowed only when the user explicitly asks for it (AGENTS.md); otherwise execute inline.
 
 **Goal:** Let `instruction-diagnosis` use a bounded previous/current/next trace window from the same `conversation_id` while keeping the selected trace as the anchor and preserving raw-analysis safety boundaries.
