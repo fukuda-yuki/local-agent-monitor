@@ -112,6 +112,10 @@ public class MonitorAnalysisRouteTests
         Assert.Equal(new[] { "trace-sib", "trace-ie" }, conversation.TraceIds.ToArray());
         Assert.Equal(2, conversation.TraceCount);
         Assert.Equal(2, conversation.AnalyzedTraceIndex);
+        var conversationContext = data.InstructionEvidence.ConversationContext;
+        Assert.NotNull(conversationContext);
+        Assert.Equal(new[] { "trace-sib", "trace-ie" }, conversationContext!.Traces.Select(trace => trace.TraceId).ToArray());
+        Assert.Equal(new[] { -1, 0 }, conversationContext.Traces.Select(trace => trace.RelativePosition).ToArray());
     }
 
     [Fact]
@@ -128,6 +132,36 @@ public class MonitorAnalysisRouteTests
 
         Assert.Single(data.InstructionEvidence.ErrorSpans);
         Assert.Null(data.InstructionEvidence.Conversation);
+        Assert.Null(data.InstructionEvidence.ConversationContext);
+    }
+
+    [Fact]
+    public void MonitorAnalysisToolData_Create_LoadsOnlyBoundedConversationWindow()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        for (var index = 0; index < 7; index++)
+        {
+            SeedEvidenceTrace(
+                store,
+                $"trace-{index}",
+                conversationId: "conv-window",
+                startTime: $"2026-07-01T00:{index:00}:00.000+00:00",
+                withError: index == 3);
+        }
+
+        var projectionStore = new CountingProjectionStore(new RawTelemetryStoreProjectionStore(store));
+        var context = new MonitorAnalysisContext(1, "trace-3", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
+
+        var data = MonitorAnalysisToolData.Create(projectionStore, context);
+
+        var conversationContext = Assert.IsType<InstructionEvidenceConversationContext>(data.InstructionEvidence.ConversationContext);
+        Assert.Equal(new[] { "trace-1", "trace-2", "trace-3", "trace-4", "trace-5" }, conversationContext.Traces.Select(trace => trace.TraceId).ToArray());
+        Assert.DoesNotContain("trace-0", projectionStore.SpansForTraceCalls);
+        Assert.DoesNotContain("trace-6", projectionStore.SpansForTraceCalls);
+        Assert.DoesNotContain("trace-0", projectionStore.RawRecordsByTraceCalls);
+        Assert.DoesNotContain("trace-6", projectionStore.RawRecordsByTraceCalls);
     }
 
     private static async Task<long> StartRunAsync(RunningMonitorHost host)
@@ -332,7 +366,7 @@ public class MonitorAnalysisRouteTests
 
         Assert.Contains("focus instruction-diagnosis", prompt);
         Assert.Contains(DotNetCopilotRawAnalysisRunner.InstructionDiagnosisPromptBlock, prompt);
-        Assert.Contains("trace-internal evidence only", prompt);
+        Assert.Contains("analyzed trace", prompt);
         Assert.Contains("goal-clarity", prompt);
         Assert.Contains("ambiguity", prompt);
         Assert.Contains("missing-acceptance-criteria", prompt);
@@ -362,6 +396,21 @@ public class MonitorAnalysisRouteTests
         Assert.Contains("user_instruction", prompt);
         Assert.Contains("conversation", prompt);
         Assert.Contains("raw-verified", prompt);
+    }
+
+    [Fact]
+    public void BuildPrompt_InstructionDiagnosis_EmbedsConversationScopeRules()
+    {
+        var context = new MonitorAnalysisContext(1, "trace-x", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
+
+        var prompt = DotNetCopilotRawAnalysisRunner.BuildPrompt(context);
+
+        Assert.Contains("conversation_context", prompt);
+        Assert.Contains("analyzed trace", prompt);
+        Assert.Contains("sibling trace", prompt);
+        Assert.Contains("trace_id", prompt);
+        Assert.Contains("bounded window", prompt);
+        Assert.Contains("outside the bounded window", prompt);
     }
 
     [Fact]
@@ -454,6 +503,89 @@ public class MonitorAnalysisRouteTests
                 DateTimeOffset.UnixEpoch.AddMinutes(5));
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class CountingProjectionStore : IMonitorProjectionStore
+    {
+        private readonly IMonitorProjectionStore inner;
+
+        public CountingProjectionStore(IMonitorProjectionStore inner)
+        {
+            this.inner = inner;
+        }
+
+        public List<string> SpansForTraceCalls { get; } = new();
+
+        public List<string> RawRecordsByTraceCalls { get; } = new();
+
+        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit) =>
+            inner.ListUnprocessedForProjection(limit);
+
+        public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) =>
+            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
+
+        public MonitorProjectionStatus GetProjectionStatus() =>
+            inner.GetProjectionStatus();
+
+        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) =>
+            inner.ListUnprocessedForSpanProjection(limit);
+
+        public bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) =>
+            inner.ApplySpanProjection(rawRecordId, spans, projectedAt);
+
+        public MonitorProjectionStatus GetSpanProjectionStatus() =>
+            inner.GetSpanProjectionStatus();
+
+        public MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) =>
+            inner.ListMonitorIngestions(afterRawRecordId, limit);
+
+        public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
+            inner.ListMonitorTraces(afterId, limit);
+
+        public MonitorTraceRow? GetMonitorTrace(string traceId) =>
+            inner.GetMonitorTrace(traceId);
+
+        public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
+            inner.ListMonitorSpans(traceId, afterId, limit);
+
+        public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId)
+        {
+            SpansForTraceCalls.Add(traceId);
+            return inner.GetSpansForTrace(traceId);
+        }
+
+        public RawTelemetryRecord? GetRawRecordById(long id) =>
+            inner.GetRawRecordById(id);
+
+        public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit)
+        {
+            RawRecordsByTraceCalls.Add(traceId);
+            return inner.ListRawRecordsByTraceId(traceId, limit);
+        }
+
+        public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
+            inner.GetPeriodSummary(startInclusive, endExclusive);
+
+        public IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) =>
+            inner.GetPerModelPeriodSummary(startInclusive, endExclusive);
+
+        public IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) =>
+            inner.GetHourlyTokenDistribution(startInclusive, endExclusive);
+
+        public IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) =>
+            inner.ListTopTokenTraces(startInclusive, endExclusive, limit);
+
+        public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) =>
+            inner.ListRecentMonitorTraces(limit);
+
+        public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) =>
+            inner.ListMonitorTracesFiltered(query);
+
+        public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) =>
+            inner.GetMonitorSpan(traceId, spanId);
+
+        public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) =>
+            inner.ListConversationTraces(conversationId);
     }
 
     private const string AgentTracePayload = """

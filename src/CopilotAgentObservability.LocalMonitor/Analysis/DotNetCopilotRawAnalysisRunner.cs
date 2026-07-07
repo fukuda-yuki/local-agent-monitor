@@ -99,7 +99,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 DefineTool("get_trace_summary", "Return the sanitized trace summary for this Local Monitor analysis run.", () => Serialize(data.TraceSummary)),
                 DefineTool("get_trace_span_tree", "Return the sanitized span tree for this Local Monitor analysis run.", () => Serialize(data.TraceSpanTree)),
                 DefineTool("get_cache_summary", "Return the sanitized cache summary for this Local Monitor analysis run.", () => Serialize(data.CacheSummary)),
-                DefineTool("get_instruction_evidence", "Return deterministic, code-extracted instruction evidence (error spans, retry chains, turn tokens, user instruction, conversation metadata) for this Local Monitor analysis run.", () => Serialize(data.InstructionEvidence)),
+                DefineTool("get_instruction_evidence", "Return deterministic, code-extracted instruction evidence (error spans, retry chains, turn tokens, user instruction, conversation metadata, and bounded conversation_context) for this Local Monitor analysis run.", () => Serialize(data.InstructionEvidence)),
             ],
             SystemMessage = new SystemMessageConfig
             {
@@ -157,7 +157,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
             });
 
     /// <summary>
-    /// Instruction-diagnosis prompt block (D046 + D047, prompt template v3):
+    /// Instruction-diagnosis prompt block (D046 + D047 + D048, prompt template v4):
     /// taxonomy v1 with the category=evidence coupling, the per-category
     /// required-evidence rules grounding each finding in the
     /// <c>get_instruction_evidence</c> output (with a raw-verified escape hatch),
@@ -167,25 +167,26 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
     /// </summary>
     internal const string InstructionDiagnosisPromptBlock =
         """
-        Diagnose the implementation instructions the user gave the agent in this trace, using trace-internal evidence only (follow-up or rephrased instruction turns, error spans, failed or retried tool calls, token waste).
+        Diagnose the implementation instructions the user gave the agent, using the analyzed trace as the anchor plus bounded same-conversation sibling trace evidence when available.
         Classify each finding into exactly one taxonomy v1 category:
         - goal-clarity: the instruction does not state the intended outcome. Evidence: user follow-up turns that redirect or redefine the goal after work started; discarded or redone agent output (rework turns, tokens spent on abandoned work).
         - ambiguity: the instruction admits multiple readings. Evidence: a rephrased or clarified instruction in a later user turn; agent clarifying-question turns; divergent exploration before the user disambiguates.
         - missing-acceptance-criteria: the instruction has no verifiable done-condition. Evidence: user correction turns after the agent declares completion; extra user-initiated verification turns.
         - task-size-split: the instruction bundles too much work for one run. Evidence: a long multi-goal trace with mid-trace error spans or retries; token totals concentrated in retried segments; follow-up turns re-scoping the work to a subset.
         - missing-context-constraints: the instruction omits environment facts or constraints the agent needed. Evidence: failed or retried tool calls, or error spans, that resolve only after a user turn supplies the missing information. (Distinguished from ambiguity by evidence type: execution failure resolved by supplied information, not instruction rephrasing.)
-        Evidence grounding rules (v3): call get_instruction_evidence first. It returns deterministic, code-extracted evidence: error_spans, retry_chains, turn_tokens, user_instruction, conversation. Each finding must ground its category in that output as follows:
+        Evidence grounding rules (v4): call get_instruction_evidence first. It returns deterministic, code-extracted evidence: error_spans, retry_chains, turn_tokens, user_instruction, conversation, and conversation_context. Each finding must ground its category in that output as follows:
         - missing-context-constraints: cite at least one error_spans or retry_chains entry by span id.
         - task-size-split: cite both a multi-goal user_instruction descriptor and a turn_tokens concentration (name the concentrated turns).
-        - ambiguity: cite user rephrase evidence - conversation sibling metadata plus the corrective wording inside the analyzed trace.
+        - ambiguity: cite user rephrase evidence - conversation_context sibling metadata plus the corrective wording inside the analyzed trace or a bounded sibling trace.
         - goal-clarity and missing-acceptance-criteria: cite turn-level evidence of the analyzed trace (turn_tokens entries and/or spans you verified through the raw tools).
-        - Escape hatch: a finding grounded outside the extractor output is allowed only with a raw-verified span id you explicitly checked through the raw tools in this session; state that raw-verified citation in the finding. Discovery of evidence the extractor cannot see stays possible through this hatch.
+        Conversation scope rules: treat the analyzed trace as the anchor. Use conversation_context.traces[] only as a bounded window of supporting evidence. A sibling trace citation must include the sibling trace_id and relative_position and must explain how that previous or following sibling trace relates to the analyzed trace. Do not cite or imply evidence outside the bounded window. If the only proof would be outside the bounded window, state that the bounded evidence is insufficient instead of inferring from missing context. Do not copy sibling instruction descriptors verbatim beyond short factual references.
+        - Escape hatch: a finding grounded outside the extractor output is allowed only with a raw-verified span id you explicitly checked through the raw tools in this session; state that raw-verified citation in the finding. Sibling raw-verified evidence must still belong to a trace_id emitted in conversation_context.traces[]. Discovery of evidence the extractor cannot see stays possible through this hatch.
         Report each finding with exactly these four parts:
         1. Category: exactly one taxonomy category id.
-        2. Evidence citation: span id(s) and/or turn number(s) that exist in the analyzed trace, with a short factual descriptor. Do not copy long raw bodies.
+        2. Evidence citation: span id(s), turn number(s), and/or sibling trace_id(s) that exist in the analyzed trace or emitted conversation_context.traces[], with a short factual descriptor. Do not copy long raw bodies.
         3. Gap explanation: what the instruction lacked, tied to the cited evidence.
         4. Improved next-time instruction: a concrete rewrite the user could give next time.
-        Rules: a finding without a citable evidence reference is forbidden. Citations must refer to spans/turns present in the analyzed trace. Zero findings is a valid result and must be stated explicitly.
+        Rules: a finding without a citable evidence reference is forbidden. Citations must refer to spans/turns present in the analyzed trace or trace_id values present in the emitted bounded window. Zero findings is a valid result and must be stated explicitly.
         Output language rule: the entire final report - headings, findings, gap explanations, improved next-time instructions, and the assessment of non-applicable categories - must be written in Japanese. Do not write the report in Chinese or English. 最終レポート全体（見出し・所見・改善指示・非該当カテゴリの評価を含む）は必ず日本語で書くこと。
         Respond with the final markdown report only; do not narrate tool usage before it.
         """;
@@ -344,11 +345,14 @@ internal sealed record MonitorAnalysisToolData(
     object CacheSummary,
     InstructionEvidence InstructionEvidence)
 {
+    private const int RawRecordLimit = 50;
+    private const int ConversationContextSiblingRadius = 2;
+
     public static MonitorAnalysisToolData Create(
         IMonitorProjectionStore projectionStore,
         MonitorAnalysisContext context)
     {
-        var rawRecords = projectionStore.ListRawRecordsByTraceId(context.TraceId, limit: 50);
+        var rawRecords = projectionStore.ListRawRecordsByTraceId(context.TraceId, limit: RawRecordLimit);
         var spans = projectionStore.GetSpansForTrace(context.TraceId);
         var selectedRawRecord = context.RawRecordId is { } rawRecordId
             ? projectionStore.GetRawRecordById(rawRecordId)
@@ -368,11 +372,18 @@ internal sealed record MonitorAnalysisToolData(
         var conversationTraces = string.IsNullOrEmpty(conversationId)
             ? Array.Empty<MonitorConversationTraceRow>()
             : projectionStore.ListConversationTraces(conversationId);
-        var instructionEvidence = InstructionEvidenceExtractor.Extract(
+        var conversationTraceInputs = BuildConversationTraceInputs(
+            projectionStore,
             context.TraceId,
             spans,
             rawRecords,
             conversationTraces);
+        var instructionEvidence = InstructionEvidenceExtractor.Extract(
+            context.TraceId,
+            spans,
+            rawRecords,
+            conversationTraces,
+            conversationTraceInputs);
 
         return new MonitorAnalysisToolData(
             RawTrace: new
@@ -441,5 +452,58 @@ internal sealed record MonitorAnalysisToolData(
                 },
             },
             InstructionEvidence: instructionEvidence);
+    }
+
+    private static IReadOnlyList<InstructionEvidenceConversationTraceInput> BuildConversationTraceInputs(
+        IMonitorProjectionStore projectionStore,
+        string analyzedTraceId,
+        IReadOnlyList<MonitorSpanRow> analyzedSpans,
+        IReadOnlyList<RawTelemetryRecord> analyzedRawRecords,
+        IReadOnlyList<MonitorConversationTraceRow> conversationTraces)
+    {
+        if (conversationTraces.Count == 0)
+        {
+            return [];
+        }
+
+        var analyzedIndex = -1;
+        for (var index = 0; index < conversationTraces.Count; index++)
+        {
+            if (string.Equals(conversationTraces[index].TraceId, analyzedTraceId, StringComparison.Ordinal))
+            {
+                analyzedIndex = index;
+                break;
+            }
+        }
+
+        if (analyzedIndex < 0)
+        {
+            return [];
+        }
+
+        var windowStart = Math.Max(0, analyzedIndex - ConversationContextSiblingRadius);
+        var windowEnd = Math.Min(conversationTraces.Count - 1, analyzedIndex + ConversationContextSiblingRadius);
+        var inputs = new List<InstructionEvidenceConversationTraceInput>();
+        for (var index = windowStart; index <= windowEnd; index++)
+        {
+            var trace = conversationTraces[index];
+            var isAnalyzedTrace = string.Equals(trace.TraceId, analyzedTraceId, StringComparison.Ordinal);
+            var spans = isAnalyzedTrace
+                ? analyzedSpans
+                : projectionStore.GetSpansForTrace(trace.TraceId);
+            var rawRecords = isAnalyzedTrace
+                ? analyzedRawRecords
+                : projectionStore.ListRawRecordsByTraceId(trace.TraceId, RawRecordLimit);
+
+            inputs.Add(new InstructionEvidenceConversationTraceInput(
+                TraceId: trace.TraceId,
+                RelativePosition: index - analyzedIndex,
+                IsAnalyzedTrace: isAnalyzedTrace,
+                FirstStartTime: trace.FirstStartTime,
+                Spans: spans,
+                RawRecords: rawRecords));
+        }
+
+        return inputs;
     }
 }

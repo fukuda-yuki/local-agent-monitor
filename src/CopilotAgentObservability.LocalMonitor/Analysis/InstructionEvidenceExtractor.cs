@@ -8,8 +8,8 @@ namespace CopilotAgentObservability.LocalMonitor.Analysis;
 /// projection rows / raw records already loaded for an analysis run plus
 /// sibling-trace metadata: no I/O, no clock, no randomness — the same inputs
 /// produce byte-identical serialized output. The output carries no long raw
-/// bodies; the only raw-derived content is the capped user-instruction
-/// descriptor, which stays inside the raw analysis surface
+/// bodies; the only raw-derived content is capped user-instruction descriptors,
+/// which stay inside the raw analysis surface
 /// (removed by <c>--sanitized-only</c>). Contract:
 /// docs/specifications/interfaces/instruction-diagnosis-analysis.md.
 /// </summary>
@@ -223,12 +223,17 @@ internal static class InstructionEvidenceExtractor
             return null;
         }
 
-        var analyzedIndex = conversationTraces
-            .Select((trace, index) => (trace.TraceId, index))
-            .FirstOrDefault(entry => string.Equals(entry.TraceId, traceId, StringComparison.Ordinal))
-            .index;
-        if (analyzedIndex < 0
-            || !conversationTraces.Any(trace => string.Equals(trace.TraceId, traceId, StringComparison.Ordinal)))
+        var analyzedIndex = -1;
+        for (var index = 0; index < conversationTraces.Count; index++)
+        {
+            if (string.Equals(conversationTraces[index].TraceId, traceId, StringComparison.Ordinal))
+            {
+                analyzedIndex = index;
+                break;
+            }
+        }
+
+        if (analyzedIndex < 0)
         {
             return null;
         }
@@ -436,7 +441,7 @@ internal static class InstructionEvidenceExtractor
 }
 
 /// <summary>
-/// Structured evidence for one analyzed trace (D047). Serialized as the
+/// Structured evidence for one analyzed trace (D047 / D048). Serialized as the
 /// <c>get_instruction_evidence</c> tool result.
 /// </summary>
 internal sealed record InstructionEvidence(
