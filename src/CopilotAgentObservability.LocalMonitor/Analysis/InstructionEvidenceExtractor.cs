@@ -21,12 +21,23 @@ internal static class InstructionEvidenceExtractor
     private const string PromptAttributeKey = "gen_ai.prompt";
     private const int UserInstructionMaxChars = 160;
     private const string TruncationMarker = "...";
+    private const int ConversationContextSiblingRadius = 2;
+    private const int ConversationContextMaxErrorSpanIds = 5;
+    private const int ConversationContextMaxRetryToolNames = 5;
 
     public static InstructionEvidence Extract(
         string traceId,
         IReadOnlyList<MonitorSpanRow> spans,
         IReadOnlyList<RawTelemetryRecord> rawRecords,
         IReadOnlyList<MonitorConversationTraceRow> conversationTraces)
+        => Extract(traceId, spans, rawRecords, conversationTraces, []);
+
+    public static InstructionEvidence Extract(
+        string traceId,
+        IReadOnlyList<MonitorSpanRow> spans,
+        IReadOnlyList<RawTelemetryRecord> rawRecords,
+        IReadOnlyList<MonitorConversationTraceRow> conversationTraces,
+        IReadOnlyList<InstructionEvidenceConversationTraceInput> conversationTraceInputs)
     {
         // Store read order (raw_record_id, span_ordinal) — deterministic even
         // when a trace spans multiple raw records with colliding ordinals.
@@ -40,7 +51,8 @@ internal static class InstructionEvidenceExtractor
             RetryChains: ExtractRetryChains(ordered),
             TurnTokens: ExtractTurnTokens(ordered),
             UserInstruction: ExtractUserInstruction(ordered, rawRecords),
-            Conversation: ExtractConversation(traceId, ordered, conversationTraces));
+            Conversation: ExtractConversation(traceId, ordered, conversationTraces),
+            ConversationContext: ExtractConversationContext(traceId, ordered, conversationTraces, conversationTraceInputs));
     }
 
     private static IReadOnlyList<InstructionEvidenceErrorSpan> ExtractErrorSpans(
@@ -195,6 +207,80 @@ internal static class InstructionEvidenceExtractor
             TraceIds: traceIds,
             TraceCount: traceIds.Count,
             AnalyzedTraceIndex: traceIds.IndexOf(traceId) + 1);
+    }
+
+    private static InstructionEvidenceConversationContext? ExtractConversationContext(
+        string traceId,
+        IReadOnlyList<MonitorSpanRow> ordered,
+        IReadOnlyList<MonitorConversationTraceRow> conversationTraces,
+        IReadOnlyList<InstructionEvidenceConversationTraceInput> conversationTraceInputs)
+    {
+        var conversationId = ordered
+            .Select(span => span.ConversationId)
+            .FirstOrDefault(id => !string.IsNullOrEmpty(id));
+        if (string.IsNullOrEmpty(conversationId) || conversationTraces.Count == 0 || conversationTraceInputs.Count == 0)
+        {
+            return null;
+        }
+
+        var analyzedIndex = conversationTraces
+            .Select((trace, index) => (trace.TraceId, index))
+            .FirstOrDefault(entry => string.Equals(entry.TraceId, traceId, StringComparison.Ordinal))
+            .index;
+        if (analyzedIndex < 0
+            || !conversationTraces.Any(trace => string.Equals(trace.TraceId, traceId, StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        var windowStart = Math.Max(0, analyzedIndex - ConversationContextSiblingRadius);
+        var windowEnd = Math.Min(conversationTraces.Count - 1, analyzedIndex + ConversationContextSiblingRadius);
+        var inputByTraceId = conversationTraceInputs.ToDictionary(input => input.TraceId, StringComparer.Ordinal);
+        var traces = new List<InstructionEvidenceConversationTrace>();
+        for (var index = windowStart; index <= windowEnd; index++)
+        {
+            var row = conversationTraces[index];
+            inputByTraceId.TryGetValue(row.TraceId, out var input);
+            var spans = input?.Spans ?? [];
+            var rawRecords = input?.RawRecords ?? [];
+            var orderedSpans = spans
+                .OrderBy(span => span.RawRecordId)
+                .ThenBy(span => span.SpanOrdinal)
+                .ToList();
+            var turnSpans = orderedSpans.Where(IsTurn).ToList();
+            var retryChains = ExtractRetryChains(orderedSpans);
+            var userInstruction = ExtractUserInstruction(orderedSpans, rawRecords);
+
+            traces.Add(new InstructionEvidenceConversationTrace(
+                TraceId: row.TraceId,
+                RelativePosition: index - analyzedIndex,
+                IsAnalyzedTrace: string.Equals(row.TraceId, traceId, StringComparison.Ordinal),
+                FirstStartTime: input?.FirstStartTime ?? row.FirstStartTime,
+                UserInstructionDescriptor: userInstruction?.Descriptor,
+                TurnCount: turnSpans.Count,
+                InputTokens: turnSpans.Sum(span => span.InputTokens ?? 0),
+                OutputTokens: turnSpans.Sum(span => span.OutputTokens ?? 0),
+                TotalTokens: turnSpans.Sum(span => span.TotalTokens ?? ((span.InputTokens ?? 0) + (span.OutputTokens ?? 0))),
+                ErrorSpanCount: orderedSpans.Count(IsError),
+                RetryChainCount: retryChains.Count,
+                ErrorSpanIds: orderedSpans.Where(IsError).Select(span => span.SpanId).Take(ConversationContextMaxErrorSpanIds).ToList(),
+                RetryToolNames: retryChains
+                    .Select(chain => chain.ToolName)
+                    .Where(toolName => !string.IsNullOrEmpty(toolName))
+                    .Select(toolName => toolName!)
+                    .Take(ConversationContextMaxRetryToolNames)
+                    .ToList()));
+        }
+
+        return new InstructionEvidenceConversationContext(
+            ConversationId: conversationId,
+            TraceCount: conversationTraces.Count,
+            AnalyzedTraceIndex: analyzedIndex + 1,
+            WindowStartIndex: windowStart + 1,
+            WindowEndIndex: windowEnd + 1,
+            TruncatedBefore: windowStart > 0,
+            TruncatedAfter: windowEnd < conversationTraces.Count - 1,
+            Traces: traces);
     }
 
     // Span-targeted gen_ai.prompt lookup over the raw OTLP payload, modeled on
@@ -358,7 +444,8 @@ internal sealed record InstructionEvidence(
     IReadOnlyList<InstructionEvidenceRetryChain> RetryChains,
     IReadOnlyList<InstructionEvidenceTurnTokens> TurnTokens,
     InstructionEvidenceUserInstruction? UserInstruction,
-    InstructionEvidenceConversation? Conversation);
+    InstructionEvidenceConversation? Conversation,
+    InstructionEvidenceConversationContext? ConversationContext);
 
 /// <summary>An error-status span, in span-ordinal order.</summary>
 internal sealed record InstructionEvidenceErrorSpan(
@@ -398,3 +485,39 @@ internal sealed record InstructionEvidenceConversation(
     IReadOnlyList<string> TraceIds,
     int TraceCount,
     int AnalyzedTraceIndex);
+
+/// <summary>Preloaded same-conversation trace data for pure bounded-context extraction.</summary>
+internal sealed record InstructionEvidenceConversationTraceInput(
+    string TraceId,
+    int RelativePosition,
+    bool IsAnalyzedTrace,
+    string? FirstStartTime,
+    IReadOnlyList<MonitorSpanRow> Spans,
+    IReadOnlyList<RawTelemetryRecord> RawRecords);
+
+/// <summary>Bounded previous/current/following trace context for instruction diagnosis (D048).</summary>
+internal sealed record InstructionEvidenceConversationContext(
+    string ConversationId,
+    int TraceCount,
+    int AnalyzedTraceIndex,
+    int WindowStartIndex,
+    int WindowEndIndex,
+    bool TruncatedBefore,
+    bool TruncatedAfter,
+    IReadOnlyList<InstructionEvidenceConversationTrace> Traces);
+
+/// <summary>Short diagnostic summary for one trace inside the bounded conversation window.</summary>
+internal sealed record InstructionEvidenceConversationTrace(
+    string TraceId,
+    int RelativePosition,
+    bool IsAnalyzedTrace,
+    string? FirstStartTime,
+    string? UserInstructionDescriptor,
+    int TurnCount,
+    int InputTokens,
+    int OutputTokens,
+    int TotalTokens,
+    int ErrorSpanCount,
+    int RetryChainCount,
+    IReadOnlyList<string?> ErrorSpanIds,
+    IReadOnlyList<string> RetryToolNames);

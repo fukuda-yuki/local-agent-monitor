@@ -189,6 +189,134 @@ public class InstructionEvidenceExtractorTests
             TraceId, [Span(0, operation: "chat", conversationId: null)], [], []);
 
         Assert.Null(evidence.Conversation);
+        Assert.Null(evidence.ConversationContext);
+    }
+
+    [Fact]
+    public void Extract_ConversationContext_MiddleTraceEmitsBoundedWindow()
+    {
+        var evidence = ExtractConversationContext(
+            analyzedTraceId: "trace-3",
+            traceCount: 7);
+
+        Assert.NotNull(evidence.ConversationContext);
+        var context = evidence.ConversationContext!;
+        Assert.Equal("conv-1", context.ConversationId);
+        Assert.Equal(7, context.TraceCount);
+        Assert.Equal(4, context.AnalyzedTraceIndex);
+        Assert.Equal(2, context.WindowStartIndex);
+        Assert.Equal(6, context.WindowEndIndex);
+        Assert.True(context.TruncatedBefore);
+        Assert.True(context.TruncatedAfter);
+        Assert.Equal(new[] { "trace-1", "trace-2", "trace-3", "trace-4", "trace-5" }, context.Traces.Select(trace => trace.TraceId).ToArray());
+        Assert.Equal(new[] { -2, -1, 0, 1, 2 }, context.Traces.Select(trace => trace.RelativePosition).ToArray());
+        Assert.Equal(new[] { false, false, true, false, false }, context.Traces.Select(trace => trace.IsAnalyzedTrace).ToArray());
+        Assert.All(context.Traces, trace => Assert.StartsWith("2026-07-01T00:", trace.FirstStartTime, StringComparison.Ordinal));
+        Assert.Equal("prompt for trace-3", context.Traces[2].UserInstructionDescriptor);
+        Assert.Equal(1, context.Traces[2].TurnCount);
+        Assert.Equal(103, context.Traces[2].InputTokens);
+        Assert.Equal(203, context.Traces[2].OutputTokens);
+        Assert.Equal(306, context.Traces[2].TotalTokens);
+    }
+
+    [Fact]
+    public void Extract_ConversationContext_FirstTraceEmitsFollowingWindowOnly()
+    {
+        var evidence = ExtractConversationContext(
+            analyzedTraceId: "trace-0",
+            traceCount: 4);
+
+        var context = Assert.IsType<InstructionEvidenceConversationContext>(evidence.ConversationContext);
+        Assert.False(context.TruncatedBefore);
+        Assert.True(context.TruncatedAfter);
+        Assert.Equal(1, context.WindowStartIndex);
+        Assert.Equal(3, context.WindowEndIndex);
+        Assert.Equal(new[] { "trace-0", "trace-1", "trace-2" }, context.Traces.Select(trace => trace.TraceId).ToArray());
+        Assert.Equal(new[] { 0, 1, 2 }, context.Traces.Select(trace => trace.RelativePosition).ToArray());
+    }
+
+    [Fact]
+    public void Extract_ConversationContext_LastTraceEmitsPreviousWindowOnly()
+    {
+        var evidence = ExtractConversationContext(
+            analyzedTraceId: "trace-3",
+            traceCount: 4);
+
+        var context = Assert.IsType<InstructionEvidenceConversationContext>(evidence.ConversationContext);
+        Assert.True(context.TruncatedBefore);
+        Assert.False(context.TruncatedAfter);
+        Assert.Equal(2, context.WindowStartIndex);
+        Assert.Equal(4, context.WindowEndIndex);
+        Assert.Equal(new[] { "trace-1", "trace-2", "trace-3" }, context.Traces.Select(trace => trace.TraceId).ToArray());
+        Assert.Equal(new[] { -2, -1, 0 }, context.Traces.Select(trace => trace.RelativePosition).ToArray());
+    }
+
+    [Fact]
+    public void Extract_ConversationContext_SingleTraceHasNoTruncation()
+    {
+        var evidence = ExtractConversationContext(
+            analyzedTraceId: "trace-0",
+            traceCount: 1);
+
+        var context = Assert.IsType<InstructionEvidenceConversationContext>(evidence.ConversationContext);
+        var trace = Assert.Single(context.Traces);
+        Assert.Equal("trace-0", trace.TraceId);
+        Assert.Equal(0, trace.RelativePosition);
+        Assert.True(trace.IsAnalyzedTrace);
+        Assert.False(context.TruncatedBefore);
+        Assert.False(context.TruncatedAfter);
+    }
+
+    [Fact]
+    public void Extract_ConversationContext_MissingOrMalformedRawDescriptorDoesNotThrow()
+    {
+        var spans = new[] { SpanForTrace("trace-1", 0, operation: "chat", conversationId: "conv-1", rawRecordId: 10) };
+        var conversationTraces = new[] { ConversationTrace("trace-0", 0), ConversationTrace("trace-1", 1) };
+        var conversationInputs = new[]
+        {
+            new InstructionEvidenceConversationTraceInput("trace-0", -1, false, "2026-07-01T00:00:00.000+00:00", [SpanForTrace("trace-0", 0, operation: "chat", conversationId: "conv-1", rawRecordId: 9)], [Record(9, "{ not json")]),
+            new InstructionEvidenceConversationTraceInput("trace-1", 0, true, "2026-07-01T00:01:00.000+00:00", spans, []),
+        };
+
+        var evidence = InstructionEvidenceExtractor.Extract("trace-1", spans, [], conversationTraces, conversationInputs);
+
+        var context = Assert.IsType<InstructionEvidenceConversationContext>(evidence.ConversationContext);
+        Assert.All(context.Traces, trace => Assert.Null(trace.UserInstructionDescriptor));
+    }
+
+    [Fact]
+    public void Extract_ConversationContext_CapsErrorSpanIdsAndRetryToolNames()
+    {
+        var spans = Enumerable.Range(0, 7)
+            .SelectMany(index => new[]
+            {
+                SpanForTrace("trace-0", index * 2, toolName: $"tool-{index}", status: "error", conversationId: "conv-1"),
+                SpanForTrace("trace-0", index * 2 + 1, toolName: $"tool-{index}", status: "ok", conversationId: "conv-1"),
+            })
+            .ToArray();
+        var conversationTraces = new[] { ConversationTrace("trace-0", 0) };
+        var conversationInputs = new[]
+        {
+            new InstructionEvidenceConversationTraceInput("trace-0", 0, true, "2026-07-01T00:00:00.000+00:00", spans, []),
+        };
+
+        var evidence = InstructionEvidenceExtractor.Extract("trace-0", spans, [], conversationTraces, conversationInputs);
+
+        var trace = Assert.Single(evidence.ConversationContext!.Traces);
+        Assert.Equal(7, trace.ErrorSpanCount);
+        Assert.Equal(7, trace.RetryChainCount);
+        Assert.Equal(new[] { "span-0", "span-2", "span-4", "span-6", "span-8" }, trace.ErrorSpanIds.ToArray());
+        Assert.Equal(new[] { "tool-0", "tool-1", "tool-2", "tool-3", "tool-4" }, trace.RetryToolNames.ToArray());
+    }
+
+    [Fact]
+    public void Extract_ConversationContext_IsDeterministicWithWebJsonDefaults()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var first = JsonSerializer.Serialize(ExtractConversationContext("trace-3", 7), options);
+        var second = JsonSerializer.Serialize(ExtractConversationContext("trace-3", 7), options);
+
+        Assert.Equal(first, second);
     }
 
     [Fact]
@@ -210,6 +338,45 @@ public class InstructionEvidenceExtractorTests
     private static InstructionEvidence Extract(params MonitorSpanRow[] spans) =>
         InstructionEvidenceExtractor.Extract(TraceId, spans, [], []);
 
+    private static InstructionEvidence ExtractConversationContext(string analyzedTraceId, int traceCount)
+    {
+        var conversationTraces = Enumerable.Range(0, traceCount)
+            .Select(index => ConversationTrace($"trace-{index}", index))
+            .ToArray();
+        var inputs = conversationTraces
+            .Select((trace, index) =>
+            {
+                var span = SpanForTrace(
+                    trace.TraceId,
+                    ordinal: 0,
+                    operation: "chat",
+                    category: "llm_call",
+                    inputTokens: 100 + index,
+                    outputTokens: 200 + index,
+                    conversationId: "conv-1",
+                    rawRecordId: 100 + index);
+                return new InstructionEvidenceConversationTraceInput(
+                    TraceId: trace.TraceId,
+                    RelativePosition: index - Array.FindIndex(conversationTraces, row => row.TraceId == analyzedTraceId),
+                    IsAnalyzedTrace: trace.TraceId == analyzedTraceId,
+                    FirstStartTime: trace.FirstStartTime,
+                    Spans: [span],
+                    RawRecords: [PromptRecord(100 + index, span.SpanId!, $"prompt for {trace.TraceId}", trace.TraceId)]);
+            })
+            .ToArray();
+        var analyzed = inputs.Single(input => input.IsAnalyzedTrace);
+
+        return InstructionEvidenceExtractor.Extract(
+            analyzedTraceId,
+            analyzed.Spans,
+            analyzed.RawRecords,
+            conversationTraces,
+            inputs);
+    }
+
+    private static MonitorConversationTraceRow ConversationTrace(string traceId, int minute) =>
+        new(traceId, $"2026-07-01T00:{minute:00}:00.000+00:00");
+
     private static RawTelemetryRecord Record(long id, string payloadJson) =>
         new(
             Id: id,
@@ -220,11 +387,20 @@ public class InstructionEvidenceExtractorTests
             PayloadJson: payloadJson);
 
     /// <summary>A raw OTLP record whose single chat span carries a gen_ai.prompt string value.</summary>
-    private static RawTelemetryRecord PromptRecord(long id, string spanId, string promptTextJson) =>
-        Record(id, PromptPayloadTemplate
-            .Replace("TRACE_ID_PLACEHOLDER", TraceId)
+    private static RawTelemetryRecord PromptRecord(long id, string spanId, string promptTextJson, string traceId = TraceId) =>
+        RecordForTrace(traceId, id, PromptPayloadTemplate
+            .Replace("TRACE_ID_PLACEHOLDER", traceId)
             .Replace("SPAN_ID_PLACEHOLDER", spanId)
             .Replace("PROMPT_TEXT_PLACEHOLDER", promptTextJson));
+
+    private static RawTelemetryRecord RecordForTrace(string traceId, long id, string payloadJson) =>
+        new(
+            Id: id,
+            Source: "raw-otlp",
+            TraceId: traceId,
+            ReceivedAt: DateTimeOffset.UnixEpoch,
+            ResourceAttributesJson: null,
+            PayloadJson: payloadJson);
 
     private const string PromptPayloadTemplate = """
         {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[
@@ -278,4 +454,32 @@ public class InstructionEvidenceExtractorTests
             StartTime: null,
             EndTime: null,
             ProjectedAt: "2026-07-01T00:00:00.000+00:00");
+
+    private static MonitorSpanRow SpanForTrace(
+        string traceId,
+        int ordinal,
+        string? operation = "execute_tool",
+        string? category = "tool_call",
+        string? toolName = null,
+        string? status = "ok",
+        string? errorType = null,
+        int? inputTokens = null,
+        int? outputTokens = null,
+        string? conversationId = null,
+        long rawRecordId = 1) =>
+        Span(
+            ordinal,
+            operation,
+            category,
+            toolName,
+            status,
+            errorType,
+            inputTokens,
+            outputTokens,
+            conversationId,
+            rawRecordId) with
+        {
+            TraceId = traceId,
+            StartTime = $"2026-07-01T00:{ordinal:00}:00.000+00:00",
+        };
 }
