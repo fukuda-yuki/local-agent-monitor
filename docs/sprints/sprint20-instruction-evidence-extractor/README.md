@@ -1,9 +1,10 @@
 # Sprint20 - Instruction Evidence Extractor (Issue #46 Phase 2, step 1)
 
-Status: M1-M4 complete; M5 conditional pass. All six traces now have results
-(A1/A2/B1/B2 under BYOK; C1/C2 completed under the SDK default no-BYOK path).
-Official M5 PASS / Issue #46 GO is held pending a BYOK re-run of C1/C2; the
-900-second timeout is localized to the BYOK provider path.
+Status: M1-M4 complete; M5 conditional pass / Phase 2 GO with provider caveat.
+All six traces now have results (A1/A2/B1/B2 under BYOK; C1/C2 completed under
+the SDK default no-BYOK path). The 900-second C1/C2 timeout is localized to the
+external GitHub Copilot/BYOK provider path and is not a Sprint20 implementation
+blocker.
 
 Milestone/task breakdown: [Plan.md](Plan.md).
 M4 regression evidence: [milestones/M4-regression-validation.md](milestones/M4-regression-validation.md).
@@ -82,7 +83,7 @@ and hallucination exposure), lower token use.
 | M2 | Extractor and unit tests | Done |
 | M3 | Tool exposure and prompt template v3 | Done |
 | M4 | Regression validation | Done |
-| M5 | A/B live validation vs Sprint19 M5 and Issue #46 update (human-gated) | Conditional pass (GO held) |
+| M5 | A/B live validation vs Sprint19 M5 and Issue #46 update (human-gated) | Conditional pass (provider caveat) |
 
 ### M1 - Specs and decision record
 
@@ -144,12 +145,12 @@ and hallucination exposure), lower token use.
   present). C1 = one `missing-context-constraints` finding (4/4 cited spans
   resolved, extractor-grounded); C2 = no finding (no-evidence-no-finding
   upheld, 6/6 evidence refs resolved). The Sprint19 B1 coupling deviations did
-  not recur. Because C1/C2 ran under a different provider/model than the
-  official gate's BYOK path, M5 is a **conditional pass** on implementation
-  validity; official M5 PASS / Issue #46 GO is **held** until C1/C2 are re-run
-  under BYOK. Evidence localizes the 900-second timeout to the BYOK provider
-  path, not the SDK/prompt/extractor. Issue #46 has a repository-safe hold
-  comment draft only (not posted).
+  not recur. Because C1/C2 ran under a different provider/model than the BYOK
+  path used for A1/A2/B1/B2, provider parity is recorded as a caveat. M5 is a
+  **conditional pass / Phase 2 GO with provider caveat**. Evidence localizes
+  the 900-second timeout to the external GitHub Copilot/BYOK provider path, not
+  the SDK/prompt/extractor. Issue #46 has a repository-safe comment draft only
+  (not posted).
 
 ## User-provided live validation inputs (M5)
 
@@ -164,8 +165,8 @@ and hallucination exposure), lower token use.
   process from `bin\Debug\net10.0`; both completed. In-PowerShell reflection
   attempts (runs 21-22) failed only because the no-BYOK provider could not
   locate `copilot.exe` under the PowerShell host. This provider switch for
-  C1/C2 is a recorded deviation from the official same-BYOK-path gate, not a
-  silent switch.
+  C1/C2 is a recorded provider-parity caveat, not a silent switch; the BYOK
+  timeout is treated as an external GitHub Copilot/provider-path issue.
 - Human judgment on the trace-specificity and coupling criteria.
 
 ## Risks

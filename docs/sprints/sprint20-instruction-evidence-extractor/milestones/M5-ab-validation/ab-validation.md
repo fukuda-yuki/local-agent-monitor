@@ -2,17 +2,17 @@
 
 Date: 2026-07-07 (BYOK runs); 2026-07-08 (no-BYOK C1/C2 completion).
 
-Verdict: **Conditional pass** (implementation validity); official M5 PASS and
-Issue #46 GO are **held**. All six preserved Sprint19 traces now have results:
-A1/A2/B1/B2 completed under the validated BYOK path (glm-5.2), and C1/C2
-completed under the SDK default (no-BYOK) Copilot provider after the BYOK runs
-timed out at 900 seconds. Prompt v3 with the deterministic
-instruction-evidence extractor produced grounded, coupled findings (C1) and a
-correct no-evidence-no-finding result (C2), so the implementation is not the
-blocker. The official M5 gate — the **same** six traces re-analyzed via the
-**same** BYOK path — is not met, because C1/C2 were completed under a different
-provider and model. The 900-second timeout is localized to the BYOK provider
-path (see Root Cause), not the SDK, prompt, or extractor.
+Verdict: **Conditional pass / Phase 2 GO with provider caveat**. All six
+preserved Sprint19 traces now have results: A1/A2/B1/B2 completed under the
+validated BYOK path (glm-5.2), and C1/C2 completed under the SDK default
+(no-BYOK) Copilot provider after the BYOK runs timed out at 900 seconds.
+Prompt v3 with the deterministic instruction-evidence extractor produced
+grounded, coupled findings (C1) and a correct no-evidence-no-finding result
+(C2), so the implementation is not the blocker. The same-provider BYOK parity
+criterion is recorded as a caveat, but the BYOK C1/C2 timeout is treated as an
+external GitHub Copilot/provider-path issue rather than a Sprint20 product
+blocker. With that caveat, Sprint20 M5 is closed and Issue #46 may be updated
+with a repository-safe GO comment.
 
 ## Environment
 
@@ -65,7 +65,7 @@ BYOK provider path is removed. Combined with the BYOK
 client/session/message-send evidence above, this localizes the 900-second
 timeout to the BYOK provider path rather than the SDK, prompt, or extractor.
 
-## Root Cause (BYOK timeout localization)
+## Root Cause (External BYOK Provider Timeout)
 
 - The in-PowerShell reflection attempts (runs 21-22) failed because the
   no-BYOK Copilot provider resolves `copilot.exe` relative to the host process
@@ -75,9 +75,11 @@ timeout to the BYOK provider path rather than the SDK, prompt, or extractor.
   Monitor .NET process from `bin\Debug\net10.0` lets the no-BYOK provider find
   that runtime, and C1/C2 then completed quickly (runs 23-24).
 - Because the same two large traces complete promptly under the no-BYOK path
-  but time out at 900 seconds under BYOK, the timeout is strongly localized to
-  the BYOK provider path (provider response time / large-trace handling), not
-  to the SDK, prompt v3, or the deterministic extractor.
+  but time out at 900 seconds under BYOK, the timeout is localized to the BYOK
+  provider path (GitHub Copilot/provider response time or large-trace handling),
+  not to the SDK, prompt v3, or the deterministic extractor. This is recorded
+  as an external provider caveat and is not treated as a Sprint20
+  implementation blocker.
 
 ## A/B Run Table
 
@@ -109,22 +111,21 @@ non-applicable (no multi-goal `user_instruction` descriptor to ground it).
 | No-evidence-no-finding | Pass (all six) | No run emitted a finding without a citation; C2 correctly emitted 0 findings. |
 | Extractor or raw-verified grounding | Pass (findings-bearing runs) | A1/A2/B1/B2 and C1 grounded (C1 in `errorSpans`/`retryChains`); C2 N/A (no finding). |
 | No recurrence of Sprint19 B1 coupling deviations | Pass | B1 run 16 did not emit equivalents of Sprint19 B1 finding 3/4 category-coupling deviations. |
-| Provider parity (official gate: same 6 traces via same BYOK path) | **Not met** | C1/C2 completed under the SDK default no-BYOK provider and a different model, not the BYOK glm-5.2 path used for A1/A2/B1/B2 and the Sprint19 baseline. |
+| Provider parity (same 6 traces via same BYOK path) | Caveat accepted | C1/C2 completed under the SDK default no-BYOK provider and a different model, not the BYOK glm-5.2 path used for A1/A2/B1/B2 and the Sprint19 baseline. The BYOK C1/C2 timeout is treated as an external GitHub Copilot/provider issue, not a product blocker. |
 | Recall signal | Not a clean verdict | Sprint20 produced 6 findings across the six traces (A1 1, A2 2, B1 1, B2 1, C1 1, C2 0) vs 9 in Sprint19. B1 intentionally drops the 2 prior coupling deviations, and C1/C2 ran under a different provider/model, so the comparison is confounded; no material recall collapse is evident on the comparable BYOK runs. |
 
-Final gate verdict: **Conditional pass (implementation validity); official M5
-PASS and Issue #46 GO are held.** Prompt v3 + the deterministic extractor
-produced grounded, coupled findings (C1) and a correct no-evidence-no-finding
-result (C2), and no completed run reproduced the Sprint19 B1 coupling
-deviations — so the implementation is validated as far as these runs go. The
-official M5 gate is not closed because C1/C2 were completed under the SDK
-default no-BYOK provider and a different model rather than the BYOK path the
-gate requires. Closing the gate requires re-running C1/C2 under the BYOK path
-once the provider-side timeout is addressed.
+Final gate verdict: **Conditional pass / Phase 2 GO with provider caveat.**
+Prompt v3 + the deterministic extractor produced grounded, coupled findings
+(C1) and a correct no-evidence-no-finding result (C2), and no completed run
+reproduced the Sprint19 B1 coupling deviations. The provider parity caveat is
+explicitly recorded because C1/C2 completed under the SDK default no-BYOK
+provider and a different model. Per validation decision, the BYOK C1/C2 timeout
+is a GitHub Copilot/provider-path issue outside the Sprint20 implementation,
+so it does not block M5 closeout or the Issue #46 Phase 2 step-1 GO update.
 
 ## Issue #46 Comment Draft
 
-Repository-safe draft, not posted (held per the M5 verdict):
+Repository-safe draft, not posted:
 
 > Sprint20 M5 A/B live validation update. All six preserved Sprint19 traces
 > now have results under prompt v3 with the deterministic
@@ -132,20 +133,19 @@ Repository-safe draft, not posted (held per the M5 verdict):
 > path (glm-5.2); C1/C2 were completed under the SDK default (no-BYOK)
 > Copilot provider after the BYOK runs timed out at 900 seconds.
 >
-> Result: conditional pass on implementation validity, official GO held.
+> Result: conditional pass / Phase 2 GO with provider caveat.
 > C1 produced one `missing-context-constraints` finding grounded in the
 > extractor's error/retry evidence (4/4 cited spans resolved). C2 correctly
 > produced no finding (no multi-goal user-instruction descriptor for
 > `task-size-split`; no-evidence-no-finding upheld, 6/6 evidence refs
 > resolved). The Sprint19 B1 category-coupling deviations did not recur.
 >
-> Because C1/C2 were completed under a different provider and model than the
-> BYOK path the official gate requires, this is not yet an official M5 PASS.
-> Evidence indicates the 900-second timeout is localized to the BYOK provider
-> path (the no-BYOK runs completed quickly and the SDK/prompt/extractor
-> behaved correctly), not the SDK, prompt, or extractor. Next step: address
-> the BYOK provider-path timeout, then re-run C1/C2 under BYOK to close the
-> official gate before any Phase 2 GO.
+> C1/C2 were completed under a different provider and model than the BYOK path
+> used by A1/A2/B1/B2, so provider parity is recorded as a caveat. Evidence
+> localizes the 900-second BYOK C1/C2 timeout to the GitHub
+> Copilot/provider path (the no-BYOK runs completed quickly and the
+> SDK/prompt/extractor behaved correctly), not to the Sprint20 implementation.
+> With that caveat recorded, Sprint20 Phase 2 step 1 is ready to proceed.
 >
 > No raw prompts/responses, tool arguments/results, credentials, or full
 > result markdown are included in the repository evidence.
