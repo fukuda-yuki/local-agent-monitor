@@ -451,8 +451,9 @@ Supported process-internal .NET SDK tool names:
 These tools are not exposed as public HTTP routes and are separate from
 repository-safe summary generation. `get_instruction_evidence` returns the
 deterministic instruction-evidence extractor output defined in
-[instruction diagnosis analysis](../interfaces/instruction-diagnosis-analysis.md)
-(D047). The Local Monitor project references the
+[instruction diagnosis analysis](../interfaces/instruction-diagnosis-analysis.md),
+including the bounded same-conversation `conversation_context` for
+`instruction-diagnosis` when available (D047 / D048). The Local Monitor project references the
 official `GitHub.Copilot.SDK` .NET package. Normal repository validation can
 build and test the integration without requiring a signed-in Copilot SDK
 runtime; live analysis validation still requires a signed-in Copilot session.

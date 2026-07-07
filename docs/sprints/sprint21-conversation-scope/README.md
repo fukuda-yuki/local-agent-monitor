@@ -82,7 +82,7 @@ not an unbounded conversation transcript.
 
 | Milestone | Summary | Status |
 | --- | --- | --- |
-| M1 | Source-of-truth specs and D048 decision for bounded conversation context. | Planned |
+| M1 | Source-of-truth specs and D048 decision for bounded conversation context. | Done |
 | M2 | Deterministic bounded conversation-context extraction and tests. | Planned |
 | M3 | Tool data wiring and prompt template v4 with sibling-evidence rules. | Planned |
 | M4 | Regression validation and self-review. | Planned |
