@@ -1,6 +1,6 @@
 # Sprint21 Conversation Scope - Implementation Plan
 
-Status: M1-M4 complete. M5 live validation is prepared separately and remains
+Status: M1-M4 complete. M5 live validation is prepared and remains
 user-controlled because it requires preserved/local trace data and provider
 execution.
 
