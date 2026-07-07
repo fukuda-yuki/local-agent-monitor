@@ -164,6 +164,24 @@ public class MonitorAnalysisRouteTests
         Assert.DoesNotContain("trace-6", projectionStore.RawRecordsByTraceCalls);
     }
 
+    [Fact]
+    public void MonitorAnalysisToolData_Create_ExistingFocusDoesNotLoadConversationContext()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        SeedEvidenceTrace(store, "trace-current", conversationId: "conv-existing", startTime: "2026-07-01T00:02:00.000+00:00", withError: false);
+        SeedEvidenceTrace(store, "trace-sibling", conversationId: "conv-existing", startTime: "2026-07-01T00:01:00.000+00:00", withError: false);
+        var projectionStore = new CountingProjectionStore(new RawTelemetryStoreProjectionStore(store));
+        var context = new MonitorAnalysisContext(1, "trace-current", null, null, MonitorAnalysisFocus.Tokens);
+
+        var data = MonitorAnalysisToolData.Create(projectionStore, context);
+
+        Assert.Null(data.InstructionEvidence.ConversationContext);
+        Assert.DoesNotContain("trace-sibling", projectionStore.SpansForTraceCalls);
+        Assert.DoesNotContain("trace-sibling", projectionStore.RawRecordsByTraceCalls);
+    }
+
     private static async Task<long> StartRunAsync(RunningMonitorHost host)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/traces/{TraceId}/analysis")

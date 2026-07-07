@@ -363,12 +363,13 @@ internal sealed record MonitorAnalysisToolData(
         var trace = projectionStore.GetMonitorTrace(context.TraceId);
         var turns = spans.Where(span => span.Operation == "chat" || span.Category == "llm_call").ToList();
 
-        // Sprint20 (D047): deterministic instruction-evidence pre-extraction.
-        // Resolve sibling traces only when the analyzed trace carries a
-        // conversation id; otherwise the conversation field stays null.
-        var conversationId = spans
-            .Select(span => span.ConversationId)
-            .FirstOrDefault(id => !string.IsNullOrEmpty(id));
+        // Sprint20/Sprint21 (D047/D048): deterministic instruction-evidence
+        // conversation context is scoped to instruction-diagnosis. Other
+        // focuses keep their existing generic prompt path and do not load
+        // sibling trace rows or raw records.
+        var conversationId = context.Focus == MonitorAnalysisFocus.InstructionDiagnosis
+            ? spans.Select(span => span.ConversationId).FirstOrDefault(id => !string.IsNullOrEmpty(id))
+            : null;
         var conversationTraces = string.IsNullOrEmpty(conversationId)
             ? Array.Empty<MonitorConversationTraceRow>()
             : projectionStore.ListConversationTraces(conversationId);
