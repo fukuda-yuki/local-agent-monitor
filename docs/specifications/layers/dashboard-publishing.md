@@ -2,7 +2,7 @@
 
 ## Scope
 
-This layer defines dashboard dataset generation, static HTML generation, and GitHub Pages snapshot publishing.
+This layer defines dashboard dataset generation and static HTML generation.
 
 ## Generation Flow
 
@@ -12,7 +12,6 @@ measurements + optional raw/candidate outputs
   -> dashboard dataset JSON / CSV tables
   -> generate-static-dashboard
   -> index.html + dashboard-data.json
-  -> latest/ and YYYY-MM-DD/
 ```
 
 ## Commands
@@ -61,20 +60,6 @@ Initial sections:
 - Diagnosis / Improvement Loop。
 - Collection Health。
 - Outcome Linkage Candidate placeholder。
-
-## Pages Layout
-
-GitHub Actions publishes:
-
-```text
-latest/index.html
-latest/dashboard-data.json
-YYYY-MM-DD/index.html
-YYYY-MM-DD/dashboard-data.json
-```
-
-Daily snapshots are retained and not automatically deleted.
-Generated snapshots are written to `gh-pages` and Pages artifacts, not to `main`.
 
 ## Safety
 

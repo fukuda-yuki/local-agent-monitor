@@ -113,9 +113,9 @@ Rejected for current scope:
 - commit / push / pull request automation。
 - automatic pass / fail judgment of improvement effect。
 
-## D009: Dashboard の第一候補は static HTML + GitHub Pages にする
+## D009: Dashboard の第一候補は static HTML にする
 
-Status: Accepted
+Status: Accepted; Pages publish superseded by D049
 
 Static HTML dashboard を常設 dashboard 第一候補にする。
 Grafana JSON dashboard は将来候補または fallback として残す。
@@ -124,7 +124,7 @@ Consequences:
 
 - `generate-static-dashboard` は `index.html` と `dashboard-data.json` を生成する。
 - No server-side API, runtime service, or network dependency.
-- GitHub Actions が daily snapshot を publish する。
+- GitHub Pages publish workflow は D049 で削除した。Static dashboard は local artifact として生成する。
 
 ## D010: Dashboard は raw content を表示しない
 
@@ -155,25 +155,10 @@ Allowed with access control:
 
 ## D011: Static dashboard の publish layout を固定する
 
-Status: Accepted
+Status: Superseded by D049
 
-Publish layout:
-
-```text
-latest/index.html
-latest/dashboard-data.json
-YYYY-MM-DD/index.html
-YYYY-MM-DD/dashboard-data.json
-```
-
-Daily snapshots are retained and not automatically deleted.
-Generated snapshots go to `gh-pages` and Pages artifacts, not to `main`.
-
-Open follow-up:
-
-- repository size monitoring。
-- GitHub Pages access control validation。
-- first live workflow result。
+- GitHub Pages publish workflow、`gh-pages` branch snapshot、Pages artifact layout は現行スコープから削除した。
+- Static dashboard の現行 artifact layout は `index.html` と `dashboard-data.json` のみ。
 
 ## D012: Outcome linkage は future candidate に留める
 
@@ -238,9 +223,8 @@ Status: Open
 - masking / redaction。
 - user notice or consent。
 - identity handling。
-- Pages visibility。
-- live workflow operation。
-- snapshot growth monitoring。
+- shared artifact access control。
+- live operation。
 
 ## D017: Collection profile を public interface にする
 
@@ -514,7 +498,7 @@ rendering）。
 
 - loopback-only bind、`Host` header 検証。
 - CORS 無効。state-changing action に CSRF + same-origin。
-- raw / PII を log、repository-safe outputs、static dashboard、GitHub Pages snapshot に
+- raw / PII を log、repository-safe outputs、static dashboard、CI artifact に
   書かない。
 - `/api/monitor/*` と SSE は sanitized metadata のみ（raw / PII を返さない）。
 - captured content は escaped inert text で描画（framework 既定エンコード。`Html.Raw`
@@ -725,7 +709,7 @@ server-rendered で表示する。これにより両ページは trace-detail pa
 - `/api/monitor/*` と SSE は sanitized metadata のみ。projection schema / API field は追加しない。
 - Sprint16 の sanitized repository metadata（D040）は、この不変条件を
   raw / PII 非送出のまま保つ scoped exception として扱う。
-- raw / PII を log、repository-safe outputs、static dashboard、GitHub Pages snapshot に書かない。
+- raw / PII を log、repository-safe outputs、static dashboard、CI artifact に書かない。
 - captured content は escaped inert text で描画。追加の CSP / sanitizer / XSS payload-matrix
   機構は設けない（AGENTS.md Local-First Risk Posture / D020）。
 
@@ -813,7 +797,7 @@ raw を Copilot SDK analysis に渡すこと自体は禁止しない。
 
 - 既存 Canvas adapter は置き換えない。Canvas action responses / logs /
   committed outputs への raw / PII 非送出境界を維持する。
-- repository、Issue、PR、GitHub Pages、static dashboard、CI artifact、
+- repository、Issue、PR、static dashboard、CI artifact、
   repository-safe docs へ raw prompt / response / full tool arguments /
   full tool results / source fragment / credential / PII / local sensitive path を
   出してはならない。
@@ -1531,3 +1515,23 @@ bounded same-conversation context を `get_instruction_evidence` の出力に
   面全体を無効化したままとする。D045 履歴ブロック、固定 4 点形式、
   no-evidence-no-finding 規則、日本語出力規則、Canvas focus set
   （D036）は変更しない。
+
+## D049: GitHub Pages deploy surface を削除する
+
+Status: Accepted
+
+GitHub Pages があることで Local Monitor / Canvas の raw-default 判断と
+repository-safe publishing 判断が混同されるため、Pages deploy surface を
+現行スコープから削除する。
+
+決定事項:
+
+- `.github/workflows/static-dashboard-pages.yml` を削除する。
+- `gh-pages` branch への snapshot commit / push、Pages artifact upload、
+  `actions/deploy-pages` による deploy は行わない。
+- Static dashboard generator は残す。出力契約は local artifact
+  `index.html` / `dashboard-data.json` とする。
+- Local Monitor と Canvas helper の raw-bearing local surfaces は引き続き
+  単一信頼ローカル利用者向けに raw prompt / response を表示してよい。
+- raw / PII を repository-safe outputs、static dashboard、CI artifact、logs、
+  Issue、PR、docs へ出さない境界は維持する。

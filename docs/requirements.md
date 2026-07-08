@@ -23,7 +23,7 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 - Copilot agent workflow の挙動を調査する開発者。
 - prompt、skill、MCP、CLI wrapper の改善効果を比較する実装者。
 - trace 由来の失敗傾向や改善候補を確認する maintainer。
-- dashboard snapshot を確認する reviewer。
+- dashboard artifact を確認する reviewer。
 
 対象外の利用者像:
 
@@ -54,7 +54,6 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 - raw store から normalized measurement dataset への変換。
 - deterministic CLI による diagnosis / improvement / auto-decision candidate generation。
 - static HTML dashboard と dashboard dataset generation。
-- GitHub Actions による static dashboard snapshot generation。
 
 任意機能:
 
@@ -130,7 +129,7 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
 - 経営向け利用状況 dashboard、課金、コスト配賦。
 - DLP、機密情報検査、監査ログ基盤。
 - VS Code 内部ログ、workspaceStorage、chatSessions を入力ソースにした解析、および VS Code の in-editor Debug UI の複製。ただし受信済み OTel テレメトリから導出する sanitized agent-execution view は許可する（D021）。
-- Langfuse / Collector / Grafana / Pages の共有運用決定。
+- Langfuse / Collector / Grafana の共有運用決定。
 - remote managed Langfuse / Collector の利用者同意 workflow。
 - trace から repository patch / diff を生成すること。
 - repository file の自動修正。
@@ -265,17 +264,17 @@ Repository に保存してはならないもの:
 - sensitive bundle content。
 - sensitive bundle local path。
 
-Local Ingestion Monitor の raw / PII 表示は loopback-only の runtime surface であり、ここで定義する repository 保存禁止や §9 の static dashboard 非表示とは別物である。raw body（tool call arguments / results、sub-agent instructions / responses、system prompt）と PII（`user.id` / `user.email`）は **既定で表示する**（server-rendered、inert text）。`--sanitized-only` フラグで metadata-only モードを復元し、TraceDetail の raw section と full raw route を除外して PII を除外できる（D023 / D030）。`--sanitized-only` でも TraceDetail の sanitized tab shell は表示される。既定・`--sanitized-only` いずれの場合も raw / PII を repository-safe outputs、static dashboard、ログ、GitHub Pages snapshot へ出力してはならない。`/api/monitor/*` と SSE は常に sanitized metadata のみを返す。この表示は単一のローカル利用者が自分のデータを閲覧する用途に限り、cross-machine な露出（remote / non-loopback、browser 経由の off-machine 送出）から防御する。
+Local Ingestion Monitor の raw / PII 表示は loopback-only の runtime surface であり、ここで定義する repository 保存禁止や §9 の static dashboard 非表示とは別物である。raw body（tool call arguments / results、sub-agent instructions / responses、system prompt）と PII（`user.id` / `user.email`）は **既定で表示する**（server-rendered、inert text）。`--sanitized-only` フラグで metadata-only モードを復元し、TraceDetail の raw section と full raw route を除外して PII を除外できる（D023 / D030）。`--sanitized-only` でも TraceDetail の sanitized tab shell は表示される。既定・`--sanitized-only` いずれの場合も raw / PII を repository-safe outputs、static dashboard、ログ、CI artifact へ出力してはならない。`/api/monitor/*` と SSE は常に sanitized metadata のみを返す。この表示は単一のローカル利用者が自分のデータを閲覧する用途に限り、cross-machine な露出（remote / non-loopback、browser 経由の off-machine 送出）から防御する。
 
 Windows Task Scheduler startup surface は Local Monitor を user logon 時に起動するだけであり、client routing 設定を書き換えない。既定 URL は `http://127.0.0.1:4320`、既定 DB / logs / state は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下とする。Windows では別の明示操作として current user の永続環境変数（HKCU user environment）に raw-local-receiver / monitor 向け OTLP routing を設定・解除できる。これは Windows ユーザーで新規起動される VS Code GitHub Copilot Chat、GitHub Copilot CLI、その他同ユーザー process に継承される既定値であり、既存 process には再起動まで反映されない。永続化は user scope のみ、管理者権限不要、`setx` ではなく user environment API を使い、変更通知を送る。グローバル user environment では client 種別を一意に決められないため `client.kind` は設定しない。Task Scheduler 経由でも loopback-only、Host header validation、same-origin、`Cache-Control: no-store`、raw / PII 非ログ出力、repository-safe outputs への raw / PII 非送出を維持する。`--sanitized-only` は常時起動時にも指定できる任意 opt-out として残す。
 
-LocalMonitor Release ZIP は published app と操作スクリプトのみを配布媒体に含める。raw store / runtime DB / logs / state は利用者端末の local runtime artifact として扱い、Release ZIP、GitHub Actions logs、Release metadata、repository artifact、Issue、static dashboard、GitHub Pages snapshot に raw / PII / credentials / full tool arguments / tool results を含めてはならない。uninstall 時、DB / logs は既定で保持し、明示指定された場合のみ削除する。
+LocalMonitor Release ZIP は published app と操作スクリプトのみを配布媒体に含める。raw store / runtime DB / logs / state は利用者端末の local runtime artifact として扱い、Release ZIP、GitHub Actions logs、Release metadata、repository artifact、Issue、static dashboard、CI artifact に raw / PII / credentials / full tool arguments / tool results を含めてはならない。uninstall 時、DB / logs は既定で保持し、明示指定された場合のみ削除する。
 
-GitHub Copilot app Canvas adapter は Local Monitor の任意表示統合であり、raw default の Local Monitor を扱ってよい。ただし Canvas action responses、logs、committed outputs、repository-safe artifacts、static dashboard、GitHub Pages snapshot には raw prompt / response body、tool arguments / results、PII、credential、token、local sensitive path、raw OTLP payload を含めてはならない。`--sanitized-only` は Canvas 専用要件ではなく、必要に応じて利用者が選ぶ metadata-only opt-out として残す。Canvas adapter は新たな telemetry input / raw JSON API を追加しない。Sprint16 の bounded exception として、既存 OTLP Resource Attributes `vcs.repository.name` / `workspace.name` / `repo.snapshot` から sanitized `repository_name` / `workspace_label` / `repo_snapshot` を `/api/monitor/*`、Canvas helper routes、bounded Canvas action DTO に表示してよい（D040）。`repo.name` は repository label source として扱わない。Sprint17 の helper analysis controls は requested values であり、`session.send()` に per-message model / reasoning / execution-timeout enforcement がない限り effective model / reasoning を主張しない。
+GitHub Copilot app Canvas adapter は Local Monitor の任意表示統合であり、raw default の Local Monitor を扱ってよい。ただし Canvas action responses、logs、committed outputs、repository-safe artifacts、static dashboard、CI artifact には raw prompt / response body、tool arguments / results、PII、credential、token、local sensitive path、raw OTLP payload を含めてはならない。`--sanitized-only` は Canvas 専用要件ではなく、必要に応じて利用者が選ぶ metadata-only opt-out として残す。Canvas adapter は新たな telemetry input / raw JSON API を追加しない。Sprint16 の bounded exception として、既存 OTLP Resource Attributes `vcs.repository.name` / `workspace.name` / `repo.snapshot` から sanitized `repository_name` / `workspace_label` / `repo_snapshot` を `/api/monitor/*`、Canvas helper routes、bounded Canvas action DTO に表示してよい（D040）。`repo.name` は repository label source として扱わない。Sprint17 の helper analysis controls は requested values であり、`session.send()` に per-message model / reasoning / execution-timeout enforcement がない限り effective model / reasoning を主張しない。
 
-Local Monitor Copilot raw analysis は Canvas adapter とは別の local raw-analysis surface であり、Local Monitor process 内の .NET GitHub Copilot SDK analysis service には raw trace / raw record / raw span context を渡してよい。禁止するのは raw を repository、Issue、PR、GitHub Pages、static dashboard、CI artifact、repository-safe docs へ出すことである。AI analysis result を GitHub 上に出す場合は、raw 本文を含まない repository-safe summary として扱う。
+Local Monitor Copilot raw analysis は Canvas adapter とは別の local raw-analysis surface であり、Local Monitor process 内の .NET GitHub Copilot SDK analysis service には raw trace / raw record / raw span context を渡してよい。禁止するのは raw を repository、Issue、PR、static dashboard、CI artifact、repository-safe docs へ出すことである。AI analysis result を GitHub 上に出す場合は、raw 本文を含まない repository-safe summary として扱う。
 
-共有環境、実データ、社内サーバー、GitHub Pages publish を扱う場合は、アクセス権、保持期間、削除方法、masking / redaction、利用者周知を先に決める。
+共有環境、実データ、社内サーバー、生成済み dashboard artifact の共有を扱う場合は、アクセス権、保持期間、削除方法、masking / redaction、利用者周知を先に決める。
 remote managed Langfuse / Collector endpoint を使う場合は、送信前に access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を確認する。
 
 ## 9. Dashboard Requirements
@@ -309,7 +308,7 @@ Static HTML dashboard は Agent workflow 改善判断のための aggregate view
 - status。
 
 Dashboard に raw prompt / response / tool arguments / tool results の全文を表示してはならない。
-`user.id` と `user.email` は表示および filter / search 対象に含めてよいが、publish 先の access control を先に確認する。
+`user.id` と `user.email` は表示および filter / search 対象に含めてよいが、共有先の access control を先に確認する。
 
 ## 10. Validation Requirements
 
@@ -344,9 +343,6 @@ Docker Desktop、WSL2 Docker Engine、remote managed endpoint、raw local receiv
 
 以下は実装前または共有運用前に決める。
 
-- GitHub Pages access control の具体設定。
-- 初回 live workflow 実行結果の確認。
-- 日次 snapshot の repository size monitoring。
 - email / display name mapping。
 - shared dashboard の access control、retention、利用者周知。
 - external outcome linkage の採否。

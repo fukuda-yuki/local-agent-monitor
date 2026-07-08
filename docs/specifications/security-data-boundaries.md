@@ -56,7 +56,7 @@ Repository-safe outputs must continue to use normalized / sanitized datasets.
 The receiver must bind only to local development endpoints unless a later
 security decision allows broader exposure.
 The receiver must not expose raw telemetry through dashboard output, generated
-static artifacts, GitHub Pages snapshots, or repository-safe review records.
+static artifacts, CI artifacts, or repository-safe review records.
 Live validation evidence must use trace ids, raw record identifiers, redacted
 summaries, and non-secret endpoint shapes instead of raw payload content.
 
@@ -84,8 +84,8 @@ Defended (in scope):
   same-origin on any state-changing action.
 - raw / PII leaking into logs or repository-committed artifacts — the
   Repository-Forbidden Data list above is unchanged; raw / PII is never logged,
-  never written to repository-safe outputs, the static dashboard, or GitHub
-  Pages snapshots.
+  never written to repository-safe outputs, the static dashboard, or CI
+  artifacts.
 
 Default posture:
 
@@ -629,8 +629,7 @@ Before shared dashboard or real-data publishing:
 - define masking / redaction。
 - define user notice or consent。
 - decide identity handling。
-- validate Pages visibility。
-- confirm snapshot growth monitoring。
+- define shared artifact access control。
 
 Before using `remote-managed-langfuse` or `remote-managed-collector`, define:
 

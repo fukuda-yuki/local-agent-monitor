@@ -39,7 +39,7 @@ Profile の一覧は [collection profile specification](specifications/interface
 - 実 credential、secret、Base64 authorization header を repository に保存しない。
 - raw prompt、raw response、tool arguments、tool results、source code fragment を commit しない。
 - `data\`、`tmp\`、`artifacts/dashboard-input/*.json` は local runtime data として扱う。
-- GitHub Pages や共有場所に publish する前に、access control、retention、削除方法、利用者周知を確認する。
+- 生成済み dashboard artifact を共有場所に置く前に、access control、retention、削除方法、利用者周知を確認する。
 - remote managed Langfuse / Collector endpoint に送信する前に、access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を決める。
 
 ## 画像で見る Static Dashboard

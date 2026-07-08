@@ -212,9 +212,8 @@ the test deterministic when the browser is absent.
 - `docs/requirements.md` and `docs/spec.md` require
   `dotnet build CopilotAgentObservability.slnx` and
   `dotnet test CopilotAgentObservability.slnx` for code/project/workflow changes.
-- `.github/workflows/static-dashboard-pages.yml` runs
-  `dotnet test CopilotAgentObservability.slnx` without a Playwright browser
-  install step.
+- Repository validation runs `dotnet test CopilotAgentObservability.slnx` and
+  requires a Playwright browser install step first.
 - `docs/sprints/sprint10-monitor-design-views/milestones/M6-validation/review.md`
   records a targeted manual sequence that installs Chromium, but also says those
   diagnostic runs are not substitutes for the required solution test command.
@@ -272,8 +271,8 @@ developer profile.
 
 ### Tests/docs to update
 
-- Update `.github/workflows/static-dashboard-pages.yml` or any future validation
-  workflow that runs `dotnet test CopilotAgentObservability.slnx`.
+- Update any future validation workflow that runs
+  `dotnet test CopilotAgentObservability.slnx`.
 - Update `docs/agent-guides/repository-workflow.md`, `README.md`, and
   `docs/contributor-guide.md` if the required local validation sequence changes.
 - If using opt-in smoke, tag/skip the Playwright test deliberately and document

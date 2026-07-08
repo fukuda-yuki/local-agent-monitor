@@ -42,12 +42,12 @@ Repository に保存してはいけないもの:
 
 `.gitignore` で多くは除外されていますが、commit 前に `git status --short` を確認してください。
 
-## Dashboard 公開前チェック
+## Dashboard 共有前チェック
 
-GitHub Pages や共有場所に publish する前に、以下を確認します。
+生成済み dashboard artifact を共有場所に置く前に、以下を確認します。
 
-- repository / Pages access control。
-- retention と snapshot 削除方法。
+- 共有先の access control。
+- retention と削除方法。
 - masking / redaction 方針。
 - `user.id` と `user.email` 表示の可否。
 - 利用者周知。

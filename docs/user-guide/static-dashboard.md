@@ -56,23 +56,20 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 Search は trace id、task、user、candidate などを対象にします。
 Table header をクリックすると sort できます。
 
-## GitHub Pages Snapshot
+## Static Artifact
 
-GitHub Actions workflow は以下を生成します。
+`generate-static-dashboard` は指定した `--out-dir` に以下を生成します。
 
 ```text
-latest/index.html
-latest/dashboard-data.json
-YYYY-MM-DD/index.html
-YYYY-MM-DD/dashboard-data.json
+index.html
+dashboard-data.json
 ```
 
-Daily snapshots は `gh-pages` branch と Pages artifact に保持します。
-生成済み snapshot は main branch に commit しません。
+生成済み artifact は local output です。必要な場合だけ、アクセス制御された共有場所へ手動で置いてください。
 
-実データ由来 aggregate を publish する前に確認すること:
+実データ由来 aggregate を共有する前に確認すること:
 
-- repository / organization の Pages access control。
+- 共有先の access control。
 - dashboard dataset に raw prompt / response / tool arguments / tool results が入っていないこと。
 - `user.id` と `user.email` の表示が許容されていること。
 - retention と削除手順。
