@@ -312,9 +312,9 @@ public class CanvasExtensionContractTests
     {
         var script = ReadExtension();
 
-        // Sprint15 M5 (child D, D038): the ONLY authorized raw-bearing
-        // route. Page-navigation only, gated by the same x-canvas-token as
-        // every other route, and never fetched as JSON from client-side JS.
+        // Sprint15 M5 (child D, D038): the authorized page-navigation raw
+        // route. Gated by the same x-canvas-token as every other route, and
+        // never fetched as JSON from client-side JS.
         Assert.Contains("/raw-preview/", script);
         Assert.Contains("extractRawPreviewFragment", script);
         Assert.Contains("renderRawPreviewHtml", script);
@@ -328,11 +328,32 @@ public class CanvasExtensionContractTests
         Assert.DoesNotContain("fetch(\"/raw-preview", script);
         Assert.DoesNotContain("fetch('/raw-preview", script);
 
-        // Every other surface (the 5 Canvas actions, the M3 trace-detail
-        // route, the M4 summary proxy) must still be raw-free; only
-        // "/raw-preview" itself and the server-to-server fetch of Local
-        // Monitor's existing raw route are authorized.
+        // The route must not loosen action/log/repository-safe boundaries.
         Assert.Contains("x-canvas-token", script);
+        Assert.DoesNotContain("payload_json", script);
+        Assert.DoesNotContain("console.log", script);
+    }
+
+    [Fact]
+    public void Extension_DeclaresTraceContentPreviewSurface()
+    {
+        var script = ReadExtension();
+
+        // D050: the helper-page surface may show selected-trace prompt/response
+        // previews, but only through the Canvas-owned token-gated local route.
+        // It reuses the existing Local Monitor span detail route and keeps
+        // action responses/logs/repository-safe output raw-free.
+        Assert.Contains("/api/trace-content/", script);
+        Assert.Contains("fetchHelperTraceContentPreview", script);
+        Assert.Contains("/spans/${encodedSpanId}/detail", script);
+        Assert.Contains("prompt_preview", script);
+        Assert.Contains("response_preview", script);
+        Assert.Contains("tracePromptPreview.textContent", script);
+        Assert.Contains("traceResponsePreview.textContent", script);
+        Assert.Contains("x-canvas-token", script);
+        Assert.Contains("Cache-Control", script);
+        Assert.Contains("no-store", script);
+        Assert.DoesNotContain("innerHTML", script);
         Assert.DoesNotContain("payload_json", script);
         Assert.DoesNotContain("console.log", script);
     }
@@ -392,11 +413,10 @@ public class CanvasExtensionContractTests
         Assert.Contains("Selected span id: ${spanId}", promptScript);
     }
 
-    // Sprint15 M5 (child D, D038) is the one deliberate exception to the
+    // Sprint15 M5 (child D, D038) is the deliberate exception to the
     // otherwise-blanket "no /raw reference" contract enforced by the facts
     // above. Rather than deleting those pre-existing checks (which would
-    // weaken the boundary for the 5 Canvas actions, the M3 trace-detail
-    // route, and the M4 summary proxy), this scopes them precisely by
+    // weaken the action/log/repository-safe boundary), this scopes them by
     // stripping the two "/raw" substrings D038 explicitly authorizes — the
     // "/raw-preview" route path itself, and the server-to-server fetch
     // target template literal `/traces/${...}/raw` (which always ends the

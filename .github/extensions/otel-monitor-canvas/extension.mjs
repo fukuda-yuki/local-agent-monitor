@@ -53,6 +53,7 @@ const DEFAULT_MONITOR_URL = "http://127.0.0.1:4320";
 const TRACE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$";
 const MAX_TRACE_LIST_LIMIT = 50;
 const MAX_SPAN_PAGE_SIZE = 200;
+const MAX_TRACE_CONTENT_DETAIL_SPANS = 20;
 const REQUEST_TIMEOUT_MS = 5000;
 const FOCUS_VALUES = ["latency", "tokens", "cache", "errors"];
 
@@ -159,6 +160,70 @@ async function fetchHelperPromptLabel(monitorUrl, traceId) {
     } catch {
         return null;
     }
+}
+
+async function fetchHelperSpanDetail(monitorUrl, traceId, spanId) {
+    try {
+        const encodedTraceId = encodeURIComponent(traceId);
+        const encodedSpanId = encodeURIComponent(spanId);
+        const { response, body } = await fetchTextWithTimeout(monitorApiUrl(monitorUrl, `/traces/${encodedTraceId}/spans/${encodedSpanId}/detail`));
+        if (!response.ok) {
+            return null;
+        }
+        return body ? parseJsonBody(body) : null;
+    } catch {
+        return null;
+    }
+}
+
+function nonEmptyString(value) {
+    return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function promptPreviewFromDetail(detail) {
+    const messages = Array.isArray(detail?.llm?.messages) ? detail.llm.messages : [];
+    const userMessage = messages.find((message) => message?.role === "user" && nonEmptyString(message.preview));
+    const anyMessage = messages.find((message) => nonEmptyString(message?.preview));
+    return nonEmptyString(userMessage?.preview) ?? nonEmptyString(anyMessage?.preview);
+}
+
+function responsePreviewFromDetail(detail) {
+    return nonEmptyString(detail?.llm?.response_preview);
+}
+
+async function fetchHelperTraceContentPreview(monitorUrl, traceId) {
+    const spans = await fetchHelperSpans(monitorUrl, traceId);
+    const sorted = spans
+        .filter((span) => matchesTraceId(span?.span_id))
+        .sort(compareByTimeThenOrdinal);
+    const chatSpans = sorted.filter(isChatTurn);
+    const chatSpanIds = new Set(chatSpans.map((span) => span.span_id));
+    const candidates = [
+        ...chatSpans,
+        ...sorted.filter((span) => !chatSpanIds.has(span.span_id)),
+    ].slice(0, MAX_TRACE_CONTENT_DETAIL_SPANS);
+
+    let promptPreview = null;
+    let responsePreview = null;
+    for (const span of candidates) {
+        const detail = await fetchHelperSpanDetail(monitorUrl, traceId, span.span_id);
+        if (!promptPreview) {
+            promptPreview = promptPreviewFromDetail(detail);
+        }
+        const candidateResponse = responsePreviewFromDetail(detail);
+        if (candidateResponse) {
+            responsePreview = candidateResponse;
+        }
+        if (promptPreview && responsePreview) {
+            break;
+        }
+    }
+
+    return {
+        trace_id: traceId,
+        prompt_preview: promptPreview,
+        response_preview: responsePreview,
+    };
 }
 
 function validateAnalysisSelection(options, payload) {
@@ -358,6 +423,26 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
                     cacheHitRate: cacheHitRate(cacheReadTokens, inputTokens),
                 });
                 sendJson(res, 200, summary);
+            } catch (err) {
+                const code = err instanceof CanvasError ? err.code : "monitor_unavailable";
+                sendJson(res, 502, { error: code, message: err.message });
+            }
+            return;
+        }
+
+        if (req.method === "GET" && path.startsWith("/api/trace-content/")) {
+            res.setHeader("Cache-Control", "no-store");
+            const traceId = decodeURIComponent(path.slice("/api/trace-content/".length));
+            if (!matchesTraceId(traceId)) {
+                sendJson(res, 400, { error: "invalid_trace_id" });
+                return;
+            }
+            try {
+                if (!isLoopbackUrl(monitorUrl)) {
+                    sendJson(res, 400, { error: "invalid_monitor_url" });
+                    return;
+                }
+                sendJson(res, 200, await fetchHelperTraceContentPreview(monitorUrl, traceId));
             } catch (err) {
                 const code = err instanceof CanvasError ? err.code : "monitor_unavailable";
                 sendJson(res, 502, { error: code, message: err.message });

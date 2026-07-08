@@ -1535,3 +1535,24 @@ repository-safe publishing 判断が混同されるため、Pages deploy surface
   単一信頼ローカル利用者向けに raw prompt / response を表示してよい。
 - raw / PII を repository-safe outputs、static dashboard、CI artifact、logs、
   Issue、PR、docs へ出さない境界は維持する。
+
+## D050: Canvas helper に選択 trace の prompt / response preview を表示する
+
+Status: Accepted
+
+単一信頼ローカル利用者向けの Local Monitor / Canvas helper では、利用者自身の
+prompt / response を画面に表示してよい。D049 で Pages deploy surface を削除し、
+repository-safe publishing と local screen の判断を分離したため、Canvas helper の
+ローカル表示も Local Monitor と同じ raw-default posture に揃える。
+
+決定事項:
+
+- Canvas action responses、`session.send()` prompt、logs、committed outputs、
+  static artifacts、Issue / PR / docs には raw prompt / response を出さない。
+- Canvas-owned loopback helper server に token-gated `GET /api/trace-content/:traceId`
+  を追加し、既存 raw-bearing route `GET /traces/{traceId}/spans/{spanId}/detail`
+  から server-to-server で prompt / response preview を取得して表示する。
+- 新しい Local Monitor endpoint、`/api/monitor/*` field、SSE field、projection
+  schema は追加しない。`--sanitized-only` では preview は表示されない。
+- helper page の client-side rendering は `textContent` による inert text 表示を
+  維持し、`innerHTML` で captured content を挿入しない。

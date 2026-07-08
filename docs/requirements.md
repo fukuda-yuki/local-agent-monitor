@@ -89,7 +89,13 @@ Copilot Agent Observability は、GitHub Copilot Chat、GitHub Copilot CLI、Cod
   `<pre>`）から server-to-server で取得し再デコードせずそのまま埋め込む方式で
   実装する。新規ページ遷移ルート `GET /raw-preview/:traceId/:spanId`
   （拡張所有・token 認証・`Cache-Control: no-store`）として提供し、
-  クライアント側 JS は raw を JSON として受け取らない（D038）。session-to-trace
+  クライアント側 JS は raw を JSON として受け取らない（D038）。D050 では、
+  同じ拡張所有・token 認証・loopback helper surface に限り、選択 trace の
+  prompt / response preview を `GET /traces/{traceId}/spans/{spanId}/detail`
+  から server-to-server 取得して画面表示してよい。これは利用者自身のローカル
+  Canvas 画面表示であり、Canvas action response、`session.send()` prompt、
+  logs、repository-safe outputs、static artifacts へ raw prompt / response を
+  流さない境界は変更しない。session-to-trace
   correlation は、OTel 取り込み側に対応する安定識別子が存在しないため見送り、
   trace は引き続き手動選択とする（D037）。実装（コード作成・自動テスト検証）は
   Claude が行い、GitHub Copilot Canvas runtime ツール

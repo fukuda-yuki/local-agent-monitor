@@ -296,6 +296,26 @@ test("renderHelperHtml: contains the trace detail summary card heading and no ra
     assert.doesNotMatch(html, /payload_json/);
 });
 
+test("renderHelperHtml: selected trace card fetches prompt and response previews as inert text", () => {
+    const html = renderHelperHtml({
+        instanceId: "inst-1",
+        monitorUrl: "http://127.0.0.1:4320",
+        healthState: "ready",
+        statusCode: 200,
+        healthBody: "{\"status\":\"ready\"}",
+        error: null,
+        token: "token-1",
+    });
+
+    assert.match(html, /プロンプト \/ 応答/);
+    assert.match(html, /id="trace-prompt-preview"/);
+    assert.match(html, /id="trace-response-preview"/);
+    assert.match(html, /fetch\("\/api\/trace-content\//);
+    assert.match(html, /tracePromptPreview\.textContent/);
+    assert.match(html, /traceResponsePreview\.textContent/);
+    assert.doesNotMatch(html, /innerHTML/);
+});
+
 test("renderHelperHtml: contains the Local Monitor 概要 dashboard card and fetches /api/summary, with no raw fields", () => {
     const html = renderHelperHtml({
         instanceId: "inst-1",

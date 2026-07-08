@@ -93,4 +93,8 @@ Do not copy, commit, or attach runtime artifacts with this extension:
 - Local absolute machine paths, user profile paths, or sensitive bundle paths.
 
 The checked-in preview image uses synthetic mock data only. Canvas action
-responses remain bounded DTOs over existing sanitized monitor APIs.
+responses remain bounded DTOs over existing sanitized monitor APIs. The local
+token-gated helper page may display selected-trace prompt/response previews for
+the same local user, but those previews must not be copied into action
+responses, logs, committed files, screenshots intended for repository evidence,
+or static artifacts.

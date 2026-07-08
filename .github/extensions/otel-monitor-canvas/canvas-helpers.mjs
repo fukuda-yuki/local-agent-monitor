@@ -786,6 +786,10 @@ export function renderHelperHtml({ instanceId, monitorUrl, healthState, statusCo
       font-size: 12px;
       line-height: 1.4;
     }
+    .preview-block { margin-top: 12px; }
+    .preview-block h3 { color: var(--fg); }
+    .preview-block label { color: var(--muted); margin-top: 10px; }
+    .preview-block pre { max-height: 180px; white-space: pre-wrap; }
     .banner {
       padding: 12px 16px;
       border-radius: 6px;
@@ -874,6 +878,16 @@ export function renderHelperHtml({ instanceId, monitorUrl, healthState, statusCo
       <dt>キャッシュヒット率</dt><dd id="td-cache"></dd>
     </dl>
     <p id="trace-detail-link" style="display:none;"><a id="td-monitor-link" href="#" target="_blank" rel="noopener noreferrer">Local Monitorで詳細を見る</a></p>
+    <div class="preview-block" id="trace-content-panel" style="display:none;">
+      <h3>プロンプト / 応答</h3>
+      <p class="muted" id="trace-content-empty">本文プレビューを読み込み中…</p>
+      <div id="trace-content-values" style="display:none;">
+        <label for="trace-prompt-preview">プロンプト</label>
+        <pre id="trace-prompt-preview"></pre>
+        <label for="trace-response-preview">応答</label>
+        <pre id="trace-response-preview"></pre>
+      </div>
+    </div>
   </div>
 
   <div class="card">
@@ -966,6 +980,11 @@ ${focusOptionsHtml}
       var tdDuration = document.getElementById("td-duration");
       var tdCache = document.getElementById("td-cache");
       var tdMonitorLink = document.getElementById("td-monitor-link");
+      var traceContentPanel = document.getElementById("trace-content-panel");
+      var traceContentEmpty = document.getElementById("trace-content-empty");
+      var traceContentValues = document.getElementById("trace-content-values");
+      var tracePromptPreview = document.getElementById("trace-prompt-preview");
+      var traceResponsePreview = document.getElementById("trace-response-preview");
 
       function setResult(msg, ok) {
         result.textContent = msg;
@@ -1052,7 +1071,54 @@ ${focusOptionsHtml}
         tdLink.style.display = "none";
       }
 
+      function hideTraceContent() {
+        traceContentPanel.style.display = "none";
+        traceContentEmpty.style.display = "none";
+        traceContentValues.style.display = "none";
+        tracePromptPreview.textContent = "";
+        traceResponsePreview.textContent = "";
+      }
+
+      function showTraceContentEmpty(msg) {
+        traceContentPanel.style.display = "";
+        traceContentEmpty.textContent = msg;
+        traceContentEmpty.style.display = "";
+        traceContentValues.style.display = "none";
+        tracePromptPreview.textContent = "";
+        traceResponsePreview.textContent = "";
+      }
+
+      function showTraceContentValues(promptPreview, responsePreview) {
+        traceContentPanel.style.display = "";
+        traceContentEmpty.style.display = "none";
+        traceContentValues.style.display = "";
+        tracePromptPreview.textContent = promptPreview || "—";
+        traceResponsePreview.textContent = responsePreview || "—";
+      }
+
+      function loadTraceContent(traceId) {
+        if (!traceId) { hideTraceContent(); return; }
+        showTraceContentEmpty("本文プレビューを読み込み中…");
+        fetch("/api/trace-content/" + encodeURIComponent(traceId) + "?t=" + encodeURIComponent(token), { headers: { "x-canvas-token": token } })
+          .then(function (r) { return r.json().then(function (b) { return { status: r.status, body: b }; }); })
+          .then(function (out) {
+            if (out.status !== 200) {
+              showTraceContentEmpty("本文プレビューを取得できませんでした: " + (out.body && out.body.error || ("HTTP " + out.status)));
+              return;
+            }
+            var promptPreview = out.body && typeof out.body.prompt_preview === "string" ? out.body.prompt_preview : "";
+            var responsePreview = out.body && typeof out.body.response_preview === "string" ? out.body.response_preview : "";
+            if (!promptPreview && !responsePreview) {
+              showTraceContentEmpty("本文プレビューはありません（sanitized-only または対応する LLM span がありません）。");
+              return;
+            }
+            showTraceContentValues(promptPreview, responsePreview);
+          })
+          .catch(function (e) { showTraceContentEmpty("本文プレビューを取得できませんでした: " + e.message); });
+      }
+
       function loadTraceDetail(traceId) {
+        loadTraceContent(traceId);
         if (!traceId) { showTraceDetailEmpty("トレースを選択すると要約が表示されます。"); return; }
         showTraceDetailEmpty("読み込み中…");
         fetch("/api/trace-detail/" + encodeURIComponent(traceId) + "?t=" + encodeURIComponent(token), { headers: { "x-canvas-token": token } })

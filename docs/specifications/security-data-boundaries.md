@@ -337,9 +337,10 @@ D036):
   trigger, no-`console.log` diagnostics, and the no-raw/PII-to-logs/committed-
   output/static-artifact boundary are all unchanged.
 - Prompt / response preview on any Canvas surface is **not** enabled by child A.
-  Whether the Canvas loopback helper page may show a prompt/response preview is
-  deferred to child D as a separate boundary-design decision; until that
-  decision, the helper page shows no raw prompt/response bodies.
+  D050 later authorizes the token-gated loopback helper page itself to show a
+  selected trace's local prompt/response preview; Canvas action responses,
+  `session.send()` prompts, logs, committed outputs, and static artifacts remain
+  raw-free.
 - A future Canvas dashboard view (child B) will reuse a new sanitized aggregate
   endpoint on the Local Monitor (e.g. `/api/monitor/summary`, built from
   `MonitorTraceRollup` and the existing projection store) shared with the Razor
@@ -453,6 +454,25 @@ Sprint15 continuation — prompt-aware trace selection (D039, implemented, M7):
   contract tests) is complete (Sprint15 M7), following the same two-stage
   (design confirmed → implementation authorized) process D037/D038 already
   used.
+
+Canvas helper prompt/response preview (D050):
+
+- The Canvas helper may show the selected trace's prompt and response preview on
+  the extension-owned loopback page. This is a local screen for the same trusted
+  user, not a Canvas action response and not a repository-safe output.
+- The helper uses a token-protected `GET /api/trace-content/:traceId` route on
+  the Canvas-owned loopback server. The route rejects non-loopback monitor URLs,
+  uses `Cache-Control: no-store`, and fetches existing Local Monitor data
+  server-to-server from `GET /traces/{traceId}/spans/{spanId}/detail`.
+- No new Local Monitor endpoint, `/api/monitor/*` field, projection schema field,
+  or SSE field is added. Under `--sanitized-only`, the span detail route is
+  absent and the helper degrades to no preview.
+- Client-side rendering must assign preview text with `textContent` (or
+  equivalent inert text APIs), not `innerHTML`.
+- Canvas actions (`monitor_health`, `list_recent_traces`, `get_trace_summary`,
+  `get_trace_span_tree`, `get_cache_summary`), `session.send()` prompts, logs,
+  committed files, screenshots intended for repository evidence, CI artifacts,
+  and static artifacts must not include the prompt/response preview.
 
 Sprint16 Canvas cross-repo adapter metadata (D040):
 
