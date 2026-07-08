@@ -295,7 +295,7 @@ public class MonitorProjectionApiTests
           {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
           {"key":"user.id","value":{"stringValue":"USER-ID-SECRET-MARKER"}},
           {"key":"user.email","value":{"stringValue":"leak-marker@example.com"}},
-          {"key":"repo.name","value":{"stringValue":"leak-marker@example.com"}},
+          {"key":"vcs.repository.name","value":{"stringValue":"leak-marker@example.com"}},
           {"key":"workspace.name","value":{"stringValue":"C:\\Users\\person\\secret"}},
           {"key":"repo.snapshot","value":{"stringValue":"Bearer token-marker"}}
         ]},"scopeSpans":[{"spans":[
@@ -309,7 +309,7 @@ public class MonitorProjectionApiTests
     private const string RepositoryMetadataJson = """
         {"resourceSpans":[{"resource":{"attributes":[
           {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
-          {"key":"repo.name","value":{"stringValue":"repo-api"}},
+          {"key":"vcs.repository.name","value":{"stringValue":"repo-api"}},
           {"key":"workspace.name","value":{"stringValue":"workspace-api"}},
           {"key":"repo.snapshot","value":{"stringValue":"snapshot-api"}}
         ]},"scopeSpans":[{"spans":[

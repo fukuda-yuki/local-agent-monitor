@@ -70,7 +70,7 @@ internal static class MonitorProjectionBuilder
         {
             var resourceAttributes = OtlpSpanReader.ReadResourceAttributes(resourceSpan);
             var resourceMetadata = new TraceRepositoryMetadata(
-                RepositoryName: MeasurementSanitizer.SanitizeFreeFormName(OtlpSpanReader.ReadString(resourceAttributes, "repo.name")),
+                RepositoryName: MeasurementSanitizer.SanitizeFreeFormName(OtlpSpanReader.ReadString(resourceAttributes, "vcs.repository.name")),
                 WorkspaceLabel: MeasurementSanitizer.SanitizeFreeFormName(OtlpSpanReader.ReadString(resourceAttributes, "workspace.name")),
                 RepoSnapshot: MeasurementSanitizer.SanitizeFreeFormName(OtlpSpanReader.ReadString(resourceAttributes, "repo.snapshot")));
 

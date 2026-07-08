@@ -286,7 +286,7 @@ public class MonitorSummaryEndpointTests
     private const string RepositoryMetadataJson = """
         {"resourceSpans":[{"resource":{"attributes":[
           {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
-          {"key":"repo.name","value":{"stringValue":"repo-summary"}},
+          {"key":"vcs.repository.name","value":{"stringValue":"repo-summary"}},
           {"key":"workspace.name","value":{"stringValue":"workspace-summary"}},
           {"key":"repo.snapshot","value":{"stringValue":"snapshot-summary"}}
         ]},"scopeSpans":[{"spans":[

@@ -1230,7 +1230,7 @@ metadata を新規 trace から投影してよい。
 
 | Projected / Canvas field | Source attribute | Boundary |
 | --- | --- | --- |
-| `repository_name` | `repo.name` | sanitized display label |
+| `repository_name` | `vcs.repository.name` | sanitized display label |
 | `workspace_label` | `workspace.name` | sanitized display label; not an absolute path |
 | `repo_snapshot` | `repo.snapshot` | sanitized branch / commit / snapshot label when present |
 
@@ -1245,6 +1245,10 @@ output へ返す禁止は維持する。
 新規 ingestion または明示的な DB 再生成で埋まる。Canvas helper は metadata 欠落時
 `unknown repository` を表示する。`repository_full_name`、`workspace_hash`、
 `git_branch`、`git_commit_sha`、`source_kind` は、この sprint では追加しない。
+CM-1 では repository label source を OpenTelemetry VCS semantic convention
+に合わせて `vcs.repository.name` へ置き換える。`repo.name` 互換 fallback は
+持たず、`vcs.repository.url.full` は Canvas helper / bounded action DTO へ
+返さない。
 
 ## D041: Canvas analysis UX は session.send の requested controls として扱う
 

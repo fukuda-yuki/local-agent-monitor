@@ -217,7 +217,7 @@ projection schema version 3):
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `repository_name` | TEXT NULL | sanitized display label derived only from `repo.name` |
+| `repository_name` | TEXT NULL | sanitized display label derived only from `vcs.repository.name`; `repo.name` is ignored |
 | `workspace_label` | TEXT NULL | sanitized display label derived only from `workspace.name`; not an absolute path |
 | `repo_snapshot` | TEXT NULL | sanitized branch / commit / snapshot label derived only from `repo.snapshot` |
 

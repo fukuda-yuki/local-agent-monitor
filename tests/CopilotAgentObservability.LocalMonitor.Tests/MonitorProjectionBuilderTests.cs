@@ -52,11 +52,29 @@ public class MonitorProjectionBuilderTests
     }
 
     [Fact]
+    public void Build_DoesNotDeriveRepositoryNameFromLegacyRepoName()
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"repo.name","value":{"stringValue":"legacy-repo"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-legacy-repo","spanId":"1111111111111111","name":"chat gpt-4o"}
+        ]}]}]}
+        """;
+        var record = Record("trace-legacy-repo", payload);
+
+        var projection = MonitorProjectionBuilder.Build(record);
+
+        var contribution = Assert.Single(projection.TraceContributions);
+        Assert.Null(contribution.RepositoryName);
+    }
+
+    [Fact]
     public void Build_DropsUnsafeRepositoryMetadataValues()
     {
         var payload = """
         {"resourceSpans":[{"resource":{"attributes":[
-          {"key":"repo.name","value":{"stringValue":"leak@example.com"}},
+          {"key":"vcs.repository.name","value":{"stringValue":"leak@example.com"}},
           {"key":"workspace.name","value":{"stringValue":"C:\\Users\\person\\secret"}},
           {"key":"repo.snapshot","value":{"stringValue":"Bearer token-marker"}}
         ]},"scopeSpans":[{"spans":[
@@ -119,7 +137,7 @@ public class MonitorProjectionBuilderTests
         var payload = """
         {"resourceSpans":[{"resource":{"attributes":[
           {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
-          {"key":"repo.name","value":{"stringValue":"shared-repository"}},
+          {"key":"vcs.repository.name","value":{"stringValue":"shared-repository"}},
           {"key":"workspace.name","value":{"stringValue":"shared-workspace"}},
           {"key":"repo.snapshot","value":{"stringValue":"shared-snapshot"}}
         ]},"scopeSpans":[{"spans":[
@@ -183,7 +201,7 @@ public class MonitorProjectionBuilderTests
           {"key":"task.category","value":{"stringValue":"refactor"}},
           {"key":"agent.variant","value":{"stringValue":"v2"}},
           {"key":"prompt.version","value":{"stringValue":"p3"}},
-          {"key":"repo.name","value":{"stringValue":"copilot-agent-observability"}},
+          {"key":"vcs.repository.name","value":{"stringValue":"copilot-agent-observability"}},
           {"key":"workspace.name","value":{"stringValue":"codex-workspace"}},
           {"key":"repo.snapshot","value":{"stringValue":"sprint16-m2"}}
         ]},"scopeSpans":[{"spans":[

@@ -592,7 +592,7 @@ codex-app
 Recommended:
 
 ```text
-repo.name
+vcs.repository.name
 workspace.name
 task.id
 task.category
@@ -606,9 +606,10 @@ mcp.profile
 cli.wrapper.version
 ```
 
-Sprint16 uses only the existing recommended attributes `repo.name`,
+Sprint16 uses only the existing recommended attributes `vcs.repository.name`,
 `workspace.name`, and `repo.snapshot` as optional sources for the Local Monitor
 projection fields `repository_name`, `workspace_label`, and `repo_snapshot`.
+`repo.name` is not a repository label source for this surface.
 These attributes are not required for repository-safe datasets, and their
 absence must not create collection-health failures. Missing values remain null
 in `/api/monitor/*`; Canvas helper UI displays `unknown repository` when it

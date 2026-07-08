@@ -37,11 +37,10 @@ All M3 (storage/migration) and M6 (security live-validation) cards are Fixed/Clo
 
 S10-1, S10-2, S10-4, S10-5 are Fixed but stay in the active feature file because it still contains S10-3 (Open).
 
-### Non-sprint Fix Cards (active)
+### Non-sprint Fix Cards (archived in place)
 
-| Card | Feature unit | Severity | Status | Plan boundary |
-| --- | --- | --- | --- | --- |
-| [CM-1](Canvas-vcs-repository-metadata.md#CM-1) | Canvas repository label source attribute | Medium | Open | Replace the custom `repo.name` source with OpenTelemetry `vcs.repository.name`; do not keep `repo.name` compatibility. |
+CM-1 is Fixed and remains in its feature file as the record for the Canvas VCS
+repository metadata cleanup.
 
 ## Active Feature Files
 
@@ -50,7 +49,6 @@ S10-1, S10-2, S10-4, S10-5 are Fixed but stay in the active feature file because
 | [M2-span-projection.md](M2-span-projection.md) | Projection builder, token rollup, field sanitization | M2-8, M2-9 |
 | [M5-agent-execution-ui.md](M5-agent-execution-ui.md) | Trace-detail page, raw default behavior, raw lookup/rendering | M5-5 |
 | [Sprint10-monitor-design-views.md](Sprint10-monitor-design-views.md) | Sprint10 monitor design views, Playwright bootstrap, test reliability | S10-3 |
-| [Canvas-vcs-repository-metadata.md](Canvas-vcs-repository-metadata.md) | Canvas repository label source attribute | CM-1 |
 
 ## Archived Files (`_archive/`)
 

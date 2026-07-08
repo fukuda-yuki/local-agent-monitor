@@ -28,7 +28,7 @@ Validation attempted while filing:
 
 | Card | Severity | Fix unit | Status |
 | --- | --- | --- | --- |
-| CM-1 | Medium | Canvas repository label source attribute | Open |
+| CM-1 | Medium | Canvas repository label source attribute | Fixed |
 
 ---
 
@@ -36,7 +36,9 @@ Validation attempted while filing:
 
 ## CM-1 — Canvas repository labels ignore OpenTelemetry VCS repository attributes — Medium
 
-Status: Open.
+Status: Fixed. Local Monitor now derives `repository_name` from
+`vcs.repository.name` only; `repo.name` is intentionally ignored for repository
+labels.
 
 ### Problem
 
@@ -137,4 +139,3 @@ dotnet build CopilotAgentObservability.slnx
 pwsh scripts\test\install-playwright-chromium.ps1
 dotnet test CopilotAgentObservability.slnx
 ```
-

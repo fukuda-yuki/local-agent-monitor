@@ -461,9 +461,11 @@ Sprint16 Canvas cross-repo adapter metadata (D040):
   manifest, lockfile, `node_modules`, or new runtime/development dependency is
   introduced.
 - The Local Monitor may project only these sanitized repository metadata fields
-  from existing OTLP Resource Attributes: `repository_name` from `repo.name`,
+  from existing OTLP Resource Attributes: `repository_name` from
+  `vcs.repository.name`,
   `workspace_label` from `workspace.name`, and `repo_snapshot` from
   `repo.snapshot`.
+- `repo.name` is not a repository label source for this surface.
 - These fields may appear in sanitized `/api/monitor/*` responses, Canvas
   helper routes, and bounded Canvas action DTOs after the monitor projection
   sanitizer accepts them. They remain display metadata, not raw content.
@@ -476,6 +478,8 @@ Sprint16 Canvas cross-repo adapter metadata (D040):
 - No `repository_full_name`, `workspace_hash`, `git_branch`, `git_commit_sha`,
   `source_kind`, current-repository auto-match, raw endpoint, raw JSON API, or
   Canvas action raw payload is added in Sprint16.
+- `vcs.repository.url.full` is not emitted to Canvas helper routes or bounded
+  Canvas action DTOs.
 
 Sprint17 Canvas analysis requested options:
 
