@@ -291,16 +291,22 @@ public class CanvasExtensionContractTests
     {
         var script = ReadExtension();
 
-        // Sprint15 M4 (child B remainder, D038): Canvas-owned /api/summary
-        // proxy route + "Local Monitor 概要" card, gated by the same
-        // x-canvas-token as every other route.
+        // Sprint15 M4 (child B remainder, D038) + D039/D050 local-screen
+        // label: Canvas-owned /api/summary proxy route + "Local Monitor
+        // 概要" card, gated by the same x-canvas-token as every other route.
         Assert.Contains("/api/summary", script);
         Assert.Contains("fetchHelperSummary", script);
         Assert.Contains("/api/monitor/summary", script);
         Assert.Contains("Local Monitor 概要", script);
+        Assert.Contains("fetchHelperPromptLabel(monitorUrl, trace.trace_id)", script);
+        Assert.Contains("prompt_label", script);
+        Assert.Contains("dropdownOptionLabel(pair[1])", script);
+        Assert.Contains("Cache-Control", script);
+        Assert.Contains("no-store", script);
 
         // The proxy must not bypass the existing per-route token check or
-        // introduce a new Local Monitor endpoint / raw field category.
+        // introduce a new Local Monitor endpoint. Prompt labels are confined
+        // to the token-gated helper screen, not Canvas actions.
         Assert.Contains("x-canvas-token", script);
         AssertNoRawReferenceOtherThanAuthorizedPreview(script);
         Assert.DoesNotContain("payload_json", script);

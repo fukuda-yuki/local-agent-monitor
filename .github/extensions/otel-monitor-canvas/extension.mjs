@@ -310,6 +310,7 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
         }
 
         if (req.method === "GET" && path === "/api/summary") {
+            res.setHeader("Cache-Control", "no-store");
             try {
                 if (!isLoopbackUrl(monitorUrl)) {
                     sendJson(res, 400, { error: "invalid_monitor_url" });
@@ -335,23 +336,34 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
                     return;
                 }
                 const summary = body ? parseJsonBody(body) : {};
-                // Additive-only enrichment mirroring /api/traces' own `line`
-                // field: every existing D037/D038 field is preserved
-                // unchanged, only a derived, already-sanitized display string
-                // is appended (Sprint15 M4 / D038). The highlight traces are
-                // raw MonitorHost.ToTraceDto shapes (no `status` field), so
-                // `summaryTraceLine` routes them through compactTrace first —
-                // calling formatTraceLine on them directly would always read
-                // `status` as undefined and mislabel error traces as "OK".
-                const withLine = (trace) => (trace ? { ...trace, line: summaryTraceLine(trace) } : null);
+                // Additive-only helper-page enrichment: every existing
+                // D037/D038 summary field is preserved unchanged. `line` is
+                // derived from sanitized compact trace fields, while
+                // `prompt_label` mirrors /api/traces' D039 local-screen label
+                // and is never exposed through Canvas actions or logs.
+                const withLineAndPromptLabel = async (trace) => {
+                    if (!trace) {
+                        return null;
+                    }
+
+                    const promptLabel = matchesTraceId(trace.trace_id)
+                        ? await fetchHelperPromptLabel(monitorUrl, trace.trace_id)
+                        : null;
+                    return { ...trace, line: summaryTraceLine(trace), prompt_label: promptLabel };
+                };
                 const withTokensFormatted = (rows) => (Array.isArray(rows)
                     ? rows.map((row) => ({ ...row, total_tokens_formatted: formatTokens(row.total_tokens) }))
                     : rows);
+                const [latestTrace, topTokenTrace, errorTrace] = await Promise.all([
+                    withLineAndPromptLabel(summary.latest_trace),
+                    withLineAndPromptLabel(summary.top_token_trace),
+                    withLineAndPromptLabel(summary.error_trace),
+                ]);
                 sendJson(res, 200, {
                     ...summary,
-                    latest_trace: withLine(summary.latest_trace),
-                    top_token_trace: withLine(summary.top_token_trace),
-                    error_trace: withLine(summary.error_trace),
+                    latest_trace: latestTrace,
+                    top_token_trace: topTokenTrace,
+                    error_trace: errorTrace,
                     per_model_summary: withTokensFormatted(summary.per_model_summary),
                     per_client_kind_summary: withTokensFormatted(summary.per_client_kind_summary),
                 });

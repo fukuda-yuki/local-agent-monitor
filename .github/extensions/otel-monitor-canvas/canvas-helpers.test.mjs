@@ -329,6 +329,7 @@ test("renderHelperHtml: contains the Local Monitor 概要 dashboard card and fet
 
     assert.match(html, /Local Monitor 概要/);
     assert.match(html, /fetch\("\/api\/summary\?t=/);
+    assert.match(html, /dropdownOptionLabel\(pair\[1\]\)/);
     // Sprint15 M5 (D038) intentionally introduces "/raw-preview" (the
     // authorized raw-preview page-navigation link); any OTHER "/raw"
     // reference (e.g. a JSON fetch of the raw-bearing route) is still

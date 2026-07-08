@@ -1296,7 +1296,7 @@ ${focusOptionsHtml}
           });
           [["最新", s.latest_trace], ["最大トークン", s.top_token_trace], ["エラー", s.error_trace]].forEach(function (pair) {
             if (!pair[1]) { return; }
-            appendLine(summaryHighlights, pair[0] + ": " + (pair[1].line || pair[1].trace_id));
+            appendLine(summaryHighlights, pair[0] + ": " + dropdownOptionLabel(pair[1]));
           });
           summaryLoading.style.display = "none";
           summaryContent.style.display = "";

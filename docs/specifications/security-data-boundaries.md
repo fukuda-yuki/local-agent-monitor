@@ -159,9 +159,16 @@ Raw-bearing surfaces:
     opaque id (D032). Only this short prompt label is raw; all other columns
     stay sanitized metadata. Under `--sanitized-only` the prompt label is
     omitted and a shortened TraceId is shown instead.
-- there is **no JSON raw API**; `/api/monitor/*` and the SSE stream **never**
-  return raw / PII (the prompt label is server-rendered only; client-side JS
-  never fetches it).
+- there is **no full-payload JSON raw API**; `/api/monitor/*` and the SSE
+  stream **never** return raw / PII. The short prompt label route is the narrow
+  raw-bearing JSON exception outside `/api/monitor/*` and may be fetched by
+  same-origin / token-gated local UI code.
+- Update (D039 / D042 / D050): prompt labels are the narrow exception to the
+  older server-rendered-only wording. Local Monitor client-side overview /
+  trace-list code and Canvas helper routes may same-origin / token-gated fetch
+  `GET /traces/{traceId}/prompt-label` and render the short label as inert text.
+  Full raw payloads still are not fetched by client-side JS, and
+  `/api/monitor/*` plus SSE remain prompt-free.
 - **default-on**: raw-bearing routes are active by default (no launch flag
   required). `--sanitized-only` removes raw-bearing surfaces: the raw-detail
   route returns `404`, the trace-detail page omits its raw section and full raw
@@ -393,12 +400,17 @@ Sprint15 child B/C/D/E resolution (D037):
   `sanitizeDto()`'s forbidden-key filter is unaffected (this route doesn't go
   through it — it's a separate code path, not a loosening of the filter). No
   new Local Monitor endpoint is added.
-- **Child B remainder — `GET /api/summary` (Canvas-owned proxy, D038).** New
-  route on the Canvas-owned loopback server (same token gate as `/api/traces`)
-  that proxies `GET /api/monitor/summary` (already sanitized per the child B
-  entry above) into a "Local Monitor 概要" card in the helper page. No new
-  Local Monitor endpoint; no field beyond what `/api/monitor/summary` already
-  returns.
+- **Child B remainder — `GET /api/summary` (Canvas-owned proxy, D038; prompt
+  label enrichment updated by D039/D050).** New route on the Canvas-owned
+  loopback server (same token gate as `/api/traces`) that proxies
+  `GET /api/monitor/summary` (already sanitized per the child B entry above)
+  into a "Local Monitor 概要" card in the helper page. No new Local Monitor
+  endpoint. The helper may add `line` plus the same D039 `prompt_label`
+  enrichment to the latest / top-token / error highlight trace objects so the
+  local user can identify those rows by prompt on the Canvas helper screen.
+  Because that label is raw-bearing local-screen data, this helper route uses
+  `Cache-Control: no-store`. `/api/monitor/summary` itself remains sanitized
+  and prompt-free.
 - **Child E — dropped.** No implementation. No new resource/span attribute is
   added to the OTel ingestion schema. The Canvas helper page's manual trace
   dropdown (child A) remains the permanent trace-selection mechanism.
@@ -426,19 +438,22 @@ Sprint15 continuation — prompt-aware trace selection (D039, implemented, M7):
   `Index.cshtml.cs`/`Traces.cshtml.cs` already call them — no new extraction
   logic. Response: `{ "trace_id", "prompt_label" }`, where `prompt_label` may
   legitimately be `null` (not an error).
-- **Canvas-owned `/api/traces` (helper-page surface, not a Canvas action)
-  fetches this per trace, in parallel, and adds `prompt_label` to its own
-  response.** This is the same "helper-page surface" category M5's
+- **Canvas-owned `/api/traces` and `/api/summary` highlight traces
+  (helper-page surfaces, not Canvas actions) fetch this per trace, in
+  parallel, and add `prompt_label` to their own responses.** This is the same
+  "helper-page surface" category M5's
   raw-preview already established as distinct from the strictly-bounded
   `invoke_canvas_action` surface — `sanitizeDto()`'s forbidden-key filter
-  (which matches `prompt`) is unaffected because `/api/traces` never passed
-  through it in the first place. Canvas **actions** (`monitor_health`,
+  (which matches `prompt`) is unaffected because these helper proxy routes
+  never pass through it in the first place. Canvas **actions** (`monitor_health`,
   `list_recent_traces`, `get_trace_summary`, `get_trace_span_tree`,
   `get_cache_summary`), `session.send()` prompts, logs, and committed
   artifacts are unchanged by this and never carry `prompt_label`. Under
   `--sanitized-only`, the new route is absent (`404`), and Canvas falls back
   to its existing decision-supporting line with no prompt shown, mirroring
-  D032's own fallback for the Local Monitor's own pages.
+  D032's own fallback for the Local Monitor's own pages. The `/api/summary`
+  helper route uses `Cache-Control: no-store` when carrying highlight prompt
+  labels.
 - **Rationale for reconsidering "no `/api/monitor/*` field" for this one
   narrow case**: unlike Local Monitor's own pages (same-origin check only,
   no secret), every route on the Canvas extension's own server — including
@@ -460,6 +475,11 @@ Canvas helper prompt/response preview (D050):
 - The Canvas helper may show the selected trace's prompt and response preview on
   the extension-owned loopback page. This is a local screen for the same trusted
   user, not a Canvas action response and not a repository-safe output.
+- The same local-screen posture applies to prompt labels used to identify trace
+  choices and summary highlight traces in the Canvas helper. They may appear on
+  token-gated helper routes (`/api/traces` and `/api/summary`) but not in
+  Canvas actions, logs, `session.send()` prompts, committed files, CI artifacts,
+  or static artifacts.
 - The helper uses a token-protected `GET /api/trace-content/:traceId` route on
   the Canvas-owned loopback server. The route rejects non-loopback monitor URLs,
   uses `Cache-Control: no-store`, and fetches existing Local Monitor data
@@ -575,15 +595,21 @@ reused):
   field stays sanitized metadata. Both pages enforce the same controls as the
   existing raw-bearing routes: same-origin (`403` on cross-site), `Cache-Control:
   no-store`, and removal under `--sanitized-only` (the label is dropped and a
-  shortened TraceId is shown). The prompt label is server-rendered only; the
-  sanitized `/api/monitor/*` JSON and the SSE stream are unchanged and still
-  never carry it. No projection schema, API field, or new endpoint is added
+  shortened TraceId is shown). The prompt label may be server-rendered or
+  fetched from the raw-bearing prompt-label route by same-origin local UI code;
+  the sanitized `/api/monitor/*` JSON and the SSE stream are unchanged and still
+  never carry it. No projection schema or API field is added
   **for the `/api/monitor/*` family** — updated by D039, which adds a
   narrowly-scoped new endpoint *outside* that family (see "Sprint15
   continuation" above); `/api/monitor/*` and SSE themselves remain unchanged
   and prompt-free. The
   old `/ingestions` page is retired and its ingestion list is folded into the
   dashboard.
+- **Prompt-label client fetch update (D039 / D042).** Sprint18's client-side
+  overview and trace-list may fetch the short prompt label route and insert it
+  with `textContent`; this supersedes only the "server-rendered only" transport
+  wording for prompt labels. It does not allow client-side fetching of full raw
+  record payloads or adding prompt fields to `/api/monitor/*`.
 - **DOM Flow Chart / Span Tree (D033).** The Cytoscape.js + dagre vendored graph
   dependency is removed; the trace-detail visualization is plain DOM (an
   indented Span Tree with a waterfall bar, plus a DOM flow view) built by
