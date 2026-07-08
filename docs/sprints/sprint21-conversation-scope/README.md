@@ -1,8 +1,9 @@
 # Sprint21 - Conversation Scope For Instruction Diagnosis (Issue #46 Phase 2, step 2)
 
-Status: M1-M4 complete; M5 live validation prepared and not run. This sprint is
-the next Issue #46 Phase 2 step after Sprint20's deterministic
-instruction-evidence extractor.
+Status: M1-M5 complete. M5 live validation reached a conditional pass /
+Phase 2 step 2 GO with a category-shift caveat. This sprint is the next
+Issue #46 Phase 2 step after Sprint20's deterministic instruction-evidence
+extractor.
 
 Sprint20 added conversation metadata to `get_instruction_evidence`, but the
 analysis remains effectively trace-scoped: the model sees the analyzed trace's
@@ -87,7 +88,7 @@ not an unbounded conversation transcript.
 | M2 | Deterministic bounded conversation-context extraction and tests. | Done |
 | M3 | Tool data wiring and prompt template v4 with sibling-evidence rules. | Done |
 | M4 | Regression validation and self-review. | Done |
-| M5 | Live validation against preserved Sprint19/Sprint20 traces plus conversation-window cases; repository-safe Issue #46 update draft. | Prepared; not run |
+| M5 | Live validation against preserved Sprint19/Sprint20 traces plus conversation-window cases; repository-safe Issue #46 update draft. | Conditional pass |
 
 ## Recommended Implementation Order
 
@@ -97,8 +98,9 @@ M1 must update the current source-of-truth specifications before code changes.
 M2 should prove the bounded context as a pure deterministic computation before
 prompt changes. M3 should then expose the new context through the existing
 `get_instruction_evidence` tool and revise only the instruction-diagnosis
-prompt block. M4 verifies the additive boundary. M5 decides whether Phase 2
-step 2 is ready to proceed.
+prompt block. M4 verifies the additive boundary. M5 recorded a conditional
+pass for Phase 2 step 2 with category-shift caveats from prompt-v4 stricter
+grounding and newly available bounded sibling context.
 
 ## Acceptance Criteria
 

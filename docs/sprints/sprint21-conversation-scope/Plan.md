@@ -1,8 +1,7 @@
 # Sprint21 Conversation Scope - Implementation Plan
 
-Status: M1-M4 complete. M5 live validation is prepared and remains
-user-controlled because it requires preserved/local trace data and provider
-execution.
+Status: M1-M5 complete. M5 live validation reached a conditional pass /
+Phase 2 step 2 GO with a category-shift caveat.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Subagent dispatch is allowed only when the user explicitly asks for it (AGENTS.md); otherwise execute inline.
 
@@ -106,3 +105,11 @@ See `milestones/M4-regression-validation/plan.md`.
 - Repository-safe Issue #46 comment draft is recorded. Posting remains user-controlled.
 
 See `milestones/M5-live-validation/plan.md`.
+
+Result: preserved Sprint19/Sprint20 traces A1/A2/B1/B2/C1/C2 were re-run
+through prompt-v4 `instruction-diagnosis` using the Local Monitor raw analysis
+runner and local BYOK provider configuration. All six runs succeeded; citation,
+grounding, bounded-window, sibling-clarity, and data-safety gates passed.
+Sprint20 category distribution shifted under stricter prompt-v4 rules and
+bounded sibling evidence, recorded in
+`milestones/M5-live-validation/live-validation.md`.
