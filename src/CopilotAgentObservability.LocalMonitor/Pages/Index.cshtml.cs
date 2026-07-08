@@ -93,11 +93,10 @@ public sealed class IndexModel : PageModel
             string? prompt = null;
             try
             {
-                var records = store.ListRawRecordsByTraceId(traceId, 1);
-                if (records.Count > 0)
-                {
-                    prompt = MonitorPromptExtractor.ExtractPromptLabel(records[0].PayloadJson, traceId);
-                }
+                var records = store.ListRawRecordsByTraceId(traceId, MonitorPromptExtractor.RecordScanLimit);
+                prompt = MonitorPromptExtractor.ExtractFirstPromptLabel(
+                    records.Select(record => record.PayloadJson),
+                    traceId);
             }
             catch (PersistenceBusyException)
             {

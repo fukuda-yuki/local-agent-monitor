@@ -139,6 +139,21 @@ public class MonitorRawViewTests
     }
 
     [Fact]
+    public async Task PromptLabel_ScansPastFirstRawRecordWithoutPrompt()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedRawRecordWithoutPrompt(temp, "trace-with-prompt");
+        SeedRawRecordWithPrompt(temp, "trace-with-prompt", "What does this function do?");
+        await using var host = await StartHostAsync(temp);
+
+        var response = await host.Client.GetAsync("/traces/trace-with-prompt/prompt-label");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"prompt_label\":\"What does this function do?\"", body);
+    }
+
+    [Fact]
     public async Task PromptLabel_CrossSiteFetchIsForbidden()
     {
         using var temp = new MonitorTempDirectory();
@@ -205,6 +220,24 @@ public class MonitorRawViewTests
         return id;
     }
 
+    private static long SeedRawRecordWithoutPrompt(MonitorTempDirectory temp, string traceId)
+    {
+        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        var payloadJson = PromptlessPayloadTemplate.Replace("TRACE_ID_PLACEHOLDER", traceId);
+        var record = new RawTelemetryRecord(
+            Id: null,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: traceId,
+            ReceivedAt: DateTimeOffset.UnixEpoch,
+            ResourceAttributesJson: null,
+            PayloadJson: payloadJson);
+        var id = store.Insert(record);
+        store.ApplyProjection(id, record.Source, record.ReceivedAt, MonitorProjectionBuilder.Build(record), DateTimeOffset.UnixEpoch.AddMinutes(1));
+        store.ApplySpanProjection(id, MonitorSpanProjectionBuilder.Build(record), DateTimeOffset.UnixEpoch.AddMinutes(2));
+        return id;
+    }
+
     private static Task<RunningMonitorHost> StartHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false) =>
         MonitorTestHost.StartAsync(
             temp,
@@ -229,6 +262,18 @@ public class MonitorRawViewTests
            "attributes":[
              {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
              {"key":"gen_ai.prompt","value":{"stringValue":"PROMPT_TEXT_PLACEHOLDER"}}
+           ]}
+        ]}]}]}
+        """;
+
+    private const string PromptlessPayloadTemplate = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"TRACE_ID_PLACEHOLDER","spanId":"0001","name":"setup",
+           "startTimeUnixNano":"1709999999000000000","endTimeUnixNano":"1710000000000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"setup"}}
            ]}
         ]}]}]}
         """;

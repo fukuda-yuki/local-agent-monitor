@@ -146,11 +146,10 @@ public sealed class TracesModel : PageModel
             }
 
             string? prompt = null;
-            var records = store.ListRawRecordsByTraceId(row.TraceId, 1);
-            if (records.Count > 0)
-            {
-                prompt = MonitorPromptExtractor.ExtractPromptLabel(records[0].PayloadJson, row.TraceId);
-            }
+            var records = store.ListRawRecordsByTraceId(row.TraceId, MonitorPromptExtractor.RecordScanLimit);
+            prompt = MonitorPromptExtractor.ExtractFirstPromptLabel(
+                records.Select(record => record.PayloadJson),
+                row.TraceId);
 
             promptByTraceId[row.TraceId] = prompt;
         }

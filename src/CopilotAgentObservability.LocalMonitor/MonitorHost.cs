@@ -652,7 +652,7 @@ internal static class MonitorHost
                 IReadOnlyList<RawTelemetryRecord> records;
                 try
                 {
-                    records = projectionStore.ListRawRecordsByTraceId(traceId, 1);
+                    records = projectionStore.ListRawRecordsByTraceId(traceId, MonitorPromptExtractor.RecordScanLimit);
                 }
                 catch (PersistenceBusyException)
                 {
@@ -660,9 +660,9 @@ internal static class MonitorHost
                     return;
                 }
 
-                var label = records.Count > 0
-                    ? MonitorPromptExtractor.ExtractPromptLabel(records[0].PayloadJson, traceId)
-                    : null;
+                var label = MonitorPromptExtractor.ExtractFirstPromptLabel(
+                    records.Select(record => record.PayloadJson),
+                    traceId);
 
                 context.Response.Headers["Cache-Control"] = "no-store";
                 await WriteJsonAsync(context, new { trace_id = traceId, prompt_label = label });

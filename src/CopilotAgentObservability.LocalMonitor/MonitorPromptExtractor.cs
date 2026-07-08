@@ -12,6 +12,7 @@ namespace CopilotAgentObservability.LocalMonitor;
 internal static class MonitorPromptExtractor
 {
     internal const int MaxLabelLength = 120;
+    internal const int RecordScanLimit = 20;
 
     // OTLP span attribute keys that carry the user prompt, in preference order.
     // The real VS Code Copilot payload shape is pending live validation; keep the
@@ -43,6 +44,20 @@ internal static class MonitorPromptExtractor
         {
             return null;
         }
+    }
+
+    public static string? ExtractFirstPromptLabel(IEnumerable<string?> payloadJsons, string traceId)
+    {
+        foreach (var payloadJson in payloadJsons)
+        {
+            var label = ExtractPromptLabel(payloadJson, traceId);
+            if (label is not null)
+            {
+                return label;
+            }
+        }
+
+        return null;
     }
 
     private static string? FindPromptText(JsonElement root, string traceId)

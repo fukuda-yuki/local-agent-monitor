@@ -74,6 +74,7 @@ public class MonitorTraceListPlaywrightTests
     {
         var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
+        SeedTrace(store, PromptlessBigPayload, minute: 0);
         SeedTrace(store, BigPayload, minute: 1);
         SeedTrace(store, ErrorPayload, minute: 2);
     }
@@ -105,6 +106,18 @@ public class MonitorTraceListPlaywrightTests
             {"key":"gen_ai.usage.output_tokens","value":{"intValue":"1000"}},
             {"key":"gen_ai.usage.cache_read.input_tokens","value":{"intValue":"2000"}}
           ]}
+        ]}]}]}
+        """;
+
+    private const string PromptlessBigPayload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-list-big","spanId":"0001","name":"setup",
+           "startTimeUnixNano":"900000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"setup"}}
+           ]}
         ]}]}]}
         """;
 
