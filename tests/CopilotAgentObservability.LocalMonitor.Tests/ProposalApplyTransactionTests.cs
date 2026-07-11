@@ -37,6 +37,23 @@ public sealed class ProposalApplyTransactionTests
     }
 
     [Fact]
+    public void Mutation_between_preflight_and_replace_is_not_overwritten()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "one");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var transaction = new ProposalApplyTransaction(directory.RuntimePath, point =>
+        {
+            if (point == "before_replace:0") File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "external");
+        });
+
+        var result = transaction.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(root, "one.txt", "one", "ONE")]);
+
+        Assert.Equal(ApplyTransactionResult.Failed, result);
+        Assert.Equal("external", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
+    }
+
+    [Fact]
     public void Rollback_requires_post_apply_hash_and_is_available_once()
     {
         using var directory = new ApplyTestDirectory();
