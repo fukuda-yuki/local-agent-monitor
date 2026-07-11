@@ -145,6 +145,7 @@ internal sealed class ProposalApplyTransaction
                 fault?.Invoke("after_rollback_replace");
             }
             WriteJournal(journalPath, journal with { State = "rolled_back" });
+            fault?.Invoke("after_rolled_back_journal");
             return ApplyTransactionResult.RolledBack;
         }
         catch (ApplyTransactionCrashException) { throw; }

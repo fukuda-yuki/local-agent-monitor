@@ -1,4 +1,7 @@
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Telemetry.Sessions;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -99,6 +102,36 @@ public sealed class ProposalApplyServiceTests
         Assert.Equal("unsafe_reparse_path", Assert.Throws<ApplyPathException>(() => service.CreateDraft(Guid.CreateVersion7(), service.Roots.Single().RootId, [new ProposalApplyFileInput("linked.txt", "changed\n")])).Code);
     }
 
+    [Theory]
+    [InlineData("after_rollback_prepared")]
+    [InlineData("after_rolled_back_journal")]
+    public void Restart_after_rollback_crash_completes_one_durable_rollback_without_duplicate_audit(string boundary)
+    {
+        using var directory = new ApplyTestDirectory();
+        var target = Path.Combine(directory.Path, "target.txt");
+        File.WriteAllText(target, "before\n");
+        var store = CreateStore(directory, out var proposalId);
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var initial = new ProposalApplyService([root], directory.RuntimePath, store);
+        var draft = ApproveSingleFile(initial, proposalId, "target.txt", "after\n");
+        var (applyId, result, _) = initial.ApplyWithId(draft.DraftId);
+        Assert.Equal(ApplyTransactionResult.Applied, result);
+
+        var crashing = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store,
+            point => { if (point == boundary) throw new ApplyTransactionCrashException(); });
+        Assert.Throws<ApplyTransactionCrashException>(() => crashing.Rollback(applyId));
+
+        var restarted = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        Assert.Equal("before\n", File.ReadAllText(target));
+        Assert.Equal(ProposalApplyState.RolledBack, store.GetProposalApplyDraft(draft.DraftId)!.State);
+        Assert.Equal(2, AuditCount(directory.DatabasePath));
+        Assert.Empty(store.ListProposalApplyPending());
+        Assert.Equal(ApplyTransactionResult.RollbackUnavailable, restarted.Rollback(applyId));
+
+        _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        Assert.Equal(2, AuditCount(directory.DatabasePath));
+    }
+
     private sealed class ApplyTestDirectory : IDisposable
     {
         public ApplyTestDirectory()
@@ -110,6 +143,40 @@ public sealed class ProposalApplyServiceTests
 
         public string Path { get; }
         public string RuntimePath { get; }
-        public void Dispose() => Directory.Delete(Path, true);
+        public string DatabasePath => System.IO.Path.Combine(Path, "monitor.db");
+        public void Dispose()
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(Path, true);
+        }
+    }
+
+    private static SqliteSessionStore CreateStore(ApplyTestDirectory directory, out Guid proposalId)
+    {
+        var store = new SqliteSessionStore(directory.DatabasePath);
+        store.CreateSchema();
+        proposalId = Guid.CreateVersion7();
+        using var connection = new SqliteConnection($"Data Source={directory.DatabasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO improvement_proposals(proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at) VALUES($id,'candidate','skill','fixture','fixture','fixture','fixture','fixture','2026-07-12T00:00:00+00:00','2026-07-12T00:00:00+00:00');";
+        command.Parameters.AddWithValue("$id", proposalId.ToString("D"));
+        command.ExecuteNonQuery();
+        return store;
+    }
+
+    private static ProposalApplyDraft ApproveSingleFile(ProposalApplyService service, Guid proposalId, string relativePath, string replacement)
+    {
+        var draft = service.CreateDraft(proposalId, service.Roots.Single().RootId, [new ProposalApplyFileInput(relativePath, replacement)]);
+        return service.Approve(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest);
+    }
+
+    private static long AuditCount(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM proposal_apply_audit;";
+        return (long)command.ExecuteScalar()!;
     }
 }
