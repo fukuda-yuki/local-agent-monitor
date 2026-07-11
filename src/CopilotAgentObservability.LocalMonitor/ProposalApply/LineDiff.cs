@@ -12,30 +12,62 @@ internal static class LineDiff
         if (string.Equals(original, replacement, StringComparison.Ordinal)) return [];
         var source = SplitLines(original);
         var output = SplitLines(replacement);
-        var lcs = new int[source.Count + 1, output.Count + 1];
-        for (var i = source.Count - 1; i >= 0; i--)
-        for (var j = output.Count - 1; j >= 0; j--)
-            lcs[i, j] = source[i] == output[j] ? lcs[i + 1, j + 1] + 1 : Math.Max(lcs[i + 1, j], lcs[i, j + 1]);
+        var anchors = FindAnchors(source, output);
 
         var hunks = new List<ApplyHunk>();
         var sourceIndex = 0;
         var outputIndex = 0;
-        while (sourceIndex < source.Count || outputIndex < output.Count)
+        foreach (var anchor in anchors.Append((Source: source.Count, Output: output.Count)))
         {
-            if (sourceIndex < source.Count && outputIndex < output.Count && source[sourceIndex] == output[outputIndex]) { sourceIndex++; outputIndex++; continue; }
-            var start = sourceIndex;
-            var replacementLines = new List<string>();
-            while (sourceIndex < source.Count || outputIndex < output.Count)
+            if (sourceIndex != anchor.Source || outputIndex != anchor.Output)
             {
-                if (sourceIndex < source.Count && outputIndex < output.Count && source[sourceIndex] == output[outputIndex]) break;
-                if (outputIndex < output.Count && (sourceIndex == source.Count || lcs[sourceIndex, outputIndex + 1] >= lcs[sourceIndex + 1, outputIndex])) replacementLines.Add(output[outputIndex++]);
-                else sourceIndex++;
+                var text = string.Concat(output.Skip(outputIndex).Take(anchor.Output - outputIndex));
+                var id = Sha256($"{relativePath}\n{sourceIndex}\n{anchor.Source - sourceIndex}\n{text}")[..24];
+                hunks.Add(new ApplyHunk(id, relativePath, sourceIndex, anchor.Source - sourceIndex, text, true));
             }
-            var text = string.Concat(replacementLines);
-            var id = Sha256($"{relativePath}\n{start}\n{sourceIndex - start}\n{text}")[..24];
-            hunks.Add(new ApplyHunk(id, relativePath, start, sourceIndex - start, text, true));
+            sourceIndex = anchor.Source + 1;
+            outputIndex = anchor.Output + 1;
         }
         return hunks;
+    }
+
+    // Unique line anchors keep the auxiliary memory linear while preserving separate edits around stable lines.
+    private static IReadOnlyList<(int Source, int Output)> FindAnchors(IReadOnlyList<string> source, IReadOnlyList<string> output)
+    {
+        var sourcePositions = Positions(source);
+        var outputPositions = Positions(output);
+        var candidates = sourcePositions
+            .Where(pair => pair.Value.Count == 1 && outputPositions.TryGetValue(pair.Key, out var positions) && positions.Count == 1)
+            .Select(pair => (Source: pair.Value[0], Output: outputPositions[pair.Key][0]))
+            .OrderBy(item => item.Source)
+            .ToArray();
+        var tails = new List<int>();
+        var previous = new int[candidates.Length];
+        var tailIndexes = new List<int>();
+        Array.Fill(previous, -1);
+        for (var index = 0; index < candidates.Length; index++)
+        {
+            var position = tails.BinarySearch(candidates[index].Output);
+            if (position < 0) position = ~position;
+            if (position > 0) previous[index] = tailIndexes[position - 1];
+            if (position == tails.Count) { tails.Add(candidates[index].Output); tailIndexes.Add(index); }
+            else { tails[position] = candidates[index].Output; tailIndexes[position] = index; }
+        }
+        var result = new List<(int Source, int Output)>();
+        for (var current = tailIndexes.Count == 0 ? -1 : tailIndexes[^1]; current >= 0; current = previous[current]) result.Add(candidates[current]);
+        result.Reverse();
+        return result;
+    }
+
+    private static Dictionary<string, List<int>> Positions(IReadOnlyList<string> lines)
+    {
+        var positions = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+        for (var index = 0; index < lines.Count; index++)
+        {
+            if (!positions.TryGetValue(lines[index], out var values)) positions.Add(lines[index], values = []);
+            values.Add(index);
+        }
+        return positions;
     }
 
     public static string Replay(string original, IEnumerable<ApplyHunk> selected)

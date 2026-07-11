@@ -70,6 +70,69 @@ public sealed class ProposalApplyTransactionTests
         Assert.Equal(ApplyTransactionResult.RollbackUnavailable, transaction.Rollback(id));
     }
 
+    [Theory]
+    [InlineData("after_prepared_journal")]
+    [InlineData("after_atomic_replace:0")]
+    [InlineData("after_atomic_replace:1")]
+    public void Restart_after_atomic_apply_replace_restores_all_originals(string boundary)
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "one");
+        File.WriteAllText(Path.Combine(directory.Path, "two.txt"), "two");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var id = Guid.CreateVersion7();
+        var crashing = new ProposalApplyTransaction(directory.RuntimePath, [root], point => { if (point == boundary) throw new ApplyTransactionCrashException(); });
+
+        Assert.Throws<ApplyTransactionCrashException>(() => crashing.Apply(id, [ApplyTarget.Create(root, "one.txt", "one", "ONE"), ApplyTarget.Create(root, "two.txt", "two", "TWO")]));
+        var restarted = new ProposalApplyTransaction(directory.RuntimePath, [ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)]);
+        restarted.RecoverUncommitted();
+
+        Assert.Equal("one", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
+        Assert.Equal("two", File.ReadAllText(Path.Combine(directory.Path, "two.txt")));
+    }
+
+    [Fact]
+    public void Restart_with_changed_root_leaves_target_untouched_and_blocks_mutation()
+    {
+        using var directory = new ApplyTestDirectory();
+        var replacementRoot = Path.Combine(directory.Path, "other");
+        Directory.CreateDirectory(replacementRoot);
+        File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "one");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var crashing = new ProposalApplyTransaction(directory.RuntimePath, [root], point => { if (point == "after_atomic_replace:0") throw new ApplyTransactionCrashException(); });
+        Assert.Throws<ApplyTransactionCrashException>(() => crashing.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(root, "one.txt", "one", "ONE")]));
+
+        var restarted = new ProposalApplyTransaction(directory.RuntimePath, [ConfiguredApplyRoot.Create(ApplyRootKind.Repository, replacementRoot)]);
+
+        restarted.RecoverUncommitted();
+        Assert.Equal("ONE", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
+        File.WriteAllText(Path.Combine(replacementRoot, "other.txt"), "other");
+        var changedRoot = restarted.ConfiguredRoots.Single();
+        Assert.Equal(ApplyTransactionResult.Failed, restarted.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(changedRoot, "other.txt", "other", "OTHER")]));
+    }
+
+    [Theory]
+    [InlineData("after_rollback_prepared")]
+    [InlineData("after_atomic_rollback_replace:0")]
+    [InlineData("after_atomic_rollback_replace:1")]
+    public void Restart_after_atomic_rollback_replace_restores_all_originals(string boundary)
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "one");
+        File.WriteAllText(Path.Combine(directory.Path, "two.txt"), "two");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var id = Guid.CreateVersion7();
+        var transaction = new ProposalApplyTransaction(directory.RuntimePath, [root], point => { if (point == boundary) throw new ApplyTransactionCrashException(); });
+        Assert.Equal(ApplyTransactionResult.Applied, transaction.Apply(id, [ApplyTarget.Create(root, "one.txt", "one", "ONE"), ApplyTarget.Create(root, "two.txt", "two", "TWO")]));
+
+        Assert.Throws<ApplyTransactionCrashException>(() => transaction.Rollback(id));
+        var restarted = new ProposalApplyTransaction(directory.RuntimePath, [ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)]);
+        restarted.RecoverUncommitted();
+
+        Assert.Equal("one", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
+        Assert.Equal("two", File.ReadAllText(Path.Combine(directory.Path, "two.txt")));
+    }
+
     private sealed class ApplyTestDirectory : IDisposable
     {
         public ApplyTestDirectory()

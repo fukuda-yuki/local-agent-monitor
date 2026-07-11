@@ -12,10 +12,10 @@ internal sealed class ProposalApplyService
     private readonly object sync = new();
     private readonly ProposalApplyTransaction transaction;
 
-    public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath)
+    public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, Action<string>? fault = null)
     {
-        Roots = roots;
-        transaction = new ProposalApplyTransaction(runtimePath, roots);
+        transaction = new ProposalApplyTransaction(runtimePath, roots, fault);
+        Roots = transaction.ConfiguredRoots;
         transaction.RecoverUncommitted();
     }
 
@@ -79,6 +79,14 @@ internal sealed class ProposalApplyService
         }
     }
     private ProposalApplyDraft Get(Guid draftId) => drafts.TryGetValue(draftId, out var draft) ? draft : throw new ApplyPathException("draft_not_found");
-    private static IReadOnlyList<ApplyTarget> RebuildFiles(IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks) => files.Select(file => file with { ReplacementText = LineDiff.Replay(file.OriginalText, hunks.Where(hunk => hunk.Selected && hunk.RelativePath == file.RelativePath)), ReplacementSha256 = LineDiff.Sha256(LineDiff.Replay(file.OriginalText, hunks.Where(hunk => hunk.Selected && hunk.RelativePath == file.RelativePath))) }).ToArray();
+    private static IReadOnlyList<ApplyTarget> RebuildFiles(IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks) => files
+        .Select(file =>
+        {
+            var selected = hunks.Where(hunk => hunk.Selected && hunk.RelativePath == file.RelativePath);
+            var replacement = LineDiff.Replay(file.OriginalText, selected);
+            return file with { ReplacementText = replacement, ReplacementSha256 = LineDiff.Sha256(replacement) };
+        })
+        .Where(file => !string.Equals(file.OriginalText, file.ReplacementText, StringComparison.Ordinal))
+        .ToArray();
     private static string Digest(Guid draftId, Guid proposalId, Guid rootId, IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks, int revision) => LineDiff.Sha256(string.Join("\n", new[] { draftId.ToString("D"), proposalId.ToString("D"), rootId.ToString("D"), revision.ToString(CultureInfo.InvariantCulture) }.Concat(files.OrderBy(file => file.RelativePath, StringComparer.Ordinal).Select(file => $"{file.RelativePath}|{file.BaseSha256}|{file.ReplacementSha256}")).Concat(hunks.Where(hunk => hunk.Selected).OrderBy(hunk => hunk.HunkId, StringComparer.Ordinal).Select(hunk => $"{hunk.HunkId}|{LineDiff.Sha256(hunk.ReplacementText)}"))));
 }

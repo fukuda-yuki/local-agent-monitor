@@ -9,6 +9,8 @@ internal static class ApplyPathPolicy
         ArgumentNullException.ThrowIfNull(root);
         if (string.IsNullOrWhiteSpace(relativePath)
             || Path.IsPathFullyQualified(relativePath)
+            || Path.IsPathRooted(relativePath)
+            || IsDriveRelativeOrDevicePath(relativePath)
             || relativePath.StartsWith("\\\\", StringComparison.Ordinal)
             || relativePath.StartsWith("\\?\\", StringComparison.Ordinal)
             || Uri.TryCreate(relativePath, UriKind.Absolute, out _)
@@ -33,6 +35,12 @@ internal static class ApplyPathPolicy
 
         return new ResolvedApplyPath(relativePath.Replace('\\', '/'), fullPath);
     }
+
+    private static bool IsDriveRelativeOrDevicePath(string value) =>
+        (value.Length >= 2 && char.IsLetter(value[0]) && value[1] == ':')
+        || value.StartsWith("\\\\?\\", StringComparison.Ordinal)
+        || value.StartsWith("\\\\.\\", StringComparison.Ordinal)
+        || value.StartsWith("\\?\\", StringComparison.Ordinal);
 
     internal static void EnsureSafeExistingPath(string path, string reparseCode)
     {

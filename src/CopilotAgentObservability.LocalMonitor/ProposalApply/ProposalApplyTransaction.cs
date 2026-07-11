@@ -5,6 +5,7 @@ using System.Text.Json;
 namespace CopilotAgentObservability.LocalMonitor.ProposalApply;
 
 internal enum ApplyTransactionResult { Applied, Stale, Failed, RolledBack, RollbackStale, RollbackUnavailable }
+internal sealed class ApplyTransactionCrashException : Exception { }
 
 internal sealed record ApplyTarget(ConfiguredApplyRoot Root, string RelativePath, string OriginalText, string ReplacementText, string BaseSha256, string ReplacementSha256)
 {
@@ -20,25 +21,36 @@ internal sealed class ProposalApplyTransaction
     private readonly string runtimePath;
     private readonly Action<string>? fault;
     private readonly Dictionary<Guid, ConfiguredApplyRoot> roots;
+    private bool recoveryBlocked;
 
     public ProposalApplyTransaction(string runtimePath, Action<string>? fault = null) : this(runtimePath, [], fault) { }
     public ProposalApplyTransaction(string runtimePath, IReadOnlyList<ConfiguredApplyRoot> configuredRoots, Action<string>? fault = null)
     {
         this.runtimePath = runtimePath;
         this.fault = fault;
-        roots = configuredRoots.ToDictionary(root => root.RootId);
+        roots = LoadRoots(configuredRoots).ToDictionary(root => root.RootId);
     }
+
+    public IReadOnlyList<ConfiguredApplyRoot> ConfiguredRoots => roots.Values.OrderBy(root => root.Kind).ToArray();
 
     public ApplyTransactionResult Apply(Guid applyId, IReadOnlyList<ApplyTarget> targets)
     {
-        if (targets.Count is < 1 or > 10 || targets.Any(target => Encoding.UTF8.GetByteCount(target.ReplacementText) > 262_144)) return ApplyTransactionResult.Failed;
-        foreach (var target in targets) roots[target.Root.RootId] = target.Root;
+        if (recoveryBlocked || targets.Count is < 1 or > 10 || targets.Any(target => Encoding.UTF8.GetByteCount(target.ReplacementText) > 262_144)) return ApplyTransactionResult.Failed;
+        targets = targets.Select(target =>
+        {
+            var configured = roots.Values.SingleOrDefault(root => root.Kind == target.Root.Kind && string.Equals(root.CanonicalPath, target.Root.CanonicalPath, StringComparison.OrdinalIgnoreCase));
+            if (configured is not null) return target with { Root = configured };
+            roots[target.Root.RootId] = target.Root;
+            return target;
+        }).ToArray();
+        PersistRoots(targets.Select(target => target.Root));
         if (!Validate(targets, usePostHash: false)) return ApplyTransactionResult.Stale;
 
         var directory = Path.Combine(runtimePath, applyId.ToString("N"));
         Directory.CreateDirectory(directory);
         var journalPath = Path.Combine(directory, "journal.json");
         var journal = new ApplyJournal("snapshotting", targets.Select((target, index) => new ApplyJournalFile(target.Root.RootId, target.RelativePath, target.BaseSha256, target.ReplacementSha256, $"{index}.snapshot")).ToArray());
+        var replacementStarted = false;
         try
         {
             foreach (var item in journal.Files)
@@ -57,7 +69,9 @@ internal sealed class ProposalApplyTransaction
                 fault?.Invoke($"before_replace:{index}");
                 var path = Resolve(journal.Files[index]);
                 if (!string.Equals(HashFile(path), journal.Files[index].OriginalSha256, StringComparison.Ordinal)) throw new IOException("stale_target");
+                replacementStarted = true;
                 Replace(path, targets[index].ReplacementText, applyId, index);
+                fault?.Invoke($"after_atomic_replace:{index}");
                 journal = journal with { State = $"replaced:{index}" };
                 WriteJournal(journalPath, journal);
                 fault?.Invoke("after_replace");
@@ -66,9 +80,10 @@ internal sealed class ProposalApplyTransaction
             WriteJournal(journalPath, journal);
             return ApplyTransactionResult.Applied;
         }
+        catch (ApplyTransactionCrashException) { throw; }
         catch
         {
-            Restore(directory, journal.Files.Take(ReplacedCount(journal.State)), onlyExistingSnapshots: true);
+            Restore(directory, replacementStarted ? journal.Files : [], onlyExistingSnapshots: true);
             WriteJournal(journalPath, journal with { State = "restored" });
             return ApplyTransactionResult.Failed;
         }
@@ -82,11 +97,15 @@ internal sealed class ProposalApplyTransaction
             var journal = ReadJournal(journalPath);
             if (journal is null || journal.State is "committed" or "rolled_back") continue;
             var directory = Path.GetDirectoryName(journalPath)!;
-            var filesToRestore = journal.State.StartsWith("rollback_", StringComparison.Ordinal)
-                ? journal.Files
-                : journal.Files.Take(ReplacedCount(journal.State));
-            Restore(directory, filesToRestore, onlyExistingSnapshots: true);
-            WriteJournal(journalPath, journal with { State = "restored" });
+            try
+            {
+                Restore(directory, journal.Files, onlyExistingSnapshots: true);
+                WriteJournal(journalPath, journal with { State = "restored" });
+            }
+            catch (ApplyPathException)
+            {
+                recoveryBlocked = true;
+            }
         }
     }
 
@@ -108,6 +127,7 @@ internal sealed class ProposalApplyTransaction
                 var path = Resolve(item);
                 if (!string.Equals(HashFile(path), item.ReplacementSha256, StringComparison.Ordinal)) throw new IOException("rollback_stale");
                 ReplaceFromSnapshot(path, Path.Combine(directory, item.SnapshotName), applyId, index);
+                fault?.Invoke($"after_atomic_rollback_replace:{index}");
                 journal = journal with { State = $"rollback_replaced:{index}" };
                 WriteJournal(journalPath, journal);
                 fault?.Invoke("after_rollback_replace");
@@ -115,6 +135,7 @@ internal sealed class ProposalApplyTransaction
             WriteJournal(journalPath, journal with { State = "rolled_back" });
             return ApplyTransactionResult.RolledBack;
         }
+        catch (ApplyTransactionCrashException) { throw; }
         catch
         {
             Restore(directory, journal.Files, onlyExistingSnapshots: true);
@@ -151,8 +172,36 @@ internal sealed class ProposalApplyTransaction
         }
     }
 
-    private static int ReplacedCount(string state) => state.StartsWith("replaced:", StringComparison.Ordinal)
-        && int.TryParse(state["replaced:".Length..], out var last) ? last + 1 : 0;
+    private IReadOnlyList<ConfiguredApplyRoot> LoadRoots(IReadOnlyList<ConfiguredApplyRoot> configuredRoots)
+    {
+        Directory.CreateDirectory(runtimePath);
+        var mapPath = Path.Combine(runtimePath, "apply-root-map.json");
+        var saved = File.Exists(mapPath) ? JsonSerializer.Deserialize<List<RootMapEntry>>(File.ReadAllText(mapPath)) ?? [] : [];
+        var resolved = new List<ConfiguredApplyRoot>();
+        foreach (var root in configuredRoots)
+        {
+            ApplyPathPolicy.EnsureSafeExistingPath(root.CanonicalPath, "invalid_apply_root");
+            var existing = saved.SingleOrDefault(entry => entry.Kind == root.Kind && string.Equals(entry.CanonicalPath, root.CanonicalPath, StringComparison.OrdinalIgnoreCase));
+            var rootId = existing?.RootId ?? Guid.CreateVersion7();
+            resolved.Add(root with { RootId = rootId });
+            if (existing is null) saved.Add(new RootMapEntry(rootId, root.Kind, root.CanonicalPath));
+        }
+        WriteRootMap(mapPath, saved);
+        return resolved;
+    }
+
+    private void PersistRoots(IEnumerable<ConfiguredApplyRoot> configuredRoots)
+    {
+        Directory.CreateDirectory(runtimePath);
+        var mapPath = Path.Combine(runtimePath, "apply-root-map.json");
+        var saved = File.Exists(mapPath) ? JsonSerializer.Deserialize<List<RootMapEntry>>(File.ReadAllText(mapPath)) ?? [] : [];
+        foreach (var root in configuredRoots)
+        {
+            if (saved.Any(entry => entry.RootId == root.RootId)) continue;
+            saved.Add(new RootMapEntry(root.RootId, root.Kind, root.CanonicalPath));
+        }
+        WriteRootMap(mapPath, saved);
+    }
 
     private static void Replace(string path, string content, Guid applyId, int index)
     {
@@ -175,7 +224,9 @@ internal sealed class ProposalApplyTransaction
     private static string HashFile(string path) => File.Exists(path) ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant() : string.Empty;
     private static void Flush(string path) { using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read); stream.Flush(true); }
     private static void WriteJournal(string path, ApplyJournal journal) { File.WriteAllText(path, JsonSerializer.Serialize(journal)); Flush(path); }
+    private static void WriteRootMap(string path, IReadOnlyList<RootMapEntry> map) { File.WriteAllText(path, JsonSerializer.Serialize(map)); Flush(path); }
     private static ApplyJournal? ReadJournal(string path) => JsonSerializer.Deserialize<ApplyJournal>(File.ReadAllText(path));
     private sealed record ApplyJournal(string State, IReadOnlyList<ApplyJournalFile> Files);
     private sealed record ApplyJournalFile(Guid RootId, string RelativePath, string OriginalSha256, string ReplacementSha256, string SnapshotName);
+    private sealed record RootMapEntry(Guid RootId, ApplyRootKind Kind, string CanonicalPath);
 }

@@ -37,6 +37,37 @@ public sealed class ProposalApplyServiceTests
     }
 
     [Fact]
+    public void Fully_deselected_file_is_not_replaced()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "one\n");
+        File.WriteAllText(Path.Combine(directory.Path, "two.txt"), "two\n");
+        var replacements = new List<string>();
+        var service = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, point => replacements.Add(point));
+        var draft = service.CreateDraft(Guid.CreateVersion7(), service.Roots.Single().RootId,
+        [new ProposalApplyFileInput("one.txt", "ONE\n"), new ProposalApplyFileInput("two.txt", "TWO\n")]);
+        var selected = service.Select(draft.DraftId, draft.SelectionRevision, [draft.Hunks.Single(hunk => hunk.RelativePath == "one.txt").HunkId]);
+        service.Approve(selected.DraftId, selected.SelectionRevision, selected.ApprovalDigest);
+
+        Assert.Equal(ApplyTransactionResult.Applied, service.Apply(selected.DraftId));
+        Assert.Equal("ONE\n", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
+        Assert.Equal("two\n", File.ReadAllText(Path.Combine(directory.Path, "two.txt")));
+        Assert.DoesNotContain(replacements, point => point == "before_replace:1");
+    }
+
+    [Fact]
+    public void Many_short_lines_use_bounded_diff_memory()
+    {
+        var original = string.Concat(Enumerable.Repeat("a\n", 131_072));
+        var replacement = string.Concat(Enumerable.Repeat("b\n", 131_072));
+
+        var hunk = Assert.Single(LineDiff.Create("large.txt", original, replacement));
+
+        Assert.Equal(0, hunk.StartLine);
+        Assert.Equal(replacement, LineDiff.Replay(original, [hunk]));
+    }
+
+    [Fact]
     public void Selection_change_invalidates_approval_and_changes_digest()
     {
         using var directory = new ApplyTestDirectory();
