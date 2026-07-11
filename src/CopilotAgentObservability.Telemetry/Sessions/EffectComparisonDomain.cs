@@ -4,6 +4,24 @@ namespace CopilotAgentObservability.Telemetry.Sessions;
 
 public enum ObjectiveResult { Pass, Fail }
 public enum ObjectiveSeverity { Normal, Severe }
+public enum EffectVerdict { Improved, NoChange, Regressed, InsufficientEvidence }
+
+public sealed record SessionEffectFacts(
+    Guid SessionId, string Side, string CaseKey, bool QualityPass,
+    bool SevereFailure, long? DurationMs, long? TotalTokens,
+    IReadOnlyList<string> EvidenceIds);
+
+public sealed record EffectComparisonFacts(
+    bool LinkageValid, IReadOnlyList<SessionEffectFacts> Pre,
+    IReadOnlyList<SessionEffectFacts> Post,
+    IReadOnlyList<string> InsufficiencyReasons);
+
+public sealed record EffectVerdictResult(
+    EffectVerdict Verdict, int PrePass, int PreCount, int PostPass,
+    int PostCount, decimal? PreDurationMedian, decimal? PostDurationMedian,
+    decimal? DurationDelta, decimal? PreTokenMedian,
+    decimal? PostTokenMedian, decimal? TokenDelta,
+    IReadOnlyList<string> Reasons);
 
 public sealed record ObjectiveEvaluationEvidence(string Kind, string ReferenceId);
 
