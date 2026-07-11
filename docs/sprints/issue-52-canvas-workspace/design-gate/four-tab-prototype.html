@@ -1,0 +1,816 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OTel Monitor — Session Workspace（4タブ プロトタイプ）</title>
+<style>
+  /* Design tokens inherited from the current Canvas helper page
+     (canvas-helpers.mjs renderHelperHtml). Dark values follow the same
+     host-variable convention the Copilot app supplies. */
+  :root {
+    --bg: #ffffff;
+    --bg-subtle: #f6f8fa;
+    --fg: #1f2328;
+    --muted: #656d76;
+    --border: #d0d7de;
+    --accent: #0969da;
+    --accent-fg: #ffffff;
+    --danger: #cf222e;
+    --danger-bg: #ffebe9;
+    --success: #1a7f37;
+    --success-bg: #dafbe1;
+    --warn: #9a6700;
+    --warn-bg: #fff8c5;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --size: 14px;
+    --leading: 20px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --bg-subtle: #161b22; --fg: #e6edf3; --muted: #8b949e;
+      --border: #30363d; --accent: #2f81f7; --accent-fg: #ffffff;
+      --danger: #f85149; --danger-bg: #2d1214;
+      --success: #3fb950; --success-bg: #12261e;
+      --warn: #d29922; --warn-bg: #272115;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1117; --bg-subtle: #161b22; --fg: #e6edf3; --muted: #8b949e;
+    --border: #30363d; --accent: #2f81f7; --accent-fg: #ffffff;
+    --danger: #f85149; --danger-bg: #2d1214;
+    --success: #3fb950; --success-bg: #12261e;
+    --warn: #d29922; --warn-bg: #272115;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff; --bg-subtle: #f6f8fa; --fg: #1f2328; --muted: #656d76;
+    --border: #d0d7de; --accent: #0969da; --accent-fg: #ffffff;
+    --danger: #cf222e; --danger-bg: #ffebe9;
+    --success: #1a7f37; --success-bg: #dafbe1;
+    --warn: #9a6700; --warn-bg: #fff8c5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: var(--font);
+    font-size: var(--size);
+    line-height: var(--leading);
+    background: var(--bg);
+    color: var(--fg);
+  }
+  code { font-size: 12px; }
+
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar h1 { font-size: 1rem; }
+  .topbar .spacer { flex: 1; }
+
+  .workspace { display: flex; min-height: calc(100vh - 42px); }
+
+  /* ---------------- sidebar ---------------- */
+  .sidebar {
+    width: 300px; flex: none;
+    border-right: 1px solid var(--border);
+    padding: 12px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .sidebar h2 {
+    font-size: 0.75rem; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .session-group { display: flex; flex-direction: column; gap: 6px; }
+  .session-item {
+    width: 100%; text-align: left;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--fg);
+    padding: 8px 10px; font: inherit; cursor: pointer;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .session-item:hover { background: var(--bg-subtle); }
+  .session-item[aria-current="true"] {
+    border-color: var(--accent);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .session-item .title { font-weight: 600; }
+  .session-item .meta { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+  .sidebar-note { color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); padding-top: 8px; margin-top: auto; }
+
+  /* ---------------- pills / badges ---------------- */
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    border-radius: 999px; padding: 0 8px;
+    font-size: 12px; font-weight: 600; line-height: 18px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .pill-running { color: var(--accent); border-color: var(--accent); }
+  @media (prefers-reduced-motion: no-preference) {
+    .pill-running .dot { animation: pulse 1.6s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: 0.25; } }
+  }
+  .pill-completed { color: var(--success); border-color: var(--success); background: var(--success-bg); }
+  .pill-failed { color: var(--danger); border-color: var(--danger); background: var(--danger-bg); }
+  .pill-incomplete { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+  .badge {
+    display: inline-block; border-radius: 4px; padding: 0 6px;
+    font-size: 11px; font-weight: 600; line-height: 16px;
+    border: 1px solid var(--border); color: var(--muted); background: var(--bg-subtle);
+  }
+  .badge-bind { color: var(--accent); border-color: var(--accent); background: transparent; }
+  .badge-exact { color: var(--success); border-color: var(--success); background: transparent; }
+  .badge-inferred { color: var(--warn); border-color: var(--warn); background: transparent; }
+  .badge-unresolved { color: var(--muted); border-style: dashed; background: transparent; }
+
+  /* ---------------- tabs ---------------- */
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .tabs {
+    display: flex; gap: 4px; padding: 8px 16px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    font: inherit; font-weight: 500; color: var(--muted);
+    background: none; border: none; border-bottom: 2px solid transparent;
+    padding: 8px 12px; cursor: pointer;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab[aria-selected="true"] {
+    color: var(--fg); font-weight: 600;
+    border-bottom-color: var(--accent);
+  }
+  .tab .count {
+    margin-left: 4px; border-radius: 999px; padding: 0 6px;
+    background: var(--bg-subtle); border: 1px solid var(--border);
+    font-size: 11px; color: var(--muted);
+  }
+  .tab-panel { padding: 16px; overflow-x: auto; }
+  .tab-panel[hidden] { display: none; }
+
+  /* ---------------- cards (inherited style) ---------------- */
+  .card { border: 1px solid var(--border); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+  .card h3 { font-size: 1rem; margin-bottom: 8px; }
+  .kv { display: grid; grid-template-columns: 160px 1fr; gap: 4px 12px; }
+  .kv dt { color: var(--muted); font-weight: 500; }
+  .muted { color: var(--muted); }
+  pre.preview {
+    background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 4px;
+    padding: 12px; margin-top: 8px; overflow: auto;
+    font-size: 12px; line-height: 1.5; white-space: pre-wrap; max-height: 180px;
+  }
+  a { color: var(--accent); }
+
+  .session-header { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 16px; }
+  .session-header .name { font-size: 1.1rem; font-weight: 600; }
+
+  .banner { padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; font-weight: 600; }
+  .banner-info { background: var(--bg-subtle); border: 1px solid var(--border); color: var(--muted); }
+  .banner-warn { background: var(--warn-bg); border: 1px solid var(--warn); color: var(--warn); }
+
+  /* quality gate */
+  .gate-row {
+    display: flex; align-items: baseline; gap: 10px;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+  }
+  .gate-row:last-child { border-bottom: none; }
+  .gate-mark { font-weight: 700; flex: none; width: 3.5em; font-size: 12px; }
+  .gate-pass .gate-mark { color: var(--success); }
+  .gate-fail .gate-mark { color: var(--danger); }
+  .gate-pending .gate-mark { color: var(--muted); }
+  .gate-label { flex: 1; }
+  .gate-evidence { font-size: 12px; white-space: nowrap; }
+
+  /* human evaluation */
+  .eval-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .btn {
+    padding: 8px 16px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--fg);
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .btn:hover { background: var(--bg-subtle); }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  .btn-primary:hover { filter: brightness(1.08); background: var(--accent); }
+  .btn[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); background: var(--bg); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .action-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+  /* ---------------- evidence tab ---------------- */
+  .evidence-layout { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 960px) { .evidence-layout { grid-template-columns: 1fr; } }
+  .tree { list-style: none; }
+  .tree ul { list-style: none; padding-left: 18px; border-left: 1px solid var(--border); margin-left: 7px; }
+  .tree-node {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    width: 100%; text-align: left; font: inherit; cursor: pointer;
+    background: none; border: 1px solid transparent; border-radius: 6px;
+    padding: 4px 6px; margin: 2px 0; color: var(--fg);
+  }
+  .tree-node:hover { background: var(--bg-subtle); }
+  .tree-node[aria-current="true"] { border-color: var(--accent); background: var(--bg-subtle); }
+  .tree-node .kind { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  .tree-node .stat { font-size: 12px; color: var(--muted); }
+
+  .timeline { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .timeline-head, .timeline-row {
+    display: grid; grid-template-columns: 64px 140px 1fr; gap: 8px;
+    padding: 6px 10px; align-items: baseline;
+  }
+  .timeline-head { background: var(--bg-subtle); font-size: 12px; font-weight: 600; color: var(--muted); }
+  .timeline-row { border-top: 1px solid var(--border); }
+  .timeline-row.dim { opacity: 0.45; }
+  .timeline-row .t { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+  .timeline-row .owner { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ev-chip {
+    display: inline-block; border-radius: 4px; border: 1px solid var(--border);
+    padding: 0 6px; font-size: 12px; margin-right: 6px;
+  }
+  .ev-error { color: var(--danger); border-color: var(--danger); background: var(--danger-bg); }
+  .ev-test { color: var(--success); border-color: var(--success); }
+  .ev-test-fail { color: var(--danger); border-color: var(--danger); }
+
+  .inspector dl { margin-top: 4px; }
+  .verdict-links { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+
+  .placeholder-list { margin: 8px 0 0 1.2em; }
+  .placeholder-list li { margin-bottom: 4px; }
+
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>OTel Monitor — Session Workspace</h1>
+  <span class="pill"><span class="dot" style="color:var(--success)"></span>Local Monitor 接続済み（ready）</span>
+  <span class="spacer"></span>
+  <span class="muted" style="font-size:12px">プロトタイプ（合成データのみ）</span>
+</header>
+
+<div class="workspace">
+  <aside class="sidebar" aria-label="セッション一覧">
+    <div class="session-group">
+      <h2>この会話（exact-bound）</h2>
+      <div id="group-bound"></div>
+    </div>
+    <div class="session-group">
+      <h2>最近のセッション</h2>
+      <div id="group-recent"></div>
+    </div>
+    <div class="session-group">
+      <h2>未紐付け（OTel のみ）</h2>
+      <div id="group-unbound"></div>
+    </div>
+    <p class="sidebar-note">「最新のセッション」は推測しません。native session ID が一致した場合のみ自動選択されます。</p>
+  </aside>
+
+  <main class="main">
+    <nav class="tabs" role="tablist" aria-label="ワークスペースタブ">
+      <button class="tab" role="tab" id="tab-btn-review" aria-selected="true" data-tab="review">Review</button>
+      <button class="tab" role="tab" id="tab-btn-evidence" aria-selected="false" data-tab="evidence">Evidence<span class="count" id="evidence-count" hidden></span></button>
+      <button class="tab" role="tab" id="tab-btn-improve" aria-selected="false" data-tab="improve">Improve<span class="count">計画中</span></button>
+      <button class="tab" role="tab" id="tab-btn-compare" aria-selected="false" data-tab="compare">Compare<span class="count">計画中</span></button>
+    </nav>
+
+    <section class="tab-panel" id="panel-review" role="tabpanel" aria-labelledby="tab-btn-review"></section>
+    <section class="tab-panel" id="panel-evidence" role="tabpanel" aria-labelledby="tab-btn-evidence" hidden></section>
+
+    <section class="tab-panel" id="panel-improve" role="tabpanel" aria-labelledby="tab-btn-improve" hidden>
+      <div class="card">
+        <h3>Improve — 恒久改善（後続 child issue）</h3>
+        <p class="muted">このタブは 4 タブ shell の一部としてのみ本プロトタイプに含まれます。実装は後続 child issue の範囲です。</p>
+        <ul class="placeholder-list muted">
+          <li>Skill / Agent / Instructions への恒久改善 diff の提示</li>
+          <li>人間の明示承認後にのみ適用（自動適用なし）</li>
+          <li>適用結果から Compare への導線</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="tab-panel" id="panel-compare" role="tabpanel" aria-labelledby="tab-btn-compare" hidden>
+      <div class="card">
+        <h3>Compare — 適用前後の比較（後続 child issue）</h3>
+        <p class="muted">このタブは 4 タブ shell の一部としてのみ本プロトタイプに含まれます。実装は後続 child issue の範囲です。</p>
+        <ul class="placeholder-list muted">
+          <li>類似セッションとの品質・トークン・時間の比較</li>
+          <li>改善適用前後の効果検証</li>
+          <li>品質低下を伴う「効率化」を改善と判定しない</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+// Synthetic sessions only. Shapes follow the #51 sanitized session-workspace
+// contract (status / completeness / source_surfaces / content_state).
+const SESSIONS = [
+  {
+    id: "0197a001",
+    group: "bound",
+    label: "READMEのセットアップ手順を更新",
+    status: "running",
+    completeness: "rich",
+    surfaces: ["copilot-sdk"],
+    repository: "sample-repo",
+    startedAt: "10:02",
+    binding: { kind: "native", note: "この Canvas の sessionId と一致" },
+    instruction: {
+      state: "available",
+      text: "READMEのセットアップ手順を最新のCLIコマンドに合わせて更新してください。前提条件のバージョン表記も見直すこと。（合成プレビュー）"
+    },
+    outcome: {
+      kind: "running",
+      summary: "実行中です。結果と品質はまだ確定していません。"
+    },
+    gates: [
+      { state: "pending", label: "テスト実行", evidence: null },
+      { state: "pending", label: "エラー span", evidence: null },
+      { state: "pending", label: "レビュー指摘", evidence: null }
+    ],
+    primary: { label: "Evidence でライブ実行を追う", target: "evidence" },
+    secondary: { label: "Local Monitor で開く" },
+    evalEnabled: false,
+    evalNote: "人間評価はセッション完了後に記録できます。",
+    evidence: {
+      agents: {
+        id: "main", kind: "Main Agent", name: "copilot-agent", rel: "exact",
+        stat: "実行中 / 3,120 tokens", model: "gpt-synthetic",
+        detail: { "状態": "実行中", "モデル": "gpt-synthetic", "トークン": "3,120", "子Agent": "1" },
+        children: [
+          { id: "skill-doc", kind: "Skill", name: "doc-update", rel: "exact",
+            stat: "1回", detail: { "呼出": "1回", "状態": "完了" }, children: [] },
+          { id: "sub-verify", kind: "Subagent", name: "verify-helper", rel: "inferred",
+            stat: "実行中", detail: { "状態": "実行中", "モデル": "gpt-synthetic", "関係": "inferred（parent span 欠落）" }, children: [
+              { id: "tool-test", kind: "Tool", name: "run_tests", rel: "exact",
+                stat: "実行中", detail: { "状態": "実行中" }, children: [] }
+            ] }
+        ]
+      },
+      timeline: [
+        { t: "10:02", owner: "main", label: "ユーザー指示を受信", chip: "message" },
+        { t: "10:03", owner: "main", label: "doc-update Skill を呼出", chip: "skill" },
+        { t: "10:05", owner: "sub-verify", label: "verify-helper を起動", chip: "agent" },
+        { t: "10:06", owner: "sub-verify", label: "run_tests 実行中", chip: "tool" }
+      ],
+      verdicts: []
+    }
+  },
+  {
+    id: "0197a002",
+    group: "recent",
+    label: "失敗するユニットテストを修正",
+    status: "completed",
+    completeness: "full",
+    surfaces: ["copilot-cli"],
+    repository: "sample-repo",
+    startedAt: "昨日 18:40",
+    binding: { kind: "native", note: "Hook の session_id で結合" },
+    instruction: {
+      state: "available",
+      text: "tests/parser_test の失敗を修正してください。既存の公開インターフェースは変更しないこと。（合成プレビュー）"
+    },
+    outcome: {
+      kind: "success",
+      summary: "対象テストの修正が完了し、テストスイートは全件成功しました。"
+    },
+    gates: [
+      { state: "pass", label: "テスト実行（12 passed / 0 failed）", evidence: "ev-test-1" },
+      { state: "pass", label: "エラー span（0 件）", evidence: null },
+      { state: "fail", label: "レビュー指摘（minor 1 件）", evidence: "ev-review-1" }
+    ],
+    primary: { label: "Compare で類似セッションと比較（計画中）", target: "compare" },
+    secondary: { label: "Local Monitor で開く" },
+    evalEnabled: true,
+    evalNote: "ワンタップで人間評価を記録します（後から変更できます）。",
+    evidence: {
+      agents: {
+        id: "main", kind: "Main Agent", name: "copilot-agent", rel: "exact",
+        stat: "完了 / 8,420 tokens", model: "gpt-synthetic",
+        detail: { "状態": "完了", "モデル": "gpt-synthetic", "トークン": "8,420", "所要時間": "4分12秒", "子Agent": "1" },
+        children: [
+          { id: "sub-fix", kind: "Subagent", name: "test-fixer", rel: "exact",
+            stat: "完了 / 5,110 tokens", detail: { "状態": "完了", "モデル": "gpt-synthetic", "トークン": "5,110", "関係": "exact（parent span）" }, children: [
+              { id: "tool-edit", kind: "Tool", name: "edit_file", rel: "exact",
+                stat: "3回", detail: { "呼出": "3回", "状態": "全件成功" }, children: [] },
+              { id: "tool-test2", kind: "Tool", name: "run_tests", rel: "exact",
+                stat: "2回", detail: { "呼出": "2回", "結果": "1回目 2 failed → 2回目 12 passed" }, children: [] }
+            ] }
+        ]
+      },
+      timeline: [
+        { t: "18:40", owner: "main", label: "ユーザー指示を受信", chip: "message" },
+        { t: "18:41", owner: "sub-fix", label: "test-fixer を起動", chip: "agent" },
+        { t: "18:42", owner: "sub-fix", label: "run_tests: 2 failed", chip: "test-fail", id: "ev-test-0" },
+        { t: "18:43", owner: "sub-fix", label: "edit_file ×3", chip: "tool" },
+        { t: "18:44", owner: "sub-fix", label: "run_tests: 12 passed", chip: "test", id: "ev-test-1" },
+        { t: "18:44", owner: "main", label: "完了報告（minor 指摘 1 件）", chip: "message", id: "ev-review-1" }
+      ],
+      verdicts: [
+        { label: "テスト成功の根拠", target: "ev-test-1" },
+        { label: "レビュー minor 指摘の根拠", target: "ev-review-1" }
+      ]
+    }
+  },
+  {
+    id: "0197a003",
+    group: "recent",
+    label: "ビルドエラーの原因調査",
+    status: "failed",
+    completeness: "partial",
+    surfaces: ["vscode"],
+    repository: "docs-workspace",
+    startedAt: "昨日 15:12",
+    binding: { kind: "native", note: "Hook の session_id で結合（lifecycle 不完全）" },
+    instruction: {
+      state: "not_captured",
+      text: null
+    },
+    outcome: {
+      kind: "failed",
+      summary: "セッションはエラーで終了しました。エラー span が 3 件記録されています。"
+    },
+    gates: [
+      { state: "fail", label: "テスト実行（2 failed）", evidence: "ev-fail-test" },
+      { state: "fail", label: "エラー span（3 件）", evidence: "ev-fail-span" },
+      { state: "pending", label: "レビュー指摘（未評価）", evidence: null }
+    ],
+    primary: { label: "Improve で改善案を確認（計画中）", target: "improve" },
+    secondary: { label: "Evidence で失敗の根拠を見る", target: "evidence" },
+    evalEnabled: true,
+    evalNote: "ワンタップで人間評価を記録します（後から変更できます）。",
+    evidence: {
+      agents: {
+        id: "main", kind: "Main Agent", name: "copilot-agent", rel: "exact",
+        stat: "失敗 / 2,410 tokens", model: "gpt-synthetic",
+        detail: { "状態": "失敗", "モデル": "gpt-synthetic", "トークン": "2,410", "子Agent": "0" },
+        children: [
+          { id: "tool-build", kind: "Tool", name: "run_build", rel: "unresolved",
+            stat: "3回失敗", detail: { "呼出": "3回", "結果": "全件失敗", "関係": "unresolved（親 span 不明）" }, children: [] }
+        ]
+      },
+      timeline: [
+        { t: "15:12", owner: "main", label: "セッション開始（指示は未取得）", chip: "message" },
+        { t: "15:13", owner: "tool-build", label: "run_build: exit 1", chip: "error", id: "ev-fail-span" },
+        { t: "15:14", owner: "tool-build", label: "run_tests: 2 failed", chip: "test-fail", id: "ev-fail-test" },
+        { t: "15:15", owner: "main", label: "エラーで終了", chip: "error" }
+      ],
+      verdicts: [
+        { label: "失敗判定の根拠（エラー span）", target: "ev-fail-span" },
+        { label: "テスト失敗の根拠", target: "ev-fail-test" }
+      ]
+    }
+  },
+  {
+    id: "0197a004",
+    group: "unbound",
+    label: "OTel トレースのみ（未紐付け）",
+    status: "incomplete",
+    completeness: "unbound",
+    surfaces: [],
+    repository: "sample-repo",
+    startedAt: "昨日 11:05",
+    binding: { kind: "unbound", note: "native session ID なし。推測では結合しません。" },
+    instruction: { state: "not_captured", text: null },
+    outcome: {
+      kind: "unknown",
+      summary: "OTel トレースのみのため、目的・結果・品質は確認できません。取得できない情報は推測で補完しません。"
+    },
+    gates: [],
+    primary: { label: "Local Monitor でトレースを開く" },
+    secondary: null,
+    evalEnabled: false,
+    evalNote: "未紐付けセッションには人間評価を記録できません。",
+    evidence: null
+  }
+];
+
+const STATUS_PILL = {
+  running: { cls: "pill-running", text: "実行中", dot: true },
+  completed: { cls: "pill-completed", text: "完了", dot: false },
+  failed: { cls: "pill-failed", text: "失敗", dot: false },
+  incomplete: { cls: "pill-incomplete", text: "未完全", dot: false }
+};
+const REL_BADGE = {
+  exact: { cls: "badge-exact", text: "exact" },
+  inferred: { cls: "badge-inferred", text: "inferred" },
+  unresolved: { cls: "badge-unresolved", text: "unresolved" }
+};
+
+let selectedSessionId = SESSIONS[0].id; // exact-bound only: this prototype's
+                                        // "current conversation" session.
+let selectedTab = "review";
+let selectedAgentId = "main";
+let evalChoice = null;
+
+function el(tag, attrs, children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "text") node.textContent = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v === true ? "" : v);
+  }
+  for (const child of children || []) node.appendChild(child);
+  return node;
+}
+
+function statusPill(status) {
+  const s = STATUS_PILL[status];
+  const children = [];
+  if (s.dot) children.push(el("span", { class: "dot" }));
+  const pill = el("span", { class: "pill " + s.cls }, children);
+  pill.appendChild(document.createTextNode(s.text));
+  return pill;
+}
+
+function completenessBadge(value) {
+  return el("span", { class: "badge", title: "取得完全性: " + value, text: value });
+}
+
+function session() { return SESSIONS.find((s) => s.id === selectedSessionId); }
+
+/* ---------------- sidebar ---------------- */
+function renderSidebar() {
+  for (const group of ["bound", "recent", "unbound"]) {
+    const host = document.getElementById("group-" + group);
+    host.textContent = "";
+    for (const s of SESSIONS.filter((x) => x.group === group)) {
+      const meta = el("span", { class: "meta" }, [statusPill(s.status), completenessBadge(s.completeness)]);
+      if (s.binding.kind === "native") meta.appendChild(el("span", { class: "badge badge-bind", text: "exact" }));
+      meta.appendChild(document.createTextNode(s.repository + " · " + s.startedAt));
+      host.appendChild(el("button", {
+        class: "session-item", type: "button",
+        "aria-current": String(s.id === selectedSessionId),
+        onclick: () => { selectedSessionId = s.id; selectedAgentId = "main"; evalChoice = null; renderAll(); }
+      }, [el("span", { class: "title", text: s.label }), meta]));
+    }
+  }
+}
+
+/* ---------------- tabs ---------------- */
+function switchTab(tab) {
+  selectedTab = tab;
+  for (const btn of document.querySelectorAll(".tab")) {
+    btn.setAttribute("aria-selected", String(btn.dataset.tab === tab));
+  }
+  for (const name of ["review", "evidence", "improve", "compare"]) {
+    document.getElementById("panel-" + name).hidden = name !== tab;
+  }
+}
+for (const btn of document.querySelectorAll(".tab")) {
+  btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+}
+
+/* ---------------- review tab ---------------- */
+function renderReview() {
+  const s = session();
+  const panel = document.getElementById("panel-review");
+  panel.textContent = "";
+
+  const header = el("div", { class: "session-header" }, [
+    el("span", { class: "name", text: s.label }),
+    statusPill(s.status),
+    completenessBadge(s.completeness)
+  ]);
+  for (const surface of s.surfaces) header.appendChild(el("span", { class: "badge", text: surface }));
+  panel.appendChild(header);
+
+  if (s.status === "running") {
+    panel.appendChild(el("div", { class: "banner banner-info", text: "このセッションは実行中です。成功・失敗はまだ判定しません。" }));
+  }
+  if (s.binding.kind === "unbound") {
+    panel.appendChild(el("div", { class: "banner banner-warn", text: "未紐付けセッションです。native session ID がないため、会話との対応は確認できません。" }));
+  }
+
+  const bindingCard = el("div", { class: "card" }, [
+    el("h3", { text: "セッションの結合" }),
+    el("dl", { class: "kv" }, [
+      el("dt", { text: "結合方法" }),
+      el("dd", { text: s.binding.kind === "native" ? "exact（native session ID）" : "未紐付け" }),
+      el("dt", { text: "詳細" }),
+      el("dd", { class: "muted", text: s.binding.note })
+    ])
+  ]);
+  panel.appendChild(bindingCard);
+
+  const instructionCard = el("div", { class: "card" }, [el("h3", { text: "実際の指示" })]);
+  if (s.instruction.state === "available") {
+    instructionCard.appendChild(el("pre", { class: "preview", text: s.instruction.text }));
+  } else {
+    instructionCard.appendChild(el("p", { class: "muted", text: "指示は取得されていません（not_captured）。推測では表示しません。" }));
+  }
+  panel.appendChild(instructionCard);
+
+  const outcomeCard = el("div", { class: "card" }, [el("h3", { text: "結果" })]);
+  const outcomeLine = el("p", {}, []);
+  if (s.outcome.kind === "success") outcomeLine.appendChild(el("strong", { style: "color:var(--success)", text: "成功: " }));
+  if (s.outcome.kind === "failed") outcomeLine.appendChild(el("strong", { style: "color:var(--danger)", text: "失敗: " }));
+  if (s.outcome.kind === "running") outcomeLine.appendChild(el("strong", { style: "color:var(--accent)", text: "未確定: " }));
+  if (s.outcome.kind === "unknown") outcomeLine.appendChild(el("strong", { class: "muted", text: "不明: " }));
+  outcomeLine.appendChild(document.createTextNode(s.outcome.summary));
+  outcomeCard.appendChild(outcomeLine);
+  panel.appendChild(outcomeCard);
+
+  const gateCard = el("div", { class: "card" }, [el("h3", { text: "品質ゲート" })]);
+  if (s.gates.length === 0) {
+    gateCard.appendChild(el("p", { class: "muted", text: "品質ゲートを評価できる根拠がありません。" }));
+  } else {
+    for (const g of s.gates) {
+      const row = el("div", { class: "gate-row gate-" + g.state }, [
+        el("span", { class: "gate-mark", text: g.state === "pass" ? "PASS" : g.state === "fail" ? "FAIL" : "未評価" }),
+        el("span", { class: "gate-label", text: g.label })
+      ]);
+      if (g.evidence) {
+        row.appendChild(el("a", {
+          class: "gate-evidence", href: "#",
+          onclick: (e) => { e.preventDefault(); switchTab("evidence"); highlightEvent(g.evidence); }
+        , text: "根拠を見る →" }));
+      }
+      gateCard.appendChild(row);
+    }
+  }
+  panel.appendChild(gateCard);
+
+  const evalCard = el("div", { class: "card" }, [
+    el("h3", { text: "人間評価" }),
+    el("p", { class: "muted", text: s.evalNote })
+  ]);
+  const actions = el("div", { class: "eval-actions" }, [
+    el("button", {
+      class: "btn", type: "button", disabled: !s.evalEnabled,
+      "aria-pressed": String(evalChoice === "good"),
+      onclick: () => { evalChoice = evalChoice === "good" ? null : "good"; renderReview(); },
+      text: "期待どおり"
+    }),
+    el("button", {
+      class: "btn", type: "button", disabled: !s.evalEnabled,
+      "aria-pressed": String(evalChoice === "bad"),
+      onclick: () => { evalChoice = evalChoice === "bad" ? null : "bad"; renderReview(); },
+      text: "問題あり"
+    })
+  ]);
+  evalCard.appendChild(actions);
+  if (evalChoice) {
+    evalCard.appendChild(el("p", { style: "margin-top:8px;color:var(--success);font-size:12px", text: "記録しました: " + (evalChoice === "good" ? "期待どおり" : "問題あり") }));
+  }
+  panel.appendChild(evalCard);
+
+  const actionCard = el("div", { class: "card" }, [el("h3", { text: "次の操作" })]);
+  const actionRow = el("div", { class: "action-row" }, [
+    el("button", {
+      class: "btn btn-primary", type: "button",
+      onclick: s.primary.target ? () => switchTab(s.primary.target) : undefined,
+      text: s.primary.label
+    })
+  ]);
+  if (s.secondary) {
+    actionRow.appendChild(el("button", {
+      class: "btn", type: "button",
+      onclick: s.secondary.target ? () => switchTab(s.secondary.target) : undefined,
+      text: s.secondary.label
+    }));
+  }
+  actionCard.appendChild(actionRow);
+  panel.appendChild(actionCard);
+}
+
+/* ---------------- evidence tab ---------------- */
+let highlightedEventId = null;
+function highlightEvent(id) { highlightedEventId = id; renderEvidence(); }
+
+function findAgent(node, id) {
+  if (node.id === id) return node;
+  for (const c of node.children) {
+    const hit = findAgent(c, id);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function agentIds(node, acc) {
+  acc.push(node.id);
+  for (const c of node.children) agentIds(c, acc);
+  return acc;
+}
+
+function renderTree(node, host) {
+  const li = el("li", {}, []);
+  const rel = REL_BADGE[node.rel];
+  const btn = el("button", {
+    class: "tree-node", type: "button",
+    "aria-current": String(node.id === selectedAgentId),
+    onclick: () => { selectedAgentId = node.id; renderEvidence(); }
+  }, [
+    el("span", { class: "kind", text: node.kind }),
+    el("strong", { text: node.name }),
+    el("span", { class: "badge " + rel.cls, text: rel.text }),
+    el("span", { class: "stat", text: node.stat })
+  ]);
+  li.appendChild(btn);
+  if (node.children.length) {
+    const ul = el("ul", {}, []);
+    for (const c of node.children) renderTree(c, ul);
+    li.appendChild(ul);
+  }
+  host.appendChild(li);
+}
+
+function renderEvidence() {
+  const s = session();
+  const panel = document.getElementById("panel-evidence");
+  const count = document.getElementById("evidence-count");
+  panel.textContent = "";
+
+  const errors = s.evidence ? s.evidence.timeline.filter((e) => e.chip === "error").length : 0;
+  count.hidden = errors === 0;
+  count.textContent = "エラー " + errors;
+
+  if (!s.evidence) {
+    panel.appendChild(el("div", { class: "banner banner-warn", text: "未紐付けセッションのため、Agent tree と timeline は利用できません。" }));
+    panel.appendChild(el("div", { class: "card" }, [
+      el("h3", { text: "取得できる根拠" }),
+      el("p", { class: "muted", text: "OTel トレースのみが存在します。Local Monitor のトレース詳細で span を確認してください。推測による Agent 帰属は行いません。" })
+    ]));
+    return;
+  }
+
+  const layout = el("div", { class: "evidence-layout" }, []);
+
+  const treeCard = el("div", { class: "card", style: "margin-bottom:0" }, [el("h3", { text: "Agent tree" })]);
+  const treeRoot = el("ul", { class: "tree" }, []);
+  renderTree(s.evidence.agents, treeRoot);
+  treeCard.appendChild(treeRoot);
+  treeCard.appendChild(el("p", { class: "muted", style: "margin-top:8px;font-size:12px", text: "関係の確度: exact = parent span で確定 / inferred = 時刻から推定 / unresolved = 親不明。推定と確定は常に区別して表示します。" }));
+
+  const right = el("div", {}, []);
+
+  const selected = findAgent(s.evidence.agents, selectedAgentId) || s.evidence.agents;
+  const ownedIds = agentIds(selected, []);
+
+  const timelineCard = el("div", { class: "card" }, [el("h3", { text: "Timeline（" + selected.name + " を強調）" })]);
+  const timeline = el("div", { class: "timeline" }, [
+    el("div", { class: "timeline-head" }, [
+      el("span", { text: "時刻" }), el("span", { text: "担当" }), el("span", { text: "イベント" })
+    ])
+  ]);
+  for (const evt of s.evidence.timeline) {
+    const owned = ownedIds.includes(evt.owner);
+    const row = el("div", {
+      class: "timeline-row" + (owned ? "" : " dim"),
+      id: evt.id || null,
+      style: highlightedEventId && evt.id === highlightedEventId ? "outline:2px solid var(--accent);outline-offset:-2px" : null
+    }, [
+      el("span", { class: "t", text: evt.t }),
+      el("span", { class: "owner", text: evt.owner }),
+      el("span", {}, [
+        el("span", {
+          class: "ev-chip" + (evt.chip === "error" ? " ev-error" : evt.chip === "test" ? " ev-test" : evt.chip === "test-fail" ? " ev-test-fail" : ""),
+          text: evt.chip
+        })
+      ])
+    ]);
+    row.lastChild.appendChild(document.createTextNode(evt.label));
+    timeline.appendChild(row);
+  }
+  timelineCard.appendChild(timeline);
+  right.appendChild(timelineCard);
+
+  const inspectorCard = el("div", { class: "card inspector", style: "margin-bottom:0" }, [
+    el("h3", { text: selected.kind + " inspector — " + selected.name })
+  ]);
+  const dl = el("dl", { class: "kv" }, []);
+  for (const [k, v] of Object.entries(selected.detail)) {
+    dl.appendChild(el("dt", { text: k }));
+    dl.appendChild(el("dd", { text: v }));
+  }
+  inspectorCard.appendChild(dl);
+  if (s.evidence.verdicts.length) {
+    const links = el("div", { class: "verdict-links" }, []);
+    links.appendChild(el("strong", { text: "品質判定の根拠リンク" }));
+    for (const v of s.evidence.verdicts) {
+      links.appendChild(el("a", {
+        href: "#", onclick: (e) => { e.preventDefault(); highlightEvent(v.target); }, text: v.label + " →"
+      }));
+    }
+    inspectorCard.appendChild(links);
+  }
+  right.appendChild(inspectorCard);
+
+  layout.appendChild(treeCard);
+  layout.appendChild(right);
+  panel.appendChild(layout);
+}
+
+function renderAll() {
+  renderSidebar();
+  renderReview();
+  renderEvidence();
+}
+renderAll();
+</script>
+</body>
+</html>
