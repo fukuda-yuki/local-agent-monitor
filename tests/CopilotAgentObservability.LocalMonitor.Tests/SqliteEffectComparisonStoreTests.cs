@@ -146,6 +146,181 @@ public sealed class SqliteEffectComparisonStoreTests
             [new(id, "pre", "case", null), new(id, "post", "case", null)]), DateTimeOffset.UtcNow));
     }
 
+    [Theory]
+    [InlineData("unknown", "case", null)]
+    [InlineData("pre", "case", "user_excluded")]
+    [InlineData("excluded", "", null)]
+    [InlineData("excluded", "", "invalid")]
+    [InlineData("pre", "", null)]
+    [InlineData("post", "bad/key", null)]
+    public void RecordEffectComparison_RejectsInvalidCohortClassificationAndCaseKey(string classification, string caseKey, string? exclusionReason)
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+
+        Assert.Throws<ArgumentException>(() => store.RecordEffectComparison(new(Guid.CreateVersion7(), 1, Guid.CreateVersion7(),
+            [new(Guid.CreateVersion7(), classification, caseKey, exclusionReason)]), DateTimeOffset.UtcNow));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM effect_comparisons;"));
+    }
+
+    [Fact]
+    public void RecordEffectComparison_RejectsOversizeCaseKeyBeforePersisting()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+
+        Assert.Throws<ArgumentException>(() => store.RecordEffectComparison(new(Guid.CreateVersion7(), 1, Guid.CreateVersion7(),
+            [new(Guid.CreateVersion7(), "pre", new string('a', 201), null)]), DateTimeOffset.UtcNow));
+    }
+
+    [Theory]
+    [InlineData("unbound", "completed", false)]
+    [InlineData("partial", "completed", false)]
+    [InlineData("rich", "completed", false)]
+    [InlineData("full", "active", false)]
+    [InlineData("full", "unknown", false)]
+    [InlineData("full", "completed", true)]
+    public void RecordEffectComparison_RequiresExactFullTerminalSession(string completeness, string status, bool removeNative)
+    {
+        using var temp = new MonitorTempDirectory(); var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7(); var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var session = SeedComparableSession(temp.DatabasePath, at.AddMinutes(-2));
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            Execute(connection, "UPDATE sessions SET completeness=$completeness,status=$status WHERE session_id=$id;", ("$completeness", completeness), ("$status", status), ("$id", session.ToString("D")));
+            if (removeNative) Execute(connection, "DELETE FROM session_native_ids WHERE session_id=$id;", ("$id", session.ToString("D")));
+        }
+
+        Assert.Throws<InvalidOperationException>(() => store.RecordEffectComparison(new(proposal, 1, apply, [new(session, "pre", "case", null)]), at));
+    }
+
+    [Theory]
+    [InlineData("missing_start")]
+    [InlineData("missing_end")]
+    [InlineData("end_before_start")]
+    public void RecordEffectComparison_RejectsMissingOrInvalidSessionTimes(string scenario)
+    {
+        using var temp = new MonitorTempDirectory(); var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7(); var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var session = SeedComparableSession(temp.DatabasePath, at.AddMinutes(-2));
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"); connection.Open();
+        Execute(connection, scenario switch
+        {
+            "missing_start" => "UPDATE sessions SET started_at=NULL WHERE session_id=$id;",
+            "missing_end" => "UPDATE sessions SET ended_at=NULL WHERE session_id=$id;",
+            _ => "UPDATE sessions SET ended_at=$time WHERE session_id=$id;"
+        }, ("$id", session.ToString("D")), ("$time", at.AddMinutes(-3).ToString("O")));
+
+        Assert.Throws<InvalidOperationException>(() => store.RecordEffectComparison(new(proposal, 1, apply, [new(session, "pre", "case", null)]), at));
+    }
+
+    [Theory]
+    [InlineData("pre_exact", false)]
+    [InlineData("post_exact", false)]
+    [InlineData("pre_after", true)]
+    [InlineData("post_before", true)]
+    [InlineData("spanning", true)]
+    public void RecordEffectComparison_EnforcesApplicationTimeBoundary(string scenario, bool rejects)
+    {
+        using var temp = new MonitorTempDirectory(); var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7(); var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var session = SeedComparableSession(temp.DatabasePath, at.AddMinutes(-2));
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            var (start, end, side) = scenario switch
+            {
+                "pre_exact" => (at.AddMinutes(-1), at, "pre"),
+                "post_exact" => (at, at.AddMinutes(1), "post"),
+                "pre_after" => (at.AddMinutes(-1), at.AddTicks(1), "pre"),
+                "post_before" => (at.AddTicks(-1), at.AddMinutes(1), "post"),
+                _ => (at.AddMinutes(-1), at.AddMinutes(1), "pre")
+            };
+            Execute(connection, "UPDATE sessions SET started_at=$start,ended_at=$end WHERE session_id=$id;", ("$start", start.ToString("O")), ("$end", end.ToString("O")), ("$id", session.ToString("D")));
+            if (rejects)
+                Assert.Throws<ArgumentException>(() => store.RecordEffectComparison(new(proposal, 1, apply, [new(session, side, "case", null)]), at));
+            else
+                Assert.Equal(EffectVerdict.InsufficientEvidence, store.RecordEffectComparison(new(proposal, 1, apply, [new(session, side, "case", null)]), at).Result.Verdict);
+        }
+    }
+
+    [Fact]
+    public void EffectComparisonRead_RestartsWithSameStoredSessionAndEvidenceIdentity()
+    {
+        using var temp = new MonitorTempDirectory(); var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7(); var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var sessions = Enumerable.Range(0, 6).Select(i => SeedComparableSession(temp.DatabasePath, i < 3 ? at.AddMinutes(-10 - i) : at.AddMinutes(10 + i))).ToArray();
+        foreach (var id in sessions) store.UpsertHumanEvaluation(new(id, "expected", at));
+        var receipt = store.RecordEffectComparison(new(proposal, 1, apply, sessions.Select((id, i) => new EffectCohortSession(id, i < 3 ? "pre" : "post", i < 3 ? "case-a" : "case-b", null)).ToArray()), at);
+
+        var reloaded = new SqliteSessionStore(temp.DatabasePath).GetEffectComparison(receipt.ComparisonId)!;
+
+        Assert.Equal(receipt.Result, reloaded.Receipt.Result, new EffectVerdictResultComparer());
+        Assert.Equal(receipt with { Result = reloaded.Receipt.Result }, reloaded.Receipt);
+        Assert.Equal(6, reloaded.Sessions.Count);
+        Assert.Equal(6, reloaded.Evidence.Count(e => e.Kind == "human"));
+        Assert.Equal(reloaded.Evidence.Where(e => e.Kind == "human").Select(e => e.SessionId).Order(), reloaded.Sessions.Where(s => s.Classification is "pre" or "post").Select(s => s.SessionId).Order());
+        Assert.Equal(new[] { "case-a", "case-b" }, reloaded.Sessions.Where(s => s.Classification != "excluded").Select(s => s.CaseKey).Distinct().Order());
+    }
+
+    [Theory]
+    [InlineData("missing_proposal")]
+    [InlineData("wrong_proposal_revision")]
+    [InlineData("candidate")]
+    [InlineData("verified")]
+    [InlineData("missing_apply")]
+    [InlineData("wrong_apply_revision")]
+    [InlineData("failed")]
+    [InlineData("rolled_back")]
+    [InlineData("rollback_pending")]
+    public void RecordEffectComparison_RejectsStaleProposalOrInactiveApplication(string scenario)
+    {
+        using var temp = new MonitorTempDirectory(); var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7(); var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var session = SeedComparableSession(temp.DatabasePath, at.AddMinutes(-2));
+        var requestProposal = scenario == "missing_proposal" ? Guid.CreateVersion7() : proposal;
+        var requestApply = scenario == "missing_apply" ? Guid.CreateVersion7() : apply;
+        var requestRevision = scenario == "wrong_proposal_revision" ? 2 : 1;
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            if (scenario is "candidate" or "verified") Execute(connection, "UPDATE improvement_proposals SET status=$state WHERE proposal_id=$id;", ("$state", scenario), ("$id", proposal.ToString("D")));
+            if (scenario == "wrong_apply_revision") Execute(connection, "UPDATE proposal_applies SET proposal_revision=2 WHERE apply_id=$id;", ("$id", apply.ToString("D")));
+            if (scenario is "failed" or "rolled_back") Execute(connection, "UPDATE proposal_applies SET state=$state WHERE apply_id=$id;", ("$state", scenario), ("$id", apply.ToString("D")));
+            if (scenario == "rollback_pending") Execute(connection, "INSERT INTO proposal_apply_pending(apply_id,draft_id,proposal_id,root_id,actor_kind,file_count,operation_kind,recorded_at) SELECT a.apply_id,a.draft_id,d.proposal_id,d.root_id,'local_user',0,'rollback',$at FROM proposal_applies a JOIN proposal_apply_drafts d ON d.draft_id=a.draft_id WHERE a.apply_id=$id;", ("$at", at.ToString("O")), ("$id", apply.ToString("D")));
+        }
+
+        Assert.Throws<InvalidOperationException>(() => store.RecordEffectComparison(new(requestProposal, requestRevision, requestApply, [new(session, "pre", "case", null)]), at));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM effect_comparisons;"));
+    }
+
+    [Fact]
+    public void RecordEffectComparison_CapturesCurrentHumanEvidenceAndTreatsDeletedObjectiveEvidenceAsMissing()
+    {
+        using var temp = new MonitorTempDirectory(); var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7(); var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var sessions = Enumerable.Range(0, 6).Select(i => SeedComparableSession(temp.DatabasePath, i < 3 ? at.AddMinutes(-10 - i) : at.AddMinutes(10 + i))).ToArray();
+        foreach (var id in sessions) store.UpsertHumanEvaluation(new(id, "expected", at));
+        var changedAt = at.AddMinutes(1);
+        store.UpsertHumanEvaluation(new(sessions[0], "problem", changedAt));
+        var objective = AddObjective(store, temp.DatabasePath, sessions[1], ObjectiveResult.Pass, ObjectiveSeverity.Normal, at);
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}")) { connection.Open(); Execute(connection, "DELETE FROM objective_evaluation_evidence WHERE objective_evaluation_id=$id; DELETE FROM objective_evaluations WHERE objective_evaluation_id=$id;", ("$id", objective.ToString("D"))); }
+
+        var receipt = store.RecordEffectComparison(new(proposal, 1, apply, sessions.Select((id, i) => new EffectCohortSession(id, i < 3 ? "pre" : "post", "case", null)).ToArray()), at.AddHours(1));
+        var detail = store.GetEffectComparison(receipt.ComparisonId)!;
+
+        Assert.Equal(EffectVerdict.Improved, receipt.Result.Verdict);
+        Assert.Contains(detail.Evidence, e => e.SessionId == sessions[0] && e.Kind == "human" && e.RecordedAt == changedAt);
+        Assert.DoesNotContain(detail.Evidence, e => e.ReferenceId == objective.ToString("D"));
+    }
+
     private static void SeedProposalAndApply(string databasePath, Guid proposalId, Guid applyId, DateTimeOffset appliedAt)
     {
         using var connection = new SqliteConnection($"Data Source={databasePath}");

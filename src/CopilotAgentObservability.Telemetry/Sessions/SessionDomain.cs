@@ -328,6 +328,7 @@ public interface ISessionStore
     IReadOnlyList<ObjectiveEvaluationReceipt> ListObjectiveEvaluations(Guid sessionId);
     EffectReceipt RecordEffectComparison(EffectComparisonRequest request, DateTimeOffset recordedAt);
     IReadOnlyList<EffectReceipt> ListEffectReceipts(Guid proposalId);
+    EffectComparisonDetail? GetEffectComparison(Guid comparisonId);
     SessionContentLookup? GetContent(Guid sessionId, Guid eventId);
     SessionRawRetentionState GetRawRetentionState(Guid sessionId);
     SessionProjectionState? GetProjectionState(string projectorKey);

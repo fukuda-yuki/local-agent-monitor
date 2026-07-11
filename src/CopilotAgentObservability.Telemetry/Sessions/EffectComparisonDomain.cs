@@ -18,6 +18,16 @@ public sealed record EffectReceipt(
     int ProposalRevision, Guid ApplyId, EffectVerdictResult Result,
     string VerificationState, DateTimeOffset RecordedAt);
 
+public sealed record EffectComparisonSession(
+    Guid SessionId, string Classification, string CaseKey, string? ExclusionReason);
+
+public sealed record EffectComparisonEvidence(
+    Guid SessionId, string Kind, string ReferenceId, DateTimeOffset? RecordedAt);
+
+public sealed record EffectComparisonDetail(
+    EffectReceipt Receipt, IReadOnlyList<EffectComparisonSession> Sessions,
+    IReadOnlyList<EffectComparisonEvidence> Evidence);
+
 public sealed record SessionEffectFacts(
     Guid SessionId, string Side, string CaseKey, bool QualityPass,
     bool SevereFailure, long? DurationMs, long? TotalTokens,

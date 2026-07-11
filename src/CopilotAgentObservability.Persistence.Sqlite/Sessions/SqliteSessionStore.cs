@@ -836,6 +836,32 @@ public sealed class SqliteSessionStore : ISessionStore
         return receipts;
     }
 
+    public EffectComparisonDetail? GetEffectComparison(Guid comparisonId)
+    {
+        using var connection = Open();
+        using var receiptCommand = connection.CreateCommand();
+        receiptCommand.CommandText = "SELECT c.cohort_revision,c.proposal_id,c.proposal_revision,c.apply_id,r.result_json,c.recorded_at,CASE WHEN a.state='rolled_back' THEN 'invalidated' ELSE 'active' END FROM effect_comparisons c JOIN effect_receipts r ON r.comparison_id=c.comparison_id JOIN proposal_applies a ON a.apply_id=c.apply_id WHERE c.comparison_id=$comparison;";
+        Add(receiptCommand, "$comparison", Id(comparisonId));
+        using var reader = receiptCommand.ExecuteReader();
+        if (!reader.Read()) return null;
+        var receipt = new EffectReceipt(comparisonId, reader.GetInt32(0), Guid.Parse(reader.GetString(1)), reader.GetInt32(2), Guid.Parse(reader.GetString(3)), System.Text.Json.JsonSerializer.Deserialize<EffectVerdictResult>(reader.GetString(4))!, reader.GetString(6), ParseTimestamp(reader.GetString(5)));
+        var sessions = new List<EffectComparisonSession>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT session_id,classification,case_key,exclusion_reason FROM effect_comparison_sessions WHERE comparison_id=$comparison ORDER BY session_order;";
+            Add(command, "$comparison", Id(comparisonId)); using var rows = command.ExecuteReader();
+            while (rows.Read()) sessions.Add(new(Guid.Parse(rows.GetString(0)), rows.GetString(1), rows.GetString(2), rows.IsDBNull(3) ? null : rows.GetString(3)));
+        }
+        var evidence = new List<EffectComparisonEvidence>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT session_id,kind,reference_id,recorded_at FROM effect_comparison_evidence WHERE comparison_id=$comparison ORDER BY evidence_order;";
+            Add(command, "$comparison", Id(comparisonId)); using var rows = command.ExecuteReader();
+            while (rows.Read()) evidence.Add(new(Guid.Parse(rows.GetString(0)), rows.GetString(1), rows.GetString(2), rows.IsDBNull(3) ? null : ParseTimestamp(rows.GetString(3))));
+        }
+        return new(receipt, sessions, evidence);
+    }
+
     private static IReadOnlyList<ObjectiveEvaluationEvidence> Evidence(SqliteConnection connection, Guid id)
     {
         using var command = connection.CreateCommand(); command.CommandText = "SELECT kind,reference_id FROM objective_evaluation_evidence WHERE objective_evaluation_id=$id ORDER BY evidence_order;"; Add(command, "$id", Id(id)); using var reader = command.ExecuteReader(); var result = new List<ObjectiveEvaluationEvidence>(); while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(1))); return result;
@@ -1301,7 +1327,7 @@ public sealed class SqliteSessionStore : ISessionStore
     }
 
     private static bool IsComparable((ObservedSessionStatus Status, SessionCompleteness Completeness, DateTimeOffset? StartedAt, DateTimeOffset? EndedAt, bool Exact) session) =>
-        session.Exact && session.Completeness == SessionCompleteness.Full && session.Status is ObservedSessionStatus.Completed or ObservedSessionStatus.Failed && session.StartedAt is not null && session.EndedAt is not null;
+        session.Exact && session.Completeness == SessionCompleteness.Full && session.Status is ObservedSessionStatus.Completed or ObservedSessionStatus.Failed && session.StartedAt is not null && session.EndedAt is not null && session.EndedAt >= session.StartedAt;
 
     private static IReadOnlyList<ObjectiveEvaluationReceipt> Objectives(SqliteConnection connection, SqliteTransaction transaction, Guid sessionId)
     {
