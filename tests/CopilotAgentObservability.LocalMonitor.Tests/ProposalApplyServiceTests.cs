@@ -132,6 +132,127 @@ public sealed class ProposalApplyServiceTests
         Assert.Equal(2, AuditCount(directory.DatabasePath));
     }
 
+    [Fact]
+    public void Apply_stale_two_file_preflight_records_one_non_reusable_failure_without_restart_duplicate()
+    {
+        using var directory = new ApplyTestDirectory();
+        var first = Path.Combine(directory.Path, "first.txt");
+        var second = Path.Combine(directory.Path, "second.txt");
+        File.WriteAllText(first, "before-first\n");
+        File.WriteAllText(second, "before-second\n");
+        var store = CreateStore(directory, out var proposalId);
+        var service = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        var draft = service.CreateDraft(proposalId, service.Roots.Single().RootId,
+        [new ProposalApplyFileInput("first.txt", "after-first\n"), new ProposalApplyFileInput("second.txt", "after-second\n")]);
+        var approved = service.Approve(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest);
+        File.WriteAllText(second, "externally-stale\n");
+
+        var (_, result, _) = service.ApplyWithId(approved.DraftId);
+
+        Assert.Equal(ApplyTransactionResult.Stale, result);
+        Assert.Equal("before-first\n", File.ReadAllText(first));
+        Assert.Equal("externally-stale\n", File.ReadAllText(second));
+        Assert.Equal(ProposalApplyState.Failed, store.GetProposalApplyDraft(approved.DraftId)!.State);
+        Assert.Empty(store.ListProposalApplyPending());
+        Assert.Empty(store.ListAppliedProposalApplyLinkages());
+        Assert.Equal(1, AuditCount(directory.DatabasePath, "apply_stale"));
+        Assert.Equal("approval_required", Assert.Throws<ApplyPathException>(() => service.Apply(approved.DraftId)).Code);
+
+        var restarted = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        Assert.Equal("draft_not_found", Assert.Throws<ApplyPathException>(() => restarted.Apply(approved.DraftId)).Code);
+        Assert.Equal(1, AuditCount(directory.DatabasePath, "apply_stale"));
+    }
+
+    [Fact]
+    public void Restart_after_committed_apply_marker_reconciles_once_and_allows_rollback()
+    {
+        using var directory = new ApplyTestDirectory();
+        var first = Path.Combine(directory.Path, "first.txt");
+        var second = Path.Combine(directory.Path, "second.txt");
+        File.WriteAllText(first, "before-first\n");
+        File.WriteAllText(second, "before-second\n");
+        var store = CreateStore(directory, out var proposalId);
+        var initial = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store,
+            point => { if (point == "after_committed_journal") throw new ApplyTransactionCrashException(); });
+        var draft = initial.CreateDraft(proposalId, initial.Roots.Single().RootId,
+        [new ProposalApplyFileInput("first.txt", "after-first\n"), new ProposalApplyFileInput("second.txt", "after-second\n")]);
+        var approved = initial.Approve(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest);
+
+        Assert.Throws<ApplyTransactionCrashException>(() => initial.ApplyWithId(approved.DraftId));
+
+        var restarted = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        Assert.Equal("after-first\n", File.ReadAllText(first));
+        Assert.Equal("after-second\n", File.ReadAllText(second));
+        Assert.Empty(store.ListProposalApplyPending());
+        Assert.Single(store.ListAppliedProposalApplyLinkages());
+        Assert.Equal(1, AuditCount(directory.DatabasePath, null));
+        Assert.Equal(ApplyTransactionResult.RolledBack, restarted.Rollback(store.ListAppliedProposalApplyLinkages().Single().ApplyId));
+        Assert.Equal("before-first\n", File.ReadAllText(first));
+        Assert.Equal("before-second\n", File.ReadAllText(second));
+
+        _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        Assert.Equal(2, AuditCount(directory.DatabasePath, null));
+    }
+
+    [Theory]
+    [InlineData("after_snapshot:0")]
+    [InlineData("after_prepared_journal")]
+    [InlineData("after_atomic_replace:0")]
+    public void Restart_after_precommit_apply_crash_restores_originals_and_records_one_sanitized_failure(string boundary)
+    {
+        using var directory = new ApplyTestDirectory();
+        var first = Path.Combine(directory.Path, "first.txt");
+        var second = Path.Combine(directory.Path, "second.txt");
+        File.WriteAllText(first, "before-first\n");
+        File.WriteAllText(second, "before-second\n");
+        var store = CreateStore(directory, out var proposalId);
+        var initial = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store,
+            point => { if (point == boundary) throw new ApplyTransactionCrashException(); });
+        var draft = initial.CreateDraft(proposalId, initial.Roots.Single().RootId,
+        [new ProposalApplyFileInput("first.txt", "after-first\n"), new ProposalApplyFileInput("second.txt", "after-second\n")]);
+        var approved = initial.Approve(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest);
+
+        Assert.Throws<ApplyTransactionCrashException>(() => initial.ApplyWithId(approved.DraftId));
+
+        _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        Assert.Equal("before-first\n", File.ReadAllText(first));
+        Assert.Equal("before-second\n", File.ReadAllText(second));
+        Assert.Empty(store.ListProposalApplyPending());
+        Assert.Empty(store.ListAppliedProposalApplyLinkages());
+        Assert.Equal(ProposalApplyState.Failed, store.GetProposalApplyDraft(approved.DraftId)!.State);
+        Assert.Equal(1, AuditCount(directory.DatabasePath, "apply_failed"));
+
+        _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        Assert.Equal(1, AuditCount(directory.DatabasePath, "apply_failed"));
+    }
+
+    [Fact]
+    public void Apply_durable_rows_do_not_contain_test_path_or_content_markers()
+    {
+        using var directory = new ApplyTestDirectory();
+        const string rootMarker = "root-marker";
+        const string pathMarker = "path-marker";
+        const string sourceMarker = "source-marker";
+        const string diffMarker = "diff-marker";
+        const string replacementMarker = "replacement-marker";
+        var rootPath = Path.Combine(directory.Path, rootMarker);
+        Directory.CreateDirectory(rootPath);
+        File.WriteAllText(Path.Combine(rootPath, pathMarker + ".txt"), sourceMarker + diffMarker + "\n");
+        var store = CreateStore(directory, out var proposalId);
+        var service = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath)], directory.RuntimePath, store);
+        var draft = service.CreateDraft(proposalId, service.Roots.Single().RootId, [new ProposalApplyFileInput(pathMarker + ".txt", replacementMarker + "\n")]);
+        var approved = service.Approve(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest);
+        Assert.Equal(ApplyTransactionResult.Applied, service.Apply(approved.DraftId));
+
+        var durableText = ReadApplyDurableText(directory.DatabasePath);
+        Assert.DoesNotContain(rootMarker, durableText, StringComparison.Ordinal);
+        Assert.DoesNotContain(pathMarker, durableText, StringComparison.Ordinal);
+        Assert.DoesNotContain(sourceMarker, durableText, StringComparison.Ordinal);
+        Assert.DoesNotContain(diffMarker, durableText, StringComparison.Ordinal);
+        Assert.DoesNotContain(replacementMarker, durableText, StringComparison.Ordinal);
+        Assert.DoesNotContain("snapshot", durableText, StringComparison.OrdinalIgnoreCase);
+    }
+
     private sealed class ApplyTestDirectory : IDisposable
     {
         public ApplyTestDirectory()
@@ -171,12 +292,22 @@ public sealed class ProposalApplyServiceTests
         return service.Approve(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest);
     }
 
-    private static long AuditCount(string databasePath)
+    private static long AuditCount(string databasePath, string? errorCode = null)
     {
         using var connection = new SqliteConnection($"Data Source={databasePath}");
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT COUNT(*) FROM proposal_apply_audit;";
+        command.CommandText = errorCode is null ? "SELECT COUNT(*) FROM proposal_apply_audit;" : "SELECT COUNT(*) FROM proposal_apply_audit WHERE error_code=$error;";
+        if (errorCode is not null) command.Parameters.AddWithValue("$error", errorCode);
         return (long)command.ExecuteScalar()!;
+    }
+
+    private static string ReadApplyDurableText(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT group_concat(quote(draft_id) || quote(proposal_id) || quote(root_id) || quote(approval_digest) || quote(state) || quote(error_code), '|') FROM (SELECT draft_id, proposal_id, root_id, approval_digest, state, NULL AS error_code FROM proposal_apply_drafts UNION ALL SELECT draft_id, NULL, NULL, base_sha256 || replacement_sha256, NULL, NULL FROM proposal_apply_files UNION ALL SELECT draft_id, NULL, NULL, hunk_id || replacement_sha256, NULL, NULL FROM proposal_apply_hunks UNION ALL SELECT draft_id, NULL, NULL, NULL, state, NULL FROM proposal_applies UNION ALL SELECT draft_id, proposal_id, root_id, NULL, state, error_code FROM proposal_apply_audit UNION ALL SELECT draft_id, proposal_id, root_id, operation_kind, NULL, NULL FROM proposal_apply_pending);";
+        return command.ExecuteScalar() as string ?? string.Empty;
     }
 }
