@@ -117,6 +117,43 @@ dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\mon
 | `--db` | `data/raw-store.db` | SQLite raw store のパス |
 | `--url` | `http://127.0.0.1:4320` | ループバック bind URL（非ループバックは拒否） |
 | `--sanitized-only` | off | metadata-only モード。raw 由来の表示（プロンプト、インスペクタ raw タブ、Copilot 解析ドロワー、raw route）と PII を除外する任意 opt-out。 |
+| `--apply-root user_config=<absolute-directory>` | なし | proposal apply で使う明示登録済みのローカル user-config root |
+| `--apply-root skill=<absolute-directory>` | なし | proposal apply で使う明示登録済みのローカル Skill root |
+| `--apply-root repository=<absolute-directory>` | なし | proposal apply で使う明示登録済みの repository working-tree root |
+
+### Canvas proposal をローカルへ適用する
+
+この操作は既存 proposal を明示承認してから行う、Local Monitor のローカル専用操作です。
+適用 root は推測されず、API から登録することもできません。起動時に必要な root だけを
+絶対パスで明示指定します。以下の `<...>` は実在するローカルディレクトリに置き換える
+ためのプレースホルダーです。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db <absolute-db-path> --url http://127.0.0.1:4320 `
+  --apply-root user_config=<absolute-user-config-directory> `
+  --apply-root skill=<absolute-skill-directory> `
+  --apply-root repository=<absolute-repository-working-tree-directory>
+```
+
+指定した root そのもの、および volume root までの祖先に symlink / junction / reparse
+point がある場合は起動を拒否します。対象にできるのは、設定済み root 配下にすでに存在する
+通常ファイルだけです。ディレクトリ、作成、削除、名前変更、任意パスの登録はできません。
+
+Canvas の Improve で既存 proposal を選び、**Apply locally** を開いた後の手順は次のとおりです。
+
+1. token-gated helper で下書きと full diff を確認する。
+2. ファイルまたは hunk を選択し、選択後の diff を確認する。
+3. 選択内容を明示承認する。
+4. 承認済み下書きだけを別操作で apply する。
+5. apply 後に戻す必要がある場合だけ、現在のファイル hash が apply 直後の hash と一致するときに限り、一度だけ rollback する。
+
+選択対象のいずれかの base hash が stale なら、**選択した全ファイルに対して書き込みは
+行われません**。snapshot / journal を使う起動時 recovery も fail-closed です。安全に
+復旧できない未完了 transaction がある場合は、その root を推測して復旧せず、適用・rollback
+を受け付けません。
+
+パス、source、full diff は token-gated helper と下書き表示の境界内だけで扱われます。Canvas
+action、`session.send()`、git branch / commit / push / PR 操作はファイルを適用しません。
 
 ### Windows logon startup
 
