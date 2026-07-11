@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -38,6 +40,31 @@ public sealed class SessionImprovementProposalRouteTests
         using var response = await host.Client.SendAsync(StatusRequest(proposalId, status));
 
         await AssertFixedError(response, HttpStatusCode.BadRequest, error);
+    }
+
+    [Fact]
+    public async Task UpdateProposalStatus_does_not_claim_a_lifecycle_change_while_an_apply_authorization_is_active()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        var first = await CreateTerminalSessionAsync(host.Client, "pending-authorization-1");
+        var second = await CreateTerminalSessionAsync(host.Client, "pending-authorization-2");
+        var proposalId = await CreateCandidateAsync(host.Client, ValidCandidate(first, second));
+        using (var promoted = await host.Client.SendAsync(StatusRequest(proposalId, "recommended")))
+        {
+            Assert.Equal(HttpStatusCode.OK, promoted.StatusCode);
+        }
+
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        Assert.True(store.TryAuthorizeProposalApply(
+            new ProposalApplyPendingOperation(Guid.CreateVersion7(), Guid.CreateVersion7(), proposalId, Guid.CreateVersion7(), 1, "apply", DateTimeOffset.UnixEpoch),
+            proposalRevision: 2));
+
+        using var response = await host.Client.SendAsync(StatusRequest(proposalId, "candidate"));
+
+        await AssertFixedError(response, HttpStatusCode.BadRequest, "invalid_proposal_status");
+        var proposal = store.GetImprovementProposal(proposalId)!;
+        Assert.Equal((ImprovementProposalStatus.Recommended, 2), (proposal.Status, proposal.Revision));
     }
 
     [Fact]

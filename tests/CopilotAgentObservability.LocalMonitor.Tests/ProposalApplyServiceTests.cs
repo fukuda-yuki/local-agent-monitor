@@ -2,6 +2,7 @@ using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
+using System.Text.Json.Nodes;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -319,6 +320,73 @@ public sealed class ProposalApplyServiceTests
         Assert.DoesNotContain("snapshot", durableText, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Legacy_private_draft_without_proposal_revision_is_upgraded_to_the_migrated_durable_revision_and_has_an_active_receipt()
+    {
+        using var directory = new ApplyTestDirectory();
+        var target = Path.Combine(directory.Path, "legacy.txt");
+        File.WriteAllText(target, "before\n");
+        var store = CreateStore(directory, out var proposalId);
+        var service = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        var approved = ApproveSingleFile(service, proposalId, "legacy.txt", "after\n");
+        Assert.Equal(ApplyTransactionResult.Applied, service.Apply(approved.DraftId));
+        Assert.Equal(1, store.GetProposalApplyDraft(approved.DraftId)!.ProposalRevision);
+
+        var privatePath = Path.Combine(directory.RuntimePath, "drafts", approved.DraftId.ToString("N") + ".json");
+        var legacy = JsonNode.Parse(File.ReadAllText(privatePath))!.AsObject();
+        legacy.Remove("ProposalRevision");
+        File.WriteAllText(privatePath, legacy.ToJsonString());
+
+        var receipt = Assert.Single(service.ListApplicationReceipts(proposalId));
+
+        Assert.Equal("active", receipt.CurrentState);
+        Assert.Equal(1, receipt.ProposalRevision);
+        Assert.Equal(1, JsonNode.Parse(File.ReadAllText(privatePath))!["ProposalRevision"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task Apply_authorization_blocks_lifecycle_transition_until_completion_and_stale_transition_rejects_before_writing_files()
+    {
+        using var directory = new ApplyTestDirectory();
+        var staleTarget = Path.Combine(directory.Path, "stale.txt");
+        File.WriteAllText(staleTarget, "before-stale\n");
+        var store = CreateStore(directory, out _);
+        var staleProposalId = Guid.CreateVersion7();
+        InsertProposal(directory.DatabasePath, staleProposalId, ImprovementProposalStatus.Recommended);
+        var staleService = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        var staleDraft = ApproveSingleFile(staleService, staleProposalId, "stale.txt", "after-stale\n");
+        store.UpdateImprovementProposalStatus(staleProposalId, ImprovementProposalStatus.Candidate, DateTimeOffset.UnixEpoch);
+
+        var stale = Assert.Throws<ApplyPathException>(() => staleService.Apply(staleDraft.DraftId));
+
+        Assert.Equal("approval_required", stale.Code);
+        Assert.Equal("before-stale\n", File.ReadAllText(staleTarget));
+        Assert.Empty(store.ListProposalApplyPending());
+        Assert.Equal(0, AuditCount(directory.DatabasePath));
+
+        var target = Path.Combine(directory.Path, "concurrent.txt");
+        File.WriteAllText(target, "before-concurrent\n");
+        var proposalId = Guid.CreateVersion7();
+        InsertProposal(directory.DatabasePath, proposalId, ImprovementProposalStatus.Recommended);
+        using var authorized = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var service = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store,
+            point => { if (point == "after_prepared_journal") { authorized.Set(); release.Wait(TimeSpan.FromSeconds(10)); } });
+        var approved = ApproveSingleFile(service, proposalId, "concurrent.txt", "after-concurrent\n");
+
+        var apply = Task.Run(() => service.ApplyWithId(approved.DraftId));
+        Assert.True(authorized.Wait(TimeSpan.FromSeconds(10)), "Apply did not reach the authorized barrier.");
+        Assert.Throws<InvalidOperationException>(() => store.UpdateImprovementProposalStatus(proposalId, ImprovementProposalStatus.Candidate, DateTimeOffset.UnixEpoch.AddMinutes(1)));
+        Assert.Equal(1, store.GetImprovementProposal(proposalId)!.Revision);
+        Assert.Equal(ImprovementProposalStatus.Recommended, store.GetImprovementProposal(proposalId)!.Status);
+
+        release.Set();
+        Assert.Equal(ApplyTransactionResult.Applied, (await apply).Result);
+        store.UpdateImprovementProposalStatus(proposalId, ImprovementProposalStatus.Candidate, DateTimeOffset.UnixEpoch.AddMinutes(2));
+        Assert.Equal(2, store.GetImprovementProposal(proposalId)!.Revision);
+        Assert.Equal(ImprovementProposalStatus.Candidate, store.GetImprovementProposal(proposalId)!.Status);
+    }
+
     private sealed class ApplyTestDirectory : IDisposable
     {
         public ApplyTestDirectory()
@@ -350,6 +418,18 @@ public sealed class ProposalApplyServiceTests
         command.Parameters.AddWithValue("$id", proposalId.ToString("D"));
         command.ExecuteNonQuery();
         return store;
+    }
+
+    private static void InsertProposal(string databasePath, Guid proposalId, ImprovementProposalStatus status)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO improvement_proposals(proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at) VALUES($id,$status,'skill','fixture','fixture','fixture','fixture','fixture','2026-07-12T00:00:00+00:00','2026-07-12T00:00:00+00:00',$recommended);";
+        command.Parameters.AddWithValue("$id", proposalId.ToString("D"));
+        command.Parameters.AddWithValue("$status", status == ImprovementProposalStatus.Recommended ? "recommended" : "candidate");
+        command.Parameters.AddWithValue("$recommended", status == ImprovementProposalStatus.Recommended ? "2026-07-12T00:00:00+00:00" : DBNull.Value);
+        command.ExecuteNonQuery();
     }
 
     private static ProposalApplyDraft ApproveSingleFile(ProposalApplyService service, Guid proposalId, string relativePath, string replacement)

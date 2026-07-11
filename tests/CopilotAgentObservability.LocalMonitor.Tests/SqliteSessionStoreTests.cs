@@ -831,7 +831,7 @@ public sealed class SqliteSessionStoreTests
     }
 
     [Fact]
-    public void Improvement_proposal_revision_starts_at_one_increments_on_lifecycle_changes_and_migrates_legacy_rows()
+    public void Improvement_proposal_revision_starts_at_one_and_increments_on_lifecycle_changes()
     {
         using var database = new SessionTestDatabase();
         var store = new SqliteSessionStore(database.Path);
@@ -850,6 +850,28 @@ public sealed class SqliteSessionStoreTests
         Assert.Equal(2, store.GetImprovementProposal(proposal.ProposalId)!.Revision);
         store.UpdateImprovementProposalStatus(proposal.ProposalId, ImprovementProposalStatus.Candidate, DateTimeOffset.UnixEpoch.AddMinutes(4));
         Assert.Equal(3, store.GetImprovementProposal(proposal.ProposalId)!.Revision);
+    }
+
+    [Fact]
+    public void CreateSchema_upgrades_a_real_version_six_database_and_keeps_legacy_application_receipts_queryable()
+    {
+        using var database = new SessionTestDatabase();
+        var proposalId = Guid.CreateVersion7();
+        var draftId = Guid.CreateVersion7();
+        var applyId = Guid.CreateVersion7();
+        var rootId = Guid.CreateVersion7();
+        CreateVersionSixProposalApplyDatabase(database.Open, proposalId, draftId, applyId, rootId);
+
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+
+        using var verify = database.Open();
+        Assert.Equal(7L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(1L, Scalar<long>(verify, "SELECT revision FROM improvement_proposals;"));
+        Assert.Equal(1L, Scalar<long>(verify, "SELECT proposal_revision FROM proposal_apply_drafts;"));
+        Assert.Equal(1L, Scalar<long>(verify, "SELECT proposal_revision FROM proposal_applies;"));
+        var receipt = Assert.Single(store.ListApplicationReceipts(proposalId));
+        Assert.Equal((applyId, draftId, proposalId, 1, "applied"), (receipt.ApplyId, receipt.DraftId, receipt.ProposalId, receipt.ProposalRevision, receipt.State));
     }
 
     private static SessionWriteBatch CreateTerminalBatch(DateTimeOffset lastSeenAt, string nativeId)
@@ -886,6 +908,49 @@ public sealed class SqliteSessionStoreTests
             now,
             null,
             null);
+    }
+
+    private static void CreateVersionSixProposalApplyDatabase(Func<SqliteConnection> open, Guid proposalId, Guid draftId, Guid applyId, Guid rootId)
+    {
+        using var connection = open();
+        Execute(connection, """
+            CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL);
+            INSERT INTO schema_version VALUES('session', 6);
+            CREATE TABLE improvement_proposals (
+                proposal_id TEXT PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('candidate','recommended','verified')),
+                target_kind TEXT NOT NULL, target_label TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
+                expected_effect TEXT NOT NULL, risk_note TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                recommended_at TEXT NULL, verified_at TEXT NULL);
+            CREATE TABLE proposal_apply_drafts (
+                draft_id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL, root_id TEXT NOT NULL,
+                selection_revision INTEGER NOT NULL CHECK (selection_revision > 0), approval_digest TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('draft','approved','applied','rolled_back','failed')),
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE proposal_apply_files (
+                draft_id TEXT NOT NULL, file_order INTEGER NOT NULL CHECK (file_order >= 0),
+                base_sha256 TEXT NOT NULL, replacement_sha256 TEXT NOT NULL, PRIMARY KEY (draft_id,file_order));
+            CREATE TABLE proposal_apply_hunks (
+                draft_id TEXT NOT NULL, hunk_id TEXT NOT NULL, selected INTEGER NOT NULL CHECK (selected IN (0,1)),
+                replacement_sha256 TEXT NOT NULL, PRIMARY KEY (draft_id,hunk_id));
+            CREATE TABLE proposal_apply_revisions (
+                draft_id TEXT NOT NULL, selection_revision INTEGER NOT NULL CHECK (selection_revision > 0),
+                approval_digest TEXT NOT NULL, approved_at TEXT NULL, PRIMARY KEY (draft_id,selection_revision));
+            CREATE TABLE proposal_applies (
+                apply_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('applied','rolled_back','failed')), created_at TEXT NOT NULL);
+            CREATE TABLE proposal_apply_audit (
+                audit_id INTEGER PRIMARY KEY, apply_id TEXT NULL, draft_id TEXT NULL, proposal_id TEXT NOT NULL,
+                root_id TEXT NOT NULL, actor_kind TEXT NOT NULL CHECK (actor_kind='local_user'), state TEXT NOT NULL,
+                error_code TEXT NULL, file_count INTEGER NOT NULL CHECK (file_count >= 0), recorded_at TEXT NOT NULL);
+            CREATE TABLE proposal_apply_pending (
+                apply_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, proposal_id TEXT NOT NULL, root_id TEXT NOT NULL,
+                actor_kind TEXT NOT NULL CHECK (actor_kind='local_user'), file_count INTEGER NOT NULL CHECK (file_count >= 0),
+                operation_kind TEXT NOT NULL CHECK (operation_kind IN ('apply','rollback')), recorded_at TEXT NOT NULL);
+            """);
+        var timestamp = DateTimeOffset.UnixEpoch.ToString("O");
+        Execute(connection, $"INSERT INTO improvement_proposals VALUES('{proposalId:D}','candidate','skill','fixture','fixture','fixture','fixture','fixture','{timestamp}','{timestamp}',NULL,NULL);");
+        Execute(connection, $"INSERT INTO proposal_apply_drafts VALUES('{draftId:D}','{proposalId:D}','{rootId:D}',1,'digest','applied','{timestamp}','{timestamp}');");
+        Execute(connection, $"INSERT INTO proposal_applies VALUES('{applyId:D}','{draftId:D}','applied','{timestamp}');");
     }
 
     private static void Execute(SqliteConnection connection, string sql)
