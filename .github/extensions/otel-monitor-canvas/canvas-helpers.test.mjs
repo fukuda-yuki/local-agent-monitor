@@ -26,6 +26,7 @@ import {
     summaryTraceLine,
     extractRawPreviewFragment,
     renderRawPreviewHtml,
+    renderRawPreviewMessageHtml,
     normalizeAnalysisOptions,
     selectedAnalysisOption,
     formatTimeoutHint,
@@ -396,8 +397,17 @@ test("renderRawPreviewHtml: embeds the fragment verbatim (byte-for-byte, no re-e
     assert.ok(html.includes(encodedFragment), "expected the exact encoded fragment to appear byte-for-byte in the output");
     assert.match(html, /trace-&lt;1&gt;/);
     assert.match(html, /span-&amp;2/);
+    assert.match(html, /href="\/analysis\?t=token-1"/);
+    assert.match(html, /← 分析ページに戻る/);
     assert.doesNotMatch(html, /<script>/);
     assert.doesNotMatch(html, /fetch\(/);
+});
+
+test("renderRawPreviewMessageHtml: returns to the analysis page", () => {
+    const html = renderRawPreviewMessageHtml({ heading: "不正なリクエスト", message: "trace id が必要です。", token: "token-1" });
+
+    assert.match(html, /href="\/analysis\?t=token-1"/);
+    assert.match(html, /← 分析ページに戻る/);
 });
 
 test("renderHelperHtml: contains the raw-preview link's Japanese text and does not client-side fetch() /raw-preview", () => {

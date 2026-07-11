@@ -867,7 +867,7 @@ internal static class MonitorHost
         return !string.IsNullOrWhiteSpace(host) && MonitorOptions.IsAllowedLoopbackHost(host);
     }
 
-    private static bool HasMonitorCsrfHeader(HttpContext context) =>
+    internal static bool HasMonitorCsrfHeader(HttpContext context) =>
         string.Equals(context.Request.Headers["x-monitor-csrf"].ToString(), "local-monitor", StringComparison.Ordinal);
 
     /// <summary>The same <c>compactTrace</c>-shaped projection <c>/api/monitor/traces</c> emits per item, reused for the summary's embedded highlight traces.</summary>

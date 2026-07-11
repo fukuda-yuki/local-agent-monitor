@@ -28,7 +28,7 @@ public class MonitorHostTests
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT version FROM schema_version WHERE component='session';";
-        Assert.Equal(1L, (long)command.ExecuteScalar()!);
+        Assert.Equal(2L, (long)command.ExecuteScalar()!);
     }
 
     [Fact]
@@ -39,7 +39,7 @@ public class MonitorHostTests
         {
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 2);";
+            command.CommandText = "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 3);";
             command.ExecuteNonQuery();
         }
 

@@ -264,6 +264,8 @@ public sealed record SessionWriteBatch(SessionDetail Detail, IReadOnlyList<Sessi
 
 public sealed record SessionContentLookup(SessionContentState State, SessionEventContent? Content);
 
+public sealed record SessionHumanEvaluation(Guid SessionId, string Verdict, DateTimeOffset RecordedAt);
+
 public interface ISessionStore
 {
     void CreateSchema();
@@ -271,6 +273,9 @@ public interface ISessionStore
     ObservedSession? Resolve(SessionSourceSurface sourceSurface, string nativeSessionId);
     IReadOnlyList<ObservedSession> ListMostRecent(int limit);
     SessionDetail? GetDetail(Guid sessionId);
+    SessionHumanEvaluation? GetHumanEvaluation(Guid sessionId);
+    void UpsertHumanEvaluation(SessionHumanEvaluation evaluation);
+    void ClearHumanEvaluation(Guid sessionId);
     SessionContentLookup? GetContent(Guid sessionId, Guid eventId);
     SessionRawRetentionState GetRawRetentionState(Guid sessionId);
     SessionProjectionState? GetProjectionState(string projectorKey);

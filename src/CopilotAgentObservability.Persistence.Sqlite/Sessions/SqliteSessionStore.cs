@@ -5,6 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 public sealed class SqliteSessionStore : ISessionStore
 {
+    private const int CurrentSchemaVersion = 2;
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
 
@@ -39,18 +40,25 @@ public sealed class SqliteSessionStore : ISessionStore
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'session';";
         var existingVersion = versionCommand.ExecuteScalar();
-        if (existingVersion is not null && Convert.ToInt32(existingVersion) != 1)
+        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or CurrentSchemaVersion))
         {
             throw new InvalidOperationException("Unsupported Session schema version.");
         }
 
         if (existingVersion is null)
         {
-            Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('session',1);");
+            command.CommandText = SchemaSql;
+            command.ExecuteNonQuery();
+            command.CommandText = HumanEvaluationSchemaSql;
+            command.ExecuteNonQuery();
+            Execute(connection, transaction, $"INSERT INTO schema_version(component,version) VALUES('session',{CurrentSchemaVersion});");
         }
-
-        command.CommandText = SchemaSql;
-        command.ExecuteNonQuery();
+        else if (Convert.ToInt32(existingVersion) == 1)
+        {
+            command.CommandText = HumanEvaluationSchemaSql;
+            command.ExecuteNonQuery();
+            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
         transaction.Commit();
     }
 
@@ -368,6 +376,44 @@ public sealed class SqliteSessionStore : ISessionStore
 
         return new(session, nativeIds, runs, events);
     }
+
+    public SessionHumanEvaluation? GetHumanEvaluation(Guid sessionId)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT session_id,verdict,recorded_at FROM session_human_evaluation WHERE session_id=$id;";
+        Add(command, "$id", Id(sessionId));
+        using var reader = command.ExecuteReader();
+        return reader.Read()
+            ? new(Guid.Parse(reader.GetString(0)), reader.GetString(1), ParseTimestamp(reader.GetString(2)))
+            : null;
+    }
+
+    public void UpsertHumanEvaluation(SessionHumanEvaluation evaluation)
+    {
+        ArgumentNullException.ThrowIfNull(evaluation);
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO session_human_evaluation(session_id,verdict,recorded_at)
+            VALUES($session_id,$verdict,$recorded_at)
+            ON CONFLICT(session_id) DO UPDATE SET verdict=excluded.verdict,recorded_at=excluded.recorded_at;
+            """;
+        Add(command, "$session_id", Id(evaluation.SessionId));
+        Add(command, "$verdict", evaluation.Verdict);
+        Add(command, "$recorded_at", Timestamp(evaluation.RecordedAt));
+        command.ExecuteNonQuery();
+    }
+
+    public void ClearHumanEvaluation(Guid sessionId)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM session_human_evaluation WHERE session_id=$id;";
+        Add(command, "$id", Id(sessionId));
+        command.ExecuteNonQuery();
+    }
+
     public SessionContentLookup? GetContent(Guid sessionId, Guid eventId)
     {
         using var connection = Open();
@@ -604,6 +650,15 @@ public sealed class SqliteSessionStore : ISessionStore
             projection_cursor INTEGER NULL CHECK (projection_cursor IS NULL OR projection_cursor >= 0),
             unsupported_event_version_count INTEGER NOT NULL CHECK (unsupported_event_version_count >= 0),
             updated_at TEXT NOT NULL
+        );
+        """;
+
+    private const string HumanEvaluationSchemaSql = """
+        CREATE TABLE IF NOT EXISTS session_human_evaluation (
+            session_id TEXT PRIMARY KEY,
+            verdict TEXT NOT NULL CHECK (verdict IN ('expected','problem')),
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
         );
         """;
 }

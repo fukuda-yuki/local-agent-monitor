@@ -129,6 +129,11 @@ internal static class SessionRoutes
             await Json(context, new
             {
                 session = SessionDto(detail.Session, detail.NativeIds, store.GetRawRetentionState(detail.Session.SessionId)),
+                human_evaluation = store.GetHumanEvaluation(id) is { } evaluation ? new
+                {
+                    verdict = evaluation.Verdict,
+                    recorded_at = evaluation.RecordedAt,
+                } : null,
                 native_ids = detail.NativeIds.Select(item => new
                 {
                     source_surface = SessionWire.ToWire(item.SourceSurface),
@@ -163,6 +168,52 @@ internal static class SessionRoutes
                     content_state = SessionWire.ToWire(item.ContentState),
                 }),
             });
+        });
+
+        app.MapPut("/api/session-workspace/sessions/{sessionId}/human-evaluation", async (string sessionId, HttpContext context) =>
+        {
+            if (MonitorHost.IsCrossSiteRequest(context))
+            {
+                await Failure(context, 403, "cross_origin_forbidden");
+                return;
+            }
+            if (!MonitorHost.HasMonitorCsrfHeader(context))
+            {
+                await Failure(context, 403, "csrf_required");
+                return;
+            }
+            if (!string.Equals(context.Request.ContentType?.Split(';', 2)[0], "application/json", StringComparison.OrdinalIgnoreCase))
+            {
+                await Failure(context, 415, "unsupported_media_type");
+                return;
+            }
+            if (!Guid.TryParseExact(sessionId, "D", out var id))
+            {
+                await Failure(context, 400, "invalid_session_id");
+                return;
+            }
+
+            var body = await ReadBoundedBody(context.Request, MaximumBodyBytes, context.RequestAborted);
+            if (body is null || !TryParseHumanEvaluation(body, out var verdict))
+            {
+                await Failure(context, 400, "invalid_human_evaluation_request");
+                return;
+            }
+            if (store.GetDetail(id) is null)
+            {
+                await Failure(context, 404, "session_not_found");
+                return;
+            }
+
+            if (verdict is null)
+            {
+                store.ClearHumanEvaluation(id);
+            }
+            else
+            {
+                store.UpsertHumanEvaluation(new(id, verdict, timeProvider.GetUtcNow()));
+            }
+            context.Response.StatusCode = 204;
         });
 
         app.MapGet("/api/session-workspace/resolve", async context =>
@@ -284,6 +335,42 @@ internal static class SessionRoutes
         limit = 50;
         return string.IsNullOrEmpty(value)
             || (int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out limit) && limit is >= 1 and <= 200);
+    }
+
+    private static bool TryParseHumanEvaluation(byte[] body, out string? verdict)
+    {
+        verdict = null;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            var properties = document.RootElement.EnumerateObject().ToArray();
+            if (properties.Length != 1 || !string.Equals(properties[0].Name, "verdict", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (properties[0].Value.ValueKind == JsonValueKind.Null)
+            {
+                return true;
+            }
+
+            if (properties[0].Value.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            verdict = properties[0].Value.GetString();
+            return verdict is "expected" or "problem";
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static async Task<byte[]?> ReadBoundedBody(HttpRequest request, int maximumBytes, CancellationToken cancellationToken)

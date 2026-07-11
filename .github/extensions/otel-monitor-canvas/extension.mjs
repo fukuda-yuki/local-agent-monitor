@@ -48,6 +48,7 @@ import {
     PROMPT_TEMPLATE_VERSION,
     MAX_CACHE_TURNS,
 } from "./canvas-helpers.mjs";
+import { renderWorkspaceHtml } from "./canvas-workspace-helpers.mjs";
 import { ensureSdkSessionCapture } from "./canvas-session-events.mjs";
 
 const DEFAULT_MONITOR_URL = "http://127.0.0.1:4320";
@@ -57,6 +58,8 @@ const MAX_SPAN_PAGE_SIZE = 200;
 const MAX_TRACE_CONTENT_DETAIL_SPANS = 20;
 const REQUEST_TIMEOUT_MS = 5000;
 const FOCUS_VALUES = ["latency", "tokens", "cache", "errors"];
+const SESSION_ID_PATTERN = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$";
+const INSTRUCTION_EVENT_TYPES = new Set(["user.message", "UserPromptSubmit", "userPromptSubmitted"]);
 
 const traceIdSchema = {
     type: "object",
@@ -82,6 +85,10 @@ const sessionCaptures = new Map();
 
 function matchesTraceId(value) {
     return typeof value === "string" && new RegExp(TRACE_ID_PATTERN).test(value);
+}
+
+function matchesSessionId(value) {
+    return typeof value === "string" && new RegExp(SESSION_ID_PATTERN).test(value);
 }
 
 function readRequestBody(req) {
@@ -142,6 +149,53 @@ async function fetchHelperSummary(monitorUrl, limitQuery) {
 
 async function fetchHelperAnalysisOptions(monitorUrl) {
     return fetchTextWithTimeout(monitorApiUrl(monitorUrl, "/api/analysis/options"));
+}
+
+async function fetchHelperWorkspaceJson(monitorUrl, path, init) {
+    const { response, body } = await fetchTextWithTimeout(monitorApiUrl(monitorUrl, path), init);
+    let parsed = null;
+    try {
+        parsed = body ? JSON.parse(body) : null;
+    } catch {
+        parsed = null;
+    }
+    return { response, body, parsed };
+}
+
+async function fetchHelperInstruction(monitorUrl, sessionId) {
+    const detail = await fetchHelperWorkspaceJson(
+        monitorUrl,
+        `/api/session-workspace/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    if (!detail.response.ok) {
+        return { status: detail.response.status, payload: detail.parsed ?? { error: "monitor_unavailable" } };
+    }
+
+    const event = (Array.isArray(detail.parsed?.events) ? detail.parsed.events : [])
+        .filter((candidate) => INSTRUCTION_EVENT_TYPES.has(candidate?.type))
+        .sort((left, right) => String(left?.occurred_at ?? "").localeCompare(String(right?.occurred_at ?? "")))[0];
+    if (!event) {
+        return { status: 200, payload: { state: "no_instruction" } };
+    }
+    if (event.content_state !== "available") {
+        return { status: 200, payload: { state: event.content_state ?? "no_instruction" } };
+    }
+
+    const content = await fetchHelperWorkspaceJson(
+        monitorUrl,
+        `/sessions/${encodeURIComponent(sessionId)}/events/${encodeURIComponent(event.event_id)}/content`,
+    );
+    if (!content.response.ok) {
+        const state = content.parsed?.content_state;
+        if (state === "expired_pending_deletion") {
+            return { status: 200, payload: { state } };
+        }
+        return { status: content.response.status, payload: content.parsed ?? { error: "monitor_unavailable" } };
+    }
+    return {
+        status: 200,
+        payload: { state: "available", preview: String(content.parsed?.content ?? "").slice(0, 2000) },
+    };
 }
 
 // Fetch one trace's prompt label (D039), proxied server-to-server from the
@@ -269,7 +323,7 @@ function validateAnalysisSelection(options, payload) {
     };
 }
 
-function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session, extensionScope }) {
+function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session, extensionScope, nativeSessionId }) {
     const server = createServer(async (req, res) => {
         const url = new URL(req.url, "http://127.0.0.1");
         const path = url.pathname;
@@ -285,7 +339,113 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
 
         if (req.method === "GET" && path === "/") {
             res.setHeader("Content-Type", "text/html; charset=utf-8");
+            res.end(renderWorkspaceHtml({ monitorUrl, healthState, token, nativeSessionId }));
+            return;
+        }
+
+        if (req.method === "GET" && path === "/analysis") {
+            res.setHeader("Content-Type", "text/html; charset=utf-8");
             res.end(renderHelperHtml({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, extensionScope }));
+            return;
+        }
+
+        if (req.method === "GET" && path === "/api/session-workspace/sessions") {
+            try {
+                if (!isLoopbackUrl(monitorUrl)) {
+                    sendJson(res, 400, { error: "invalid_monitor_url" });
+                    return;
+                }
+                const limit = url.searchParams.has("limit") ? `?limit=${encodeURIComponent(url.searchParams.get("limit"))}` : "";
+                const result = await fetchHelperWorkspaceJson(monitorUrl, `/api/session-workspace/sessions${limit}`);
+                sendJson(res, result.response.status, result.parsed ?? { error: "monitor_unavailable" });
+            } catch {
+                sendJson(res, 502, { error: "monitor_unavailable" });
+            }
+            return;
+        }
+
+        if (req.method === "GET" && path.startsWith("/api/session-workspace/sessions/")) {
+            const sessionId = decodeURIComponent(path.slice("/api/session-workspace/sessions/".length));
+            if (!matchesSessionId(sessionId)) {
+                sendJson(res, 400, { error: "invalid_session_id" });
+                return;
+            }
+            try {
+                if (!isLoopbackUrl(monitorUrl)) {
+                    sendJson(res, 400, { error: "invalid_monitor_url" });
+                    return;
+                }
+                const result = await fetchHelperWorkspaceJson(monitorUrl, `/api/session-workspace/sessions/${encodeURIComponent(sessionId)}`);
+                sendJson(res, result.response.status, result.parsed ?? { error: "monitor_unavailable" });
+            } catch {
+                sendJson(res, 502, { error: "monitor_unavailable" });
+            }
+            return;
+        }
+
+        if (req.method === "GET" && path === "/api/session-workspace/resolve") {
+            try {
+                if (!isLoopbackUrl(monitorUrl)) {
+                    sendJson(res, 400, { error: "invalid_monitor_url" });
+                    return;
+                }
+                const sourceSurface = url.searchParams.get("source_surface") ?? "";
+                const nativeSessionId = url.searchParams.get("native_session_id") ?? "";
+                const query = `?source_surface=${encodeURIComponent(sourceSurface)}&native_session_id=${encodeURIComponent(nativeSessionId)}`;
+                const result = await fetchHelperWorkspaceJson(monitorUrl, `/api/session-workspace/resolve${query}`);
+                sendJson(res, result.response.status, result.parsed ?? { error: "monitor_unavailable" });
+            } catch {
+                sendJson(res, 502, { error: "monitor_unavailable" });
+            }
+            return;
+        }
+
+        if (req.method === "GET" && path.startsWith("/api/session-instruction/")) {
+            res.setHeader("Cache-Control", "no-store");
+            const sessionId = decodeURIComponent(path.slice("/api/session-instruction/".length));
+            if (!matchesSessionId(sessionId)) {
+                sendJson(res, 400, { error: "invalid_session_id" });
+                return;
+            }
+            try {
+                if (!isLoopbackUrl(monitorUrl)) {
+                    sendJson(res, 400, { error: "invalid_monitor_url" });
+                    return;
+                }
+                const result = await fetchHelperInstruction(monitorUrl, sessionId);
+                sendJson(res, result.status, result.payload);
+            } catch {
+                sendJson(res, 502, { error: "monitor_unavailable" });
+            }
+            return;
+        }
+
+        if (req.method === "PUT" && path.startsWith("/api/session-workspace/sessions/") && path.endsWith("/human-evaluation")) {
+            const sessionId = decodeURIComponent(path.slice("/api/session-workspace/sessions/".length, -"/human-evaluation".length));
+            if (!matchesSessionId(sessionId)) {
+                sendJson(res, 400, { error: "invalid_session_id" });
+                return;
+            }
+            try {
+                if (!isLoopbackUrl(monitorUrl)) {
+                    sendJson(res, 400, { error: "invalid_monitor_url" });
+                    return;
+                }
+                const body = await readRequestBody(req);
+                const result = await fetchHelperWorkspaceJson(
+                    monitorUrl,
+                    `/api/session-workspace/sessions/${encodeURIComponent(sessionId)}/human-evaluation`,
+                    { method: "PUT", headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body },
+                );
+                if (result.response.status === 204) {
+                    res.statusCode = 204;
+                    res.end();
+                } else {
+                    sendJson(res, result.response.status, result.parsed ?? { error: "monitor_unavailable" });
+                }
+            } catch {
+                sendJson(res, 502, { error: "monitor_unavailable" });
+            }
             return;
         }
 
@@ -608,8 +768,8 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
     return server;
 }
 
-async function startHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session, extensionScope }) {
-    const server = createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session, extensionScope });
+async function startHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session, extensionScope, nativeSessionId }) {
+    const server = createHelperServer({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, session, extensionScope, nativeSessionId });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : 0;
@@ -661,11 +821,11 @@ function monitorApiUrl(monitorUrl, path) {
     return `${base}${path}`;
 }
 
-async function fetchTextWithTimeout(url) {
+async function fetchTextWithTimeout(url, init = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-        const response = await fetch(url, { signal: controller.signal });
+        const response = await fetch(url, { ...init, signal: controller.signal });
         const body = await response.text();
         return { response, body };
     } catch (err) {
@@ -1012,6 +1172,7 @@ const session = await joinSession({
                     token,
                     session,
                     extensionScope,
+                    nativeSessionId: ctx.sessionId,
                 });
                 servers.set(ctx.instanceId, entry);
                 return {

@@ -599,7 +599,7 @@ export function renderRawPreviewHtml({ traceId, spanId, fragment, token }) {
 <body>
   <h1>生データプレビュー</h1>
   <p class="meta">trace: <code>${escapedTraceId}</code> / span: <code>${escapedSpanId}</code></p>
-  <p><a href="/?t=${escapedToken}">← ヘルパーページに戻る</a></p>
+  <p><a href="/analysis?t=${escapedToken}">← 分析ページに戻る</a></p>
   <pre>${fragment}</pre>
 </body>
 </html>`;
@@ -622,7 +622,7 @@ export function renderRawPreviewMessageHtml({ heading, message, token }) {
 <body>
   <h1>${escapedHeading}</h1>
   <p>${escapedMessage}</p>
-  <p><a href="/?t=${escapedToken}">← ヘルパーページに戻る</a></p>
+  <p><a href="/analysis?t=${escapedToken}">← 分析ページに戻る</a></p>
 </body>
 </html>`;
 }

@@ -210,6 +210,30 @@ public class CanvasExtensionContractTests
     }
 
     [Fact]
+    public void Extension_DeclaresSessionWorkspaceShellAndKeepsAnalysisAtItsOwnRoute()
+    {
+        var script = ReadExtension();
+
+        Assert.Contains("renderWorkspaceHtml", script);
+        Assert.Contains("path === \"/analysis\"", script);
+        Assert.Contains("renderHelperHtml({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, extensionScope })", script);
+        Assert.Contains("/api/session-workspace/sessions", script);
+        Assert.Contains("/api/session-workspace/resolve", script);
+        Assert.Contains("/api/session-instruction/", script);
+        Assert.Contains("human-evaluation", script);
+        Assert.Contains("x-monitor-csrf\": \"local-monitor", script);
+        Assert.DoesNotContain("console.log", script);
+    }
+
+    [Fact]
+    public void Extension_SessionInstructionRouteSetsNoStoreForEveryOutcome()
+    {
+        var script = ReadExtension();
+
+        Assert.Matches("""(?s)if \(req\.method === "GET" && path\.startsWith\("/api/session-instruction/"\)\) \{\s*res\.setHeader\("Cache-Control", "no-store"\);""", script);
+    }
+
+    [Fact]
     public void Extension_DeclaresSprint17RequestedAnalysisOptionsWithoutRawRunner()
     {
         var script = ReadExtension();
@@ -472,11 +496,17 @@ public class CanvasExtensionContractTests
         var sessionEventsCheck = RunNode(directory, "--check", "canvas-session-events.mjs");
         Assert.True(sessionEventsCheck.ExitCode == 0, $"node --check canvas-session-events.mjs failed: {sessionEventsCheck.Output}{sessionEventsCheck.Error}");
 
+        var workspaceHelpersCheck = RunNode(directory, "--check", "canvas-workspace-helpers.mjs");
+        Assert.True(workspaceHelpersCheck.ExitCode == 0, $"node --check canvas-workspace-helpers.mjs failed: {workspaceHelpersCheck.Output}{workspaceHelpersCheck.Error}");
+
         var unitSmoke = RunNode(directory, "--test", "canvas-helpers.test.mjs");
         Assert.True(unitSmoke.ExitCode == 0, $"node --test canvas-helpers.test.mjs failed: {unitSmoke.Output}{unitSmoke.Error}");
 
         var sessionEventsUnitSmoke = RunNode(directory, "--test", "canvas-session-events.test.mjs");
         Assert.True(sessionEventsUnitSmoke.ExitCode == 0, $"node --test canvas-session-events.test.mjs failed: {sessionEventsUnitSmoke.Output}{sessionEventsUnitSmoke.Error}");
+
+        var workspaceHelpersUnitSmoke = RunNode(directory, "--test", "canvas-workspace-helpers.test.mjs");
+        Assert.True(workspaceHelpersUnitSmoke.ExitCode == 0, $"node --test canvas-workspace-helpers.test.mjs failed: {workspaceHelpersUnitSmoke.Output}{workspaceHelpersUnitSmoke.Error}");
     }
 
     private static string ReadExtension()
@@ -485,7 +515,8 @@ public class CanvasExtensionContractTests
         var extension = File.ReadAllText(Path.Combine(directory, "extension.mjs"));
         var helpers = File.ReadAllText(Path.Combine(directory, "canvas-helpers.mjs"));
         var sessionEvents = File.ReadAllText(Path.Combine(directory, "canvas-session-events.mjs"));
-        return extension + "\n" + helpers + "\n" + sessionEvents;
+        var workspaceHelpers = File.ReadAllText(Path.Combine(directory, "canvas-workspace-helpers.mjs"));
+        return extension + "\n" + helpers + "\n" + sessionEvents + "\n" + workspaceHelpers;
     }
 
     private static string ExtensionDirectory()

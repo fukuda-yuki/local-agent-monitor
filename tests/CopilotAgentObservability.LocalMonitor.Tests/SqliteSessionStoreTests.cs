@@ -16,8 +16,8 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var connection = database.Open();
-        Assert.Equal(1L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
-        foreach (var table in new[] { "sessions", "session_native_ids", "session_runs", "session_events", "session_event_content", "session_projection_state" })
+        Assert.Equal(2L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
+        foreach (var table in new[] { "sessions", "session_native_ids", "session_runs", "session_events", "session_event_content", "session_projection_state", "session_human_evaluation" })
         {
             Assert.Equal(1L, Scalar<long>(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
         }
@@ -44,14 +44,35 @@ public sealed class SqliteSessionStoreTests
         using var database = new SessionTestDatabase();
         using (var connection = database.Open())
         {
-            Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 2);");
+            Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 3);");
         }
 
         Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(database.Path).CreateSchema());
 
         using var verify = database.Open();
+        Assert.Equal(3L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(0L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_native_ids','session_runs','session_events','session_event_content','session_projection_state','session_human_evaluation');"));
+    }
+
+    [Fact]
+    public void CreateSchema_VersionOneDatabaseAddsHumanEvaluationTable()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.Parse("2026-07-11T00:00:00Z"));
+        store.Write(batch);
+        using (var connection = database.Open())
+        {
+            Execute(connection, "DROP TABLE session_human_evaluation; UPDATE schema_version SET version=1 WHERE component='session';");
+        }
+
+        store.CreateSchema();
+
+        using var verify = database.Open();
         Assert.Equal(2L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
-        Assert.Equal(0L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_native_ids','session_runs','session_events','session_event_content','session_projection_state');"));
+        Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_human_evaluation';"));
+        Assert.NotNull(store.GetDetail(batch.Detail.Session.SessionId));
     }
 
     [Fact]

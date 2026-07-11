@@ -159,7 +159,8 @@ normalizer (`user.message`, `UserPromptSubmit`, `userPromptSubmitted`):
 
 The preview is same-local-user display data: it must not be copied into
 Canvas action responses, logs, or committed artifacts, matching the existing
-trace-content preview boundary.
+trace-content preview boundary. Every `/api/session-instruction/*` response
+sets `Cache-Control: no-store`, like the sibling raw-bearing helper routes.
 
 ## Local Monitor: Human Evaluation
 
@@ -170,14 +171,15 @@ PUT /api/session-workspace/sessions/{sessionId}/human-evaluation
 ```
 
 - Loopback + Host-header validation as the existing monitor routes.
-- Requires the CSRF header `x-monitor-csrf: local-monitor` (state-changing
-  action).
+- Same-origin only (cross-site requests are rejected first) and requires the
+  CSRF header `x-monitor-csrf: local-monitor` (state-changing action), the
+  same two-layer guard as the existing raw analysis action.
 - `Content-Type: application/json`; body is exactly
   `{ "verdict": "expected" | "problem" | null }`; `null` clears.
 - `204` on success. Failures use the fixed shape `{ "error": "<code>" }`:
   `400` `invalid_session_id`, `400` `invalid_human_evaluation_request`,
-  `403` `csrf_required`, `404` `session_not_found`,
-  `415` `unsupported_media_type`.
+  `403` `cross_origin_forbidden`, `403` `csrf_required`,
+  `404` `session_not_found`, `415` `unsupported_media_type`.
 
 Storage: additive session-store table `session_human_evaluation`
 (`session_id` PK/FK, `verdict` TEXT, `recorded_at` TEXT ISO-8601). The

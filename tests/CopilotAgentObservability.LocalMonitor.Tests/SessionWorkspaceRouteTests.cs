@@ -30,6 +30,10 @@ public sealed class SessionWorkspaceRouteTests
         Assert.False(item.TryGetProperty("payload", out _));
 
         using var detail = await host.Client.GetFromJsonAsync<JsonDocument>($"/api/session-workspace/sessions/{sessionId}");
+        Assert.Equal(
+            ["session", "human_evaluation", "native_ids", "runs", "events"],
+            detail!.RootElement.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(JsonValueKind.Null, detail.RootElement.GetProperty("human_evaluation").ValueKind);
         var eventItem = Assert.Single(detail!.RootElement.GetProperty("events").EnumerateArray());
         Assert.Equal(
             ["event_id", "run_id", "source_surface", "parent_event_id", "status", "type", "occurred_at", "content_state"],
