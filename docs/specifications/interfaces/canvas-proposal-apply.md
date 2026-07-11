@@ -56,7 +56,7 @@ creates a branch, commit, tag, push, pull request, stash, or checkout.
 ## Draft, Diff, And Approval
 
 `POST /api/session-workspace/proposal-applies/drafts` receives an existing
-proposal ID, root ID, and 1..10 `relative_path` / complete `replacement_text`
+pinned proposal ID/revision, root ID, and 1..10 `relative_path` / complete `replacement_text`
 pairs. The request carries source text only between the token-gated helper
 screen and Local Monitor; neither participant logs it. The server reads each
 current target, calculates `base_sha256`, creates deterministic line-oriented
@@ -72,7 +72,7 @@ changes invalidate any pending approval; the previous revision cannot apply.
 
 `POST .../drafts/{draftId}/approve` requires the current `selection_revision`
 and its `approval_digest` (SHA-256 of canonical draft identity, proposal ID,
-root ID, canonical relative paths, base hashes, selected hunk IDs, selected
+proposal revision, root ID, canonical relative paths, base hashes, selected hunk IDs, selected
 replacement hashes, and selection revision). It records an `approved` revision
 with `actor_kind = local_user`. Approval never changes the Issue #54 proposal
 lifecycle. A changed root, base hash, target identity, hunk selection, or
@@ -159,8 +159,20 @@ The additive local tables are `proposal_apply_drafts`,
 `proposal_applies`, and `proposal_apply_audit`. Original/replacement/snapshot
 content and journal files live only in the private Local Monitor runtime data
 directory, never in proposal tables or repository-safe records. Durable rows
-reference the existing proposal and its source Sessions but do not change
+reference the existing proposal revision and its source Sessions but do not change
 `improvement_proposals` status or evidence.
+
+Issue #56 adds a sanitized read-only receipt projection:
+
+```text
+GET /api/session-workspace/proposal-applies/receipts?proposal_id={proposalId}
+```
+
+It returns only opaque proposal/draft/apply IDs, the pinned proposal and
+selection revisions, application state/time, file count, and a derived current
+post-hash state. It never returns root paths, relative paths, hashes, source,
+diff, replacement, snapshot, journal, or exception data. This read does not
+apply or roll back a change.
 
 Audit exposes only opaque proposal/draft/apply/root IDs, source Session IDs,
 actor kind, state/error code, timestamps, file count, and SHA-256 values. It

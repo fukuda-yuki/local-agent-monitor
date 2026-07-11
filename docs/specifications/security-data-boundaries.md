@@ -751,6 +751,31 @@ the remembered path. Audit records contain only opaque IDs, actor kind, timestam
 state/error code, and hashes; they never contain paths, diff/source text,
 raw Session data, credentials, or tokens.
 
+## Effect Comparison Boundary
+
+Issue #56 compares sanitized, exact-linked local metadata only. Objective
+evaluation receipts bind an existing Session, Run, trace, evaluator/version,
+criterion, case key, pass/fail severity, and opaque evidence references. They
+contain no evaluator note, prompt/response, tool payload, source fragment,
+filesystem path, credential, token, or PII. An unlinked normalized measurement
+label is not promoted into this boundary.
+
+Candidate suggestions are non-authoritative and may not use repository or
+timestamp proximity as identity. Cohort membership and exclusions require an
+explicit local-user confirmation. Comparison writes use the same loopback,
+Host-header, same-origin, CSRF, JSON, 1 MiB, no-store controls as other Session
+workspace mutations. Fixed errors never echo rejected values or exceptions.
+
+Effect summaries, case-key drill-down, and receipts are projections of the
+same persisted Session/evidence references. They may expose opaque IDs,
+quality counts/fractions, duration/token medians, fixed verdict/reason codes,
+application state/time, and verification activity only. They never expose
+Issue #55 root/path/hash/diff/snapshot data. Canvas actions, `session.send()`
+prompts, logs, URLs, repository-safe/committed output, CI/static artifacts,
+Issue/PR text, and docs receive no cohort or evaluation payload. Verified is
+an atomic Local Monitor state transition after explicit comparison; there is
+no automatic comparison, mutation, rollback, retry, or git operation.
+
 The installed `hook-forward --endpoint <loopback-url> --timeout-ms 250` mode is
 fail-open only with respect to the agent Hook decision: invalid input, network
 failure, and timeout still exit `0`, stdout/stderr remain empty, and the

@@ -65,6 +65,12 @@ The expected collection attributes (`user.id`, `user.email`, `team.id`, `departm
 
 `trace_id` is not a Resource Attribute but a **source trace reference** required for referential integrity. When missing, a collection health row is emitted (sharing the `missing-required-attribute` health_check_kind in the current implementation), but this is conceptually separate from Resource Attribute required-attribute validation.
 
+Issue #56 does not treat a dataset row with manually supplied
+`success_status=pass` as an objective Session evaluation. The repository-safe
+dataset has no durable Session/Run foreign key. A quality fact participates in
+Canvas effect comparison only after the Local Monitor records the exact-linked
+immutable receipt defined in `canvas-effect-comparison.md`.
+
 ## Downstream Consumers
 
 Normalized measurements are consumed by:

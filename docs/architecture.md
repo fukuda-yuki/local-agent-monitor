@@ -219,6 +219,23 @@ and lower completeness. Ephemeral usage is aggregated; reasoning and deltas are
 not persisted. OTel enrichment runs after existing projection and leaves the
 OTLP receiver, trace/span schema, and readiness contract unchanged.
 
+### Canvas Effect Verification Loop
+
+```text
+exact Session / Run / trace + objective or human quality evidence
+  + pinned proposal revision + active application receipt
+  -> user-confirmed pre/post/excluded cohort
+  -> pure quality-first verdict engine
+  -> immutable effect receipt
+  -> atomic proposal Verified transition only for improved
+```
+
+Objective evaluation, cohort, and effect data live in additive Session-store
+tables. They contain sanitized identifiers and numeric summaries only. The
+verdict engine compares quality before efficiency and never reads raw content,
+paths, diffs, or repository artifacts. A rollback preserves historical effect
+evidence but invalidates it for active-effect display.
+
 ### Improvement Support Loop
 
 ```text

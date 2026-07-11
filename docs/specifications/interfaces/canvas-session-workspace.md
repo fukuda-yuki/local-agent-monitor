@@ -304,6 +304,15 @@ content routes, ingest semantics, or the proposal lifecycle. Apply drafts,
 approval, snapshots, and audit are local runtime data; only opaque proposal /
 Session references and sanitized state are workspace metadata.
 
+## Effect Comparison Amendment
+
+Issue #56 adds the objective-evaluation, application-receipt, candidate, and
+effect-comparison routes defined in `canvas-effect-comparison.md`. Objective
+evidence must bind to an existing Session/Run/trace and does not change Session
+identity, merge, completeness, ingest, list/detail shapes, or raw-content
+retention. Comparison cohort and effect rows are sanitized local-runtime
+metadata; event payloads and raw trace content remain outside this interface.
+
 ## Raw Event Content Read
 
 The raw-bearing content route is:

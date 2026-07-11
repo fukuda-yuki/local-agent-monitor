@@ -36,6 +36,7 @@ A proposal is local runtime data with these fields:
 | Field | Contract |
 | --- | --- |
 | `proposal_id` | Local UUIDv7 string. |
+| `proposal_revision` | Positive integer, initially `1`; candidate/recommended transitions increment it, and Issue #55/#56 receipts bind the exact value. |
 | `status` | `candidate`, `recommended`, or `verified`. |
 | `target_kind` | One of `skill`, `agent`, `instructions`, `template`, `hook_config`. |
 | `target_label` | A user-facing opaque label, 1..200 characters. It is not a path, URI, source fragment, or secret. |
@@ -75,6 +76,11 @@ operation may create an immutable, separately human-approved apply draft, but
 that operation never changes this lifecycle. This interface never creates a
 branch, commit, push, pull request, file edit, local configuration change, or
 Skill/Agent/Instruction installation.
+
+The comparison-owned `verified` transition is atomic with an immutable effect
+receipt and records the pre-transition proposal revision. A later rollback
+does not erase the historical status or receipt, but Issue #56 marks the
+verification inactive for current-effect display.
 
 ## Local Monitor Interface
 
