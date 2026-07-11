@@ -230,10 +230,14 @@ pagination and no additional filters. Each list item has exactly these fields:
 An invalid or out-of-range `limit` returns `400` with
 `{ "error": "invalid_session_workspace_query" }`.
 
-`GET /api/session-workspace/sessions/{sessionId}` returns exactly four top-level
-fields:
+`GET /api/session-workspace/sessions/{sessionId}` returns exactly five
+top-level fields (`human_evaluation` is the Issue #52 additive amendment; see
+`canvas-session-workspace-ui.md`):
 
 - `session`: the exact list-item shape above;
+- `human_evaluation`: JSON `null`, or `{ "verdict": "expected"|"problem",
+  "recorded_at": "<ISO-8601>" }` recorded through the Issue #52
+  human-evaluation endpoint;
 - `native_ids`: entries with `source_surface`, `native_session_id`,
   `binding_kind` (`native`, `explicit_resume`, `explicit_handoff`, or
   `trace_context`), and `observed_at`;
