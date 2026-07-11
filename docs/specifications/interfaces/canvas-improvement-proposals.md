@@ -9,8 +9,9 @@ completeness, Agent ownership, or the Issue #45 `session.send()` execution
 boundary.
 
 The feature turns a user-reviewed analysis into a structured, evidence-backed
-proposal. It does not apply a file change. Issue #55 exclusively owns approval,
-diff review, direct apply, snapshots, rollback, and audit of an applied change.
+proposal. It does not apply a file change by itself. Issue #55 exclusively owns
+approval, diff review, direct apply, snapshots, rollback, and audit of an
+applied change through `canvas-proposal-apply.md`.
 Issue #56 exclusively owns the comparison that may set a proposal to
 `verified`.
 
@@ -69,7 +70,9 @@ unresolvable evidence is displayed honestly and cannot satisfy the promotion
 rule. Multiple recommendations for the same Session are rejected until the
 existing recommendation is demoted to `candidate` by an explicit user action.
 
-The lifecycle does not mean approved for file mutation. It never creates a
+The lifecycle does not mean approved for file mutation. A later Issue #55
+operation may create an immutable, separately human-approved apply draft, but
+that operation never changes this lifecycle. This interface never creates a
 branch, commit, push, pull request, file edit, local configuration change, or
 Skill/Agent/Instruction installation.
 

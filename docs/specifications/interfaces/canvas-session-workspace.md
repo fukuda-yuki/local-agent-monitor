@@ -295,6 +295,15 @@ identity/merge rules, completeness, raw-content routes, or the Issue #45
 local-runtime metadata; raw event content remains available only through the
 separate raw event-content route below.
 
+## Proposal Apply Amendment
+
+Issue #55 adds the separately token-gated Canvas-helper and Local Monitor
+apply contract in `canvas-proposal-apply.md`. It consumes an existing Issue #54
+proposal but does not alter Session identity, Session list/detail shapes, raw
+content routes, ingest semantics, or the proposal lifecycle. Apply drafts,
+approval, snapshots, and audit are local runtime data; only opaque proposal /
+Session references and sanitized state are workspace metadata.
+
 ## Raw Event Content Read
 
 The raw-bearing content route is:

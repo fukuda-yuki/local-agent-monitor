@@ -15,8 +15,9 @@ The mandatory pre-UI design gate for this UI was captured and approved on
 Issue #52 shipped Evidence, Improve, and Compare as fixed placeholder cards.
 Issue #53 replaces the Evidence placeholder under the separate
 `canvas-session-evidence.md` contract. Issue #54 replaces the Improve
-placeholder under `canvas-improvement-proposals.md`; Compare remains a later
-child.
+placeholder under `canvas-improvement-proposals.md`; Issue #55 adds its
+separately token-gated local apply confirmation flow under
+`canvas-proposal-apply.md`. Compare remains a later child.
 
 ## Shell Composition
 

@@ -1682,3 +1682,40 @@ Evidence ownership を変更しない。
   auto-promotion、file/config/Skill/Agent/Instruction の自動変更はしない。
 - direct apply、diff/path handling、snapshot、rollback、applied audit、git 操作は Issue #55
   の専有責務とする。
+
+## D054: 人間承認済み proposal の local apply を root 制限 transaction に閉じる
+
+Status: Accepted
+
+Issue #55 は、Canvas から任意のローカル path を操作する機能ではなく、既存 Issue #54
+proposal に紐付く human-approved local apply とする。Canvas action / `session.send()`
+は filesystem authority を持たず、per-launch token を持つ helper screen が Local
+Monitor の loopback surface を proxy する。これにより Canvas action response、log、
+prompt、repository-safe output に source/diff/path を通さない。
+
+決定事項:
+
+- Local Monitor は明示的な startup `--apply-root user_config|skill|repository=<absolute-directory>`
+だけを trusted root とする。既定 root、UI/API からの root 登録、任意 path は持たない。
+root の canonical path は process 内部だけに保持し、Canvas には opaque root ID と kind
+だけを返す。
+- apply target は root 下の既存 regular file と normalized relative path に限る。
+absolute/UNC/device/URI/`..`、directory/create/delete/rename/permission change、symlink/
+junction/reparse point（root / ancestor / target）、root identity change は拒否する。
+- 利用者は helper screen で full diff と hunk を選び、選択内容の digest を明示承認する。
+approval は immutable であり、path/base hash/selection/replacement/root の変更は必ず
+新しい selection + approval を必要とする。Issue #54 lifecycle は変更しない。
+- 適用は全 target の root/reparse/base SHA-256/approval digest を write 前に検証する。
+一つでも stale なら no-write。snapshot と write-ahead journal を flush した後に same-volume
+atomic replace を行い、failure/uncommitted startup recovery は全 snapshot へ戻す。
+durable state は all-applied または all-restored とする。
+- rollback は apply 後 hash と current hash の一致を必要とし、external edit を clobber
+しない。一度 rollback 済みの apply を再 rollback できない。
+- audit は opaque IDs、Session/proposal linkage、actor kind、state/error、timestamp、hash、
+file count だけである。path、source/diff/replacement/snapshot、raw Session content、
+credential/token、exception details は保存・返却・ログ出力しない。
+- git の起動・branch/commit/push/PR 操作は構造的に追加しない。比較 verdict は Issue #56
+の専有である。
+
+正本は [Canvas Proposal Apply interface](specifications/interfaces/canvas-proposal-apply.md)
+とする。

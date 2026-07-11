@@ -27,6 +27,7 @@
 | Canvas Session workspace UI | [interfaces/canvas-session-workspace-ui.md](interfaces/canvas-session-workspace-ui.md) |
 | Canvas Session Evidence | [interfaces/canvas-session-evidence.md](interfaces/canvas-session-evidence.md) |
 | Canvas Improvement Proposals | [interfaces/canvas-improvement-proposals.md](interfaces/canvas-improvement-proposals.md) |
+| Canvas Proposal Apply | [interfaces/canvas-proposal-apply.md](interfaces/canvas-proposal-apply.md) |
 | Trace agent execution graph | [interfaces/trace-agent-execution-graph.md](interfaces/trace-agent-execution-graph.md) |
 | Security and data boundaries | [security-data-boundaries.md](security-data-boundaries.md) |
 

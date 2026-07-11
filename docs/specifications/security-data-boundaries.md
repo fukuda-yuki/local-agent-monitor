@@ -717,6 +717,37 @@ files, CI artifacts, static artifacts, Issue/PR text, or docs. Direct apply,
 snapshots, and rollback require the Issue #55 boundary and are not authorized
 by this proposal interface.
 
+## Proposal Apply Boundary
+
+Issue #55 is the only privileged local file-mutation surface. A Canvas action,
+`session.send()` prompt, or Issue #54 proposal never has filesystem authority.
+The Canvas helper may show source and diff text only on its per-launch-token,
+loopback local screen; that text never enters an action DTO, log, persisted
+proposal metadata, repository-safe output, CI/static artifact, Issue/PR, or
+documentation.
+
+The Local Monitor accepts an apply target only under an explicitly configured
+startup root. It accepts an opaque root ID and a normalized relative path, not
+an absolute, drive-relative, UNC, device, URI, or `..` path. Every configured
+root and every target ancestor is re-resolved before preview, approval, apply,
+recovery, and rollback. A symlink, junction, or other reparse point at the
+root, any ancestor, or target is rejected. Only an existing regular file may
+be changed; directory creation, deletion, rename, permission changes, and git
+operations are structurally absent.
+
+All mutation routes are loopback/Host-header restricted, same-origin,
+`x-monitor-csrf: local-monitor`, JSON-only, bounded, and `Cache-Control:
+no-store`. The server validates the proposal evidence, immutable approval
+digest, selected-hunk digest, target base SHA-256, and current target SHA-256.
+If one target is stale, unavailable, reparse-bearing, or invalid, it performs
+no write. Before mutation it writes and flushes snapshots plus a write-ahead
+recovery journal; failure and uncommitted-startup recovery restore every
+already changed target. Rollback requires the target's current hash to equal
+the recorded post-apply hash, preventing it from clobbering an intervening
+external edit. Audit records contain only opaque IDs, actor kind, timestamps,
+state/error code, and hashes; they never contain paths, diff/source text,
+raw Session data, credentials, or tokens.
+
 The installed `hook-forward --endpoint <loopback-url> --timeout-ms 250` mode is
 fail-open only with respect to the agent Hook decision: invalid input, network
 failure, and timeout still exit `0`, stdout/stderr remain empty, and the
