@@ -1,3 +1,5 @@
+using CopilotAgentObservability.LocalMonitor.ProposalApply;
+
 namespace CopilotAgentObservability.LocalMonitor;
 
 internal sealed record MonitorOptions(
@@ -6,7 +8,8 @@ internal sealed record MonitorOptions(
     bool SanitizedOnly,
     int MaxRequestBodyBytes,
     int IngestionStallThresholdSeconds = MonitorOptions.DefaultIngestionStallThresholdSeconds,
-    int ProjectionLagThresholdSeconds = MonitorOptions.DefaultProjectionLagThresholdSeconds)
+    int ProjectionLagThresholdSeconds = MonitorOptions.DefaultProjectionLagThresholdSeconds,
+    IReadOnlyList<ConfiguredApplyRoot>? ApplyRoots = null)
 {
     public const string MaxRequestBodyBytesEnvironmentVariable = "CAO_MONITOR_MAX_REQUEST_BODY_BYTES";
     public const int DefaultMaxRequestBodyBytes = 31_457_280;
@@ -30,6 +33,7 @@ internal sealed record MonitorOptions(
         int? maxRequestBodyBytes = null;
         int? ingestionStallThresholdSeconds = null;
         int? projectionLagThresholdSeconds = null;
+        var applyRoots = new List<ConfiguredApplyRoot>();
 
         for (var index = 0; index < args.Length; index++)
         {
@@ -170,6 +174,20 @@ internal sealed record MonitorOptions(
                     index++;
                     break;
 
+                case "--apply-root":
+                    if (!TryReadValue(args, index, out var applyRootValue)) return Failure("--apply-root requires kind=<absolute-directory>.");
+                    var separator = applyRootValue.IndexOf('=');
+                    if (separator <= 0 || !ConfiguredApplyRoot.TryParseKind(applyRootValue[..separator], out var kind)) return Failure("--apply-root requires user_config, skill, or repository.");
+                    try
+                    {
+                        var root = ConfiguredApplyRoot.Create(kind, applyRootValue[(separator + 1)..]);
+                        if (applyRoots.Any(existing => string.Equals(existing.CanonicalPath, root.CanonicalPath, StringComparison.OrdinalIgnoreCase))) return Failure("--apply-root does not allow duplicate roots.");
+                        applyRoots.Add(root);
+                    }
+                    catch (ApplyPathException) { return Failure("--apply-root requires an existing non-reparse absolute directory."); }
+                    index++;
+                    break;
+
                 default:
                     return Failure($"unknown local-monitor option '{args[index]}'.");
             }
@@ -224,7 +242,8 @@ internal sealed record MonitorOptions(
                 sanitizedOnly,
                 maxRequestBodyBytes ?? DefaultMaxRequestBodyBytes,
                 ingestionStallThresholdSeconds ?? DefaultIngestionStallThresholdSeconds,
-                projectionLagThresholdSeconds ?? DefaultProjectionLagThresholdSeconds),
+                projectionLagThresholdSeconds ?? DefaultProjectionLagThresholdSeconds,
+                applyRoots),
             null);
     }
 

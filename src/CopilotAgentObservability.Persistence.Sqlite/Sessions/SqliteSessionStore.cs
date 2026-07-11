@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 public sealed class SqliteSessionStore : ISessionStore
 {
-    private const int CurrentSchemaVersion = 3;
+    private const int CurrentSchemaVersion = 4;
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
 
@@ -40,7 +40,7 @@ public sealed class SqliteSessionStore : ISessionStore
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'session';";
         var existingVersion = versionCommand.ExecuteScalar();
-        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or CurrentSchemaVersion))
+        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or CurrentSchemaVersion))
         {
             throw new InvalidOperationException("Unsupported Session schema version.");
         }
@@ -53,6 +53,8 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = ImprovementProposalSchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = ProposalApplySchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"INSERT INTO schema_version(component,version) VALUES('session',{CurrentSchemaVersion});");
         }
         else if (Convert.ToInt32(existingVersion) == 1)
@@ -61,11 +63,21 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = ImprovementProposalSchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = ProposalApplySchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 2)
         {
             command.CommandText = ImprovementProposalSchemaSql;
+            command.ExecuteNonQuery();
+            command.CommandText = ProposalApplySchemaSql;
+            command.ExecuteNonQuery();
+            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
+        else if (Convert.ToInt32(existingVersion) == 3)
+        {
+            command.CommandText = ProposalApplySchemaSql;
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
@@ -1020,6 +1032,62 @@ public sealed class SqliteSessionStore : ISessionStore
             reference_id TEXT NOT NULL,
             PRIMARY KEY (proposal_id, evidence_order),
             FOREIGN KEY (proposal_id) REFERENCES improvement_proposals(proposal_id) ON DELETE CASCADE
+        );
+        """;
+
+    private const string ProposalApplySchemaSql = """
+        CREATE TABLE IF NOT EXISTS proposal_apply_drafts (
+            draft_id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL,
+            root_id TEXT NOT NULL,
+            selection_revision INTEGER NOT NULL CHECK (selection_revision > 0),
+            approval_digest TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('draft','approved','applied','rolled_back','failed')),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (proposal_id) REFERENCES improvement_proposals(proposal_id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS proposal_apply_files (
+            draft_id TEXT NOT NULL,
+            file_order INTEGER NOT NULL CHECK (file_order >= 0),
+            base_sha256 TEXT NOT NULL,
+            replacement_sha256 TEXT NOT NULL,
+            PRIMARY KEY (draft_id,file_order),
+            FOREIGN KEY (draft_id) REFERENCES proposal_apply_drafts(draft_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS proposal_apply_hunks (
+            draft_id TEXT NOT NULL,
+            hunk_id TEXT NOT NULL,
+            selected INTEGER NOT NULL CHECK (selected IN (0,1)),
+            replacement_sha256 TEXT NOT NULL,
+            PRIMARY KEY (draft_id,hunk_id),
+            FOREIGN KEY (draft_id) REFERENCES proposal_apply_drafts(draft_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS proposal_apply_revisions (
+            draft_id TEXT NOT NULL,
+            selection_revision INTEGER NOT NULL CHECK (selection_revision > 0),
+            approval_digest TEXT NOT NULL,
+            approved_at TEXT NULL,
+            PRIMARY KEY (draft_id,selection_revision),
+            FOREIGN KEY (draft_id) REFERENCES proposal_apply_drafts(draft_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS proposal_applies (
+            apply_id TEXT PRIMARY KEY,
+            draft_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('applied','rolled_back','failed')),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (draft_id) REFERENCES proposal_apply_drafts(draft_id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS proposal_apply_audit (
+            audit_id INTEGER PRIMARY KEY,
+            apply_id TEXT NULL,
+            draft_id TEXT NULL,
+            proposal_id TEXT NOT NULL,
+            root_id TEXT NOT NULL,
+            actor_kind TEXT NOT NULL CHECK (actor_kind='local_user'),
+            state TEXT NOT NULL,
+            error_code TEXT NULL,
+            file_count INTEGER NOT NULL CHECK (file_count >= 0),
+            recorded_at TEXT NOT NULL
         );
         """;
 }

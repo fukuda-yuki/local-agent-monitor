@@ -7,6 +7,7 @@ public enum SessionBindingKind { Native, ExplicitResume, ExplicitHandoff, TraceC
 public enum SessionContentState { Available, NotCaptured, Redacted, Unsupported, ExpiredPendingDeletion }
 public enum SessionRawRetentionState { Expiring, ExpiredPendingDeletion, NotCaptured }
 public enum ImprovementProposalStatus { Candidate, Recommended, Verified }
+public enum ProposalApplyState { Draft, Approved, Applied, RolledBack, Failed }
 
 public static class SessionWire
 {
@@ -286,6 +287,15 @@ public sealed record ImprovementProposal(
     DateTimeOffset UpdatedAt,
     DateTimeOffset? RecommendedAt,
     DateTimeOffset? VerifiedAt);
+
+public sealed record ProposalApplyAudit(
+    Guid ApplyId,
+    Guid ProposalId,
+    Guid DraftId,
+    Guid RootId,
+    ProposalApplyState State,
+    int FileCount,
+    DateTimeOffset RecordedAt);
 
 public interface ISessionStore
 {

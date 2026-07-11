@@ -3,6 +3,23 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public class MonitorOptionsTests
 {
     [Fact]
+    public void Parse_accepts_repeated_apply_roots_without_exposing_paths_in_labels()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"cao-root-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var result = MonitorOptions.Parse(["--apply-root", $"repository={root}", "--apply-root", $"skill={root}\\child"]);
+            Assert.NotNull(result.Error);
+            Directory.CreateDirectory(Path.Combine(root, "child"));
+            result = MonitorOptions.Parse(["--apply-root", $"repository={root}", "--apply-root", $"skill={root}\\child"]);
+            Assert.Null(result.Error);
+            Assert.Equal(2, result.Options!.ApplyRoots!.Count);
+            Assert.DoesNotContain(root, result.Options.ApplyRoots[0].Label, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    [Fact]
     public void Parse_DefaultsToLoopbackPort4320AndRawShown()
     {
         var result = MonitorOptions.Parse([]);
