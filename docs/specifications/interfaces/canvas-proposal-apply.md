@@ -31,6 +31,12 @@ reparse-bearing root or a root whose ancestors through its volume root contain
 a reparse point. The process keeps the canonical path private and exposes only
 an opaque `root_id`, `kind`, and a fixed user-facing kind label. An unavailable
 or changed root after startup is not silently rediscovered; apply is rejected.
+If startup finds an uncommitted apply/rollback journal whose root cannot be
+resolved through the currently configured non-reparse root set, recovery must
+not rediscover or write that path. Instead Local Monitor host construction
+fails closed before any mutation route is mapped. The user must restore the
+same configured root or resolve the private local recovery record; a monitor
+with an unresolved transaction never serves an apply or rollback request.
 
 A target is valid only when all of the following hold at preview, approval,
 apply, recovery, and rollback:
@@ -95,8 +101,11 @@ from the snapshot, flushes the journal outcome, and returns `apply_failed`.
 On startup and before accepting another mutation, an uncommitted journal is
 recovered to every original snapshot. Therefore the observable durable outcome
 after recovery is either all selected replacements or all originals; a partial
-transaction is never accepted as a usable state. Snapshot/journal retention is
-local runtime data and is not exposed as a browser/file browsing API.
+transaction is never accepted as a usable state. If safe root resolution is
+impossible, host construction fails closed rather than accepting a partial
+transaction or writing through a remembered absolute path. Snapshot/journal
+retention is local runtime data and is not exposed as a browser/file browsing
+API.
 
 ## Rollback
 

@@ -1711,6 +1711,11 @@ atomic replace を行い、failure/uncommitted startup recovery は全 snapshot 
 durable state は all-applied または all-restored とする。
 - rollback は apply 後 hash と current hash の一致を必要とし、external edit を clobber
 しない。一度 rollback 済みの apply を再 rollback できない。
+- uncommitted journal の opaque root ID を current startup root set から安全に解決できない
+場合、記録済み absolute path を再探索・書込みしない。Local Monitor host construction を
+fail-closed にし、mutation surface を公開しない。利用者は同じ trusted root を復元するか、
+private local recovery record を解決してから起動する。partial transaction を受け入れた
+状態で通常動作を続けることはしない。
 - audit は opaque IDs、Session/proposal linkage、actor kind、state/error、timestamp、hash、
 file count だけである。path、source/diff/replacement/snapshot、raw Session content、
 credential/token、exception details は保存・返却・ログ出力しない。

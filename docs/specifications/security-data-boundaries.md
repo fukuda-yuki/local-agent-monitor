@@ -744,7 +744,10 @@ no write. Before mutation it writes and flushes snapshots plus a write-ahead
 recovery journal; failure and uncommitted-startup recovery restore every
 already changed target. Rollback requires the target's current hash to equal
 the recorded post-apply hash, preventing it from clobbering an intervening
-external edit. Audit records contain only opaque IDs, actor kind, timestamps,
+external edit. A startup journal whose opaque root ID cannot be safely resolved
+through the current configured root set is a fail-closed host-construction
+error: Local Monitor maps no mutation surface and does not rediscover or write
+the remembered path. Audit records contain only opaque IDs, actor kind, timestamps,
 state/error code, and hashes; they never contain paths, diff/source text,
 raw Session data, credentials, or tokens.
 
