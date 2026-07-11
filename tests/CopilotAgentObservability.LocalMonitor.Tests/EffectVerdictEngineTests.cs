@@ -192,6 +192,42 @@ public sealed class EffectVerdictEngineTests
         Assert.Equal(100m, result.PreTokenMedian);
     }
 
+    [Theory]
+    [InlineData(true, null, 90L, EffectVerdict.Improved, 0.10)]
+    [InlineData(false, null, 100L, EffectVerdict.NoChange, 0.0)]
+    [InlineData(true, 0L, 90L, EffectVerdict.Improved, 0.10)]
+    [InlineData(false, 0L, 100L, EffectVerdict.NoChange, 0.0)]
+    [InlineData(true, -1L, 90L, EffectVerdict.Improved, 0.10)]
+    [InlineData(false, -1L, 100L, EffectVerdict.NoChange, 0.0)]
+    public void Evaluate_IncompleteOrNonpositiveTokens_DoNotParticipateWhileDurationDeterminesVerdict(
+        bool invalidInPre,
+        long? invalidTokens,
+        long postDuration,
+        EffectVerdict expectedVerdict,
+        decimal expectedDurationDelta)
+    {
+        var pre = Sessions("pre", true, 3, duration: 100, tokens: 100).ToArray();
+        var post = Sessions("post", true, 3, duration: postDuration, tokens: 100).ToArray();
+        if (invalidInPre)
+        {
+            pre[1] = pre[1] with { TotalTokens = invalidTokens };
+        }
+        else
+        {
+            post[2] = post[2] with { TotalTokens = invalidTokens };
+        }
+
+        var result = EffectVerdictEngine.Evaluate(Facts(pre, post));
+
+        Assert.Equal(expectedVerdict, result.Verdict);
+        Assert.Equal(100m, result.PreDurationMedian);
+        Assert.Equal((decimal)postDuration, result.PostDurationMedian);
+        Assert.Equal(expectedDurationDelta, result.DurationDelta);
+        Assert.Null(result.PreTokenMedian);
+        Assert.Null(result.PostTokenMedian);
+        Assert.Null(result.TokenDelta);
+    }
+
     [Fact]
     public void Evaluate_NoCommonCompleteMetricAtEqualQuality_IsInsufficient()
     {
