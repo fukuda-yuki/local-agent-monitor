@@ -24,6 +24,8 @@
 | Dashboard dataset | [interfaces/dashboard-dataset.md](interfaces/dashboard-dataset.md) |
 | Instruction diagnosis analysis | [interfaces/instruction-diagnosis-analysis.md](interfaces/instruction-diagnosis-analysis.md) |
 | Canvas Session workspace | [interfaces/canvas-session-workspace.md](interfaces/canvas-session-workspace.md) |
+| Canvas Session workspace UI | [interfaces/canvas-session-workspace-ui.md](interfaces/canvas-session-workspace-ui.md) |
+| Trace agent execution graph | [interfaces/trace-agent-execution-graph.md](interfaces/trace-agent-execution-graph.md) |
 | Security and data boundaries | [security-data-boundaries.md](security-data-boundaries.md) |
 
 ## Change Rule
