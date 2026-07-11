@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -17,6 +18,8 @@ public class LocalMonitorScriptTests
         "install-startup-task.ps1",
         "uninstall-user-env.ps1",
         "uninstall-startup-task.ps1",
+        "install-session-hooks.ps1",
+        "uninstall-session-hooks.ps1",
     ];
 
     private static readonly string[] RequiredTestScripts =
@@ -110,6 +113,8 @@ public class LocalMonitorScriptTests
         Assert.Contains("scripts", package, StringComparison.Ordinal);
         Assert.Contains("install-user-env.ps1", package, StringComparison.Ordinal);
         Assert.Contains("uninstall-user-env.ps1", package, StringComparison.Ordinal);
+        Assert.Contains("install-session-hooks.ps1", package, StringComparison.Ordinal);
+        Assert.Contains("uninstall-session-hooks.ps1", package, StringComparison.Ordinal);
         Assert.Contains("Compress-Archive", package, StringComparison.Ordinal);
         Assert.Contains("$LASTEXITCODE", package, StringComparison.Ordinal);
         Assert.Contains("dotnet_publish_failed", package, StringComparison.Ordinal);
@@ -171,6 +176,171 @@ public class LocalMonitorScriptTests
         AssertScriptContains("uninstall-startup-task.ps1", "$RemoveData");
         AssertScriptContains("uninstall-startup-task.ps1", "$InstallRoot");
         AssertScriptContains("package-release.ps1", "$RuntimeIdentifier");
+        AssertScriptContains("install-session-hooks.ps1", "local-agent-monitor.json");
+        AssertScriptContains("uninstall-session-hooks.ps1", "local-agent-monitor.json");
+    }
+
+    [Fact]
+    public void SessionHookScriptsAreOptInAndProtectUnmanagedConfiguration()
+    {
+        var install = File.ReadAllText(ScriptPath("install-session-hooks.ps1"));
+        var uninstall = File.ReadAllText(ScriptPath("uninstall-session-hooks.ps1"));
+        var normalInstall = File.ReadAllText(ScriptPath("install.ps1"));
+
+        Assert.Contains("managed_by", install, StringComparison.Ordinal);
+        Assert.Contains("CopilotAgentObservability.LocalMonitor", install, StringComparison.Ordinal);
+        Assert.Contains("hook-forward", install, StringComparison.Ordinal);
+        Assert.Contains("SessionStart", install, StringComparison.Ordinal);
+        Assert.Contains("UserPromptSubmit", install, StringComparison.Ordinal);
+        Assert.Contains("PreToolUse", install, StringComparison.Ordinal);
+        Assert.Contains("PostToolUse", install, StringComparison.Ordinal);
+        Assert.Contains("SubagentStart", install, StringComparison.Ordinal);
+        Assert.Contains("SubagentStop", install, StringComparison.Ordinal);
+        Assert.Contains("Stop", install, StringComparison.Ordinal);
+        Assert.Contains("hook_config_exists_unmanaged", install, StringComparison.Ordinal);
+        Assert.Contains("managed_by", uninstall, StringComparison.Ordinal);
+        Assert.Contains("hook_config_exists_unmanaged", uninstall, StringComparison.Ordinal);
+        Assert.DoesNotContain("install-session-hooks", normalInstall, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SessionHookInstallAndUninstallAreIdempotentInTemporaryHome()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var home = Directory.CreateDirectory(Path.Combine(root, "home")).FullName;
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            File.WriteAllText(Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe"), string.Empty);
+
+            var first = RunPowerShellScript(
+                ScriptPath("install-session-hooks.ps1"),
+                "-HomeDirectory", home,
+                "-InstallRoot", installRoot);
+            var second = RunPowerShellScript(
+                ScriptPath("install-session-hooks.ps1"),
+                "-HomeDirectory", home,
+                "-InstallRoot", installRoot);
+
+            Assert.Equal(0, first.ExitCode);
+            Assert.Equal(0, second.ExitCode);
+            var configPath = Path.Combine(home, ".copilot", "hooks", "local-agent-monitor.json");
+            using var document = JsonDocument.Parse(File.ReadAllText(configPath));
+            Assert.Equal(1, document.RootElement.GetProperty("version").GetInt32());
+            Assert.Equal(
+                "CopilotAgentObservability.LocalMonitor",
+                document.RootElement.GetProperty("managed_by").GetString());
+            Assert.Equal(7, document.RootElement.GetProperty("hooks").EnumerateObject().Count());
+            Assert.Contains("hook-forward", document.RootElement.GetProperty("hooks").GetProperty("SessionStart")[0].GetProperty("command").GetString());
+            Assert.Equal(1, document.RootElement.GetProperty("hooks").GetProperty("SessionStart")[0].GetProperty("timeoutSec").GetInt32());
+
+            var uninstall = RunPowerShellScript(
+                ScriptPath("uninstall-session-hooks.ps1"),
+                "-HomeDirectory", home);
+            var repeatedUninstall = RunPowerShellScript(
+                ScriptPath("uninstall-session-hooks.ps1"),
+                "-HomeDirectory", home);
+
+            Assert.Equal(0, uninstall.ExitCode);
+            Assert.Equal(0, repeatedUninstall.ExitCode);
+            Assert.False(File.Exists(configPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SessionHookScriptsNeverOverwriteOrDeleteUnmanagedFile()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var home = Directory.CreateDirectory(Path.Combine(root, "home")).FullName;
+            var hooks = Directory.CreateDirectory(Path.Combine(home, ".copilot", "hooks")).FullName;
+            var configPath = Path.Combine(hooks, "local-agent-monitor.json");
+            const string unmanaged = "{\"version\":1,\"hooks\":{}}";
+            File.WriteAllText(configPath, unmanaged);
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            File.WriteAllText(Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe"), string.Empty);
+
+            var install = RunPowerShellScript(
+                ScriptPath("install-session-hooks.ps1"),
+                "-HomeDirectory", home,
+                "-InstallRoot", installRoot);
+            var uninstall = RunPowerShellScript(
+                ScriptPath("uninstall-session-hooks.ps1"),
+                "-HomeDirectory", home);
+
+            Assert.NotEqual(0, install.ExitCode);
+            Assert.Contains("hook_config_exists_unmanaged", install.Error, StringComparison.Ordinal);
+            Assert.NotEqual(0, uninstall.ExitCode);
+            Assert.Contains("hook_config_exists_unmanaged", uninstall.Error, StringComparison.Ordinal);
+            Assert.Equal(unmanaged, File.ReadAllText(configPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("http://user:secret@127.0.0.1:4320")]
+    [InlineData("http://127.0.0.1:4320/other")]
+    [InlineData("http://127.0.0.1:4320?token=secret")]
+    [InlineData("http://127.0.0.1:4320#fragment")]
+    public void SessionHookInstallerRejectsEndpointShapesRejectedByForwarder(string endpoint)
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var home = Directory.CreateDirectory(Path.Combine(root, "home")).FullName;
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            File.WriteAllText(Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe"), string.Empty);
+
+            var result = RunPowerShellScript(
+                ScriptPath("install-session-hooks.ps1"),
+                "-HomeDirectory", home,
+                "-InstallRoot", installRoot,
+                "-Endpoint", endpoint);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.False(File.Exists(Path.Combine(home, ".copilot", "hooks", "local-agent-monitor.json")));
+            Assert.DoesNotContain("secret", result.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret", result.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("http://127.0.0.1:4320/api/session-ingest/v1/events")]
+    [InlineData("http://[::1]:4320")]
+    public void SessionHookInstallerAcceptsQualifiedAndIpv6LoopbackEndpoints(string endpoint)
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var home = Directory.CreateDirectory(Path.Combine(root, "home")).FullName;
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            File.WriteAllText(Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe"), string.Empty);
+
+            var result = RunPowerShellScript(
+                ScriptPath("install-session-hooks.ps1"),
+                "-HomeDirectory", home,
+                "-InstallRoot", installRoot,
+                "-Endpoint", endpoint);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.True(File.Exists(Path.Combine(home, ".copilot", "hooks", "local-agent-monitor.json")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -303,5 +473,36 @@ public class LocalMonitorScriptTests
         var error = process.StandardError.ReadToEnd();
         process.WaitForExit();
         return (process.ExitCode, output, error);
+    }
+
+    private static (int ExitCode, string Output, string Error) RunPowerShellScript(string scriptPath, params string[] arguments)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "pwsh",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-File");
+        startInfo.ArgumentList.Add(scriptPath);
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start pwsh.");
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return (process.ExitCode, output, error);
+    }
+
+    private static string CreateTemporaryDirectory()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"cao-hook-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(path);
+        return path;
     }
 }

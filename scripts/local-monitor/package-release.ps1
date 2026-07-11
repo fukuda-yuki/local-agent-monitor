@@ -56,7 +56,9 @@ $scriptNames = @(
     'install-user-env.ps1',
     'install-startup-task.ps1',
     'uninstall-user-env.ps1',
-    'uninstall-startup-task.ps1'
+    'uninstall-startup-task.ps1',
+    'install-session-hooks.ps1',
+    'uninstall-session-hooks.ps1'
 )
 foreach ($scriptName in $scriptNames) {
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\local-monitor\$scriptName") -Destination $scriptsDirectory -Force

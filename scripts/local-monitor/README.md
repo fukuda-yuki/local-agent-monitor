@@ -46,6 +46,19 @@ This persists raw-local-receiver / monitor routing in the current Windows
 user's environment for newly started VS Code and Copilot CLI processes. Restart
 already-running clients after changing it.
 
+Optional Copilot CLI / VS Code Session Hooks forwarding is a separate opt-in:
+
+```powershell
+.\scripts\install-session-hooks.ps1
+.\scripts\uninstall-session-hooks.ps1
+```
+
+The installer creates only `~/.copilot/hooks/local-agent-monitor.json`. It is
+idempotent for the LocalMonitor-managed file and refuses to overwrite or remove
+an existing file without its management marker. Normal LocalMonitor install
+does not enable Hooks. Hook forwarding is fail-open: malformed input, an
+unavailable collector, or the 250 ms timeout never changes the agent decision.
+
 Start immediately without registering startup:
 
 ```powershell
