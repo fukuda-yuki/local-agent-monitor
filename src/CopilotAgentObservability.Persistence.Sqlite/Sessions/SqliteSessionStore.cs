@@ -172,6 +172,11 @@ public sealed class SqliteSessionStore : ISessionStore
         using var connection = Open(); using var transaction = connection.BeginTransaction();
         Execute(connection, transaction, "INSERT INTO proposal_apply_pending(apply_id,draft_id,proposal_id,root_id,actor_kind,file_count,operation_kind,recorded_at) VALUES($apply,$draft,$proposal,$root,'local_user',$count,$kind,$time);", ("$apply", Id(pending.ApplyId)), ("$draft", Id(pending.DraftId)), ("$proposal", Id(pending.ProposalId)), ("$root", Id(pending.RootId)), ("$count", pending.FileCount), ("$kind", pending.OperationKind), ("$time", Timestamp(pending.RecordedAt))); transaction.Commit();
     }
+    public bool TryAuthorizeProposalApply(ProposalApplyPendingOperation pending, int proposalRevision)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction();
+        var rows = Execute(connection, transaction, "INSERT INTO proposal_apply_pending(apply_id,draft_id,proposal_id,root_id,actor_kind,file_count,operation_kind,recorded_at) SELECT $apply,$draft,$proposal,$root,'local_user',$count,'apply',$time WHERE EXISTS(SELECT 1 FROM improvement_proposals WHERE proposal_id=$proposal AND revision=$revision) AND NOT EXISTS(SELECT 1 FROM proposal_apply_pending WHERE proposal_id=$proposal AND operation_kind='apply');", ("$apply", Id(pending.ApplyId)), ("$draft", Id(pending.DraftId)), ("$proposal", Id(pending.ProposalId)), ("$root", Id(pending.RootId)), ("$count", pending.FileCount), ("$time", Timestamp(pending.RecordedAt)), ("$revision", proposalRevision)); transaction.Commit(); return rows == 1;
+    }
 
     public IReadOnlyList<ProposalApplyPendingOperation> ListProposalApplyPending()
     {
@@ -728,14 +733,15 @@ public sealed class SqliteSessionStore : ISessionStore
             ValidatePromotion(connection, transaction, proposal, proposalId);
         }
 
-        Execute(connection, transaction, """
+        var rows = Execute(connection, transaction, """
             UPDATE improvement_proposals
             SET status=$status, revision=revision + CASE WHEN status <> $status THEN 1 ELSE 0 END, updated_at=$updated_at, recommended_at=$recommended_at
-            WHERE proposal_id=$proposal_id;
+            WHERE proposal_id=$proposal_id AND (status=$status OR NOT EXISTS(SELECT 1 FROM proposal_apply_pending WHERE proposal_id=$proposal_id AND operation_kind='apply'));
             """,
             ("$status", ProposalStatus(status)), ("$updated_at", Timestamp(updatedAt)),
             ("$recommended_at", status == ImprovementProposalStatus.Recommended ? Timestamp(updatedAt) : null),
             ("$proposal_id", Id(proposalId)));
+        if (rows != 1) throw new InvalidOperationException("Improvement proposal apply authorization is active.");
         transaction.Commit();
     }
 
@@ -1013,13 +1019,13 @@ public sealed class SqliteSessionStore : ISessionStore
     private static long? NullableInt64(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
     private static SessionSourceSurface? NullableSurface(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : SessionWire.ParseSourceSurface(reader.GetString(ordinal));
 
-    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql, params (string Name, object? Value)[] parameters)
+    private static int Execute(SqliteConnection connection, SqliteTransaction transaction, string sql, params (string Name, object? Value)[] parameters)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = sql;
         foreach (var parameter in parameters) Add(command, parameter.Name, parameter.Value);
-        command.ExecuteNonQuery();
+        return command.ExecuteNonQuery();
     }
 
     private static void Add(SqliteCommand command, string name, object? value) => command.Parameters.AddWithValue(name, value ?? DBNull.Value);

@@ -340,6 +340,7 @@ public interface ISessionStore
     void SaveProposalApplyApproval(Guid draftId, ProposalApplyRevisionMetadata revision);
     void SaveProposalApplyOutcome(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode);
     void SaveProposalApplyPending(ProposalApplyPendingOperation pending);
+    bool TryAuthorizeProposalApply(ProposalApplyPendingOperation pending, int proposalRevision);
     IReadOnlyList<ProposalApplyPendingOperation> ListProposalApplyPending();
     IReadOnlyList<ProposalApplyLinkage> ListAppliedProposalApplyLinkages();
     IReadOnlyList<ProposalApplyLinkage> ListProposalApplyLinkages(Guid proposalId);

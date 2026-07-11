@@ -66,7 +66,7 @@ internal sealed class ProposalApplyService
     public (Guid ApplyId, ApplyTransactionResult Result, ProposalApplyDraft Draft) ApplyWithId(Guid id)
     {
         lock (sync) { var draft = Get(id); if (!draft.IsApproved || !IsTrusted(draft, requireApproved: true) || !HasCurrentProposalRevision(draft)) throw new ApplyPathException("approval_required"); var apply = Guid.CreateVersion7();
-            store?.SaveProposalApplyPending(new(apply, id, draft.ProposalId, draft.RootId, draft.Files.Count, "apply", DateTimeOffset.UtcNow));
+            if (store is not null && !store.TryAuthorizeProposalApply(new(apply, id, draft.ProposalId, draft.RootId, draft.Files.Count, "apply", DateTimeOffset.UtcNow), draft.ProposalRevision)) throw new ApplyPathException("approval_required");
             var result = transaction.Apply(apply, draft.Files);
             if (result == ApplyTransactionResult.Applied) Complete(apply, draft, ProposalApplyState.Applied, null);
             else Complete(apply, draft, ProposalApplyState.Failed, result == ApplyTransactionResult.Stale ? "apply_stale" : "apply_failed");
@@ -134,6 +134,7 @@ internal sealed class ProposalApplyService
         try
         {
             var draft = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(path));
+            if (draft is not null && draft.ProposalRevision == 0 && store?.GetProposalApplyDraft(draft.DraftId) is { } legacy) { draft = draft with { ProposalRevision = legacy.ProposalRevision }; WritePrivate(draft); }
             if (draft is null || (expectedId is not null && draft.DraftId != expectedId) || !Roots.Any(r => r.RootId == draft.RootId) || !IsTrusted(draft, requireApproved: draft.IsApproved)) return;
             drafts[draft.DraftId] = draft;
         }
@@ -175,7 +176,7 @@ internal sealed class ProposalApplyService
     }
     private ProposalApplyDraft? ReadReceiptDraft(Guid draftId)
     {
-        try { return JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(Path.Combine(draftPath, draftId.ToString("N") + ".json"))); }
+        try { var draft = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(Path.Combine(draftPath, draftId.ToString("N") + ".json"))); if (draft is not null && draft.ProposalRevision == 0 && store!.GetProposalApplyDraft(draftId) is { } legacy) { draft = draft with { ProposalRevision = legacy.ProposalRevision }; WritePrivate(draft); } return draft; }
         catch { return null; }
     }
     private bool MatchesImmutableReceipt(ProposalApplyDraft draft, ProposalApplicationReceipt receipt)
