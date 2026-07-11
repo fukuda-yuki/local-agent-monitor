@@ -16,6 +16,8 @@ Required:
 Optional:
 
 - Codex App / app-server。
+- Issue #51 Session events from `copilot-sdk-stream` or
+  `copilot-compatible-hook`, accepted by the installed Local Monitor only.
 
 Reference-only:
 
@@ -377,6 +379,10 @@ statement for the three sanitized repository metadata fields
 `repository_name`, `workspace_label`, and `repo_snapshot`; it does not add a
 new telemetry input, raw route, query parameter, normalized dataset field,
 candidate record field, or dashboard contract.
+Issue #51 further supersedes the no-new-input/schema statement only for the
+separate Session ingest, Session storage, workspace reads, and exact-link OTel
+enrichment defined in
+[Canvas Session workspace](../interfaces/canvas-session-workspace.md).
 `--sanitized-only` remains an optional Local Monitor metadata-only mode, not a
 Canvas requirement.
 
@@ -391,6 +397,8 @@ local Monitor UI data and are not copied into Canvas action responses, logs,
 committed files, or static artifacts. No monitor payload is embedded in the
 trigger instruction. M5 adds no telemetry input, schema, endpoint, query
 parameter, response field, raw route, or dependency.
+That statement describes the Sprint11 M5 trigger scope; it does not prohibit the
+separate Issue #51 Session interfaces.
 
 Raw / PII exposure follows the Local Ingestion Monitor boundary in
 [../security-data-boundaries.md](../security-data-boundaries.md): raw body
@@ -415,11 +423,64 @@ Live validation for the monitor records the same evidence as the
 `raw-local-receiver` profile, plus the monitor port, the VS Code / GitHub
 Copilot extension version, and optionally whether `--sanitized-only` was set.
 
+## Session Event Ingestion And Enrichment
+
+Issue #51 adds a Session event input beside, not inside, the OTLP receiver:
+
+```text
+POST /api/session-ingest/v1/events
+```
+
+This is the only new Session event write interface. It accepts schema v1 JSON
+from adapters `copilot-sdk-stream` and `copilot-compatible-hook`, with source
+surfaces `copilot-sdk`, `copilot-cli`, `vscode`, and `hook-unknown`. It requires
+`X-CAO-Session-Event-Version: 1`, accepts batches of 1..100 events, and enforces
+a 1 MiB request limit. It returns `204` only after commit. Fixed error mapping,
+the envelope/event shape, and read interfaces are defined in
+[Canvas Session workspace](../interfaces/canvas-session-workspace.md).
+
+The installed Local Monitor also provides:
+
+```text
+hook-forward --endpoint <loopback-url> --timeout-ms 250
+```
+
+The forwarder reads one stdin JSON payload. Invalid input, network failure, and
+timeout always exit `0`; stdout and stderr remain empty; the forwarder never
+influences the agent Hook decision. The endpoint must be loopback.
+
+Copilot CLI and VS Code share PascalCase Hooks. When Hook evidence does not
+identify the source exactly, ingestion records `hook-unknown`. Environment,
+repository, tool names, transcript paths, and timestamps must not infer the
+surface. OTel `client_kind` may only confirm whether `hook-unknown` is
+`copilot-cli` or `vscode`; it never participates in Session binding or merge.
+
+Canvas/App SDK capture uses `ctx.sessionId` as the native session ID and begins
+at the first Canvas open. Persisted SDK events are sent to the Session event
+endpoint; ephemeral usage is aggregated; reasoning and streaming deltas are not
+persisted. Events missed before the first open are not reconstructed and lower
+Session completeness.
+
+OTel Session enrichment runs only after the existing monitor projection. It
+uses the dedicated `session_projection_state` cursor. A byte-for-byte trace
+context already recorded on an event may exact-link OTel evidence. Exact
+`gen_ai.conversation.id` may bind/enrich only when byte-for-byte equal to an
+already-recorded native session ID; otherwise OTel remains `unbound`.
+`client_kind` never binds or merges Sessions. Session schema migration runs at
+startup, and failure fails host construction, matching the analysis-store
+migration. It does not change the existing OTLP receiver, trace/span schema,
+monitor projection cursor, or readiness thresholds/body/status mapping.
+
+This Issue #51 exception supersedes older absolute wording that Canvas adds no
+telemetry input or correlation. It does not broaden unrelated Canvas actions,
+raw-data, loopback/token, bounded-response, or `session.send()` contracts.
+
 ## Local Monitor Copilot Raw Analysis
 
 The Local Monitor may start a Copilot SDK raw analysis run for a selected trace
-in the normal raw-default posture. This does not add telemetry input and does
-not change existing sanitized `/api/monitor/*` or SSE contracts.
+in the normal raw-default posture. The raw-analysis feature itself does not add
+telemetry input and does not change existing sanitized `/api/monitor/*` or SSE
+contracts; Issue #51's separate Session input is not part of this analysis path.
 
 Routes:
 

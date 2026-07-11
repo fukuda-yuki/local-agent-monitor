@@ -23,6 +23,17 @@ Config CLI
 Static HTML dashboard
 ```
 
+Issue #51 adds a parallel local Session path inside the installed Local Monitor:
+
+```text
+Canvas/App SDK stream ----+
+Copilot-compatible Hook --+--> Session event ingest --> Session subsystem
+existing OTel projection -+--> exact-link enrichment --> Session workspace reads
+```
+
+This path does not replace or alter the OTLP receiver and existing monitor
+projection.
+
 Collection profile は telemetry routing mode を表す public interface とする。
 `raw-only` は最小構成、`docker-desktop-langfuse` は標準 full profile である。
 
@@ -83,6 +94,19 @@ Config CLI は repository-local な中核ツールである。
 - saved raw OTLP JSON を file-based ingest する。
 - `raw-local-receiver` profile から受信した raw telemetry も保存できる。
 - PostgreSQL は共有環境、長期保持、検索性能が必要になった場合の将来候補に留める。
+
+### Session Subsystem
+
+- Issue #51 の Session / Run / Event identity、native ID mapping、event content、
+  post-projection OTel enrichment cursor を所有する。
+- additive tables は `sessions`、`session_native_ids`、`session_runs`、
+  `session_events`、`session_event_content`、`session_projection_state`。
+- `RawTelemetryStore.cs` にこの責務を追加しない。
+- local Session / Run / Event ID は UUIDv7 string。merge は identical native
+  session ID、explicit resume/handoff、exact trace context のみに限定し、
+  repository / timestamp proximity は使わない。
+- raw content は secret-filter 後に metadata と分離して保存し、capture から
+  90 日で expiry。物理削除 / pin / delete-now は Issue #57 に残す。
 
 ### Candidate Pipeline
 
@@ -172,6 +196,24 @@ Copilot client
 - Langfuse なしで VS Code から直接 raw data loop に接続する。
 - 追加インストールが難しい company-managed PC でも repository-local execution で検証できる path を提供する。
 
+### Session Workspace Loop
+
+```text
+Canvas ctx.sessionId / SDK persisted events / PascalCase Hooks
+  -> POST /api/session-ingest/v1/events
+  -> separate Session tables
+existing monitor projection
+  -> dedicated session_projection_state cursor
+  -> exact-linked OTel enrichment
+  -> sanitized /api/session-workspace reads
+  -> same-origin no-store event content read
+```
+
+Canvas capture begins at first open. Missed earlier events are not reconstructed
+and lower completeness. Ephemeral usage is aggregated; reasoning and deltas are
+not persisted. OTel enrichment runs after existing projection and leaves the
+OTLP receiver, trace/span schema, and readiness contract unchanged.
+
 ### Improvement Support Loop
 
 ```text
@@ -231,6 +273,11 @@ Not allowed in repository:
 
 Sensitive local output may be generated only by explicit opt-in commands.
 It must include expiry metadata and delete target paths, but automatic deletion is not implemented.
+
+Issue #51 Session content is another local raw-bearing storage class. It is
+secret-filtered, stored separately from Session metadata, and expires for reads
+at `captured_at + 90 days`; expired reads report `expired_pending_deletion`.
+Automatic physical deletion remains Issue #57 scope.
 
 ## 5. Aspire AppHost Boundary
 

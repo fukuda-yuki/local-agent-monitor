@@ -278,9 +278,12 @@ Sprint11 GitHub Copilot app Canvas adapter (bounded adapter, boundary
 unchanged):
 
 - The Canvas adapter is a thin project-scoped extension over the existing Local
-  Monitor. It does not add telemetry input, schema, API field, raw-bearing route,
-  repository-stored monitor output, or a replacement monitor UI, except for the
-  Sprint16 scoped sanitized repository metadata fields recorded below (D040).
+  Monitor. Sprint11 itself did not add telemetry input, schema, API field,
+  raw-bearing route, repository-stored monitor output, or a replacement monitor
+  UI, except for the Sprint16 scoped sanitized repository metadata fields
+  recorded below (D040). Issue #51 supersedes this prohibition only for the
+  separate Session ingest/storage/workspace interfaces and exact-link OTel
+  enrichment defined in D051.
 - The Canvas adapter may be used with the normal raw-default Local Monitor.
   Canvas surfaces may link to Local Monitor pages that show raw-bearing
   server-rendered UI under the Local Monitor's existing loopback, same-origin,
@@ -411,9 +414,11 @@ Sprint15 child B/C/D/E resolution (D037):
   Because that label is raw-bearing local-screen data, this helper route uses
   `Cache-Control: no-store`. `/api/monitor/summary` itself remains sanitized
   and prompt-free.
-- **Child E — dropped.** No implementation. No new resource/span attribute is
-  added to the OTel ingestion schema. The Canvas helper page's manual trace
-  dropdown (child A) remains the permanent trace-selection mechanism.
+- **Child E — dropped in the D037 trace-centric adapter.** No implementation or
+  resource/span attribute was added there, and that adapter keeps its manual
+  trace dropdown. D051 separately introduces an exact-bound Session subsystem;
+  it does not change D037 trace selection. Neither subsystem permits heuristic,
+  latest-trace, repository, timestamp, or proximity selection.
 - **Live Canvas runtime verification is a separate, final, cross-cutting step
   (D038), not part of any child's implementation scope.** It requires
   `extensions_manage`/`open_canvas`/`invoke_canvas_action`, which this Claude
@@ -664,6 +669,38 @@ Route boundary:
   They may be read from user-secrets or equivalent local configuration, but API
   keys must not be logged, stored in analysis events/results, exposed in UI, or
   included in repository-safe summaries.
+
+## Session Workspace Boundary
+
+Issue #51 Session ingestion remains inside the installed Local Monitor's
+single-trusted-local-user, loopback, Host-header, no-CORS boundary. It does not
+authorize remote or non-loopback ingest.
+
+`POST /api/session-ingest/v1/events` accepts raw-bearing SDK/Hook event payloads.
+Requests require JSON and `X-CAO-Session-Event-Version: 1`, are bounded to 1 MiB
+and 1..100 events, and return `204` only after commit. Fixed error responses use
+only `{ "error": "<code>" }`; responses and logs never echo payloads, raw
+exception details, PII, credentials, tokens, or local paths.
+
+Session metadata and content are separated. `session_events` and sanitized
+`/api/session-workspace` reads do not contain event payload/content. Raw content
+is secret-filtered before storage in `session_event_content` and receives
+`expires_at = captured_at + 90 days`.
+
+`GET /sessions/{id}/events/{eventId}/content` is
+raw-bearing and must enforce same-origin plus `Cache-Control: no-store`. It is
+absent under `--sanitized-only` (`404`). Expired content returns `410` with
+`{ "error": "raw_content_expired", "content_state":
+"expired_pending_deletion" }`; automatic physical deletion, pin, and
+delete-now remain Issue #57 scope. Raw Session content must not enter Canvas
+actions, `session.send()` prompts, sanitized workspace reads, logs,
+repository-safe outputs, static artifacts, Issue/PR/docs, or CI artifacts.
+
+The installed `hook-forward --endpoint <loopback-url> --timeout-ms 250` mode is
+fail-open only with respect to the agent Hook decision: invalid input, network
+failure, and timeout still exit `0`, stdout/stderr remain empty, and the
+forwarder never changes the Hook decision. This does not relax the Session
+ingest validation or raw-data boundary.
 
 ## Shared Use Preconditions
 

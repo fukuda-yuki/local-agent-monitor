@@ -328,6 +328,65 @@ Raw access (default-on):
 - the full raw / PII trust boundary and the route contract are defined in
   [../security-data-boundaries.md](../security-data-boundaries.md).
 
+## Session Storage And Normalization
+
+Issue #51 adds a separate additive Session subsystem. It does not add Session
+responsibilities to `RawTelemetryStore.cs` and does not change `raw_records`,
+the normalized measurement schema, candidate schemas, dashboard dataset schema,
+or the existing monitor projection tables/cursor.
+
+The Session subsystem owns these additive tables:
+
+- `sessions`
+- `session_native_ids`
+- `session_runs`
+- `session_events`
+- `session_event_content`
+- `session_projection_state`
+
+`sessions`, `session_runs`, and `session_events` use local UUIDv7 string IDs.
+`session_native_ids` preserves source identity separately from local IDs.
+`session_events` stores normalized event metadata; raw-bearing content is
+secret-filtered and stored separately in `session_event_content`.
+`session_projection_state` owns the dedicated post-monitor-projection OTel
+enrichment cursor.
+
+Source idempotency uses SDK event ID for `copilot-sdk-stream`, Hook canonical
+hash for `copilot-compatible-hook`, or exact OTel trace/span identity for OTel
+enrichment. A Session merge is permitted only for an identical native session
+ID, explicit resume/handoff linkage, or exact trace context. Repository and
+timestamp proximity never merge Sessions.
+
+The normalizer assigns exactly one completeness state:
+
+- `unbound`: OTel-only and not linked to a native session ID.
+- `partial`: native ID exists but lifecycle or input family is incomplete.
+- `rich`: instruction, lifecycle, and SDK/Hook or OTel evidence exist, but some
+  content or terminal evidence is missing.
+- `full`: surface-required start-to-end evidence exists, there is no unsupported
+  version or ingest gap, and OTel enrichment is exact-linked.
+
+The post-projection OTel enricher advances only its dedicated Session cursor.
+It runs after existing monitor projection and must not advance or redefine the
+existing monitor cursor/readiness contract. A byte-for-byte trace context
+already recorded on a Session event may link OTel evidence. Exact
+`gen_ai.conversation.id` may bind/enrich only when byte-for-byte equal to an
+already-recorded native session ID; otherwise OTel remains `unbound`.
+`client_kind` never participates in binding or merge and may only confirm
+whether `hook-unknown` is `copilot-cli` or `vscode`. Inexact evidence does not
+merge a Session or produce `full` completeness.
+
+Session schema migration runs during Local Monitor startup. Any migration
+failure fails host construction, matching the analysis-store migration; it is
+not represented by a new readiness check. Existing readiness body fields,
+thresholds, units, configuration names, and HTTP status mapping remain unchanged.
+
+Raw event content receives `expires_at = captured_at + 90 days`. Expiry changes
+the content read to `410` / `expired_pending_deletion`; the row remains stored.
+Automatic physical deletion, pin, and delete-now are Issue #57 scope. The full
+write/read shape is defined in
+[Canvas Session workspace](../interfaces/canvas-session-workspace.md).
+
 ## Local Analysis Persistence
 
 The Local Monitor adds local-only analysis tables for Copilot SDK raw analysis.
