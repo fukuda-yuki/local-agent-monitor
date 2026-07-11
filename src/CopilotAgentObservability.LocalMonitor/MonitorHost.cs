@@ -96,7 +96,7 @@ internal static class MonitorHost
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
         var proposalApplyRuntimePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!, "proposal-apply");
-        var proposalApplyService = new ProposalApplyService(options.ApplyRoots ?? [], proposalApplyRuntimePath);
+        var proposalApplyService = new ProposalApplyService(options.ApplyRoots ?? [], proposalApplyRuntimePath, sessionStore);
         builder.Services.AddSingleton(proposalApplyService);
         var sessionEventQueue = testOptions?.SessionEventQueue ?? new SessionEventQueue();
         var sessionEventNormalizer = new SessionEventNormalizer(sessionStore, sessionTimeProvider);
@@ -171,6 +171,7 @@ internal static class MonitorHost
             options,
             sessionEventQueue,
             sessionStore,
+            proposalApplyService,
             sessionOtelEnricher,
             testOptions?.SessionCommitTimeout ?? DefaultCommitTimeout,
             sessionTimeProvider);

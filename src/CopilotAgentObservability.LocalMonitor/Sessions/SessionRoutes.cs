@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using CopilotAgentObservability.Telemetry.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.LocalMonitor.ProposalApply;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions;
 
@@ -20,10 +21,12 @@ internal static class SessionRoutes
         MonitorOptions monitorOptions,
         SessionEventQueue queue,
         ISessionStore store,
+        ProposalApplyService proposalApplyService,
         SqliteSessionOtelEnricher otelEnricher,
         TimeSpan commitTimeout,
         TimeProvider timeProvider)
     {
+        MapProposalApplyRoutes(app, store, proposalApplyService);
         app.MapPost(IngestPath, async context =>
         {
             if (!string.Equals(context.Request.ContentType?.Split(';', 2)[0], "application/json", StringComparison.OrdinalIgnoreCase))
@@ -350,6 +353,66 @@ internal static class SessionRoutes
             });
         }
     }
+
+    private static void MapProposalApplyRoutes(WebApplication app, ISessionStore store, ProposalApplyService service)
+    {
+        const string prefix = "/api/session-workspace/proposal-applies";
+        app.MapGet(prefix + "/roots", async context =>
+        {
+            if (!await ProposalPolicy(context, body: false)) return;
+            await Json(context, new { items = service.Roots.Select(root => new { root_id = root.RootId, kind = root.Kind switch { ApplyRootKind.UserConfig => "user_config", ApplyRootKind.Skill => "skill", _ => "repository" }, label = root.Label }) });
+        });
+        app.MapPost(prefix + "/drafts", async context =>
+        {
+            if (!await ProposalPolicy(context, body: true)) return;
+            var body = await ReadBoundedBody(context.Request, MaximumBodyBytes, context.RequestAborted); if (body is null) { await Failure(context, 413, "request_too_large"); return; }
+            if (!TryParse(body, out ProposalApplyDraftRequest? request) || !TryUuidV7(request!.ProposalId!, out var proposalId) || !TryUuidV7(request.RootId!, out var rootId) || request.Files is null || request.Files.Any(file => string.IsNullOrEmpty(file.RelativePath) || file.ReplacementText is null)) { await Failure(context, 400, "invalid_apply_request"); return; }
+            if (store.GetImprovementProposal(proposalId) is null) { await Failure(context, 404, "proposal_not_found"); return; }
+            try { var draft = service.CreateDraft(proposalId, rootId, request.Files.Select(file => new ProposalApplyFileInput(file.RelativePath!, file.ReplacementText!)).ToArray()); context.Response.StatusCode = 201; await JsonBody(context, DraftDto(draft)); }
+            catch (ApplyPathException exception) { await Failure(context, ErrorStatus(exception.Code), exception.Code); }
+        });
+        app.MapGet(prefix + "/drafts/{draftId}", async (string draftId, HttpContext context) =>
+        {
+            if (!await ProposalPolicy(context, body: false) || !TryUuidV7(draftId, out var id)) { if (!TryUuidV7(draftId, out _)) await Failure(context, 400, "invalid_apply_request"); return; }
+            try { await Json(context, DraftDto(service.GetDraft(id))); } catch (ApplyPathException exception) { await Failure(context, 404, exception.Code); }
+        });
+        app.MapPut(prefix + "/drafts/{draftId}/selection", async (string draftId, HttpContext context) =>
+        {
+            if (!await ProposalPolicy(context, body: true) || !TryUuidV7(draftId, out var id)) { if (!TryUuidV7(draftId, out _)) await Failure(context, 400, "invalid_apply_request"); return; }
+            var body = await ReadBoundedBody(context.Request, MaximumBodyBytes, context.RequestAborted); if (body is null) { await Failure(context, 413, "request_too_large"); return; }
+            if (!TryParse(body, out ProposalApplySelectionRequest? request) || request!.SelectionRevision is null || request.SelectedHunkIds is null) { await Failure(context, 400, "invalid_apply_request"); return; }
+            try { await Json(context, DraftDto(service.Select(id, request.SelectionRevision.Value, request.SelectedHunkIds))); } catch (ApplyPathException exception) { await Failure(context, ErrorStatus(exception.Code), exception.Code); }
+        });
+        app.MapPost(prefix + "/drafts/{draftId}/approve", async (string draftId, HttpContext context) =>
+        {
+            if (!await ProposalPolicy(context, body: true) || !TryUuidV7(draftId, out var id)) { if (!TryUuidV7(draftId, out _)) await Failure(context, 400, "invalid_apply_request"); return; }
+            var body = await ReadBoundedBody(context.Request, MaximumBodyBytes, context.RequestAborted); if (body is null) { await Failure(context, 413, "request_too_large"); return; }
+            if (!TryParse(body, out ProposalApplyApprovalRequest? request) || request!.SelectionRevision is null || string.IsNullOrEmpty(request.ApprovalDigest)) { await Failure(context, 400, "invalid_apply_request"); return; }
+            try { await Json(context, DraftDto(service.Approve(id, request.SelectionRevision.Value, request.ApprovalDigest))); } catch (ApplyPathException exception) { await Failure(context, ErrorStatus(exception.Code), exception.Code); }
+        });
+        app.MapPost(prefix + "/drafts/{draftId}/apply", async (string draftId, HttpContext context) =>
+        {
+            if (!await ProposalPolicy(context, body: false) || !TryUuidV7(draftId, out var id)) { if (!TryUuidV7(draftId, out _)) await Failure(context, 400, "invalid_apply_request"); return; }
+            try { var result = service.ApplyWithId(id); if (result.Result == ApplyTransactionResult.Applied) await Json(context, new { apply_id = result.ApplyId, state = "applied" }); else await Failure(context, 409, result.Result == ApplyTransactionResult.Stale ? "apply_stale" : "apply_failed"); } catch (ApplyPathException exception) { await Failure(context, ErrorStatus(exception.Code), exception.Code); }
+        });
+        app.MapPost(prefix + "/{applyId}/rollback", async (string applyId, HttpContext context) =>
+        {
+            if (!await ProposalPolicy(context, body: false) || !TryUuidV7(applyId, out var id)) { if (!TryUuidV7(applyId, out _)) await Failure(context, 400, "invalid_apply_request"); return; }
+            var result = service.Rollback(id); if (result == ApplyTransactionResult.RolledBack) await Json(context, new { apply_id = id, state = "rolled_back" }); else await Failure(context, result == ApplyTransactionResult.RollbackStale ? 409 : 404, result == ApplyTransactionResult.RollbackStale ? "rollback_stale" : "rollback_not_available");
+        });
+    }
+
+    private static async Task<bool> ProposalPolicy(HttpContext context, bool body)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        if (MonitorHost.IsCrossSiteRequest(context)) { await Failure(context, 403, "cross_origin_forbidden"); return false; }
+        if (!MonitorHost.HasMonitorCsrfHeader(context)) { await Failure(context, 403, "csrf_required"); return false; }
+        if (body && !IsJson(context.Request)) { await Failure(context, 415, "unsupported_media_type"); return false; }
+        return true;
+    }
+    private static bool TryParse<T>(byte[] body, out T? value) { try { value = JsonSerializer.Deserialize<T>(body, StrictJson); return value is not null; } catch (JsonException) { value = default; return false; } }
+    private static int ErrorStatus(string code) => code is "draft_not_found" or "proposal_not_found" ? 404 : code is "selection_stale" or "approval_digest_mismatch" ? 409 : code is "request_too_large" ? 413 : 400;
+    private static object DraftDto(ProposalApplyDraft draft) => new { draft_id = draft.DraftId, proposal_id = draft.ProposalId, root_id = draft.RootId, selection_revision = draft.SelectionRevision, approval_digest = draft.ApprovalDigest, state = draft.IsApproved ? "approved" : "draft", files = draft.Files.Select(file => new { relative_path = file.RelativePath, base_sha256 = file.BaseSha256, replacement_sha256 = file.ReplacementSha256 }), hunks = draft.Hunks.Select(hunk => new { hunk_id = hunk.HunkId, relative_path = hunk.RelativePath, start_line = hunk.StartLine, base_line_count = hunk.BaseLineCount, replacement_text = hunk.ReplacementText, selected = hunk.Selected }) };
 
     private static object SessionDto(ObservedSession item, IReadOnlyList<SessionNativeId> nativeIds, SessionRawRetentionState rawRetentionState) => new
     {

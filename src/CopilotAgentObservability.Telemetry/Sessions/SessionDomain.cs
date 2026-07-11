@@ -297,6 +297,14 @@ public sealed record ProposalApplyAudit(
     int FileCount,
     DateTimeOffset RecordedAt);
 
+public sealed record ProposalApplyDraftMetadata(
+    Guid DraftId, Guid ProposalId, Guid RootId, int SelectionRevision, string ApprovalDigest,
+    ProposalApplyState State, int FileCount, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+
+public sealed record ProposalApplyRevisionMetadata(Guid DraftId, int SelectionRevision, string ApprovalDigest, DateTimeOffset? ApprovedAt);
+
+public sealed record ProposalApplyOutcome(Guid ApplyId, Guid DraftId, ProposalApplyState State, DateTimeOffset RecordedAt);
+
 public interface ISessionStore
 {
     void CreateSchema();
@@ -315,4 +323,10 @@ public interface ISessionStore
     ImprovementProposal? GetImprovementProposal(Guid proposalId);
     void CreateImprovementProposal(ImprovementProposal proposal);
     void UpdateImprovementProposalStatus(Guid proposalId, ImprovementProposalStatus status, DateTimeOffset updatedAt);
+    void SaveProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision);
+    void UpdateProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision);
+    ProposalApplyDraftMetadata? GetProposalApplyDraft(Guid draftId);
+    IReadOnlyList<ProposalApplyDraftMetadata> ListActiveProposalApplyDrafts();
+    void SaveProposalApplyApproval(Guid draftId, ProposalApplyRevisionMetadata revision);
+    void SaveProposalApplyOutcome(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode);
 }

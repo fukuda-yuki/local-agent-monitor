@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 public sealed class SqliteSessionStore : ISessionStore
 {
-    private const int CurrentSchemaVersion = 4;
+    private const int CurrentSchemaVersion = 5;
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
 
@@ -40,7 +40,7 @@ public sealed class SqliteSessionStore : ISessionStore
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'session';";
         var existingVersion = versionCommand.ExecuteScalar();
-        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or CurrentSchemaVersion))
+        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or CurrentSchemaVersion))
         {
             throw new InvalidOperationException("Unsupported Session schema version.");
         }
@@ -81,7 +81,60 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
+        else if (Convert.ToInt32(existingVersion) == 4)
+        {
+            command.CommandText = "ALTER TABLE proposal_apply_drafts ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.0000000+00:00';";
+            command.ExecuteNonQuery();
+            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
         transaction.Commit();
+    }
+
+    public void SaveProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, "INSERT INTO proposal_apply_drafts(draft_id,proposal_id,root_id,selection_revision,approval_digest,state,created_at,updated_at) VALUES($id,$proposal,$root,$revision,$digest,$state,$created,$updated);",
+            ("$id", Id(draft.DraftId)), ("$proposal", Id(draft.ProposalId)), ("$root", Id(draft.RootId)), ("$revision", draft.SelectionRevision), ("$digest", draft.ApprovalDigest), ("$state", ApplyState(draft.State)), ("$created", Timestamp(draft.CreatedAt)), ("$updated", Timestamp(draft.UpdatedAt)));
+        for (var i = 0; i < files.Count; i++) Execute(connection, transaction, "INSERT INTO proposal_apply_files(draft_id,file_order,base_sha256,replacement_sha256) VALUES($id,$order,$base,$replacement);", ("$id", Id(draft.DraftId)), ("$order", i), ("$base", files[i].BaseSha256), ("$replacement", files[i].ReplacementSha256));
+        foreach (var hunk in hunks) Execute(connection, transaction, "INSERT INTO proposal_apply_hunks(draft_id,hunk_id,selected,replacement_sha256) VALUES($id,$hunk,$selected,$replacement);", ("$id", Id(draft.DraftId)), ("$hunk", hunk.HunkId), ("$selected", hunk.Selected ? 1 : 0), ("$replacement", hunk.ReplacementSha256));
+        Execute(connection, transaction, "INSERT INTO proposal_apply_revisions(draft_id,selection_revision,approval_digest,approved_at) VALUES($id,$revision,$digest,$approved);", ("$id", Id(revision.DraftId)), ("$revision", revision.SelectionRevision), ("$digest", revision.ApprovalDigest), ("$approved", Timestamp(revision.ApprovedAt)));
+        transaction.Commit();
+    }
+
+    public ProposalApplyDraftMetadata? GetProposalApplyDraft(Guid draftId)
+    {
+        using var connection = Open(); using var command = connection.CreateCommand(); command.CommandText = "SELECT draft_id,proposal_id,root_id,selection_revision,approval_digest,state,(SELECT COUNT(*) FROM proposal_apply_files WHERE draft_id=d.draft_id),created_at,updated_at FROM proposal_apply_drafts d WHERE draft_id=$id;"; command.Parameters.AddWithValue("$id", Id(draftId)); using var reader = command.ExecuteReader();
+        return reader.Read() ? new(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)), reader.GetInt32(3), reader.GetString(4), ParseApplyState(reader.GetString(5)), reader.GetInt32(6), DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture), DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture)) : null;
+    }
+
+    public void UpdateProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, "UPDATE proposal_apply_drafts SET selection_revision=$revision,approval_digest=$digest,state=$state,updated_at=$updated WHERE draft_id=$id;", ("$revision", draft.SelectionRevision), ("$digest", draft.ApprovalDigest), ("$state", ApplyState(draft.State)), ("$updated", Timestamp(draft.UpdatedAt)), ("$id", Id(draft.DraftId)));
+        Execute(connection, transaction, "DELETE FROM proposal_apply_files WHERE draft_id=$id; DELETE FROM proposal_apply_hunks WHERE draft_id=$id;", ("$id", Id(draft.DraftId)));
+        for (var i = 0; i < files.Count; i++) Execute(connection, transaction, "INSERT INTO proposal_apply_files(draft_id,file_order,base_sha256,replacement_sha256) VALUES($id,$order,$base,$replacement);", ("$id", Id(draft.DraftId)), ("$order", i), ("$base", files[i].BaseSha256), ("$replacement", files[i].ReplacementSha256));
+        foreach (var hunk in hunks) Execute(connection, transaction, "INSERT INTO proposal_apply_hunks(draft_id,hunk_id,selected,replacement_sha256) VALUES($id,$hunk,$selected,$replacement);", ("$id", Id(draft.DraftId)), ("$hunk", hunk.HunkId), ("$selected", hunk.Selected ? 1 : 0), ("$replacement", hunk.ReplacementSha256));
+        Execute(connection, transaction, "INSERT INTO proposal_apply_revisions(draft_id,selection_revision,approval_digest,approved_at) VALUES($id,$revision,$digest,$approved);", ("$id", Id(revision.DraftId)), ("$revision", revision.SelectionRevision), ("$digest", revision.ApprovalDigest), ("$approved", Timestamp(revision.ApprovedAt))); transaction.Commit();
+    }
+
+    public IReadOnlyList<ProposalApplyDraftMetadata> ListActiveProposalApplyDrafts()
+    {
+        using var connection = Open(); using var command = connection.CreateCommand(); command.CommandText = "SELECT draft_id FROM proposal_apply_drafts WHERE state IN ('draft','approved');"; using var reader = command.ExecuteReader(); var ids = new List<Guid>(); while (reader.Read()) ids.Add(Guid.Parse(reader.GetString(0))); return ids.Select(GetProposalApplyDraft).OfType<ProposalApplyDraftMetadata>().ToArray();
+    }
+
+    public void SaveProposalApplyApproval(Guid draftId, ProposalApplyRevisionMetadata revision)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, "UPDATE proposal_apply_drafts SET state='approved',updated_at=$updated WHERE draft_id=$id AND selection_revision=$revision;", ("$updated", Timestamp(revision.ApprovedAt)), ("$id", Id(draftId)), ("$revision", revision.SelectionRevision));
+        Execute(connection, transaction, "UPDATE proposal_apply_revisions SET approved_at=$approved WHERE draft_id=$id AND selection_revision=$revision;", ("$approved", Timestamp(revision.ApprovedAt)), ("$id", Id(draftId)), ("$revision", revision.SelectionRevision)); transaction.Commit();
+    }
+
+    public void SaveProposalApplyOutcome(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, "INSERT INTO proposal_applies(apply_id,draft_id,state,created_at) VALUES($apply,$draft,$state,$time) ON CONFLICT(apply_id) DO UPDATE SET state=excluded.state;", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)));
+        Execute(connection, transaction, "UPDATE proposal_apply_drafts SET state=$state,updated_at=$time WHERE draft_id=$draft;", ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)), ("$draft", Id(outcome.DraftId)));
+        Execute(connection, transaction, "INSERT INTO proposal_apply_audit(apply_id,draft_id,proposal_id,root_id,actor_kind,state,error_code,file_count,recorded_at) VALUES($apply,$draft,$proposal,$root,'local_user',$state,$error,$count,$time);", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$proposal", Id(proposalId)), ("$root", Id(rootId)), ("$state", ApplyState(outcome.State)), ("$error", errorCode), ("$count", fileCount), ("$time", Timestamp(outcome.RecordedAt))); transaction.Commit();
     }
 
     public void Write(SessionWriteBatch batch)
@@ -1044,6 +1097,7 @@ public sealed class SqliteSessionStore : ISessionStore
             approval_digest TEXT NOT NULL,
             state TEXT NOT NULL CHECK (state IN ('draft','approved','applied','rolled_back','failed')),
             created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
             FOREIGN KEY (proposal_id) REFERENCES improvement_proposals(proposal_id) ON DELETE RESTRICT
         );
         CREATE TABLE IF NOT EXISTS proposal_apply_files (
@@ -1090,4 +1144,7 @@ public sealed class SqliteSessionStore : ISessionStore
             recorded_at TEXT NOT NULL
         );
         """;
+
+    private static string ApplyState(ProposalApplyState state) => state switch { ProposalApplyState.Draft => "draft", ProposalApplyState.Approved => "approved", ProposalApplyState.Applied => "applied", ProposalApplyState.RolledBack => "rolled_back", ProposalApplyState.Failed => "failed", _ => throw new ArgumentOutOfRangeException(nameof(state)) };
+    private static ProposalApplyState ParseApplyState(string value) => value switch { "draft" => ProposalApplyState.Draft, "approved" => ProposalApplyState.Approved, "applied" => ProposalApplyState.Applied, "rolled_back" => ProposalApplyState.RolledBack, "failed" => ProposalApplyState.Failed, _ => throw new InvalidOperationException("Invalid proposal apply state.") };
 }

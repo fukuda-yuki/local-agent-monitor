@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using CopilotAgentObservability.Telemetry.Sessions;
 
 namespace CopilotAgentObservability.LocalMonitor.ProposalApply;
 
@@ -11,14 +13,15 @@ internal sealed class ProposalApplyService
     private readonly Dictionary<Guid, ProposalApplyDraft> drafts = [];
     private readonly object sync = new();
     private readonly ProposalApplyTransaction transaction;
+    private readonly ISessionStore? store;
+    private readonly string draftPath;
 
-    public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, Action<string>? fault = null)
+    public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, Action<string>? fault = null) : this(roots, runtimePath, null, fault) { }
+    public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, ISessionStore? store, Action<string>? fault = null)
     {
-        transaction = new ProposalApplyTransaction(runtimePath, roots, fault);
-        Roots = transaction.ConfiguredRoots;
-        transaction.RecoverUncommitted();
+        transaction = new ProposalApplyTransaction(runtimePath, roots, fault); Roots = transaction.ConfiguredRoots; this.store = store;
+        draftPath = Path.Combine(runtimePath, "drafts"); Directory.CreateDirectory(draftPath); transaction.RecoverUncommitted(); LoadDrafts();
     }
-
     public IReadOnlyList<ConfiguredApplyRoot> Roots { get; }
 
     public ProposalApplyDraft CreateDraft(Guid proposalId, Guid rootId, IReadOnlyList<ProposalApplyFileInput> inputs)
@@ -28,65 +31,48 @@ internal sealed class ProposalApplyService
         var files = inputs.Select(input =>
         {
             if (Encoding.UTF8.GetByteCount(input.ReplacementText) > 262_144) throw new ApplyPathException("request_too_large");
-            var resolved = ApplyPathPolicy.Resolve(root, input.RelativePath);
-            var original = File.ReadAllText(resolved.FullPath);
+            var resolved = ApplyPathPolicy.Resolve(root, input.RelativePath); var original = File.ReadAllText(resolved.FullPath);
             if (Encoding.UTF8.GetByteCount(original) > 262_144) throw new ApplyPathException("request_too_large");
             return new ApplyTarget(root, resolved.RelativePath, original, input.ReplacementText, LineDiff.Sha256(original), LineDiff.Sha256(input.ReplacementText));
         }).ToArray();
         if (files.Select(file => file.RelativePath).Distinct(StringComparer.OrdinalIgnoreCase).Count() != files.Length) throw new ApplyPathException("duplicate_target");
-        var hunks = files.SelectMany(file => LineDiff.Create(file.RelativePath, file.OriginalText, file.ReplacementText)).ToArray();
-        if (hunks.Length == 0) throw new ApplyPathException("invalid_selection");
-        var draftId = Guid.CreateVersion7();
-        var draft = new ProposalApplyDraft(draftId, proposalId, rootId, 1, Digest(draftId, proposalId, rootId, files, hunks, 1), false, files, hunks);
-        lock (sync) drafts.Add(draft.DraftId, draft);
-        return draft;
+        var hunks = files.SelectMany(file => LineDiff.Create(file.RelativePath, file.OriginalText, file.ReplacementText)).ToArray(); if (hunks.Length == 0) throw new ApplyPathException("invalid_selection");
+        var id = Guid.CreateVersion7(); var draft = new ProposalApplyDraft(id, proposalId, rootId, 1, Digest(id, proposalId, rootId, files, hunks, 1), false, files, hunks);
+        lock (sync) { drafts.Add(id, draft); Persist(draft, ProposalApplyState.Draft); } return draft;
     }
-
-    public ProposalApplyDraft Select(Guid draftId, int revision, IReadOnlyList<string> selectedHunkIds)
+    public ProposalApplyDraft GetDraft(Guid id) { lock (sync) return Get(id); }
+    public ProposalApplyDraft Select(Guid id, int revision, IReadOnlyList<string> selectedHunkIds)
     {
-        lock (sync)
-        {
-            var draft = Get(draftId);
-            if (draft.SelectionRevision != revision) throw new ApplyPathException("selection_stale");
-            var selected = draft.Hunks.Select(hunk => hunk with { Selected = selectedHunkIds.Contains(hunk.HunkId, StringComparer.Ordinal) }).ToArray();
-            if (!selected.Any(hunk => hunk.Selected)) throw new ApplyPathException("invalid_selection");
-            var files = RebuildFiles(draft.Files, selected);
-            var updated = draft with { SelectionRevision = revision + 1, Files = files, Hunks = selected, IsApproved = false, ApprovalDigest = Digest(draft.DraftId, draft.ProposalId, draft.RootId, files, selected, revision + 1) };
-            drafts[draftId] = updated;
-            return updated;
-        }
+        lock (sync) { var draft = Get(id); if (draft.SelectionRevision != revision) throw new ApplyPathException("selection_stale");
+            var selected = draft.Hunks.Select(h => h with { Selected = selectedHunkIds.Contains(h.HunkId, StringComparer.Ordinal) }).ToArray(); if (!selected.Any(h => h.Selected)) throw new ApplyPathException("invalid_selection");
+            var files = RebuildFiles(draft.Files, selected); var updated = draft with { SelectionRevision = revision + 1, Files = files, Hunks = selected, IsApproved = false, ApprovalDigest = Digest(draft.DraftId, draft.ProposalId, draft.RootId, files, selected, revision + 1) };
+            drafts[id] = updated; Persist(updated, ProposalApplyState.Draft); return updated; }
     }
-
-    public ProposalApplyDraft Approve(Guid draftId, int revision, string digest)
+    public ProposalApplyDraft Approve(Guid id, int revision, string digest)
     {
-        lock (sync)
-        {
-            var draft = Get(draftId);
-            if (draft.SelectionRevision != revision) throw new ApplyPathException("selection_stale");
-            if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(draft.ApprovalDigest), Encoding.UTF8.GetBytes(digest))) throw new ApplyPathException("approval_digest_mismatch");
-            var approved = draft with { IsApproved = true };
-            drafts[draftId] = approved;
-            return approved;
-        }
+        lock (sync) { var draft = Get(id); if (draft.SelectionRevision != revision) throw new ApplyPathException("selection_stale"); if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(draft.ApprovalDigest), Encoding.UTF8.GetBytes(digest))) throw new ApplyPathException("approval_digest_mismatch");
+            var approved = draft with { IsApproved = true }; drafts[id] = approved; Persist(approved, ProposalApplyState.Approved); return approved; }
     }
-
-    public ApplyTransactionResult Apply(Guid draftId)
+    public ApplyTransactionResult Apply(Guid id) => ApplyWithId(id).Result;
+    public (Guid ApplyId, ApplyTransactionResult Result, ProposalApplyDraft Draft) ApplyWithId(Guid id)
     {
-        lock (sync)
-        {
-            var draft = Get(draftId);
-            return draft.IsApproved ? transaction.Apply(Guid.CreateVersion7(), draft.Files) : throw new ApplyPathException("approval_required");
-        }
+        lock (sync) { var draft = Get(id); if (!draft.IsApproved) throw new ApplyPathException("approval_required"); var apply = Guid.CreateVersion7(); var result = transaction.Apply(apply, draft.Files);
+            if (result == ApplyTransactionResult.Applied) store?.SaveProposalApplyOutcome(new(apply, id, ProposalApplyState.Applied, DateTimeOffset.UtcNow), draft.ProposalId, draft.RootId, draft.Files.Count, null);
+            else if (result == ApplyTransactionResult.Failed) store?.SaveProposalApplyOutcome(new(apply, id, ProposalApplyState.Failed, DateTimeOffset.UtcNow), draft.ProposalId, draft.RootId, draft.Files.Count, "apply_failed");
+            return (apply, result, draft); }
     }
-    private ProposalApplyDraft Get(Guid draftId) => drafts.TryGetValue(draftId, out var draft) ? draft : throw new ApplyPathException("draft_not_found");
-    private static IReadOnlyList<ApplyTarget> RebuildFiles(IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks) => files
-        .Select(file =>
-        {
-            var selected = hunks.Where(hunk => hunk.Selected && hunk.RelativePath == file.RelativePath);
-            var replacement = LineDiff.Replay(file.OriginalText, selected);
-            return file with { ReplacementText = replacement, ReplacementSha256 = LineDiff.Sha256(replacement) };
-        })
-        .Where(file => !string.Equals(file.OriginalText, file.ReplacementText, StringComparison.Ordinal))
-        .ToArray();
-    private static string Digest(Guid draftId, Guid proposalId, Guid rootId, IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks, int revision) => LineDiff.Sha256(string.Join("\n", new[] { draftId.ToString("D"), proposalId.ToString("D"), rootId.ToString("D"), revision.ToString(CultureInfo.InvariantCulture) }.Concat(files.OrderBy(file => file.RelativePath, StringComparer.Ordinal).Select(file => $"{file.RelativePath}|{file.BaseSha256}|{file.ReplacementSha256}")).Concat(hunks.Where(hunk => hunk.Selected).OrderBy(hunk => hunk.HunkId, StringComparer.Ordinal).Select(hunk => $"{hunk.HunkId}|{LineDiff.Sha256(hunk.ReplacementText)}"))));
+    public ApplyTransactionResult Rollback(Guid applyId) => transaction.Rollback(applyId);
+    private ProposalApplyDraft Get(Guid id) => drafts.TryGetValue(id, out var draft) ? draft : throw new ApplyPathException("draft_not_found");
+    private void Persist(ProposalApplyDraft draft, ProposalApplyState state)
+    {
+        WritePrivate(draft); if (store is null) return; var now = DateTimeOffset.UtcNow; var metadata = new ProposalApplyDraftMetadata(draft.DraftId, draft.ProposalId, draft.RootId, draft.SelectionRevision, draft.ApprovalDigest, state, draft.Files.Count, now, now);
+        var files = draft.Files.Select(f => (f.BaseSha256, f.ReplacementSha256)).ToArray(); var hunks = draft.Hunks.Select(h => (h.HunkId, h.Selected, LineDiff.Sha256(h.ReplacementText))).ToArray();
+        if (draft.SelectionRevision == 1) store.SaveProposalApplyDraft(metadata, files, hunks, new(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest, draft.IsApproved ? now : null));
+        else if (draft.IsApproved) store.SaveProposalApplyApproval(draft.DraftId, new(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest, now));
+        else store.UpdateProposalApplyDraft(metadata, files, hunks, new(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest, null));
+    }
+    private void WritePrivate(ProposalApplyDraft draft) { var path = Path.Combine(draftPath, draft.DraftId.ToString("N") + ".json"); var temp = path + ".tmp"; File.WriteAllText(temp, JsonSerializer.Serialize(draft)); using (var s = new FileStream(temp, FileMode.Open, FileAccess.Read, FileShare.Read)) s.Flush(true); File.Move(temp, path, true); }
+    private void LoadDrafts() { foreach (var path in Directory.EnumerateFiles(draftPath, "*.json")) try { var draft = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(path)); if (draft is null || !Roots.Any(r => r.RootId == draft.RootId)) continue; drafts[draft.DraftId] = draft; } catch { } }
+    private static IReadOnlyList<ApplyTarget> RebuildFiles(IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks) => files.Select(file => { var replacement = LineDiff.Replay(file.OriginalText, hunks.Where(h => h.Selected && h.RelativePath == file.RelativePath)); return file with { ReplacementText = replacement, ReplacementSha256 = LineDiff.Sha256(replacement) }; }).Where(file => !string.Equals(file.OriginalText, file.ReplacementText, StringComparison.Ordinal)).ToArray();
+    private static string Digest(Guid draftId, Guid proposalId, Guid rootId, IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks, int revision) => LineDiff.Sha256(string.Join("\n", new[] { draftId.ToString("D"), proposalId.ToString("D"), rootId.ToString("D"), revision.ToString(CultureInfo.InvariantCulture) }.Concat(files.OrderBy(f => f.RelativePath, StringComparer.Ordinal).Select(f => $"{f.RelativePath}|{f.BaseSha256}|{f.ReplacementSha256}")).Concat(hunks.Where(h => h.Selected).OrderBy(h => h.HunkId, StringComparer.Ordinal).Select(h => $"{h.HunkId}|{LineDiff.Sha256(h.ReplacementText)}"))));
 }
