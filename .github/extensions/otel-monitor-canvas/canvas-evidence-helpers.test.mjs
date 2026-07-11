@@ -90,6 +90,17 @@ test("forest uses caller ids with out-of-order agents, separate roots, and hones
     assert.deepEqual(forest.parallelGroups, [["child", "root-b"], ["root-a", "child"]]);
 });
 
+test("null-caller unresolved Agent is an orphan while valid null-caller Agents remain roots", () => {
+    const forest = buildAgentForest([
+        { span_id: "unresolved", caller_agent_span_id: null, agent_role: "unknown", relationship_source: "unresolved", relationship_confidence: "unknown" },
+        { span_id: "exact-root", caller_agent_span_id: null, agent_role: "main", relationship_source: "parent_span", relationship_confidence: "exact" },
+        { span_id: "inferred-root", caller_agent_span_id: null, agent_role: "root", relationship_source: "time_inferred", relationship_confidence: "inferred" },
+    ], []);
+    assert.deepEqual(forest.roots.map((node) => node.agent.span_id), ["exact-root", "inferred-root"]);
+    assert.deepEqual(forest.orphans.map((node) => node.agent.span_id), ["unresolved"]);
+    assert.equal(relationshipLabel(forest.orphans[0].agent.relationship_source, forest.orphans[0].agent.relationship_confidence), "判定不能");
+});
+
 test("selection keys include trace id for duplicate Agent and span ids", () => {
     assert.equal(evidenceSelectionKey("agent", { span_id: "same" }, "trace-a"), "agent:trace-a:same");
     assert.equal(evidenceSelectionKey("span", { span_id: "same" }, "trace-b"), "span:trace-b:same");

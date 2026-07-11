@@ -132,6 +132,16 @@ test("browser forest preserves API agent_depth and uses separate displayDepth", 
     assert.notEqual(context.evidenceKey("span", { span_id: "same" }, "trace-a"), context.evidenceKey("span", { span_id: "same" }, "trace-b"));
 });
 
+test("browser forest renders null-caller unresolved Agent as 判定不能 orphan", () => {
+    const context = vm.createContext({ URL, Number, Set, Map, Date, BigInt, encodeURIComponent, console });
+    new vm.Script(evidenceBrowserScript()).runInContext(context);
+    const agent = { span_id: "unresolved", caller_agent_span_id: null, agent_depth: null, agent_role: "unknown", relationship_source: "unresolved", relationship_confidence: "unknown" };
+    const forest = context.evidenceForestClient([agent], []);
+    assert.equal(forest.roots.length, 0);
+    assert.equal(forest.orphans.length, 1);
+    assert.equal(context.evidenceRelationship(forest.orphans[0].agent), "判定不能");
+});
+
 test("actual Review gate helper does not apply stale selection after deferred load", async () => {
     const context = vm.createContext({ URL, Number, Set, Map, Date, BigInt, encodeURIComponent, console });
     new vm.Script(evidenceBrowserScript()).runInContext(context);
