@@ -22,6 +22,7 @@ Check these perspectives before completion:
 - Maintainability, readability, and unnecessary complexity.
 - Data safety when telemetry, raw content, credentials, generated artifacts, or dashboard publication are involved.
 - Documentation consistency when product behavior, public interfaces, or user workflows change.
+- Information placement: comments record constraints and rejected alternatives rather than restating code; commit bodies record why the change was needed (`docs/agent-guides/information-placement.md`).
 
 ## Preserved Review Records
 

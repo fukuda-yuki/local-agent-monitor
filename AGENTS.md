@@ -73,6 +73,15 @@ For Aspire AppHost usage decisions, refer to `docs/specifications/layers/telemet
 Ask before irreversible changes, product behavior or public interface changes, security policy changes, dependency additions, source-of-truth conflicts, missing spec decisions, or unclear preserved review records.
 Keep changes minimum, scoped, and traceable to the request.
 
+## Information Placement
+
+- Production code shows **How**: structure, naming, and types carry it; no comments that restate the code.
+- Test code guarantees **What**: observable behavior and contracts under stated conditions, not implementation details.
+- Commit logs record **Why**: the pinned title carries the what; the body says why the change was needed.
+- Code comments keep **Why not** and constraints the code cannot show: rejected alternatives, external constraints, invariants.
+
+Detail and examples: `docs/agent-guides/information-placement.md`.
+
 ## Local-First Risk Posture
 
 This repository's local tools (e.g. the Sprint8 Local Ingestion Monitor) target a
@@ -157,6 +166,7 @@ Do not wait for an explicit user request when a completed, verified step can be 
 If the active work item is unclear, or the change mixes unrelated concerns, ask before committing.
 
 Commit messages must start with the active work item name and then follow Conventional Commits.
+For `feat`, `fix`, `refactor`, and `perf` commits, the body must record why the change was needed (see `docs/agent-guides/information-placement.md`).
 
 ---
 

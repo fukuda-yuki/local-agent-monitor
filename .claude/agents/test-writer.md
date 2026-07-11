@@ -15,6 +15,10 @@ relevant `docs/specifications/` file — not from the implementation. Grep
 the spec for the concrete contract (route, flag, config key, threshold,
 unit, status mapping) and assert those exact values.
 
+Assert observable behavior and contracts — not internal call counts or
+private structure — so refactors do not break tests whose behavior still
+holds (`docs/agent-guides/information-placement.md`).
+
 ## Repository conventions (follow, do not reinvent)
 
 - xunit `[Fact]`/`[Theory]` with plain `Assert.*`. Do not add assertion,

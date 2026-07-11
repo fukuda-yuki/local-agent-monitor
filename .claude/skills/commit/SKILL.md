@@ -27,6 +27,29 @@ Sprint15: docs: add M7 live validation evidence
 - `<type>` follows Conventional Commits (`feat`, `fix`, `docs`, `test`,
   `refactor`, `chore`, ...).
 
+## Body: record the Why
+
+The title carries the searchable what; the body records why the change
+was needed and what was wrong before — the one thing `git diff` cannot
+reconstruct.
+
+- `feat`, `fix`, `refactor`, `perf`: body required.
+- `docs`, `chore`, `test`, `style`: body optional when the title already
+  carries the why.
+- Never a work log ("Update IngestionService.cs", "Fix tests").
+
+Example:
+
+```
+Sprint8 ingestion hardening: fix(monitor): reset connection state before re-ingest
+
+Reconnect processing could submit the final buffered span twice because
+the previous connection state remained active. Reset the state before
+starting a new ingestion cycle.
+```
+
+Detail: `docs/agent-guides/information-placement.md`.
+
 ## Procedure
 
 1. Run `git status` and `git diff` to review exactly what would be committed.
@@ -40,7 +63,7 @@ Sprint15: docs: add M7 live validation evidence
    arguments/results, sensitive bundle content/paths, or generated runtime
    artifacts (`bin/`, `obj/`, `artifacts/` except the committed
    `artifacts/dashboard-input/README.md`).
-6. Commit with the message format above.
+6. Commit with the title format and body rule above.
 
 ## Hard limits
 
