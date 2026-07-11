@@ -196,10 +196,13 @@ unchanged. `canvas-session-workspace.md` records this amendment.
   round-trip), migration additivity.
 - `node --test`: pure workspace helpers — sidebar grouping/labels from a
   sessions list, status pill mapping, gate derivation, next-action mapping,
-  instruction preview state handling.
-- Playwright smoke: workspace page renders sidebar groups and Review cards
-  against a stub monitor; `/analysis` still serves the existing analysis
-  view.
+  instruction preview state handling — plus rendered-HTML assertions that
+  the workspace page contains the sidebar groups, the four-tab shell, and
+  the Review cards for representative session fixtures, and that
+  `/analysis` serves the existing analysis view. These run through the
+  existing `CanvasExtensionContractTests` node integration; no new browser
+  harness is added for the extension. Browser-level evidence stays in the
+  design-gate/E2E screenshot record.
 
 ## Non-Goals
 
