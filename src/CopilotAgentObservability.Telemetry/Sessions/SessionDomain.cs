@@ -274,6 +274,7 @@ public sealed record ImprovementProposalEvidenceReference(
 
 public sealed record ImprovementProposal(
     Guid ProposalId,
+    int Revision,
     ImprovementProposalStatus Status,
     string TargetKind,
     string TargetLabel,
@@ -298,7 +299,7 @@ public sealed record ProposalApplyAudit(
     DateTimeOffset RecordedAt);
 
 public sealed record ProposalApplyDraftMetadata(
-    Guid DraftId, Guid ProposalId, Guid RootId, int SelectionRevision, string ApprovalDigest,
+    Guid DraftId, Guid ProposalId, int ProposalRevision, Guid RootId, int SelectionRevision, string ApprovalDigest,
     ProposalApplyState State, int FileCount, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
 
 public sealed record ProposalApplyRevisionMetadata(Guid DraftId, int SelectionRevision, string ApprovalDigest, DateTimeOffset? ApprovedAt);
@@ -310,7 +311,8 @@ public sealed record ProposalApplyImmutableMetadata(
 
 public sealed record ProposalApplyOutcome(Guid ApplyId, Guid DraftId, ProposalApplyState State, DateTimeOffset RecordedAt);
 public sealed record ProposalApplyPendingOperation(Guid ApplyId, Guid DraftId, Guid ProposalId, Guid RootId, int FileCount, string OperationKind, DateTimeOffset RecordedAt);
-public sealed record ProposalApplyLinkage(Guid ApplyId, Guid DraftId, Guid ProposalId, Guid RootId, int FileCount, int SelectionRevision, string ApprovalDigest);
+public sealed record ProposalApplyLinkage(Guid ApplyId, Guid DraftId, Guid ProposalId, int ProposalRevision, Guid RootId, int FileCount, int SelectionRevision, string ApprovalDigest);
+public sealed record ProposalApplicationReceipt(Guid ApplyId, Guid DraftId, Guid ProposalId, int ProposalRevision, int SelectionRevision, DateTimeOffset AppliedAt, int FileCount, string State, string CurrentState);
 
 public interface ISessionStore
 {
@@ -340,6 +342,8 @@ public interface ISessionStore
     void SaveProposalApplyPending(ProposalApplyPendingOperation pending);
     IReadOnlyList<ProposalApplyPendingOperation> ListProposalApplyPending();
     IReadOnlyList<ProposalApplyLinkage> ListAppliedProposalApplyLinkages();
+    IReadOnlyList<ProposalApplyLinkage> ListProposalApplyLinkages(Guid proposalId);
+    IReadOnlyList<ProposalApplicationReceipt> ListApplicationReceipts(Guid proposalId);
     bool TryStartProposalApplyRollback(ProposalApplyPendingOperation pending);
     void CompleteProposalApplyPending(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode);
 }

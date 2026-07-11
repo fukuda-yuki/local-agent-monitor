@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 public sealed class SqliteSessionStore : ISessionStore
 {
-    private const int CurrentSchemaVersion = 6;
+    private const int CurrentSchemaVersion = 7;
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
 
@@ -40,7 +40,7 @@ public sealed class SqliteSessionStore : ISessionStore
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'session';";
         var existingVersion = versionCommand.ExecuteScalar();
-        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or 5 or CurrentSchemaVersion))
+        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or 5 or 6 or CurrentSchemaVersion))
         {
             throw new InvalidOperationException("Unsupported Session schema version.");
         }
@@ -93,14 +93,20 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
+        else if (Convert.ToInt32(existingVersion) == 6)
+        {
+            command.CommandText = "ALTER TABLE improvement_proposals ADD COLUMN revision INTEGER NOT NULL DEFAULT 1; ALTER TABLE proposal_apply_drafts ADD COLUMN proposal_revision INTEGER NOT NULL DEFAULT 1; ALTER TABLE proposal_applies ADD COLUMN proposal_revision INTEGER NOT NULL DEFAULT 1;";
+            command.ExecuteNonQuery();
+            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
         transaction.Commit();
     }
 
     public void SaveProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision)
     {
         using var connection = Open(); using var transaction = connection.BeginTransaction();
-        Execute(connection, transaction, "INSERT INTO proposal_apply_drafts(draft_id,proposal_id,root_id,selection_revision,approval_digest,state,created_at,updated_at) VALUES($id,$proposal,$root,$revision,$digest,$state,$created,$updated);",
-            ("$id", Id(draft.DraftId)), ("$proposal", Id(draft.ProposalId)), ("$root", Id(draft.RootId)), ("$revision", draft.SelectionRevision), ("$digest", draft.ApprovalDigest), ("$state", ApplyState(draft.State)), ("$created", Timestamp(draft.CreatedAt)), ("$updated", Timestamp(draft.UpdatedAt)));
+        Execute(connection, transaction, "INSERT INTO proposal_apply_drafts(draft_id,proposal_id,proposal_revision,root_id,selection_revision,approval_digest,state,created_at,updated_at) VALUES($id,$proposal,$proposal_revision,$root,$revision,$digest,$state,$created,$updated);",
+            ("$id", Id(draft.DraftId)), ("$proposal", Id(draft.ProposalId)), ("$proposal_revision", draft.ProposalRevision), ("$root", Id(draft.RootId)), ("$revision", draft.SelectionRevision), ("$digest", draft.ApprovalDigest), ("$state", ApplyState(draft.State)), ("$created", Timestamp(draft.CreatedAt)), ("$updated", Timestamp(draft.UpdatedAt)));
         for (var i = 0; i < files.Count; i++) Execute(connection, transaction, "INSERT INTO proposal_apply_files(draft_id,file_order,base_sha256,replacement_sha256) VALUES($id,$order,$base,$replacement);", ("$id", Id(draft.DraftId)), ("$order", i), ("$base", files[i].BaseSha256), ("$replacement", files[i].ReplacementSha256));
         foreach (var hunk in hunks) Execute(connection, transaction, "INSERT INTO proposal_apply_hunks(draft_id,hunk_id,selected,replacement_sha256) VALUES($id,$hunk,$selected,$replacement);", ("$id", Id(draft.DraftId)), ("$hunk", hunk.HunkId), ("$selected", hunk.Selected ? 1 : 0), ("$replacement", hunk.ReplacementSha256));
         Execute(connection, transaction, "INSERT INTO proposal_apply_revisions(draft_id,selection_revision,approval_digest,approved_at) VALUES($id,$revision,$digest,$approved);", ("$id", Id(revision.DraftId)), ("$revision", revision.SelectionRevision), ("$digest", revision.ApprovalDigest), ("$approved", Timestamp(revision.ApprovedAt)));
@@ -109,8 +115,8 @@ public sealed class SqliteSessionStore : ISessionStore
 
     public ProposalApplyDraftMetadata? GetProposalApplyDraft(Guid draftId)
     {
-        using var connection = Open(); using var command = connection.CreateCommand(); command.CommandText = "SELECT draft_id,proposal_id,root_id,selection_revision,approval_digest,state,(SELECT COUNT(*) FROM proposal_apply_files WHERE draft_id=d.draft_id),created_at,updated_at FROM proposal_apply_drafts d WHERE draft_id=$id;"; command.Parameters.AddWithValue("$id", Id(draftId)); using var reader = command.ExecuteReader();
-        return reader.Read() ? new(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)), reader.GetInt32(3), reader.GetString(4), ParseApplyState(reader.GetString(5)), reader.GetInt32(6), DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture), DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture)) : null;
+        using var connection = Open(); using var command = connection.CreateCommand(); command.CommandText = "SELECT draft_id,proposal_id,proposal_revision,root_id,selection_revision,approval_digest,state,(SELECT COUNT(*) FROM proposal_apply_files WHERE draft_id=d.draft_id),created_at,updated_at FROM proposal_apply_drafts d WHERE draft_id=$id;"; command.Parameters.AddWithValue("$id", Id(draftId)); using var reader = command.ExecuteReader();
+        return reader.Read() ? new(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), reader.GetInt32(2), Guid.Parse(reader.GetString(3)), reader.GetInt32(4), reader.GetString(5), ParseApplyState(reader.GetString(6)), reader.GetInt32(7), DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture), DateTimeOffset.Parse(reader.GetString(9), CultureInfo.InvariantCulture)) : null;
     }
 
     public ProposalApplyImmutableMetadata? GetProposalApplyImmutableMetadata(Guid draftId)
@@ -156,7 +162,7 @@ public sealed class SqliteSessionStore : ISessionStore
     public void SaveProposalApplyOutcome(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode)
     {
         using var connection = Open(); using var transaction = connection.BeginTransaction();
-        Execute(connection, transaction, "INSERT INTO proposal_applies(apply_id,draft_id,state,created_at) VALUES($apply,$draft,$state,$time) ON CONFLICT(apply_id) DO UPDATE SET state=excluded.state;", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)));
+        Execute(connection, transaction, "INSERT INTO proposal_applies(apply_id,draft_id,proposal_revision,state,created_at) SELECT $apply,$draft,proposal_revision,$state,$time FROM proposal_apply_drafts WHERE draft_id=$draft ON CONFLICT(apply_id) DO UPDATE SET state=excluded.state;", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)));
         Execute(connection, transaction, "UPDATE proposal_apply_drafts SET state=$state,updated_at=$time WHERE draft_id=$draft;", ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)), ("$draft", Id(outcome.DraftId)));
         Execute(connection, transaction, "INSERT INTO proposal_apply_audit(apply_id,draft_id,proposal_id,root_id,actor_kind,state,error_code,file_count,recorded_at) VALUES($apply,$draft,$proposal,$root,'local_user',$state,$error,$count,$time);", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$proposal", Id(proposalId)), ("$root", Id(rootId)), ("$state", ApplyState(outcome.State)), ("$error", errorCode), ("$count", fileCount), ("$time", Timestamp(outcome.RecordedAt))); transaction.Commit();
     }
@@ -177,9 +183,20 @@ public sealed class SqliteSessionStore : ISessionStore
     public IReadOnlyList<ProposalApplyLinkage> ListAppliedProposalApplyLinkages()
     {
         using var connection = Open(); using var command = connection.CreateCommand();
-        command.CommandText = "SELECT a.apply_id,a.draft_id,d.proposal_id,d.root_id,(SELECT COUNT(*) FROM proposal_apply_files WHERE draft_id=d.draft_id),d.selection_revision,d.approval_digest FROM proposal_applies a JOIN proposal_apply_drafts d ON d.draft_id=a.draft_id WHERE a.state='applied' ORDER BY a.created_at;";
+        command.CommandText = "SELECT a.apply_id,a.draft_id,d.proposal_id,a.proposal_revision,d.root_id,(SELECT COUNT(*) FROM proposal_apply_files WHERE draft_id=d.draft_id),d.selection_revision,d.approval_digest FROM proposal_applies a JOIN proposal_apply_drafts d ON d.draft_id=a.draft_id WHERE a.state='applied' ORDER BY a.created_at;";
         using var reader = command.ExecuteReader(); var result = new List<ProposalApplyLinkage>();
-        while (reader.Read()) result.Add(new(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)), Guid.Parse(reader.GetString(3)), reader.GetInt32(4), reader.GetInt32(5), reader.GetString(6)));
+        while (reader.Read()) result.Add(new(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)), reader.GetInt32(3), Guid.Parse(reader.GetString(4)), reader.GetInt32(5), reader.GetInt32(6), reader.GetString(7)));
+        return result;
+    }
+
+    public IReadOnlyList<ProposalApplyLinkage> ListProposalApplyLinkages(Guid proposalId) => ListAppliedProposalApplyLinkages().Where(item => item.ProposalId == proposalId).ToArray();
+
+    public IReadOnlyList<ProposalApplicationReceipt> ListApplicationReceipts(Guid proposalId)
+    {
+        using var connection = Open(); using var command = connection.CreateCommand();
+        command.CommandText = "SELECT a.apply_id,a.draft_id,d.proposal_id,a.proposal_revision,d.selection_revision,a.created_at,(SELECT COUNT(*) FROM proposal_apply_files WHERE draft_id=d.draft_id),a.state FROM proposal_applies a JOIN proposal_apply_drafts d ON d.draft_id=a.draft_id WHERE d.proposal_id=$proposal ORDER BY a.created_at;";
+        command.Parameters.AddWithValue("$proposal", Id(proposalId)); using var reader = command.ExecuteReader(); var result = new List<ProposalApplicationReceipt>();
+        while (reader.Read()) { var state = reader.GetString(7); result.Add(new(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)), reader.GetInt32(3), reader.GetInt32(4), ParseTimestamp(reader.GetString(5)), reader.GetInt32(6), state, state == "applied" ? "pending" : state == "rolled_back" ? "rolled_back" : "pending")); }
         return result;
     }
 
@@ -198,7 +215,7 @@ public sealed class SqliteSessionStore : ISessionStore
         if (operationKind is null) { transaction.Commit(); return; }
         if (operationKind == "apply" || outcome.State == ProposalApplyState.RolledBack)
         {
-            Execute(connection, transaction, "INSERT INTO proposal_applies(apply_id,draft_id,state,created_at) VALUES($apply,$draft,$state,$time) ON CONFLICT(apply_id) DO UPDATE SET state=excluded.state;", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)));
+            Execute(connection, transaction, "INSERT INTO proposal_applies(apply_id,draft_id,proposal_revision,state,created_at) SELECT $apply,$draft,proposal_revision,$state,$time FROM proposal_apply_drafts WHERE draft_id=$draft ON CONFLICT(apply_id) DO UPDATE SET state=excluded.state;", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)));
             Execute(connection, transaction, "UPDATE proposal_apply_drafts SET state=$state,updated_at=$time WHERE draft_id=$draft;", ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)), ("$draft", Id(outcome.DraftId)));
         }
         Execute(connection, transaction, "INSERT INTO proposal_apply_audit(apply_id,draft_id,proposal_id,root_id,actor_kind,state,error_code,file_count,recorded_at) VALUES($apply,$draft,$proposal,$root,'local_user',$state,$error,$count,$time);", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$proposal", Id(proposalId)), ("$root", Id(rootId)), ("$state", ApplyState(outcome.State)), ("$error", errorCode), ("$count", fileCount), ("$time", Timestamp(outcome.RecordedAt)));
@@ -672,10 +689,10 @@ public sealed class SqliteSessionStore : ISessionStore
         using var transaction = connection.BeginTransaction();
         _ = ValidateProposalReferences(connection, transaction, proposal);
         Execute(connection, transaction, """
-            INSERT INTO improvement_proposals(proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at,verified_at)
-            VALUES($proposal_id,$status,$target_kind,$target_label,$title,$summary,$expected_effect,$risk_note,$created_at,$updated_at,$recommended_at,$verified_at);
+            INSERT INTO improvement_proposals(proposal_id,revision,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at,verified_at)
+            VALUES($proposal_id,$revision,$status,$target_kind,$target_label,$title,$summary,$expected_effect,$risk_note,$created_at,$updated_at,$recommended_at,$verified_at);
             """,
-            ("$proposal_id", Id(proposal.ProposalId)), ("$status", ProposalStatus(proposal.Status)),
+            ("$proposal_id", Id(proposal.ProposalId)), ("$revision", proposal.Revision), ("$status", ProposalStatus(proposal.Status)),
             ("$target_kind", proposal.TargetKind), ("$target_label", proposal.TargetLabel), ("$title", proposal.Title),
             ("$summary", proposal.Summary), ("$expected_effect", proposal.ExpectedEffect), ("$risk_note", proposal.RiskNote),
             ("$created_at", Timestamp(proposal.CreatedAt)), ("$updated_at", Timestamp(proposal.UpdatedAt)),
@@ -713,7 +730,7 @@ public sealed class SqliteSessionStore : ISessionStore
 
         Execute(connection, transaction, """
             UPDATE improvement_proposals
-            SET status=$status, updated_at=$updated_at, recommended_at=$recommended_at
+            SET status=$status, revision=revision + CASE WHEN status <> $status THEN 1 ELSE 0 END, updated_at=$updated_at, recommended_at=$recommended_at
             WHERE proposal_id=$proposal_id;
             """,
             ("$status", ProposalStatus(status)), ("$updated_at", Timestamp(updatedAt)),
@@ -895,7 +912,7 @@ public sealed class SqliteSessionStore : ISessionStore
     {
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at,verified_at
+            SELECT proposal_id,revision,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at,verified_at
             FROM improvement_proposals WHERE proposal_id=$proposal_id;
             """;
         Add(command, "$proposal_id", Id(proposalId));
@@ -905,23 +922,24 @@ public sealed class SqliteSessionStore : ISessionStore
         var proposal = new
         {
             ProposalId = Guid.Parse(reader.GetString(0)),
-            Status = ParseProposalStatus(reader.GetString(1)),
-            TargetKind = reader.GetString(2),
-            TargetLabel = reader.GetString(3),
-            Title = reader.GetString(4),
-            Summary = reader.GetString(5),
-            ExpectedEffect = reader.GetString(6),
-            RiskNote = reader.GetString(7),
-            CreatedAt = ParseTimestamp(reader.GetString(8)),
-            UpdatedAt = ParseTimestamp(reader.GetString(9)),
-            RecommendedAt = NullableTimestamp(reader, 10),
-            VerifiedAt = NullableTimestamp(reader, 11),
+            Revision = reader.GetInt32(1),
+            Status = ParseProposalStatus(reader.GetString(2)),
+            TargetKind = reader.GetString(3),
+            TargetLabel = reader.GetString(4),
+            Title = reader.GetString(5),
+            Summary = reader.GetString(6),
+            ExpectedEffect = reader.GetString(7),
+            RiskNote = reader.GetString(8),
+            CreatedAt = ParseTimestamp(reader.GetString(9)),
+            UpdatedAt = ParseTimestamp(reader.GetString(10)),
+            RecommendedAt = NullableTimestamp(reader, 11),
+            VerifiedAt = NullableTimestamp(reader, 12),
         };
         reader.Close();
         var sourceSessions = ReadImprovementProposalSourceSessions(connection, proposalId);
         var evidenceReferences = ReadImprovementProposalEvidenceReferences(connection, proposalId);
         return new ImprovementProposal(
-            proposal.ProposalId, proposal.Status, proposal.TargetKind, proposal.TargetLabel, proposal.Title, proposal.Summary,
+            proposal.ProposalId, proposal.Revision, proposal.Status, proposal.TargetKind, proposal.TargetLabel, proposal.Title, proposal.Summary,
             proposal.ExpectedEffect, proposal.RiskNote, sourceSessions, evidenceReferences, proposal.CreatedAt, proposal.UpdatedAt,
             proposal.RecommendedAt, proposal.VerifiedAt);
     }
@@ -1124,6 +1142,7 @@ public sealed class SqliteSessionStore : ISessionStore
     private const string ImprovementProposalSchemaSql = """
         CREATE TABLE IF NOT EXISTS improvement_proposals (
             proposal_id TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
             status TEXT NOT NULL CHECK (status IN ('candidate','recommended','verified')),
             target_kind TEXT NOT NULL,
             target_label TEXT NOT NULL,
@@ -1139,6 +1158,7 @@ public sealed class SqliteSessionStore : ISessionStore
 
         CREATE TABLE IF NOT EXISTS improvement_proposal_sessions (
             proposal_id TEXT NOT NULL,
+            proposal_revision INTEGER NOT NULL DEFAULT 1 CHECK (proposal_revision > 0),
             session_id TEXT NOT NULL,
             source_order INTEGER NOT NULL CHECK (source_order >= 0),
             PRIMARY KEY (proposal_id, session_id),
@@ -1161,6 +1181,7 @@ public sealed class SqliteSessionStore : ISessionStore
         CREATE TABLE IF NOT EXISTS proposal_apply_drafts (
             draft_id TEXT PRIMARY KEY,
             proposal_id TEXT NOT NULL,
+            proposal_revision INTEGER NOT NULL DEFAULT 1 CHECK (proposal_revision > 0),
             root_id TEXT NOT NULL,
             selection_revision INTEGER NOT NULL CHECK (selection_revision > 0),
             approval_digest TEXT NOT NULL,
@@ -1196,6 +1217,7 @@ public sealed class SqliteSessionStore : ISessionStore
         CREATE TABLE IF NOT EXISTS proposal_applies (
             apply_id TEXT PRIMARY KEY,
             draft_id TEXT NOT NULL,
+            proposal_revision INTEGER NOT NULL DEFAULT 1 CHECK (proposal_revision > 0),
             state TEXT NOT NULL CHECK (state IN ('applied','rolled_back','failed')),
             created_at TEXT NOT NULL,
             FOREIGN KEY (draft_id) REFERENCES proposal_apply_drafts(draft_id) ON DELETE RESTRICT

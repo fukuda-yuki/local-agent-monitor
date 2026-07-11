@@ -363,6 +363,14 @@ internal static class SessionRoutes
             if (!await EnsureApplyConfigured(context, service)) return;
             await Json(context, new { items = service.Roots.Select(root => new { root_id = root.RootId, kind = root.Kind switch { ApplyRootKind.UserConfig => "user_config", ApplyRootKind.Skill => "skill", _ => "repository" }, label = root.Label }) });
         });
+        app.MapGet(prefix + "/receipts", async context =>
+        {
+            if (!await ProposalPolicy(context, body: false)) return;
+            if (!await EnsureApplyConfigured(context, service)) return;
+            if (!TryUuidV7(context.Request.Query["proposal_id"].ToString(), out var proposalId)) { await Failure(context, 400, "invalid_apply_request"); return; }
+            if (store.GetImprovementProposal(proposalId) is null) { await Failure(context, 404, "proposal_not_found"); return; }
+            await Json(context, new { items = store.ListApplicationReceipts(proposalId).Select(receipt => new { apply_id = receipt.ApplyId, draft_id = receipt.DraftId, proposal_id = receipt.ProposalId, proposal_revision = receipt.ProposalRevision, selection_revision = receipt.SelectionRevision, applied_at = receipt.AppliedAt, file_count = receipt.FileCount, state = receipt.State, current_state = receipt.CurrentState }) });
+        });
         app.MapPost(prefix + "/drafts", async context =>
         {
             if (!await ProposalPolicy(context, body: true)) return;
@@ -531,7 +539,7 @@ internal static class SessionRoutes
             if (reference.Kind is not ("event" or "run" or "trace" or "gate") || !IsBounded(reference.ReferenceId, 512)) return false;
             references.Add(new(reference.Kind, reference.ReferenceId!));
         }
-        proposal = new ImprovementProposal(Guid.CreateVersion7(), ImprovementProposalStatus.Candidate, request.TargetKind, request.TargetLabel!, request.Title!, request.Summary!, request.ExpectedEffect!, request.RiskNote!, sourceIds, references, now, now, null, null);
+        proposal = new ImprovementProposal(Guid.CreateVersion7(), 1, ImprovementProposalStatus.Candidate, request.TargetKind, request.TargetLabel!, request.Title!, request.Summary!, request.ExpectedEffect!, request.RiskNote!, sourceIds, references, now, now, null, null);
         return true;
     }
 
@@ -573,6 +581,7 @@ internal static class SessionRoutes
     private static object ProposalDto(ImprovementProposal proposal) => new
     {
         proposal_id = proposal.ProposalId,
+        proposal_revision = proposal.Revision,
         status = proposal.Status switch { ImprovementProposalStatus.Candidate => "candidate", ImprovementProposalStatus.Recommended => "recommended", ImprovementProposalStatus.Verified => "verified", _ => throw new ArgumentOutOfRangeException() },
         target_kind = proposal.TargetKind,
         target_label = proposal.TargetLabel,

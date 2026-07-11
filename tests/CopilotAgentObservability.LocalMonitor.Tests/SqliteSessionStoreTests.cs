@@ -272,7 +272,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var connection = database.Open();
-        Assert.Equal(6L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
+        Assert.Equal(7L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
         foreach (var table in new[] { "sessions", "session_native_ids", "session_runs", "session_events", "session_event_content", "session_projection_state", "session_human_evaluation", "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence", "proposal_apply_drafts", "proposal_apply_files", "proposal_apply_hunks", "proposal_apply_revisions", "proposal_applies", "proposal_apply_audit", "proposal_apply_pending" })
         {
             Assert.Equal(1L, Scalar<long>(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
@@ -300,13 +300,13 @@ public sealed class SqliteSessionStoreTests
         using var database = new SessionTestDatabase();
         using (var connection = database.Open())
         {
-            Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 7);");
+            Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 8);");
         }
 
         Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(database.Path).CreateSchema());
 
         using var verify = database.Open();
-        Assert.Equal(7L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(8L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(0L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_native_ids','session_runs','session_events','session_event_content','session_projection_state','session_human_evaluation');"));
     }
 
@@ -326,7 +326,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(6L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(7L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_human_evaluation';"));
         Assert.NotNull(store.GetDetail(batch.Detail.Session.SessionId));
     }
@@ -345,7 +345,7 @@ public sealed class SqliteSessionStoreTests
         var applyId = Guid.CreateVersion7();
         var rootId = Guid.CreateVersion7();
         var now = DateTimeOffset.Parse("2026-07-12T00:00:00Z");
-        var draft = new ProposalApplyDraftMetadata(draftId, proposal.ProposalId, rootId, 2, "digest", ProposalApplyState.Approved, 1, now, now);
+        var draft = new ProposalApplyDraftMetadata(draftId, proposal.ProposalId, 1, rootId, 2, "digest", ProposalApplyState.Approved, 1, now, now);
         store.SaveProposalApplyDraft(draft, [("base", "replacement")], [("hunk", true, "replacement")], new(draftId, 2, "digest", now));
         store.SaveProposalApplyOutcome(new(applyId, draftId, ProposalApplyState.Applied, now), proposal.ProposalId, rootId, 1, null);
 
@@ -380,7 +380,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(6L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(7L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         foreach (var table in new[] { "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence" })
         {
             Assert.Equal(1L, Scalar<long>(verify, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
@@ -830,6 +830,28 @@ public sealed class SqliteSessionStoreTests
         return new(new SessionDetail(session, [native], [run], [@event]), [content]);
     }
 
+    [Fact]
+    public void Improvement_proposal_revision_starts_at_one_increments_on_lifecycle_changes_and_migrates_legacy_rows()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "revision-a");
+        var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "revision-b");
+        store.Write(first);
+        store.Write(second);
+        var proposal = CreateProposal([first, second]);
+        store.CreateImprovementProposal(proposal);
+
+        Assert.Equal(1, store.GetImprovementProposal(proposal.ProposalId)!.Revision);
+        store.UpdateImprovementProposalStatus(proposal.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch.AddMinutes(2));
+        Assert.Equal(2, store.GetImprovementProposal(proposal.ProposalId)!.Revision);
+        store.UpdateImprovementProposalStatus(proposal.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch.AddMinutes(3));
+        Assert.Equal(2, store.GetImprovementProposal(proposal.ProposalId)!.Revision);
+        store.UpdateImprovementProposalStatus(proposal.ProposalId, ImprovementProposalStatus.Candidate, DateTimeOffset.UnixEpoch.AddMinutes(4));
+        Assert.Equal(3, store.GetImprovementProposal(proposal.ProposalId)!.Revision);
+    }
+
     private static SessionWriteBatch CreateTerminalBatch(DateTimeOffset lastSeenAt, string nativeId)
     {
         var batch = CreateBatch(lastSeenAt, nativeId);
@@ -850,6 +872,7 @@ public sealed class SqliteSessionStoreTests
         var now = DateTimeOffset.UnixEpoch;
         return new(
             Guid.CreateVersion7(),
+            1,
             ImprovementProposalStatus.Candidate,
             "skill",
             "Opaque target",

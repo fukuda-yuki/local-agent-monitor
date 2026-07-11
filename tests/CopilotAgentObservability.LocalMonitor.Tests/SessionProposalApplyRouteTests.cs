@@ -11,6 +11,7 @@ public sealed class SessionProposalApplyRouteTests
 {
     [Theory]
     [InlineData("GET", "/api/session-workspace/proposal-applies/roots", false)]
+    [InlineData("GET", "/api/session-workspace/proposal-applies/receipts?proposal_id=0197d7c0-0000-7000-8000-000000000001", false)]
     [InlineData("POST", "/api/session-workspace/proposal-applies/drafts", true)]
     [InlineData("GET", "/api/session-workspace/proposal-applies/drafts/0197d7c0-0000-7000-8000-000000000001", false)]
     [InlineData("PUT", "/api/session-workspace/proposal-applies/drafts/0197d7c0-0000-7000-8000-000000000001/selection", true)]
@@ -172,6 +173,24 @@ public sealed class SessionProposalApplyRouteTests
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("\"kind\":\"repository\"", body);
+        Assert.DoesNotContain(rootPath, body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Receipt_query_rejects_malformed_id_with_no_store_and_no_sensitive_echo()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "receipt-root-marker");
+        Directory.CreateDirectory(rootPath);
+        await using var host = await StartAsync(temp, ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath));
+        using var request = CsrfRequest(HttpMethod.Get, "/api/session-workspace/proposal-applies/receipts?proposal_id=bad-path-marker");
+        using var response = await host.Client.SendAsync(request);
+
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Equal("{\"error\":\"invalid_apply_request\"}", body);
+        Assert.DoesNotContain("bad-path-marker", body, StringComparison.Ordinal);
         Assert.DoesNotContain(rootPath, body, StringComparison.OrdinalIgnoreCase);
     }
 
