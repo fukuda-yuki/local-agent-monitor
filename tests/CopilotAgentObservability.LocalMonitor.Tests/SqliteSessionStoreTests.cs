@@ -332,6 +332,39 @@ public sealed class SqliteSessionStoreTests
     }
 
     [Fact]
+    public void ProposalApply_rollback_linkage_is_durable_and_failure_keeps_applied_state()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        var proposal = CreateProposal(batch);
+        store.CreateImprovementProposal(proposal);
+        var draftId = Guid.CreateVersion7();
+        var applyId = Guid.CreateVersion7();
+        var rootId = Guid.CreateVersion7();
+        var now = DateTimeOffset.Parse("2026-07-12T00:00:00Z");
+        var draft = new ProposalApplyDraftMetadata(draftId, proposal.ProposalId, rootId, 2, "digest", ProposalApplyState.Approved, 1, now, now);
+        store.SaveProposalApplyDraft(draft, [("base", "replacement")], [("hunk", true, "replacement")], new(draftId, 2, "digest", now));
+        store.SaveProposalApplyOutcome(new(applyId, draftId, ProposalApplyState.Applied, now), proposal.ProposalId, rootId, 1, null);
+
+        var linkage = Assert.Single(store.ListAppliedProposalApplyLinkages());
+        Assert.Equal((applyId, draftId, proposal.ProposalId, rootId, 1, 2, "digest"), (linkage.ApplyId, linkage.DraftId, linkage.ProposalId, linkage.RootId, linkage.FileCount, linkage.SelectionRevision, linkage.ApprovalDigest));
+        Assert.True(store.TryStartProposalApplyRollback(new(applyId, draftId, proposal.ProposalId, rootId, 1, "rollback", now)));
+        Assert.False(store.TryStartProposalApplyRollback(new(applyId, draftId, proposal.ProposalId, rootId, 1, "rollback", now)));
+
+        store.CompleteProposalApplyPending(new(applyId, draftId, ProposalApplyState.Failed, now), proposal.ProposalId, rootId, 1, "rollback_failed");
+        store.CompleteProposalApplyPending(new(applyId, draftId, ProposalApplyState.Failed, now), proposal.ProposalId, rootId, 1, "rollback_failed");
+
+        Assert.Equal(ProposalApplyState.Applied, store.GetProposalApplyDraft(draftId)!.State);
+        Assert.Single(store.ListAppliedProposalApplyLinkages());
+        using var connection = database.Open();
+        Assert.Equal(2L, Scalar<long>(connection, "SELECT COUNT(*) FROM proposal_apply_audit;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM proposal_apply_pending;"));
+    }
+
+    [Fact]
     public void CreateSchema_VersionTwoDatabaseAddsProposalTablesAndPreservesSessionRow()
     {
         using var database = new SessionTestDatabase();

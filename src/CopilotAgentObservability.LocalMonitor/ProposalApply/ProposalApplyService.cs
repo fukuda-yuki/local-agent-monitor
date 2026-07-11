@@ -15,13 +15,13 @@ internal sealed class ProposalApplyService
     private readonly ProposalApplyTransaction transaction;
     private readonly ISessionStore? store;
     private readonly string draftPath;
-    private readonly Dictionary<Guid, ProposalApplyDraft> applies = [];
+    private readonly Dictionary<Guid, ProposalApplyLinkage> applies = [];
 
     public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, Action<string>? fault = null) : this(roots, runtimePath, null, fault) { }
     public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, ISessionStore? store, Action<string>? fault = null)
     {
         transaction = new ProposalApplyTransaction(runtimePath, roots, fault); Roots = transaction.ConfiguredRoots; this.store = store;
-        draftPath = Path.Combine(runtimePath, "drafts"); Directory.CreateDirectory(draftPath); transaction.RecoverUncommitted(); ReconcilePending(); LoadDrafts();
+        draftPath = Path.Combine(runtimePath, "drafts"); Directory.CreateDirectory(draftPath); transaction.RecoverUncommitted(); ReconcilePending(); LoadDrafts(); LoadAppliedLinkages();
     }
     public IReadOnlyList<ConfiguredApplyRoot> Roots { get; }
 
@@ -60,32 +60,42 @@ internal sealed class ProposalApplyService
         lock (sync) { var draft = Get(id); if (!draft.IsApproved || !IsTrusted(draft, requireApproved: true)) throw new ApplyPathException("approval_required"); var apply = Guid.CreateVersion7();
             store?.SaveProposalApplyPending(new(apply, id, draft.ProposalId, draft.RootId, draft.Files.Count, "apply", DateTimeOffset.UtcNow));
             var result = transaction.Apply(apply, draft.Files);
-            applies[apply] = draft;
             if (result == ApplyTransactionResult.Applied) Complete(apply, draft, ProposalApplyState.Applied, null);
-            else if (result == ApplyTransactionResult.Failed) Complete(apply, draft, ProposalApplyState.Failed, "apply_failed");
+            else Complete(apply, draft, ProposalApplyState.Failed, result == ApplyTransactionResult.Stale ? "apply_stale" : "apply_failed");
+            if (result == ApplyTransactionResult.Applied) applies[apply] = new(apply, draft.DraftId, draft.ProposalId, draft.RootId, draft.Files.Count, draft.SelectionRevision, draft.ApprovalDigest);
             return (apply, result, draft); }
     }
     public ApplyTransactionResult Rollback(Guid applyId)
     {
         lock (sync)
         {
-            if (!applies.TryGetValue(applyId, out var draft)) return ApplyTransactionResult.RollbackUnavailable;
-            store?.SaveProposalApplyPending(new(applyId, draft.DraftId, draft.ProposalId, draft.RootId, draft.Files.Count, "rollback", DateTimeOffset.UtcNow));
+            if (!applies.TryGetValue(applyId, out var linkage)) return ApplyTransactionResult.RollbackUnavailable;
+            if (store is not null && !store.TryStartProposalApplyRollback(new(applyId, linkage.DraftId, linkage.ProposalId, linkage.RootId, linkage.FileCount, "rollback", DateTimeOffset.UtcNow))) return ApplyTransactionResult.RollbackUnavailable;
             var result = transaction.Rollback(applyId);
-            if (result == ApplyTransactionResult.RolledBack) Complete(applyId, draft, ProposalApplyState.RolledBack, null);
+            if (store is null) { if (!drafts.TryGetValue(linkage.DraftId, out var draft)) return ApplyTransactionResult.RollbackUnavailable; if (result == ApplyTransactionResult.RolledBack) Complete(applyId, draft, ProposalApplyState.RolledBack, null); }
+            else Complete(applyId, linkage, result == ApplyTransactionResult.RolledBack ? ProposalApplyState.RolledBack : ProposalApplyState.Failed, result == ApplyTransactionResult.RollbackStale ? "rollback_stale" : "rollback_failed");
+            if (result == ApplyTransactionResult.RolledBack) applies.Remove(applyId);
             return result;
         }
     }
     private void Complete(Guid applyId, ProposalApplyDraft draft, ProposalApplyState state, string? errorCode) => store?.CompleteProposalApplyPending(new(applyId, draft.DraftId, state, DateTimeOffset.UtcNow), draft.ProposalId, draft.RootId, draft.Files.Count, errorCode);
+    private void Complete(Guid applyId, ProposalApplyLinkage linkage, ProposalApplyState state, string? errorCode) => store?.CompleteProposalApplyPending(new(applyId, linkage.DraftId, state, DateTimeOffset.UtcNow), linkage.ProposalId, linkage.RootId, linkage.FileCount, errorCode);
     private void ReconcilePending()
     {
         if (store is null) return;
         foreach (var pending in store.ListProposalApplyPending())
         {
-            var state = transaction.GetJournalState(pending.ApplyId);
-            var outcome = state == "committed" ? ProposalApplyState.Applied : state == "rolled_back" ? ProposalApplyState.RolledBack : ProposalApplyState.Failed;
-            store.CompleteProposalApplyPending(new(pending.ApplyId, pending.DraftId, outcome, DateTimeOffset.UtcNow), pending.ProposalId, pending.RootId, pending.FileCount, outcome == ProposalApplyState.Failed ? "apply_failed" : null);
+            var marker = transaction.GetJournalState(pending.ApplyId);
+            var rolledBack = marker is "rolled_back" or "restored";
+            var outcome = pending.OperationKind == "apply" ? marker == "committed" ? ProposalApplyState.Applied : ProposalApplyState.Failed : rolledBack ? ProposalApplyState.RolledBack : ProposalApplyState.Failed;
+            var error = outcome == ProposalApplyState.Failed ? pending.OperationKind == "apply" ? "apply_failed" : "rollback_failed" : null;
+            store.CompleteProposalApplyPending(new(pending.ApplyId, pending.DraftId, outcome, DateTimeOffset.UtcNow), pending.ProposalId, pending.RootId, pending.FileCount, error);
         }
+    }
+    private void LoadAppliedLinkages()
+    {
+        if (store is null) return;
+        foreach (var linkage in store.ListAppliedProposalApplyLinkages()) applies[linkage.ApplyId] = linkage;
     }
     private ProposalApplyDraft Get(Guid id) => drafts.TryGetValue(id, out var draft) ? draft : throw new ApplyPathException("draft_not_found");
     private void Persist(ProposalApplyDraft draft, ProposalApplyState state)

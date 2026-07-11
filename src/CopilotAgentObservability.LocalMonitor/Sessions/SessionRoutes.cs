@@ -387,7 +387,7 @@ internal static class SessionRoutes
             if (!TryUuidV7(draftId, out var id)) { await Failure(context, 400, "invalid_apply_request"); return; }
             var body = await ReadBoundedBody(context.Request, MaximumBodyBytes, context.RequestAborted); if (body is null) { await Failure(context, 413, "request_too_large"); return; }
             if (!TryParse(body, out ProposalApplySelectionRequest? request) || request!.SelectionRevision is null || request.SelectedHunkIds is null) { await Failure(context, 400, "invalid_apply_request"); return; }
-            try { await Json(context, DraftDto(service.Select(id, request.SelectionRevision.Value, request.SelectedHunkIds))); } catch (ApplyPathException exception) { await Failure(context, ErrorStatus(exception.Code), exception.Code); }
+            try { await Json(context, DraftStateDto(service.Select(id, request.SelectionRevision.Value, request.SelectedHunkIds))); } catch (ApplyPathException exception) { await Failure(context, ErrorStatus(exception.Code), exception.Code); }
         });
         app.MapPost(prefix + "/drafts/{draftId}/approve", async (string draftId, HttpContext context) =>
         {
@@ -396,7 +396,7 @@ internal static class SessionRoutes
             if (!TryUuidV7(draftId, out var id)) { await Failure(context, 400, "invalid_apply_request"); return; }
             var body = await ReadBoundedBody(context.Request, MaximumBodyBytes, context.RequestAborted); if (body is null) { await Failure(context, 413, "request_too_large"); return; }
             if (!TryParse(body, out ProposalApplyApprovalRequest? request) || request!.SelectionRevision is null || string.IsNullOrEmpty(request.ApprovalDigest)) { await Failure(context, 400, "invalid_apply_request"); return; }
-            try { await Json(context, DraftDto(service.Approve(id, request.SelectionRevision.Value, request.ApprovalDigest))); } catch (ApplyPathException exception) { await Failure(context, ErrorStatus(exception.Code), exception.Code); }
+            try { await Json(context, DraftStateDto(service.Approve(id, request.SelectionRevision.Value, request.ApprovalDigest))); } catch (ApplyPathException exception) { await Failure(context, ErrorStatus(exception.Code), exception.Code); }
         });
         app.MapPost(prefix + "/drafts/{draftId}/apply", async (string draftId, HttpContext context) =>
         {
@@ -431,17 +431,15 @@ internal static class SessionRoutes
     private static async Task<bool> RequireEmptyApplyBody(HttpContext context)
     {
         if (context.Request.ContentLength is > MaximumBodyBytes) { await Failure(context, 413, "request_too_large"); return false; }
-        if (context.Request.ContentLength is > 0) { await Failure(context, 400, "invalid_apply_request"); return false; }
-        if (context.Request.ContentLength is null)
-        {
-            var buffer = new byte[1];
-            if (await context.Request.Body.ReadAsync(buffer, context.RequestAborted) != 0) { await Failure(context, 400, "invalid_apply_request"); return false; }
-        }
+        var body = await ReadBoundedBody(context.Request, MaximumBodyBytes, context.RequestAborted);
+        if (body is null) { await Failure(context, 413, "request_too_large"); return false; }
+        if (body.Length != 0) { await Failure(context, 400, "invalid_apply_request"); return false; }
         return true;
     }
     private static bool TryParse<T>(byte[] body, out T? value) { try { value = JsonSerializer.Deserialize<T>(body, StrictJson); return value is not null; } catch (JsonException) { value = default; return false; } }
     private static int ErrorStatus(string code) => code is "draft_not_found" or "proposal_not_found" ? 404 : code is "selection_stale" or "approval_digest_mismatch" ? 409 : code is "request_too_large" ? 413 : 400;
     private static object DraftDto(ProposalApplyDraft draft) => new { draft_id = draft.DraftId, proposal_id = draft.ProposalId, root_id = draft.RootId, selection_revision = draft.SelectionRevision, approval_digest = draft.ApprovalDigest, state = draft.IsApproved ? "approved" : "draft", diff = string.Concat(draft.Files.OrderBy(file => file.RelativePath, StringComparer.Ordinal).Select(file => LineDiff.Unified(file.RelativePath, file.OriginalText, file.ReplacementText))), files = draft.Files.Select(file => new { relative_path = file.RelativePath, base_sha256 = file.BaseSha256, replacement_sha256 = file.ReplacementSha256 }), hunks = draft.Hunks.Select(hunk => new { hunk_id = hunk.HunkId, relative_path = hunk.RelativePath, start_line = hunk.StartLine, base_line_count = hunk.BaseLineCount, replacement_text = hunk.ReplacementText, selected = hunk.Selected }) };
+    private static object DraftStateDto(ProposalApplyDraft draft) => new { draft_id = draft.DraftId, proposal_id = draft.ProposalId, root_id = draft.RootId, selection_revision = draft.SelectionRevision, approval_digest = draft.ApprovalDigest, state = draft.IsApproved ? "approved" : "draft", files = draft.Files.Select(file => new { base_sha256 = file.BaseSha256, replacement_sha256 = file.ReplacementSha256 }), hunks = draft.Hunks.Select(hunk => new { hunk_id = hunk.HunkId, selected = hunk.Selected }) };
 
     private static object SessionDto(ObservedSession item, IReadOnlyList<SessionNativeId> nativeIds, SessionRawRetentionState rawRetentionState) => new
     {

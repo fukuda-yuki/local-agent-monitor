@@ -28,6 +28,27 @@ public sealed class SessionProposalApplyRouteTests
     }
 
     [Fact]
+    public async Task Apply_rejects_chunked_body_over_one_mebibyte_before_mutation()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "root");
+        Directory.CreateDirectory(rootPath);
+        await using var host = await StartAsync(temp, ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath));
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/session-workspace/proposal-applies/drafts/{Guid.CreateVersion7()}/apply")
+        {
+            Content = new StreamContent(new MemoryStream(new byte[1_048_577])),
+        };
+        request.Headers.TransferEncodingChunked = true;
+        request.Content.Headers.ContentLength = null;
+        request.Headers.TryAddWithoutValidation("X-Monitor-Csrf", "local-monitor");
+
+        var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Contains("request_too_large", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Roots_requires_same_origin_and_returns_only_opaque_root_metadata()
     {
         using var temp = new MonitorTempDirectory();

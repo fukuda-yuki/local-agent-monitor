@@ -174,11 +174,33 @@ public sealed class SqliteSessionStore : ISessionStore
         return result;
     }
 
+    public IReadOnlyList<ProposalApplyLinkage> ListAppliedProposalApplyLinkages()
+    {
+        using var connection = Open(); using var command = connection.CreateCommand();
+        command.CommandText = "SELECT a.apply_id,a.draft_id,d.proposal_id,d.root_id,(SELECT COUNT(*) FROM proposal_apply_files WHERE draft_id=d.draft_id),d.selection_revision,d.approval_digest FROM proposal_applies a JOIN proposal_apply_drafts d ON d.draft_id=a.draft_id WHERE a.state='applied' ORDER BY a.created_at;";
+        using var reader = command.ExecuteReader(); var result = new List<ProposalApplyLinkage>();
+        while (reader.Read()) result.Add(new(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)), Guid.Parse(reader.GetString(3)), reader.GetInt32(4), reader.GetInt32(5), reader.GetString(6)));
+        return result;
+    }
+
+    public bool TryStartProposalApplyRollback(ProposalApplyPendingOperation pending)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction(); using var command = connection.CreateCommand(); command.Transaction = transaction;
+        command.CommandText = "INSERT INTO proposal_apply_pending(apply_id,draft_id,proposal_id,root_id,actor_kind,file_count,operation_kind,recorded_at) SELECT $apply,$draft,$proposal,$root,'local_user',$count,'rollback',$time WHERE EXISTS(SELECT 1 FROM proposal_applies WHERE apply_id=$apply AND draft_id=$draft AND state='applied') AND NOT EXISTS(SELECT 1 FROM proposal_apply_pending WHERE apply_id=$apply);";
+        command.Parameters.AddWithValue("$apply", Id(pending.ApplyId)); command.Parameters.AddWithValue("$draft", Id(pending.DraftId)); command.Parameters.AddWithValue("$proposal", Id(pending.ProposalId)); command.Parameters.AddWithValue("$root", Id(pending.RootId)); command.Parameters.AddWithValue("$count", pending.FileCount); command.Parameters.AddWithValue("$time", Timestamp(pending.RecordedAt));
+        var started = command.ExecuteNonQuery() == 1; transaction.Commit(); return started;
+    }
+
     public void CompleteProposalApplyPending(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode)
     {
         using var connection = Open(); using var transaction = connection.BeginTransaction();
-        Execute(connection, transaction, "INSERT INTO proposal_applies(apply_id,draft_id,state,created_at) VALUES($apply,$draft,$state,$time) ON CONFLICT(apply_id) DO UPDATE SET state=excluded.state;", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)));
-        Execute(connection, transaction, "UPDATE proposal_apply_drafts SET state=$state,updated_at=$time WHERE draft_id=$draft;", ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)), ("$draft", Id(outcome.DraftId)));
+        using var pending = connection.CreateCommand(); pending.Transaction = transaction; pending.CommandText = "SELECT operation_kind FROM proposal_apply_pending WHERE apply_id=$apply;"; pending.Parameters.AddWithValue("$apply", Id(outcome.ApplyId)); var operationKind = pending.ExecuteScalar() as string;
+        if (operationKind is null) { transaction.Commit(); return; }
+        if (operationKind == "apply" || outcome.State == ProposalApplyState.RolledBack)
+        {
+            Execute(connection, transaction, "INSERT INTO proposal_applies(apply_id,draft_id,state,created_at) VALUES($apply,$draft,$state,$time) ON CONFLICT(apply_id) DO UPDATE SET state=excluded.state;", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)));
+            Execute(connection, transaction, "UPDATE proposal_apply_drafts SET state=$state,updated_at=$time WHERE draft_id=$draft;", ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)), ("$draft", Id(outcome.DraftId)));
+        }
         Execute(connection, transaction, "INSERT INTO proposal_apply_audit(apply_id,draft_id,proposal_id,root_id,actor_kind,state,error_code,file_count,recorded_at) VALUES($apply,$draft,$proposal,$root,'local_user',$state,$error,$count,$time);", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$proposal", Id(proposalId)), ("$root", Id(rootId)), ("$state", ApplyState(outcome.State)), ("$error", errorCode), ("$count", fileCount), ("$time", Timestamp(outcome.RecordedAt)));
         Execute(connection, transaction, "DELETE FROM proposal_apply_pending WHERE apply_id=$apply;", ("$apply", Id(outcome.ApplyId)));
         transaction.Commit();

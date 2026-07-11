@@ -310,6 +310,7 @@ public sealed record ProposalApplyImmutableMetadata(
 
 public sealed record ProposalApplyOutcome(Guid ApplyId, Guid DraftId, ProposalApplyState State, DateTimeOffset RecordedAt);
 public sealed record ProposalApplyPendingOperation(Guid ApplyId, Guid DraftId, Guid ProposalId, Guid RootId, int FileCount, string OperationKind, DateTimeOffset RecordedAt);
+public sealed record ProposalApplyLinkage(Guid ApplyId, Guid DraftId, Guid ProposalId, Guid RootId, int FileCount, int SelectionRevision, string ApprovalDigest);
 
 public interface ISessionStore
 {
@@ -338,5 +339,7 @@ public interface ISessionStore
     void SaveProposalApplyOutcome(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode);
     void SaveProposalApplyPending(ProposalApplyPendingOperation pending);
     IReadOnlyList<ProposalApplyPendingOperation> ListProposalApplyPending();
+    IReadOnlyList<ProposalApplyLinkage> ListAppliedProposalApplyLinkages();
+    bool TryStartProposalApplyRollback(ProposalApplyPendingOperation pending);
     void CompleteProposalApplyPending(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode);
 }
