@@ -7,6 +7,27 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SqliteSessionStoreTests
 {
     [Fact]
+    public void ObjectiveEvaluations_RequireNativeExactBindingAsWellAsTerminalFullScope()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "unbound-objective");
+        var fullButUnbound = batch with
+        {
+            Detail = batch.Detail with
+            {
+                Session = batch.Detail.Session with { Completeness = SessionCompleteness.Full },
+                NativeIds = []
+            }
+        };
+        store.Write(fullButUnbound);
+        var receipt = new ObjectiveEvaluationReceipt(Guid.CreateVersion7(), fullButUnbound.Detail.Session.SessionId, fullButUnbound.Detail.Runs[0].RunId, fullButUnbound.Detail.Runs[0].TraceId!, ObjectiveResult.Fail, ObjectiveSeverity.Normal, "eval", "v1", "criterion", "case", [new("run", fullButUnbound.Detail.Runs[0].RunId.ToString("D"))], DateTimeOffset.UnixEpoch);
+
+        Assert.Throws<ArgumentException>(() => store.CreateObjectiveEvaluation(receipt));
+    }
+
+    [Fact]
     public void ObjectiveEvaluations_PersistAcrossStoreRestartAndAreImmutable()
     {
         using var database = new SessionTestDatabase();

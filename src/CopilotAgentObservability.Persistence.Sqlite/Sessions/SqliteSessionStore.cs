@@ -737,7 +737,7 @@ public sealed class SqliteSessionStore : ISessionStore
     private static bool ExactReceiptScope(SqliteConnection connection, SqliteTransaction transaction, ObjectiveEvaluationReceipt receipt)
     {
         using var scope = connection.CreateCommand(); scope.Transaction = transaction;
-        scope.CommandText = "SELECT 1 FROM sessions s JOIN session_runs r ON r.session_id=s.session_id WHERE s.session_id=$session AND r.run_id=$run AND s.completeness='full' AND s.status IN ('completed','failed') AND r.trace_id=$trace;";
+        scope.CommandText = "SELECT 1 FROM sessions s JOIN session_runs r ON r.session_id=s.session_id WHERE s.session_id=$session AND r.run_id=$run AND s.completeness='full' AND s.status IN ('completed','failed') AND r.trace_id=$trace AND EXISTS (SELECT 1 FROM session_native_ids n WHERE n.session_id=s.session_id AND n.binding_kind='native');";
         Add(scope, "$session", Id(receipt.SessionId)); Add(scope, "$run", Id(receipt.RunId)); Add(scope, "$trace", receipt.TraceId);
         if (scope.ExecuteScalar() is null) return false;
         foreach (var evidence in receipt.Evidence)
@@ -753,7 +753,7 @@ public sealed class SqliteSessionStore : ISessionStore
                 _ => "SELECT 0;",
             };
             Add(command, "$session", Id(receipt.SessionId)); Add(command, "$run", Id(receipt.RunId)); Add(command, "$trace", receipt.TraceId); Add(command, "$reference", evidence.ReferenceId);
-            if (command.ExecuteScalar() is null) return false;
+            if (command.ExecuteScalar() is not 1L) return false;
         }
         return true;
     }

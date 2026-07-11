@@ -22,6 +22,8 @@ public static partial class ObjectiveEvaluationValidation
     public static bool IsValid(ObjectiveEvaluationReceipt receipt) =>
         receipt.ObjectiveEvaluationId != Guid.Empty && receipt.SessionId != Guid.Empty && receipt.RunId != Guid.Empty
         && !string.IsNullOrWhiteSpace(receipt.TraceId)
+        && receipt.Result is ObjectiveResult.Pass or ObjectiveResult.Fail
+        && receipt.Severity is ObjectiveSeverity.Normal or ObjectiveSeverity.Severe
         && (receipt.Result != ObjectiveResult.Pass || receipt.Severity == ObjectiveSeverity.Normal)
         && IdentifierValue(receipt.EvaluatorId, 100) && IdentifierValue(receipt.EvaluatorVersion, 100)
         && IdentifierValue(receipt.CriterionId, 100) && IdentifierValue(receipt.CaseKey, 200)

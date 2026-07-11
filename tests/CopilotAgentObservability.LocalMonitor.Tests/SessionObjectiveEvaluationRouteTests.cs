@@ -41,6 +41,14 @@ public sealed class SessionObjectiveEvaluationRouteTests
     }
 
     [Fact]
+    public void Receipt_RejectsUndefinedEnumValues()
+    {
+        var receipt = new ObjectiveEvaluationReceipt(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), "trace", (ObjectiveResult)99, ObjectiveSeverity.Normal, "eval", "v1", "quality", "case", [new("gate", "terminal")], DateTimeOffset.UtcNow);
+
+        Assert.False(ObjectiveEvaluationValidation.IsValid(receipt));
+    }
+
+    [Fact]
     public async Task Post_UsesFixedNoEchoErrorsForInvalidAndUnsafeRequests()
     {
         using var temp = new MonitorTempDirectory();
@@ -53,11 +61,189 @@ public sealed class SessionObjectiveEvaluationRouteTests
         Assert.DoesNotContain(sentinel, text, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("a", 100)]
+    [InlineData("a.b_c:d-9", 100)]
+    [InlineData("a", 200)]
+    public void Receipt_AcceptsIdentifierBoundaries(string value, int maximum)
+    {
+        var identifier = value.Length == 1 && maximum > 1 ? new string('a', maximum) : value;
+        Assert.True(ObjectiveEvaluationValidation.IdentifierValue(identifier, maximum));
+    }
+
+    [Theory]
+    [InlineData("_starts", 100)]
+    [InlineData("has space", 100)]
+    [InlineData("a/../path", 100)]
+    [InlineData("a", 0)]
+    public void Receipt_RejectsInvalidIdentifierBoundaries(string value, int maximum)
+    {
+        Assert.False(ObjectiveEvaluationValidation.IdentifierValue(value, maximum));
+    }
+
+    [Fact]
+    public async Task Post_RejectsIdentityScopeAndEvidenceMismatchesWithoutEcho()
+    {
+        using var temp = new MonitorTempDirectory();
+        var batch = CreateExactBatch();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        store.Write(batch);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        var sentinel = "C:\\\\secret\\\\objective-token";
+        var cases = new[]
+        {
+            Body(batch, session: Guid.CreateVersion7().ToString("D")), Body(batch, run: Guid.CreateVersion7().ToString("D")),
+            Body(batch, trace: "other-trace"), Body(batch, evidence: "[{\"kind\":\"event\",\"reference_id\":\"" + Guid.CreateVersion7() + "\"}]"),
+            Body(batch, evidence: "[{\"kind\":\"trace\",\"reference_id\":\"other-trace\"}]"),
+            Body(batch, evidence: "[{\"kind\":\"gate\",\"reference_id\":\"missing\"}]"),
+            Body(batch, evaluator: sentinel)
+        };
+
+        foreach (var (body, index) in cases.Select((body, index) => (body, index)))
+        {
+            using var response = await host.Client.SendAsync(Request(body));
+            var text = await response.Content.ReadAsStringAsync();
+            Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
+            Assert.True(response.StatusCode != HttpStatusCode.Created, $"case {index} unexpectedly created a receipt");
+            Assert.DoesNotContain(sentinel, text, StringComparison.Ordinal);
+        }
+        Assert.Empty(store.ListObjectiveEvaluations(batch.Detail.Session.SessionId));
+    }
+
+    [Theory]
+    [InlineData("{\"unknown\":true}")]
+    [InlineData("{\"session_id\":\"x\",\"session_id\":\"y\"}")]
+    [InlineData("not-json")]
+    public async Task Post_RejectsMalformedUnknownAndDuplicateJson(string payload)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        using var response = await host.Client.SendAsync(Request(payload));
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
+        Assert.Equal("{\"error\":\"invalid_objective_evaluation\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Post_RejectsNullTracePassSevereAndInvalidEvidenceCardinalityOrKind()
+    {
+        using var temp = new MonitorTempDirectory();
+        var batch = CreateExactBatch();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        store.Write(batch);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        var eleven = "[" + string.Join(',', Enumerable.Range(0, 11).Select(index => "{\"kind\":\"run\",\"reference_id\":\"" + batch.Detail.Runs[0].RunId + index + "\"}")) + "]";
+        var cases = new[]
+        {
+            Body(batch).Replace("\"trace-exact\"", "null", StringComparison.Ordinal),
+            Body(batch).Replace("\"severity\":\"normal\"", "\"severity\":\"severe\"", StringComparison.Ordinal).Replace("\"result\":\"fail\"", "\"result\":\"pass\"", StringComparison.Ordinal),
+            Body(batch, evidence: "[]"),
+            Body(batch, evidence: eleven),
+            Body(batch, evidence: "[{\"kind\":\"unknown\",\"reference_id\":\"x\"}]"),
+            Body(batch, evidence: "[{\"kind\":\"run\",\"reference_id\":\"" + batch.Detail.Runs[0].RunId + "\"},{\"kind\":\"run\",\"reference_id\":\"" + batch.Detail.Runs[0].RunId + "\"}]")
+        };
+
+        foreach (var body in cases)
+        {
+            using var response = await host.Client.SendAsync(Request(body));
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal("{\"error\":\"invalid_objective_evaluation\"}", await response.Content.ReadAsStringAsync());
+            Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
+        }
+    }
+
+    [Fact]
+    public async Task Post_AcceptsBothGateKindsWhenTheyResolveInTheExactRun()
+    {
+        using var temp = new MonitorTempDirectory();
+        var batch = CreateExactBatch();
+        var errorEvent = batch.Detail.Events[0] with { Status = "error" };
+        batch = batch with { Detail = batch.Detail with { Events = [errorEvent] } };
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        store.Write(batch);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        using var response = await host.Client.SendAsync(Request(Body(batch, evidence: "[{\"kind\":\"gate\",\"reference_id\":\"terminal\"},{\"kind\":\"gate\",\"reference_id\":\"error\"}]")));
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Post_EnforcesOriginCsrfMediaTypeAndBodyLimitWithNoStore()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        var requests = new[]
+        {
+            new HttpRequestMessage(HttpMethod.Post, "/api/session-workspace/objective-evaluations") { Content = new StringContent("{}", Encoding.UTF8, "text/plain") },
+            new HttpRequestMessage(HttpMethod.Post, "/api/session-workspace/objective-evaluations") { Content = new StringContent("{}", Encoding.UTF8, "application/json") },
+            Request(new string('x', 1024 * 1024 + 1)),
+        };
+        requests[1].Headers.Add("Origin", "http://untrusted.example");
+        requests[2].Content = new StreamedContent(1024 * 1024 + 1);
+
+        foreach (var request in requests)
+        {
+            using (request)
+            {
+                using var response = await host.Client.SendAsync(request);
+                Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
+                Assert.True(new[] { HttpStatusCode.Forbidden, HttpStatusCode.UnsupportedMediaType, HttpStatusCode.RequestEntityTooLarge }.Contains(response.StatusCode));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Get_IsNoStoreOrderedAndInvalidQueryDoesNotEcho()
+    {
+        using var temp = new MonitorTempDirectory();
+        var batch = CreateExactBatch();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        store.Write(batch);
+        var first = Receipt(batch, Guid.CreateVersion7(), DateTimeOffset.UnixEpoch);
+        var second = Receipt(batch, Guid.CreateVersion7(), DateTimeOffset.UnixEpoch.AddSeconds(1));
+        store.CreateObjectiveEvaluation(second);
+        store.CreateObjectiveEvaluation(first);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+
+        using var response = await host.Client.GetAsync($"/api/session-workspace/objective-evaluations?session_id={batch.Detail.Session.SessionId:D}");
+        Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
+        using var listed = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(first.ObjectiveEvaluationId.ToString("D"), listed.RootElement.GetProperty("items")[0].GetProperty("objective_evaluation_id").GetString());
+        using var invalid = await host.Client.GetAsync("/api/session-workspace/objective-evaluations?session_id=C%3A%5Csecret");
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        Assert.DoesNotContain("secret", await invalid.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal("no-store", invalid.Headers.CacheControl!.ToString());
+    }
+
+    [Fact]
+    public async Task Endpoint_HasNoUpdateOrDeleteOperation()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        using var response = await host.Client.SendAsync(new HttpRequestMessage(HttpMethod.Put, "/api/session-workspace/objective-evaluations"));
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     private static HttpRequestMessage Request(string body)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, "/api/session-workspace/objective-evaluations") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         request.Headers.Add("x-monitor-csrf", "local-monitor");
         return request;
+    }
+
+    private static string Body(SessionWriteBatch batch, string? session = null, string? run = null, string? trace = null, string? evaluator = null, string? evidence = null) =>
+        $$"""{"session_id":"{{session ?? batch.Detail.Session.SessionId.ToString("D")}}","run_id":"{{run ?? batch.Detail.Runs[0].RunId.ToString("D")}}","trace_id":"{{trace ?? "trace-exact"}}","result":"fail","severity":"normal","evaluator_id":"{{evaluator ?? "eval"}}","evaluator_version":"v1","criterion_id":"quality","case_key":"case-1","evidence_refs":{{evidence ?? "[{\"kind\":\"run\",\"reference_id\":\"" + batch.Detail.Runs[0].RunId + "\"}]"}}}""";
+
+    private static ObjectiveEvaluationReceipt Receipt(SessionWriteBatch batch, Guid id, DateTimeOffset recordedAt) =>
+        new(id, batch.Detail.Session.SessionId, batch.Detail.Runs[0].RunId, "trace-exact", ObjectiveResult.Fail, ObjectiveSeverity.Normal, "eval", "v1", "quality", "case-1", [new("run", batch.Detail.Runs[0].RunId.ToString("D"))], recordedAt);
+
+    private sealed class StreamedContent(int length) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => stream.WriteAsync(new byte[length]).AsTask();
+        protected override bool TryComputeLength(out long length) { length = 0; return false; }
     }
 
     private static SessionWriteBatch CreateExactBatch()
