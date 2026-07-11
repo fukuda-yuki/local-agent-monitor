@@ -146,6 +146,8 @@ Keep it short and practical; put detailed procedures in `docs/agent-guides/` and
 
 Use subagents only when the user explicitly asks for subagent delegation and the active surface provides that capability.
 When subagents are available, use `.agents/skills/codex-subagent-dispatch/SKILL.md`.
+For API contract, async UI state, local-risk posture, or test-only work, also use the bounded
+specialist mission cards in `docs/agent-guides/codex-specialist-agents.md`.
 Otherwise continue in the main chat or provide a mission card the user can run elsewhere.
 
 ## Review Workflow
