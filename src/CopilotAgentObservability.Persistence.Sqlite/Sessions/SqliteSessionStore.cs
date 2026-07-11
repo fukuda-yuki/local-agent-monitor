@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 public sealed class SqliteSessionStore : ISessionStore
 {
-    private const int CurrentSchemaVersion = 9;
+    private const int CurrentSchemaVersion = 10;
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
     private readonly Action<string>? comparisonCheckpoint;
@@ -47,7 +47,7 @@ public sealed class SqliteSessionStore : ISessionStore
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'session';";
         var existingVersion = versionCommand.ExecuteScalar();
-        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or CurrentSchemaVersion))
+        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9 or CurrentSchemaVersion))
         {
             throw new InvalidOperationException("Unsupported Session schema version.");
         }
@@ -106,8 +106,7 @@ public sealed class SqliteSessionStore : ISessionStore
         }
         else if (Convert.ToInt32(existingVersion) == 4)
         {
-            command.CommandText = "ALTER TABLE proposal_apply_drafts ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.0000000+00:00';";
-            command.ExecuteNonQuery();
+            AddColumnIfMissing(connection, transaction, "proposal_apply_drafts", "updated_at", "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.0000000+00:00'");
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
@@ -126,8 +125,9 @@ public sealed class SqliteSessionStore : ISessionStore
         }
         else if (Convert.ToInt32(existingVersion) == 6)
         {
-            command.CommandText = "ALTER TABLE improvement_proposals ADD COLUMN revision INTEGER NOT NULL DEFAULT 1; ALTER TABLE proposal_apply_drafts ADD COLUMN proposal_revision INTEGER NOT NULL DEFAULT 1; ALTER TABLE proposal_applies ADD COLUMN proposal_revision INTEGER NOT NULL DEFAULT 1;";
-            command.ExecuteNonQuery();
+            AddColumnIfMissing(connection, transaction, "improvement_proposals", "revision", "INTEGER NOT NULL DEFAULT 1");
+            AddColumnIfMissing(connection, transaction, "proposal_apply_drafts", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
+            AddColumnIfMissing(connection, transaction, "proposal_applies", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
@@ -145,6 +145,12 @@ public sealed class SqliteSessionStore : ISessionStore
         else if (Convert.ToInt32(existingVersion) == 8)
         {
             command.CommandText = EffectComparisonSchemaSql;
+            command.ExecuteNonQuery();
+            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
+        else if (Convert.ToInt32(existingVersion) == 9)
+        {
+            command.CommandText = "ALTER TABLE effect_comparison_sessions ADD COLUMN effective_quality TEXT NULL CHECK (effective_quality IS NULL OR effective_quality IN ('pass','fail','missing')); ALTER TABLE effect_comparison_sessions ADD COLUMN severe_failure INTEGER NOT NULL DEFAULT 0 CHECK (severe_failure IN (0,1)); ALTER TABLE effect_comparison_evidence ADD COLUMN human_verdict TEXT NULL CHECK (human_verdict IS NULL OR human_verdict IN ('expected','problem'));";
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
@@ -777,7 +783,8 @@ public sealed class SqliteSessionStore : ISessionStore
         comparisonCheckpoint?.Invoke("after_active_apply_read");
 
         var facts = new List<SessionEffectFacts>();
-        var capturedEvidence = new List<(Guid SessionId, string Kind, string ReferenceId, string? RecordedAt)>();
+        var sessionFacts = new List<(Guid SessionId, string? EffectiveQuality, bool SevereFailure)>();
+        var capturedEvidence = new List<(Guid SessionId, string Kind, string ReferenceId, string? RecordedAt, string? HumanVerdict)>();
         foreach (var item in request.Sessions.Where(item => item.Classification is "pre" or "post"))
         {
             var session = ReadComparisonSession(connection, transaction, item.SessionId);
@@ -788,6 +795,7 @@ public sealed class SqliteSessionStore : ISessionStore
 
             var evidence = new List<string>();
             var qualityPass = true;
+            var hasDecisiveQuality = false;
             var severe = false;
             using (var human = connection.CreateCommand())
             {
@@ -799,22 +807,25 @@ public sealed class SqliteSessionStore : ISessionStore
                 {
                     var id = "human:" + Id(item.SessionId);
                     evidence.Add(id);
-                    capturedEvidence.Add((item.SessionId, "human", Id(item.SessionId), reader.GetString(1)));
+                    capturedEvidence.Add((item.SessionId, "human", Id(item.SessionId), reader.GetString(1), reader.GetString(0)));
+                    hasDecisiveQuality = true;
                     qualityPass &= reader.GetString(0) == "expected";
                 }
             }
             foreach (var objective in Objectives(connection, transaction, item.SessionId))
             {
                 evidence.Add(Id(objective.ObjectiveEvaluationId));
-                capturedEvidence.Add((item.SessionId, "objective", Id(objective.ObjectiveEvaluationId), Timestamp(objective.RecordedAt)));
+                capturedEvidence.Add((item.SessionId, "objective", Id(objective.ObjectiveEvaluationId), Timestamp(objective.RecordedAt), null));
+                hasDecisiveQuality = true;
                 qualityPass &= objective.Result == ObjectiveResult.Pass;
                 severe |= objective.Result == ObjectiveResult.Fail && objective.Severity == ObjectiveSeverity.Severe;
                 foreach (var reference in objective.Evidence)
-                    capturedEvidence.Add((item.SessionId, "objective_" + reference.Kind, reference.ReferenceId, null));
+                    capturedEvidence.Add((item.SessionId, "objective_" + reference.Kind, reference.ReferenceId, null, null));
             }
             var duration = session.Value.StartedAt is { } started && session.Value.EndedAt is { } ended ? (long?)(ended - started).TotalMilliseconds : null;
             var tokens = SessionTokens(connection, transaction, item.SessionId);
             facts.Add(new(item.SessionId, item.Classification, item.CaseKey, qualityPass, severe, duration, tokens, evidence));
+            sessionFacts.Add((item.SessionId, hasDecisiveQuality ? qualityPass ? "pass" : "fail" : "missing", severe));
         }
 
         var result = EffectVerdictEngine.Evaluate(new(true, facts.Where(item => item.Side == "pre").ToArray(), facts.Where(item => item.Side == "post").ToArray(), []));
@@ -822,9 +833,12 @@ public sealed class SqliteSessionStore : ISessionStore
         var cohortRevision = NextCohortRevision(connection, transaction, request.ProposalId, request.ApplyId);
         Execute(connection, transaction, "INSERT INTO effect_comparisons(comparison_id,cohort_revision,proposal_id,proposal_revision,apply_id,recorded_at) VALUES($id,$cohort,$proposal,$revision,$apply,$recorded);", ("$id", Id(comparisonId)), ("$cohort", cohortRevision), ("$proposal", Id(request.ProposalId)), ("$revision", request.ProposalRevision), ("$apply", Id(request.ApplyId)), ("$recorded", Timestamp(recordedAt)));
         foreach (var (item, order) in request.Sessions.Select((value, index) => (value, index)))
-            Execute(connection, transaction, "INSERT INTO effect_comparison_sessions(comparison_id,session_id,classification,case_key,exclusion_reason,session_order) VALUES($comparison,$session,$classification,$case,$reason,$order);", ("$comparison", Id(comparisonId)), ("$session", Id(item.SessionId)), ("$classification", item.Classification), ("$case", item.CaseKey), ("$reason", item.ExclusionReason), ("$order", order));
+        {
+            var fact = sessionFacts.FirstOrDefault(value => value.SessionId == item.SessionId);
+            Execute(connection, transaction, "INSERT INTO effect_comparison_sessions(comparison_id,session_id,classification,case_key,exclusion_reason,session_order,effective_quality,severe_failure) VALUES($comparison,$session,$classification,$case,$reason,$order,$quality,$severe);", ("$comparison", Id(comparisonId)), ("$session", Id(item.SessionId)), ("$classification", item.Classification), ("$case", item.CaseKey), ("$reason", item.ExclusionReason), ("$order", order), ("$quality", fact.EffectiveQuality), ("$severe", fact.SevereFailure ? 1 : 0));
+        }
         foreach (var (evidence, order) in capturedEvidence.Select((value, index) => (value, index)))
-            Execute(connection, transaction, "INSERT INTO effect_comparison_evidence(comparison_id,evidence_order,session_id,kind,reference_id,recorded_at) VALUES($comparison,$order,$session,$kind,$reference,$recorded);", ("$comparison", Id(comparisonId)), ("$order", order), ("$session", Id(evidence.SessionId)), ("$kind", evidence.Kind), ("$reference", evidence.ReferenceId), ("$recorded", evidence.RecordedAt));
+            Execute(connection, transaction, "INSERT INTO effect_comparison_evidence(comparison_id,evidence_order,session_id,kind,reference_id,recorded_at,human_verdict) VALUES($comparison,$order,$session,$kind,$reference,$recorded,$human_verdict);", ("$comparison", Id(comparisonId)), ("$order", order), ("$session", Id(evidence.SessionId)), ("$kind", evidence.Kind), ("$reference", evidence.ReferenceId), ("$recorded", evidence.RecordedAt), ("$human_verdict", evidence.HumanVerdict));
         comparisonCheckpoint?.Invoke("after_cohort_session_evidence_insert");
         Execute(connection, transaction, "INSERT INTO effect_receipts(comparison_id,verdict,result_json,recorded_at) VALUES($comparison,$verdict,$result,$recorded);", ("$comparison", Id(comparisonId)), ("$verdict", VerdictText(result.Verdict)), ("$result", System.Text.Json.JsonSerializer.Serialize(result)), ("$recorded", Timestamp(recordedAt)));
         comparisonCheckpoint?.Invoke("after_effect_receipt_insert");
@@ -858,16 +872,16 @@ public sealed class SqliteSessionStore : ISessionStore
         var sessions = new List<EffectComparisonSession>();
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "SELECT session_id,classification,case_key,exclusion_reason FROM effect_comparison_sessions WHERE comparison_id=$comparison ORDER BY session_order;";
+            command.CommandText = "SELECT session_id,classification,case_key,exclusion_reason,effective_quality,severe_failure FROM effect_comparison_sessions WHERE comparison_id=$comparison ORDER BY session_order;";
             Add(command, "$comparison", Id(comparisonId)); using var rows = command.ExecuteReader();
-            while (rows.Read()) sessions.Add(new(Guid.Parse(rows.GetString(0)), rows.GetString(1), rows.GetString(2), rows.IsDBNull(3) ? null : rows.GetString(3)));
+            while (rows.Read()) sessions.Add(new(Guid.Parse(rows.GetString(0)), rows.GetString(1), rows.GetString(2), rows.IsDBNull(3) ? null : rows.GetString(3), rows.IsDBNull(4) ? null : rows.GetString(4), rows.GetInt32(5) != 0));
         }
         var evidence = new List<EffectComparisonEvidence>();
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "SELECT session_id,kind,reference_id,recorded_at FROM effect_comparison_evidence WHERE comparison_id=$comparison ORDER BY evidence_order;";
+            command.CommandText = "SELECT session_id,kind,reference_id,recorded_at,human_verdict FROM effect_comparison_evidence WHERE comparison_id=$comparison ORDER BY evidence_order;";
             Add(command, "$comparison", Id(comparisonId)); using var rows = command.ExecuteReader();
-            while (rows.Read()) evidence.Add(new(Guid.Parse(rows.GetString(0)), rows.GetString(1), rows.GetString(2), rows.IsDBNull(3) ? null : ParseTimestamp(rows.GetString(3))));
+            while (rows.Read()) evidence.Add(new(Guid.Parse(rows.GetString(0)), rows.GetString(1), rows.GetString(2), rows.IsDBNull(3) ? null : ParseTimestamp(rows.GetString(3)), rows.IsDBNull(4) ? null : rows.GetString(4)));
         }
         return new(receipt, sessions, evidence);
     }
@@ -1301,6 +1315,16 @@ public sealed class SqliteSessionStore : ISessionStore
         command.ExecuteNonQuery();
     }
 
+    private static void AddColumnIfMissing(SqliteConnection connection, SqliteTransaction transaction, string table, string column, string definition)
+    {
+        using var columns = connection.CreateCommand();
+        columns.Transaction = transaction;
+        columns.CommandText = $"SELECT 1 FROM pragma_table_info('{table}') WHERE name=$column;";
+        Add(columns, "$column", column);
+        if (columns.ExecuteScalar() is not null) return;
+        Execute(connection, transaction, $"ALTER TABLE {table} ADD COLUMN {column} {definition};");
+    }
+
     private static void ValidateComparisonRequest(EffectComparisonRequest request)
     {
         if (request.ProposalId == Guid.Empty || request.ApplyId == Guid.Empty || request.ProposalRevision < 1 || request.Sessions is not { Count: > 0 }) throw new ArgumentException("Invalid comparison request.", nameof(request));
@@ -1497,6 +1521,8 @@ public sealed class SqliteSessionStore : ISessionStore
             case_key TEXT NOT NULL,
             exclusion_reason TEXT NULL CHECK (exclusion_reason IS NULL OR exclusion_reason IN ('not_comparable','wrong_case','missing_evidence','overlaps_application','user_excluded')),
             session_order INTEGER NOT NULL CHECK (session_order >= 0),
+            effective_quality TEXT NULL CHECK (effective_quality IS NULL OR effective_quality IN ('pass','fail','missing')),
+            severe_failure INTEGER NOT NULL DEFAULT 0 CHECK (severe_failure IN (0,1)),
             PRIMARY KEY(comparison_id,session_id),
             UNIQUE(comparison_id,session_order),
             FOREIGN KEY(comparison_id) REFERENCES effect_comparisons(comparison_id) ON DELETE RESTRICT,
@@ -1509,6 +1535,7 @@ public sealed class SqliteSessionStore : ISessionStore
             kind TEXT NOT NULL,
             reference_id TEXT NOT NULL,
             recorded_at TEXT NULL,
+            human_verdict TEXT NULL CHECK (human_verdict IS NULL OR human_verdict IN ('expected','problem')),
             PRIMARY KEY(comparison_id,evidence_order),
             FOREIGN KEY(comparison_id) REFERENCES effect_comparisons(comparison_id) ON DELETE RESTRICT,
             FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT

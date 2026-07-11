@@ -19,10 +19,12 @@ public sealed record EffectReceipt(
     string VerificationState, DateTimeOffset RecordedAt);
 
 public sealed record EffectComparisonSession(
-    Guid SessionId, string Classification, string CaseKey, string? ExclusionReason);
+    Guid SessionId, string Classification, string CaseKey, string? ExclusionReason,
+    string? EffectiveQuality = null, bool SevereFailure = false);
 
 public sealed record EffectComparisonEvidence(
-    Guid SessionId, string Kind, string ReferenceId, DateTimeOffset? RecordedAt);
+    Guid SessionId, string Kind, string ReferenceId, DateTimeOffset? RecordedAt,
+    string? HumanVerdict = null);
 
 public sealed record EffectComparisonDetail(
     EffectReceipt Receipt, IReadOnlyList<EffectComparisonSession> Sessions,

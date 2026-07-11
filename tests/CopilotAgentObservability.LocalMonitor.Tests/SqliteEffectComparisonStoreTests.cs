@@ -7,7 +7,12 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SqliteEffectComparisonStoreTests
 {
     [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
     [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
     [InlineData(7)]
     [InlineData(8)]
     public void CreateSchema_UpgradesSupportedPriorVersions_AdditivelyAndWithoutSensitiveColumns(int previousVersion)
@@ -30,7 +35,7 @@ public sealed class SqliteEffectComparisonStoreTests
 
         using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
         verify.Open();
-        Assert.Equal(9L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(10L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(session.ToString("D"), Text(verify, "SELECT session_id FROM sessions LIMIT 1;"));
         foreach (var table in new[] { "effect_comparisons", "effect_comparison_sessions", "effect_comparison_evidence", "effect_receipts" })
             Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=$name;", ("$name", table)));
@@ -268,6 +273,30 @@ public sealed class SqliteEffectComparisonStoreTests
         Assert.Equal(new[] { "case-a", "case-b" }, reloaded.Sessions.Where(s => s.Classification != "excluded").Select(s => s.CaseKey).Distinct().Order());
     }
 
+    [Fact]
+    public void EffectComparisonRead_RestartsWithCapturedHumanVerdictAndSessionFactsAfterHumanEvaluationChanges()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7(); var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var sessions = SeedImprovedCohort(temp.DatabasePath, store, at);
+        var receipt = store.RecordEffectComparison(Request(proposal, apply, sessions), at.AddHours(1));
+        var before = store.GetEffectComparison(receipt.ComparisonId)!;
+
+        store.UpsertHumanEvaluation(new(sessions[0], "expected", at.AddHours(2)));
+        store.ClearHumanEvaluation(sessions[1]);
+
+        var after = new SqliteSessionStore(temp.DatabasePath).GetEffectComparison(receipt.ComparisonId)!;
+        Assert.Equal(before.Sessions, after.Sessions);
+        Assert.Equal(before.Evidence, after.Evidence);
+        Assert.Equal("problem", Assert.Single(after.Evidence, evidence => evidence.SessionId == sessions[0] && evidence.Kind == "human").HumanVerdict);
+        Assert.Equal("fail", Assert.Single(after.Sessions, session => session.SessionId == sessions[0]).EffectiveQuality);
+        Assert.False(Assert.Single(after.Sessions, session => session.SessionId == sessions[0]).SevereFailure);
+        Assert.Equal("fail", Assert.Single(after.Sessions, session => session.SessionId == sessions[1]).EffectiveQuality);
+        Assert.Equal(EffectVerdict.Improved, after.Receipt.Result.Verdict);
+    }
+
     [Theory]
     [InlineData("missing_proposal")]
     [InlineData("wrong_proposal_revision")]
@@ -405,6 +434,24 @@ public sealed class SqliteEffectComparisonStoreTests
         Assert.Throws<InvalidOperationException>(() => store.RecordEffectComparison(Request(proposal, apply, sessions), at.AddHours(1)));
         AssertComparisonRows(temp.DatabasePath, 0);
         Assert.Equal(ImprovementProposalStatus.Recommended, store.GetImprovementProposal(proposal)!.Status);
+    }
+
+    [Fact]
+    public async Task RecordEffectComparison_RollbackStartsFirst_ObservesPendingStateWithoutReceiptOrMaturityChange()
+    {
+        using var temp = new MonitorTempDirectory(); var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7(); var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var sessions = SeedImprovedCohort(temp.DatabasePath, store, at);
+        using var rollbackStarted = new ManualResetEventSlim();
+        var rollbackTask = Task.Run(() => { var started = StartRollback(store, temp.DatabasePath, proposal, apply, at.AddHours(1)); rollbackStarted.Set(); return started; });
+        rollbackStarted.Wait();
+        Assert.True(await rollbackTask);
+
+        Assert.Throws<InvalidOperationException>(() => store.RecordEffectComparison(Request(proposal, apply, sessions), at.AddHours(2)));
+        AssertComparisonRows(temp.DatabasePath, 0);
+        Assert.Equal(ImprovementProposalStatus.Recommended, store.GetImprovementProposal(proposal)!.Status);
+        CompleteRollback(store, temp.DatabasePath, proposal, apply, at.AddHours(3));
     }
 
     [Fact]
