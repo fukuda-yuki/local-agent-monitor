@@ -344,6 +344,7 @@ test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, 
         if (route.endsWith("/proposal-applies/roots")) return response({ items: [{ root_id: "root-1", kind: "repository", label: "Repository" }] });
         if (route.endsWith("/proposal-applies/drafts") && init.method === "POST") return response(draft, 201);
         if (route.endsWith("/selection")) return response(selected);
+        if (route === `/api/session-workspace/proposal-applies/drafts/${id}`) return response({ ...selected, diff: "selected hunk only" });
         if (route.endsWith("/approve")) return response({ ...selected, state: "approved" });
         if (route.endsWith("/apply")) return response({ apply_id: "apply-1", state: "applied" });
         if (route.endsWith("/rollback")) return response({ error: "rollback_stale" }, 409);
@@ -379,6 +380,8 @@ test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, 
     assert.doesNotMatch(textIn(document.getElementById("workspace-panel")), /<script>inert<\/script>/, "confirmation is source/diff-free");
     assert.equal(calls.filter(call => /\/(apply|rollback)(?:\?|$)/.test(call.path)).length, 0, "no mutation occurs before explicit approval and apply");
     assert.equal(button("適用する"), undefined, "selection invalidates approval and cannot mutate early");
+    await button("確認へ進む").click();
+    await settle();
     await button("承認する").click();
     await settle();
     const apply = button("適用する");
@@ -396,11 +399,54 @@ test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, 
     assert.equal(button("ロールバック"), undefined, "a failed rollback remains permanently disabled");
 });
 
+test("emitted workspace IIFE refetches and displays the selected diff before confirmation can enable approval", async () => {
+    const calls = [], id = "0197d7c0-0000-7000-8000-000000000001";
+    const proposal = { proposal_id: "proposal-1", status: "recommended", evidence_refs: [{ kind: "event", reference_id: "stop" }] };
+    const detail = { session: bound, native_ids: [{ binding_kind: "native" }], events: [{ event_id: "stop", type: "Stop" }], runs: [] };
+    let resolveSelectedDraft;
+    const fetch = async (path, init = {}) => {
+        calls.push({ path: String(path), init });
+        const route = String(path).split("?")[0];
+        if (route === "/api/session-workspace/sessions") return response({ items: [bound] });
+        if (route.startsWith("/api/session-workspace/resolve")) return response({ binding_status: "bound", session_id: bound.session_id });
+        if (route === `/api/session-workspace/sessions/${bound.session_id}`) return response(detail);
+        if (route.startsWith("/api/session-instruction/")) return response({ state: "no_instruction" });
+        if (route.startsWith("/api/session-workspace/improvement-proposals")) return response({ items: [proposal] });
+        if (route.endsWith("/roots")) return response({ items: [{ root_id: "root-1", kind: "repository", label: "Repository" }] });
+        if (route.endsWith("/drafts") && init.method === "POST") return response({ draft_id: id, proposal_id: "proposal-1", root_id: "root-1", selection_revision: 1, approval_digest: "digest-1", state: "draft", diff: "all hunks\nremoved hunk", files: [{ relative_path: "safe.txt" }], hunks: [{ hunk_id: "keep", relative_path: "safe.txt", selected: true }, { hunk_id: "remove", relative_path: "safe.txt", selected: true }] }, 201);
+        if (route.endsWith("/selection")) return response({ draft_id: id, proposal_id: "proposal-1", root_id: "root-1", selection_revision: 2, approval_digest: "digest-2", state: "selected", files: [{}], hunks: [{ hunk_id: "keep", selected: true }] });
+        if (route === `/api/session-workspace/proposal-applies/drafts/${id}`) return new Promise(resolve => { resolveSelectedDraft = resolve; });
+        return response({ error: "unexpected" }, 404);
+    };
+    const { document } = await runWorkspaceIife(fetch);
+    const button = text => document.querySelectorAll("button").find(item => item.textContent === text);
+    const settle = async () => { await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve)); };
+    await button("Improve").click(); await settle(); await button("Apply locally").click(); await settle();
+    const pathInput = document.querySelectorAll("input").find(item => item.placeholder === "relative path"), replacement = document.querySelectorAll("textarea").find(item => item.placeholder === "complete replacement text");
+    pathInput.value = "safe.txt"; replacement.value = "replacement";
+    let form = pathInput; while (form.tagName !== "form") form = form.parentNode;
+    await form.dispatch("submit"); await settle();
+    const hunkChecks = document.querySelectorAll("input").filter(item => item.type === "checkbox");
+    hunkChecks.find(item => item.value === "remove").checked = false;
+    const selectionClick = button("選択を更新").click(); await settle();
+    assert.ok(calls.some(call => call.path.split("?")[0] === `/api/session-workspace/proposal-applies/drafts/${id}` && !call.init.method), "selection fetches the current helper-only draft");
+    assert.equal(button("承認する"), undefined, "approval remains unavailable while selected-diff fetch is pending");
+    resolveSelectedDraft(response({ draft_id: id, proposal_id: "proposal-1", root_id: "root-1", selection_revision: 2, approval_digest: "digest-2", state: "selected", diff: "selected hunk only", files: [{ relative_path: "safe.txt" }], hunks: [{ hunk_id: "keep", relative_path: "safe.txt", selected: true }] }));
+    await selectionClick;
+    await settle();
+    assert.match(textIn(document.getElementById("workspace-panel")), /selected hunk only/);
+    assert.doesNotMatch(textIn(document.getElementById("workspace-panel")), /removed hunk/);
+    assert.equal(button("承認する"), undefined, "reviewing the selected diff is separate from confirmation");
+    await button("確認へ進む").click(); await settle();
+    assert.doesNotMatch(textIn(document.getElementById("workspace-panel")), /selected hunk only/, "confirmation is source/diff-free");
+    assert.ok(button("承認する"));
+});
+
 test("emitted workspace IIFE renders unavailable roots, ten-file limit, stale selection, and every apply/rollback terminal", async () => {
     const id = "0197d7c0-0000-7000-8000-000000000001", proposal = { proposal_id: "proposal-1", status: "recommended", evidence_refs: [{ kind: "event", reference_id: "stop" }] }, detail = { session: bound, native_ids: [{ binding_kind: "native" }], events: [{ event_id: "stop", type: "Stop" }], runs: [] };
     const settle = async () => { await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve)); };
     const drive = async ({ roots = 200, selection = response({ draft_id: id, proposal_id: "proposal-1", root_id: "root-1", selection_revision: 2, approval_digest: "digest-2", state: "selected", files: [], hunks: [] }), apply = response({ apply_id: "apply-1", state: "applied" }), rollback = response({ apply_id: "apply-1", state: "rolled_back" }) } = {}) => {
-        const calls = [], fetch = async (path, init = {}) => { calls.push({ path: String(path), init }); const route = String(path).split("?")[0]; if (route === "/api/session-workspace/sessions") return response({ items: [bound] }); if (route.startsWith("/api/session-workspace/resolve")) return response({ binding_status: "bound", session_id: bound.session_id }); if (route === `/api/session-workspace/sessions/${bound.session_id}`) return response(detail); if (route.startsWith("/api/session-instruction/")) return response({ state: "no_instruction" }); if (route.startsWith("/api/session-workspace/improvement-proposals")) return response({ items: [proposal] }); if (route.endsWith("/roots")) return roots === 200 ? response({ items: [{ root_id: "root-1", kind: "repository", label: "Repository" }] }) : response({ error: "apply_not_configured" }, roots); if (route.endsWith("/drafts") && init.method === "POST") return response({ draft_id: id, proposal_id: "proposal-1", root_id: "root-1", selection_revision: 1, approval_digest: "digest-1", state: "draft", diff: "source-only", files: [{ relative_path: "safe.txt" }], hunks: [{ hunk_id: "hunk-a", relative_path: "safe.txt", selected: true }] }, 201); if (route.endsWith("/selection")) return selection; if (route.endsWith("/approve")) return response({ draft_id: id, selection_revision: 2, approval_digest: "digest-2", state: "approved" }); if (route.endsWith("/apply")) return apply; if (route.endsWith("/rollback")) return rollback; return response({}, 404); };
+        const calls = [], fetch = async (path, init = {}) => { calls.push({ path: String(path), init }); const route = String(path).split("?")[0]; if (route === "/api/session-workspace/sessions") return response({ items: [bound] }); if (route.startsWith("/api/session-workspace/resolve")) return response({ binding_status: "bound", session_id: bound.session_id }); if (route === `/api/session-workspace/sessions/${bound.session_id}`) return response(detail); if (route.startsWith("/api/session-instruction/")) return response({ state: "no_instruction" }); if (route.startsWith("/api/session-workspace/improvement-proposals")) return response({ items: [proposal] }); if (route.endsWith("/roots")) return roots === 200 ? response({ items: [{ root_id: "root-1", kind: "repository", label: "Repository" }] }) : response({ error: "apply_not_configured" }, roots); if (route.endsWith("/drafts") && init.method === "POST") return response({ draft_id: id, proposal_id: "proposal-1", root_id: "root-1", selection_revision: 1, approval_digest: "digest-1", state: "draft", diff: "source-only", files: [{ relative_path: "safe.txt" }], hunks: [{ hunk_id: "hunk-a", relative_path: "safe.txt", selected: true }] }, 201); if (route.endsWith("/selection")) return selection; if (route === `/api/session-workspace/proposal-applies/drafts/${id}`) return response({ draft_id: id, proposal_id: "proposal-1", root_id: "root-1", selection_revision: 2, approval_digest: "digest-2", state: "selected", diff: "selected hunk only", files: [], hunks: [] }); if (route.endsWith("/approve")) return response({ draft_id: id, selection_revision: 2, approval_digest: "digest-2", state: "approved" }); if (route.endsWith("/apply")) return apply; if (route.endsWith("/rollback")) return rollback; return response({}, 404); };
         const { document } = await runWorkspaceIife(fetch), button = text => document.querySelectorAll("button").find(item => item.textContent === text);
         await button("Improve").click(); await settle(); await button("Apply locally").click(); await settle();
         return { calls, document, button, settle };
@@ -415,8 +461,8 @@ test("emitted workspace IIFE renders unavailable roots, ten-file limit, stale se
     assert.equal(JSON.parse(ten.calls.find(call => call.path.split("?")[0].endsWith("/proposal-applies/drafts") && call.init.method === "POST").init.body).files.length, 10, "ten complete files form a valid draft request");
     const stale = await drive({ selection: response({ error: "selection_stale" }, 409) });
     const stalePath = stale.document.querySelectorAll("input").find(item => item.placeholder === "relative path"), staleText = stale.document.querySelectorAll("textarea").find(item => item.placeholder === "complete replacement text"); stalePath.value = "safe.txt"; staleText.value = "text"; let form = stalePath; while (form.tagName !== "form") form = form.parentNode; await form.dispatch("submit"); await stale.settle(); await stale.button("選択を更新").click(); await stale.settle(); assert.match(textIn(stale.document.getElementById("workspace-panel")), /selection_stale/);
-    for (const [apply, expected] of [[response({ error: "apply_failed" }, 409), "apply_failed"], [response({ apply_id: "apply-1", state: "recovered" }), "recovered"]]) { const run = await drive({ apply }); const path = run.document.querySelectorAll("input").find(item => item.placeholder === "relative path"), text = run.document.querySelectorAll("textarea").find(item => item.placeholder === "complete replacement text"); path.value = "safe.txt"; text.value = "text"; let form = path; while (form.tagName !== "form") form = form.parentNode; await form.dispatch("submit"); await run.settle(); await run.button("選択を更新").click(); await run.settle(); await run.button("承認する").click(); await run.settle(); await run.button("適用する").click(); await run.settle(); assert.match(textIn(run.document.getElementById("workspace-panel")), new RegExp(expected)); }
-    for (const [rollback, expected] of [[response({ apply_id: "apply-1", state: "rolled_back" }), "rolled_back"], [response({ error: "rollback_not_available" }, 409), "rollback_not_available"]]) { const run = await drive({ rollback }); const path = run.document.querySelectorAll("input").find(item => item.placeholder === "relative path"), text = run.document.querySelectorAll("textarea").find(item => item.placeholder === "complete replacement text"); path.value = "safe.txt"; text.value = "text"; let form = path; while (form.tagName !== "form") form = form.parentNode; await form.dispatch("submit"); await run.settle(); await run.button("選択を更新").click(); await run.settle(); await run.button("承認する").click(); await run.settle(); await run.button("適用する").click(); await run.settle(); await run.button("ロールバック").click(); await run.settle(); assert.match(textIn(run.document.getElementById("workspace-panel")), new RegExp(expected)); assert.equal(run.button("ロールバック"), undefined, "rollback remains unavailable after its first terminal attempt"); }
+    for (const [apply, expected] of [[response({ error: "apply_failed" }, 409), "apply_failed"], [response({ apply_id: "apply-1", state: "recovered" }), "recovered"]]) { const run = await drive({ apply }); const path = run.document.querySelectorAll("input").find(item => item.placeholder === "relative path"), text = run.document.querySelectorAll("textarea").find(item => item.placeholder === "complete replacement text"); path.value = "safe.txt"; text.value = "text"; let form = path; while (form.tagName !== "form") form = form.parentNode; await form.dispatch("submit"); await run.settle(); await run.button("選択を更新").click(); await run.settle(); await run.button("確認へ進む").click(); await run.settle(); await run.button("承認する").click(); await run.settle(); await run.button("適用する").click(); await run.settle(); assert.match(textIn(run.document.getElementById("workspace-panel")), new RegExp(expected)); }
+    for (const [rollback, expected] of [[response({ apply_id: "apply-1", state: "rolled_back" }), "rolled_back"], [response({ error: "rollback_not_available" }, 409), "rollback_not_available"]]) { const run = await drive({ rollback }); const path = run.document.querySelectorAll("input").find(item => item.placeholder === "relative path"), text = run.document.querySelectorAll("textarea").find(item => item.placeholder === "complete replacement text"); path.value = "safe.txt"; text.value = "text"; let form = path; while (form.tagName !== "form") form = form.parentNode; await form.dispatch("submit"); await run.settle(); await run.button("選択を更新").click(); await run.settle(); await run.button("確認へ進む").click(); await run.settle(); await run.button("承認する").click(); await run.settle(); await run.button("適用する").click(); await run.settle(); await run.button("ロールバック").click(); await run.settle(); assert.match(textIn(run.document.getElementById("workspace-panel")), new RegExp(expected)); assert.equal(run.button("ロールバック"), undefined, "rollback remains unavailable after its first terminal attempt"); }
 });
 
 test("helper server routes the legacy analysis view unchanged at /analysis", async () => {
