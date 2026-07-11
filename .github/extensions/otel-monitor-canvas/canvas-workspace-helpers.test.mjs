@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 import {
     deriveWorkspaceGates,
@@ -11,6 +12,7 @@ import {
     workspaceSessionLabel,
     workspaceStatusPill,
 } from "./canvas-workspace-helpers.mjs";
+import { evidenceBrowserScript } from "./canvas-evidence-helpers.mjs";
 
 const bound = {
     session_id: "11111111-1111-7111-8111-111111111111",
@@ -73,4 +75,72 @@ test("helper server routes the legacy analysis view unchanged at /analysis", asy
     const extension = await readFile(new URL("./extension.mjs", import.meta.url), "utf8");
     assert.match(extension, /path === "\/analysis"/);
     assert.match(extension, /res\.end\(renderHelperHtml\(\{ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, extensionScope \}\)\)/);
+});
+
+test("workspace Evidence renders exact trace loading, independent forests, timeline, inspector, and unavailable states", () => {
+    const html = renderWorkspaceHtml({ monitorUrl: "http://127.0.0.1:4320", healthState: "ready", token: "synthetic-token" });
+    for (const expected of [
+        "/api/session-evidence/traces/", "agent-graph", "spans?limit=200", "Agent 実行グラフ",
+        "リンク済みタイムライン", "Inspector", "Session / unowned", "推定", "判定不能",
+        "none_detected", "undeterminable", "exact-linked trace がないため Agent graph は利用できません。",
+        "skill_name", "test_result", "review_result", "証拠利用不可",
+    ]) assert.ok(html.includes(expected), `missing ${expected}`);
+    assert.match(html, /evidenceTraceIdsClient/);
+    assert.match(html, /seen\.has\(id\)/);
+    assert.match(html, /seen\.has\(next\)/);
+    assert.match(html, /selectionGeneration/);
+    assert.match(html, /generation!==selectionGeneration/);
+    assert.match(html, /data-evidence-key/);
+    assert.match(html, /aria-current/);
+    assert.match(html, /\.focus\(\{preventScroll:true\}\)/);
+    assert.match(html, /選択したセッションを読み込んでいます/);
+    for (const field of ["start_time", "end_time", "request_model", "response_model", "tool_type", "mcp_server_name", "error_type"]) assert.ok(html.includes(field));
+    for (const terminal of ["session.shutdown", "session.task_complete", "SessionEnd", "Stop"]) assert.ok(html.includes(terminal));
+    assert.match(html, /item\.kind==="event"\?"Session · ":"OTel · "/);
+    assert.doesNotMatch(html, /event\.run_id.*own/i);
+    assert.doesNotMatch(html, /innerHTML/);
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    assert.ok(script);
+    assert.doesNotThrow(() => new vm.Script(script));
+});
+
+test("browser Evidence loader independently keeps graph errors and follows numeric span cursors", async () => {
+    const context = vm.createContext({ URL, Number, Set, Map, Date, encodeURIComponent, console });
+    new vm.Script(evidenceBrowserScript()).runInContext(context);
+    const calls = [];
+    const request = async (path) => {
+        calls.push(path);
+        if (path.endsWith("agent-graph")) return { status: 503, body: { error: "persistence_busy" } };
+        if (!path.includes("after=")) return { status: 200, body: { items: [{ span_id: "s", start_time: "2026-07-11T00:00:00Z", request_model: "gpt-5.6" }], next_cursor: 200 } };
+        return { status: 200, body: { items: [], next_cursor: null } };
+    };
+    const traces = await context.loadSessionEvidence({ runs: [{ trace_id: "trace" }] }, request);
+    assert.equal(traces[0].graphError.status, 503);
+    assert.equal(traces[0].spans.length, 1);
+    assert.equal(calls.at(-1), "/api/session-evidence/traces/trace/spans?limit=200&after=200");
+    const view = context.evidenceView({ events: [{ event_id: "e", occurred_at: "2026-07-11T00:00:01Z" }] }, traces);
+    assert.deepEqual(Array.from(view.timeline, (item) => item.id), ["s", "e"]);
+});
+
+test("browser forest preserves API agent_depth and uses separate displayDepth", () => {
+    const context = vm.createContext({ URL, Number, Set, Map, Date, BigInt, encodeURIComponent, console });
+    new vm.Script(evidenceBrowserScript()).runInContext(context);
+    const graphValue = { summary: { agent_presence: "detected" }, agents: [{ span_id: "root", caller_agent_span_id: null, agent_depth: 7 }], span_ownership: [], parallel_groups: [], graph_warnings: [] };
+    const view = context.evidenceView({}, [{ traceId: "t", graph: graphValue, spans: [] }]);
+    assert.equal(view.forests[0].agents[0].agent_depth, 7);
+    assert.equal(view.forests[0].agents[0].displayDepth, 0);
+    assert.notEqual(context.evidenceKey("span", { span_id: "same" }, "trace-a"), context.evidenceKey("span", { span_id: "same" }, "trace-b"));
+});
+
+test("actual Review gate helper does not apply stale selection after deferred load", async () => {
+    const context = vm.createContext({ URL, Number, Set, Map, Date, BigInt, encodeURIComponent, console });
+    new vm.Script(evidenceBrowserScript()).runInContext(context);
+    let resolveLoad;
+    let state = { sessionId: "A", generation: 1 };
+    const applied = [];
+    const pending = context.runReviewEvidenceLink("A", { event_id: "error" }, () => new Promise((resolve) => resolveLoad = resolve), () => state, (event) => applied.push(event.event_id));
+    state = { sessionId: "B", generation: 2 };
+    resolveLoad(true);
+    assert.equal(await pending, false);
+    assert.deepEqual(applied, []);
 });

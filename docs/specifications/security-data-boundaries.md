@@ -696,6 +696,15 @@ delete-now remain Issue #57 scope. Raw Session content must not enter Canvas
 actions, `session.send()` prompts, sanitized workspace reads, logs,
 repository-safe outputs, static artifacts, Issue/PR/docs, or CI artifacts.
 
+Issue #53 Canvas Evidence remains inside the sanitized boundary. Its
+extension-owned token-gated routes proxy only the existing Agent graph and
+paged spans APIs. Evidence adds no Session content route, raw span-detail
+route, or action DTO. It shows Session event metadata/content_state only and
+never follows the raw event-content route. `--sanitized-only` keeps hierarchy,
+timeline metadata, and inspector available without reconstructing prompt /
+response, tool arguments/results, Skill identity, or test/review facts. Proxy
+errors and logs never echo payload content or upstream exceptions.
+
 The installed `hook-forward --endpoint <loopback-url> --timeout-ms 250` mode is
 fail-open only with respect to the agent Hook decision: invalid input, network
 failure, and timeout still exit `0`, stdout/stderr remain empty, and the

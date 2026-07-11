@@ -29,6 +29,11 @@ Issue #51 adds a parallel local Session path inside the installed Local Monitor:
 Canvas/App SDK stream ----+
 Copilot-compatible Hook --+--> Session event ingest --> Session subsystem
 existing OTel projection -+--> exact-link enrichment --> Session workspace reads
+                                      |
+                                      +--> Canvas Evidence exact trace composition
+                                           |-- agent-graph (sole ownership model)
+                                           +-- all sanitized span pages
+Session sanitized events -----------------> timeline as Session / unowned
 ```
 
 This path does not replace or alter the OTLP receiver and existing monitor

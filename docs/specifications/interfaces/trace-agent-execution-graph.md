@@ -9,6 +9,9 @@ waterfall, inspector). It is the single Agent ownership model; Issue #53
 Canvas Evidence integration consumes this same API and adds no separate
 interpretation.
 
+The Canvas consumer contract is `canvas-session-evidence.md`. It consumes the
+graph verbatim and does not re-run or supplement ancestry/time inference.
+
 No new telemetry input, span schema change, or projection migration is
 introduced. The graph is derived on read from already-projected spans.
 

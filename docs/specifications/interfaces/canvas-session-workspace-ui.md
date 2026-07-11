@@ -12,10 +12,10 @@ The mandatory pre-UI design gate for this UI was captured and approved on
 2026-07-11; evidence lives in
 `docs/sprints/issue-52-canvas-workspace/design-gate/`.
 
-Out of scope (later children): Evidence tab content (Issue #53, after the
-Issue #49 agent execution graph), Improve (permanent-improvement diffs), and
-Compare (cross-session comparison). In #52 these tabs render fixed
-placeholder cards only.
+Issue #52 shipped Evidence, Improve, and Compare as fixed placeholder cards.
+Issue #53 replaces only the Evidence placeholder under the separate
+`canvas-session-evidence.md` contract. This document preserves the historical
+#52 shell/Review scope; Improve and Compare remain later children.
 
 ## Shell Composition
 
@@ -30,7 +30,9 @@ The workspace page is composed of:
 - a top bar with the Local Monitor connection state (existing health
   derivation: ready / not_ready / unreachable);
 - a session sidebar (below);
-- four tabs: Review (functional), Evidence, Improve, Compare (placeholders).
+- four tabs: Review and Evidence (functional after the Issue #53 amendment),
+  Improve and Compare (placeholders). Issue #52 historically shipped Evidence
+  as a placeholder; `canvas-session-evidence.md` defines its current behavior.
 
 The page uses the existing helper-page design tokens (host-variable-backed
 colors, card layout, Japanese UI copy). All monitor data reaches the page

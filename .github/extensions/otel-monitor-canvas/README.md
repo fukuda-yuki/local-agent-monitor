@@ -17,8 +17,8 @@ User-scoped copy:
 $COPILOT_HOME/extensions/otel-monitor-canvas/
 ```
 
-Copy this whole folder, including `extension.mjs`, `canvas-helpers.mjs`,
-`canvas-helpers.test.mjs`, `canvas.json`, this README, and `assets/preview.png`.
+Copy this whole folder, including `extension.mjs`, its Canvas/Session/Evidence
+helper and test modules, `canvas.json`, this README, and `assets/preview.png`.
 Do not create a second mirror folder in this repository.
 
 ## Prerequisites
@@ -73,6 +73,26 @@ Example local configuration:
   }
 }
 ```
+
+## Session Workspace Evidence
+
+The Canvas root page is the Session Workspace. Review shows exact binding,
+instruction state, deterministic quality gates, and human evaluation. Evidence
+uses only non-null trace IDs already recorded in the selected Session's runs.
+For each trace it loads the sanitized Agent graph and every sanitized spans
+page, keeps trace forests separate, and combines spans with Session events in a
+linked timeline. Session events remain unowned; Agent ownership comes only from
+the Local Monitor `span_ownership` graph response.
+
+Agent graph and spans are loaded independently. If either source fails, the
+other source remains visible with an explicit per-source error. Numeric span
+cursors are followed until the Monitor returns `next_cursor: null`.
+
+The inspector shows sanitized Agent/span/event fields. Missing typed Skill,
+test, or review metadata is unavailable and is never guessed from names or
+output. With no linked trace, Session events remain visible while the graph is
+unavailable. `--sanitized-only` preserves this metadata view. Evidence adds no
+raw content proxy and does not change Canvas actions.
 
 ## Reload
 

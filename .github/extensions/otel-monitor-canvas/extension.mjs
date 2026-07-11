@@ -50,6 +50,7 @@ import {
 } from "./canvas-helpers.mjs";
 import { renderWorkspaceHtml } from "./canvas-workspace-helpers.mjs";
 import { ensureSdkSessionCapture } from "./canvas-session-events.mjs";
+import { handleEvidenceProxy } from "./canvas-evidence-proxy.mjs";
 
 const DEFAULT_MONITOR_URL = "http://127.0.0.1:4320";
 const TRACE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$";
@@ -346,6 +347,18 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
         if (req.method === "GET" && path === "/analysis") {
             res.setHeader("Content-Type", "text/html; charset=utf-8");
             res.end(renderHelperHtml({ instanceId, monitorUrl, healthState, statusCode, healthBody, error, token, extensionScope }));
+            return;
+        }
+
+        if (path.startsWith("/api/session-evidence/traces/")) {
+            await handleEvidenceProxy(req, res, {
+                monitorUrl,
+                token,
+                fetchImpl: async (target) => {
+                    const { response, body } = await fetchTextWithTimeout(target);
+                    return { status: response.status, body };
+                },
+            });
             return;
         }
 

@@ -234,6 +234,20 @@ public class CanvasExtensionContractTests
     }
 
     [Fact]
+    public void Extension_DeclaresTokenGatedSanitizedSessionEvidenceProxies()
+    {
+        var script = ReadExtension();
+
+        Assert.Contains("/api/session-evidence/traces/", script);
+        Assert.Contains("agent-graph", script);
+        Assert.Contains("spans?limit=", script);
+        Assert.Contains("suppliedToken !== token", script);
+        Assert.Contains("handleEvidenceProxy", script);
+        Assert.Contains("next_cursor", script);
+        Assert.DoesNotContain("console.log", script);
+    }
+
+    [Fact]
     public void Extension_DeclaresSprint17RequestedAnalysisOptionsWithoutRawRunner()
     {
         var script = ReadExtension();
@@ -507,6 +521,18 @@ public class CanvasExtensionContractTests
 
         var workspaceHelpersUnitSmoke = RunNode(directory, "--test", "canvas-workspace-helpers.test.mjs");
         Assert.True(workspaceHelpersUnitSmoke.ExitCode == 0, $"node --test canvas-workspace-helpers.test.mjs failed: {workspaceHelpersUnitSmoke.Output}{workspaceHelpersUnitSmoke.Error}");
+
+        var evidenceHelpersSyntax = RunNode(directory, "--check", "canvas-evidence-helpers.mjs");
+        Assert.True(evidenceHelpersSyntax.ExitCode == 0, $"node --check canvas-evidence-helpers.mjs failed: {evidenceHelpersSyntax.Output}{evidenceHelpersSyntax.Error}");
+
+        var evidenceHelpersUnitSmoke = RunNode(directory, "--test", "canvas-evidence-helpers.test.mjs");
+        Assert.True(evidenceHelpersUnitSmoke.ExitCode == 0, $"node --test canvas-evidence-helpers.test.mjs failed: {evidenceHelpersUnitSmoke.Output}{evidenceHelpersUnitSmoke.Error}");
+
+        var evidenceProxySyntax = RunNode(directory, "--check", "canvas-evidence-proxy.mjs");
+        Assert.True(evidenceProxySyntax.ExitCode == 0, $"node --check canvas-evidence-proxy.mjs failed: {evidenceProxySyntax.Output}{evidenceProxySyntax.Error}");
+
+        var evidenceProxyUnitSmoke = RunNode(directory, "--test", "canvas-evidence-proxy.test.mjs");
+        Assert.True(evidenceProxyUnitSmoke.ExitCode == 0, $"node --test canvas-evidence-proxy.test.mjs failed: {evidenceProxyUnitSmoke.Output}{evidenceProxyUnitSmoke.Error}");
     }
 
     private static string ReadExtension()
@@ -516,7 +542,9 @@ public class CanvasExtensionContractTests
         var helpers = File.ReadAllText(Path.Combine(directory, "canvas-helpers.mjs"));
         var sessionEvents = File.ReadAllText(Path.Combine(directory, "canvas-session-events.mjs"));
         var workspaceHelpers = File.ReadAllText(Path.Combine(directory, "canvas-workspace-helpers.mjs"));
-        return extension + "\n" + helpers + "\n" + sessionEvents + "\n" + workspaceHelpers;
+        var evidenceHelpers = File.ReadAllText(Path.Combine(directory, "canvas-evidence-helpers.mjs"));
+        var evidenceProxy = File.ReadAllText(Path.Combine(directory, "canvas-evidence-proxy.mjs"));
+        return extension + "\n" + helpers + "\n" + sessionEvents + "\n" + workspaceHelpers + "\n" + evidenceHelpers + "\n" + evidenceProxy;
     }
 
     private static string ExtensionDirectory()
