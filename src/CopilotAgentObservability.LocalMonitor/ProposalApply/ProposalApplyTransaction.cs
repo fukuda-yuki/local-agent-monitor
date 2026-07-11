@@ -109,8 +109,17 @@ internal sealed class ProposalApplyTransaction
                 if (journal is null || journal.State is "committed" or "rolled_back") continue;
                 foreach (var file in journal.Files) _ = Resolve(file);
                 var directory = Path.GetDirectoryName(journalPath)!;
-                Restore(directory, journal.Files, onlyExistingSnapshots: true);
-                WriteJournal(journalPath, journal with { State = "restored" });
+                if (journal.State.StartsWith("rollback_", StringComparison.Ordinal))
+                {
+                    RequireValidSnapshots(directory, journal.Files);
+                    Restore(directory, journal.Files, onlyExistingSnapshots: false);
+                    WriteJournal(journalPath, journal with { State = "rolled_back" });
+                }
+                else
+                {
+                    Restore(directory, journal.Files, onlyExistingSnapshots: true);
+                    WriteJournal(journalPath, journal with { State = "restored" });
+                }
             }
             catch
             {
@@ -133,6 +142,7 @@ internal sealed class ProposalApplyTransaction
             journal = journal with { State = "rollback_prepared" };
             WriteJournal(journalPath, journal);
             fault?.Invoke("after_rollback_prepared");
+            RequireValidSnapshots(directory, journal.Files);
             for (var index = 0; index < journal.Files.Count; index++)
             {
                 var item = journal.Files[index];
@@ -151,9 +161,18 @@ internal sealed class ProposalApplyTransaction
         catch (ApplyTransactionCrashException) { throw; }
         catch
         {
-            Restore(directory, journal.Files, onlyExistingSnapshots: true);
-            WriteJournal(journalPath, journal with { State = "rolled_back" });
-            return ApplyTransactionResult.RolledBack;
+            try
+            {
+                RequireValidSnapshots(directory, journal.Files);
+                Restore(directory, journal.Files, onlyExistingSnapshots: false);
+                WriteJournal(journalPath, journal with { State = "rolled_back" });
+                return ApplyTransactionResult.RolledBack;
+            }
+            catch
+            {
+                recoveryBlocked = true;
+                return ApplyTransactionResult.Failed;
+            }
         }
     }
 
@@ -182,6 +201,15 @@ internal sealed class ProposalApplyTransaction
             var snapshot = Path.Combine(directory, item.SnapshotName);
             if (onlyExistingSnapshots && !File.Exists(snapshot)) continue;
             ReplaceFromSnapshot(Resolve(item), snapshot, Guid.Empty, 0);
+        }
+    }
+
+    private static void RequireValidSnapshots(string directory, IEnumerable<ApplyJournalFile> files)
+    {
+        foreach (var item in files)
+        {
+            var snapshot = Path.Combine(directory, item.SnapshotName);
+            if (!File.Exists(snapshot) || !string.Equals(HashFile(snapshot), item.OriginalSha256, StringComparison.Ordinal)) throw new ApplyRecoveryException();
         }
     }
 

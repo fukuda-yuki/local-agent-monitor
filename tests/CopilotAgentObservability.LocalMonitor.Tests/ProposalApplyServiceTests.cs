@@ -167,6 +167,37 @@ public sealed class ProposalApplyServiceTests
         Assert.DoesNotContain(replacement.Trim(), durableText, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Rollback_with_missing_or_corrupt_snapshot_fails_closed_and_blocks_restart(bool corruptSnapshot)
+    {
+        using var directory = new ApplyTestDirectory();
+        const string original = "rollback-snapshot-original-marker\n";
+        const string replacement = "rollback-snapshot-replacement-marker\n";
+        var target = Path.Combine(directory.Path, "snapshot-target.txt");
+        File.WriteAllText(target, original);
+        var store = CreateStore(directory, out var proposalId);
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var service = new ProposalApplyService([root], directory.RuntimePath, store);
+        var draft = ApproveSingleFile(service, proposalId, "snapshot-target.txt", replacement);
+        var (applyId, applyResult, _) = service.ApplyWithId(draft.DraftId);
+        Assert.Equal(ApplyTransactionResult.Applied, applyResult);
+
+        var snapshot = Path.Combine(directory.RuntimePath, applyId.ToString("N"), "0.snapshot");
+        if (corruptSnapshot) File.WriteAllText(snapshot, "corrupt snapshot\n");
+        else File.Delete(snapshot);
+
+        Assert.Equal(ApplyTransactionResult.Failed, service.Rollback(applyId));
+        Assert.Equal(replacement, File.ReadAllText(target));
+        Assert.NotEqual(ProposalApplyState.RolledBack, store.GetProposalApplyDraft(draft.DraftId)!.State);
+        Assert.Equal(0, AuditCount(directory.DatabasePath, null, "rolled_back"));
+        Assert.Empty(store.ListProposalApplyPending());
+        Assert.Single(store.ListAppliedProposalApplyLinkages());
+
+        Assert.Throws<ApplyRecoveryException>(() => _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store));
+    }
+
     [Fact]
     public void Apply_stale_two_file_preflight_records_one_non_reusable_failure_without_restart_duplicate()
     {
