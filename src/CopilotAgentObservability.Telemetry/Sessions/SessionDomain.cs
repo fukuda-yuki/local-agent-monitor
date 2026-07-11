@@ -326,6 +326,8 @@ public interface ISessionStore
     void ClearHumanEvaluation(Guid sessionId);
     void CreateObjectiveEvaluation(ObjectiveEvaluationReceipt receipt);
     IReadOnlyList<ObjectiveEvaluationReceipt> ListObjectiveEvaluations(Guid sessionId);
+    EffectReceipt RecordEffectComparison(EffectComparisonRequest request, DateTimeOffset recordedAt);
+    IReadOnlyList<EffectReceipt> ListEffectReceipts(Guid proposalId);
     SessionContentLookup? GetContent(Guid sessionId, Guid eventId);
     SessionRawRetentionState GetRawRetentionState(Guid sessionId);
     SessionProjectionState? GetProjectionState(string projectorKey);

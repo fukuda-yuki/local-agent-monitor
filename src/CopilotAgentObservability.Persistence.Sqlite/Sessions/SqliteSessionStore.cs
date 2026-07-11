@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 public sealed class SqliteSessionStore : ISessionStore
 {
-    private const int CurrentSchemaVersion = 8;
+    private const int CurrentSchemaVersion = 9;
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
 
@@ -40,7 +40,7 @@ public sealed class SqliteSessionStore : ISessionStore
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'session';";
         var existingVersion = versionCommand.ExecuteScalar();
-        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or CurrentSchemaVersion))
+        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or CurrentSchemaVersion))
         {
             throw new InvalidOperationException("Unsupported Session schema version.");
         }
@@ -57,6 +57,8 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = EffectComparisonSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"INSERT INTO schema_version(component,version) VALUES('session',{CurrentSchemaVersion});");
         }
         else if (Convert.ToInt32(existingVersion) == 1)
@@ -69,6 +71,8 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = EffectComparisonSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 2)
@@ -79,6 +83,8 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = EffectComparisonSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 3)
@@ -86,6 +92,8 @@ public sealed class SqliteSessionStore : ISessionStore
             command.CommandText = ProposalApplySchemaSql;
             command.ExecuteNonQuery();
             command.CommandText = ObjectiveEvaluationSchemaSql;
+            command.ExecuteNonQuery();
+            command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
@@ -95,6 +103,8 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = EffectComparisonSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 5)
@@ -102,6 +112,8 @@ public sealed class SqliteSessionStore : ISessionStore
             command.CommandText = ProposalApplyPendingSchemaSql;
             command.ExecuteNonQuery();
             command.CommandText = ObjectiveEvaluationSchemaSql;
+            command.ExecuteNonQuery();
+            command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
@@ -111,11 +123,19 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = EffectComparisonSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 7)
         {
             command.CommandText = ObjectiveEvaluationSchemaSql;
+            command.ExecuteNonQuery();
+            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
+        else if (Convert.ToInt32(existingVersion) == 8)
+        {
+            command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
@@ -731,6 +751,89 @@ public sealed class SqliteSessionStore : ISessionStore
         return rows;
     }
 
+    public EffectReceipt RecordEffectComparison(EffectComparisonRequest request, DateTimeOffset recordedAt)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ValidateComparisonRequest(request);
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction(deferred: false);
+
+        var proposal = ReadImprovementProposal(connection, request.ProposalId);
+        if (proposal is null || proposal.Revision != request.ProposalRevision || proposal.Status != ImprovementProposalStatus.Recommended)
+            throw new InvalidOperationException("Proposal revision is stale.");
+
+        var apply = ReadActiveApply(connection, transaction, request);
+        if (apply is null)
+            throw new InvalidOperationException("Application is not active.");
+
+        var facts = new List<SessionEffectFacts>();
+        var capturedEvidence = new List<(Guid SessionId, string Kind, string ReferenceId, string? RecordedAt)>();
+        foreach (var item in request.Sessions.Where(item => item.Classification is "pre" or "post"))
+        {
+            var session = ReadComparisonSession(connection, transaction, item.SessionId);
+            if (session is null || !IsComparable(session.Value))
+                throw new InvalidOperationException("Comparison evidence is stale.");
+            if (item.Classification == "pre" && session.Value.EndedAt > apply.Value.AppliedAt || item.Classification == "post" && session.Value.StartedAt < apply.Value.AppliedAt)
+                throw new ArgumentException("Session crosses application boundary.", nameof(request));
+
+            var evidence = new List<string>();
+            var qualityPass = true;
+            var severe = false;
+            using (var human = connection.CreateCommand())
+            {
+                human.Transaction = transaction;
+                human.CommandText = "SELECT verdict,recorded_at FROM session_human_evaluation WHERE session_id=$session;";
+                Add(human, "$session", Id(item.SessionId));
+                using var reader = human.ExecuteReader();
+                if (reader.Read())
+                {
+                    var id = "human:" + Id(item.SessionId);
+                    evidence.Add(id);
+                    capturedEvidence.Add((item.SessionId, "human", Id(item.SessionId), reader.GetString(1)));
+                    qualityPass &= reader.GetString(0) == "expected";
+                }
+            }
+            foreach (var objective in Objectives(connection, transaction, item.SessionId))
+            {
+                evidence.Add(Id(objective.ObjectiveEvaluationId));
+                capturedEvidence.Add((item.SessionId, "objective", Id(objective.ObjectiveEvaluationId), Timestamp(objective.RecordedAt)));
+                qualityPass &= objective.Result == ObjectiveResult.Pass;
+                severe |= objective.Result == ObjectiveResult.Fail && objective.Severity == ObjectiveSeverity.Severe;
+                foreach (var reference in objective.Evidence)
+                    capturedEvidence.Add((item.SessionId, "objective_" + reference.Kind, reference.ReferenceId, null));
+            }
+            var duration = session.Value.StartedAt is { } started && session.Value.EndedAt is { } ended ? (long?)(ended - started).TotalMilliseconds : null;
+            var tokens = SessionTokens(connection, transaction, item.SessionId);
+            facts.Add(new(item.SessionId, item.Classification, item.CaseKey, qualityPass, severe, duration, tokens, evidence));
+        }
+
+        var result = EffectVerdictEngine.Evaluate(new(true, facts.Where(item => item.Side == "pre").ToArray(), facts.Where(item => item.Side == "post").ToArray(), []));
+        var comparisonId = Guid.CreateVersion7();
+        var cohortRevision = NextCohortRevision(connection, transaction, request.ProposalId, request.ApplyId);
+        Execute(connection, transaction, "INSERT INTO effect_comparisons(comparison_id,cohort_revision,proposal_id,proposal_revision,apply_id,recorded_at) VALUES($id,$cohort,$proposal,$revision,$apply,$recorded);", ("$id", Id(comparisonId)), ("$cohort", cohortRevision), ("$proposal", Id(request.ProposalId)), ("$revision", request.ProposalRevision), ("$apply", Id(request.ApplyId)), ("$recorded", Timestamp(recordedAt)));
+        foreach (var (item, order) in request.Sessions.Select((value, index) => (value, index)))
+            Execute(connection, transaction, "INSERT INTO effect_comparison_sessions(comparison_id,session_id,classification,case_key,exclusion_reason,session_order) VALUES($comparison,$session,$classification,$case,$reason,$order);", ("$comparison", Id(comparisonId)), ("$session", Id(item.SessionId)), ("$classification", item.Classification), ("$case", item.CaseKey), ("$reason", item.ExclusionReason), ("$order", order));
+        foreach (var (evidence, order) in capturedEvidence.Select((value, index) => (value, index)))
+            Execute(connection, transaction, "INSERT INTO effect_comparison_evidence(comparison_id,evidence_order,session_id,kind,reference_id,recorded_at) VALUES($comparison,$order,$session,$kind,$reference,$recorded);", ("$comparison", Id(comparisonId)), ("$order", order), ("$session", Id(evidence.SessionId)), ("$kind", evidence.Kind), ("$reference", evidence.ReferenceId), ("$recorded", evidence.RecordedAt));
+        Execute(connection, transaction, "INSERT INTO effect_receipts(comparison_id,verdict,result_json,recorded_at) VALUES($comparison,$verdict,$result,$recorded);", ("$comparison", Id(comparisonId)), ("$verdict", VerdictText(result.Verdict)), ("$result", System.Text.Json.JsonSerializer.Serialize(result)), ("$recorded", Timestamp(recordedAt)));
+        if (result.Verdict == EffectVerdict.Improved)
+        {
+            var changed = Execute(connection, transaction, "UPDATE improvement_proposals SET status='verified',verified_at=$time,updated_at=$time WHERE proposal_id=$proposal AND revision=$revision AND status='recommended';", ("$time", Timestamp(recordedAt)), ("$proposal", Id(request.ProposalId)), ("$revision", request.ProposalRevision));
+            if (changed != 1) throw new InvalidOperationException("Proposal revision is stale.");
+        }
+        transaction.Commit();
+        return new(comparisonId, cohortRevision, request.ProposalId, request.ProposalRevision, request.ApplyId, result, "active", recordedAt);
+    }
+
+    public IReadOnlyList<EffectReceipt> ListEffectReceipts(Guid proposalId)
+    {
+        using var connection = Open(); using var command = connection.CreateCommand();
+        command.CommandText = "SELECT c.comparison_id,c.cohort_revision,c.proposal_id,c.proposal_revision,c.apply_id,r.result_json,c.recorded_at,CASE WHEN a.state='rolled_back' THEN 'invalidated' ELSE 'active' END FROM effect_comparisons c JOIN effect_receipts r ON r.comparison_id=c.comparison_id JOIN proposal_applies a ON a.apply_id=c.apply_id WHERE c.proposal_id=$proposal ORDER BY c.recorded_at,c.comparison_id;";
+        Add(command, "$proposal", Id(proposalId)); using var reader = command.ExecuteReader(); var receipts = new List<EffectReceipt>();
+        while (reader.Read()) receipts.Add(new(Guid.Parse(reader.GetString(0)), reader.GetInt32(1), Guid.Parse(reader.GetString(2)), reader.GetInt32(3), Guid.Parse(reader.GetString(4)), System.Text.Json.JsonSerializer.Deserialize<EffectVerdictResult>(reader.GetString(5))!, reader.GetString(7), ParseTimestamp(reader.GetString(6))));
+        return receipts;
+    }
+
     private static IReadOnlyList<ObjectiveEvaluationEvidence> Evidence(SqliteConnection connection, Guid id)
     {
         using var command = connection.CreateCommand(); command.CommandText = "SELECT kind,reference_id FROM objective_evaluation_evidence WHERE objective_evaluation_id=$id ORDER BY evidence_order;"; Add(command, "$id", Id(id)); using var reader = command.ExecuteReader(); var result = new List<ObjectiveEvaluationEvidence>(); while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(1))); return result;
@@ -1160,6 +1263,67 @@ public sealed class SqliteSessionStore : ISessionStore
         command.ExecuteNonQuery();
     }
 
+    private static void ValidateComparisonRequest(EffectComparisonRequest request)
+    {
+        if (request.ProposalId == Guid.Empty || request.ApplyId == Guid.Empty || request.ProposalRevision < 1 || request.Sessions is not { Count: > 0 }) throw new ArgumentException("Invalid comparison request.", nameof(request));
+        if (request.Sessions.Any(item => item is null || item.SessionId == Guid.Empty) || request.Sessions.Select(item => item.SessionId).Distinct().Count() != request.Sessions.Count) throw new ArgumentException("A session can have one classification.", nameof(request));
+        foreach (var item in request.Sessions)
+        {
+            if (item.Classification is "pre" or "post")
+            {
+                if (!ObjectiveEvaluationValidation.IdentifierValue(item.CaseKey, 200) || item.ExclusionReason is not null) throw new ArgumentException("Invalid included cohort session.", nameof(request));
+            }
+            else if (item.Classification == "excluded")
+            {
+                if (!string.IsNullOrEmpty(item.CaseKey) || item.ExclusionReason is not ("not_comparable" or "wrong_case" or "missing_evidence" or "overlaps_application" or "user_excluded")) throw new ArgumentException("Invalid excluded cohort session.", nameof(request));
+            }
+            else throw new ArgumentException("Invalid cohort classification.", nameof(request));
+        }
+    }
+
+    private static (DateTimeOffset AppliedAt, Guid DraftId)? ReadActiveApply(SqliteConnection connection, SqliteTransaction transaction, EffectComparisonRequest request)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction;
+        command.CommandText = "SELECT a.created_at,a.draft_id FROM proposal_applies a JOIN proposal_apply_drafts d ON d.draft_id=a.draft_id WHERE a.apply_id=$apply AND d.proposal_id=$proposal AND a.proposal_revision=$revision AND a.state='applied' AND NOT EXISTS(SELECT 1 FROM proposal_apply_pending p WHERE p.apply_id=a.apply_id AND p.operation_kind='rollback');";
+        Add(command, "$apply", Id(request.ApplyId)); Add(command, "$proposal", Id(request.ProposalId)); Add(command, "$revision", request.ProposalRevision);
+        using var reader = command.ExecuteReader(); return reader.Read() ? (ParseTimestamp(reader.GetString(0)), Guid.Parse(reader.GetString(1))) : null;
+    }
+
+    private static (ObservedSessionStatus Status, SessionCompleteness Completeness, DateTimeOffset? StartedAt, DateTimeOffset? EndedAt, bool Exact)? ReadComparisonSession(SqliteConnection connection, SqliteTransaction transaction, Guid sessionId)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction;
+        command.CommandText = "SELECT status,completeness,started_at,ended_at,EXISTS(SELECT 1 FROM session_native_ids n WHERE n.session_id=s.session_id AND n.binding_kind='native') FROM sessions s WHERE session_id=$session;";
+        Add(command, "$session", Id(sessionId)); using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+        return (SessionWire.ParseStatus(reader.GetString(0)), SessionWire.ParseCompleteness(reader.GetString(1)), reader.IsDBNull(2) ? null : ParseTimestamp(reader.GetString(2)), reader.IsDBNull(3) ? null : ParseTimestamp(reader.GetString(3)), reader.GetInt32(4) != 0);
+    }
+
+    private static bool IsComparable((ObservedSessionStatus Status, SessionCompleteness Completeness, DateTimeOffset? StartedAt, DateTimeOffset? EndedAt, bool Exact) session) =>
+        session.Exact && session.Completeness == SessionCompleteness.Full && session.Status is ObservedSessionStatus.Completed or ObservedSessionStatus.Failed && session.StartedAt is not null && session.EndedAt is not null;
+
+    private static IReadOnlyList<ObjectiveEvaluationReceipt> Objectives(SqliteConnection connection, SqliteTransaction transaction, Guid sessionId)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction;
+        command.CommandText = "SELECT objective_evaluation_id,session_id,run_id,trace_id,result,severity,evaluator_id,evaluator_version,criterion_id,case_key,recorded_at FROM objective_evaluations WHERE session_id=$session ORDER BY recorded_at,objective_evaluation_id;";
+        Add(command, "$session", Id(sessionId)); using var reader = command.ExecuteReader(); var result = new List<ObjectiveEvaluationReceipt>();
+        while (reader.Read()) result.Add(new(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)), reader.GetString(3), reader.GetString(4) == "pass" ? ObjectiveResult.Pass : ObjectiveResult.Fail, reader.GetString(5) == "normal" ? ObjectiveSeverity.Normal : ObjectiveSeverity.Severe, reader.GetString(6), reader.GetString(7), reader.GetString(8), reader.GetString(9), Evidence(connection, Guid.Parse(reader.GetString(0))), ParseTimestamp(reader.GetString(10))));
+        return result;
+    }
+
+    private static long? SessionTokens(SqliteConnection connection, SqliteTransaction transaction, Guid sessionId)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT total_tokens FROM session_runs WHERE session_id=$session;"; Add(command, "$session", Id(sessionId)); using var reader = command.ExecuteReader(); long total = 0; var found = false;
+        while (reader.Read()) { found = true; if (reader.IsDBNull(0)) return null; total += reader.GetInt64(0); }
+        return found ? total : null;
+    }
+
+    private static int NextCohortRevision(SqliteConnection connection, SqliteTransaction transaction, Guid proposalId, Guid applyId)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT COALESCE(MAX(cohort_revision),0)+1 FROM effect_comparisons WHERE proposal_id=$proposal AND apply_id=$apply;"; Add(command, "$proposal", Id(proposalId)); Add(command, "$apply", Id(applyId)); return Convert.ToInt32(command.ExecuteScalar());
+    }
+
+    private static string VerdictText(EffectVerdict verdict) => verdict switch { EffectVerdict.Improved => "improved", EffectVerdict.NoChange => "no_change", EffectVerdict.Regressed => "regressed", _ => "insufficient_evidence" };
+
     private const string SchemaSql = """
         CREATE TABLE IF NOT EXISTS sessions (
             session_id TEXT PRIMARY KEY,
@@ -1273,6 +1437,50 @@ public sealed class SqliteSessionStore : ISessionStore
             reference_id TEXT NOT NULL,
             PRIMARY KEY (objective_evaluation_id,evidence_order),
             FOREIGN KEY (objective_evaluation_id) REFERENCES objective_evaluations(objective_evaluation_id) ON DELETE RESTRICT
+        );
+        """;
+
+    private const string EffectComparisonSchemaSql = """
+        CREATE TABLE IF NOT EXISTS effect_comparisons (
+            comparison_id TEXT PRIMARY KEY,
+            cohort_revision INTEGER NOT NULL CHECK (cohort_revision > 0),
+            proposal_id TEXT NOT NULL,
+            proposal_revision INTEGER NOT NULL CHECK (proposal_revision > 0),
+            apply_id TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            UNIQUE(proposal_id,apply_id,cohort_revision),
+            FOREIGN KEY (proposal_id) REFERENCES improvement_proposals(proposal_id) ON DELETE RESTRICT,
+            FOREIGN KEY (apply_id) REFERENCES proposal_applies(apply_id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS effect_comparison_sessions (
+            comparison_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            classification TEXT NOT NULL CHECK (classification IN ('pre','post','excluded')),
+            case_key TEXT NOT NULL,
+            exclusion_reason TEXT NULL CHECK (exclusion_reason IS NULL OR exclusion_reason IN ('not_comparable','wrong_case','missing_evidence','overlaps_application','user_excluded')),
+            session_order INTEGER NOT NULL CHECK (session_order >= 0),
+            PRIMARY KEY(comparison_id,session_id),
+            UNIQUE(comparison_id,session_order),
+            FOREIGN KEY(comparison_id) REFERENCES effect_comparisons(comparison_id) ON DELETE RESTRICT,
+            FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS effect_comparison_evidence (
+            comparison_id TEXT NOT NULL,
+            evidence_order INTEGER NOT NULL CHECK (evidence_order >= 0),
+            session_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            reference_id TEXT NOT NULL,
+            recorded_at TEXT NULL,
+            PRIMARY KEY(comparison_id,evidence_order),
+            FOREIGN KEY(comparison_id) REFERENCES effect_comparisons(comparison_id) ON DELETE RESTRICT,
+            FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS effect_receipts (
+            comparison_id TEXT PRIMARY KEY,
+            verdict TEXT NOT NULL CHECK (verdict IN ('improved','no_change','regressed','insufficient_evidence')),
+            result_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY(comparison_id) REFERENCES effect_comparisons(comparison_id) ON DELETE RESTRICT
         );
         """;
 

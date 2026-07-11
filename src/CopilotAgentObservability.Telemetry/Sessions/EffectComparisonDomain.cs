@@ -6,6 +6,18 @@ public enum ObjectiveResult { Pass, Fail }
 public enum ObjectiveSeverity { Normal, Severe }
 public enum EffectVerdict { Improved, NoChange, Regressed, InsufficientEvidence }
 
+public sealed record EffectCohortSession(
+    Guid SessionId, string Classification, string CaseKey, string? ExclusionReason);
+
+public sealed record EffectComparisonRequest(
+    Guid ProposalId, int ProposalRevision, Guid ApplyId,
+    IReadOnlyList<EffectCohortSession> Sessions);
+
+public sealed record EffectReceipt(
+    Guid ComparisonId, int CohortRevision, Guid ProposalId,
+    int ProposalRevision, Guid ApplyId, EffectVerdictResult Result,
+    string VerificationState, DateTimeOffset RecordedAt);
+
 public sealed record SessionEffectFacts(
     Guid SessionId, string Side, string CaseKey, bool QualityPass,
     bool SevereFailure, long? DurationMs, long? TotalTokens,
