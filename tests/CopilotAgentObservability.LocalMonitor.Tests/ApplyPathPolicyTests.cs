@@ -35,6 +35,69 @@ public sealed class ApplyPathPolicyTests
         Assert.Equal("target_not_regular_file", Assert.Throws<ApplyPathException>(() => ApplyPathPolicy.Resolve(root, "folder")).Code);
     }
 
+    [Theory]
+    [InlineData("root")]
+    [InlineData("ancestor")]
+    [InlineData("target")]
+    public void Resolve_rejects_actual_reparse_bearing_root_ancestor_and_target(string location)
+    {
+        using var directory = new ApplyTestDirectory();
+        var external = Path.Combine(directory.Path, "external");
+        Directory.CreateDirectory(external);
+        File.WriteAllText(Path.Combine(external, "file.txt"), "content");
+
+        string rootPath;
+        string relativePath;
+        if (location == "root")
+        {
+            rootPath = Path.Combine(directory.Path, "root-link");
+            CreateDirectoryLinkOrSkip(rootPath, external);
+            relativePath = "file.txt";
+        }
+        else
+        {
+            rootPath = Path.Combine(directory.Path, "root");
+            Directory.CreateDirectory(rootPath);
+            if (location == "ancestor")
+            {
+                CreateDirectoryLinkOrSkip(Path.Combine(rootPath, "linked"), external);
+                relativePath = "linked/file.txt";
+            }
+            else
+            {
+                CreateFileLinkOrSkip(Path.Combine(rootPath, "file.txt"), Path.Combine(external, "file.txt"));
+                relativePath = "file.txt";
+            }
+        }
+
+        if (location == "root")
+        {
+            Assert.Equal("invalid_apply_root", Assert.Throws<ApplyPathException>(() => ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath)).Code);
+            return;
+        }
+
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath);
+        Assert.Equal("unsafe_reparse_path", Assert.Throws<ApplyPathException>(() => ApplyPathPolicy.Resolve(root, relativePath)).Code);
+    }
+
+    private static void CreateDirectoryLinkOrSkip(string path, string target)
+    {
+        try { _ = Directory.CreateSymbolicLink(path, target); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip($"Cannot create directory reparse fixture: {exception.GetType().Name}");
+        }
+    }
+
+    private static void CreateFileLinkOrSkip(string path, string target)
+    {
+        try { _ = File.CreateSymbolicLink(path, target); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip($"Cannot create file reparse fixture: {exception.GetType().Name}");
+        }
+    }
+
     private sealed class ApplyTestDirectory : IDisposable
     {
         public ApplyTestDirectory()

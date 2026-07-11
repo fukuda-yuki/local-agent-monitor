@@ -54,6 +54,25 @@ public sealed class ProposalApplyTransactionTests
     }
 
     [Fact]
+    public void Staging_failure_before_atomic_replace_does_not_overwrite_external_edit()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "one");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var transaction = new ProposalApplyTransaction(directory.RuntimePath, point =>
+        {
+            if (point == "after_staged_replacement:0")
+            {
+                File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "external");
+                throw new IOException("synthetic");
+            }
+        });
+
+        Assert.Equal(ApplyTransactionResult.Failed, transaction.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(root, "one.txt", "one", "ONE")]));
+        Assert.Equal("external", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
+    }
+
+    [Fact]
     public void Rollback_requires_post_apply_hash_and_is_available_once()
     {
         using var directory = new ApplyTestDirectory();
@@ -71,6 +90,7 @@ public sealed class ProposalApplyTransactionTests
     }
 
     [Theory]
+    [InlineData("after_snapshots")]
     [InlineData("after_prepared_journal")]
     [InlineData("after_atomic_replace:0")]
     [InlineData("after_atomic_replace:1")]
@@ -84,31 +104,157 @@ public sealed class ProposalApplyTransactionTests
         var crashing = new ProposalApplyTransaction(directory.RuntimePath, [root], point => { if (point == boundary) throw new ApplyTransactionCrashException(); });
 
         Assert.Throws<ApplyTransactionCrashException>(() => crashing.Apply(id, [ApplyTarget.Create(root, "one.txt", "one", "ONE"), ApplyTarget.Create(root, "two.txt", "two", "TWO")]));
-        var restarted = new ProposalApplyTransaction(directory.RuntimePath, [ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)]);
-        restarted.RecoverUncommitted();
+        _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath);
 
         Assert.Equal("one", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
         Assert.Equal("two", File.ReadAllText(Path.Combine(directory.Path, "two.txt")));
     }
 
     [Fact]
-    public void Restart_with_changed_root_leaves_target_untouched_and_blocks_mutation()
+    public void Snapshot_failure_leaves_all_originals()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "one");
+        File.WriteAllText(Path.Combine(directory.Path, "two.txt"), "two");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var transaction = new ProposalApplyTransaction(directory.RuntimePath, point => { if (point == "after_snapshot:1") throw new IOException("synthetic"); });
+
+        Assert.Equal(ApplyTransactionResult.Failed, transaction.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(root, "one.txt", "one", "ONE"), ApplyTarget.Create(root, "two.txt", "two", "TWO")]));
+        Assert.Equal("one", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
+        Assert.Equal("two", File.ReadAllText(Path.Combine(directory.Path, "two.txt")));
+    }
+
+    [Fact]
+    public void Restart_after_commit_marker_keeps_all_replacements()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "one");
+        File.WriteAllText(Path.Combine(directory.Path, "two.txt"), "two");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var crashing = new ProposalApplyTransaction(directory.RuntimePath, [root], point => { if (point == "after_committed_journal") throw new ApplyTransactionCrashException(); });
+
+        Assert.Throws<ApplyTransactionCrashException>(() => crashing.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(root, "one.txt", "one", "ONE"), ApplyTarget.Create(root, "two.txt", "two", "TWO")]));
+        _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath);
+
+        Assert.Equal("ONE", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
+        Assert.Equal("TWO", File.ReadAllText(Path.Combine(directory.Path, "two.txt")));
+    }
+
+    [Fact]
+    public void Restart_with_changed_root_fails_closed_without_writing_partial_transaction()
     {
         using var directory = new ApplyTestDirectory();
         var replacementRoot = Path.Combine(directory.Path, "other");
         Directory.CreateDirectory(replacementRoot);
         File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "one");
+        File.WriteAllText(Path.Combine(directory.Path, "two.txt"), "two");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var crashing = new ProposalApplyTransaction(directory.RuntimePath, [root], point => { if (point == "after_atomic_replace:0") throw new ApplyTransactionCrashException(); });
+        Assert.Throws<ApplyTransactionCrashException>(() => crashing.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(root, "one.txt", "one", "ONE"), ApplyTarget.Create(root, "two.txt", "two", "TWO")]));
+
+        Assert.Throws<ApplyRecoveryException>(() => _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, replacementRoot)], directory.RuntimePath));
+        Assert.Equal("ONE", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
+        Assert.Equal("two", File.ReadAllText(Path.Combine(directory.Path, "two.txt")));
+        Assert.Single(Directory.EnumerateFiles(directory.RuntimePath, "journal.json", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public void Restart_with_omitted_root_fails_closed_without_writing_partial_transaction()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "one.txt"), "one");
+        File.WriteAllText(Path.Combine(directory.Path, "two.txt"), "two");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var crashing = new ProposalApplyTransaction(directory.RuntimePath, [root], point => { if (point == "after_atomic_replace:0") throw new ApplyTransactionCrashException(); });
+
+        Assert.Throws<ApplyTransactionCrashException>(() => crashing.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(root, "one.txt", "one", "ONE"), ApplyTarget.Create(root, "two.txt", "two", "TWO")]));
+        Assert.Throws<ApplyRecoveryException>(() => _ = new ProposalApplyService([], directory.RuntimePath));
+
+        Assert.Equal("ONE", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
+        Assert.Equal("two", File.ReadAllText(Path.Combine(directory.Path, "two.txt")));
+        Assert.Single(Directory.EnumerateFiles(directory.RuntimePath, "journal.json", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public void Unresolved_recovery_blocks_rollback_without_writing_committed_apply()
+    {
+        using var directory = new ApplyTestDirectory();
+        var oldRootPath = Path.Combine(directory.Path, "old");
+        var currentRootPath = Path.Combine(directory.Path, "current");
+        Directory.CreateDirectory(oldRootPath);
+        Directory.CreateDirectory(currentRootPath);
+        File.WriteAllText(Path.Combine(oldRootPath, "one.txt"), "one");
+        File.WriteAllText(Path.Combine(oldRootPath, "committed.txt"), "base");
+        File.WriteAllText(Path.Combine(currentRootPath, "two.txt"), "two");
+        var oldRoot = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, oldRootPath);
+        var currentRoot = ConfiguredApplyRoot.Create(ApplyRootKind.UserConfig, currentRootPath);
+        var committed = new ProposalApplyTransaction(directory.RuntimePath, [oldRoot]);
+        var committedId = Guid.CreateVersion7();
+        Assert.Equal(ApplyTransactionResult.Applied, committed.Apply(committedId, [ApplyTarget.Create(oldRoot, "committed.txt", "base", "POST")]));
+        var crashing = new ProposalApplyTransaction(directory.RuntimePath, [oldRoot], point => { if (point == "after_atomic_replace:0") throw new ApplyTransactionCrashException(); });
+        Assert.Throws<ApplyTransactionCrashException>(() => crashing.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(oldRoot, "one.txt", "one", "ONE")]));
+
+        var restarted = new ProposalApplyTransaction(directory.RuntimePath, [currentRoot]);
+        Assert.Throws<ApplyRecoveryException>(() => restarted.RecoverUncommitted());
+
+        Assert.Equal(ApplyTransactionResult.Failed, restarted.Rollback(committedId));
+        Assert.Equal("POST", File.ReadAllText(Path.Combine(oldRootPath, "committed.txt")));
+    }
+
+    [Fact]
+    public void Apply_revalidation_rejects_actual_reparse_ancestor_without_writing_link_target()
+    {
+        using var directory = new ApplyTestDirectory();
+        var nested = Path.Combine(directory.Path, "nested");
+        var external = Path.Combine(directory.Path, "external");
+        Directory.CreateDirectory(nested);
+        Directory.CreateDirectory(external);
+        File.WriteAllText(Path.Combine(nested, "one.txt"), "one");
+        File.WriteAllText(Path.Combine(external, "one.txt"), "external");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var target = ApplyTarget.Create(root, "nested/one.txt", "one", "ONE");
+        Directory.Delete(nested, true);
+        CreateDirectoryLinkOrSkip(nested, external);
+
+        Assert.Equal(ApplyTransactionResult.Stale, new ProposalApplyTransaction(directory.RuntimePath).Apply(Guid.CreateVersion7(), [target]));
+        Assert.Equal("external", File.ReadAllText(Path.Combine(external, "one.txt")));
+    }
+
+    [Fact]
+    public void Rollback_rejects_actual_reparse_target_without_writing_link_target()
+    {
+        using var directory = new ApplyTestDirectory();
+        var targetPath = Path.Combine(directory.Path, "one.txt");
+        var externalPath = Path.Combine(directory.Path, "external.txt");
+        File.WriteAllText(targetPath, "one");
+        File.WriteAllText(externalPath, "external");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var committed = new ProposalApplyTransaction(directory.RuntimePath, [root]);
+        var committedId = Guid.CreateVersion7();
+        Assert.Equal(ApplyTransactionResult.Applied, committed.Apply(committedId, [ApplyTarget.Create(root, "one.txt", "one", "ONE")]));
+        File.Delete(targetPath);
+        CreateFileLinkOrSkip(targetPath, externalPath);
+
+        Assert.Equal(ApplyTransactionResult.RollbackStale, committed.Rollback(committedId));
+        Assert.Equal("external", File.ReadAllText(externalPath));
+    }
+
+    [Fact]
+    public void Recovery_rejects_actual_reparse_target_without_writing_link_target()
+    {
+        using var directory = new ApplyTestDirectory();
+        var targetPath = Path.Combine(directory.Path, "one.txt");
+        var externalPath = Path.Combine(directory.Path, "external.txt");
+        File.WriteAllText(targetPath, "one");
+        File.WriteAllText(externalPath, "external");
         var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
         var crashing = new ProposalApplyTransaction(directory.RuntimePath, [root], point => { if (point == "after_atomic_replace:0") throw new ApplyTransactionCrashException(); });
         Assert.Throws<ApplyTransactionCrashException>(() => crashing.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(root, "one.txt", "one", "ONE")]));
+        File.Delete(targetPath);
+        CreateFileLinkOrSkip(targetPath, externalPath);
 
-        var restarted = new ProposalApplyTransaction(directory.RuntimePath, [ConfiguredApplyRoot.Create(ApplyRootKind.Repository, replacementRoot)]);
-
-        restarted.RecoverUncommitted();
-        Assert.Equal("ONE", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
-        File.WriteAllText(Path.Combine(replacementRoot, "other.txt"), "other");
-        var changedRoot = restarted.ConfiguredRoots.Single();
-        Assert.Equal(ApplyTransactionResult.Failed, restarted.Apply(Guid.CreateVersion7(), [ApplyTarget.Create(changedRoot, "other.txt", "other", "OTHER")]));
+        Assert.Throws<ApplyRecoveryException>(() => _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath));
+        Assert.Equal("external", File.ReadAllText(externalPath));
     }
 
     [Theory]
@@ -126,8 +272,7 @@ public sealed class ProposalApplyTransactionTests
         Assert.Equal(ApplyTransactionResult.Applied, transaction.Apply(id, [ApplyTarget.Create(root, "one.txt", "one", "ONE"), ApplyTarget.Create(root, "two.txt", "two", "TWO")]));
 
         Assert.Throws<ApplyTransactionCrashException>(() => transaction.Rollback(id));
-        var restarted = new ProposalApplyTransaction(directory.RuntimePath, [ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)]);
-        restarted.RecoverUncommitted();
+        _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath);
 
         Assert.Equal("one", File.ReadAllText(Path.Combine(directory.Path, "one.txt")));
         Assert.Equal("two", File.ReadAllText(Path.Combine(directory.Path, "two.txt")));
@@ -145,5 +290,23 @@ public sealed class ProposalApplyTransactionTests
         public string Path { get; }
         public string RuntimePath { get; }
         public void Dispose() => Directory.Delete(Path, true);
+    }
+
+    private static void CreateDirectoryLinkOrSkip(string path, string target)
+    {
+        try { _ = Directory.CreateSymbolicLink(path, target); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip($"Cannot create directory reparse fixture: {exception.GetType().Name}");
+        }
+    }
+
+    private static void CreateFileLinkOrSkip(string path, string target)
+    {
+        try { _ = File.CreateSymbolicLink(path, target); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip($"Cannot create file reparse fixture: {exception.GetType().Name}");
+        }
     }
 }

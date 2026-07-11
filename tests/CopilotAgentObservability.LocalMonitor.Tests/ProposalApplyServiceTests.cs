@@ -82,6 +82,23 @@ public sealed class ProposalApplyServiceTests
         Assert.False(selected.IsApproved);
     }
 
+    [Fact]
+    public void Draft_rejects_actual_reparse_target()
+    {
+        using var directory = new ApplyTestDirectory();
+        var external = Path.Combine(directory.Path, "external.txt");
+        File.WriteAllText(external, "content\n");
+        try { _ = File.CreateSymbolicLink(Path.Combine(directory.Path, "linked.txt"), external); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip($"Cannot create file reparse fixture: {exception.GetType().Name}");
+        }
+
+        var service = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath);
+
+        Assert.Equal("unsafe_reparse_path", Assert.Throws<ApplyPathException>(() => service.CreateDraft(Guid.CreateVersion7(), service.Roots.Single().RootId, [new ProposalApplyFileInput("linked.txt", "changed\n")])).Code);
+    }
+
     private sealed class ApplyTestDirectory : IDisposable
     {
         public ApplyTestDirectory()

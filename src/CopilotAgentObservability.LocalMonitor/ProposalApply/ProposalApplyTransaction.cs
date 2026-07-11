@@ -6,6 +6,7 @@ namespace CopilotAgentObservability.LocalMonitor.ProposalApply;
 
 internal enum ApplyTransactionResult { Applied, Stale, Failed, RolledBack, RollbackStale, RollbackUnavailable }
 internal sealed class ApplyTransactionCrashException : Exception { }
+internal sealed class ApplyRecoveryException : Exception { }
 
 internal sealed record ApplyTarget(ConfiguredApplyRoot Root, string RelativePath, string OriginalText, string ReplacementText, string BaseSha256, string ReplacementSha256)
 {
@@ -53,12 +54,14 @@ internal sealed class ProposalApplyTransaction
         var replacementStarted = false;
         try
         {
-            foreach (var item in journal.Files)
+            for (var index = 0; index < journal.Files.Count; index++)
             {
+                var item = journal.Files[index];
                 var path = Resolve(item);
                 var snapshot = Path.Combine(directory, item.SnapshotName);
                 File.Copy(path, snapshot, true);
                 Flush(snapshot);
+                fault?.Invoke($"after_snapshot:{index}");
             }
             fault?.Invoke("after_snapshots");
             journal = journal with { State = "prepared" };
@@ -69,8 +72,7 @@ internal sealed class ProposalApplyTransaction
                 fault?.Invoke($"before_replace:{index}");
                 var path = Resolve(journal.Files[index]);
                 if (!string.Equals(HashFile(path), journal.Files[index].OriginalSha256, StringComparison.Ordinal)) throw new IOException("stale_target");
-                replacementStarted = true;
-                Replace(path, targets[index].ReplacementText, applyId, index);
+                Replace(path, targets[index].ReplacementText, applyId, index, () => replacementStarted = true);
                 fault?.Invoke($"after_atomic_replace:{index}");
                 journal = journal with { State = $"replaced:{index}" };
                 WriteJournal(journalPath, journal);
@@ -78,6 +80,7 @@ internal sealed class ProposalApplyTransaction
             }
             journal = journal with { State = "committed" };
             WriteJournal(journalPath, journal);
+            fault?.Invoke("after_committed_journal");
             return ApplyTransactionResult.Applied;
         }
         catch (ApplyTransactionCrashException) { throw; }
@@ -94,23 +97,26 @@ internal sealed class ProposalApplyTransaction
         if (!Directory.Exists(runtimePath)) return;
         foreach (var journalPath in Directory.EnumerateFiles(runtimePath, "journal.json", SearchOption.AllDirectories))
         {
-            var journal = ReadJournal(journalPath);
-            if (journal is null || journal.State is "committed" or "rolled_back") continue;
-            var directory = Path.GetDirectoryName(journalPath)!;
             try
             {
+                var journal = ReadJournal(journalPath);
+                if (journal is null || journal.State is "committed" or "rolled_back") continue;
+                foreach (var file in journal.Files) _ = Resolve(file);
+                var directory = Path.GetDirectoryName(journalPath)!;
                 Restore(directory, journal.Files, onlyExistingSnapshots: true);
                 WriteJournal(journalPath, journal with { State = "restored" });
             }
-            catch (ApplyPathException)
+            catch
             {
                 recoveryBlocked = true;
+                throw new ApplyRecoveryException();
             }
         }
     }
 
     public ApplyTransactionResult Rollback(Guid applyId)
     {
+        if (recoveryBlocked) return ApplyTransactionResult.Failed;
         var journalPath = Path.Combine(runtimePath, applyId.ToString("N"), "journal.json");
         var journal = File.Exists(journalPath) ? ReadJournal(journalPath) : null;
         if (journal is null || journal.State != "committed") return ApplyTransactionResult.RollbackUnavailable;
@@ -203,12 +209,14 @@ internal sealed class ProposalApplyTransaction
         WriteRootMap(mapPath, saved);
     }
 
-    private static void Replace(string path, string content, Guid applyId, int index)
+    private void Replace(string path, string content, Guid applyId, int index, Action replacementCompleted)
     {
         var staged = Path.Combine(Path.GetDirectoryName(path)!, $".{applyId:N}.{index}.tmp");
         File.WriteAllText(staged, content);
         Flush(staged);
+        fault?.Invoke($"after_staged_replacement:{index}");
         File.Move(staged, path, true);
+        replacementCompleted();
         Flush(path);
     }
 
