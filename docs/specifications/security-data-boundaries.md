@@ -705,6 +705,18 @@ timeline metadata, and inspector available without reconstructing prompt /
 response, tool arguments/results, Skill identity, or test/review facts. Proxy
 errors and logs never echo payload content or upstream exceptions.
 
+Issue #54 Canvas Improve stores only local-runtime sanitized proposal metadata:
+opaque target label, bounded rationale/effect/risk text, lifecycle timestamps,
+and opaque Session/Run/Event/Trace/Evidence references. It must not store or
+return raw event content, model response text, source fragments, filesystem
+paths, credentials, tokens, PII, tool arguments, or tool results. Its writes
+are loopback-only, same-origin, CSRF-protected Local Monitor operations; Canvas
+helper proxies remain per-launch-token-gated and no-store. Proposal data never
+enters Canvas actions, `session.send()` prompts, logs, committed/repository-safe
+files, CI artifacts, static artifacts, Issue/PR text, or docs. Direct apply,
+snapshots, and rollback require the Issue #55 boundary and are not authorized
+by this proposal interface.
+
 The installed `hook-forward --endpoint <loopback-url> --timeout-ms 250` mode is
 fail-open only with respect to the agent Hook decision: invalid input, network
 failure, and timeout still exit `0`, stdout/stderr remain empty, and the

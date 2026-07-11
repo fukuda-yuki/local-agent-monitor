@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -112,6 +113,56 @@ public class CanvasExtensionContractTests
         {
             Assert.Contains($"name: \"{action}\"", script);
         }
+    }
+
+    [Fact]
+    public void Extension_DeclaresTokenGatedProposalProxiesWithoutCanvasActionOrAnalysisExpansion()
+    {
+        var script = ReadExtension();
+
+        Assert.Contains("/api/session-workspace/improvement-proposals", script);
+        Assert.Contains("x-monitor-csrf\": \"local-monitor", script);
+        Assert.Contains("readRequestBodyAtMost", script);
+        Assert.Contains("1048576", script);
+        Assert.Contains("Cache-Control\", \"no-store", script);
+        Assert.Contains("suppliedToken !== token", script);
+        Assert.Contains("isProposalHelperPath(path)", script);
+        Assert.Contains("invalid_proposal_id", script);
+        Assert.DoesNotContain("name: \"create_proposal\"", script);
+        Assert.DoesNotContain("name: \"promote_proposal\"", script);
+        Assert.DoesNotContain("session.send({ prompt: payload", script);
+        Assert.DoesNotContain("/analysis/runs", script);
+        Assert.DoesNotContain("console.log", script);
+    }
+
+    [Fact]
+    public void CanvasProposalLifecycle_RemainsMetadataOnlyAndNeverEnablesApply()
+    {
+        var extension = ReadExtension();
+        var workspace = File.ReadAllText(Path.Combine(ExtensionDirectory(), "canvas-workspace-helpers.mjs"));
+
+        var actionNames = Regex.Matches(extension, "(?m)^\\s*name: \\\"(?<name>[^\\\"]+)\\\"")
+            .Select(match => match.Groups["name"].Value)
+            .ToArray();
+        var proposalCreationStatuses = ProposalCreationStatuses(workspace);
+        var proposalPromotionStatuses = Regex.Matches(workspace, "updateProposalStatus\\(s\\.proposal_id,\\\"(?<status>[^\\\"]+)\\\"\\)")
+            .Select(match => match.Groups["status"].Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(
+        [
+            "monitor_health",
+            "list_recent_traces",
+            "get_trace_summary",
+            "get_trace_span_tree",
+            "get_cache_summary",
+        ],
+        actionNames);
+        Assert.Equal(["candidate"], proposalCreationStatuses);
+        Assert.Equal(["approved"], ProposalCreationStatuses("const payload={status:\"approved\"};"));
+        Assert.Equal(["recommended"], proposalPromotionStatuses);
+        Assert.DoesNotContain("session.send", workspace, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -546,6 +597,12 @@ public class CanvasExtensionContractTests
         var evidenceProxy = File.ReadAllText(Path.Combine(directory, "canvas-evidence-proxy.mjs"));
         return extension + "\n" + helpers + "\n" + sessionEvents + "\n" + workspaceHelpers + "\n" + evidenceHelpers + "\n" + evidenceProxy;
     }
+
+    private static string[] ProposalCreationStatuses(string workspace) =>
+        Regex.Matches(workspace, "(?:const\\s+)?payload\\s*=\\s*\\{\\s*status\\s*:\\s*\\\"(?<status>[^\\\"]+)\\\"")
+            .Select(match => match.Groups["status"].Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
 
     private static string ExtensionDirectory()
     {

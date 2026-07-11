@@ -285,6 +285,16 @@ An invalid resolve request returns `400` with
 `unsupported_event_version_count` and `projection_backlog` are nonnegative
 integers; `projection_cursor` is JSON null or a nonnegative integer.
 
+## Improvement Proposal Amendment
+
+Issue #54 adds the proposal collection and mutation routes defined in
+`canvas-improvement-proposals.md`. They are additive to this workspace API:
+they do not change the list-item or Session-detail shapes above, Session
+identity/merge rules, completeness, raw-content routes, or the Issue #45
+`session.send()` behavior. Proposal text and evidence references are sanitized
+local-runtime metadata; raw event content remains available only through the
+separate raw event-content route below.
+
 ## Raw Event Content Read
 
 The raw-bearing content route is:

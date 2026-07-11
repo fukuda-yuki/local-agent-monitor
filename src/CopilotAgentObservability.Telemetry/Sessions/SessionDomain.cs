@@ -6,6 +6,7 @@ public enum SessionSourceSurface { CopilotSdk, CopilotCli, VisualStudioCode, Hoo
 public enum SessionBindingKind { Native, ExplicitResume, ExplicitHandoff, TraceContext }
 public enum SessionContentState { Available, NotCaptured, Redacted, Unsupported, ExpiredPendingDeletion }
 public enum SessionRawRetentionState { Expiring, ExpiredPendingDeletion, NotCaptured }
+public enum ImprovementProposalStatus { Candidate, Recommended, Verified }
 
 public static class SessionWire
 {
@@ -266,6 +267,26 @@ public sealed record SessionContentLookup(SessionContentState State, SessionEven
 
 public sealed record SessionHumanEvaluation(Guid SessionId, string Verdict, DateTimeOffset RecordedAt);
 
+public sealed record ImprovementProposalEvidenceReference(
+    string Kind,
+    string ReferenceId);
+
+public sealed record ImprovementProposal(
+    Guid ProposalId,
+    ImprovementProposalStatus Status,
+    string TargetKind,
+    string TargetLabel,
+    string Title,
+    string Summary,
+    string ExpectedEffect,
+    string RiskNote,
+    IReadOnlyList<Guid> SourceSessionIds,
+    IReadOnlyList<ImprovementProposalEvidenceReference> EvidenceReferences,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    DateTimeOffset? RecommendedAt,
+    DateTimeOffset? VerifiedAt);
+
 public interface ISessionStore
 {
     void CreateSchema();
@@ -280,4 +301,8 @@ public interface ISessionStore
     SessionRawRetentionState GetRawRetentionState(Guid sessionId);
     SessionProjectionState? GetProjectionState(string projectorKey);
     void UpsertProjectionState(SessionProjectionState state);
+    IReadOnlyList<ImprovementProposal> ListImprovementProposals(Guid sessionId);
+    ImprovementProposal? GetImprovementProposal(Guid proposalId);
+    void CreateImprovementProposal(ImprovementProposal proposal);
+    void UpdateImprovementProposalStatus(Guid proposalId, ImprovementProposalStatus status, DateTimeOffset updatedAt);
 }

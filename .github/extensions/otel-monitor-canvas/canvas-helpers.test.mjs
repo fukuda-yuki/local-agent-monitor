@@ -4,6 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import {
     BOUNDARY_NOTE,
     FOCUS_OPTIONS,
@@ -74,6 +75,23 @@ test("renderHelperHtml: ready state has Japanese button/heading, Japanese focus 
     assert.doesNotMatch(html, /\/raw(?!-preview)/);
     assert.doesNotMatch(html, /payload_json/);
     assert.doesNotMatch(html, /console\.log/);
+});
+
+test("proposal proxy keeps proposal text outside Canvas actions and injects CSRF only server-side", async () => {
+    const extension = await readFile(new URL("./extension.mjs", import.meta.url), "utf8");
+    assert.match(extension, /improvement-proposals/);
+    assert.match(extension, /"x-monitor-csrf": "local-monitor"/);
+    assert.match(extension, /Cache-Control", "no-store"/);
+    assert.doesNotMatch(extension, /session\.send\(\{[^}]*summary/);
+    assert.doesNotMatch(extension, /name:\s*["'](?:create|promote)_proposal/);
+});
+
+test("proposal proxy marks rejected requests no-store and safely rejects malformed status IDs", async () => {
+    const extension = await readFile(new URL("./extension.mjs", import.meta.url), "utf8");
+    assert.match(extension, /isProposalHelperPath\(path\)/);
+    assert.match(extension, /res\.setHeader\("Cache-Control", "no-store"\);/);
+    assert.match(extension, /try \{\s*proposalId = decodeURIComponent/);
+    assert.match(extension, /error: "invalid_proposal_id"/);
 });
 
 test("renderHelperHtml: unreachable state shows the unreachable banner and next-action guidance", () => {

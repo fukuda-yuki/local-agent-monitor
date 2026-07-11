@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 public sealed class SqliteSessionStore : ISessionStore
 {
-    private const int CurrentSchemaVersion = 2;
+    private const int CurrentSchemaVersion = 3;
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
 
@@ -40,7 +40,7 @@ public sealed class SqliteSessionStore : ISessionStore
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'session';";
         var existingVersion = versionCommand.ExecuteScalar();
-        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or CurrentSchemaVersion))
+        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or CurrentSchemaVersion))
         {
             throw new InvalidOperationException("Unsupported Session schema version.");
         }
@@ -51,11 +51,21 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = HumanEvaluationSchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = ImprovementProposalSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"INSERT INTO schema_version(component,version) VALUES('session',{CurrentSchemaVersion});");
         }
         else if (Convert.ToInt32(existingVersion) == 1)
         {
             command.CommandText = HumanEvaluationSchemaSql;
+            command.ExecuteNonQuery();
+            command.CommandText = ImprovementProposalSchemaSql;
+            command.ExecuteNonQuery();
+            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
+        else if (Convert.ToInt32(existingVersion) == 2)
+        {
+            command.CommandText = ImprovementProposalSchemaSql;
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
@@ -490,6 +500,241 @@ public sealed class SqliteSessionStore : ISessionStore
         command.ExecuteNonQuery();
     }
 
+    public IReadOnlyList<ImprovementProposal> ListImprovementProposals(Guid sessionId)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT proposal_id FROM improvement_proposal_sessions WHERE session_id=$session_id ORDER BY source_order,proposal_id;";
+        Add(command, "$session_id", Id(sessionId));
+        using var reader = command.ExecuteReader();
+        var proposalIds = new List<Guid>();
+        while (reader.Read())
+        {
+            proposalIds.Add(Guid.Parse(reader.GetString(0)));
+        }
+
+        return proposalIds.Select(proposalId => ReadImprovementProposal(connection, proposalId)
+            ?? throw new InvalidOperationException("Improvement proposal was not found.")).ToArray();
+    }
+
+    public ImprovementProposal? GetImprovementProposal(Guid proposalId)
+    {
+        using var connection = Open();
+        return ReadImprovementProposal(connection, proposalId);
+    }
+
+    public void CreateImprovementProposal(ImprovementProposal proposal)
+    {
+        ArgumentNullException.ThrowIfNull(proposal);
+        if (proposal.Status != ImprovementProposalStatus.Candidate
+            || proposal.RecommendedAt is not null
+            || proposal.VerifiedAt is not null)
+        {
+            throw new InvalidOperationException("Improvement proposals must be created as candidates without lifecycle timestamps.");
+        }
+
+        ValidateProposalShape(proposal);
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction();
+        _ = ValidateProposalReferences(connection, transaction, proposal);
+        Execute(connection, transaction, """
+            INSERT INTO improvement_proposals(proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at,verified_at)
+            VALUES($proposal_id,$status,$target_kind,$target_label,$title,$summary,$expected_effect,$risk_note,$created_at,$updated_at,$recommended_at,$verified_at);
+            """,
+            ("$proposal_id", Id(proposal.ProposalId)), ("$status", ProposalStatus(proposal.Status)),
+            ("$target_kind", proposal.TargetKind), ("$target_label", proposal.TargetLabel), ("$title", proposal.Title),
+            ("$summary", proposal.Summary), ("$expected_effect", proposal.ExpectedEffect), ("$risk_note", proposal.RiskNote),
+            ("$created_at", Timestamp(proposal.CreatedAt)), ("$updated_at", Timestamp(proposal.UpdatedAt)),
+            ("$recommended_at", Timestamp(proposal.RecommendedAt)), ("$verified_at", Timestamp(proposal.VerifiedAt)));
+
+        for (var index = 0; index < proposal.SourceSessionIds.Count; index++)
+        {
+            Execute(connection, transaction, "INSERT INTO improvement_proposal_sessions(proposal_id,session_id,source_order) VALUES($proposal_id,$session_id,$source_order);",
+                ("$proposal_id", Id(proposal.ProposalId)), ("$session_id", Id(proposal.SourceSessionIds[index])), ("$source_order", index));
+        }
+
+        for (var index = 0; index < proposal.EvidenceReferences.Count; index++)
+        {
+            var reference = proposal.EvidenceReferences[index];
+            Execute(connection, transaction, "INSERT INTO improvement_proposal_evidence(proposal_id,evidence_order,kind,reference_id) VALUES($proposal_id,$evidence_order,$kind,$reference_id);",
+                ("$proposal_id", Id(proposal.ProposalId)), ("$evidence_order", index), ("$kind", reference.Kind), ("$reference_id", reference.ReferenceId));
+        }
+
+        transaction.Commit();
+    }
+
+    public void UpdateImprovementProposalStatus(Guid proposalId, ImprovementProposalStatus status, DateTimeOffset updatedAt)
+    {
+        RejectVerified(status);
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction();
+        var proposal = ReadImprovementProposal(connection, proposalId)
+            ?? throw new InvalidOperationException("Improvement proposal was not found.");
+        RejectVerified(proposal.Status);
+
+        if (status == ImprovementProposalStatus.Recommended)
+        {
+            ValidatePromotion(connection, transaction, proposal, proposalId);
+        }
+
+        Execute(connection, transaction, """
+            UPDATE improvement_proposals
+            SET status=$status, updated_at=$updated_at, recommended_at=$recommended_at
+            WHERE proposal_id=$proposal_id;
+            """,
+            ("$status", ProposalStatus(status)), ("$updated_at", Timestamp(updatedAt)),
+            ("$recommended_at", status == ImprovementProposalStatus.Recommended ? Timestamp(updatedAt) : null),
+            ("$proposal_id", Id(proposalId)));
+        transaction.Commit();
+    }
+
+    private static void ValidateProposalShape(ImprovementProposal proposal)
+    {
+        if (!IsUuidVersion7(proposal.ProposalId)
+            || !IsOneOf(proposal.TargetKind, "skill", "agent", "instructions", "template", "hook_config")
+            || !IsBounded(proposal.TargetLabel, 200)
+            || !IsBounded(proposal.Title, 200)
+            || !IsBounded(proposal.Summary, 2000)
+            || !IsBounded(proposal.ExpectedEffect, 1000)
+            || !IsBounded(proposal.RiskNote, 1000)
+            || proposal.SourceSessionIds is null
+            || proposal.SourceSessionIds.Count == 0
+            || proposal.SourceSessionIds.Any(sessionId => !IsUuidVersion7(sessionId))
+            || proposal.SourceSessionIds.Distinct().Count() != proposal.SourceSessionIds.Count
+            || proposal.EvidenceReferences is null
+            || proposal.EvidenceReferences.Count is < 1 or > 10
+            || proposal.EvidenceReferences.Any(reference => reference is null
+                || !IsOneOf(reference.Kind, "event", "run", "trace", "gate")
+                || !IsBounded(reference.ReferenceId, 512)))
+        {
+            throw new InvalidOperationException("Improvement proposal is invalid.");
+        }
+    }
+
+    private static void ValidatePromotion(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ImprovementProposal proposal,
+        Guid proposalId)
+    {
+        ValidateProposalShape(proposal);
+        if (proposal.SourceSessionIds.Count < 2
+            || proposal.SourceSessionIds.Distinct().Count() != proposal.SourceSessionIds.Count
+            || proposal.EvidenceReferences.Count == 0)
+        {
+            throw new InvalidOperationException("Improvement recommendations require distinct source sessions and evidence.");
+        }
+
+        var evidencedSourceSessions = ValidateProposalReferences(connection, transaction, proposal);
+        if (evidencedSourceSessions.Count < 2)
+        {
+            throw new InvalidOperationException("Improvement recommendations require evidence from two distinct source sessions.");
+        }
+        foreach (var sessionId in proposal.SourceSessionIds)
+        {
+            using var sessionCommand = connection.CreateCommand();
+            sessionCommand.Transaction = transaction;
+            sessionCommand.CommandText = """
+                SELECT EXISTS(
+                    SELECT 1 FROM sessions session
+                    WHERE session.session_id=$session_id
+                    AND session.status IN ('completed','failed')
+                    AND EXISTS (
+                        SELECT 1 FROM session_native_ids native
+                        WHERE native.session_id=session.session_id AND native.binding_kind='native'
+                    )
+                );
+                """;
+            Add(sessionCommand, "$session_id", Id(sessionId));
+            if (Convert.ToInt64(sessionCommand.ExecuteScalar()) == 0)
+            {
+                throw new InvalidOperationException("Improvement proposal source session is not eligible for recommendation.");
+            }
+
+            using var recommendationCommand = connection.CreateCommand();
+            recommendationCommand.Transaction = transaction;
+            recommendationCommand.CommandText = """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM improvement_proposals proposal
+                    JOIN improvement_proposal_sessions source ON source.proposal_id=proposal.proposal_id
+                    WHERE source.session_id=$session_id AND proposal.status='recommended' AND proposal.proposal_id <> $proposal_id
+                );
+                """;
+            Add(recommendationCommand, "$session_id", Id(sessionId));
+            Add(recommendationCommand, "$proposal_id", Id(proposalId));
+            if (Convert.ToInt64(recommendationCommand.ExecuteScalar()) != 0)
+            {
+                throw new InvalidOperationException("An improvement recommendation already exists for a source session.");
+            }
+        }
+    }
+
+    private static IReadOnlySet<Guid> ValidateProposalReferences(SqliteConnection connection, SqliteTransaction transaction, ImprovementProposal proposal)
+    {
+        var evidencedSourceSessions = new HashSet<Guid>();
+        foreach (var reference in proposal.EvidenceReferences)
+        {
+            var resolvingSourceSessions = ResolveReferenceSourceSessions(connection, transaction, proposal.SourceSessionIds, reference);
+            if (resolvingSourceSessions.Count == 0)
+            {
+                throw new InvalidOperationException("Improvement proposal evidence does not resolve to a source session.");
+            }
+
+            evidencedSourceSessions.UnionWith(resolvingSourceSessions);
+        }
+
+        return evidencedSourceSessions;
+    }
+
+    private static IReadOnlyList<Guid> ResolveReferenceSourceSessions(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<Guid> sourceSessionIds,
+        ImprovementProposalEvidenceReference reference)
+    {
+        var sessionColumn = reference.Kind == "event" ? "event_id" : "run_id";
+        var table = reference.Kind == "event" ? "session_events" : "session_runs";
+        if (reference.Kind is "event" or "run")
+        {
+            if (!Guid.TryParse(reference.ReferenceId, out var referenceId)) return [];
+            return sourceSessionIds.Where(sessionId => Exists(connection, transaction,
+                $"SELECT 1 FROM {table} WHERE {sessionColumn}=$reference_id AND session_id=$session_id;",
+                ("$reference_id", Id(referenceId)), ("$session_id", Id(sessionId)))).ToArray();
+        }
+
+        if (reference.Kind == "trace")
+        {
+            return sourceSessionIds.Where(sessionId => Exists(connection, transaction,
+                "SELECT 1 FROM session_runs WHERE trace_id=$trace_id AND session_id=$session_id;",
+                ("$trace_id", reference.ReferenceId), ("$session_id", Id(sessionId)))).ToArray();
+        }
+
+        return reference.ReferenceId switch
+        {
+            "terminal" => sourceSessionIds.Where(sessionId => Exists(connection, transaction,
+                "SELECT 1 FROM session_events WHERE session_id=$session_id AND type IN ('session.shutdown','session.task_complete','SessionEnd','Stop');",
+                ("$session_id", Id(sessionId)))).ToArray(),
+            "error" => sourceSessionIds.Where(sessionId => Exists(connection, transaction,
+                "SELECT 1 FROM session_events WHERE session_id=$session_id AND status='error';",
+                ("$session_id", Id(sessionId)))).ToArray(),
+            _ => [],
+        };
+    }
+
+    private static bool Exists(SqliteConnection connection, SqliteTransaction transaction, string sql, params (string Name, object? Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        foreach (var parameter in parameters) Add(command, parameter.Name, parameter.Value);
+        return command.ExecuteScalar() is not null;
+    }
+
+    private static bool IsOneOf(string? value, params string[] values) => value is not null && values.Contains(value, StringComparer.Ordinal);
+    private static bool IsBounded(string? value, int maximum) => !string.IsNullOrWhiteSpace(value) && value.Length <= maximum;
+    private static bool IsUuidVersion7(Guid value) => value != Guid.Empty && value.ToString("D")[14] == '7';
+
     private static void WriteSession(SqliteConnection connection, SqliteTransaction transaction, ObservedSession value) =>
         Execute(connection, transaction, """
             INSERT INTO sessions(session_id,status,completeness,repository,workspace,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at)
@@ -512,6 +757,63 @@ public sealed class SqliteSessionStore : ISessionStore
         return command.ExecuteScalar() is string value ? Guid.Parse(value) : null;
     }
 
+    private static ImprovementProposal? ReadImprovementProposal(SqliteConnection connection, Guid proposalId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at,verified_at
+            FROM improvement_proposals WHERE proposal_id=$proposal_id;
+            """;
+        Add(command, "$proposal_id", Id(proposalId));
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+
+        var proposal = new
+        {
+            ProposalId = Guid.Parse(reader.GetString(0)),
+            Status = ParseProposalStatus(reader.GetString(1)),
+            TargetKind = reader.GetString(2),
+            TargetLabel = reader.GetString(3),
+            Title = reader.GetString(4),
+            Summary = reader.GetString(5),
+            ExpectedEffect = reader.GetString(6),
+            RiskNote = reader.GetString(7),
+            CreatedAt = ParseTimestamp(reader.GetString(8)),
+            UpdatedAt = ParseTimestamp(reader.GetString(9)),
+            RecommendedAt = NullableTimestamp(reader, 10),
+            VerifiedAt = NullableTimestamp(reader, 11),
+        };
+        reader.Close();
+        var sourceSessions = ReadImprovementProposalSourceSessions(connection, proposalId);
+        var evidenceReferences = ReadImprovementProposalEvidenceReferences(connection, proposalId);
+        return new ImprovementProposal(
+            proposal.ProposalId, proposal.Status, proposal.TargetKind, proposal.TargetLabel, proposal.Title, proposal.Summary,
+            proposal.ExpectedEffect, proposal.RiskNote, sourceSessions, evidenceReferences, proposal.CreatedAt, proposal.UpdatedAt,
+            proposal.RecommendedAt, proposal.VerifiedAt);
+    }
+
+    private static IReadOnlyList<Guid> ReadImprovementProposalSourceSessions(SqliteConnection connection, Guid proposalId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT session_id FROM improvement_proposal_sessions WHERE proposal_id=$proposal_id ORDER BY source_order;";
+        Add(command, "$proposal_id", Id(proposalId));
+        using var reader = command.ExecuteReader();
+        var sourceSessions = new List<Guid>();
+        while (reader.Read()) sourceSessions.Add(Guid.Parse(reader.GetString(0)));
+        return sourceSessions;
+    }
+
+    private static IReadOnlyList<ImprovementProposalEvidenceReference> ReadImprovementProposalEvidenceReferences(SqliteConnection connection, Guid proposalId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT kind,reference_id FROM improvement_proposal_evidence WHERE proposal_id=$proposal_id ORDER BY evidence_order;";
+        Add(command, "$proposal_id", Id(proposalId));
+        using var reader = command.ExecuteReader();
+        var evidenceReferences = new List<ImprovementProposalEvidenceReference>();
+        while (reader.Read()) evidenceReferences.Add(new(reader.GetString(0), reader.GetString(1)));
+        return evidenceReferences;
+    }
+
     private static ObservedSession? ReadSession(SqliteConnection connection, Guid sessionId)
     {
         using var command = connection.CreateCommand();
@@ -527,6 +829,29 @@ public sealed class SqliteSessionStore : ISessionStore
         SessionWire.ParseRawRetentionState(reader.GetString(8)), ParseTimestamp(reader.GetString(9)), ParseTimestamp(reader.GetString(10)));
 
     private static string Id(Guid value) => value.ToString("D");
+    private static void RejectVerified(ImprovementProposalStatus status)
+    {
+        if (status == ImprovementProposalStatus.Verified)
+        {
+            throw new InvalidOperationException("Improvement proposal verification is owned by comparison.");
+        }
+    }
+
+    private static string ProposalStatus(ImprovementProposalStatus status) => status switch
+    {
+        ImprovementProposalStatus.Candidate => "candidate",
+        ImprovementProposalStatus.Recommended => "recommended",
+        ImprovementProposalStatus.Verified => "verified",
+        _ => throw new ArgumentOutOfRangeException(nameof(status)),
+    };
+
+    private static ImprovementProposalStatus ParseProposalStatus(string status) => status switch
+    {
+        "candidate" => ImprovementProposalStatus.Candidate,
+        "recommended" => ImprovementProposalStatus.Recommended,
+        "verified" => ImprovementProposalStatus.Verified,
+        _ => throw new InvalidOperationException("Unsupported improvement proposal status."),
+    };
     private static string Timestamp(DateTimeOffset value) => value.ToString("O");
     private static string? Timestamp(DateTimeOffset? value) => value?.ToString("O");
     private static DateTimeOffset ParseTimestamp(string value) => DateTimeOffset.Parse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
@@ -659,6 +984,42 @@ public sealed class SqliteSessionStore : ISessionStore
             verdict TEXT NOT NULL CHECK (verdict IN ('expected','problem')),
             recorded_at TEXT NOT NULL,
             FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+        );
+        """;
+
+    private const string ImprovementProposalSchemaSql = """
+        CREATE TABLE IF NOT EXISTS improvement_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL CHECK (status IN ('candidate','recommended','verified')),
+            target_kind TEXT NOT NULL,
+            target_label TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            expected_effect TEXT NOT NULL,
+            risk_note TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            recommended_at TEXT NULL,
+            verified_at TEXT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS improvement_proposal_sessions (
+            proposal_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            source_order INTEGER NOT NULL CHECK (source_order >= 0),
+            PRIMARY KEY (proposal_id, session_id),
+            UNIQUE (proposal_id, source_order),
+            FOREIGN KEY (proposal_id) REFERENCES improvement_proposals(proposal_id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS improvement_proposal_evidence (
+            proposal_id TEXT NOT NULL,
+            evidence_order INTEGER NOT NULL CHECK (evidence_order >= 0),
+            kind TEXT NOT NULL,
+            reference_id TEXT NOT NULL,
+            PRIMARY KEY (proposal_id, evidence_order),
+            FOREIGN KEY (proposal_id) REFERENCES improvement_proposals(proposal_id) ON DELETE CASCADE
         );
         """;
 }

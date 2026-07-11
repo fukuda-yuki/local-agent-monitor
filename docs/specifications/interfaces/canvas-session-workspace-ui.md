@@ -13,9 +13,10 @@ The mandatory pre-UI design gate for this UI was captured and approved on
 `docs/sprints/issue-52-canvas-workspace/design-gate/`.
 
 Issue #52 shipped Evidence, Improve, and Compare as fixed placeholder cards.
-Issue #53 replaces only the Evidence placeholder under the separate
-`canvas-session-evidence.md` contract. This document preserves the historical
-#52 shell/Review scope; Improve and Compare remain later children.
+Issue #53 replaces the Evidence placeholder under the separate
+`canvas-session-evidence.md` contract. Issue #54 replaces the Improve
+placeholder under `canvas-improvement-proposals.md`; Compare remains a later
+child.
 
 ## Shell Composition
 
@@ -30,9 +31,11 @@ The workspace page is composed of:
 - a top bar with the Local Monitor connection state (existing health
   derivation: ready / not_ready / unreachable);
 - a session sidebar (below);
-- four tabs: Review and Evidence (functional after the Issue #53 amendment),
-  Improve and Compare (placeholders). Issue #52 historically shipped Evidence
-  as a placeholder; `canvas-session-evidence.md` defines its current behavior.
+- four tabs: Review, Evidence, and Improve (functional after the Issue #53 and
+  Issue #54 amendments), plus Compare (placeholder). Issue #52 historically
+  shipped Evidence and Improve as placeholders; their current behavior is
+  defined by `canvas-session-evidence.md` and
+  `canvas-improvement-proposals.md`.
 
 The page uses the existing helper-page design tokens (host-variable-backed
 colors, card layout, Japanese UI copy). All monitor data reaches the page
@@ -129,11 +132,13 @@ The current verdict renders as pressed state plus recorded time.
 | Session state | Primary action | Secondary |
 | --- | --- | --- |
 | `active` | Local Monitor を開く | — |
-| `completed` / `failed`, bound | トレース分析を開く（`/analysis`） | Local Monitor を開く |
+| `completed` / `failed`, bound, no proposal | 詳細分析と改善案を作る | Local Monitor を開く |
+| `completed` / `failed`, bound, proposal exists | 改善案を確認 | Local Monitor を開く |
 | unbound | Local Monitor でトレースを開く | — |
 
-Actions referencing Evidence / Improve / Compare content are not shipped in
-v1; the placeholder tabs state their later-child scope.
+Review actions may reference Improve only through the bounded Issue #54
+proposal interface. Compare remains a placeholder until its later-child
+contract is implemented.
 
 ## Helper Proxy Routes (extension server)
 
@@ -210,6 +215,7 @@ unchanged. `canvas-session-workspace.md` records this amendment.
 
 ## Non-Goals
 
-No Evidence/Improve/Compare behavior, no session merge or completeness
-changes, no new dependencies, no change to the #45 dispatch instruction, no
-raw content in sanitized responses, and no physical raw deletion (Issue #57).
+No Compare behavior, no session merge or completeness changes, no new
+dependencies, no change to the #45 dispatch instruction, no raw content in
+sanitized responses, and no physical raw deletion (Issue #57). Direct apply,
+patch generation, target-path resolution, and rollback remain Issue #55.

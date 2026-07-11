@@ -92,12 +92,35 @@ function matchesSessionId(value) {
     return typeof value === "string" && new RegExp(SESSION_ID_PATTERN).test(value);
 }
 
+function isProposalHelperPath(path) {
+    return path === "/api/session-workspace/improvement-proposals"
+        || path.startsWith("/api/session-workspace/improvement-proposals/");
+}
+
 function readRequestBody(req) {
     return new Promise((resolve) => {
         let data = "";
         req.on("data", (chunk) => { data += chunk; if (data.length > 8192) { req.destroy(); } });
         req.on("end", () => resolve(data));
         req.on("error", () => resolve(""));
+    });
+}
+
+function readRequestBodyAtMost(req, maximumBytes) {
+    return new Promise((resolve) => {
+        const chunks = [];
+        let bytes = 0;
+        let exceeded = false;
+        req.on("data", (chunk) => {
+            bytes += chunk.length;
+            if (bytes > maximumBytes) {
+                exceeded = true;
+                return;
+            }
+            chunks.push(chunk);
+        });
+        req.on("end", () => resolve({ exceeded, body: exceeded ? "" : Buffer.concat(chunks).toString("utf8") }));
+        req.on("error", () => resolve({ exceeded: false, body: "" }));
     });
 }
 
@@ -161,6 +184,49 @@ async function fetchHelperWorkspaceJson(monitorUrl, path, init) {
         parsed = null;
     }
     return { response, body, parsed };
+}
+
+async function handleProposalProxy(req, res, { monitorUrl, path }) {
+    res.setHeader("Cache-Control", "no-store");
+    if (!isLoopbackUrl(monitorUrl)) {
+        sendJson(res, 400, { error: "invalid_monitor_url" });
+        return;
+    }
+
+    const isWrite = req.method === "POST" || req.method === "PUT";
+    let body;
+    if (isWrite) {
+        if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+            sendJson(res, 415, { error: "unsupported_media_type" });
+            return;
+        }
+        const contentLength = Number(req.headers["content-length"]);
+        if (Number.isFinite(contentLength) && contentLength > 1048576) {
+            sendJson(res, 413, { error: "request_too_large" });
+            return;
+        }
+        const requestBody = await readRequestBodyAtMost(req, 1048576);
+        if (requestBody.exceeded) {
+            sendJson(res, 413, { error: "request_too_large" });
+            return;
+        }
+        try {
+            JSON.parse(requestBody.body);
+        } catch {
+            sendJson(res, 400, { error: "invalid_proposal_request" });
+            return;
+        }
+        body = requestBody.body;
+    }
+
+    try {
+        const result = await fetchHelperWorkspaceJson(monitorUrl, path, isWrite
+            ? { method: req.method, headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body }
+            : undefined);
+        sendJson(res, result.response.status, result.parsed ?? { error: "monitor_unavailable" });
+    } catch {
+        sendJson(res, 502, { error: "monitor_unavailable" });
+    }
 }
 
 async function fetchHelperInstruction(monitorUrl, sessionId) {
@@ -329,6 +395,12 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
         const url = new URL(req.url, "http://127.0.0.1");
         const path = url.pathname;
 
+        // Proposal data is local runtime display data. Never permit it to be
+        // cached, including when token validation rejects the request.
+        if (isProposalHelperPath(path)) {
+            res.setHeader("Cache-Control", "no-store");
+        }
+
         // Token validation for all routes.
         const headerToken = req.headers["x-canvas-token"];
         const queryToken = url.searchParams.get("t");
@@ -358,6 +430,46 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
                     const { response, body } = await fetchTextWithTimeout(target);
                     return { status: response.status, body };
                 },
+            });
+            return;
+        }
+
+        if (path === "/api/session-workspace/improvement-proposals") {
+            if (req.method === "GET") {
+                const sessionId = url.searchParams.get("session_id") ?? "";
+                if (!matchesSessionId(sessionId)) {
+                    res.setHeader("Cache-Control", "no-store");
+                    sendJson(res, 400, { error: "invalid_session_id" });
+                    return;
+                }
+                await handleProposalProxy(req, res, {
+                    monitorUrl,
+                    path: `/api/session-workspace/improvement-proposals?session_id=${encodeURIComponent(sessionId)}`,
+                });
+                return;
+            }
+            if (req.method === "POST") {
+                await handleProposalProxy(req, res, { monitorUrl, path: "/api/session-workspace/improvement-proposals" });
+                return;
+            }
+        }
+
+        if (req.method === "PUT" && path.startsWith("/api/session-workspace/improvement-proposals/") && path.endsWith("/status")) {
+            let proposalId;
+            try {
+                proposalId = decodeURIComponent(path.slice("/api/session-workspace/improvement-proposals/".length, -"/status".length));
+            } catch {
+                sendJson(res, 400, { error: "invalid_proposal_id" });
+                return;
+            }
+            if (!matchesSessionId(proposalId)) {
+                res.setHeader("Cache-Control", "no-store");
+                sendJson(res, 400, { error: "invalid_proposal_id" });
+                return;
+            }
+            await handleProposalProxy(req, res, {
+                monitorUrl,
+                path: `/api/session-workspace/improvement-proposals/${encodeURIComponent(proposalId)}/status`,
             });
             return;
         }

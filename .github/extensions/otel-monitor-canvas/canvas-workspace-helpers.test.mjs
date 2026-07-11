@@ -9,6 +9,8 @@ import {
     instructionDisplay,
     renderWorkspaceHtml,
     workspaceNextActions,
+    workspaceCandidatePayload,
+    workspaceProposalReference,
     workspaceSessionLabel,
     workspaceStatusPill,
 } from "./canvas-workspace-helpers.mjs";
@@ -23,6 +25,15 @@ const bound = {
     last_seen_at: "2026-07-11T01:05:00Z",
     source_surfaces: ["copilot-sdk"],
 };
+
+function workspaceRuntimeHelpers() {
+    const html = renderWorkspaceHtml({ monitorUrl: "http://127.0.0.1:4320", healthState: "ready", token: "synthetic-token" });
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    const prefix = script.slice(0, script.indexOf("(function(){"));
+    const context = vm.createContext({ Set, Map, Date, Number, BigInt, URL, encodeURIComponent, console });
+    new vm.Script(prefix).runInContext(context);
+    return context;
+}
 
 test("workspace helpers group only the resolved session as this conversation and preserve list order", () => {
     const groups = groupWorkspaceSessions([
@@ -46,7 +57,8 @@ test("workspace helpers render labels, pills, deterministic gates, next actions,
         { label: "エラーイベント", state: "fail", detail: "1 件" },
     ]);
     assert.deepEqual(workspaceNextActions({ ...bound, status: "active" }, true), { primary: "Local Monitor を開く", secondary: null, analysis: false });
-    assert.deepEqual(workspaceNextActions(bound, true), { primary: "トレース分析を開く", secondary: "Local Monitor を開く", analysis: true });
+    assert.deepEqual(workspaceNextActions(bound, true, false), { primary: "詳細分析と改善案を作る", secondary: "Local Monitor を開く", improve: true });
+    assert.deepEqual(workspaceNextActions(bound, true, true), { primary: "改善案を確認", secondary: "Local Monitor を開く", improve: true });
     for (const state of ["not_captured", "redacted", "unsupported", "expired_pending_deletion", "no_instruction"]) {
         assert.equal(instructionDisplay({ state }).text, `指示は ${state} です。推測では表示しません。`);
     }
@@ -69,6 +81,73 @@ test("workspace HTML contains the sidebar groups, four-tab shell, review cards, 
     assert.match(html, /人間評価を保存できませんでした。接続を確認して再試行してください。/);
     assert.match(html, /\.catch\(showEvaluationError\)/);
     assert.doesNotMatch(html, /innerHTML/);
+});
+
+test("Improve shows an honest unavailable state for an unbound session and contains no mutation controls", () => {
+    const html = renderWorkspaceHtml({
+        monitorUrl: "http://127.0.0.1:4320",
+        healthState: "ready",
+        token: "synthetic-token",
+        nativeSessionId: "native-session",
+    });
+
+    assert.match(html, /改善案を作成/);
+    assert.match(html, /native binding/);
+    assert.match(html, /improvement-proposals/);
+    assert.match(html, /textContent/);
+    for (const forbidden of ["git", "rollback", "raw analysis", "sendAndWait"]) {
+        assert.doesNotMatch(html, new RegExp(forbidden, "i"));
+    }
+    assert.doesNotMatch(html, /textContent="[^"]*apply/i);
+});
+
+test("Improve limits candidate controls to terminal native-bound sessions and uses safe evidence controls", () => {
+    const html = renderWorkspaceHtml({ monitorUrl: "http://127.0.0.1:4320", healthState: "ready", token: "synthetic-token" });
+
+    assert.match(html, /session.status!=="completed"&&session.status!=="failed"/);
+    assert.match(html, /終了状態が未確定のため、改善案は作成できません/);
+    assert.match(html, /Evidence を開く/);
+    assert.match(html, /証拠参照は利用不可/);
+    assert.match(html, /selectedTab="evidence"/);
+    assert.doesNotMatch(html, /innerHTML/);
+});
+
+test("final Improve payload includes each selected session with a resolving sanitized reference and enforces ten-source limit", () => {
+    const primary = { session: bound, evidence_refs: [{ kind: "event", reference_id: "event-primary" }] };
+    const secondary = { session: { ...bound, session_id: "22222222-2222-7222-8222-222222222222" }, evidence_refs: [{ kind: "gate", reference_id: "terminal" }] };
+    const runtime = workspaceRuntimeHelpers();
+    const payload = runtime.workspaceCandidatePayload(primary, [secondary], { target_kind: "skill", title: "title" });
+
+    assert.deepEqual(Array.from(payload.source_sessions), [bound.session_id, secondary.session.session_id]);
+    assert.deepEqual(JSON.parse(JSON.stringify(payload.evidence_refs)), [{ kind: "event", reference_id: "event-primary" }, { kind: "gate", reference_id: "terminal" }]);
+    assert.equal(runtime.workspaceCandidatePayload(primary, Array.from({ length: 10 }, () => secondary), {}), null);
+    const html = renderWorkspaceHtml({ monitorUrl: "http://127.0.0.1:4320", healthState: "ready", token: "synthetic-token" });
+    assert.match(html, /workspaceCandidatePayload\(primary,others/);
+    assert.match(html, /secondary\.length>9/);
+});
+
+test("final emitted Improve helper preserves the evidence reference selected by the user", () => {
+    const runtime = workspaceRuntimeHelpers();
+    const primary = { session: bound, evidence_refs: [{ kind: "trace", reference_id: "trace-user-selected" }] };
+    const payload = runtime.workspaceCandidatePayload(primary, [], { target_kind: "skill" });
+
+    assert.deepEqual(JSON.parse(JSON.stringify(payload.evidence_refs)), [{ kind: "trace", reference_id: "trace-user-selected" }]);
+    const html = renderWorkspaceHtml({ monitorUrl: "http://127.0.0.1:4320", healthState: "ready", token: "synthetic-token" });
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    assert.match(script, /analysisLink\.href="\/analysis\?t="\+encodeURIComponent\(token\)/);
+    assert.match(script, /証拠参照を選択してください/);
+});
+
+test("final proposal reference resolver opens sanitized Evidence candidates for event run trace and gates", () => {
+    const detail = { events: [{ event_id: "event", type: "Stop" }, { event_id: "error", status: "error" }], runs: [{ run_id: "run", trace_id: "trace" }] };
+    const runtime = workspaceRuntimeHelpers();
+    for (const [reference, expected] of [[{ kind: "event", reference_id: "event" }, "event"], [{ kind: "run", reference_id: "run" }, "run"], [{ kind: "trace", reference_id: "trace" }, "trace"], [{ kind: "gate", reference_id: "terminal" }, "event"], [{ kind: "gate", reference_id: "error" }, "event"]]) {
+        assert.equal(runtime.workspaceProposalReference(reference, detail).kind, expected);
+    }
+    assert.equal(runtime.workspaceProposalReference({ kind: "gate", reference_id: "error" }, { events: [], runs: [] }).value, null);
+    const html = renderWorkspaceHtml({ monitorUrl: "http://127.0.0.1:4320", healthState: "ready", token: "synthetic-token" });
+    assert.match(html, /workspaceProposalReference\(reference,selectedDetail\)/);
+    assert.match(html, /selectedTab="evidence"/);
 });
 
 test("helper server routes the legacy analysis view unchanged at /analysis", async () => {

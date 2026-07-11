@@ -7,6 +7,262 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SqliteSessionStoreTests
 {
     [Fact]
+    public void ImprovementProposals_PersistCandidateWithOpaqueReferences()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        var proposal = CreateProposal(batch);
+
+        store.CreateImprovementProposal(proposal);
+
+        var actual = Assert.Single(store.ListImprovementProposals(batch.Detail.Session.SessionId));
+        Assert.Equal(proposal.ProposalId, actual.ProposalId);
+        Assert.Equal(ImprovementProposalStatus.Candidate, actual.Status);
+        Assert.Equal(proposal.EvidenceReferences, actual.EvidenceReferences);
+    }
+
+    [Fact]
+    public void ImprovementProposals_GetByProposalIdReturnsOnlyTheRequestedProposal()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        var proposal = CreateProposal(batch);
+        store.CreateImprovementProposal(proposal);
+
+        var actual = store.GetImprovementProposal(proposal.ProposalId);
+
+        Assert.NotNull(actual);
+        Assert.Equal(proposal.ProposalId, actual.ProposalId);
+        Assert.Equal(proposal.SourceSessionIds, actual.SourceSessionIds);
+        Assert.Equal(proposal.EvidenceReferences, actual.EvidenceReferences);
+        Assert.Null(store.GetImprovementProposal(Guid.CreateVersion7()));
+    }
+
+    [Fact]
+    public void Promote_WhenAnySourceSessionAlreadyHasRecommendation_Throws()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "native-first");
+        var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "native-second");
+        store.Write(first);
+        store.Write(second);
+        var existing = CreateProposal([first, second]);
+        var competing = CreateProposal([first, second]);
+        store.CreateImprovementProposal(existing);
+        store.CreateImprovementProposal(competing);
+        store.UpdateImprovementProposalStatus(existing.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            store.UpdateImprovementProposalStatus(
+                competing.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch));
+    }
+
+    [Fact]
+    public void ImprovementProposals_RejectVerifiedWrites()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        var proposal = CreateProposal(batch) with { Status = ImprovementProposalStatus.Verified };
+
+        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal));
+    }
+
+    [Theory]
+    [InlineData(ImprovementProposalStatus.Candidate)]
+    [InlineData(ImprovementProposalStatus.Recommended)]
+    public void ImprovementProposals_VerifiedProposalCannotBeChangedByCanvasStatusUpdates(ImprovementProposalStatus requestedStatus)
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "native-verified-first");
+        var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "native-verified-second");
+        store.Write(first);
+        store.Write(second);
+        var proposal = CreateProposal([first, second]);
+        store.CreateImprovementProposal(proposal);
+        using (var connection = database.Open())
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE improvement_proposals SET status='verified', verified_at='2026-07-12T00:00:00.0000000+00:00' WHERE proposal_id=$proposal_id;";
+            command.Parameters.AddWithValue("$proposal_id", proposal.ProposalId.ToString("D"));
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+
+        Assert.Throws<InvalidOperationException>(() =>
+            store.UpdateImprovementProposalStatus(proposal.ProposalId, requestedStatus, DateTimeOffset.UnixEpoch.AddDays(1)));
+
+        var actual = store.GetImprovementProposal(proposal.ProposalId)!;
+        Assert.Equal(ImprovementProposalStatus.Verified, actual.Status);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-12T00:00:00.0000000+00:00"), actual.VerifiedAt);
+        Assert.Equal(proposal.UpdatedAt, actual.UpdatedAt);
+        Assert.Null(actual.RecommendedAt);
+    }
+
+    [Fact]
+    public void ImprovementProposals_CreateAcceptsOnlyCandidateWithoutLifecycleTimestamps()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        var proposal = CreateProposal(batch);
+
+        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal with { Status = ImprovementProposalStatus.Recommended }));
+        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal with { RecommendedAt = DateTimeOffset.UnixEpoch }));
+        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal with { VerifiedAt = DateTimeOffset.UnixEpoch }));
+    }
+
+    [Fact]
+    public void Promotion_RequiresTwoTerminalNativeSourceSessions()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        var proposal = CreateProposal(batch);
+        store.CreateImprovementProposal(proposal);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            store.UpdateImprovementProposalStatus(proposal.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch));
+    }
+
+    [Fact]
+    public void Promotion_RequiresEvidenceFromTwoDistinctSourceSessions()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "native-first");
+        var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "native-second");
+        store.Write(first);
+        store.Write(second);
+        var proposal = CreateProposal([first, second]) with
+        {
+            EvidenceReferences = [new ImprovementProposalEvidenceReference("event", first.Detail.Events[0].EventId.ToString("D"))],
+        };
+        store.CreateImprovementProposal(proposal);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            store.UpdateImprovementProposalStatus(proposal.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch));
+    }
+
+    [Fact]
+    public void ImprovementProposals_RejectNonVersionSevenProposalId()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        var proposal = CreateProposal(batch) with { ProposalId = Guid.NewGuid() };
+
+        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal));
+    }
+
+    [Fact]
+    public void Promotion_RejectsEvidenceOutsideSourceSessions()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "native-first");
+        var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "native-second");
+        var other = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(2), "native-other");
+        store.Write(first);
+        store.Write(second);
+        store.Write(other);
+        var proposal = CreateProposal([first, second]);
+        store.CreateImprovementProposal(proposal);
+        using (var connection = database.Open())
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE improvement_proposal_evidence SET reference_id=$reference_id WHERE proposal_id=$proposal_id;";
+            command.Parameters.AddWithValue("$reference_id", other.Detail.Events[0].EventId.ToString("D"));
+            command.Parameters.AddWithValue("$proposal_id", proposal.ProposalId.ToString("D"));
+            command.ExecuteNonQuery();
+        }
+
+        Assert.Throws<InvalidOperationException>(() =>
+            store.UpdateImprovementProposalStatus(proposal.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch));
+    }
+
+    [Fact]
+    public void ImprovementProposals_InvalidWriteRollsBackWithoutPartialState()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        var proposal = CreateProposal(batch) with { TargetKind = "invalid" };
+
+        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal));
+
+        using var connection = database.Open();
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposals;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposal_sessions;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposal_evidence;"));
+    }
+
+    [Fact]
+    public void ImprovementProposals_TransactionFailureRollsBackRootAndAssociations()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        var proposal = CreateProposal(batch) with { SourceSessionIds = [batch.Detail.Session.SessionId, Guid.CreateVersion7()] };
+
+        Assert.Throws<SqliteException>(() => store.CreateImprovementProposal(proposal));
+
+        using var connection = database.Open();
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposals;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposal_sessions;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposal_evidence;"));
+    }
+
+    [Fact]
+    public void ImprovementProposals_RejectMalformedDomainValues()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        var proposal = CreateProposal(batch);
+
+        var invalidProposals = new[]
+        {
+            proposal with { TargetLabel = new string('x', 201) },
+            proposal with { SourceSessionIds = [Guid.NewGuid()] },
+            proposal with { SourceSessionIds = [batch.Detail.Session.SessionId, batch.Detail.Session.SessionId] },
+            proposal with { EvidenceReferences = [] },
+            proposal with { EvidenceReferences = [new ImprovementProposalEvidenceReference("unknown", "reference")] },
+            proposal with { EvidenceReferences = [new ImprovementProposalEvidenceReference("event", "not-a-guid")] },
+        };
+
+        foreach (var invalid in invalidProposals)
+        {
+            Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(invalid));
+        }
+    }
+
+    [Fact]
     public void CreateSchema_EmptyDatabaseCreatesSessionSchemaAndIsIdempotent()
     {
         using var database = new SessionTestDatabase();
@@ -16,8 +272,8 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var connection = database.Open();
-        Assert.Equal(2L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
-        foreach (var table in new[] { "sessions", "session_native_ids", "session_runs", "session_events", "session_event_content", "session_projection_state", "session_human_evaluation" })
+        Assert.Equal(3L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
+        foreach (var table in new[] { "sessions", "session_native_ids", "session_runs", "session_events", "session_event_content", "session_projection_state", "session_human_evaluation", "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence" })
         {
             Assert.Equal(1L, Scalar<long>(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
         }
@@ -44,13 +300,13 @@ public sealed class SqliteSessionStoreTests
         using var database = new SessionTestDatabase();
         using (var connection = database.Open())
         {
-            Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 3);");
+            Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 4);");
         }
 
         Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(database.Path).CreateSchema());
 
         using var verify = database.Open();
-        Assert.Equal(3L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(4L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(0L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_native_ids','session_runs','session_events','session_event_content','session_projection_state','session_human_evaluation');"));
     }
 
@@ -70,9 +326,33 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(2L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(3L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_human_evaluation';"));
         Assert.NotNull(store.GetDetail(batch.Detail.Session.SessionId));
+    }
+
+    [Fact]
+    public void CreateSchema_VersionTwoDatabaseAddsProposalTablesAndPreservesSessionRow()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.Parse("2026-07-11T00:00:00Z"));
+        store.Write(batch);
+        using (var connection = database.Open())
+        {
+            Execute(connection, "DROP TABLE improvement_proposal_evidence; DROP TABLE improvement_proposal_sessions; DROP TABLE improvement_proposals; UPDATE schema_version SET version=2 WHERE component='session';");
+        }
+
+        store.CreateSchema();
+
+        using var verify = database.Open();
+        Assert.Equal(3L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        foreach (var table in new[] { "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence" })
+        {
+            Assert.Equal(1L, Scalar<long>(verify, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
+        }
+        Assert.Equal(batch.Detail.Session.SessionId, store.GetDetail(batch.Detail.Session.SessionId)?.Session.SessionId);
     }
 
     [Fact]
@@ -515,6 +795,41 @@ public sealed class SqliteSessionStoreTests
             "copilot-sdk-stream", $"event-{nativeId}", "user.message", lastSeenAt, SessionContentState.Available);
         var content = new SessionEventContent(@event.EventId, "application/json", "{\"text\":\"synthetic\"}", lastSeenAt, lastSeenAt.AddDays(90));
         return new(new SessionDetail(session, [native], [run], [@event]), [content]);
+    }
+
+    private static SessionWriteBatch CreateTerminalBatch(DateTimeOffset lastSeenAt, string nativeId)
+    {
+        var batch = CreateBatch(lastSeenAt, nativeId);
+        return batch with
+        {
+            Detail = batch.Detail with
+            {
+                Session = batch.Detail.Session with { Status = ObservedSessionStatus.Completed, EndedAt = lastSeenAt },
+                Runs = [batch.Detail.Runs[0] with { Status = ObservedSessionStatus.Completed, EndedAt = lastSeenAt }],
+            },
+        };
+    }
+
+    private static ImprovementProposal CreateProposal(SessionWriteBatch batch) => CreateProposal([batch]);
+
+    private static ImprovementProposal CreateProposal(IReadOnlyList<SessionWriteBatch> batches)
+    {
+        var now = DateTimeOffset.UnixEpoch;
+        return new(
+            Guid.CreateVersion7(),
+            ImprovementProposalStatus.Candidate,
+            "skill",
+            "Opaque target",
+            "Improve evidence selection",
+            "Use existing exact-bound evidence.",
+            "More consistent review.",
+            "Requires user review.",
+            batches.Select(batch => batch.Detail.Session.SessionId).ToArray(),
+            batches.Select(batch => new ImprovementProposalEvidenceReference("event", batch.Detail.Events[0].EventId.ToString("D"))).ToArray(),
+            now,
+            now,
+            null,
+            null);
     }
 
     private static void Execute(SqliteConnection connection, string sql)
