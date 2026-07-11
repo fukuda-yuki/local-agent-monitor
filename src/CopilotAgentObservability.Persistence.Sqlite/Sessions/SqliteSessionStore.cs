@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 public sealed class SqliteSessionStore : ISessionStore
 {
-    private const int CurrentSchemaVersion = 7;
+    private const int CurrentSchemaVersion = 8;
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
 
@@ -40,7 +40,7 @@ public sealed class SqliteSessionStore : ISessionStore
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'session';";
         var existingVersion = versionCommand.ExecuteScalar();
-        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or 5 or 6 or CurrentSchemaVersion))
+        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or CurrentSchemaVersion))
         {
             throw new InvalidOperationException("Unsupported Session schema version.");
         }
@@ -55,6 +55,8 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = ProposalApplySchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = ObjectiveEvaluationSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"INSERT INTO schema_version(component,version) VALUES('session',{CurrentSchemaVersion});");
         }
         else if (Convert.ToInt32(existingVersion) == 1)
@@ -65,6 +67,8 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = ProposalApplySchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = ObjectiveEvaluationSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 2)
@@ -72,6 +76,8 @@ public sealed class SqliteSessionStore : ISessionStore
             command.CommandText = ImprovementProposalSchemaSql;
             command.ExecuteNonQuery();
             command.CommandText = ProposalApplySchemaSql;
+            command.ExecuteNonQuery();
+            command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
@@ -85,17 +91,29 @@ public sealed class SqliteSessionStore : ISessionStore
         {
             command.CommandText = "ALTER TABLE proposal_apply_drafts ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.0000000+00:00';";
             command.ExecuteNonQuery();
+            command.CommandText = ObjectiveEvaluationSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 5)
         {
             command.CommandText = ProposalApplyPendingSchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = ObjectiveEvaluationSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 6)
         {
             command.CommandText = "ALTER TABLE improvement_proposals ADD COLUMN revision INTEGER NOT NULL DEFAULT 1; ALTER TABLE proposal_apply_drafts ADD COLUMN proposal_revision INTEGER NOT NULL DEFAULT 1; ALTER TABLE proposal_applies ADD COLUMN proposal_revision INTEGER NOT NULL DEFAULT 1;";
+            command.ExecuteNonQuery();
+            command.CommandText = ObjectiveEvaluationSchemaSql;
+            command.ExecuteNonQuery();
+            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
+        else if (Convert.ToInt32(existingVersion) == 7)
+        {
+            command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
@@ -673,6 +691,73 @@ public sealed class SqliteSessionStore : ISessionStore
         command.ExecuteNonQuery();
     }
 
+    public void CreateObjectiveEvaluation(ObjectiveEvaluationReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        if (!ObjectiveEvaluationValidation.IsValid(receipt)) throw new ArgumentException("Invalid objective evaluation.", nameof(receipt));
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction();
+        if (!ExactReceiptScope(connection, transaction, receipt)) throw new ArgumentException("Objective evidence is not exact.", nameof(receipt));
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "INSERT INTO objective_evaluations(objective_evaluation_id,session_id,run_id,trace_id,result,severity,evaluator_id,evaluator_version,criterion_id,case_key,recorded_at) VALUES($id,$session,$run,$trace,$result,$severity,$evaluator,$version,$criterion,$case,$recorded);";
+            Add(command, "$id", Id(receipt.ObjectiveEvaluationId)); Add(command, "$session", Id(receipt.SessionId)); Add(command, "$run", Id(receipt.RunId)); Add(command, "$trace", receipt.TraceId); Add(command, "$result", receipt.Result == ObjectiveResult.Pass ? "pass" : "fail"); Add(command, "$severity", receipt.Severity == ObjectiveSeverity.Normal ? "normal" : "severe"); Add(command, "$evaluator", receipt.EvaluatorId); Add(command, "$version", receipt.EvaluatorVersion); Add(command, "$criterion", receipt.CriterionId); Add(command, "$case", receipt.CaseKey); Add(command, "$recorded", Timestamp(receipt.RecordedAt));
+            command.ExecuteNonQuery();
+        }
+        foreach (var (evidence, index) in receipt.Evidence.Select((value, index) => (value, index)))
+        {
+            using var command = connection.CreateCommand(); command.Transaction = transaction;
+            command.CommandText = "INSERT INTO objective_evaluation_evidence(objective_evaluation_id,evidence_order,kind,reference_id) VALUES($id,$order,$kind,$reference);";
+            Add(command, "$id", Id(receipt.ObjectiveEvaluationId)); Add(command, "$order", index); Add(command, "$kind", evidence.Kind); Add(command, "$reference", evidence.ReferenceId); command.ExecuteNonQuery();
+        }
+        transaction.Commit();
+    }
+
+    public IReadOnlyList<ObjectiveEvaluationReceipt> ListObjectiveEvaluations(Guid sessionId)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT objective_evaluation_id,session_id,run_id,trace_id,result,severity,evaluator_id,evaluator_version,criterion_id,case_key,recorded_at FROM objective_evaluations WHERE session_id=$session ORDER BY recorded_at,objective_evaluation_id;";
+        Add(command, "$session", Id(sessionId)); using var reader = command.ExecuteReader();
+        var rows = new List<ObjectiveEvaluationReceipt>();
+        while (reader.Read())
+        {
+            var id = Guid.Parse(reader.GetString(0));
+            rows.Add(new(id, Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)), reader.GetString(3), reader.GetString(4) == "pass" ? ObjectiveResult.Pass : ObjectiveResult.Fail, reader.GetString(5) == "normal" ? ObjectiveSeverity.Normal : ObjectiveSeverity.Severe, reader.GetString(6), reader.GetString(7), reader.GetString(8), reader.GetString(9), Evidence(connection, id), ParseTimestamp(reader.GetString(10))));
+        }
+        return rows;
+    }
+
+    private static IReadOnlyList<ObjectiveEvaluationEvidence> Evidence(SqliteConnection connection, Guid id)
+    {
+        using var command = connection.CreateCommand(); command.CommandText = "SELECT kind,reference_id FROM objective_evaluation_evidence WHERE objective_evaluation_id=$id ORDER BY evidence_order;"; Add(command, "$id", Id(id)); using var reader = command.ExecuteReader(); var result = new List<ObjectiveEvaluationEvidence>(); while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(1))); return result;
+    }
+
+    private static bool ExactReceiptScope(SqliteConnection connection, SqliteTransaction transaction, ObjectiveEvaluationReceipt receipt)
+    {
+        using var scope = connection.CreateCommand(); scope.Transaction = transaction;
+        scope.CommandText = "SELECT 1 FROM sessions s JOIN session_runs r ON r.session_id=s.session_id WHERE s.session_id=$session AND r.run_id=$run AND s.completeness='full' AND s.status IN ('completed','failed') AND r.trace_id=$trace;";
+        Add(scope, "$session", Id(receipt.SessionId)); Add(scope, "$run", Id(receipt.RunId)); Add(scope, "$trace", receipt.TraceId);
+        if (scope.ExecuteScalar() is null) return false;
+        foreach (var evidence in receipt.Evidence)
+        {
+            using var command = connection.CreateCommand(); command.Transaction = transaction;
+            command.CommandText = evidence.Kind switch
+            {
+                "run" => "SELECT 1 FROM session_runs WHERE session_id=$session AND run_id=$reference AND run_id=$run AND trace_id=$trace;",
+                "event" => "SELECT 1 FROM session_events WHERE session_id=$session AND event_id=$reference AND run_id=$run AND trace_id=$trace;",
+                "trace" => "SELECT 1 FROM session_runs WHERE session_id=$session AND run_id=$run AND trace_id=$reference AND trace_id=$trace;",
+                "gate" when evidence.ReferenceId == "terminal" => "SELECT 1 FROM session_events WHERE session_id=$session AND run_id=$run AND trace_id=$trace AND type IN ('session.shutdown','session.task_complete','SessionEnd','Stop');",
+                "gate" when evidence.ReferenceId == "error" => "SELECT 1 FROM session_events WHERE session_id=$session AND run_id=$run AND trace_id=$trace AND status='error';",
+                _ => "SELECT 0;",
+            };
+            Add(command, "$session", Id(receipt.SessionId)); Add(command, "$run", Id(receipt.RunId)); Add(command, "$trace", receipt.TraceId); Add(command, "$reference", evidence.ReferenceId);
+            if (command.ExecuteScalar() is null) return false;
+        }
+        return true;
+    }
+
     public IReadOnlyList<ImprovementProposal> ListImprovementProposals(Guid sessionId)
     {
         using var connection = Open();
@@ -1159,6 +1244,32 @@ public sealed class SqliteSessionStore : ISessionStore
             verdict TEXT NOT NULL CHECK (verdict IN ('expected','problem')),
             recorded_at TEXT NOT NULL,
             FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+        );
+        """;
+
+    private const string ObjectiveEvaluationSchemaSql = """
+        CREATE TABLE IF NOT EXISTS objective_evaluations (
+            objective_evaluation_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            trace_id TEXT NOT NULL,
+            result TEXT NOT NULL CHECK (result IN ('pass','fail')),
+            severity TEXT NOT NULL CHECK (severity IN ('normal','severe')),
+            evaluator_id TEXT NOT NULL,
+            evaluator_version TEXT NOT NULL,
+            criterion_id TEXT NOT NULL,
+            case_key TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT,
+            FOREIGN KEY (run_id) REFERENCES session_runs(run_id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS objective_evaluation_evidence (
+            objective_evaluation_id TEXT NOT NULL,
+            evidence_order INTEGER NOT NULL CHECK (evidence_order >= 0),
+            kind TEXT NOT NULL CHECK (kind IN ('run','event','trace','gate')),
+            reference_id TEXT NOT NULL,
+            PRIMARY KEY (objective_evaluation_id,evidence_order),
+            FOREIGN KEY (objective_evaluation_id) REFERENCES objective_evaluations(objective_evaluation_id) ON DELETE RESTRICT
         );
         """;
 

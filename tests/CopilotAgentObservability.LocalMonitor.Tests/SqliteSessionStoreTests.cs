@@ -7,6 +7,26 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SqliteSessionStoreTests
 {
     [Fact]
+    public void ObjectiveEvaluations_PersistAcrossStoreRestartAndAreImmutable()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "objective");
+        var full = batch with { Detail = batch.Detail with { Session = batch.Detail.Session with { Completeness = SessionCompleteness.Full } } };
+        store.Write(full);
+        var receipt = new ObjectiveEvaluationReceipt(Guid.CreateVersion7(), full.Detail.Session.SessionId, full.Detail.Runs[0].RunId, full.Detail.Runs[0].TraceId!, ObjectiveResult.Fail, ObjectiveSeverity.Severe, "eval", "v1", "criterion", "case", [new("run", full.Detail.Runs[0].RunId.ToString("D")), new("event", full.Detail.Events[0].EventId.ToString("D")), new("trace", full.Detail.Runs[0].TraceId!)], DateTimeOffset.UnixEpoch);
+
+        store.CreateObjectiveEvaluation(receipt);
+
+        var restarted = new SqliteSessionStore(database.Path);
+        var persisted = Assert.Single(restarted.ListObjectiveEvaluations(full.Detail.Session.SessionId));
+        Assert.Equal(receipt with { Evidence = [] }, persisted with { Evidence = [] });
+        Assert.Equal(receipt.Evidence, persisted.Evidence);
+        Assert.Throws<SqliteException>(() => restarted.CreateObjectiveEvaluation(receipt));
+    }
+
+    [Fact]
     public void ImprovementProposals_PersistCandidateWithOpaqueReferences()
     {
         using var database = new SessionTestDatabase();
@@ -272,8 +292,8 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var connection = database.Open();
-        Assert.Equal(7L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
-        foreach (var table in new[] { "sessions", "session_native_ids", "session_runs", "session_events", "session_event_content", "session_projection_state", "session_human_evaluation", "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence", "proposal_apply_drafts", "proposal_apply_files", "proposal_apply_hunks", "proposal_apply_revisions", "proposal_applies", "proposal_apply_audit", "proposal_apply_pending" })
+        Assert.Equal(8L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
+        foreach (var table in new[] { "sessions", "session_native_ids", "session_runs", "session_events", "session_event_content", "session_projection_state", "session_human_evaluation", "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence", "proposal_apply_drafts", "proposal_apply_files", "proposal_apply_hunks", "proposal_apply_revisions", "proposal_applies", "proposal_apply_audit", "proposal_apply_pending", "objective_evaluations", "objective_evaluation_evidence" })
         {
             Assert.Equal(1L, Scalar<long>(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
         }
@@ -300,13 +320,13 @@ public sealed class SqliteSessionStoreTests
         using var database = new SessionTestDatabase();
         using (var connection = database.Open())
         {
-            Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 8);");
+            Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 9);");
         }
 
         Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(database.Path).CreateSchema());
 
         using var verify = database.Open();
-        Assert.Equal(8L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(9L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(0L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_native_ids','session_runs','session_events','session_event_content','session_projection_state','session_human_evaluation');"));
     }
 
@@ -326,7 +346,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(7L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(8L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_human_evaluation';"));
         Assert.NotNull(store.GetDetail(batch.Detail.Session.SessionId));
     }
@@ -380,7 +400,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(7L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(8L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         foreach (var table in new[] { "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence" })
         {
             Assert.Equal(1L, Scalar<long>(verify, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
@@ -866,7 +886,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(7L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(8L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT revision FROM improvement_proposals;"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT proposal_revision FROM proposal_apply_drafts;"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT proposal_revision FROM proposal_applies;"));

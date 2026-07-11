@@ -324,6 +324,8 @@ public interface ISessionStore
     SessionHumanEvaluation? GetHumanEvaluation(Guid sessionId);
     void UpsertHumanEvaluation(SessionHumanEvaluation evaluation);
     void ClearHumanEvaluation(Guid sessionId);
+    void CreateObjectiveEvaluation(ObjectiveEvaluationReceipt receipt);
+    IReadOnlyList<ObjectiveEvaluationReceipt> ListObjectiveEvaluations(Guid sessionId);
     SessionContentLookup? GetContent(Guid sessionId, Guid eventId);
     SessionRawRetentionState GetRawRetentionState(Guid sessionId);
     SessionProjectionState? GetProjectionState(string projectorKey);

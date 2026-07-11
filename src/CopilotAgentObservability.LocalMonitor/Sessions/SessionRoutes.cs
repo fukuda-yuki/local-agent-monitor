@@ -27,6 +27,32 @@ internal static class SessionRoutes
         TimeProvider timeProvider)
     {
         MapProposalApplyRoutes(app, store, proposalApplyService);
+        app.MapPost("/api/session-workspace/objective-evaluations", async context =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            if (MonitorHost.IsCrossSiteRequest(context)) { await Failure(context, 403, "cross_origin_forbidden"); return; }
+            if (!MonitorHost.HasMonitorCsrfHeader(context)) { await Failure(context, 403, "csrf_required"); return; }
+            if (!IsJson(context.Request)) { await Failure(context, 415, "unsupported_media_type"); return; }
+            var body = await ReadBoundedBody(context.Request, MaximumBodyBytes, context.RequestAborted);
+            if (body is null) { await Failure(context, 413, "request_too_large"); return; }
+            if (!ObjectiveEvaluationRequest.TryParse(body, out var request)
+                || !TryUuidV7(request!.SessionId!, out var sessionId) || !TryUuidV7(request.RunId!, out var runId)
+                || request.TraceId is null || request.Result is not ("pass" or "fail") || request.Severity is not ("normal" or "severe"))
+            { await Failure(context, 400, "invalid_objective_evaluation"); return; }
+            var receipt = new ObjectiveEvaluationReceipt(Guid.CreateVersion7(), sessionId, runId, request.TraceId, request.Result == "pass" ? ObjectiveResult.Pass : ObjectiveResult.Fail, request.Severity == "normal" ? ObjectiveSeverity.Normal : ObjectiveSeverity.Severe, request.EvaluatorId!, request.EvaluatorVersion!, request.CriterionId!, request.CaseKey!, request.EvidenceRefs!, timeProvider.GetUtcNow());
+            if (!ObjectiveEvaluationValidation.IsValid(receipt)) { await Failure(context, 400, "invalid_objective_evaluation"); return; }
+            try { store.CreateObjectiveEvaluation(receipt); }
+            catch (ArgumentException) { await Failure(context, 400, "objective_evidence_not_exact"); return; }
+            catch (Microsoft.Data.Sqlite.SqliteException) { await Failure(context, 503, "objective_evidence_not_exact"); return; }
+            context.Response.StatusCode = 201;
+            await JsonBody(context, ObjectiveReceiptDto(receipt));
+        });
+        app.MapGet("/api/session-workspace/objective-evaluations", async context =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            if (!TryUuidV7(context.Request.Query["session_id"].ToString(), out var sessionId)) { await Failure(context, 400, "invalid_objective_evaluation"); return; }
+            await Json(context, new { items = store.ListObjectiveEvaluations(sessionId).Select(ObjectiveReceiptDto) });
+        });
         app.MapPost(IngestPath, async context =>
         {
             if (!string.Equals(context.Request.ContentType?.Split(';', 2)[0], "application/json", StringComparison.OrdinalIgnoreCase))
@@ -595,6 +621,22 @@ internal static class SessionRoutes
         updated_at = proposal.UpdatedAt,
         recommended_at = proposal.RecommendedAt,
         verified_at = proposal.VerifiedAt,
+    };
+
+    private static object ObjectiveReceiptDto(ObjectiveEvaluationReceipt receipt) => new
+    {
+        objective_evaluation_id = receipt.ObjectiveEvaluationId,
+        session_id = receipt.SessionId,
+        run_id = receipt.RunId,
+        trace_id = receipt.TraceId,
+        result = receipt.Result == ObjectiveResult.Pass ? "pass" : "fail",
+        severity = receipt.Severity == ObjectiveSeverity.Normal ? "normal" : "severe",
+        evaluator_id = receipt.EvaluatorId,
+        evaluator_version = receipt.EvaluatorVersion,
+        criterion_id = receipt.CriterionId,
+        case_key = receipt.CaseKey,
+        evidence_refs = receipt.Evidence.Select(item => new { kind = item.Kind, reference_id = item.ReferenceId }),
+        recorded_at = receipt.RecordedAt,
     };
 
     private static bool TrySurface(string value, out SessionSourceSurface surface)
