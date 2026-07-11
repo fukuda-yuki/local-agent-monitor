@@ -8,12 +8,19 @@ public sealed class SqliteSessionStore : ISessionStore
     private const int CurrentSchemaVersion = 9;
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
+    private readonly Action<string>? comparisonCheckpoint;
 
     public SqliteSessionStore(string databasePath, TimeProvider? timeProvider = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.databasePath = databasePath;
         this.timeProvider = timeProvider ?? TimeProvider.System;
+    }
+
+    internal SqliteSessionStore(string databasePath, Action<string> comparisonCheckpoint)
+        : this(databasePath)
+    {
+        this.comparisonCheckpoint = comparisonCheckpoint ?? throw new ArgumentNullException(nameof(comparisonCheckpoint));
     }
 
     public void CreateSchema()
@@ -767,6 +774,7 @@ public sealed class SqliteSessionStore : ISessionStore
         var apply = ReadActiveApply(connection, transaction, request);
         if (apply is null)
             throw new InvalidOperationException("Application is not active.");
+        comparisonCheckpoint?.Invoke("after_active_apply_read");
 
         var facts = new List<SessionEffectFacts>();
         var capturedEvidence = new List<(Guid SessionId, string Kind, string ReferenceId, string? RecordedAt)>();
@@ -817,7 +825,9 @@ public sealed class SqliteSessionStore : ISessionStore
             Execute(connection, transaction, "INSERT INTO effect_comparison_sessions(comparison_id,session_id,classification,case_key,exclusion_reason,session_order) VALUES($comparison,$session,$classification,$case,$reason,$order);", ("$comparison", Id(comparisonId)), ("$session", Id(item.SessionId)), ("$classification", item.Classification), ("$case", item.CaseKey), ("$reason", item.ExclusionReason), ("$order", order));
         foreach (var (evidence, order) in capturedEvidence.Select((value, index) => (value, index)))
             Execute(connection, transaction, "INSERT INTO effect_comparison_evidence(comparison_id,evidence_order,session_id,kind,reference_id,recorded_at) VALUES($comparison,$order,$session,$kind,$reference,$recorded);", ("$comparison", Id(comparisonId)), ("$order", order), ("$session", Id(evidence.SessionId)), ("$kind", evidence.Kind), ("$reference", evidence.ReferenceId), ("$recorded", evidence.RecordedAt));
+        comparisonCheckpoint?.Invoke("after_cohort_session_evidence_insert");
         Execute(connection, transaction, "INSERT INTO effect_receipts(comparison_id,verdict,result_json,recorded_at) VALUES($comparison,$verdict,$result,$recorded);", ("$comparison", Id(comparisonId)), ("$verdict", VerdictText(result.Verdict)), ("$result", System.Text.Json.JsonSerializer.Serialize(result)), ("$recorded", Timestamp(recordedAt)));
+        comparisonCheckpoint?.Invoke("after_effect_receipt_insert");
         if (result.Verdict == EffectVerdict.Improved)
         {
             var changed = Execute(connection, transaction, "UPDATE improvement_proposals SET status='verified',verified_at=$time,updated_at=$time WHERE proposal_id=$proposal AND revision=$revision AND status='recommended';", ("$time", Timestamp(recordedAt)), ("$proposal", Id(request.ProposalId)), ("$revision", request.ProposalRevision));
@@ -1312,7 +1322,7 @@ public sealed class SqliteSessionStore : ISessionStore
     private static (DateTimeOffset AppliedAt, Guid DraftId)? ReadActiveApply(SqliteConnection connection, SqliteTransaction transaction, EffectComparisonRequest request)
     {
         using var command = connection.CreateCommand(); command.Transaction = transaction;
-        command.CommandText = "SELECT a.created_at,a.draft_id FROM proposal_applies a JOIN proposal_apply_drafts d ON d.draft_id=a.draft_id WHERE a.apply_id=$apply AND d.proposal_id=$proposal AND a.proposal_revision=$revision AND a.state='applied' AND NOT EXISTS(SELECT 1 FROM proposal_apply_pending p WHERE p.apply_id=a.apply_id AND p.operation_kind='rollback');";
+        command.CommandText = "SELECT a.created_at,a.draft_id FROM proposal_applies a JOIN proposal_apply_drafts d ON d.draft_id=a.draft_id WHERE a.apply_id=$apply AND d.proposal_id=$proposal AND a.proposal_revision=$revision AND a.state='applied' AND NOT EXISTS(SELECT 1 FROM proposal_apply_pending p WHERE p.apply_id=a.apply_id);";
         Add(command, "$apply", Id(request.ApplyId)); Add(command, "$proposal", Id(request.ProposalId)); Add(command, "$revision", request.ProposalRevision);
         using var reader = command.ExecuteReader(); return reader.Read() ? (ParseTimestamp(reader.GetString(0)), Guid.Parse(reader.GetString(1))) : null;
     }

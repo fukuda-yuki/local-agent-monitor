@@ -321,6 +321,110 @@ public sealed class SqliteEffectComparisonStoreTests
         Assert.DoesNotContain(detail.Evidence, e => e.ReferenceId == objective.ToString("D"));
     }
 
+    [Theory]
+    [InlineData("after_cohort_session_evidence_insert")]
+    [InlineData("after_effect_receipt_insert")]
+    public void RecordEffectComparison_InjectedFailureRollsBackEveryComparisonRowAndVerification(string failurePoint)
+    {
+        using var temp = new MonitorTempDirectory();
+        var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7();
+        var setup = new SqliteSessionStore(temp.DatabasePath); setup.CreateSchema();
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var sessions = SeedImprovedCohort(temp.DatabasePath, setup, at);
+        var store = new SqliteSessionStore(temp.DatabasePath, point =>
+        {
+            if (point == failurePoint) throw new InvalidOperationException("injected comparison failure");
+        });
+
+        Assert.Throws<InvalidOperationException>(() => store.RecordEffectComparison(Request(proposal, apply, sessions), at.AddHours(1)));
+
+        AssertComparisonRows(temp.DatabasePath, 0);
+        Assert.Equal(ImprovementProposalStatus.Recommended, setup.GetImprovementProposal(proposal)!.Status);
+    }
+
+    [Fact]
+    public async Task RecordEffectComparison_SerializesRollbackAfterActiveApplyReadAndKeepsHistoricalVerifiedReceipt()
+    {
+        using var temp = new MonitorTempDirectory();
+        var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7();
+        var setup = new SqliteSessionStore(temp.DatabasePath); setup.CreateSchema();
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var sessions = SeedImprovedCohort(temp.DatabasePath, setup, at);
+        using var comparisonAtApplyRead = new ManualResetEventSlim();
+        using var releaseComparison = new ManualResetEventSlim();
+        var comparing = new SqliteSessionStore(temp.DatabasePath, point =>
+        {
+            if (point != "after_active_apply_read") return;
+            comparisonAtApplyRead.Set();
+            releaseComparison.Wait();
+        });
+        var compareTask = Task.Run(() => comparing.RecordEffectComparison(Request(proposal, apply, sessions), at.AddHours(1)));
+        comparisonAtApplyRead.Wait();
+        var rollbackStarted = new ManualResetEventSlim();
+        var rollbackTask = Task.Run(() =>
+        {
+            rollbackStarted.Set();
+            return StartRollback(setup, temp.DatabasePath, proposal, apply, at.AddHours(2));
+        });
+        rollbackStarted.Wait();
+        releaseComparison.Set();
+        var receipt = await compareTask;
+        Assert.True(await rollbackTask);
+        CompleteRollback(setup, temp.DatabasePath, proposal, apply, at.AddHours(3));
+
+        var restarted = new SqliteSessionStore(temp.DatabasePath);
+        var first = restarted.GetEffectComparison(receipt.ComparisonId)!.Receipt;
+        var second = restarted.GetEffectComparison(receipt.ComparisonId)!.Receipt;
+        Assert.Equal(EffectVerdict.Improved, first.Result.Verdict);
+        Assert.Equal("invalidated", first.VerificationState);
+        Assert.Equal(first.ComparisonId, second.ComparisonId);
+        Assert.Equal(first.CohortRevision, second.CohortRevision);
+        Assert.Equal(first.RecordedAt, second.RecordedAt);
+        Assert.Equal(first.Result, second.Result, new EffectVerdictResultComparer());
+        Assert.Equal(ImprovementProposalStatus.Verified, restarted.GetImprovementProposal(proposal)!.Status);
+        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM effect_receipts;"));
+    }
+
+    [Theory]
+    [InlineData("rollback")]
+    [InlineData("apply")]
+    public void RecordEffectComparison_RejectsWhenApplyOperationIsPendingWithoutPersistingReceipt(string operationKind)
+    {
+        using var temp = new MonitorTempDirectory(); var store = new SqliteSessionStore(temp.DatabasePath); store.CreateSchema();
+        var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00"); var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7();
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var sessions = SeedImprovedCohort(temp.DatabasePath, store, at);
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            Execute(connection, "INSERT INTO proposal_apply_pending(apply_id,draft_id,proposal_id,root_id,actor_kind,file_count,operation_kind,recorded_at) SELECT a.apply_id,a.draft_id,d.proposal_id,d.root_id,'local_user',0,$kind,$at FROM proposal_applies a JOIN proposal_apply_drafts d ON d.draft_id=a.draft_id WHERE a.apply_id=$apply;", ("$kind", operationKind), ("$at", at.ToString("O")), ("$apply", apply.ToString("D")));
+        }
+
+        Assert.Throws<InvalidOperationException>(() => store.RecordEffectComparison(Request(proposal, apply, sessions), at.AddHours(1)));
+        AssertComparisonRows(temp.DatabasePath, 0);
+        Assert.Equal(ImprovementProposalStatus.Recommended, store.GetImprovementProposal(proposal)!.Status);
+    }
+
+    [Fact]
+    public void RecordEffectComparison_FailureDoesNotBlockRollbackRecovery()
+    {
+        using var temp = new MonitorTempDirectory(); var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7(); var setup = new SqliteSessionStore(temp.DatabasePath); setup.CreateSchema();
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var sessions = SeedImprovedCohort(temp.DatabasePath, setup, at);
+        var failing = new SqliteSessionStore(temp.DatabasePath, point => { if (point == "after_effect_receipt_insert") throw new InvalidOperationException("injected"); });
+
+        Assert.Throws<InvalidOperationException>(() => failing.RecordEffectComparison(Request(proposal, apply, sessions), at));
+        Assert.True(StartRollback(setup, temp.DatabasePath, proposal, apply, at.AddMinutes(1)));
+        CompleteRollback(setup, temp.DatabasePath, proposal, apply, at.AddMinutes(2));
+
+        Assert.Empty(setup.ListProposalApplyPending());
+        Assert.Equal("rolled_back", setup.ListApplicationReceipts(proposal).Single().State);
+        AssertComparisonRows(temp.DatabasePath, 0);
+    }
+
     private static void SeedProposalAndApply(string databasePath, Guid proposalId, Guid applyId, DateTimeOffset appliedAt)
     {
         using var connection = new SqliteConnection($"Data Source={databasePath}");
@@ -329,6 +433,39 @@ public sealed class SqliteEffectComparisonStoreTests
         var draft = Guid.CreateVersion7();
         Execute(connection, "INSERT INTO proposal_apply_drafts(draft_id,proposal_id,proposal_revision,root_id,selection_revision,approval_digest,state,created_at,updated_at) VALUES($draft,$proposal,1,$root,1,'digest','applied',$at,$at);", ("$draft", draft.ToString("D")), ("$proposal", proposalId.ToString("D")), ("$root", Guid.CreateVersion7().ToString("D")), ("$at", appliedAt.ToString("O")));
         Execute(connection, "INSERT INTO proposal_applies(apply_id,draft_id,proposal_revision,state,created_at) VALUES($apply,$draft,1,'applied',$at);", ("$apply", applyId.ToString("D")), ("$draft", draft.ToString("D")), ("$at", appliedAt.ToString("O")));
+    }
+
+    private static Guid[] SeedImprovedCohort(string databasePath, SqliteSessionStore store, DateTimeOffset at)
+    {
+        var sessions = Enumerable.Range(0, 6).Select(i => SeedComparableSession(databasePath, i < 3 ? at.AddMinutes(-10 - i) : at.AddMinutes(10 + i))).ToArray();
+        foreach (var (id, index) in sessions.Select((id, index) => (id, index))) store.UpsertHumanEvaluation(new(id, index < 3 ? "problem" : "expected", at));
+        return sessions;
+    }
+
+    private static EffectComparisonRequest Request(Guid proposal, Guid apply, IReadOnlyList<Guid> sessions) => new(proposal, 1, apply, sessions.Select((id, i) => new EffectCohortSession(id, i < 3 ? "pre" : "post", "case", null)).ToArray());
+
+    private static void AssertComparisonRows(string databasePath, long expected)
+    {
+        Assert.Equal(expected, Scalar(databasePath, "SELECT COUNT(*) FROM effect_comparisons;"));
+        Assert.Equal(expected == 0 ? 0 : expected * 6, Scalar(databasePath, "SELECT COUNT(*) FROM effect_comparison_sessions;"));
+        Assert.Equal(expected == 0 ? 0 : expected * 6, Scalar(databasePath, "SELECT COUNT(*) FROM effect_comparison_evidence;"));
+        Assert.Equal(expected, Scalar(databasePath, "SELECT COUNT(*) FROM effect_receipts;"));
+    }
+
+    private static bool StartRollback(SqliteSessionStore store, string databasePath, Guid proposal, Guid apply, DateTimeOffset at)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}"); connection.Open();
+        var draft = Guid.Parse(Text(connection, "SELECT draft_id FROM proposal_applies WHERE apply_id=$apply;", ("$apply", apply.ToString("D")))!);
+        var root = Guid.Parse(Text(connection, "SELECT root_id FROM proposal_apply_drafts WHERE draft_id=$draft;", ("$draft", draft.ToString("D")))!);
+        return store.TryStartProposalApplyRollback(new(apply, draft, proposal, root, 0, "rollback", at));
+    }
+
+    private static void CompleteRollback(SqliteSessionStore store, string databasePath, Guid proposal, Guid apply, DateTimeOffset at)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}"); connection.Open();
+        var draft = Guid.Parse(Text(connection, "SELECT draft_id FROM proposal_applies WHERE apply_id=$apply;", ("$apply", apply.ToString("D")))!);
+        var root = Guid.Parse(Text(connection, "SELECT root_id FROM proposal_apply_drafts WHERE draft_id=$draft;", ("$draft", draft.ToString("D")))!);
+        store.CompleteProposalApplyPending(new(apply, draft, ProposalApplyState.RolledBack, at), proposal, root, 0, null);
     }
 
     private static Guid SeedComparableSession(string databasePath, DateTimeOffset boundary, long? totalTokens = 10)
