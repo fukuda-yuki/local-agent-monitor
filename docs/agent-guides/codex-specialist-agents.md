@@ -1,9 +1,8 @@
 # Codex Specialist Subagent Mission Cards
 
-Native Codex definitions live under `.codex/agents/`. These mission cards document the same
-specialist reviewer and test-writer roles for Codex surfaces that provide prompt-based subagent
-delegation. The equivalent Claude definitions under `.claude/agents/` are not a Codex discovery
-surface.
+These mission cards make the repository's specialist reviewer and test-writer roles usable by
+Codex surfaces that provide subagent delegation. The equivalent Claude definitions under
+`.claude/agents/` are not a Codex discovery surface.
 
 Use these roles only when the user explicitly requests subagent delegation. Keep the main Codex
 chat responsible for integration, validation, and final decisions. Combine each card with the

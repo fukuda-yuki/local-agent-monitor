@@ -28,16 +28,6 @@ Use the smallest sufficient agent.
 - `high-writer`: normal implementation, tests, and documentation edits
 - `max-writer`: hard, risky, architecture-sensitive, or subtle correctness work
 
-### Specialist agents
-
-- `api-contract-reviewer`: read-only spec / producer / consumer wire-contract comparison
-- `async-ui-state-reviewer`: read-only stale-response, selection, tab, loading, and focus race review
-- `local-risk-posture-reviewer`: read-only review of the repository's documented local-first and sanitized-data boundaries
-- `test-writer`: test-only xUnit, Playwright, and executable `node:test` implementation
-
-Use a specialist when its bounded review or write scope matches the mission. Use the generic
-reader/writer tiers for integration work that spans multiple specialties.
-
 ## Reader Mission Card
 
 When delegating to a reader agent, use this template:
