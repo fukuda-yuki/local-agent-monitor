@@ -125,7 +125,8 @@ public class CanvasExtensionContractTests
         Assert.Contains("readRequestBodyAtMost", script);
         Assert.Contains("1048576", script);
         Assert.Contains("Cache-Control\", \"no-store", script);
-        Assert.Contains("suppliedToken !== token", script);
+        Assert.Contains("headerToken !== undefined && headerToken !== token", script);
+        Assert.Contains("queryToken !== null && queryToken !== token", script);
         Assert.Contains("isProposalHelperPath(path)", script);
         Assert.Contains("invalid_proposal_id", script);
         Assert.DoesNotContain("name: \"create_proposal\"", script);
@@ -315,7 +316,8 @@ public class CanvasExtensionContractTests
         Assert.Contains("/api/session-evidence/traces/", script);
         Assert.Contains("agent-graph", script);
         Assert.Contains("spans?limit=", script);
-        Assert.Contains("suppliedToken !== token", script);
+        Assert.Contains("headerToken !== undefined && headerToken !== token", script);
+        Assert.Contains("queryToken !== null && queryToken !== token", script);
         Assert.Contains("handleEvidenceProxy", script);
         Assert.Contains("next_cursor", script);
         Assert.DoesNotContain("console.log", script);

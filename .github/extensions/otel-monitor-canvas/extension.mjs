@@ -464,8 +464,7 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
         // Token validation for all routes.
         const headerToken = req.headers["x-canvas-token"];
         const queryToken = url.searchParams.get("t");
-        const suppliedToken = headerToken || queryToken;
-        if (suppliedToken !== token) {
+        if ((headerToken !== undefined && headerToken !== token) || (queryToken !== null && queryToken !== token) || (headerToken === undefined && queryToken === null)) {
             sendJson(res, 401, { error: "unauthorized" });
             return;
         }
