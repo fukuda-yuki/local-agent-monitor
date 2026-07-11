@@ -49,7 +49,7 @@ async function proposalApplyHelperServer(fetchCalls, { monitorUrl = "http://127.
     const executable = source.slice(0, boundary).replace(/^import[\s\S]*?;\r?\n/gm, "") + "\nglobalThis.createHelperServer = createHelperServer;";
     const context = vm.createContext({
         createServer, URL, Buffer, AbortController, setTimeout, clearTimeout,
-        fetch: async (target, init) => { fetchCalls.push({ target: String(target), init }); return fetchResponse ? fetchResponse(String(target), init) : new Response(JSON.stringify(target.includes("roots") ? { items: [] } : target.includes("apply") || target.includes("rollback") ? { apply_id: "0197d7c0-0000-7000-8000-000000000001", state: "applied" } : { draft_id: "0197d7c0-0000-7000-8000-000000000001", proposal_id: "0197d7c0-0000-7000-8000-000000000002", root_id: "0197d7c0-0000-7000-8000-000000000003", selection_revision: 1, approval_digest: "digest", state: "draft", files: [], hunks: [] }), { status: 200, headers: { "content-type": "application/json" } }); },
+        fetch: async (target, init) => { fetchCalls.push({ target: String(target), init }); if (fetchResponse) return fetchResponse(String(target), init); const path = new URL(String(target)).pathname; const value = path.endsWith("/roots") ? { items: [] } : path.endsWith("/apply") || path.endsWith("/rollback") ? { apply_id: "0197d7c0-0000-7000-8000-000000000001", state: "applied" } : path.endsWith("/selection") || path.endsWith("/approve") ? { draft_id: "0197d7c0-0000-7000-8000-000000000001", proposal_id: "0197d7c0-0000-7000-8000-000000000002", root_id: "0197d7c0-0000-7000-8000-000000000003", selection_revision: 1, approval_digest: "digest", state: "selected", files: [], hunks: [] } : { draft_id: "0197d7c0-0000-7000-8000-000000000001", proposal_id: "0197d7c0-0000-7000-8000-000000000002", root_id: "0197d7c0-0000-7000-8000-000000000003", selection_revision: 1, approval_digest: "digest", state: "draft", files: [], hunks: [] }; return new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } }); },
         Response, TextEncoder, console,
         renderWorkspaceHtml: () => "", renderHelperHtml: () => "", handleEvidenceProxy: () => {}, CanvasError: class CanvasError extends Error {},
     });
@@ -57,7 +57,7 @@ async function proposalApplyHelperServer(fetchCalls, { monitorUrl = "http://127.
     const server = context.createHelperServer({ instanceId: "i", monitorUrl, healthState: "ready", statusCode: 200, healthBody: "", error: null, token: "token", session: {}, extensionScope: "", nativeSessionId: "" });
     await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
     const port = server.address().port;
-    const call = (method, path, headers = {}, body) => new Promise((resolve, reject) => { const request = httpRequest({ port, host: "127.0.0.1", method, path, headers }, response => { let text = ""; response.on("data", chunk => text += chunk); response.on("end", () => resolve({ status: response.statusCode, headers: response.headers, text })); }); request.on("error", reject); if (body !== undefined) request.write(body); request.end(); });
+    const call = (method, path, headers = {}, body) => new Promise((resolve, reject) => { const request = httpRequest({ port, host: "127.0.0.1", method, path, headers }, response => { let text = ""; response.on("data", chunk => text += chunk); response.on("end", () => resolve({ status: response.statusCode, headers: response.headers, text })); }); request.on("error", reject); if (Array.isArray(body)) body.forEach(chunk => request.write(chunk)); else if (body !== undefined) request.write(body); request.end(); });
     return { server, call };
 }
 
@@ -280,7 +280,7 @@ test("proposal apply helper server rejects every unsafe boundary and sanitizes r
         await reject("GET", "/api/session-workspace/proposal-applies/roots?t=wrong", { "x-canvas-token": "token" }, undefined, 401);
         await reject("GET", valid("/api/session-workspace/proposal-applies/roots"), { "x-canvas-token": "wrong" }, undefined, 401);
         assert.equal(calls.length, 0, "token rejection never reaches upstream");
-        for (const [method, path] of [["POST", "/api/session-workspace/proposal-applies/roots"], ["GET", "/api/session-workspace/proposal-applies/drafts"], ["DELETE", `/api/session-workspace/proposal-applies/drafts/${id}`], ["PUT", `/api/session-workspace/proposal-applies/${id}/rollback`]]) await reject(method, valid(path), { "x-canvas-token": "token" }, undefined, 404);
+        for (const [method, path] of [["POST", "/api/session-workspace/proposal-applies/roots"], ["GET", "/api/session-workspace/proposal-applies/drafts"], ["DELETE", `/api/session-workspace/proposal-applies/drafts/${id}`], ["GET", `/api/session-workspace/proposal-applies/drafts/${id}/selection`], ["POST", `/api/session-workspace/proposal-applies/drafts/${id}/selection`], ["GET", `/api/session-workspace/proposal-applies/drafts/${id}/approve`], ["PUT", `/api/session-workspace/proposal-applies/drafts/${id}/approve`], ["GET", `/api/session-workspace/proposal-applies/drafts/${id}/apply`], ["PUT", `/api/session-workspace/proposal-applies/drafts/${id}/apply`], ["PUT", `/api/session-workspace/proposal-applies/${id}/rollback`]]) await reject(method, valid(path), { "x-canvas-token": "token" }, undefined, 404);
         await reject("GET", valid("/api/session-workspace/proposal-applies/drafts/%E0%A4%A"), { "x-canvas-token": "token" }, undefined, 400);
         for (const contentType of [undefined, "text/plain"]) await reject("POST", valid("/api/session-workspace/proposal-applies/drafts"), { "x-canvas-token": "token", ...(contentType ? { "content-type": contentType } : {}) }, "{}", 415);
         await reject("POST", valid("/api/session-workspace/proposal-applies/drafts"), { "x-canvas-token": "token", "content-type": "application/json" }, "{", 400);
@@ -297,6 +297,33 @@ test("proposal apply helper server rejects every unsafe boundary and sanitizes r
     } finally { await new Promise(resolve => helper.server.close(resolve)); }
     const remoteCalls = [], remote = await proposalApplyHelperServer(remoteCalls, { monitorUrl: "http://example.test:4320" });
     try { const result = await remote.call("GET", "/api/session-workspace/proposal-applies/roots?t=token", { "x-canvas-token": "token" }); assert.equal(result.status, 400); assert.equal(result.headers["cache-control"], "no-store"); assert.equal(remoteCalls.length, 0); } finally { await new Promise(resolve => remote.server.close(resolve)); }
+});
+
+test("proposal apply helper server streams size limits and returns every canonical route's bounded shape", async () => {
+    const id = "0197d7c0-0000-7000-8000-000000000001", calls = [];
+    const helper = await proposalApplyHelperServer(calls, { fetchResponse: target => {
+        const path = new URL(target).pathname, secret = { path: "secret-path", source: "secret-source", diff: "secret-diff" };
+        if (path.endsWith("/roots")) return new Response(JSON.stringify({ items: [{ root_id: "root", kind: "repository", label: "Repo", ...secret }] }));
+        if (path.endsWith("/drafts")) return new Response(JSON.stringify({ draft_id: id, full_diff: "helper-only", files: [], hunks: [], path: secret.path, source: secret.source }));
+        if (/\/drafts\/[^/]+$/.test(path)) return new Response(JSON.stringify({ draft_id: id, full_diff: "helper-only", files: [], hunks: [], path: secret.path, source: secret.source }));
+        if (path.endsWith("/selection") || path.endsWith("/approve")) return new Response(JSON.stringify({ draft_id: id, proposal_id: "proposal", root_id: "root", selection_revision: 3, approval_digest: "digest", state: "approved", files: [{ base_sha256: "base", ...secret }], hunks: [{ hunk_id: "h", selected: true, ...secret }], ...secret }));
+        if (path.endsWith("/apply")) return new Response(JSON.stringify({ apply_id: "apply", state: "applied", ...secret }));
+        if (path.endsWith("/rollback")) return new Response(JSON.stringify({ apply_id: "apply", state: "rolled_back", ...secret }));
+        return new Response(JSON.stringify({ error: "unknown", ...secret }), { status: 500 });
+    } });
+    try {
+        const valid = path => `${path}?t=token`, json = { "x-canvas-token": "token", "content-type": "application/json", authorization: "Bearer browser", "x-monitor-csrf": "browser" };
+        const huge = ["x".repeat(524289), "x".repeat(524289)];
+        for (const [method, path, headers] of [["POST", "/api/session-workspace/proposal-applies/drafts", json], ["POST", `/api/session-workspace/proposal-applies/${id}/rollback`, { "x-canvas-token": "token" }]]) { const result = await helper.call(method, valid(path), headers, huge); assert.equal(result.status, 413); assert.equal(result.headers["cache-control"], "no-store"); }
+        const routes = [["GET", "/api/session-workspace/proposal-applies/roots", undefined, "items"], ["POST", "/api/session-workspace/proposal-applies/drafts", "{}", "draft_id"], ["GET", `/api/session-workspace/proposal-applies/drafts/${id}`, undefined, "full_diff"], ["PUT", `/api/session-workspace/proposal-applies/drafts/${id}/selection`, "{}", "selection_revision"], ["POST", `/api/session-workspace/proposal-applies/drafts/${id}/approve`, "{}", "approval_digest"], ["POST", `/api/session-workspace/proposal-applies/drafts/${id}/apply`, "discarded", "apply_id"], ["POST", `/api/session-workspace/proposal-applies/${id}/rollback`, "discarded", "apply_id"]];
+        for (const [method, path, body, key] of routes) { const result = await helper.call(method, valid(path), body === undefined || path.endsWith("/apply") || path.endsWith("/rollback") ? { "x-canvas-token": "token", authorization: "Bearer browser", "x-monitor-csrf": "browser" } : json, body); assert.equal(result.status, 200, `${method} ${path}`); assert.ok(Object.hasOwn(JSON.parse(result.text), key)); assert.doesNotMatch(result.text, /secret-/); }
+        const forwarded = calls.filter(call => call.init?.method);
+        for (const suffix of ["/drafts", "/approve", "/rollback"]) { const call = forwarded.find(item => new URL(item.target).pathname.endsWith(suffix)); assert.equal(call.init.headers.authorization, undefined); assert.equal(call.init.headers["x-monitor-csrf"], "local-monitor"); }
+        const original = calls.length;
+        const unknown = await proposalApplyHelperServer([], { fetchResponse: () => new Response(JSON.stringify({ error: "unexpected", path: "secret", source: "secret", diff: "secret" }), { status: 500 }) });
+        try { const result = await unknown.call("GET", valid("/api/session-workspace/proposal-applies/roots"), { "x-canvas-token": "token" }); assert.equal(result.status, 500); assert.equal(result.text, '{"error":"monitor_unavailable"}'); } finally { await new Promise(resolve => unknown.server.close(resolve)); }
+        assert.ok(calls.length >= original);
+    } finally { await new Promise(resolve => helper.server.close(resolve)); }
 });
 
 test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, and gives rollback failures terminal precedence", async () => {
@@ -336,6 +363,8 @@ test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, 
     while (draftForm.tagName !== "form") draftForm = draftForm.parentNode;
     await draftForm.dispatch("submit");
     await settle();
+    const draftCall = calls.find(call => call.path.split("?")[0].endsWith("/proposal-applies/drafts") && call.init.method === "POST");
+    assert.deepEqual(JSON.parse(draftCall.init.body), { proposal_id: "proposal-1", root_id: "root-1", files: [{ relative_path: "safe.txt", replacement_text: "complete replacement" }] });
     assert.match(textIn(document.getElementById("workspace-panel")), /<script>inert<\/script>/, "diff is rendered as text, never parsed markup");
     const fileToggle = document.querySelectorAll("input").find(item => item.type === "checkbox");
     fileToggle.checked = false;
@@ -345,6 +374,10 @@ test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, 
     hunk.checked = true;
     await button("選択を更新").click();
     await settle();
+    const selectionCall = calls.find(call => call.path.split("?")[0].endsWith("/selection"));
+    assert.deepEqual(JSON.parse(selectionCall.init.body), { selection_revision: 1, selected_hunk_ids: ["hunk-b"] });
+    assert.doesNotMatch(textIn(document.getElementById("workspace-panel")), /<script>inert<\/script>/, "confirmation is source/diff-free");
+    assert.equal(calls.filter(call => /\/(apply|rollback)(?:\?|$)/.test(call.path)).length, 0, "no mutation occurs before explicit approval and apply");
     assert.equal(button("適用する"), undefined, "selection invalidates approval and cannot mutate early");
     await button("承認する").click();
     await settle();
@@ -352,6 +385,7 @@ test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, 
     assert.ok(apply);
     await apply.click();
     await settle();
+    assert.match(textIn(document.getElementById("workspace-panel")), /状態: applied/);
     const applyCall = calls.find(call => call.path.split("?")[0].endsWith("/apply"));
     assert.equal(applyCall.init.body, undefined, "apply has no editable browser body");
     await button("ロールバック").click();
@@ -360,6 +394,29 @@ test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, 
     assert.match(panel, /rollback_stale/);
     assert.doesNotMatch(panel, /状態: applied/);
     assert.equal(button("ロールバック"), undefined, "a failed rollback remains permanently disabled");
+});
+
+test("emitted workspace IIFE renders unavailable roots, ten-file limit, stale selection, and every apply/rollback terminal", async () => {
+    const id = "0197d7c0-0000-7000-8000-000000000001", proposal = { proposal_id: "proposal-1", status: "recommended", evidence_refs: [{ kind: "event", reference_id: "stop" }] }, detail = { session: bound, native_ids: [{ binding_kind: "native" }], events: [{ event_id: "stop", type: "Stop" }], runs: [] };
+    const settle = async () => { await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve)); };
+    const drive = async ({ roots = 200, selection = response({ draft_id: id, proposal_id: "proposal-1", root_id: "root-1", selection_revision: 2, approval_digest: "digest-2", state: "selected", files: [], hunks: [] }), apply = response({ apply_id: "apply-1", state: "applied" }), rollback = response({ apply_id: "apply-1", state: "rolled_back" }) } = {}) => {
+        const calls = [], fetch = async (path, init = {}) => { calls.push({ path: String(path), init }); const route = String(path).split("?")[0]; if (route === "/api/session-workspace/sessions") return response({ items: [bound] }); if (route.startsWith("/api/session-workspace/resolve")) return response({ binding_status: "bound", session_id: bound.session_id }); if (route === `/api/session-workspace/sessions/${bound.session_id}`) return response(detail); if (route.startsWith("/api/session-instruction/")) return response({ state: "no_instruction" }); if (route.startsWith("/api/session-workspace/improvement-proposals")) return response({ items: [proposal] }); if (route.endsWith("/roots")) return roots === 200 ? response({ items: [{ root_id: "root-1", kind: "repository", label: "Repository" }] }) : response({ error: "apply_not_configured" }, roots); if (route.endsWith("/drafts") && init.method === "POST") return response({ draft_id: id, proposal_id: "proposal-1", root_id: "root-1", selection_revision: 1, approval_digest: "digest-1", state: "draft", diff: "source-only", files: [{ relative_path: "safe.txt" }], hunks: [{ hunk_id: "hunk-a", relative_path: "safe.txt", selected: true }] }, 201); if (route.endsWith("/selection")) return selection; if (route.endsWith("/approve")) return response({ draft_id: id, selection_revision: 2, approval_digest: "digest-2", state: "approved" }); if (route.endsWith("/apply")) return apply; if (route.endsWith("/rollback")) return rollback; return response({}, 404); };
+        const { document } = await runWorkspaceIife(fetch), button = text => document.querySelectorAll("button").find(item => item.textContent === text);
+        await button("Improve").click(); await settle(); await button("Apply locally").click(); await settle();
+        return { calls, document, button, settle };
+    };
+    const unavailable = await drive({ roots: 503 });
+    assert.match(textIn(unavailable.document.getElementById("workspace-panel")), /apply_not_configured/);
+    const ten = await drive();
+    for (let index = 0; index < 10; index++) await ten.button("ファイルを追加").click();
+    const tenPaths = ten.document.querySelectorAll("input").filter(item => item.placeholder === "relative path"), tenTexts = ten.document.querySelectorAll("textarea").filter(item => item.placeholder === "complete replacement text");
+    assert.equal(tenPaths.length, 10, "the eleventh file control is rejected");
+    tenPaths.forEach((item, index) => item.value = `file-${index}.txt`); tenTexts.forEach((item, index) => item.value = `replacement-${index}`); let tenForm = tenPaths[0]; while (tenForm.tagName !== "form") tenForm = tenForm.parentNode; await tenForm.dispatch("submit"); await ten.settle();
+    assert.equal(JSON.parse(ten.calls.find(call => call.path.split("?")[0].endsWith("/proposal-applies/drafts") && call.init.method === "POST").init.body).files.length, 10, "ten complete files form a valid draft request");
+    const stale = await drive({ selection: response({ error: "selection_stale" }, 409) });
+    const stalePath = stale.document.querySelectorAll("input").find(item => item.placeholder === "relative path"), staleText = stale.document.querySelectorAll("textarea").find(item => item.placeholder === "complete replacement text"); stalePath.value = "safe.txt"; staleText.value = "text"; let form = stalePath; while (form.tagName !== "form") form = form.parentNode; await form.dispatch("submit"); await stale.settle(); await stale.button("選択を更新").click(); await stale.settle(); assert.match(textIn(stale.document.getElementById("workspace-panel")), /selection_stale/);
+    for (const [apply, expected] of [[response({ error: "apply_failed" }, 409), "apply_failed"], [response({ apply_id: "apply-1", state: "recovered" }), "recovered"]]) { const run = await drive({ apply }); const path = run.document.querySelectorAll("input").find(item => item.placeholder === "relative path"), text = run.document.querySelectorAll("textarea").find(item => item.placeholder === "complete replacement text"); path.value = "safe.txt"; text.value = "text"; let form = path; while (form.tagName !== "form") form = form.parentNode; await form.dispatch("submit"); await run.settle(); await run.button("選択を更新").click(); await run.settle(); await run.button("承認する").click(); await run.settle(); await run.button("適用する").click(); await run.settle(); assert.match(textIn(run.document.getElementById("workspace-panel")), new RegExp(expected)); }
+    for (const [rollback, expected] of [[response({ apply_id: "apply-1", state: "rolled_back" }), "rolled_back"], [response({ error: "rollback_not_available" }, 409), "rollback_not_available"]]) { const run = await drive({ rollback }); const path = run.document.querySelectorAll("input").find(item => item.placeholder === "relative path"), text = run.document.querySelectorAll("textarea").find(item => item.placeholder === "complete replacement text"); path.value = "safe.txt"; text.value = "text"; let form = path; while (form.tagName !== "form") form = form.parentNode; await form.dispatch("submit"); await run.settle(); await run.button("選択を更新").click(); await run.settle(); await run.button("承認する").click(); await run.settle(); await run.button("適用する").click(); await run.settle(); await run.button("ロールバック").click(); await run.settle(); assert.match(textIn(run.document.getElementById("workspace-panel")), new RegExp(expected)); assert.equal(run.button("ロールバック"), undefined, "rollback remains unavailable after its first terminal attempt"); }
 });
 
 test("helper server routes the legacy analysis view unchanged at /analysis", async () => {
