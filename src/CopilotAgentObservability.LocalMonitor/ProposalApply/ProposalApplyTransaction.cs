@@ -153,7 +153,7 @@ internal sealed class ProposalApplyTransaction
         {
             Restore(directory, journal.Files, onlyExistingSnapshots: true);
             WriteJournal(journalPath, journal with { State = "rolled_back" });
-            return ApplyTransactionResult.Failed;
+            return ApplyTransactionResult.RolledBack;
         }
     }
 

@@ -133,6 +133,41 @@ public sealed class ProposalApplyServiceTests
     }
 
     [Fact]
+    public void Rollback_io_failure_after_replacement_reports_the_durable_rolled_back_outcome()
+    {
+        using var directory = new ApplyTestDirectory();
+        const string original = "rollback-original-leak-marker\n";
+        const string replacement = "rollback-replacement-leak-marker\n";
+        const string targetName = "rollback-path-leak-marker.txt";
+        var target = Path.Combine(directory.Path, targetName);
+        File.WriteAllText(target, original);
+        var store = CreateStore(directory, out var proposalId);
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var initial = new ProposalApplyService([root], directory.RuntimePath, store);
+        var draft = ApproveSingleFile(initial, proposalId, targetName, replacement);
+        var (applyId, applyResult, _) = initial.ApplyWithId(draft.DraftId);
+        Assert.Equal(ApplyTransactionResult.Applied, applyResult);
+
+        var failing = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store,
+            point => { if (point == "after_atomic_rollback_replace:0") throw new IOException("synthetic rollback progress failure"); });
+
+        Assert.Equal(ApplyTransactionResult.RolledBack, failing.Rollback(applyId));
+        Assert.Equal(original, File.ReadAllText(target));
+        Assert.Equal(ProposalApplyState.RolledBack, store.GetProposalApplyDraft(draft.DraftId)!.State);
+        Assert.Equal(1, AuditCount(directory.DatabasePath, null, "rolled_back"));
+        Assert.Empty(store.ListProposalApplyPending());
+        Assert.Empty(store.ListAppliedProposalApplyLinkages());
+
+        var restarted = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        Assert.Equal(ApplyTransactionResult.RollbackUnavailable, restarted.Rollback(applyId));
+        Assert.Equal(1, AuditCount(directory.DatabasePath, null, "rolled_back"));
+        var durableText = ReadApplyDurableText(directory.DatabasePath);
+        Assert.DoesNotContain(targetName, durableText, StringComparison.Ordinal);
+        Assert.DoesNotContain(original.Trim(), durableText, StringComparison.Ordinal);
+        Assert.DoesNotContain(replacement.Trim(), durableText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Apply_stale_two_file_preflight_records_one_non_reusable_failure_without_restart_duplicate()
     {
         using var directory = new ApplyTestDirectory();
@@ -292,13 +327,14 @@ public sealed class ProposalApplyServiceTests
         return service.Approve(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest);
     }
 
-    private static long AuditCount(string databasePath, string? errorCode = null)
+    private static long AuditCount(string databasePath, string? errorCode = null, string? state = null)
     {
         using var connection = new SqliteConnection($"Data Source={databasePath}");
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = errorCode is null ? "SELECT COUNT(*) FROM proposal_apply_audit;" : "SELECT COUNT(*) FROM proposal_apply_audit WHERE error_code=$error;";
+        command.CommandText = errorCode is not null ? "SELECT COUNT(*) FROM proposal_apply_audit WHERE error_code=$error;" : state is not null ? "SELECT COUNT(*) FROM proposal_apply_audit WHERE state=$state;" : "SELECT COUNT(*) FROM proposal_apply_audit;";
         if (errorCode is not null) command.Parameters.AddWithValue("$error", errorCode);
+        if (state is not null) command.Parameters.AddWithValue("$state", state);
         return (long)command.ExecuteScalar()!;
     }
 
