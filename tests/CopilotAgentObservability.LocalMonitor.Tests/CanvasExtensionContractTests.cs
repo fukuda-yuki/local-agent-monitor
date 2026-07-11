@@ -143,8 +143,13 @@ public class CanvasExtensionContractTests
 
         Assert.Contains("proposal-applies", extension);
         Assert.Contains("proposalApplyRoute", extension);
+        Assert.Contains("/drafts/([^/]+)/apply", extension);
+        Assert.Contains("/${encodeURIComponent(id)}/rollback", extension);
         Assert.Contains("x-monitor-csrf\": \"local-monitor", extension);
         Assert.Contains("Cache-Control\", \"no-store", extension);
+        Assert.Contains("split(\";\", 1)[0].trim().toLowerCase() !== \"application/json\"", extension);
+        Assert.Contains("mutationRoute ? { method: req.method, headers: { \"x-monitor-csrf\": \"local-monitor\" } }", extension);
+        Assert.Contains("fixedErrors", extension);
         Assert.Contains("Apply locally", workspace);
         Assert.Contains("workspaceApplyRequest()", workspace);
         Assert.Contains("textContent", workspace);

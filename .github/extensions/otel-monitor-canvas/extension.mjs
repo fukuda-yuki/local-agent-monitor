@@ -110,7 +110,7 @@ function proposalApplyRoute(path, method) {
     const selection = new RegExp(`^${prefix}/drafts/([^/]+)/selection$`).exec(path);
     const approve = new RegExp(`^${prefix}/drafts/([^/]+)/approve$`).exec(path);
     const apply = new RegExp(`^${prefix}/drafts/([^/]+)/apply$`).exec(path);
-    const rollback = new RegExp(`^${prefix}/applies/([^/]+)/rollback$`).exec(path);
+    const rollback = new RegExp(`^${prefix}/([^/]+)/rollback$`).exec(path);
     const match = draft ?? selection ?? approve ?? apply ?? rollback;
     if (!match) return null;
     let id;
@@ -120,7 +120,7 @@ function proposalApplyRoute(path, method) {
     if (selection && method === "PUT") return `${prefix}/drafts/${encodeURIComponent(id)}/selection`;
     if (approve && method === "POST") return `${prefix}/drafts/${encodeURIComponent(id)}/approve`;
     if (apply && method === "POST") return `${prefix}/drafts/${encodeURIComponent(id)}/apply`;
-    if (rollback && method === "POST") return `${prefix}/applies/${encodeURIComponent(id)}/rollback`;
+    if (rollback && method === "POST") return `${prefix}/${encodeURIComponent(id)}/rollback`;
     return null;
 }
 
@@ -259,22 +259,32 @@ async function handleProposalProxy(req, res, { monitorUrl, path }) {
 async function handleProposalApplyProxy(req, res, { monitorUrl, path }) {
     res.setHeader("Cache-Control", "no-store");
     if (!isLoopbackUrl(monitorUrl)) { sendJson(res, 400, { error: "invalid_monitor_url" }); return; }
-    const bodyRoute = req.method === "POST" || req.method === "PUT";
+    const bodyRoute = path.endsWith("/drafts") || path.endsWith("/selection") || path.endsWith("/approve");
+    const mutationRoute = path.endsWith("/apply") || path.endsWith("/rollback");
     let body;
     if (bodyRoute) {
-        if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) { sendJson(res, 415, { error: "unsupported_media_type" }); return; }
+        if (String(req.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase() !== "application/json") { sendJson(res, 415, { error: "unsupported_media_type" }); return; }
         const length = Number(req.headers["content-length"]);
         if (Number.isFinite(length) && length > 1048576) { sendJson(res, 413, { error: "request_too_large" }); return; }
         const requestBody = await readRequestBodyAtMost(req, 1048576);
         if (requestBody.exceeded) { sendJson(res, 413, { error: "request_too_large" }); return; }
         try { JSON.parse(requestBody.body); } catch { sendJson(res, 400, { error: "invalid_apply_request" }); return; }
-        body = path.endsWith("/apply") || path.endsWith("/rollback") ? "{}" : requestBody.body;
+        body = requestBody.body;
+    } else if (mutationRoute) {
+        const discarded = await readRequestBodyAtMost(req, 1048576);
+        if (discarded.exceeded) { sendJson(res, 413, { error: "request_too_large" }); return; }
     }
     try {
         const result = await fetchHelperWorkspaceJson(monitorUrl, path, bodyRoute
             ? { method: req.method, headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body }
-            : undefined);
-        sendJson(res, result.response.status, result.parsed ?? { error: "monitor_unavailable" });
+            : mutationRoute ? { method: req.method, headers: { "x-monitor-csrf": "local-monitor" } } : undefined);
+        const fixedErrors = new Set(["apply_not_configured", "invalid_apply_root", "invalid_root_id", "invalid_relative_path", "unsafe_reparse_path", "target_not_regular_file", "target_outside_root", "duplicate_target", "request_too_large", "proposal_not_found", "invalid_apply_request", "draft_not_found", "invalid_selection", "selection_stale", "approval_required", "approval_digest_mismatch", "apply_stale", "apply_failed", "apply_not_found", "rollback_stale", "rollback_not_available", "cross_origin_forbidden", "csrf_required", "unsupported_media_type"]);
+        if (!result.response.ok) { sendJson(res, result.response.status, fixedErrors.has(result.parsed?.error) ? { error: result.parsed.error } : { error: "monitor_unavailable" }); return; }
+        if (path.endsWith("/roots") && Array.isArray(result.parsed?.items)) { sendJson(res, 200, { items: result.parsed.items.map(item => ({ root_id: item.root_id, kind: item.kind, label: item.label })) }); return; }
+        if (path.endsWith("/drafts") || /\/drafts\/[^/]+$/.test(path)) { sendJson(res, result.response.status, result.parsed); return; }
+        if (path.endsWith("/selection") || path.endsWith("/approve")) { const value = result.parsed; sendJson(res, 200, { draft_id: value?.draft_id, proposal_id: value?.proposal_id, root_id: value?.root_id, selection_revision: value?.selection_revision, approval_digest: value?.approval_digest, state: value?.state, files: Array.isArray(value?.files) ? value.files.map(file => ({ base_sha256: file.base_sha256, replacement_sha256: file.replacement_sha256 })) : [], hunks: Array.isArray(value?.hunks) ? value.hunks.map(hunk => ({ hunk_id: hunk.hunk_id, selected: hunk.selected })) : [] }); return; }
+        if (mutationRoute && typeof result.parsed?.apply_id === "string" && typeof result.parsed?.state === "string") { sendJson(res, 200, { apply_id: result.parsed.apply_id, state: result.parsed.state }); return; }
+        sendJson(res, 502, { error: "monitor_unavailable" });
     } catch { sendJson(res, 502, { error: "monitor_unavailable" }); }
 }
 

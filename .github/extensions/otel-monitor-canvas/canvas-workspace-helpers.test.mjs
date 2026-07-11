@@ -16,6 +16,8 @@ import {
     workspaceApplyApprovalPayload,
     workspaceApplyRequest,
     workspaceApplyView,
+    workspaceApplyDraftReview,
+    workspaceApplyConfirmation,
     workspaceSessionLabel,
     workspaceStatusPill,
 } from "./canvas-workspace-helpers.mjs";
@@ -154,15 +156,17 @@ test("final proposal reference resolver opens sanitized Evidence candidates for 
     assert.match(html, /selectedTab="evidence"/);
 });
 
-test("proposal apply helpers bound draft source to creation and mutation requests to opaque state", () => {
+test("proposal apply helpers use the Local Monitor numeric revision and top-level hunks", () => {
     const files = [{ relative_path: "skills/example.md", replacement_text: "complete replacement" }];
     assert.deepEqual(workspaceApplyDraftPayload("proposal-id", "root-id", files), { proposal_id: "proposal-id", root_id: "root-id", files });
     assert.equal(workspaceApplyDraftPayload("proposal-id", "root-id", []), null);
-    assert.deepEqual(workspaceApplySelectionPayload("3", ["hunk-a", "hunk-b"]), { selection_revision: "3", selected_hunk_ids: ["hunk-a", "hunk-b"] });
-    assert.deepEqual(workspaceApplyApprovalPayload("4", "digest"), { selection_revision: "4", approval_digest: "digest" });
-    assert.deepEqual(workspaceApplyRequest(), {});
-    assert.deepEqual(workspaceApplyView({ state: "approved", selection_revision: "4", approval_digest: "digest", root: { kind: "skill", label: "Skill" } }), {
-        state: "approved", selection_revision: "4", approval_digest: "digest", root: { kind: "skill", label: "Skill" }, canApply: true, canRollback: false,
+    assert.deepEqual(workspaceApplySelectionPayload(3, ["hunk-a", "hunk-b"]), { selection_revision: 3, selected_hunk_ids: ["hunk-a", "hunk-b"] });
+    assert.deepEqual(workspaceApplyApprovalPayload(4, "digest"), { selection_revision: 4, approval_digest: "digest" });
+    assert.equal(workspaceApplyRequest(), undefined);
+    assert.deepEqual(workspaceApplyDraftReview({ files: [{ relative_path: "one.txt" }], hunks: [{ hunk_id: "hunk-a", relative_path: "one.txt", selected: true }] }), [{ relative_path: "one.txt", hunks: [{ hunk_id: "hunk-a", relative_path: "one.txt", selected: true }] }]);
+    assert.deepEqual(workspaceApplyConfirmation({ selection_revision: 4, approval_digest: "digest", files: [{ base_sha256: "base" }] }), { selection_revision: 4, approval_digest: "digest", file_count: 1 });
+    assert.deepEqual(workspaceApplyView({ state: "approved", selection_revision: 4, approval_digest: "digest" }), {
+        state: "approved", selection_revision: 4, approval_digest: "digest", root: null, canApply: true, canRollback: false,
     });
 });
 
