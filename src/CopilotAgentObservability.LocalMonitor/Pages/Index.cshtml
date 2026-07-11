@@ -39,9 +39,10 @@
 
     <div class="kpi-grid">
         <a class="kpi-card" id="kpi-tokens-card" href="/traces?period=today">
-            <span class="kpi-label" id="kpi-tokens-label">今日のトークン</span>
-            <span class="kpi-value kpi-gold" id="kpi-tokens-value">@MonitorViewFormat.CompactTokens(kpi.TokensTotal)</span>
-            <span class="kpi-note" id="kpi-tokens-compare">前期間 @MonitorViewFormat.CompactTokens(kpi.TokensPreviousPeriod)@(kpi.TokensChangePct is { } change ? $" {(change >= 0 ? "+" : "")}{change.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}%" : "")</span>
+            <span class="kpi-label" id="kpi-tokens-label">今日のトークン（実消費）</span>
+            <span class="kpi-value kpi-gold" id="kpi-tokens-value">@MonitorViewFormat.CompactTokens(kpi.UncachedTokensTotal)</span>
+            <span class="kpi-note" id="kpi-tokens-compare">前期間 @MonitorViewFormat.CompactTokens(kpi.UncachedTokensPreviousPeriod)@(kpi.UncachedTokensChangePct is { } change ? $" {(change >= 0 ? "+" : "")}{change.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}%" : "")</span>
+            <span class="kpi-note" id="kpi-tokens-breakdown">総量 @MonitorViewFormat.CompactTokens(kpi.TokensTotal)（キャッシュ読取 @MonitorViewFormat.CompactTokens(kpi.CacheReadTokensTotal) 込み）</span>
         </a>
         <div class="kpi-card">
             <span class="kpi-label">実効入力換算（読取=0.1×）</span>
@@ -52,6 +53,7 @@
             <span class="kpi-label">キャッシュ読取率</span>
             <span class="kpi-value" id="kpi-cache-rate-value">@MonitorViewFormat.Percent(kpi.CacheReadRatePct)</span>
             <span class="kpi-bar-track"><span class="kpi-bar-fill" id="kpi-cache-rate-bar" style="width: @(kpi.CacheReadRatePct is { } rate ? BarWidth((long)Math.Round(rate), 100) : "0%")"></span></span>
+            <span class="kpi-note" id="kpi-cache-rate-basis">@(kpi.CacheReadRatePct is not null ? $"読取 {MonitorViewFormat.CompactTokens(kpi.CacheReadTokensTotal)} ÷ 入力 {MonitorViewFormat.CompactTokens(kpi.CacheAwareInputTokens)}" : "キャッシュ集計はまだありません")</span>
         </div>
         <a class="kpi-card" id="kpi-error-card" href="/traces?status=error&period=today">
             <span class="kpi-label">エラー trace</span>

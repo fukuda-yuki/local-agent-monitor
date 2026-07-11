@@ -50,12 +50,15 @@
   /* ── KPI + mid/low cards from /api/monitor/overview ── */
 
   function renderKpi(overview, period) {
-    setText("kpi-tokens-label", `${PERIOD_LABEL[period]}のトークン`);
-    setText("kpi-tokens-value", compactTokens(overview.kpi.tokens_total));
-    const change = overview.kpi.tokens_change_pct;
+    setText("kpi-tokens-label", `${PERIOD_LABEL[period]}のトークン（実消費）`);
+    setText("kpi-tokens-value", compactTokens(overview.kpi.uncached_tokens_total));
+    const change = overview.kpi.uncached_tokens_change_pct;
     setText(
       "kpi-tokens-compare",
-      `前期間 ${compactTokens(overview.kpi.tokens_previous_period)}${change === null ? "" : ` ${change >= 0 ? "+" : ""}${trimNumber(change)}%`}`);
+      `前期間 ${compactTokens(overview.kpi.uncached_tokens_previous_period)}${change === null ? "" : ` ${change >= 0 ? "+" : ""}${trimNumber(change)}%`}`);
+    setText(
+      "kpi-tokens-breakdown",
+      `総量 ${compactTokens(overview.kpi.tokens_total)}（キャッシュ読取 ${compactTokens(overview.kpi.cache_read_tokens_total)} 込み）`);
     setText("kpi-effective-value", compactTokens(overview.kpi.effective_input_tokens));
     const compression = overview.kpi.cache_compression_pct;
     setText(
@@ -64,6 +67,11 @@
     setText("kpi-cache-rate-value", percent(overview.kpi.cache_read_rate_pct));
     const rateBar = document.getElementById("kpi-cache-rate-bar");
     if (rateBar) rateBar.style.width = `${Math.round(overview.kpi.cache_read_rate_pct ?? 0)}%`;
+    setText(
+      "kpi-cache-rate-basis",
+      overview.kpi.cache_read_rate_pct === null
+        ? "キャッシュ集計はまだありません"
+        : `読取 ${compactTokens(overview.kpi.cache_read_tokens_total)} ÷ 入力 ${compactTokens(overview.kpi.cache_aware_input_tokens)}`);
     setText("kpi-error-value", String(overview.kpi.error_trace_count));
     setText("kpi-error-note", `/ ${overview.kpi.trace_count} 中 · 確認する →`);
 

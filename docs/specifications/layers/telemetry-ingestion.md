@@ -352,6 +352,22 @@ agent name, model, token counts (including `cache_read_tokens` /
 `cache_creation_tokens`), status, error type, timing, and hierarchy
 (`parent_span_id`, `span_ordinal`). No raw content or PII.
 
+`GET /api/monitor/overview?period=today|7d|30d` returns the sanitized period
+aggregate for the overview dashboard (D044): `{period, range, kpi, per_model,
+hourly_tokens}`. `kpi` carries numeric aggregates only: `tokens_total`,
+`tokens_previous_period`, `tokens_change_pct`, `uncached_tokens_total`,
+`uncached_tokens_previous_period`, `uncached_tokens_change_pct`
+(実消費 = uncached input + output; see
+[raw-store-normalization.md](raw-store-normalization.md) token-usage
+convention), `cache_read_tokens_total`, `cache_aware_input_tokens`,
+`effective_input_tokens`, `cache_compression_pct`, `cache_read_rate_pct`
+(rates over the cache-aware input sum only; `null` when no cache-bearing row
+is in the window), `error_trace_count`, and `trace_count`. Unsupported
+`period` values return `400 invalid_query`. `GET /api/monitor/trace-list`
+serves the filtered trace list from the same rollup columns. Both stay inside
+the sanitized `/api/monitor/*` boundary (see
+[../security-data-boundaries.md](../security-data-boundaries.md)).
+
 The Sprint10 monitor **design views** (Flow Chart, Cache Explorer, timeline
 filter/sort, themed trace-detail UI) are **client-side presentation over this
 existing endpoint only** — they add no new endpoint, query parameter, or response

@@ -230,9 +230,31 @@ projection schema version 4, D044):
 | `cache_creation_tokens` | INTEGER NULL | trace-level cache-creation sum; same branch rule |
 | `trace_status` | TEXT NULL | `ok` (no error spans) / `unrecovered` (last span by `start_time`, fallback `span_ordinal`, is an error) / `recovered` (an error occurred but a later span succeeded) |
 
-Two display-side constants the Sprint18 monitor UI derives from these columns
-(client-side presentation only; no schema or API field):
+Token-usage convention (pinned; verified against live Copilot CLI and VS Code
+Copilot Chat emissions):
 
+- `gen_ai.usage.input_tokens` counts the **full prompt including cache-read
+  tokens** (`cache_read_tokens` is a subset of `input_tokens`), and
+  `total_tokens = input_tokens + output_tokens`. All cache displays assume this
+  inclusive convention: uncached input = `input_tokens − cache_read_tokens`
+  (clamped at 0), cache read rate = `cache_read_tokens / input_tokens`. A span
+  without cache attributes is treated as 0 cache read. Sources that emit an
+  exclusive input convention (input without cache reads) are out of scope; no
+  per-source dual path is added.
+
+Display rules the monitor UI derives from these columns:
+
+- **Token headline (実消費)**: the overview KPI headline shows 実消費トークン =
+  uncached input + output (= `total_tokens − cache_read_tokens`, clamped at 0),
+  because agent sessions resend the full history every turn and the
+  cache-inclusive total is dominated by cache reads. The previous-period
+  comparison uses the same 実消費 basis. The cache-inclusive total and the
+  cache-read sum remain visible as a secondary breakdown line on the same card.
+  Pre-v4 rows with NULL cache columns count as fully uncached in this headline
+  (documented limitation, D044 no-backfill).
+- **Cache-rate basis line**: the キャッシュ読取率 KPI card shows its numerator /
+  denominator (`読取 cache_read ÷ 入力 cache-aware input`) so the rate is
+  verifiable from the displayed numbers.
 - **Effective-input conversion**: the overview KPI and the trace-detail cache
   column show an "実効入力換算" figure computed as
   `cache_read_tokens x 0.1 + uncached input tokens` (cache reads are weighted at

@@ -55,9 +55,11 @@ public class MonitorOverviewPlaywrightTests
         // Period toggle refetches the sanitized overview endpoint for 7d.
         await page.Locator("#period-toggle .period-btn[data-period='7d']").ClickAsync();
         await Expect(page.Locator("#period-toggle .period-btn[data-period='7d']")).ToHaveClassAsync(new System.Text.RegularExpressions.Regex("active"));
-        await Expect(page.Locator("#kpi-tokens-label")).ToHaveTextAsync("7日のトークン");
+        await Expect(page.Locator("#kpi-tokens-label")).ToHaveTextAsync("7日のトークン（実消費）");
         // The seeded trace is recent, so the 7d window includes its tokens.
-        await Expect(page.Locator("#kpi-tokens-value")).ToHaveTextAsync("1.2K");
+        // 実消費 = (1000 input − 700 cache read) + 200 output = 500.
+        await Expect(page.Locator("#kpi-tokens-value")).ToHaveTextAsync("500");
+        await Expect(page.Locator("#kpi-tokens-breakdown")).ToContainTextAsync("総量 1.2K");
         await Expect(page.Locator("#top-traces .top-trace-row")).ToHaveCountAsync(1);
         Assert.Contains(requestedUrls, url => url.Contains("/api/monitor/overview?period=7d", StringComparison.Ordinal));
         Assert.Contains(requestedUrls, url => url.Contains("/api/monitor/trace-list?period=7d", StringComparison.Ordinal));

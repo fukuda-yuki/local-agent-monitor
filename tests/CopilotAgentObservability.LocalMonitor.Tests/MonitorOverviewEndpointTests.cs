@@ -28,10 +28,14 @@ public class MonitorOverviewEndpointTests
         Assert.False(string.IsNullOrEmpty(root.GetProperty("range").GetProperty("end").GetString()));
         var kpi = root.GetProperty("kpi");
         Assert.Equal(0, kpi.GetProperty("tokens_total").GetInt64());
+        Assert.Equal(0, kpi.GetProperty("uncached_tokens_total").GetInt64());
+        Assert.Equal(0, kpi.GetProperty("cache_read_tokens_total").GetInt64());
+        Assert.Equal(0, kpi.GetProperty("cache_aware_input_tokens").GetInt64());
         Assert.Equal(0, kpi.GetProperty("trace_count").GetInt32());
         Assert.Equal(0, kpi.GetProperty("error_trace_count").GetInt32());
         Assert.Equal(JsonValueKind.Null, kpi.GetProperty("cache_read_rate_pct").ValueKind);
         Assert.Equal(JsonValueKind.Null, kpi.GetProperty("tokens_change_pct").ValueKind);
+        Assert.Equal(JsonValueKind.Null, kpi.GetProperty("uncached_tokens_change_pct").ValueKind);
         Assert.Equal(0, root.GetProperty("per_model").GetArrayLength());
         Assert.Equal(24, root.GetProperty("hourly_tokens").GetArrayLength());
     }
@@ -86,6 +90,13 @@ public class MonitorOverviewEndpointTests
         Assert.Equal(1800, kpi.GetProperty("tokens_total").GetInt64());
         Assert.Equal(600, kpi.GetProperty("tokens_previous_period").GetInt64());
         Assert.Equal(200.0, kpi.GetProperty("tokens_change_pct").GetDouble());
+        // 実消費 (uncached) = (1500 - 700) + 300 = 1100; previous period = 500 + 100 = 600
+        Assert.Equal(1100, kpi.GetProperty("uncached_tokens_total").GetInt64());
+        Assert.Equal(600, kpi.GetProperty("uncached_tokens_previous_period").GetInt64());
+        Assert.Equal(83.3, kpi.GetProperty("uncached_tokens_change_pct").GetDouble());
+        // cache-rate basis: numerator 700, denominator = cache-aware input 1000
+        Assert.Equal(700, kpi.GetProperty("cache_read_tokens_total").GetInt64());
+        Assert.Equal(1000, kpi.GetProperty("cache_aware_input_tokens").GetInt64());
         // effective input = (1500 - 700) + 700 * 0.1 = 870
         Assert.Equal(870, kpi.GetProperty("effective_input_tokens").GetInt64());
         // rates over the cache-aware input only (1000, not 1500)

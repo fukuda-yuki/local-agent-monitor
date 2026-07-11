@@ -20,15 +20,23 @@ internal sealed record MonitorOverview(
     IReadOnlyList<MonitorOverviewHour> HourlyTokens);
 
 /// <summary>
-/// KPI block. EffectiveInputTokens = cache_read × 0.1 + (input − cache_read).
-/// Cache percentages use the cache-aware input sum only, so pre-v4 rows with
-/// NULL cache columns never skew the rates (D044); they are null when no row in
-/// the window carries cache data.
+/// KPI block. UncachedTokensTotal (実消費) = (input − cache_read) + output,
+/// clamped at 0; the token-usage convention (input includes cache reads) is
+/// pinned in raw-store-normalization.md. EffectiveInputTokens =
+/// cache_read × 0.1 + (input − cache_read). Cache percentages use the
+/// cache-aware input sum only, so pre-v4 rows with NULL cache columns never
+/// skew the rates (D044); they are null when no row in the window carries
+/// cache data.
 /// </summary>
 internal sealed record MonitorOverviewKpi(
     long TokensTotal,
     long TokensPreviousPeriod,
     double? TokensChangePct,
+    long UncachedTokensTotal,
+    long UncachedTokensPreviousPeriod,
+    double? UncachedTokensChangePct,
+    long CacheReadTokensTotal,
+    long CacheAwareInputTokens,
     long EffectiveInputTokens,
     double? CacheCompressionPct,
     double? CacheReadRatePct,
@@ -114,16 +122,30 @@ internal sealed class MonitorOverviewService
             ? Math.Round((current.TotalTokens - previous.TotalTokens) * 100.0 / previous.TotalTokens, 1)
             : null;
 
+        var uncached = UncachedTokens(current);
+        var uncachedPrevious = UncachedTokens(previous);
+        double? uncachedChangePct = uncachedPrevious > 0
+            ? Math.Round((uncached - uncachedPrevious) * 100.0 / uncachedPrevious, 1)
+            : null;
+
         return new MonitorOverviewKpi(
             TokensTotal: current.TotalTokens,
             TokensPreviousPeriod: previous.TotalTokens,
             TokensChangePct: changePct,
+            UncachedTokensTotal: uncached,
+            UncachedTokensPreviousPeriod: uncachedPrevious,
+            UncachedTokensChangePct: uncachedChangePct,
+            CacheReadTokensTotal: current.CacheReadTokens,
+            CacheAwareInputTokens: current.CacheAwareInputTokens,
             EffectiveInputTokens: effectiveInput,
             CacheCompressionPct: CachePct(current.CacheReadTokens * 0.9, current.CacheAwareInputTokens),
             CacheReadRatePct: CachePct(current.CacheReadTokens, current.CacheAwareInputTokens),
             ErrorTraceCount: current.ErrorTraceCount,
             TraceCount: current.TraceCount);
     }
+
+    private static long UncachedTokens(MonitorPeriodSummaryRow row) =>
+        Math.Max(0, row.InputTokens - row.CacheReadTokens) + row.OutputTokens;
 
     private static MonitorOverviewModel BuildModel(MonitorModelPeriodSummaryRow row) => new(
         Model: row.Model ?? "unknown",
