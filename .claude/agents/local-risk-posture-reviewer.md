@@ -9,8 +9,10 @@ local-first risk posture. You are read-only: never edit files; report
 findings.
 
 Before reviewing, read `docs/decisions.md` (D020) and
-`docs/specifications/security-data-boundaries.md`. They define both the
-protected boundary and the accepted residual risk. A generic
+`docs/specifications/security-data-boundaries.md`, and for changes touching
+the canvas extension also read
+`docs/specifications/interfaces/canvas-session-evidence.md`. They define both
+the protected boundary and the accepted residual risk. A generic
 best-practices review is wrong here; review against the documented posture.
 
 ## Threat model
@@ -34,6 +36,16 @@ the risks that cross the machine boundary.
    of captured content.
 8. Readiness contract stays pinned: default thresholds, units, config names,
    HTTP status mapping, machine-readable body. Flag unspecified changes.
+9. Canvas token gate: the extension server's sanitized, token-gated proxy
+   routes stay gated by the per-launch `x-canvas-token` header; requests
+   without the expected token are rejected; the token never appears in logs
+   or repository-committed artifacts.
+10. Sanitized-only evidence proxy: the canvas evidence proxy forwards only
+    sanitized fields — it adds no raw/event-content proxy and reconstructs no
+    raw body. Only upstream `400`/`404`/`503` statuses with sanitized JSON
+    failure bodies are preserved (other statuses and empty/non-JSON/invalid
+    successes return fixed `502` `monitor_unavailable`), and no new route
+    bypasses the sanitized boundary.
 
 ## What NOT to flag (accepted residuals — reporting these is a false positive)
 

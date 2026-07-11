@@ -37,6 +37,14 @@ holds (`docs/agent-guides/information-placement.md`).
     `Microsoft.Playwright.Assertions.Expect`.
   - ConfigCli.Tests: synthetic fixtures under `TestData\`
     (e.g. `raw-otlp.synthetic.json`), `ReceiverTempDirectory`.
+- Canvas extension tests (`.github\extensions\otel-monitor-canvas\*.test.mjs`):
+  `node:test` `test()` blocks with `node:assert/strict`; stand up a synthetic
+  HTTP upstream via `node:http` `createServer` bound to `127.0.0.1` on port
+  `0`; register cleanup with `t.after`. `canvas-evidence-proxy.test.mjs` is
+  the established example. Contract tests must be executable: never assert on
+  the implementation's source text (substring checks over the source file) —
+  drive the behavior through the synthetic upstream and assert the response
+  status, the forwarded upstream query, and the response shape.
 - Fixtures are small and synthetic: `demo-`/`trace-` prefixed ids and
   marker strings (e.g. `SECRET_PROMPT_TEXT_MARKER`) instead of realistic
   prompts. Never real user data, real prompts/responses, or PII.
@@ -53,6 +61,18 @@ dotnet test tests\<project>\<project>.csproj --filter FullyQualifiedName~<class>
 
 Playwright tests additionally need
 `pwsh scripts\test\install-playwright-chromium.ps1` once after build.
+
+Canvas extension tests run with Node directly:
+
+```powershell
+node --check .github\extensions\otel-monitor-canvas\<file>.mjs
+node --test .github\extensions\otel-monitor-canvas\<name>.test.mjs
+```
+
+These node tests are also wired into the `dotnet test` gate through
+`tests\CopilotAgentObservability.LocalMonitor.Tests\CanvasExtensionContractTests.cs`,
+so the pinned suite exercises them too.
+
 The targeted run is not a substitute for the pinned full suite — state
 that the `dotnet test CopilotAgentObservability.slnx` gate still applies.
 
