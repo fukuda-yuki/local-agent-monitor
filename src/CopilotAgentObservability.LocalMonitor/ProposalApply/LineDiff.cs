@@ -7,6 +7,18 @@ internal sealed record ApplyHunk(string HunkId, string RelativePath, int StartLi
 
 internal static class LineDiff
 {
+    public static string Unified(string relativePath, string original, string replacement)
+    {
+        var source = SplitLines(original);
+        var output = SplitLines(replacement);
+        var builder = new StringBuilder();
+        builder.Append("--- a/").Append(relativePath).Append('\n');
+        builder.Append("+++ b/").Append(relativePath).Append('\n');
+        builder.Append("@@ -1,").Append(source.Count).Append(" +1,").Append(output.Count).Append(" @@\n");
+        foreach (var line in source) builder.Append('-').Append(line.EndsWith('\n') ? line[..^1] : line).Append('\n');
+        foreach (var line in output) builder.Append('+').Append(line.EndsWith('\n') ? line[..^1] : line).Append('\n');
+        return builder.ToString();
+    }
     public static IReadOnlyList<ApplyHunk> Create(string relativePath, string original, string replacement)
     {
         if (string.Equals(original, replacement, StringComparison.Ordinal)) return [];

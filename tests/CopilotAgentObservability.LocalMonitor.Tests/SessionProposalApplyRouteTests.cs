@@ -8,6 +8,26 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SessionProposalApplyRouteTests
 {
     [Fact]
+    public async Task Apply_rejects_a_nonempty_body_before_mutation()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "root");
+        Directory.CreateDirectory(rootPath);
+        await using var host = await StartAsync(temp, ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath));
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/session-workspace/proposal-applies/drafts/{Guid.CreateVersion7()}/apply")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        request.Headers.TryAddWithoutValidation("X-Monitor-Csrf", "local-monitor");
+
+        var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("invalid_apply_request", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Roots_requires_same_origin_and_returns_only_opaque_root_metadata()
     {
         using var temp = new MonitorTempDirectory();

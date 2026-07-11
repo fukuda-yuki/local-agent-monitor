@@ -302,8 +302,14 @@ public sealed record ProposalApplyDraftMetadata(
     ProposalApplyState State, int FileCount, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
 
 public sealed record ProposalApplyRevisionMetadata(Guid DraftId, int SelectionRevision, string ApprovalDigest, DateTimeOffset? ApprovedAt);
+public sealed record ProposalApplyImmutableMetadata(
+    ProposalApplyDraftMetadata Draft,
+    ProposalApplyRevisionMetadata Revision,
+    IReadOnlyList<(string BaseSha256, string ReplacementSha256)> Files,
+    IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> Hunks);
 
 public sealed record ProposalApplyOutcome(Guid ApplyId, Guid DraftId, ProposalApplyState State, DateTimeOffset RecordedAt);
+public sealed record ProposalApplyPendingOperation(Guid ApplyId, Guid DraftId, Guid ProposalId, Guid RootId, int FileCount, string OperationKind, DateTimeOffset RecordedAt);
 
 public interface ISessionStore
 {
@@ -326,7 +332,11 @@ public interface ISessionStore
     void SaveProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision);
     void UpdateProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision);
     ProposalApplyDraftMetadata? GetProposalApplyDraft(Guid draftId);
+    ProposalApplyImmutableMetadata? GetProposalApplyImmutableMetadata(Guid draftId);
     IReadOnlyList<ProposalApplyDraftMetadata> ListActiveProposalApplyDrafts();
     void SaveProposalApplyApproval(Guid draftId, ProposalApplyRevisionMetadata revision);
     void SaveProposalApplyOutcome(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode);
+    void SaveProposalApplyPending(ProposalApplyPendingOperation pending);
+    IReadOnlyList<ProposalApplyPendingOperation> ListProposalApplyPending();
+    void CompleteProposalApplyPending(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode);
 }

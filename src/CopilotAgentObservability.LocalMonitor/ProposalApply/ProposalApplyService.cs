@@ -15,12 +15,13 @@ internal sealed class ProposalApplyService
     private readonly ProposalApplyTransaction transaction;
     private readonly ISessionStore? store;
     private readonly string draftPath;
+    private readonly Dictionary<Guid, ProposalApplyDraft> applies = [];
 
     public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, Action<string>? fault = null) : this(roots, runtimePath, null, fault) { }
     public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, ISessionStore? store, Action<string>? fault = null)
     {
         transaction = new ProposalApplyTransaction(runtimePath, roots, fault); Roots = transaction.ConfiguredRoots; this.store = store;
-        draftPath = Path.Combine(runtimePath, "drafts"); Directory.CreateDirectory(draftPath); transaction.RecoverUncommitted(); LoadDrafts();
+        draftPath = Path.Combine(runtimePath, "drafts"); Directory.CreateDirectory(draftPath); transaction.RecoverUncommitted(); ReconcilePending(); LoadDrafts();
     }
     public IReadOnlyList<ConfiguredApplyRoot> Roots { get; }
 
@@ -56,23 +57,85 @@ internal sealed class ProposalApplyService
     public ApplyTransactionResult Apply(Guid id) => ApplyWithId(id).Result;
     public (Guid ApplyId, ApplyTransactionResult Result, ProposalApplyDraft Draft) ApplyWithId(Guid id)
     {
-        lock (sync) { var draft = Get(id); if (!draft.IsApproved) throw new ApplyPathException("approval_required"); var apply = Guid.CreateVersion7(); var result = transaction.Apply(apply, draft.Files);
-            if (result == ApplyTransactionResult.Applied) store?.SaveProposalApplyOutcome(new(apply, id, ProposalApplyState.Applied, DateTimeOffset.UtcNow), draft.ProposalId, draft.RootId, draft.Files.Count, null);
-            else if (result == ApplyTransactionResult.Failed) store?.SaveProposalApplyOutcome(new(apply, id, ProposalApplyState.Failed, DateTimeOffset.UtcNow), draft.ProposalId, draft.RootId, draft.Files.Count, "apply_failed");
+        lock (sync) { var draft = Get(id); if (!draft.IsApproved || !IsTrusted(draft, requireApproved: true)) throw new ApplyPathException("approval_required"); var apply = Guid.CreateVersion7();
+            store?.SaveProposalApplyPending(new(apply, id, draft.ProposalId, draft.RootId, draft.Files.Count, "apply", DateTimeOffset.UtcNow));
+            var result = transaction.Apply(apply, draft.Files);
+            applies[apply] = draft;
+            if (result == ApplyTransactionResult.Applied) Complete(apply, draft, ProposalApplyState.Applied, null);
+            else if (result == ApplyTransactionResult.Failed) Complete(apply, draft, ProposalApplyState.Failed, "apply_failed");
             return (apply, result, draft); }
     }
-    public ApplyTransactionResult Rollback(Guid applyId) => transaction.Rollback(applyId);
+    public ApplyTransactionResult Rollback(Guid applyId)
+    {
+        lock (sync)
+        {
+            if (!applies.TryGetValue(applyId, out var draft)) return ApplyTransactionResult.RollbackUnavailable;
+            store?.SaveProposalApplyPending(new(applyId, draft.DraftId, draft.ProposalId, draft.RootId, draft.Files.Count, "rollback", DateTimeOffset.UtcNow));
+            var result = transaction.Rollback(applyId);
+            if (result == ApplyTransactionResult.RolledBack) Complete(applyId, draft, ProposalApplyState.RolledBack, null);
+            return result;
+        }
+    }
+    private void Complete(Guid applyId, ProposalApplyDraft draft, ProposalApplyState state, string? errorCode) => store?.CompleteProposalApplyPending(new(applyId, draft.DraftId, state, DateTimeOffset.UtcNow), draft.ProposalId, draft.RootId, draft.Files.Count, errorCode);
+    private void ReconcilePending()
+    {
+        if (store is null) return;
+        foreach (var pending in store.ListProposalApplyPending())
+        {
+            var state = transaction.GetJournalState(pending.ApplyId);
+            var outcome = state == "committed" ? ProposalApplyState.Applied : state == "rolled_back" ? ProposalApplyState.RolledBack : ProposalApplyState.Failed;
+            store.CompleteProposalApplyPending(new(pending.ApplyId, pending.DraftId, outcome, DateTimeOffset.UtcNow), pending.ProposalId, pending.RootId, pending.FileCount, outcome == ProposalApplyState.Failed ? "apply_failed" : null);
+        }
+    }
     private ProposalApplyDraft Get(Guid id) => drafts.TryGetValue(id, out var draft) ? draft : throw new ApplyPathException("draft_not_found");
     private void Persist(ProposalApplyDraft draft, ProposalApplyState state)
     {
-        WritePrivate(draft); if (store is null) return; var now = DateTimeOffset.UtcNow; var metadata = new ProposalApplyDraftMetadata(draft.DraftId, draft.ProposalId, draft.RootId, draft.SelectionRevision, draft.ApprovalDigest, state, draft.Files.Count, now, now);
+        if (store is null) { WritePrivate(draft); return; } var now = DateTimeOffset.UtcNow; var metadata = new ProposalApplyDraftMetadata(draft.DraftId, draft.ProposalId, draft.RootId, draft.SelectionRevision, draft.ApprovalDigest, state, draft.Files.Count, now, now);
         var files = draft.Files.Select(f => (f.BaseSha256, f.ReplacementSha256)).ToArray(); var hunks = draft.Hunks.Select(h => (h.HunkId, h.Selected, LineDiff.Sha256(h.ReplacementText))).ToArray();
         if (draft.SelectionRevision == 1) store.SaveProposalApplyDraft(metadata, files, hunks, new(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest, draft.IsApproved ? now : null));
         else if (draft.IsApproved) store.SaveProposalApplyApproval(draft.DraftId, new(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest, now));
         else store.UpdateProposalApplyDraft(metadata, files, hunks, new(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest, null));
+        WritePrivate(draft);
     }
     private void WritePrivate(ProposalApplyDraft draft) { var path = Path.Combine(draftPath, draft.DraftId.ToString("N") + ".json"); var temp = path + ".tmp"; File.WriteAllText(temp, JsonSerializer.Serialize(draft)); using (var s = new FileStream(temp, FileMode.Open, FileAccess.Read, FileShare.Read)) s.Flush(true); File.Move(temp, path, true); }
-    private void LoadDrafts() { foreach (var path in Directory.EnumerateFiles(draftPath, "*.json")) try { var draft = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(path)); if (draft is null || !Roots.Any(r => r.RootId == draft.RootId)) continue; drafts[draft.DraftId] = draft; } catch { } }
+    private void LoadDrafts()
+    {
+        if (store is null)
+        {
+            foreach (var path in Directory.EnumerateFiles(draftPath, "*.json")) TryLoad(path, null);
+            return;
+        }
+        foreach (var metadata in store.ListActiveProposalApplyDrafts())
+        {
+            var path = Path.Combine(draftPath, metadata.DraftId.ToString("N") + ".json");
+            if (File.Exists(path)) TryLoad(path, metadata.DraftId);
+        }
+    }
+    private void TryLoad(string path, Guid? expectedId)
+    {
+        try
+        {
+            var draft = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(path));
+            if (draft is null || (expectedId is not null && draft.DraftId != expectedId) || !Roots.Any(r => r.RootId == draft.RootId) || !IsTrusted(draft, requireApproved: draft.IsApproved)) return;
+            drafts[draft.DraftId] = draft;
+        }
+        catch { }
+    }
+    private bool IsTrusted(ProposalApplyDraft draft, bool requireApproved)
+    {
+        if (store is null) return true;
+        var immutable = store.GetProposalApplyImmutableMetadata(draft.DraftId);
+        if (immutable is null || store.GetImprovementProposal(draft.ProposalId) is null) return false;
+        var metadata = immutable.Draft;
+        if (metadata.ProposalId != draft.ProposalId || metadata.RootId != draft.RootId || metadata.SelectionRevision != draft.SelectionRevision || metadata.ApprovalDigest != draft.ApprovalDigest || metadata.FileCount != draft.Files.Count) return false;
+        if ((metadata.State == ProposalApplyState.Approved) != draft.IsApproved || (requireApproved && (metadata.State != ProposalApplyState.Approved || immutable.Revision.ApprovedAt is null))) return false;
+        if (immutable.Revision.SelectionRevision != draft.SelectionRevision || immutable.Revision.ApprovalDigest != draft.ApprovalDigest) return false;
+        var files = draft.Files.Select(file => (file.BaseSha256, file.ReplacementSha256)).ToArray();
+        if (!files.SequenceEqual(immutable.Files)) return false;
+        var hunks = draft.Hunks.Select(hunk => (hunk.HunkId, hunk.Selected, LineDiff.Sha256(hunk.ReplacementText))).OrderBy(hunk => hunk.HunkId, StringComparer.Ordinal).ToArray();
+        if (!hunks.SequenceEqual(immutable.Hunks)) return false;
+        return Digest(draft.DraftId, draft.ProposalId, draft.RootId, draft.Files, draft.Hunks, draft.SelectionRevision) == draft.ApprovalDigest;
+    }
     private static IReadOnlyList<ApplyTarget> RebuildFiles(IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks) => files.Select(file => { var replacement = LineDiff.Replay(file.OriginalText, hunks.Where(h => h.Selected && h.RelativePath == file.RelativePath)); return file with { ReplacementText = replacement, ReplacementSha256 = LineDiff.Sha256(replacement) }; }).Where(file => !string.Equals(file.OriginalText, file.ReplacementText, StringComparison.Ordinal)).ToArray();
     private static string Digest(Guid draftId, Guid proposalId, Guid rootId, IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks, int revision) => LineDiff.Sha256(string.Join("\n", new[] { draftId.ToString("D"), proposalId.ToString("D"), rootId.ToString("D"), revision.ToString(CultureInfo.InvariantCulture) }.Concat(files.OrderBy(f => f.RelativePath, StringComparer.Ordinal).Select(f => $"{f.RelativePath}|{f.BaseSha256}|{f.ReplacementSha256}")).Concat(hunks.Where(h => h.Selected).OrderBy(h => h.HunkId, StringComparer.Ordinal).Select(h => $"{h.HunkId}|{LineDiff.Sha256(h.ReplacementText)}"))));
 }

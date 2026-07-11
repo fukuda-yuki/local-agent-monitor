@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 public sealed class SqliteSessionStore : ISessionStore
 {
-    private const int CurrentSchemaVersion = 5;
+    private const int CurrentSchemaVersion = 6;
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
 
@@ -40,7 +40,7 @@ public sealed class SqliteSessionStore : ISessionStore
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'session';";
         var existingVersion = versionCommand.ExecuteScalar();
-        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or CurrentSchemaVersion))
+        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or 5 or CurrentSchemaVersion))
         {
             throw new InvalidOperationException("Unsupported Session schema version.");
         }
@@ -87,6 +87,12 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
+        else if (Convert.ToInt32(existingVersion) == 5)
+        {
+            command.CommandText = ProposalApplyPendingSchemaSql;
+            command.ExecuteNonQuery();
+            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
         transaction.Commit();
     }
 
@@ -105,6 +111,24 @@ public sealed class SqliteSessionStore : ISessionStore
     {
         using var connection = Open(); using var command = connection.CreateCommand(); command.CommandText = "SELECT draft_id,proposal_id,root_id,selection_revision,approval_digest,state,(SELECT COUNT(*) FROM proposal_apply_files WHERE draft_id=d.draft_id),created_at,updated_at FROM proposal_apply_drafts d WHERE draft_id=$id;"; command.Parameters.AddWithValue("$id", Id(draftId)); using var reader = command.ExecuteReader();
         return reader.Read() ? new(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)), reader.GetInt32(3), reader.GetString(4), ParseApplyState(reader.GetString(5)), reader.GetInt32(6), DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture), DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture)) : null;
+    }
+
+    public ProposalApplyImmutableMetadata? GetProposalApplyImmutableMetadata(Guid draftId)
+    {
+        var draft = GetProposalApplyDraft(draftId);
+        if (draft is null) return null;
+        using var connection = Open();
+        using var revisionCommand = connection.CreateCommand();
+        revisionCommand.CommandText = "SELECT approval_digest,approved_at FROM proposal_apply_revisions WHERE draft_id=$id AND selection_revision=$revision;";
+        revisionCommand.Parameters.AddWithValue("$id", Id(draftId)); revisionCommand.Parameters.AddWithValue("$revision", draft.SelectionRevision);
+        using var revisionReader = revisionCommand.ExecuteReader();
+        if (!revisionReader.Read()) return null;
+        var revision = new ProposalApplyRevisionMetadata(draftId, draft.SelectionRevision, revisionReader.GetString(0), revisionReader.IsDBNull(1) ? null : DateTimeOffset.Parse(revisionReader.GetString(1), CultureInfo.InvariantCulture));
+        using var fileCommand = connection.CreateCommand(); fileCommand.CommandText = "SELECT base_sha256,replacement_sha256 FROM proposal_apply_files WHERE draft_id=$id ORDER BY file_order;"; fileCommand.Parameters.AddWithValue("$id", Id(draftId));
+        using var fileReader = fileCommand.ExecuteReader(); var files = new List<(string, string)>(); while (fileReader.Read()) files.Add((fileReader.GetString(0), fileReader.GetString(1)));
+        using var hunkCommand = connection.CreateCommand(); hunkCommand.CommandText = "SELECT hunk_id,selected,replacement_sha256 FROM proposal_apply_hunks WHERE draft_id=$id ORDER BY hunk_id;"; hunkCommand.Parameters.AddWithValue("$id", Id(draftId));
+        using var hunkReader = hunkCommand.ExecuteReader(); var hunks = new List<(string, bool, string)>(); while (hunkReader.Read()) hunks.Add((hunkReader.GetString(0), hunkReader.GetInt32(1) != 0, hunkReader.GetString(2)));
+        return new ProposalApplyImmutableMetadata(draft, revision, files, hunks);
     }
 
     public void UpdateProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision)
@@ -135,6 +159,29 @@ public sealed class SqliteSessionStore : ISessionStore
         Execute(connection, transaction, "INSERT INTO proposal_applies(apply_id,draft_id,state,created_at) VALUES($apply,$draft,$state,$time) ON CONFLICT(apply_id) DO UPDATE SET state=excluded.state;", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)));
         Execute(connection, transaction, "UPDATE proposal_apply_drafts SET state=$state,updated_at=$time WHERE draft_id=$draft;", ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)), ("$draft", Id(outcome.DraftId)));
         Execute(connection, transaction, "INSERT INTO proposal_apply_audit(apply_id,draft_id,proposal_id,root_id,actor_kind,state,error_code,file_count,recorded_at) VALUES($apply,$draft,$proposal,$root,'local_user',$state,$error,$count,$time);", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$proposal", Id(proposalId)), ("$root", Id(rootId)), ("$state", ApplyState(outcome.State)), ("$error", errorCode), ("$count", fileCount), ("$time", Timestamp(outcome.RecordedAt))); transaction.Commit();
+    }
+
+    public void SaveProposalApplyPending(ProposalApplyPendingOperation pending)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, "INSERT INTO proposal_apply_pending(apply_id,draft_id,proposal_id,root_id,actor_kind,file_count,operation_kind,recorded_at) VALUES($apply,$draft,$proposal,$root,'local_user',$count,$kind,$time);", ("$apply", Id(pending.ApplyId)), ("$draft", Id(pending.DraftId)), ("$proposal", Id(pending.ProposalId)), ("$root", Id(pending.RootId)), ("$count", pending.FileCount), ("$kind", pending.OperationKind), ("$time", Timestamp(pending.RecordedAt))); transaction.Commit();
+    }
+
+    public IReadOnlyList<ProposalApplyPendingOperation> ListProposalApplyPending()
+    {
+        using var connection = Open(); using var command = connection.CreateCommand(); command.CommandText = "SELECT apply_id,draft_id,proposal_id,root_id,file_count,operation_kind,recorded_at FROM proposal_apply_pending ORDER BY recorded_at;"; using var reader = command.ExecuteReader(); var result = new List<ProposalApplyPendingOperation>();
+        while (reader.Read()) result.Add(new(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)), Guid.Parse(reader.GetString(3)), reader.GetInt32(4), reader.GetString(5), DateTimeOffset.Parse(reader.GetString(6), CultureInfo.InvariantCulture)));
+        return result;
+    }
+
+    public void CompleteProposalApplyPending(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, "INSERT INTO proposal_applies(apply_id,draft_id,state,created_at) VALUES($apply,$draft,$state,$time) ON CONFLICT(apply_id) DO UPDATE SET state=excluded.state;", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)));
+        Execute(connection, transaction, "UPDATE proposal_apply_drafts SET state=$state,updated_at=$time WHERE draft_id=$draft;", ("$state", ApplyState(outcome.State)), ("$time", Timestamp(outcome.RecordedAt)), ("$draft", Id(outcome.DraftId)));
+        Execute(connection, transaction, "INSERT INTO proposal_apply_audit(apply_id,draft_id,proposal_id,root_id,actor_kind,state,error_code,file_count,recorded_at) VALUES($apply,$draft,$proposal,$root,'local_user',$state,$error,$count,$time);", ("$apply", Id(outcome.ApplyId)), ("$draft", Id(outcome.DraftId)), ("$proposal", Id(proposalId)), ("$root", Id(rootId)), ("$state", ApplyState(outcome.State)), ("$error", errorCode), ("$count", fileCount), ("$time", Timestamp(outcome.RecordedAt)));
+        Execute(connection, transaction, "DELETE FROM proposal_apply_pending WHERE apply_id=$apply;", ("$apply", Id(outcome.ApplyId)));
+        transaction.Commit();
     }
 
     public void Write(SessionWriteBatch batch)
@@ -1141,6 +1188,29 @@ public sealed class SqliteSessionStore : ISessionStore
             state TEXT NOT NULL,
             error_code TEXT NULL,
             file_count INTEGER NOT NULL CHECK (file_count >= 0),
+            recorded_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS proposal_apply_pending (
+            apply_id TEXT PRIMARY KEY,
+            draft_id TEXT NOT NULL,
+            proposal_id TEXT NOT NULL,
+            root_id TEXT NOT NULL,
+            actor_kind TEXT NOT NULL CHECK (actor_kind='local_user'),
+            file_count INTEGER NOT NULL CHECK (file_count >= 0),
+            operation_kind TEXT NOT NULL CHECK (operation_kind IN ('apply','rollback')),
+            recorded_at TEXT NOT NULL
+        );
+        """;
+
+    private const string ProposalApplyPendingSchemaSql = """
+        CREATE TABLE IF NOT EXISTS proposal_apply_pending (
+            apply_id TEXT PRIMARY KEY,
+            draft_id TEXT NOT NULL,
+            proposal_id TEXT NOT NULL,
+            root_id TEXT NOT NULL,
+            actor_kind TEXT NOT NULL CHECK (actor_kind='local_user'),
+            file_count INTEGER NOT NULL CHECK (file_count >= 0),
+            operation_kind TEXT NOT NULL CHECK (operation_kind IN ('apply','rollback')),
             recorded_at TEXT NOT NULL
         );
         """;

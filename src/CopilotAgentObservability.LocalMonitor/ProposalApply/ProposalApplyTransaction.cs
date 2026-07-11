@@ -34,6 +34,12 @@ internal sealed class ProposalApplyTransaction
 
     public IReadOnlyList<ConfiguredApplyRoot> ConfiguredRoots => roots.Values.OrderBy(root => root.Kind).ToArray();
 
+    public string? GetJournalState(Guid applyId)
+    {
+        var path = Path.Combine(runtimePath, applyId.ToString("N"), "journal.json");
+        return File.Exists(path) ? ReadJournal(path)?.State : null;
+    }
+
     public ApplyTransactionResult Apply(Guid applyId, IReadOnlyList<ApplyTarget> targets)
     {
         if (recoveryBlocked || targets.Count is < 1 or > 10 || targets.Any(target => Encoding.UTF8.GetByteCount(target.ReplacementText) > 262_144)) return ApplyTransactionResult.Failed;
