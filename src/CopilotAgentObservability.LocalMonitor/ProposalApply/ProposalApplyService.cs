@@ -44,6 +44,11 @@ internal sealed class ProposalApplyService
         lock (sync) { drafts.Add(id, draft); Persist(draft, ProposalApplyState.Draft); } return draft;
     }
     public ProposalApplyDraft GetDraft(Guid id) { lock (sync) return Get(id); }
+    public IReadOnlyList<ProposalApplicationReceipt> ListApplicationReceipts(Guid proposalId)
+    {
+        if (store is null) return [];
+        lock (sync) return store.ListApplicationReceipts(proposalId).Select(receipt => receipt with { CurrentState = CurrentReceiptState(receipt) }).ToArray();
+    }
     public ProposalApplyDraft Select(Guid id, int revision, IReadOnlyList<string> selectedHunkIds)
     {
         lock (sync) { var draft = Get(id); if (draft.SelectionRevision != revision) throw new ApplyPathException("selection_stale");
@@ -149,6 +154,37 @@ internal sealed class ProposalApplyService
         var hunks = draft.Hunks.Select(hunk => (hunk.HunkId, hunk.Selected, LineDiff.Sha256(hunk.ReplacementText))).OrderBy(hunk => hunk.HunkId, StringComparer.Ordinal).ToArray();
         if (!hunks.SequenceEqual(immutable.Hunks)) return false;
         return HasCurrentProposalRevision(draft) && Digest(draft.DraftId, draft.ProposalId, draft.ProposalRevision, draft.RootId, draft.Files, draft.Hunks, draft.SelectionRevision) == draft.ApprovalDigest;
+    }
+    private string CurrentReceiptState(ProposalApplicationReceipt receipt)
+    {
+        if (receipt.State == "rolled_back") return "rolled_back";
+        if (receipt.State != "applied") return "pending";
+        if (store!.GetImprovementProposal(receipt.ProposalId)?.Revision != receipt.ProposalRevision) return "stale";
+        var root = Roots.SingleOrDefault(item => item.RootId == store.GetProposalApplyDraft(receipt.DraftId)?.RootId);
+        if (root is null || !Directory.Exists(root.CanonicalPath)) return "unavailable";
+        var draft = ReadReceiptDraft(receipt.DraftId);
+        if (draft is null || !MatchesImmutableReceipt(draft, receipt)) return "unavailable";
+        try
+        {
+            return draft.Files.All(file => string.Equals(LineDiff.Sha256(File.ReadAllText(ApplyPathPolicy.Resolve(root, file.RelativePath).FullPath)), file.ReplacementSha256, StringComparison.Ordinal))
+                ? "active" : "stale";
+        }
+        catch (ApplyPathException) { return "unavailable"; }
+        catch (IOException) { return "unavailable"; }
+        catch (UnauthorizedAccessException) { return "unavailable"; }
+    }
+    private ProposalApplyDraft? ReadReceiptDraft(Guid draftId)
+    {
+        try { return JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(Path.Combine(draftPath, draftId.ToString("N") + ".json"))); }
+        catch { return null; }
+    }
+    private bool MatchesImmutableReceipt(ProposalApplyDraft draft, ProposalApplicationReceipt receipt)
+    {
+        var immutable = store!.GetProposalApplyImmutableMetadata(receipt.DraftId);
+        if (immutable is null || draft.DraftId != receipt.DraftId || draft.ProposalId != receipt.ProposalId || draft.ProposalRevision != receipt.ProposalRevision || draft.SelectionRevision != receipt.SelectionRevision || draft.Files.Count != receipt.FileCount) return false;
+        if (immutable.Draft.ProposalId != draft.ProposalId || immutable.Draft.ProposalRevision != draft.ProposalRevision || immutable.Draft.RootId != draft.RootId || immutable.Draft.SelectionRevision != draft.SelectionRevision || immutable.Draft.FileCount != draft.Files.Count || immutable.Draft.ApprovalDigest != draft.ApprovalDigest || immutable.Revision.ApprovedAt is null) return false;
+        if (!draft.Files.Select(file => (file.BaseSha256, file.ReplacementSha256)).SequenceEqual(immutable.Files)) return false;
+        return Digest(draft.DraftId, draft.ProposalId, draft.ProposalRevision, draft.RootId, draft.Files, draft.Hunks, draft.SelectionRevision) == draft.ApprovalDigest;
     }
     private static IReadOnlyList<ApplyTarget> RebuildFiles(IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks) => files.Select(file => { var replacement = LineDiff.Replay(file.OriginalText, hunks.Where(h => h.Selected && h.RelativePath == file.RelativePath)); return file with { ReplacementText = replacement, ReplacementSha256 = LineDiff.Sha256(replacement) }; }).Where(file => !string.Equals(file.OriginalText, file.ReplacementText, StringComparison.Ordinal)).ToArray();
     private bool HasCurrentProposalRevision(ProposalApplyDraft draft) => store?.GetImprovementProposal(draft.ProposalId)?.Revision == draft.ProposalRevision || store is null;

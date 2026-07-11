@@ -271,6 +271,18 @@ public sealed class SessionProposalApplyRouteTests
             Assert.Equal("two\n", File.ReadAllText(second));
             Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_applies WHERE state='applied';"));
             Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_audit WHERE state='applied';"));
+            using var activeReceipt = await GetReceiptAsync(host.Client, proposalId);
+            Assert.Equal("active", activeReceipt.RootElement.GetProperty("items")[0].GetProperty("current_state").GetString());
+            AssertNoReceiptSecrets(activeReceipt.RootElement.GetProperty("items")[0].GetRawText(), rootPath);
+            File.WriteAllText(first, "external-edit-marker\n");
+            using var staleReceipt = await GetReceiptAsync(host.Client, proposalId);
+            Assert.Equal("stale", staleReceipt.RootElement.GetProperty("items")[0].GetProperty("current_state").GetString());
+            Directory.Delete(rootPath, recursive: true);
+            using var unavailableReceipt = await GetReceiptAsync(host.Client, proposalId);
+            Assert.Equal("unavailable", unavailableReceipt.RootElement.GetProperty("items")[0].GetProperty("current_state").GetString());
+            Directory.CreateDirectory(rootPath);
+            File.WriteAllText(first, "ONE\n");
+            File.WriteAllText(second, "two\n");
         }
 
         await using (var restarted = await StartAsync(temp, root))
@@ -281,6 +293,8 @@ public sealed class SessionProposalApplyRouteTests
             Assert.Equal("one\n", File.ReadAllText(first));
             Assert.Equal("two\n", File.ReadAllText(second));
             Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_audit WHERE state='rolled_back';"));
+            using var rolledBackReceipt = await GetReceiptAsync(restarted.Client, proposalId);
+            Assert.Equal("rolled_back", rolledBackReceipt.RootElement.GetProperty("items")[0].GetProperty("current_state").GetString());
         }
 
         await using var afterRollback = await StartAsync(temp, root);
@@ -547,6 +561,23 @@ public sealed class SessionProposalApplyRouteTests
         response.EnsureSuccessStatusCode();
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         return body.RootElement.GetProperty("items")[0].GetProperty("root_id").GetGuid();
+    }
+
+    private static async Task<JsonDocument> GetReceiptAsync(HttpClient client, Guid proposalId)
+    {
+        using var request = CsrfRequest(HttpMethod.Get, $"/api/session-workspace/proposal-applies/receipts?proposal_id={proposalId:D}");
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        return JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+    }
+
+    private static void AssertNoReceiptSecrets(string body, string rootPath)
+    {
+        foreach (var sentinel in new[] { rootPath, "one.txt", "two.txt", "sha256", "replacement", "snapshot", "journal", "token", "exception" })
+        {
+            Assert.DoesNotContain(sentinel, body, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     private static HttpRequestMessage JsonRequest(HttpMethod method, string path, string body)

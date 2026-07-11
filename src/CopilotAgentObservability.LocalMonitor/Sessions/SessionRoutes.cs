@@ -369,7 +369,7 @@ internal static class SessionRoutes
             if (!await EnsureApplyConfigured(context, service)) return;
             if (!TryUuidV7(context.Request.Query["proposal_id"].ToString(), out var proposalId)) { await Failure(context, 400, "invalid_apply_request"); return; }
             if (store.GetImprovementProposal(proposalId) is null) { await Failure(context, 404, "proposal_not_found"); return; }
-            await Json(context, new { items = store.ListApplicationReceipts(proposalId).Select(receipt => new { apply_id = receipt.ApplyId, draft_id = receipt.DraftId, proposal_id = receipt.ProposalId, proposal_revision = receipt.ProposalRevision, selection_revision = receipt.SelectionRevision, applied_at = receipt.AppliedAt, file_count = receipt.FileCount, state = receipt.State, current_state = receipt.CurrentState }) });
+            await Json(context, new { items = service.ListApplicationReceipts(proposalId).Select(receipt => new { apply_id = receipt.ApplyId, draft_id = receipt.DraftId, proposal_id = receipt.ProposalId, proposal_revision = receipt.ProposalRevision, selection_revision = receipt.SelectionRevision, applied_at = receipt.AppliedAt, file_count = receipt.FileCount, state = receipt.State, current_state = receipt.CurrentState }) });
         });
         app.MapPost(prefix + "/drafts", async context =>
         {
