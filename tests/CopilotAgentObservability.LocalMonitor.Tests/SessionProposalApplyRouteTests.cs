@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using Microsoft.Data.Sqlite;
 
@@ -266,6 +267,250 @@ public sealed class SessionProposalApplyRouteTests
         await using var afterRollback = await StartAsync(temp, root);
         using var secondRollback = CsrfRequest(HttpMethod.Post, $"/api/session-workspace/proposal-applies/{applyId:D}/rollback");
         Assert.Equal(HttpStatusCode.NotFound, (await afterRollback.Client.SendAsync(secondRollback)).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("missing_private")]
+    [InlineData("invalid_private")]
+    [InlineData("replacement_text")]
+    [InlineData("is_approved")]
+    [InlineData("approval_digest")]
+    [InlineData("selection_revision")]
+    [InlineData("file_hash")]
+    [InlineData("hunk_hash")]
+    [InlineData("root_id")]
+    [InlineData("proposal_id")]
+    [InlineData("sqlite_draft")]
+    [InlineData("sqlite_file")]
+    [InlineData("sqlite_hunk")]
+    public async Task Restart_rejects_tampered_draft_without_echo_or_mutation(string tamper)
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "root");
+        Directory.CreateDirectory(rootPath);
+        var target = Path.Combine(rootPath, "target.txt");
+        const string original = "original-private-marker\n";
+        const string replacement = "replacement-private-marker\n";
+        File.WriteAllText(target, original);
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath);
+        var proposalId = Guid.CreateVersion7();
+        Guid draftId;
+
+        await using (var host = await StartAsync(temp, root))
+        {
+            InsertPersistedProposal(temp.DatabasePath, proposalId);
+            var rootId = await GetSingleRootIdAsync(host.Client);
+            using var create = JsonRequest(HttpMethod.Post, "/api/session-workspace/proposal-applies/drafts", $$"""{"proposal_id":"{{proposalId:D}}","root_id":"{{rootId:D}}","files":[{"relative_path":"target.txt","replacement_text":"replacement-private-marker\n"}]}""");
+            using var response = await host.Client.SendAsync(create);
+            response.EnsureSuccessStatusCode();
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            draftId = document.RootElement.GetProperty("draft_id").GetGuid();
+            var revision = document.RootElement.GetProperty("selection_revision").GetInt32();
+            var digest = document.RootElement.GetProperty("approval_digest").GetString();
+            using var approve = JsonRequest(HttpMethod.Post, $"/api/session-workspace/proposal-applies/drafts/{draftId:D}/approve", $$"""{"selection_revision":{{revision}},"approval_digest":"{{digest}}"}""");
+            using var approved = await host.Client.SendAsync(approve);
+            Assert.True(approved.StatusCode == HttpStatusCode.OK, await approved.Content.ReadAsStringAsync());
+        }
+
+        TamperApprovedDraft(temp, draftId, tamper);
+
+        await using var restarted = await StartAsync(temp, root);
+        using var get = CsrfRequest(HttpMethod.Get, $"/api/session-workspace/proposal-applies/drafts/{draftId:D}");
+        using var getResponse = await restarted.Client.SendAsync(get);
+        using var apply = CsrfRequest(HttpMethod.Post, $"/api/session-workspace/proposal-applies/drafts/{draftId:D}/apply");
+        using var applyResponse = await restarted.Client.SendAsync(apply);
+        var combined = (await getResponse.Content.ReadAsStringAsync()) + (await applyResponse.Content.ReadAsStringAsync());
+
+        Assert.Equal(HttpStatusCode.NotFound, getResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, applyResponse.StatusCode);
+        Assert.Equal("no-store", getResponse.Headers.CacheControl?.ToString());
+        Assert.Equal("no-store", applyResponse.Headers.CacheControl?.ToString());
+        Assert.Equal(original, File.ReadAllText(target));
+        Assert.DoesNotContain("target.txt", combined, StringComparison.Ordinal);
+        Assert.DoesNotContain(replacement.Trim(), combined, StringComparison.Ordinal);
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_pending;"));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_audit;"));
+    }
+
+    [Theory]
+    [InlineData("../escape.txt", "invalid_relative_path")]
+    [InlineData("C:\\escape.txt", "invalid_relative_path")]
+    [InlineData("\\\\server\\share\\escape.txt", "invalid_relative_path")]
+    [InlineData("\\\\.\\PhysicalDrive0", "invalid_relative_path")]
+    public async Task Draft_creation_rejects_unsafe_paths_without_echo_or_audit(string relativePath, string error)
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "root");
+        Directory.CreateDirectory(rootPath);
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath);
+        var proposalId = Guid.CreateVersion7();
+        await using var host = await StartAsync(temp, root);
+        InsertPersistedProposal(temp.DatabasePath, proposalId);
+        var rootId = await GetSingleRootIdAsync(host.Client);
+        const string replacement = "unsafe-replacement-marker";
+        using var request = JsonRequest(HttpMethod.Post, "/api/session-workspace/proposal-applies/drafts", JsonSerializer.Serialize(new { proposal_id = proposalId, root_id = rootId, files = new[] { new { relative_path = relativePath, replacement_text = replacement } } }));
+        using var response = await host.Client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal($"{{\"error\":\"{error}\"}}", body);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.DoesNotContain(relativePath, body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(replacement, body, StringComparison.Ordinal);
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_audit;"));
+    }
+
+    [Fact]
+    public async Task Invalid_root_id_does_not_access_or_create_the_supplied_target()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "root");
+        Directory.CreateDirectory(rootPath);
+        var target = "invalid-root-target-marker.txt";
+        var proposalId = Guid.CreateVersion7();
+        await using var host = await StartAsync(temp, ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath));
+        InsertPersistedProposal(temp.DatabasePath, proposalId);
+        using var request = JsonRequest(HttpMethod.Post, "/api/session-workspace/proposal-applies/drafts", $$"""{"proposal_id":"{{proposalId:D}}","root_id":"{{Guid.CreateVersion7():D}}","files":[{"relative_path":"{{target}}","replacement_text":"replacement"}]}""");
+        using var response = await host.Client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("{\"error\":\"invalid_root_id\"}", body);
+        Assert.False(File.Exists(Path.Combine(rootPath, target)));
+        Assert.DoesNotContain(target, body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Draft_creation_rejects_duplicate_and_directory_targets_without_echo_or_audit()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "root");
+        Directory.CreateDirectory(rootPath);
+        File.WriteAllText(Path.Combine(rootPath, "same.txt"), "original\n");
+        Directory.CreateDirectory(Path.Combine(rootPath, "directory-marker"));
+        var proposalId = Guid.CreateVersion7();
+        await using var host = await StartAsync(temp, ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath));
+        InsertPersistedProposal(temp.DatabasePath, proposalId);
+        var rootId = await GetSingleRootIdAsync(host.Client);
+        foreach (var scenario in new[]
+        {
+            ("duplicate_target", new[] { new { relative_path = "same.txt", replacement_text = "replacement-marker" }, new { relative_path = "SAME.TXT", replacement_text = "replacement-marker" } }),
+            ("target_not_regular_file", new[] { new { relative_path = "directory-marker", replacement_text = "replacement-marker" } }),
+        })
+        {
+            using var request = JsonRequest(HttpMethod.Post, "/api/session-workspace/proposal-applies/drafts", JsonSerializer.Serialize(new { proposal_id = proposalId, root_id = rootId, files = scenario.Item2 }));
+            using var response = await host.Client.SendAsync(request);
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal($"{{\"error\":\"{scenario.Item1}\"}}", body);
+            Assert.DoesNotContain("replacement-marker", body, StringComparison.Ordinal);
+        }
+        Assert.Equal("original\n", File.ReadAllText(Path.Combine(rootPath, "same.txt")));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_audit;"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Draft_creation_rejects_reparse_target_and_ancestor_without_echo(bool ancestor)
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "root");
+        var externalPath = Path.Combine(temp.Path, "external");
+        Directory.CreateDirectory(rootPath);
+        Directory.CreateDirectory(externalPath);
+        File.WriteAllText(Path.Combine(externalPath, "linked-marker.txt"), "original\n");
+        var link = ancestor ? Path.Combine(rootPath, "linked-directory") : Path.Combine(rootPath, "linked-marker.txt");
+        try
+        {
+            if (ancestor) _ = Directory.CreateSymbolicLink(link, externalPath);
+            else _ = File.CreateSymbolicLink(link, Path.Combine(externalPath, "linked-marker.txt"));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip($"Cannot create {(ancestor ? "ancestor" : "target")} reparse fixture: {exception.GetType().Name}");
+        }
+        var proposalId = Guid.CreateVersion7();
+        await using var host = await StartAsync(temp, ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath));
+        InsertPersistedProposal(temp.DatabasePath, proposalId);
+        var rootId = await GetSingleRootIdAsync(host.Client);
+        var relative = ancestor ? "linked-directory/linked-marker.txt" : "linked-marker.txt";
+        using var request = JsonRequest(HttpMethod.Post, "/api/session-workspace/proposal-applies/drafts", JsonSerializer.Serialize(new { proposal_id = proposalId, root_id = rootId, files = new[] { new { relative_path = relative, replacement_text = "replacement-marker" } } }));
+        using var response = await host.Client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("{\"error\":\"unsafe_reparse_path\"}", body);
+        Assert.DoesNotContain(relative, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("replacement-marker", body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("replacement")]
+    [InlineData("source")]
+    public async Task Draft_creation_rejects_over_256_kib_content_without_echo_or_audit(string kind)
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "root");
+        Directory.CreateDirectory(rootPath);
+        var target = Path.Combine(rootPath, "large-marker.txt");
+        File.WriteAllText(target, kind == "source" ? new string('s', 262_145) : "small");
+        var proposalId = Guid.CreateVersion7();
+        await using var host = await StartAsync(temp, ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath));
+        InsertPersistedProposal(temp.DatabasePath, proposalId);
+        var rootId = await GetSingleRootIdAsync(host.Client);
+        var marker = kind == "replacement" ? new string('r', 262_145) : "replacement";
+        using var request = JsonRequest(HttpMethod.Post, "/api/session-workspace/proposal-applies/drafts", JsonSerializer.Serialize(new { proposal_id = proposalId, root_id = rootId, files = new[] { new { relative_path = "large-marker.txt", replacement_text = marker } } }));
+        using var response = await host.Client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Equal("{\"error\":\"request_too_large\"}", body);
+        Assert.DoesNotContain("large-marker.txt", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(marker[..Math.Min(16, marker.Length)], body, StringComparison.Ordinal);
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_audit;"));
+    }
+
+    private static void TamperApprovedDraft(MonitorTempDirectory temp, Guid draftId, string tamper)
+    {
+        var privatePath = Path.Combine(temp.Path, "proposal-apply", "drafts", draftId.ToString("N") + ".json");
+        if (tamper == "missing_private") { File.Delete(privatePath); return; }
+        if (tamper == "invalid_private") { File.WriteAllText(privatePath, "{"); return; }
+        if (tamper.StartsWith("sqlite_", StringComparison.Ordinal))
+        {
+            var sql = tamper switch
+            {
+                "sqlite_draft" => "UPDATE proposal_apply_drafts SET selection_revision=99 WHERE draft_id=$id;",
+                "sqlite_file" => "UPDATE proposal_apply_files SET base_sha256='tampered-file-hash' WHERE draft_id=$id;",
+                _ => "UPDATE proposal_apply_hunks SET replacement_sha256='tampered-hunk-hash' WHERE draft_id=$id;",
+            };
+            Execute(temp.DatabasePath, sql, draftId);
+            return;
+        }
+
+        var node = JsonNode.Parse(File.ReadAllText(privatePath))!.AsObject();
+        switch (tamper)
+        {
+            case "replacement_text": node["Files"]![0]!["ReplacementText"] = "tampered-replacement-marker\n"; break;
+            case "is_approved": node["IsApproved"] = false; break;
+            case "approval_digest": node["ApprovalDigest"] = "tampered-digest"; break;
+            case "selection_revision": node["SelectionRevision"] = 99; break;
+            case "file_hash": node["Files"]![0]!["BaseSha256"] = "tampered-file-hash"; break;
+            case "hunk_hash": node["Hunks"]![0]!["ReplacementText"] = "tampered-hunk-marker\n"; break;
+            case "root_id": node["RootId"] = Guid.CreateVersion7(); break;
+            case "proposal_id": node["ProposalId"] = Guid.CreateVersion7(); break;
+            default: throw new ArgumentOutOfRangeException(nameof(tamper));
+        }
+        File.WriteAllText(privatePath, node.ToJsonString());
+    }
+
+    private static void Execute(string databasePath, string sql, Guid draftId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$id", draftId.ToString("D"));
+        command.ExecuteNonQuery();
     }
 
     private static HttpRequestMessage CreateRequest(string method, string path, bool body)

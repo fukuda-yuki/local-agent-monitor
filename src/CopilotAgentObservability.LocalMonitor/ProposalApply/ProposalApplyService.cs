@@ -102,7 +102,7 @@ internal sealed class ProposalApplyService
     {
         if (store is null) { WritePrivate(draft); return; } var now = DateTimeOffset.UtcNow; var metadata = new ProposalApplyDraftMetadata(draft.DraftId, draft.ProposalId, draft.RootId, draft.SelectionRevision, draft.ApprovalDigest, state, draft.Files.Count, now, now);
         var files = draft.Files.Select(f => (f.BaseSha256, f.ReplacementSha256)).ToArray(); var hunks = draft.Hunks.Select(h => (h.HunkId, h.Selected, LineDiff.Sha256(h.ReplacementText))).ToArray();
-        if (draft.SelectionRevision == 1) store.SaveProposalApplyDraft(metadata, files, hunks, new(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest, draft.IsApproved ? now : null));
+        if (store.GetProposalApplyDraft(draft.DraftId) is null) store.SaveProposalApplyDraft(metadata, files, hunks, new(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest, draft.IsApproved ? now : null));
         else if (draft.IsApproved) store.SaveProposalApplyApproval(draft.DraftId, new(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest, now));
         else store.UpdateProposalApplyDraft(metadata, files, hunks, new(draft.DraftId, draft.SelectionRevision, draft.ApprovalDigest, null));
         WritePrivate(draft);
@@ -140,6 +140,7 @@ internal sealed class ProposalApplyService
         if (metadata.ProposalId != draft.ProposalId || metadata.RootId != draft.RootId || metadata.SelectionRevision != draft.SelectionRevision || metadata.ApprovalDigest != draft.ApprovalDigest || metadata.FileCount != draft.Files.Count) return false;
         if ((metadata.State == ProposalApplyState.Approved) != draft.IsApproved || (requireApproved && (metadata.State != ProposalApplyState.Approved || immutable.Revision.ApprovedAt is null))) return false;
         if (immutable.Revision.SelectionRevision != draft.SelectionRevision || immutable.Revision.ApprovalDigest != draft.ApprovalDigest) return false;
+        if (draft.Files.Any(file => LineDiff.Sha256(file.OriginalText) != file.BaseSha256 || LineDiff.Sha256(file.ReplacementText) != file.ReplacementSha256)) return false;
         var files = draft.Files.Select(file => (file.BaseSha256, file.ReplacementSha256)).ToArray();
         if (!files.SequenceEqual(immutable.Files)) return false;
         var hunks = draft.Hunks.Select(hunk => (hunk.HunkId, hunk.Selected, LineDiff.Sha256(hunk.ReplacementText))).OrderBy(hunk => hunk.HunkId, StringComparer.Ordinal).ToArray();
