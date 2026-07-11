@@ -85,6 +85,8 @@ public sealed class SqliteSessionStore : ISessionStore
         {
             command.CommandText = ProposalApplySchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = ObjectiveEvaluationSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 4)
@@ -1138,6 +1140,7 @@ public sealed class SqliteSessionStore : ISessionStore
         {
             DataSource = databasePath,
             Pooling = false,
+            DefaultTimeout = 5,
         }.ToString());
         connection.Open();
         Execute(connection, "PRAGMA foreign_keys=ON;");

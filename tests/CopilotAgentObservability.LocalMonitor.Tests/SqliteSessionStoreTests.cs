@@ -7,6 +7,43 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SqliteSessionStoreTests
 {
     [Fact]
+    public void ObjectiveEvaluations_RejectNonVersionSevenReceiptIdentifiers()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "objective-v4");
+        var full = batch with { Detail = batch.Detail with { Session = batch.Detail.Session with { Completeness = SessionCompleteness.Full } } };
+        store.Write(full);
+        var receipt = new ObjectiveEvaluationReceipt(Guid.NewGuid(), full.Detail.Session.SessionId, full.Detail.Runs[0].RunId, full.Detail.Runs[0].TraceId!, ObjectiveResult.Fail, ObjectiveSeverity.Normal, "eval", "v1", "criterion", "case", [new("run", full.Detail.Runs[0].RunId.ToString("D"))], DateTimeOffset.UnixEpoch);
+
+        Assert.Throws<ArgumentException>(() => store.CreateObjectiveEvaluation(receipt));
+    }
+
+    [Fact]
+    public void CreateSchema_upgrades_version_three_with_objective_tables_and_preserved_data()
+    {
+        using var database = new SessionTestDatabase();
+        var original = new SqliteSessionStore(database.Path);
+        original.CreateSchema();
+        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "version-three-preserved");
+        original.Write(batch);
+        using (var connection = database.Open())
+        {
+            Execute(connection, "DROP TABLE objective_evaluation_evidence; DROP TABLE objective_evaluations; UPDATE schema_version SET version=3 WHERE component='session';");
+        }
+
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+
+        using var verify = database.Open();
+        Assert.Equal(8L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(batch.Detail.Session.SessionId, store.GetDetail(batch.Detail.Session.SessionId)!.Session.SessionId);
+        Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='objective_evaluations';"));
+        Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='objective_evaluation_evidence';"));
+    }
+
+    [Fact]
     public void ObjectiveEvaluations_RequireNativeExactBindingAsWellAsTerminalFullScope()
     {
         using var database = new SessionTestDatabase();

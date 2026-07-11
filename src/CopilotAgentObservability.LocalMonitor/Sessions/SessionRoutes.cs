@@ -43,7 +43,7 @@ internal static class SessionRoutes
             if (!ObjectiveEvaluationValidation.IsValid(receipt)) { await Failure(context, 400, "invalid_objective_evaluation"); return; }
             try { store.CreateObjectiveEvaluation(receipt); }
             catch (ArgumentException) { await Failure(context, 400, "objective_evidence_not_exact"); return; }
-            catch (Microsoft.Data.Sqlite.SqliteException) { await Failure(context, 503, "objective_evidence_not_exact"); return; }
+            catch (Microsoft.Data.Sqlite.SqliteException) { await Failure(context, 503, "objective_store_unavailable"); return; }
             context.Response.StatusCode = 201;
             await JsonBody(context, ObjectiveReceiptDto(receipt));
         });

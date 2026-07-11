@@ -20,7 +20,7 @@ public static partial class ObjectiveEvaluationValidation
     private static partial Regex Identifier();
 
     public static bool IsValid(ObjectiveEvaluationReceipt receipt) =>
-        receipt.ObjectiveEvaluationId != Guid.Empty && receipt.SessionId != Guid.Empty && receipt.RunId != Guid.Empty
+        IsUuidVersion7(receipt.ObjectiveEvaluationId) && receipt.SessionId != Guid.Empty && receipt.RunId != Guid.Empty
         && !string.IsNullOrWhiteSpace(receipt.TraceId)
         && receipt.Result is ObjectiveResult.Pass or ObjectiveResult.Fail
         && receipt.Severity is ObjectiveSeverity.Normal or ObjectiveSeverity.Severe
@@ -32,4 +32,6 @@ public static partial class ObjectiveEvaluationValidation
         && receipt.Evidence.Select(e => (e.Kind, e.ReferenceId)).Distinct().Count() == receipt.Evidence.Count;
 
     public static bool IdentifierValue(string? value, int maximum) => value is { Length: >= 1 } && value.Length <= maximum && Identifier().IsMatch(value);
+
+    private static bool IsUuidVersion7(Guid value) => value != Guid.Empty && value.ToString("D")[14] == '7';
 }

@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -167,6 +168,70 @@ public sealed class SessionObjectiveEvaluationRouteTests
         await using var host = await MonitorTestHost.StartAsync(temp);
         using var response = await host.Client.SendAsync(Request(Body(batch, evidence: "[{\"kind\":\"gate\",\"reference_id\":\"terminal\"},{\"kind\":\"gate\",\"reference_id\":\"error\"}]")));
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Post_RejectsRealCrossSessionAndCrossRunEvidenceForEveryKind()
+    {
+        using var temp = new MonitorTempDirectory();
+        var first = CreateExactBatch();
+        var secondRun = first.Detail.Runs[0] with { RunId = Guid.CreateVersion7(), TraceId = "trace-second-run" };
+        var secondRunEvent = first.Detail.Events[0] with { EventId = Guid.CreateVersion7(), RunId = secondRun.RunId, TraceId = secondRun.TraceId, Type = "event", SourceEventId = "objective-event-second-run" };
+        first = first with { Detail = first.Detail with { Runs = [first.Detail.Runs[0], secondRun], Events = [first.Detail.Events[0], secondRunEvent] } };
+        var second = CreateExactBatch();
+        var secondSession = second.Detail.Session with { SessionId = Guid.CreateVersion7() };
+        var otherRun = second.Detail.Runs[0] with { RunId = Guid.CreateVersion7(), SessionId = secondSession.SessionId, TraceId = "trace-second-session" };
+        var otherEvent = second.Detail.Events[0] with { EventId = Guid.CreateVersion7(), SessionId = secondSession.SessionId, RunId = otherRun.RunId, TraceId = otherRun.TraceId, Type = "event", SourceEventId = "objective-event-second-session" };
+        var otherNative = second.Detail.NativeIds[0] with { SessionId = secondSession.SessionId, NativeSessionId = "objective-native-other" };
+        second = second with { Detail = new(secondSession, [otherNative], [otherRun], [otherEvent]) };
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        store.Write(first);
+        store.Write(second);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        var wrongSession = new[]
+        {
+            Body(first, evidence: "[{\"kind\":\"run\",\"reference_id\":\"" + otherRun.RunId + "\"}]"),
+            Body(first, evidence: "[{\"kind\":\"event\",\"reference_id\":\"" + otherEvent.EventId + "\"}]"),
+            Body(first, evidence: "[{\"kind\":\"trace\",\"reference_id\":\"" + otherRun.TraceId + "\"}]"),
+            Body(second, evidence: "[{\"kind\":\"gate\",\"reference_id\":\"terminal\"}]")
+        };
+        var wrongRun = new[]
+        {
+            Body(first, run: secondRun.RunId.ToString("D"), trace: secondRun.TraceId, evidence: "[{\"kind\":\"run\",\"reference_id\":\"" + first.Detail.Runs[0].RunId + "\"}]"),
+            Body(first, run: secondRun.RunId.ToString("D"), trace: secondRun.TraceId, evidence: "[{\"kind\":\"event\",\"reference_id\":\"" + first.Detail.Events[0].EventId + "\"}]"),
+            Body(first, run: secondRun.RunId.ToString("D"), trace: secondRun.TraceId, evidence: "[{\"kind\":\"trace\",\"reference_id\":\"trace-exact\"}]"),
+            Body(first, run: secondRun.RunId.ToString("D"), trace: secondRun.TraceId, evidence: "[{\"kind\":\"gate\",\"reference_id\":\"terminal\"}]")
+        };
+
+        foreach (var body in wrongSession.Concat(wrongRun))
+        {
+            using var response = await host.Client.SendAsync(Request(body));
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal("{\"error\":\"objective_evidence_not_exact\"}", await response.Content.ReadAsStringAsync());
+        }
+    }
+
+    [Fact]
+    public async Task Post_MapsControlledSqliteExclusiveLockToFixedStoreUnavailable()
+    {
+        using var temp = new MonitorTempDirectory();
+        var batch = CreateExactBatch();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        store.Write(batch);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        await using var lockConnection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = temp.DatabasePath, Pooling = false, DefaultTimeout = 0 }.ToString());
+        await lockConnection.OpenAsync();
+        await using var lockCommand = lockConnection.CreateCommand();
+        lockCommand.CommandText = "BEGIN EXCLUSIVE;";
+        await lockCommand.ExecuteNonQueryAsync();
+
+        using var response = await host.Client.SendAsync(Request(Body(batch)));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("{\"error\":\"objective_store_unavailable\"}", await response.Content.ReadAsStringAsync());
+        Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
     }
 
     [Fact]

@@ -186,11 +186,16 @@ stale / invalidated state. Candidate and comparison responses contain only
 sanitized Session metadata and evidence identifiers.
 
 Fixed errors include `invalid_objective_evaluation`,
-`objective_evidence_not_exact`, `invalid_comparison_request`,
+`objective_evidence_not_exact`, `objective_store_unavailable`,
+`invalid_comparison_request`,
 `proposal_revision_stale`, `application_not_active`, `cohort_not_confirmed`,
 `comparison_evidence_stale`, `comparison_not_found`,
 `cross_origin_forbidden`, `csrf_required`, `unsupported_media_type`, and
 `request_too_large`. Rejected content and exception details are never echoed.
+`objective_evidence_not_exact` is reserved for a validly processed request
+whose referenced Session/Run/trace/evidence scope does not match.
+`objective_store_unavailable` is `503` for SQLite busy, I/O, schema, or other
+storage failures; it never claims that a valid request has bad evidence.
 
 The additive tables are `objective_evaluations`,
 `objective_evaluation_evidence`, `effect_comparisons`,
