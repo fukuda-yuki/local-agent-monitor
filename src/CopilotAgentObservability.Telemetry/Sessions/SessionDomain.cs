@@ -272,6 +272,7 @@ public interface ISessionStore
     IReadOnlyList<ObservedSession> ListMostRecent(int limit);
     SessionDetail? GetDetail(Guid sessionId);
     SessionContentLookup? GetContent(Guid sessionId, Guid eventId);
+    SessionRawRetentionState GetRawRetentionState(Guid sessionId);
     SessionProjectionState? GetProjectionState(string projectorKey);
     void UpsertProjectionState(SessionProjectionState state);
 }

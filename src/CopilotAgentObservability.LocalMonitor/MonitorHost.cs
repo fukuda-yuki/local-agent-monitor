@@ -4,6 +4,7 @@ using CopilotAgentObservability.LocalMonitor.Events;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Diagnostics;
@@ -89,9 +90,20 @@ internal static class MonitorHost
         var analysisStore = testOptions?.AnalysisStore ?? new SqliteMonitorAnalysisStore(options.DatabasePath);
         analysisStore.CreateSchema();
         builder.Services.AddSingleton(analysisStore);
-        ISessionStore sessionStore = new SqliteSessionStore(options.DatabasePath, testOptions?.TimeProvider);
+        var sessionTimeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
+        ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, sessionTimeProvider);
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
+        var sessionEventQueue = testOptions?.SessionEventQueue ?? new SessionEventQueue();
+        var sessionEventNormalizer = new SessionEventNormalizer(sessionStore, sessionTimeProvider);
+        var sessionOtelEnricher = new SqliteSessionOtelEnricher(options.DatabasePath, sessionStore, sessionTimeProvider);
+        builder.Services.AddSingleton(sessionEventQueue);
+        builder.Services.AddSingleton(sessionEventNormalizer);
+        builder.Services.AddSingleton(sessionOtelEnricher);
+        if (testOptions?.StartSessionWriter ?? true)
+        {
+            builder.Services.AddHostedService(_ => new SessionEventWriterWorker(sessionEventQueue, sessionEventNormalizer));
+        }
         var analysisRunner = testOptions?.AnalysisRunner ?? new DotNetCopilotRawAnalysisRunner(analysisStore, projectionStore, builder.Configuration);
         builder.Services.AddSingleton(analysisRunner);
 
@@ -101,6 +113,10 @@ internal static class MonitorHost
             // runs first; the projection worker also guards on migration_complete.
             var projectionWorker = new ProjectionWorker(projectionStore, health, eventBroker: eventBroker, pollInterval: testOptions?.ProjectionPollInterval);
             builder.Services.AddHostedService(_ => projectionWorker);
+        }
+        if (testOptions?.StartSessionOtelEnrichment ?? true)
+        {
+            builder.Services.AddHostedService(_ => new SessionOtelEnrichmentWorker(sessionOtelEnricher, testOptions?.SessionOtelPollInterval));
         }
 
         var app = builder.Build();
@@ -146,6 +162,14 @@ internal static class MonitorHost
             context.Response.ContentType = JsonContentType;
             await context.Response.WriteAsync(MonitorReadinessJson.Serialize(readiness));
         });
+        SessionRoutes.Map(
+            app,
+            options,
+            sessionEventQueue,
+            sessionStore,
+            sessionOtelEnricher,
+            testOptions?.SessionCommitTimeout ?? DefaultCommitTimeout,
+            sessionTimeProvider);
         app.MapGet("/api/monitor/ingestions", async context =>
         {
             if (!TryParseCursorQuery(context, out var after, out var limit))
@@ -1117,6 +1141,18 @@ internal sealed class MonitorHostTestOptions
     public IMonitorAnalysisRunner? AnalysisRunner { get; init; }
 
     public bool StartProjectionWorker { get; init; } = true;
+
+    public ISessionStore? SessionStore { get; init; }
+
+    public SessionEventQueue? SessionEventQueue { get; init; }
+
+    public bool StartSessionWriter { get; init; } = true;
+
+    public TimeSpan? SessionCommitTimeout { get; init; }
+
+    public bool StartSessionOtelEnrichment { get; init; } = true;
+
+    public TimeSpan? SessionOtelPollInterval { get; init; }
 
     public TimeProvider? TimeProvider { get; init; }
 

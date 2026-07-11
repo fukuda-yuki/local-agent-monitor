@@ -389,6 +389,30 @@ public sealed class SqliteSessionStore : ISessionStore
             ? new(SessionContentState.Available, content)
             : new(SessionContentState.ExpiredPendingDeletion, null);
     }
+
+    public SessionRawRetentionState GetRawRetentionState(Guid sessionId)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT CASE
+              WHEN EXISTS (
+                SELECT 1 FROM session_event_content c
+                JOIN session_events e ON e.event_id=c.event_id
+                WHERE e.session_id=$session_id AND c.expires_at > $now
+              ) THEN 'expiring'
+              WHEN EXISTS (
+                SELECT 1 FROM session_event_content c
+                JOIN session_events e ON e.event_id=c.event_id
+                WHERE e.session_id=$session_id
+              ) THEN 'expired_pending_deletion'
+              ELSE 'not_captured'
+            END;
+            """;
+        Add(command, "$session_id", Id(sessionId));
+        Add(command, "$now", Timestamp(timeProvider.GetUtcNow()));
+        return SessionWire.ParseRawRetentionState((string)command.ExecuteScalar()!);
+    }
     public SessionProjectionState? GetProjectionState(string projectorKey)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectorKey);
