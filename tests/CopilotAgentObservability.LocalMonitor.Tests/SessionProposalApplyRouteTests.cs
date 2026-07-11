@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -173,11 +174,148 @@ public sealed class SessionProposalApplyRouteTests
         Assert.DoesNotContain(rootPath, body, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Draft_creation_checks_the_persisted_proposal_before_target_filesystem_access()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "root");
+        Directory.CreateDirectory(rootPath);
+        await using var host = await StartAsync(temp, ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath));
+        var missingProposal = Guid.CreateVersion7();
+        var marker = "missing-target-should-not-be-probed.txt";
+        var rootId = (await GetSingleRootIdAsync(host.Client)).ToString("D");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/session-workspace/proposal-applies/drafts")
+        {
+            Content = new StringContent($$"""{"proposal_id":"{{missingProposal:D}}","root_id":"{{rootId}}","files":[{"relative_path":"{{marker}}","replacement_text":"replacement"}]}""", Encoding.UTF8, "application/json"),
+        };
+        request.Headers.TryAddWithoutValidation("X-Monitor-Csrf", "local-monitor");
+
+        var response = await host.Client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("{\"error\":\"proposal_not_found\"}", body);
+        Assert.False(File.Exists(Path.Combine(rootPath, marker)));
+        Assert.DoesNotContain(marker, body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Http_workflow_persists_apply_and_allows_exactly_one_rollback_across_restarts()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "root");
+        Directory.CreateDirectory(rootPath);
+        var first = Path.Combine(rootPath, "one.txt");
+        var second = Path.Combine(rootPath, "two.txt");
+        File.WriteAllText(first, "one\n");
+        File.WriteAllText(second, "two\n");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath);
+        var proposalId = Guid.CreateVersion7();
+        Guid draftId;
+        Guid applyId;
+
+        await using (var host = await StartAsync(temp, root))
+        {
+            InsertPersistedProposal(temp.DatabasePath, proposalId);
+            var rootId = await GetSingleRootIdAsync(host.Client);
+            using var create = JsonRequest(HttpMethod.Post, "/api/session-workspace/proposal-applies/drafts", $$"""{"proposal_id":"{{proposalId:D}}","root_id":"{{rootId:D}}","files":[{"relative_path":"one.txt","replacement_text":"ONE\n"},{"relative_path":"two.txt","replacement_text":"TWO\n"}]}""");
+            using var created = await host.Client.SendAsync(create);
+            var createBody = await created.Content.ReadAsStringAsync();
+            Assert.True(created.StatusCode == HttpStatusCode.Created, createBody);
+            Assert.Contains("--- a/one.txt", createBody);
+            using var draft = JsonDocument.Parse(createBody);
+            draftId = draft.RootElement.GetProperty("draft_id").GetGuid();
+            var hunkId = draft.RootElement.GetProperty("hunks")[0].GetProperty("hunk_id").GetString();
+
+            using var selection = JsonRequest(HttpMethod.Put, $"/api/session-workspace/proposal-applies/drafts/{draftId:D}/selection", $$"""{"selection_revision":1,"selected_hunk_ids":["{{hunkId}}"]}""");
+            using var selected = await host.Client.SendAsync(selection);
+            Assert.Equal(HttpStatusCode.OK, selected.StatusCode);
+            var selectedBody = await selected.Content.ReadAsStringAsync();
+            Assert.DoesNotContain("one.txt", selectedBody, StringComparison.Ordinal);
+            Assert.DoesNotContain("ONE", selectedBody, StringComparison.Ordinal);
+            using var selectedJson = JsonDocument.Parse(selectedBody);
+            var revision = selectedJson.RootElement.GetProperty("selection_revision").GetInt32();
+            var digest = selectedJson.RootElement.GetProperty("approval_digest").GetString();
+
+            using var approve = JsonRequest(HttpMethod.Post, $"/api/session-workspace/proposal-applies/drafts/{draftId:D}/approve", $$"""{"selection_revision":{{revision}},"approval_digest":"{{digest}}"}""");
+            using var approved = await host.Client.SendAsync(approve);
+            Assert.Equal(HttpStatusCode.OK, approved.StatusCode);
+            Assert.DoesNotContain("one.txt", await approved.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+            using var apply = CsrfRequest(HttpMethod.Post, $"/api/session-workspace/proposal-applies/drafts/{draftId:D}/apply");
+            using var applied = await host.Client.SendAsync(apply);
+            Assert.Equal(HttpStatusCode.OK, applied.StatusCode);
+            using var appliedJson = JsonDocument.Parse(await applied.Content.ReadAsStringAsync());
+            applyId = appliedJson.RootElement.GetProperty("apply_id").GetGuid();
+            Assert.Equal("ONE\n", File.ReadAllText(first));
+            Assert.Equal("two\n", File.ReadAllText(second));
+            Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_applies WHERE state='applied';"));
+            Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_audit WHERE state='applied';"));
+        }
+
+        await using (var restarted = await StartAsync(temp, root))
+        {
+            using var rollback = CsrfRequest(HttpMethod.Post, $"/api/session-workspace/proposal-applies/{applyId:D}/rollback");
+            using var rolledBack = await restarted.Client.SendAsync(rollback);
+            Assert.Equal(HttpStatusCode.OK, rolledBack.StatusCode);
+            Assert.Equal("one\n", File.ReadAllText(first));
+            Assert.Equal("two\n", File.ReadAllText(second));
+            Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_audit WHERE state='rolled_back';"));
+        }
+
+        await using var afterRollback = await StartAsync(temp, root);
+        using var secondRollback = CsrfRequest(HttpMethod.Post, $"/api/session-workspace/proposal-applies/{applyId:D}/rollback");
+        Assert.Equal(HttpStatusCode.NotFound, (await afterRollback.Client.SendAsync(secondRollback)).StatusCode);
+    }
+
     private static HttpRequestMessage CreateRequest(string method, string path, bool body)
     {
         var request = new HttpRequestMessage(new HttpMethod(method), path);
         if (body) request.Content = new StringContent("{}", Encoding.UTF8, "application/json");
         return request;
+    }
+
+    private static async Task<Guid> GetSingleRootIdAsync(HttpClient client)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/session-workspace/proposal-applies/roots");
+        request.Headers.TryAddWithoutValidation("X-Monitor-Csrf", "local-monitor");
+        using var response = await client.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return body.RootElement.GetProperty("items")[0].GetProperty("root_id").GetGuid();
+    }
+
+    private static HttpRequestMessage JsonRequest(HttpMethod method, string path, string body)
+    {
+        var request = CsrfRequest(method, path);
+        request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+        return request;
+    }
+
+    private static HttpRequestMessage CsrfRequest(HttpMethod method, string path)
+    {
+        var request = new HttpRequestMessage(method, path);
+        request.Headers.TryAddWithoutValidation("X-Monitor-Csrf", "local-monitor");
+        return request;
+    }
+
+    private static void InsertPersistedProposal(string databasePath, Guid proposalId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO improvement_proposals(proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at) VALUES($id,'candidate','skill','fixture','fixture','fixture','fixture','fixture','2026-07-12T00:00:00+00:00','2026-07-12T00:00:00+00:00');";
+        command.Parameters.AddWithValue("$id", proposalId.ToString("D"));
+        command.ExecuteNonQuery();
+    }
+
+    private static long Scalar(string databasePath, string sql)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return (long)command.ExecuteScalar()!;
     }
 
     private static async Task<RunningMonitorHost> StartAsync(MonitorTempDirectory temp, params ConfiguredApplyRoot[] roots)
