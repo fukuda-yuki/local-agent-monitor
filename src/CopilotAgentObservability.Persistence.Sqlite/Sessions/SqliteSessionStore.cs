@@ -131,6 +131,8 @@ public sealed class SqliteSessionStore : ISessionStore
         {
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
+            command.CommandText = EffectComparisonSchemaSql;
+            command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 8)
