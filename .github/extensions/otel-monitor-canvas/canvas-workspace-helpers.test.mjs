@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createServer, request as httpRequest } from "node:http";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -40,6 +41,24 @@ function workspaceRuntimeHelpers() {
     const context = vm.createContext({ Set, Map, Date, Number, BigInt, URL, encodeURIComponent, console });
     new vm.Script(prefix).runInContext(context);
     return context;
+}
+
+async function proposalApplyHelperServer(fetchCalls) {
+    const source = await readFile(new URL("./extension.mjs", import.meta.url), "utf8");
+    const boundary = source.indexOf("// --------------- canvas ---------------");
+    const executable = source.slice(0, boundary).replace(/^import[\s\S]*?;\r?\n/gm, "") + "\nglobalThis.createHelperServer = createHelperServer;";
+    const context = vm.createContext({
+        createServer, URL, Buffer, AbortController, setTimeout, clearTimeout,
+        fetch: async (target, init) => { fetchCalls.push({ target: String(target), init }); return new Response(JSON.stringify(target.includes("roots") ? { items: [] } : target.includes("apply") || target.includes("rollback") ? { apply_id: "0197d7c0-0000-7000-8000-000000000001", state: "applied" } : { draft_id: "0197d7c0-0000-7000-8000-000000000001", proposal_id: "0197d7c0-0000-7000-8000-000000000002", root_id: "0197d7c0-0000-7000-8000-000000000003", selection_revision: 1, approval_digest: "digest", state: "draft", files: [], hunks: [] }), { status: 200, headers: { "content-type": "application/json" } }); },
+        Response, TextEncoder, console,
+        renderWorkspaceHtml: () => "", renderHelperHtml: () => "", handleEvidenceProxy: () => {}, CanvasError: class CanvasError extends Error {},
+    });
+    new vm.Script(executable).runInContext(context);
+    const server = context.createHelperServer({ instanceId: "i", monitorUrl: "http://127.0.0.1:4320", healthState: "ready", statusCode: 200, healthBody: "", error: null, token: "token", session: {}, extensionScope: "", nativeSessionId: "" });
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const call = (method, path, headers = {}, body) => new Promise((resolve, reject) => { const request = httpRequest({ port, host: "127.0.0.1", method, path, headers }, response => { let text = ""; response.on("data", chunk => text += chunk); response.on("end", () => resolve({ status: response.statusCode, headers: response.headers, text })); }); request.on("error", reject); if (body !== undefined) request.write(body); request.end(); });
+    return { server, call };
 }
 
 test("workspace helpers group only the resolved session as this conversation and preserve list order", () => {
@@ -168,6 +187,28 @@ test("proposal apply helpers use the Local Monitor numeric revision and top-leve
     assert.deepEqual(workspaceApplyView({ state: "approved", selection_revision: 4, approval_digest: "digest" }), {
         state: "approved", selection_revision: 4, approval_digest: "digest", root: null, canApply: true, canRollback: false,
     });
+});
+
+test("proposal apply helper server token-gates canonical routes and forwards empty mutation bodies", async () => {
+    const calls = [];
+    const helper = await proposalApplyHelperServer(calls);
+    try {
+        const denied = await helper.call("GET", "/api/session-workspace/proposal-applies/roots");
+        assert.equal(denied.status, 401);
+        assert.equal(denied.headers["cache-control"], "no-store");
+        const id = "0197d7c0-0000-7000-8000-000000000001";
+        for (const [method, path, body] of [["GET", "/api/session-workspace/proposal-applies/roots"], ["POST", "/api/session-workspace/proposal-applies/drafts", "{}"], ["GET", `/api/session-workspace/proposal-applies/drafts/${id}`], ["PUT", `/api/session-workspace/proposal-applies/drafts/${id}/selection`, "{}"], ["POST", `/api/session-workspace/proposal-applies/drafts/${id}/approve`, "{}"], ["POST", `/api/session-workspace/proposal-applies/drafts/${id}/apply`, "ignored"], ["POST", `/api/session-workspace/proposal-applies/${id}/rollback`, "ignored"]]) {
+            const result = await helper.call(method, `${path}?t=token`, body === undefined ? { authorization: "Bearer ignored" } : { "content-type": "application/json", authorization: "Bearer ignored", "x-monitor-csrf": "browser-value" }, body);
+            assert.equal(result.status, 200, `${method} ${path}`);
+            assert.equal(result.headers["cache-control"], "no-store");
+        }
+        const mutationCalls = calls.filter(call => call.target.endsWith("/apply") || call.target.endsWith("/rollback"));
+        assert.equal(mutationCalls.length, 2);
+        for (const call of mutationCalls) { assert.equal(call.init.body, undefined); assert.equal(call.init.headers["x-monitor-csrf"], "local-monitor"); assert.equal(Object.keys(call.init.headers).length, 1); }
+        const malformed = await helper.call("POST", "/api/session-workspace/proposal-applies/drafts/%E0%A4%A/apply?t=token");
+        assert.equal(malformed.status, 400);
+        assert.equal(malformed.headers["cache-control"], "no-store");
+    } finally { await new Promise(resolve => helper.server.close(resolve)); }
 });
 
 test("helper server routes the legacy analysis view unchanged at /analysis", async () => {
