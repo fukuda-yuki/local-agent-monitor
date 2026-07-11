@@ -1,26 +1,27 @@
-# Repository-scoped template. Verify how your Codex surface loads project config before relying on
-# this file as an effective runtime configuration.
+# <repository>/.codex/config.toml
+# trusted repository only
 
-# 人間への承認要求で停止しない
+# 継続的な自律実装
 approval_policy = "never"
-
-# リポジトリ内では自由に読み書き・コマンド実行を許可
-sandbox_mode = "workspace-write"
+sandbox_mode = "danger-full-access"
 
 [agents]
-max_threads = 24
+# root orchestrator から直接生成される worker/reviewer のみ許可
 max_depth = 1
-job_max_runtime_seconds = 3600
 
-[features]
-fast_mode = true
-multi_agent = true
+# 通常の spawn_agent には適用されない。
+# spawn_agents_on_csv を使用する場合だけ残す。
+# job_max_runtime_seconds = 3600
 
-# restore、npm install、Web APIなどの外部通信を許可
-[sandbox_workspace_write]
-network_access = true
+[features.multi_agent_v2]
+enabled = true
 
-# Windowsでは強い隔離方式を使用
-[windows]
-sandbox = "elevated"
-sandbox_private_desktop = true
+# root orchestrator を含む総スロット数。
+# 8なら root 1 + subagent 最大7。
+max_concurrent_threads_per_session = 8
+
+# spawn_agent に model / reasoning_effort を露出させる
+hide_spawn_agent_metadata = false
+
+# collaboration.spawn_agent の予約済みスキーマ衝突を回避
+tool_namespace = "agents"
