@@ -5,12 +5,49 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
+using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public class MonitorHostTests
 {
+    [Fact]
+    public void Build_MigratesAndRegistersDedicatedSessionStoreSynchronously()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+
+        using var app = MonitorHost.Build(
+            new MonitorOptions(tempDirectory.DatabasePath, "http://127.0.0.1:0", false, 31_457_280),
+            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
+
+        var store = app.Services.GetRequiredService<ISessionStore>();
+        Assert.Null(store.GetProjectionState("host-startup-probe"));
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = tempDirectory.DatabasePath, Pooling = false }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT version FROM schema_version WHERE component='session';";
+        Assert.Equal(1L, (long)command.ExecuteScalar()!);
+    }
+
+    [Fact]
+    public void Build_WhenSessionMigrationFails_FailsHostConstruction()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = tempDirectory.DatabasePath, Pooling = false }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 2);";
+            command.ExecuteNonQuery();
+        }
+
+        Assert.Throws<InvalidOperationException>(() => MonitorHost.Build(
+            new MonitorOptions(tempDirectory.DatabasePath, "http://127.0.0.1:0", false, 31_457_280),
+            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false }));
+    }
+
     [Fact]
     public async Task PostTraces_ValidJsonPersistsRawRecord()
     {

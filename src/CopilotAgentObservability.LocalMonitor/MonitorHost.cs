@@ -4,6 +4,8 @@ using CopilotAgentObservability.LocalMonitor.Events;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
@@ -87,6 +89,9 @@ internal static class MonitorHost
         var analysisStore = testOptions?.AnalysisStore ?? new SqliteMonitorAnalysisStore(options.DatabasePath);
         analysisStore.CreateSchema();
         builder.Services.AddSingleton(analysisStore);
+        ISessionStore sessionStore = new SqliteSessionStore(options.DatabasePath, testOptions?.TimeProvider);
+        sessionStore.CreateSchema();
+        builder.Services.AddSingleton(sessionStore);
         var analysisRunner = testOptions?.AnalysisRunner ?? new DotNetCopilotRawAnalysisRunner(analysisStore, projectionStore, builder.Configuration);
         builder.Services.AddSingleton(analysisRunner);
 
