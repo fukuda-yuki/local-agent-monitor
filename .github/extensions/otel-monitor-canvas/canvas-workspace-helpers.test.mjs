@@ -11,6 +11,11 @@ import {
     workspaceNextActions,
     workspaceCandidatePayload,
     workspaceProposalReference,
+    workspaceApplyDraftPayload,
+    workspaceApplySelectionPayload,
+    workspaceApplyApprovalPayload,
+    workspaceApplyRequest,
+    workspaceApplyView,
     workspaceSessionLabel,
     workspaceStatusPill,
 } from "./canvas-workspace-helpers.mjs";
@@ -95,10 +100,9 @@ test("Improve shows an honest unavailable state for an unbound session and conta
     assert.match(html, /native binding/);
     assert.match(html, /improvement-proposals/);
     assert.match(html, /textContent/);
-    for (const forbidden of ["git", "rollback", "raw analysis", "sendAndWait"]) {
+    for (const forbidden of ["git", "raw analysis", "sendAndWait"]) {
         assert.doesNotMatch(html, new RegExp(forbidden, "i"));
     }
-    assert.doesNotMatch(html, /textContent="[^"]*apply/i);
 });
 
 test("Improve limits candidate controls to terminal native-bound sessions and uses safe evidence controls", () => {
@@ -148,6 +152,18 @@ test("final proposal reference resolver opens sanitized Evidence candidates for 
     const html = renderWorkspaceHtml({ monitorUrl: "http://127.0.0.1:4320", healthState: "ready", token: "synthetic-token" });
     assert.match(html, /workspaceProposalReference\(reference,selectedDetail\)/);
     assert.match(html, /selectedTab="evidence"/);
+});
+
+test("proposal apply helpers bound draft source to creation and mutation requests to opaque state", () => {
+    const files = [{ relative_path: "skills/example.md", replacement_text: "complete replacement" }];
+    assert.deepEqual(workspaceApplyDraftPayload("proposal-id", "root-id", files), { proposal_id: "proposal-id", root_id: "root-id", files });
+    assert.equal(workspaceApplyDraftPayload("proposal-id", "root-id", []), null);
+    assert.deepEqual(workspaceApplySelectionPayload("3", ["hunk-a", "hunk-b"]), { selection_revision: "3", selected_hunk_ids: ["hunk-a", "hunk-b"] });
+    assert.deepEqual(workspaceApplyApprovalPayload("4", "digest"), { selection_revision: "4", approval_digest: "digest" });
+    assert.deepEqual(workspaceApplyRequest(), {});
+    assert.deepEqual(workspaceApplyView({ state: "approved", selection_revision: "4", approval_digest: "digest", root: { kind: "skill", label: "Skill" } }), {
+        state: "approved", selection_revision: "4", approval_digest: "digest", root: { kind: "skill", label: "Skill" }, canApply: true, canRollback: false,
+    });
 });
 
 test("helper server routes the legacy analysis view unchanged at /analysis", async () => {

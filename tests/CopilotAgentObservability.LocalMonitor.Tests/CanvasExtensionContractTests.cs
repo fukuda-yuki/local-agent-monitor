@@ -136,6 +136,24 @@ public class CanvasExtensionContractTests
     }
 
     [Fact]
+    public void Extension_ConfinesProposalApplyToTheTokenGatedHelperBoundary()
+    {
+        var extension = File.ReadAllText(Path.Combine(ExtensionDirectory(), "extension.mjs"));
+        var workspace = File.ReadAllText(Path.Combine(ExtensionDirectory(), "canvas-workspace-helpers.mjs"));
+
+        Assert.Contains("proposal-applies", extension);
+        Assert.Contains("proposalApplyRoute", extension);
+        Assert.Contains("x-monitor-csrf\": \"local-monitor", extension);
+        Assert.Contains("Cache-Control\", \"no-store", extension);
+        Assert.Contains("Apply locally", workspace);
+        Assert.Contains("workspaceApplyRequest()", workspace);
+        Assert.Contains("textContent", workspace);
+        Assert.DoesNotContain("innerHTML", workspace);
+        Assert.DoesNotContain("name: \"apply_proposal\"", extension);
+        Assert.DoesNotContain("session.send", workspace, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CanvasProposalLifecycle_RemainsMetadataOnlyAndNeverEnablesApply()
     {
         var extension = ReadExtension();

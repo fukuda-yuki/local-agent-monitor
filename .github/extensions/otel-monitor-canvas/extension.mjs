@@ -97,6 +97,33 @@ function isProposalHelperPath(path) {
         || path.startsWith("/api/session-workspace/improvement-proposals/");
 }
 
+function isProposalApplyHelperPath(path) {
+    return path === "/api/session-workspace/proposal-applies"
+        || path.startsWith("/api/session-workspace/proposal-applies/");
+}
+
+function proposalApplyRoute(path, method) {
+    const prefix = "/api/session-workspace/proposal-applies";
+    if (path === `${prefix}/roots` && method === "GET") return "/api/session-workspace/proposal-applies/roots";
+    if (path === `${prefix}/drafts` && method === "POST") return "/api/session-workspace/proposal-applies/drafts";
+    const draft = new RegExp(`^${prefix}/drafts/([^/]+)$`).exec(path);
+    const selection = new RegExp(`^${prefix}/drafts/([^/]+)/selection$`).exec(path);
+    const approve = new RegExp(`^${prefix}/drafts/([^/]+)/approve$`).exec(path);
+    const apply = new RegExp(`^${prefix}/drafts/([^/]+)/apply$`).exec(path);
+    const rollback = new RegExp(`^${prefix}/applies/([^/]+)/rollback$`).exec(path);
+    const match = draft ?? selection ?? approve ?? apply ?? rollback;
+    if (!match) return null;
+    let id;
+    try { id = decodeURIComponent(match[1]); } catch { return false; }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) return false;
+    if (draft && method === "GET") return `${prefix}/drafts/${encodeURIComponent(id)}`;
+    if (selection && method === "PUT") return `${prefix}/drafts/${encodeURIComponent(id)}/selection`;
+    if (approve && method === "POST") return `${prefix}/drafts/${encodeURIComponent(id)}/approve`;
+    if (apply && method === "POST") return `${prefix}/drafts/${encodeURIComponent(id)}/apply`;
+    if (rollback && method === "POST") return `${prefix}/applies/${encodeURIComponent(id)}/rollback`;
+    return null;
+}
+
 function readRequestBody(req) {
     return new Promise((resolve) => {
         let data = "";
@@ -227,6 +254,28 @@ async function handleProposalProxy(req, res, { monitorUrl, path }) {
     } catch {
         sendJson(res, 502, { error: "monitor_unavailable" });
     }
+}
+
+async function handleProposalApplyProxy(req, res, { monitorUrl, path }) {
+    res.setHeader("Cache-Control", "no-store");
+    if (!isLoopbackUrl(monitorUrl)) { sendJson(res, 400, { error: "invalid_monitor_url" }); return; }
+    const bodyRoute = req.method === "POST" || req.method === "PUT";
+    let body;
+    if (bodyRoute) {
+        if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) { sendJson(res, 415, { error: "unsupported_media_type" }); return; }
+        const length = Number(req.headers["content-length"]);
+        if (Number.isFinite(length) && length > 1048576) { sendJson(res, 413, { error: "request_too_large" }); return; }
+        const requestBody = await readRequestBodyAtMost(req, 1048576);
+        if (requestBody.exceeded) { sendJson(res, 413, { error: "request_too_large" }); return; }
+        try { JSON.parse(requestBody.body); } catch { sendJson(res, 400, { error: "invalid_apply_request" }); return; }
+        body = path.endsWith("/apply") || path.endsWith("/rollback") ? "{}" : requestBody.body;
+    }
+    try {
+        const result = await fetchHelperWorkspaceJson(monitorUrl, path, bodyRoute
+            ? { method: req.method, headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body }
+            : undefined);
+        sendJson(res, result.response.status, result.parsed ?? { error: "monitor_unavailable" });
+    } catch { sendJson(res, 502, { error: "monitor_unavailable" }); }
 }
 
 async function fetchHelperInstruction(monitorUrl, sessionId) {
@@ -400,6 +449,7 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
         if (isProposalHelperPath(path)) {
             res.setHeader("Cache-Control", "no-store");
         }
+        if (isProposalApplyHelperPath(path)) res.setHeader("Cache-Control", "no-store");
 
         // Token validation for all routes.
         const headerToken = req.headers["x-canvas-token"];
@@ -431,6 +481,14 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
                     return { status: response.status, body };
                 },
             });
+            return;
+        }
+
+        if (isProposalApplyHelperPath(path)) {
+            const target = proposalApplyRoute(path, req.method);
+            if (target === false) { sendJson(res, 400, { error: "invalid_apply_request" }); return; }
+            if (!target) { sendJson(res, 404, { error: "not_found" }); return; }
+            await handleProposalApplyProxy(req, res, { monitorUrl, path: target });
             return;
         }
 
