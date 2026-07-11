@@ -336,6 +336,7 @@ public interface ISessionStore
     void UpdateProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision);
     ProposalApplyDraftMetadata? GetProposalApplyDraft(Guid draftId);
     ProposalApplyImmutableMetadata? GetProposalApplyImmutableMetadata(Guid draftId);
+    bool TryMigrateProposalApplyDigest(Guid draftId, int proposalRevision, int selectionRevision, string expectedOldDigest, string newDigest);
     IReadOnlyList<ProposalApplyDraftMetadata> ListActiveProposalApplyDrafts();
     void SaveProposalApplyApproval(Guid draftId, ProposalApplyRevisionMetadata revision);
     void SaveProposalApplyOutcome(ProposalApplyOutcome outcome, Guid proposalId, Guid rootId, int fileCount, string? errorCode);

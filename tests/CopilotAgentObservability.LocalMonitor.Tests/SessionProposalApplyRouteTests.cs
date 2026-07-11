@@ -1,4 +1,6 @@
 using System.Net;
+using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -225,9 +227,7 @@ public sealed class SessionProposalApplyRouteTests
         }
 
         var privatePath = Path.Combine(temp.Path, "proposal-apply", "drafts", draftId.ToString("N") + ".json");
-        var legacy = JsonNode.Parse(File.ReadAllText(privatePath))!.AsObject();
-        legacy.Remove("ProposalRevision");
-        File.WriteAllText(privatePath, legacy.ToJsonString());
+        WriteMigratedVersionSixPrivateDraft(temp.DatabasePath, privatePath, draftId);
 
         await using var restarted = await StartAsync(temp, root);
         var migratedBytes = File.ReadAllBytes(privatePath);
@@ -591,6 +591,33 @@ public sealed class SessionProposalApplyRouteTests
         command.CommandText = sql;
         command.Parameters.AddWithValue("$id", draftId.ToString("D"));
         command.ExecuteNonQuery();
+    }
+
+    private static void WriteMigratedVersionSixPrivateDraft(string databasePath, string privatePath, Guid draftId)
+    {
+        var current = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(privatePath))!;
+        var legacyDigest = LegacyDigest(current);
+        var legacy = JsonNode.Parse(File.ReadAllText(privatePath))!.AsObject();
+        legacy.Remove("ProposalRevision");
+        legacy["ApprovalDigest"] = legacyDigest;
+        File.WriteAllText(privatePath, legacy.ToJsonString());
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE proposal_apply_drafts SET approval_digest=$digest WHERE draft_id=$id; UPDATE proposal_apply_revisions SET approval_digest=$digest WHERE draft_id=$id;";
+        command.Parameters.AddWithValue("$digest", legacyDigest);
+        command.Parameters.AddWithValue("$id", draftId.ToString("D"));
+        Assert.Equal(2, command.ExecuteNonQuery());
+    }
+
+    private static string LegacyDigest(ProposalApplyDraft draft)
+    {
+        var values = new[]
+        {
+            draft.DraftId.ToString("D"), draft.ProposalId.ToString("D"), draft.RootId.ToString("D"), draft.SelectionRevision.ToString(CultureInfo.InvariantCulture),
+        }.Concat(draft.Files.OrderBy(file => file.RelativePath, StringComparer.Ordinal).Select(file => $"{file.RelativePath}|{file.BaseSha256}|{file.ReplacementSha256}"))
+            .Concat(draft.Hunks.Where(hunk => hunk.Selected).OrderBy(hunk => hunk.HunkId, StringComparer.Ordinal).Select(hunk => $"{hunk.HunkId}|{LineDiff.Sha256(hunk.ReplacementText)}"));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", values)))).ToLowerInvariant();
     }
 
     private static HttpRequestMessage CreateRequest(string method, string path, bool body)

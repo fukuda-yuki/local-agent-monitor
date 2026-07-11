@@ -137,6 +137,23 @@ public sealed class SqliteSessionStore : ISessionStore
         return new ProposalApplyImmutableMetadata(draft, revision, files, hunks);
     }
 
+    public bool TryMigrateProposalApplyDigest(Guid draftId, int proposalRevision, int selectionRevision, string expectedOldDigest, string newDigest)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction();
+        using var current = connection.CreateCommand(); current.Transaction = transaction;
+        current.CommandText = "SELECT d.approval_digest,r.approval_digest FROM proposal_apply_drafts d JOIN proposal_apply_revisions r ON r.draft_id=d.draft_id AND r.selection_revision=d.selection_revision WHERE d.draft_id=$id AND d.proposal_revision=$proposal_revision AND d.selection_revision=$selection_revision;";
+        current.Parameters.AddWithValue("$id", Id(draftId)); current.Parameters.AddWithValue("$proposal_revision", proposalRevision); current.Parameters.AddWithValue("$selection_revision", selectionRevision);
+        using var reader = current.ExecuteReader();
+        if (!reader.Read()) return false;
+        var draftDigest = reader.GetString(0); var revisionDigest = reader.GetString(1);
+        if (draftDigest == newDigest && revisionDigest == newDigest) { transaction.Commit(); return true; }
+        if (draftDigest != expectedOldDigest || revisionDigest != expectedOldDigest) return false;
+        var draftRows = Execute(connection, transaction, "UPDATE proposal_apply_drafts SET approval_digest=$new WHERE draft_id=$id AND proposal_revision=$proposal_revision AND selection_revision=$selection_revision AND approval_digest=$old;", ("$new", newDigest), ("$id", Id(draftId)), ("$proposal_revision", proposalRevision), ("$selection_revision", selectionRevision), ("$old", expectedOldDigest));
+        var revisionRows = Execute(connection, transaction, "UPDATE proposal_apply_revisions SET approval_digest=$new WHERE draft_id=$id AND selection_revision=$selection_revision AND approval_digest=$old;", ("$new", newDigest), ("$id", Id(draftId)), ("$selection_revision", selectionRevision), ("$old", expectedOldDigest));
+        if (draftRows != 1 || revisionRows != 1) return false;
+        transaction.Commit(); return true;
+    }
+
     public void UpdateProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision)
     {
         using var connection = Open(); using var transaction = connection.BeginTransaction();

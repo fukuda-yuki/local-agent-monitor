@@ -2,6 +2,10 @@ using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -321,6 +325,34 @@ public sealed class ProposalApplyServiceTests
     }
 
     [Fact]
+    public void Real_version_six_private_and_durable_legacy_digest_upgrade_produces_an_active_applied_receipt()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "v6.txt"), "before\n");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path);
+        var proposalId = Guid.CreateVersion7();
+        var legacyService = new ProposalApplyService([root], directory.RuntimePath);
+        var approved = ApproveSingleFile(legacyService, proposalId, "v6.txt", "after\n");
+        File.WriteAllText(Path.Combine(directory.Path, "v6.txt"), "after\n");
+        var legacyDigest = LegacyDigest(approved);
+        var privatePath = Path.Combine(directory.RuntimePath, "drafts", approved.DraftId.ToString("N") + ".json");
+        var legacy = JsonNode.Parse(File.ReadAllText(privatePath))!.AsObject();
+        legacy.Remove("ProposalRevision");
+        legacy["ApprovalDigest"] = legacyDigest;
+        File.WriteAllText(privatePath, legacy.ToJsonString());
+        CreateVersionSixAppliedDraft(directory.DatabasePath, approved, legacyDigest);
+
+        var store = new SqliteSessionStore(directory.DatabasePath);
+        store.CreateSchema();
+        var migrated = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+
+        var receipt = Assert.Single(migrated.ListApplicationReceipts(proposalId));
+        Assert.Equal((1, "active"), (receipt.ProposalRevision, receipt.CurrentState));
+        Assert.Equal(1, JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(privatePath))!.ProposalRevision);
+        Assert.NotEqual(legacyDigest, JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(privatePath))!.ApprovalDigest);
+    }
+
+    [Fact]
     public void Legacy_private_draft_without_proposal_revision_is_upgraded_to_the_migrated_durable_revision_and_has_an_active_receipt()
     {
         using var directory = new ApplyTestDirectory();
@@ -332,14 +364,12 @@ public sealed class ProposalApplyServiceTests
         Assert.Equal(ApplyTransactionResult.Applied, service.Apply(approved.DraftId));
         Assert.Equal(1, store.GetProposalApplyDraft(approved.DraftId)!.ProposalRevision);
 
-        var privatePath = Path.Combine(directory.RuntimePath, "drafts", approved.DraftId.ToString("N") + ".json");
-        var legacy = JsonNode.Parse(File.ReadAllText(privatePath))!.AsObject();
-        legacy.Remove("ProposalRevision");
-        File.WriteAllText(privatePath, legacy.ToJsonString());
+        var privatePath = WriteMigratedVersionSixPrivateDraft(directory, approved.DraftId);
 
-        var restarted = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        _ = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
         var migratedBytes = File.ReadAllBytes(privatePath);
         var migratedWriteTime = File.GetLastWriteTimeUtc(privatePath);
+        var restarted = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
         var receipt = Assert.Single(restarted.ListApplicationReceipts(proposalId));
         var repeatedReceipt = Assert.Single(restarted.ListApplicationReceipts(proposalId));
 
@@ -349,6 +379,43 @@ public sealed class ProposalApplyServiceTests
         Assert.Equal(1, JsonNode.Parse(File.ReadAllText(privatePath))!["ProposalRevision"]!.GetValue<int>());
         Assert.Equal(migratedBytes, File.ReadAllBytes(privatePath));
         Assert.Equal(migratedWriteTime, File.GetLastWriteTimeUtc(privatePath));
+    }
+
+    [Fact]
+    public void Startup_completes_an_interrupted_legacy_digest_migration_when_durable_metadata_is_already_rebound()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "interrupted.txt"), "before\n");
+        var store = CreateStore(directory, out var proposalId);
+        var initial = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        var approved = ApproveSingleFile(initial, proposalId, "interrupted.txt", "after\n");
+        Assert.Equal(ApplyTransactionResult.Applied, initial.Apply(approved.DraftId));
+        var newDigest = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(Path.Combine(directory.RuntimePath, "drafts", approved.DraftId.ToString("N") + ".json")))!.ApprovalDigest;
+        var privatePath = WriteMigratedVersionSixPrivateDraft(directory, approved.DraftId);
+        RebindDurableDigest(directory.DatabasePath, approved.DraftId, newDigest);
+
+        var restarted = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+
+        Assert.Equal("active", Assert.Single(restarted.ListApplicationReceipts(proposalId)).CurrentState);
+        Assert.Equal(newDigest, JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(privatePath))!.ApprovalDigest);
+        Assert.Equal(1, JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(privatePath))!.ProposalRevision);
+    }
+
+    [Fact]
+    public void Startup_fails_closed_for_a_tampered_legacy_digest()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "tampered.txt"), "before\n");
+        var store = CreateStore(directory, out var proposalId);
+        var initial = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        var approved = ApproveSingleFile(initial, proposalId, "tampered.txt", "after\n");
+        Assert.Equal(ApplyTransactionResult.Applied, initial.Apply(approved.DraftId));
+        var privatePath = WriteMigratedVersionSixPrivateDraft(directory, approved.DraftId);
+        var legacy = JsonNode.Parse(File.ReadAllText(privatePath))!.AsObject();
+        legacy["ApprovalDigest"] = "tampered-legacy-digest";
+        File.WriteAllText(privatePath, legacy.ToJsonString());
+
+        Assert.Throws<ApplyRecoveryException>(() => new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store));
     }
 
     [Fact]
@@ -456,6 +523,78 @@ public sealed class ProposalApplyServiceTests
         command.Parameters.AddWithValue("$id", proposalId.ToString("D"));
         command.Parameters.AddWithValue("$status", status == ImprovementProposalStatus.Recommended ? "recommended" : "candidate");
         command.Parameters.AddWithValue("$recommended", status == ImprovementProposalStatus.Recommended ? "2026-07-12T00:00:00+00:00" : DBNull.Value);
+        command.ExecuteNonQuery();
+    }
+
+    private static string WriteMigratedVersionSixPrivateDraft(ApplyTestDirectory directory, Guid draftId)
+    {
+        var privatePath = Path.Combine(directory.RuntimePath, "drafts", draftId.ToString("N") + ".json");
+        var current = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(privatePath))!;
+        var legacyDigest = LegacyDigest(current);
+        var legacy = JsonNode.Parse(File.ReadAllText(privatePath))!.AsObject();
+        legacy.Remove("ProposalRevision");
+        legacy["ApprovalDigest"] = legacyDigest;
+        File.WriteAllText(privatePath, legacy.ToJsonString());
+        RebindDurableDigest(directory.DatabasePath, draftId, legacyDigest);
+        return privatePath;
+    }
+
+    private static void RebindDurableDigest(string databasePath, Guid draftId, string digest)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE proposal_apply_drafts SET approval_digest=$digest WHERE draft_id=$id; UPDATE proposal_apply_revisions SET approval_digest=$digest WHERE draft_id=$id;";
+        command.Parameters.AddWithValue("$digest", digest);
+        command.Parameters.AddWithValue("$id", draftId.ToString("D"));
+        Assert.Equal(2, command.ExecuteNonQuery());
+    }
+
+    private static string LegacyDigest(ProposalApplyDraft draft)
+    {
+        var values = new[]
+        {
+            draft.DraftId.ToString("D"), draft.ProposalId.ToString("D"), draft.RootId.ToString("D"), draft.SelectionRevision.ToString(CultureInfo.InvariantCulture),
+        }.Concat(draft.Files.OrderBy(file => file.RelativePath, StringComparer.Ordinal).Select(file => $"{file.RelativePath}|{file.BaseSha256}|{file.ReplacementSha256}"))
+            .Concat(draft.Hunks.Where(hunk => hunk.Selected).OrderBy(hunk => hunk.HunkId, StringComparer.Ordinal).Select(hunk => $"{hunk.HunkId}|{LineDiff.Sha256(hunk.ReplacementText)}"));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", values)))).ToLowerInvariant();
+    }
+
+    private static void CreateVersionSixAppliedDraft(string databasePath, ProposalApplyDraft draft, string digest)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using (var schema = connection.CreateCommand())
+        {
+            schema.CommandText = """
+                CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL);
+                INSERT INTO schema_version VALUES('session', 6);
+                CREATE TABLE improvement_proposals (proposal_id TEXT PRIMARY KEY, status TEXT NOT NULL, target_kind TEXT NOT NULL, target_label TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL, expected_effect TEXT NOT NULL, risk_note TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, recommended_at TEXT NULL, verified_at TEXT NULL);
+                CREATE TABLE improvement_proposal_sessions (proposal_id TEXT NOT NULL, session_id TEXT NOT NULL, source_order INTEGER NOT NULL, PRIMARY KEY(proposal_id,session_id));
+                CREATE TABLE improvement_proposal_evidence (proposal_id TEXT NOT NULL, evidence_order INTEGER NOT NULL, kind TEXT NOT NULL, reference_id TEXT NOT NULL, PRIMARY KEY(proposal_id,evidence_order));
+                CREATE TABLE proposal_apply_drafts (draft_id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL, root_id TEXT NOT NULL, selection_revision INTEGER NOT NULL, approval_digest TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE proposal_apply_files (draft_id TEXT NOT NULL, file_order INTEGER NOT NULL, base_sha256 TEXT NOT NULL, replacement_sha256 TEXT NOT NULL, PRIMARY KEY(draft_id,file_order));
+                CREATE TABLE proposal_apply_hunks (draft_id TEXT NOT NULL, hunk_id TEXT NOT NULL, selected INTEGER NOT NULL, replacement_sha256 TEXT NOT NULL, PRIMARY KEY(draft_id,hunk_id));
+                CREATE TABLE proposal_apply_revisions (draft_id TEXT NOT NULL, selection_revision INTEGER NOT NULL, approval_digest TEXT NOT NULL, approved_at TEXT NULL, PRIMARY KEY(draft_id,selection_revision));
+                CREATE TABLE proposal_applies (apply_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE proposal_apply_pending (apply_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, proposal_id TEXT NOT NULL, root_id TEXT NOT NULL, actor_kind TEXT NOT NULL, file_count INTEGER NOT NULL, operation_kind TEXT NOT NULL, recorded_at TEXT NOT NULL);
+                """;
+            schema.ExecuteNonQuery();
+        }
+        var timestamp = DateTimeOffset.UnixEpoch.ToString("O");
+        ExecuteVersionSix(connection, "INSERT INTO improvement_proposals VALUES($proposal,'candidate','skill','fixture','fixture','fixture','fixture','fixture',$time,$time,NULL,NULL);", ("$proposal", draft.ProposalId.ToString("D")), ("$time", timestamp));
+        ExecuteVersionSix(connection, "INSERT INTO proposal_apply_drafts VALUES($draft,$proposal,$root,$selection,$digest,'applied',$time,$time);", ("$draft", draft.DraftId.ToString("D")), ("$proposal", draft.ProposalId.ToString("D")), ("$root", draft.RootId.ToString("D")), ("$selection", draft.SelectionRevision), ("$digest", digest), ("$time", timestamp));
+        for (var index = 0; index < draft.Files.Count; index++) ExecuteVersionSix(connection, "INSERT INTO proposal_apply_files VALUES($draft,$order,$base,$replacement);", ("$draft", draft.DraftId.ToString("D")), ("$order", index), ("$base", draft.Files[index].BaseSha256), ("$replacement", draft.Files[index].ReplacementSha256));
+        foreach (var hunk in draft.Hunks) ExecuteVersionSix(connection, "INSERT INTO proposal_apply_hunks VALUES($draft,$hunk,$selected,$replacement);", ("$draft", draft.DraftId.ToString("D")), ("$hunk", hunk.HunkId), ("$selected", hunk.Selected ? 1 : 0), ("$replacement", LineDiff.Sha256(hunk.ReplacementText)));
+        ExecuteVersionSix(connection, "INSERT INTO proposal_apply_revisions VALUES($draft,$selection,$digest,$time);", ("$draft", draft.DraftId.ToString("D")), ("$selection", draft.SelectionRevision), ("$digest", digest), ("$time", timestamp));
+        ExecuteVersionSix(connection, "INSERT INTO proposal_applies VALUES($apply,$draft,'applied',$time);", ("$apply", Guid.CreateVersion7().ToString("D")), ("$draft", draft.DraftId.ToString("D")), ("$time", timestamp));
+    }
+
+    private static void ExecuteVersionSix(SqliteConnection connection, string sql, params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value);
         command.ExecuteNonQuery();
     }
 

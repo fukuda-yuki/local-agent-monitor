@@ -138,9 +138,14 @@ internal sealed class ProposalApplyService
             {
                 var draft = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(path));
                 if (draft is null || draft.ProposalRevision != 0) continue;
-                var durable = store.GetProposalApplyDraft(draft.DraftId);
-                if (durable is null || durable.ProposalRevision <= 0) continue;
-                WritePrivate(draft with { ProposalRevision = durable.ProposalRevision });
+                var immutable = store.GetProposalApplyImmutableMetadata(draft.DraftId);
+                if (immutable is null || immutable.Draft.ProposalRevision != 1 || immutable.Draft.ProposalId != draft.ProposalId || immutable.Draft.RootId != draft.RootId || immutable.Draft.SelectionRevision != draft.SelectionRevision || immutable.Draft.FileCount != draft.Files.Count) throw new ApplyRecoveryException();
+                var legacyDigest = LegacyDigest(draft.DraftId, draft.ProposalId, draft.RootId, draft.Files, draft.Hunks, draft.SelectionRevision);
+                if (draft.ApprovalDigest != legacyDigest) throw new ApplyRecoveryException();
+                var rebound = draft with { ProposalRevision = immutable.Draft.ProposalRevision };
+                var newDigest = Digest(rebound.DraftId, rebound.ProposalId, rebound.ProposalRevision, rebound.RootId, rebound.Files, rebound.Hunks, rebound.SelectionRevision);
+                if (!store.TryMigrateProposalApplyDigest(draft.DraftId, rebound.ProposalRevision, rebound.SelectionRevision, legacyDigest, newDigest)) throw new ApplyRecoveryException();
+                WritePrivate(rebound with { ApprovalDigest = newDigest });
             }
             catch (JsonException) { }
             catch (IOException) { throw new ApplyRecoveryException(); }
@@ -206,5 +211,6 @@ internal sealed class ProposalApplyService
     }
     private static IReadOnlyList<ApplyTarget> RebuildFiles(IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks) => files.Select(file => { var replacement = LineDiff.Replay(file.OriginalText, hunks.Where(h => h.Selected && h.RelativePath == file.RelativePath)); return file with { ReplacementText = replacement, ReplacementSha256 = LineDiff.Sha256(replacement) }; }).Where(file => !string.Equals(file.OriginalText, file.ReplacementText, StringComparison.Ordinal)).ToArray();
     private bool HasCurrentProposalRevision(ProposalApplyDraft draft) => store?.GetImprovementProposal(draft.ProposalId)?.Revision == draft.ProposalRevision || store is null;
+    private static string LegacyDigest(Guid draftId, Guid proposalId, Guid rootId, IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks, int revision) => LineDiff.Sha256(string.Join("\n", new[] { draftId.ToString("D"), proposalId.ToString("D"), rootId.ToString("D"), revision.ToString(CultureInfo.InvariantCulture) }.Concat(files.OrderBy(f => f.RelativePath, StringComparer.Ordinal).Select(f => $"{f.RelativePath}|{f.BaseSha256}|{f.ReplacementSha256}")).Concat(hunks.Where(h => h.Selected).OrderBy(h => h.HunkId, StringComparer.Ordinal).Select(h => $"{h.HunkId}|{LineDiff.Sha256(h.ReplacementText)}"))));
     private static string Digest(Guid draftId, Guid proposalId, int proposalRevision, Guid rootId, IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks, int revision) => LineDiff.Sha256(string.Join("\n", new[] { draftId.ToString("D"), proposalId.ToString("D"), proposalRevision.ToString(CultureInfo.InvariantCulture), rootId.ToString("D"), revision.ToString(CultureInfo.InvariantCulture) }.Concat(files.OrderBy(f => f.RelativePath, StringComparer.Ordinal).Select(f => $"{f.RelativePath}|{f.BaseSha256}|{f.ReplacementSha256}")).Concat(hunks.Where(h => h.Selected).OrderBy(h => h.HunkId, StringComparer.Ordinal).Select(h => $"{h.HunkId}|{LineDiff.Sha256(h.ReplacementText)}"))));
 }
