@@ -4,6 +4,7 @@ using CopilotAgentObservability.LocalMonitor.Events;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -94,6 +95,9 @@ internal static class MonitorHost
         ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, sessionTimeProvider);
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
+        var proposalApplyRuntimePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!, "proposal-apply");
+        var proposalApplyService = new ProposalApplyService(options.ApplyRoots ?? [], proposalApplyRuntimePath);
+        builder.Services.AddSingleton(proposalApplyService);
         var sessionEventQueue = testOptions?.SessionEventQueue ?? new SessionEventQueue();
         var sessionEventNormalizer = new SessionEventNormalizer(sessionStore, sessionTimeProvider);
         var sessionOtelEnricher = new SqliteSessionOtelEnricher(options.DatabasePath, sessionStore, sessionTimeProvider);

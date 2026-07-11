@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
+using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
@@ -47,6 +48,86 @@ public class MonitorHostTests
         Assert.Throws<InvalidOperationException>(() => MonitorHost.Build(
             new MonitorOptions(tempDirectory.DatabasePath, "http://127.0.0.1:0", false, 31_457_280),
             new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false }));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Build_WithUnresolvedApplyRecoveryRoot_FailsClosedWithoutWritingPartialTransaction(bool omitRoot)
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        var configuredRootPath = Path.Combine(tempDirectory.Path, "configured");
+        var changedRootPath = Path.Combine(tempDirectory.Path, "changed");
+        Directory.CreateDirectory(configuredRootPath);
+        Directory.CreateDirectory(changedRootPath);
+        var firstTarget = Path.Combine(configuredRootPath, "one.txt");
+        var secondTarget = Path.Combine(configuredRootPath, "two.txt");
+        File.WriteAllText(firstTarget, "one");
+        File.WriteAllText(secondTarget, "two");
+        var configuredRoot = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, configuredRootPath);
+        var runtimePath = Path.Combine(Path.GetDirectoryName(tempDirectory.DatabasePath)!, "proposal-apply");
+        var crashing = new ProposalApplyTransaction(runtimePath, [configuredRoot], point =>
+        {
+            if (point == "after_atomic_replace:0") throw new ApplyTransactionCrashException();
+        });
+
+        Assert.Throws<ApplyTransactionCrashException>(() => crashing.Apply(
+            Guid.CreateVersion7(),
+            [
+                ApplyTarget.Create(configuredRoot, "one.txt", "one", "ONE"),
+                ApplyTarget.Create(configuredRoot, "two.txt", "two", "TWO"),
+            ]));
+
+        var startupRoots = omitRoot
+            ? Array.Empty<ConfiguredApplyRoot>()
+            : [ConfiguredApplyRoot.Create(ApplyRootKind.Repository, changedRootPath)];
+        var firstWriteTime = File.GetLastWriteTimeUtc(firstTarget);
+        var secondWriteTime = File.GetLastWriteTimeUtc(secondTarget);
+
+        Assert.Throws<ApplyRecoveryException>(() => MonitorHost.Build(
+            new MonitorOptions(tempDirectory.DatabasePath, "http://127.0.0.1:0", false, 31_457_280, ApplyRoots: startupRoots),
+            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false }));
+
+        Assert.Equal("ONE", File.ReadAllText(firstTarget));
+        Assert.Equal("two", File.ReadAllText(secondTarget));
+        Assert.Equal(firstWriteTime, File.GetLastWriteTimeUtc(firstTarget));
+        Assert.Equal(secondWriteTime, File.GetLastWriteTimeUtc(secondTarget));
+        Assert.Single(Directory.EnumerateFiles(runtimePath, "journal.json", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public void Build_WithSameApplyRecoveryRoot_RestoresOriginalsAndRegistersOneServiceInstance()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        var rootPath = Path.Combine(tempDirectory.Path, "configured");
+        Directory.CreateDirectory(rootPath);
+        var firstTarget = Path.Combine(rootPath, "one.txt");
+        var secondTarget = Path.Combine(rootPath, "two.txt");
+        File.WriteAllText(firstTarget, "one");
+        File.WriteAllText(secondTarget, "two");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath);
+        var runtimePath = Path.Combine(Path.GetDirectoryName(tempDirectory.DatabasePath)!, "proposal-apply");
+        var crashing = new ProposalApplyTransaction(runtimePath, [root], point =>
+        {
+            if (point == "after_atomic_replace:0") throw new ApplyTransactionCrashException();
+        });
+
+        Assert.Throws<ApplyTransactionCrashException>(() => crashing.Apply(
+            Guid.CreateVersion7(),
+            [
+                ApplyTarget.Create(root, "one.txt", "one", "ONE"),
+                ApplyTarget.Create(root, "two.txt", "two", "TWO"),
+            ]));
+
+        using var app = MonitorHost.Build(
+            new MonitorOptions(tempDirectory.DatabasePath, "http://127.0.0.1:0", false, 31_457_280, ApplyRoots: [root]),
+            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
+
+        var service = app.Services.GetRequiredService<ProposalApplyService>();
+        Assert.Same(service, app.Services.GetRequiredService<ProposalApplyService>());
+        Assert.Equal(rootPath, Assert.Single(service.Roots).CanonicalPath, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal("one", File.ReadAllText(firstTarget));
+        Assert.Equal("two", File.ReadAllText(secondTarget));
     }
 
     [Fact]
