@@ -21,7 +21,7 @@ internal sealed class ProposalApplyService
     public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, ISessionStore? store, Action<string>? fault = null)
     {
         transaction = new ProposalApplyTransaction(runtimePath, roots, fault); Roots = transaction.ConfiguredRoots; this.store = store;
-        draftPath = Path.Combine(runtimePath, "drafts"); Directory.CreateDirectory(draftPath); transaction.RecoverUncommitted(); ReconcilePending(); LoadDrafts(); LoadAppliedLinkages();
+        draftPath = Path.Combine(runtimePath, "drafts"); Directory.CreateDirectory(draftPath); transaction.RecoverUncommitted(); ReconcilePending(); MigrateLegacyDraftRevisions(); LoadDrafts(); LoadAppliedLinkages();
     }
     public IReadOnlyList<ConfiguredApplyRoot> Roots { get; }
 
@@ -129,12 +129,29 @@ internal sealed class ProposalApplyService
             if (File.Exists(path)) TryLoad(path, metadata.DraftId);
         }
     }
+    private void MigrateLegacyDraftRevisions()
+    {
+        if (store is null) return;
+        foreach (var path in Directory.EnumerateFiles(draftPath, "*.json"))
+        {
+            try
+            {
+                var draft = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(path));
+                if (draft is null || draft.ProposalRevision != 0) continue;
+                var durable = store.GetProposalApplyDraft(draft.DraftId);
+                if (durable is null || durable.ProposalRevision <= 0) continue;
+                WritePrivate(draft with { ProposalRevision = durable.ProposalRevision });
+            }
+            catch (JsonException) { }
+            catch (IOException) { throw new ApplyRecoveryException(); }
+            catch (UnauthorizedAccessException) { throw new ApplyRecoveryException(); }
+        }
+    }
     private void TryLoad(string path, Guid? expectedId)
     {
         try
         {
             var draft = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(path));
-            if (draft is not null && draft.ProposalRevision == 0 && store?.GetProposalApplyDraft(draft.DraftId) is { } legacy) { draft = draft with { ProposalRevision = legacy.ProposalRevision }; WritePrivate(draft); }
             if (draft is null || (expectedId is not null && draft.DraftId != expectedId) || !Roots.Any(r => r.RootId == draft.RootId) || !IsTrusted(draft, requireApproved: draft.IsApproved)) return;
             drafts[draft.DraftId] = draft;
         }
@@ -176,7 +193,7 @@ internal sealed class ProposalApplyService
     }
     private ProposalApplyDraft? ReadReceiptDraft(Guid draftId)
     {
-        try { var draft = JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(Path.Combine(draftPath, draftId.ToString("N") + ".json"))); if (draft is not null && draft.ProposalRevision == 0 && store!.GetProposalApplyDraft(draftId) is { } legacy) { draft = draft with { ProposalRevision = legacy.ProposalRevision }; WritePrivate(draft); } return draft; }
+        try { return JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(Path.Combine(draftPath, draftId.ToString("N") + ".json"))); }
         catch { return null; }
     }
     private bool MatchesImmutableReceipt(ProposalApplyDraft draft, ProposalApplicationReceipt receipt)

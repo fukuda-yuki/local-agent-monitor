@@ -337,11 +337,38 @@ public sealed class ProposalApplyServiceTests
         legacy.Remove("ProposalRevision");
         File.WriteAllText(privatePath, legacy.ToJsonString());
 
-        var receipt = Assert.Single(service.ListApplicationReceipts(proposalId));
+        var restarted = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        var migratedBytes = File.ReadAllBytes(privatePath);
+        var migratedWriteTime = File.GetLastWriteTimeUtc(privatePath);
+        var receipt = Assert.Single(restarted.ListApplicationReceipts(proposalId));
+        var repeatedReceipt = Assert.Single(restarted.ListApplicationReceipts(proposalId));
 
         Assert.Equal("active", receipt.CurrentState);
+        Assert.Equal("active", repeatedReceipt.CurrentState);
         Assert.Equal(1, receipt.ProposalRevision);
         Assert.Equal(1, JsonNode.Parse(File.ReadAllText(privatePath))!["ProposalRevision"]!.GetValue<int>());
+        Assert.Equal(migratedBytes, File.ReadAllBytes(privatePath));
+        Assert.Equal(migratedWriteTime, File.GetLastWriteTimeUtc(privatePath));
+    }
+
+    [Fact]
+    public void Current_application_receipt_queries_do_not_mutate_private_draft_files()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "current.txt"), "before\n");
+        var store = CreateStore(directory, out var proposalId);
+        var service = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store);
+        var approved = ApproveSingleFile(service, proposalId, "current.txt", "after\n");
+        Assert.Equal(ApplyTransactionResult.Applied, service.Apply(approved.DraftId));
+        var privatePath = Path.Combine(directory.RuntimePath, "drafts", approved.DraftId.ToString("N") + ".json");
+        var before = File.ReadAllBytes(privatePath);
+        var writeTime = File.GetLastWriteTimeUtc(privatePath);
+
+        Assert.Equal("active", Assert.Single(service.ListApplicationReceipts(proposalId)).CurrentState);
+        Assert.Equal("active", Assert.Single(service.ListApplicationReceipts(proposalId)).CurrentState);
+
+        Assert.Equal(before, File.ReadAllBytes(privatePath));
+        Assert.Equal(writeTime, File.GetLastWriteTimeUtc(privatePath));
     }
 
     [Fact]

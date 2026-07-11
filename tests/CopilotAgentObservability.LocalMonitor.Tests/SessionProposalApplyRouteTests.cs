@@ -195,6 +195,53 @@ public sealed class SessionProposalApplyRouteTests
     }
 
     [Fact]
+    public async Task Legacy_receipt_get_does_not_mutate_private_draft_after_startup_migration()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rootPath = Path.Combine(temp.Path, "legacy-receipt-root");
+        Directory.CreateDirectory(rootPath);
+        File.WriteAllText(Path.Combine(rootPath, "legacy.txt"), "before\n");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath);
+        var proposalId = Guid.CreateVersion7();
+        Guid draftId;
+
+        await using (var host = await StartAsync(temp, root))
+        {
+            InsertPersistedProposal(temp.DatabasePath, proposalId);
+            var rootId = await GetSingleRootIdAsync(host.Client);
+            using var create = JsonRequest(HttpMethod.Post, "/api/session-workspace/proposal-applies/drafts", $$"""{"proposal_id":"{{proposalId:D}}","root_id":"{{rootId:D}}","files":[{"relative_path":"legacy.txt","replacement_text":"after\n"}]}""");
+            using var created = await host.Client.SendAsync(create);
+            created.EnsureSuccessStatusCode();
+            using var draft = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+            draftId = draft.RootElement.GetProperty("draft_id").GetGuid();
+            var revision = draft.RootElement.GetProperty("selection_revision").GetInt32();
+            var digest = draft.RootElement.GetProperty("approval_digest").GetString();
+            using var approve = JsonRequest(HttpMethod.Post, $"/api/session-workspace/proposal-applies/drafts/{draftId:D}/approve", $$"""{"selection_revision":{{revision}},"approval_digest":"{{digest}}"}""");
+            using var approved = await host.Client.SendAsync(approve);
+            approved.EnsureSuccessStatusCode();
+            using var apply = CsrfRequest(HttpMethod.Post, $"/api/session-workspace/proposal-applies/drafts/{draftId:D}/apply");
+            using var applied = await host.Client.SendAsync(apply);
+            applied.EnsureSuccessStatusCode();
+        }
+
+        var privatePath = Path.Combine(temp.Path, "proposal-apply", "drafts", draftId.ToString("N") + ".json");
+        var legacy = JsonNode.Parse(File.ReadAllText(privatePath))!.AsObject();
+        legacy.Remove("ProposalRevision");
+        File.WriteAllText(privatePath, legacy.ToJsonString());
+
+        await using var restarted = await StartAsync(temp, root);
+        var migratedBytes = File.ReadAllBytes(privatePath);
+        var migratedWriteTime = File.GetLastWriteTimeUtc(privatePath);
+        using var first = await GetReceiptAsync(restarted.Client, proposalId);
+        using var second = await GetReceiptAsync(restarted.Client, proposalId);
+
+        Assert.Equal("active", first.RootElement.GetProperty("items")[0].GetProperty("current_state").GetString());
+        Assert.Equal("active", second.RootElement.GetProperty("items")[0].GetProperty("current_state").GetString());
+        Assert.Equal(migratedBytes, File.ReadAllBytes(privatePath));
+        Assert.Equal(migratedWriteTime, File.GetLastWriteTimeUtc(privatePath));
+    }
+
+    [Fact]
     public async Task Draft_creation_checks_the_persisted_proposal_before_target_filesystem_access()
     {
         using var temp = new MonitorTempDirectory();
