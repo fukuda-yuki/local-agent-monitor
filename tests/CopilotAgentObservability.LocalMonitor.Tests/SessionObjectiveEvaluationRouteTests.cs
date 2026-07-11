@@ -213,6 +213,14 @@ public sealed class SessionObjectiveEvaluationRouteTests
     }
 
     [Fact]
+    public Task Post_RejectsTerminalGateThatExistsOnlyOnAnotherExactSession() =>
+        AssertCrossSessionGateRejected("terminal");
+
+    [Fact]
+    public Task Post_RejectsErrorGateThatExistsOnlyOnAnotherExactSession() =>
+        AssertCrossSessionGateRejected("error");
+
+    [Fact]
     public async Task Post_MapsControlledSqliteExclusiveLockToFixedStoreUnavailable()
     {
         using var temp = new MonitorTempDirectory();
@@ -297,6 +305,34 @@ public sealed class SessionObjectiveEvaluationRouteTests
         var request = new HttpRequestMessage(HttpMethod.Post, "/api/session-workspace/objective-evaluations") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         request.Headers.Add("x-monitor-csrf", "local-monitor");
         return request;
+    }
+
+    private static async Task AssertCrossSessionGateRejected(string gate)
+    {
+        using var temp = new MonitorTempDirectory();
+        var selected = CreateExactBatch();
+        var selectedEvent = selected.Detail.Events[0] with { Type = "event", Status = null };
+        selected = selected with { Detail = selected.Detail with { Events = [selectedEvent] } };
+        var other = CreateExactBatch();
+        var otherEvent = other.Detail.Events[0] with
+        {
+            SourceEventId = $"objective-event-{gate}-other",
+            Type = gate == "terminal" ? "Stop" : "event",
+            Status = gate == "error" ? "error" : null
+        };
+        var otherNative = other.Detail.NativeIds[0] with { NativeSessionId = $"objective-native-{gate}-other" };
+        other = other with { Detail = other.Detail with { NativeIds = [otherNative], Events = [otherEvent] } };
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        store.Write(selected);
+        store.Write(other);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+
+        using var response = await host.Client.SendAsync(Request(Body(selected, trace: selected.Detail.Runs[0].TraceId, evidence: "[{\"kind\":\"gate\",\"reference_id\":\"" + gate + "\"}]")));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("{\"error\":\"objective_evidence_not_exact\"}", await response.Content.ReadAsStringAsync());
+        Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
     }
 
     private static string Body(SessionWriteBatch batch, string? session = null, string? run = null, string? trace = null, string? evaluator = null, string? evidence = null) =>
