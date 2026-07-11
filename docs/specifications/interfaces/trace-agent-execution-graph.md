@@ -73,8 +73,9 @@ attribute payloads):
 - `graph_warnings[]`: bounded codes (`cycle_detected`, `duplicate_span_id`,
   `unknown_parent`, `time_range_inconsistent`).
 
-Unknown trace: `404 { "error": "trace_not_found" }` matching existing
-monitor API error conventions.
+Unknown trace: `404` with the existing `/api/monitor/*` failure shape
+`{ "accepted": false, "error": "trace_not_found", "message": "..." }`; the
+`message` is fixed text and never echoes request content.
 
 ## Trace Detail UI
 

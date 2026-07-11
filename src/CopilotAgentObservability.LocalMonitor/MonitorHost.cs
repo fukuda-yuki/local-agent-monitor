@@ -270,6 +270,65 @@ internal static class MonitorHost
                 await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
             }
         });
+        app.MapGet("/api/monitor/traces/{traceId}/agent-graph", async (string traceId, HttpContext context) =>
+        {
+            try
+            {
+                if (projectionStore.GetMonitorTrace(traceId) is null)
+                {
+                    await WriteFailureAsync(context, StatusCodes.Status404NotFound, "trace_not_found", "The requested trace was not found.");
+                    return;
+                }
+
+                var graph = AgentExecutionGraphBuilder.Build(projectionStore.GetSpansForTrace(traceId));
+                await WriteJsonAsync(context, new
+                {
+                    summary = new
+                    {
+                        main_agent_name = graph.Summary.MainAgentName,
+                        root_agent_count = graph.Summary.RootAgentCount,
+                        subagent_invocation_count = graph.Summary.SubagentInvocationCount,
+                        unique_subagent_count = graph.Summary.UniqueSubagentCount,
+                        max_agent_depth = graph.Summary.MaxAgentDepth,
+                        parallel_agent_group_count = graph.Summary.ParallelAgentGroupCount,
+                        relationship_quality = graph.Summary.RelationshipQuality,
+                        agent_presence = graph.Summary.AgentPresence,
+                    },
+                    agents = graph.Agents.Select(agent => new
+                    {
+                        span_id = agent.SpanId,
+                        agent_name = agent.AgentName,
+                        agent_role = agent.AgentRole,
+                        caller_agent_span_id = agent.CallerAgentSpanId,
+                        model = agent.Model,
+                        started_at = agent.StartedAt,
+                        ended_at = agent.EndedAt,
+                        duration_ms = agent.DurationMs,
+                        input_tokens = agent.InputTokens,
+                        output_tokens = agent.OutputTokens,
+                        total_tokens = agent.TotalTokens,
+                        status = agent.Status,
+                        child_agent_count = agent.ChildAgentCount,
+                        agent_depth = agent.AgentDepth,
+                        relationship_source = agent.RelationshipSource,
+                        relationship_confidence = agent.RelationshipConfidence,
+                    }),
+                    span_ownership = graph.SpanOwnership.Select(ownership => new
+                    {
+                        span_id = ownership.SpanId,
+                        owning_agent_span_id = ownership.OwningAgentSpanId,
+                        relationship_source = ownership.RelationshipSource,
+                        relationship_confidence = ownership.RelationshipConfidence,
+                    }),
+                    parallel_groups = graph.ParallelGroups.Select(group => group.SpanIds),
+                    graph_warnings = graph.GraphWarnings,
+                });
+            }
+            catch (PersistenceBusyException)
+            {
+                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+            }
+        });
         app.MapGet("/api/monitor/summary", async context =>
         {
             if (!TryParseLimitQuery(context, out var limit))

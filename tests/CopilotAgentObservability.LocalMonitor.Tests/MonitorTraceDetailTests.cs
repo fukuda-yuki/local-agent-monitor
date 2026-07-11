@@ -68,6 +68,10 @@ public class MonitorTraceDetailTests
         Assert.Contains("id=\"waterfall-view\"", body);
         Assert.Contains("id=\"cache-overview\"", body);
         Assert.Contains("id=\"cache-turns\"", body);
+        Assert.Contains("id=\"agent-summary\"", body);
+        Assert.Contains("id=\"agent-summary-state\"", body);
+        Assert.Contains("Agent実行グラフを読み込み中", body);
+        Assert.Contains("swatch-agent", body);
         Assert.Contains("data-trace-id=\"trace-detail\"", body);
         Assert.Contains("/monitor-flow.js", body);
         Assert.Contains("/monitor-waterfall.js", body);

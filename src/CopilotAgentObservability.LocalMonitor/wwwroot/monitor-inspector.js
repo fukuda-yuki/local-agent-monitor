@@ -21,6 +21,8 @@
 
   let currentSpan = null;
   let currentDetail = null;
+  let currentDetailState = "idle";
+  let selectionVersion = 0;
   let activeTab = "formatted";
   let restorePanel = null; // Which side panel was visible before the inspector opened.
 
@@ -67,8 +69,11 @@
   /* ── Open / close ── */
 
   function open(span) {
+    selectionVersion += 1;
+    const version = selectionVersion;
     currentSpan = span;
     currentDetail = null;
+    currentDetailState = rawAvailable && span.span_id ? "loading" : "idle";
     activeTab = "formatted";
     if (restorePanel === null) {
       restorePanel = errorPanel && !errorPanel.hidden ? errorPanel : cacheColumn;
@@ -78,31 +83,41 @@
     inspector.hidden = false;
     render();
     if (rawAvailable && span.span_id) {
-      loadDetail(span.span_id);
+      loadDetail(span.span_id, version);
     }
   }
 
   function close() {
+    selectionVersion += 1;
     inspector.hidden = true;
     inspector.replaceChildren();
     currentSpan = null;
     currentDetail = null;
+    currentDetailState = "idle";
     if (restorePanel) restorePanel.hidden = false;
     restorePanel = null;
     document.dispatchEvent(new CustomEvent("cao-inspector-closed"));
   }
 
-  async function loadDetail(spanId) {
+  async function loadDetail(spanId, version) {
+    let detail = null;
+    let state = "unavailable";
     try {
       const resp = await fetch(`/traces/${encodeURIComponent(traceId)}/spans/${encodeURIComponent(spanId)}/detail`, { cache: "no-store" });
-      if (!resp.ok) return;
-      const detail = await resp.json();
-      if (currentSpan && currentSpan.span_id === spanId) {
-        currentDetail = detail;
-        render();
+      if (resp.ok) {
+        const parsed = await resp.json();
+        if (parsed && typeof parsed === "object") {
+          detail = parsed;
+          state = "success";
+        }
       }
     } catch {
-      // Formatted sections stay empty; the sanitized metadata remains.
+      state = "unavailable";
+    }
+    if (selectionVersion === version && currentSpan?.span_id === spanId) {
+      currentDetail = detail;
+      currentDetailState = state;
+      render();
     }
   }
 
@@ -172,6 +187,11 @@
   }
 
   function renderFormattedTab(body, span) {
+    if (span.kind === "agent") {
+      renderAgentDetail(body, span);
+      return;
+    }
+
     if (!rawAvailable) {
       const note = document.createElement("p");
       note.className = "inspector-note";
@@ -288,6 +308,77 @@
     body.append(actions);
   }
 
+  function renderAgentDetail(body, span) {
+    const agent = span.agent ?? {};
+    body.append(sectionTitle("Agent 詳細"));
+    const meta = document.createElement("div");
+    meta.className = "inspector-meta agent-inspector-meta";
+    meta.append(
+      metaRow("span id", agent.span_id ?? span.span_id ?? "—"),
+      metaRow("Agent名", agent.agent_name ?? span.label ?? "—"),
+      metaRow("role", agent.agent_role ?? "unknown"),
+      metaRow("caller Agent", agent.caller_agent_span_id ?? "—"),
+      metaRow("model", agent.model ?? "—"),
+      metaRow("開始", agent.started_at ?? span.start_time ?? "—"),
+      metaRow("終了", agent.ended_at ?? span.end_time ?? "—"),
+      metaRow("所要", fmtDuration(agent.duration_ms ?? span.durationMs)),
+      metaRow("input tokens", compactTokens(agent.input_tokens)),
+      metaRow("output tokens", compactTokens(agent.output_tokens)),
+      metaRow("total tokens", compactTokens(agent.total_tokens)),
+      metaRow("status", agent.status ?? "—"),
+      metaRow("子Agent", String(agent.child_agent_count ?? 0)),
+      metaRow("Agent depth", agent.agent_depth === null || agent.agent_depth === undefined ? "—" : String(agent.agent_depth)),
+      metaRow("relationship source", agent.relationship_source ?? "unresolved"),
+      metaRow("relationship confidence", agent.relationship_confidence ?? "unknown"),
+      metaRow("所有ターン", String(agent.ownedTurnCount ?? 0)),
+      metaRow("所有ツール", String(agent.ownedToolCount ?? 0)));
+    body.append(meta);
+
+    if (!rawAvailable) {
+      const note = document.createElement("p");
+      note.className = "inspector-note";
+      note.textContent = "--sanitized-only のため sanitized な Agent 詳細のみ表示しています。";
+      body.append(note);
+      return;
+    }
+
+    const llm = currentDetail?.llm;
+    if (currentDetailState === "unavailable") {
+      const note = document.createElement("p");
+      note.className = "inspector-note";
+      note.textContent = "Sub-agent の指示・応答を取得できませんでした。sanitized な Agent 詳細は引き続き確認できます。";
+      body.append(note);
+    } else if (!llm) {
+      const note = document.createElement("p");
+      note.className = "inspector-note";
+      note.textContent = currentDetailState === "success"
+        ? "Sub-agent の指示・応答は抽出できませんでした。raw タブで確認できます。"
+        : "Sub-agent の指示・応答を読み込み中…";
+      body.append(note);
+    } else {
+      if (llm.messages.length > 0) {
+        body.append(sectionTitle("Sub-agent 指示（best effort）"));
+        llm.messages.forEach((message) => body.append(monoBlock(message.preview)));
+      }
+      if (llm.response_preview) {
+        body.append(sectionTitle("Sub-agent 応答（best effort）"), monoBlock(llm.response_preview));
+      }
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "inspector-actions";
+    const openRaw = document.createElement("button");
+    openRaw.type = "button";
+    openRaw.className = "inspector-open-raw";
+    openRaw.textContent = "raw を開く";
+    openRaw.addEventListener("click", () => {
+      activeTab = "raw";
+      render();
+    });
+    actions.append(openRaw);
+    body.append(actions);
+  }
+
   function appendMeta(body, span) {
     body.append(sectionTitle("メタ"));
     const meta = document.createElement("div");
@@ -313,7 +404,9 @@
     if (!rawJson) {
       const note = document.createElement("p");
       note.className = "inspector-note";
-      note.textContent = currentDetail ? "raw スパン JSON を取得できませんでした。" : "raw スパン JSON を読み込み中…";
+      note.textContent = currentDetailState === "unavailable" || currentDetail
+        ? "raw スパン JSON を取得できませんでした。"
+        : "raw スパン JSON を読み込み中…";
       body.append(note);
       return;
     }

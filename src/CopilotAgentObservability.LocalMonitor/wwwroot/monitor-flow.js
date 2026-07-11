@@ -3,7 +3,8 @@
 // renders the vertical flow chart, drives the フロー | waterfall toggle, the
 // エラーのみ filter, span selection, and the ?view=&span= URL state.
 //
-// Sanitized boundary: reads only /api/monitor/traces/{id}/spans. It never
+// Sanitized boundary: reads only /api/monitor/traces/{id}/spans and the
+// sanitized /agent-graph ownership model. It never
 // fetches a raw-bearing route (the span inspector's raw detail is a separate
 // module gated on data-raw-available). All DOM nodes are built with
 // createElement / textContent; no markup strings are ever injected.
@@ -19,12 +20,16 @@
   const statusLine = document.getElementById("flow-status");
   const errorsOnly = document.getElementById("errors-only");
   const viewToggle = document.getElementById("view-toggle");
+  const agentSummary = document.getElementById("agent-summary");
+  const agentSummaryState = document.getElementById("agent-summary-state");
+  const agentSummaryMeta = document.getElementById("agent-summary-meta");
 
   const state = {
     view: "flow",
     errorsOnly: false,
     selectedSpanId: null,
     expandedRuns: new Set(),
+    collapsedAgents: new Set(),
   };
 
   let model = null;
@@ -65,6 +70,72 @@
       if (page.next_cursor === null || page.next_cursor === undefined) return spans;
       after = page.next_cursor;
     }
+  }
+
+  async function fetchAgentGraph() {
+    try {
+      const resp = await fetch(`/api/monitor/traces/${encodeURIComponent(traceId)}/agent-graph`, { cache: "no-store" });
+      if (!resp.ok) return null;
+      return await resp.json();
+    } catch {
+      return null;
+    }
+  }
+
+  function relationshipLabel(confidence) {
+    if (confidence === "inferred") return "推定";
+    if (confidence === "unknown") return "判定不能";
+    return null;
+  }
+
+  function relationshipBadge(confidence) {
+    const label = relationshipLabel(confidence);
+    if (!label) return null;
+    const badge = document.createElement("span");
+    badge.className = `relationship-badge relationship-${confidence}`;
+    badge.textContent = label;
+    return badge;
+  }
+
+  function renderAgentSummary(graph) {
+    if (!agentSummary || !agentSummaryState || !agentSummaryMeta) return;
+    if (!graph?.summary) {
+      agentSummary.classList.add("agent-summary-unavailable");
+      agentSummaryState.textContent = "Sub-agent利用を判定できません";
+      agentSummaryMeta.textContent = "Agent実行グラフを取得できませんでした";
+      return;
+    }
+
+    const summary = graph.summary;
+    agentSummary.classList.remove("agent-summary-unavailable");
+    agentSummaryState.textContent = summary.agent_presence === "undeterminable"
+      ? "Sub-agent利用を判定できません"
+      : summary.subagent_invocation_count > 0
+        ? `Sub-agent ${summary.subagent_invocation_count}回検出`
+        : "Sub-agentは検出されませんでした";
+    const main = summary.main_agent_name ? `main ${summary.main_agent_name}` : "main —";
+    const rootAgents = (graph.agents ?? []).filter((agent) => agent.agent_role === "root");
+    const rootNames = [...new Set(rootAgents.map((agent) => agent.agent_name).filter(Boolean))];
+    const shownRootNames = rootNames.slice(0, 3);
+    const rootNameLabel = shownRootNames.length === 0
+      ? ""
+      : ` ${shownRootNames.join(", ")}${rootNames.length > shownRootNames.length ? ` +${rootNames.length - shownRootNames.length}` : ""}`;
+    const quality = summary.relationship_quality === "partially_inferred"
+      ? "一部推定"
+      : summary.relationship_quality === "undeterminable"
+        ? "判定不能"
+        : "exact";
+    const meta = [
+      main,
+      `root ${summary.root_agent_count}${rootNameLabel}`,
+      `呼出 ${summary.subagent_invocation_count}`,
+      `ユニーク ${summary.unique_subagent_count}`,
+      `最大深度 ${summary.max_agent_depth}`,
+      `Agent並行 ${summary.parallel_agent_group_count}`,
+      `関係 ${quality}`,
+    ];
+    if (graph.graph_warnings?.includes("time_range_inconsistent")) meta.push("時刻矛盾あり");
+    agentSummaryMeta.textContent = meta.join(" · ");
   }
 
   function parseMs(timestamp) {
@@ -113,9 +184,27 @@
     };
   }
 
-  function buildModel(rawSpans) {
+  function buildModel(rawSpans, agentGraph) {
     const spans = rawSpans.map(normalize);
-    const byId = new Map(spans.filter((span) => span.span_id).map((span) => [span.span_id, span]));
+    const spansById = new Map();
+    const byId = new Map();
+    for (const span of spans.filter((candidate) => candidate.span_id)) {
+      if (!spansById.has(span.span_id)) spansById.set(span.span_id, []);
+      spansById.get(span.span_id).push(span);
+      if (!byId.has(span.span_id)) byId.set(span.span_id, span);
+    }
+
+    const ownershipById = new Map((agentGraph?.span_ownership ?? [])
+      .filter((ownership) => ownership.span_id)
+      .map((ownership) => [ownership.span_id, ownership]));
+    for (const span of spans) {
+      const ownership = ownershipById.get(span.span_id);
+      if (ownership) {
+        span.owningAgentSpanId = ownership.owning_agent_span_id;
+        span.relationshipSource = ownership.relationship_source;
+        span.relationshipConfidence = ownership.relationship_confidence;
+      }
+    }
 
     const startCandidates = spans.map((span) => span.startMs).filter((value) => value !== null);
     const endCandidates = spans.map((span) => span.endMs ?? span.startMs).filter((value) => value !== null);
@@ -128,7 +217,48 @@
     const sortKey = (span) => span.startMs ?? range.startMs + span.span_ordinal;
     const llmSpans = spans.filter((span) => span.kind === "llm").sort((a, b) => sortKey(a) - sortKey(b) || a.span_ordinal - b.span_ordinal);
     const toolSpans = spans.filter((span) => span.kind === "tool").sort((a, b) => sortKey(a) - sortKey(b) || a.span_ordinal - b.span_ordinal);
-    const agentSpans = spans.filter((span) => span.kind === "agent");
+    const graphAgents = agentGraph?.agents ?? [];
+    const agentIdCounts = new Map();
+    for (const agent of graphAgents) {
+      if (agent.span_id) agentIdCounts.set(agent.span_id, (agentIdCounts.get(agent.span_id) ?? 0) + 1);
+    }
+    const usedAgentCandidates = new Map();
+    const agentSpans = [];
+    const agentById = new Map();
+    let agentIndex = 0;
+    for (const agent of graphAgents) {
+      const candidates = agent.span_id
+        ? (spansById.get(agent.span_id) ?? []).filter((span) => span.kind === "agent")
+        : [];
+      const candidateIndex = usedAgentCandidates.get(agent.span_id) ?? 0;
+      const span = candidates[candidateIndex] ?? normalize({
+        span_id: agent.span_id,
+        span_ordinal: Number.MAX_SAFE_INTEGER,
+        operation: "invoke_agent",
+        category: "agent_invocation",
+        agent_name: agent.agent_name,
+        start_time: agent.started_at,
+        end_time: agent.ended_at,
+        duration_ms: agent.duration_ms,
+        input_tokens: agent.input_tokens,
+        output_tokens: agent.output_tokens,
+        total_tokens: agent.total_tokens,
+        status: agent.status,
+      });
+      if (agent.span_id) usedAgentCandidates.set(agent.span_id, candidateIndex + 1);
+      span.agent = agent;
+      span.relationshipSource = agent.relationship_source;
+      span.relationshipConfidence = agent.relationship_confidence;
+      span.owningAgentSpanId = agent.caller_agent_span_id;
+      span.hasUniqueAgentId = Boolean(agent.span_id && agentIdCounts.get(agent.span_id) === 1);
+      span.agentUiKey = span.hasUniqueAgentId ? agent.span_id : `agent-${agentIndex}`;
+      agentIndex += 1;
+      agentSpans.push(span);
+      if (span.hasUniqueAgentId) {
+        agentById.set(agent.span_id, span);
+        byId.set(agent.span_id, span);
+      }
+    }
 
     const turns = llmSpans.map((span, index) => ({ span, index, tools: [], groups: [], title: "", matchesFilter: false }));
     const turnBySpanId = new Map(turns.filter((turn) => turn.span.span_id).map((turn) => [turn.span.span_id, turn]));
@@ -199,7 +329,45 @@
     }
     errorSpans.sort((a, b) => ((a.span.startMs ?? 0) - (b.span.startMs ?? 0)) || (a.span.span_ordinal - b.span.span_ordinal));
 
-    return { traceId, spans, byId, range, turns, agentSpans, orphanTools, errorSpans };
+    const ownedSpans = new Map();
+    for (const span of spans.filter((candidate) => candidate.kind !== "agent")) {
+      const ownerId = span.owningAgentSpanId ?? null;
+      if (!ownedSpans.has(ownerId)) ownedSpans.set(ownerId, []);
+      ownedSpans.get(ownerId).push(span);
+    }
+
+    const childAgents = new Map();
+    for (const agent of agentSpans) {
+      const callerId = agent.agent?.caller_agent_span_id;
+      const ownerId = callerId && agentById.has(callerId) ? callerId : null;
+      if (!childAgents.has(ownerId)) childAgents.set(ownerId, []);
+      childAgents.get(ownerId).push(agent);
+      const direct = agent.hasUniqueAgentId ? ownedSpans.get(agent.span_id) ?? [] : [];
+      agent.agent = {
+        ...(agent.agent ?? {}),
+        ownedTurnCount: direct.filter((span) => span.kind === "llm").length,
+        ownedToolCount: direct.filter((span) => span.kind === "tool").length,
+      };
+    }
+
+    const sortSpans = (items) => items.sort((a, b) => sortKey(a) - sortKey(b) || a.span_ordinal - b.span_ordinal);
+    for (const items of ownedSpans.values()) sortSpans(items);
+    for (const items of childAgents.values()) sortSpans(items);
+
+    return {
+      traceId,
+      spans,
+      byId,
+      range,
+      turns,
+      agentSpans,
+      agentById,
+      ownedSpans,
+      childAgents,
+      agentGraph,
+      orphanTools,
+      errorSpans,
+    };
   }
 
   /* ── Flow rendering ── */
@@ -267,6 +435,8 @@
       pill.textContent = tool.recovered ? "回復済み → 再試行あり" : "未回復";
       card.append(pill);
     }
+    const relationship = relationshipBadge(tool.relationshipConfidence);
+    if (relationship) card.append(relationship);
     return card;
   }
 
@@ -282,6 +452,8 @@
     meta.className = "turn-meta monitor-mono";
     meta.textContent = spanMeta(turn.span);
     card.append(title, meta);
+    const relationship = relationshipBadge(turn.span.relationshipConfidence);
+    if (relationship) card.append(relationship);
     return card;
   }
 
@@ -294,7 +466,7 @@
     return flowRow(marker("marker-collapsed", "…"), body, { className: "flow-collapsed-row" });
   }
 
-  function renderFlow() {
+  function renderLegacyFlow() {
     if (!model) return;
     flowView.replaceChildren();
 
@@ -411,11 +583,188 @@
     applySelection();
   }
 
+  function appendTurnBranch(container, turn, ownerId) {
+    container.append(turnCard(turn));
+    for (const originalGroup of turn.groups) {
+      const tools = originalGroup.tools.filter((tool) => (tool.owningAgentSpanId ?? null) === ownerId);
+      if (tools.length === 0) continue;
+      const branch = document.createElement("div");
+      branch.className = "tool-branch";
+      if (tools.length > 1 && originalGroup.parallel) {
+        const head = document.createElement("span");
+        head.className = "parallel-head";
+        const badge = document.createElement("span");
+        badge.className = "parallel-badge";
+        badge.textContent = `⑂ 並行 ${tools.length} 件`;
+        head.append(badge);
+        branch.append(head);
+        const lane = document.createElement("div");
+        lane.className = "parallel-lane";
+        tools.forEach((tool) => lane.append(toolCard(tool)));
+        branch.append(lane);
+      } else {
+        tools.forEach((tool) => branch.append(toolCard(tool)));
+      }
+      container.append(branch);
+    }
+  }
+
+  function agentHeader(agent) {
+    const head = document.createElement("div");
+    head.className = "agent-container-head";
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "agent-select";
+    select.dataset.spanId = agent.hasUniqueAgentId ? agent.span_id : "";
+    select.disabled = !agent.hasUniqueAgentId;
+    const roleName = document.createElement("strong");
+    roleName.className = "agent-role-name";
+    roleName.textContent = `${agent.agent?.agent_role ?? "unknown"} · ${agent.agent?.agent_name ?? agent.label}`;
+    select.append(roleName);
+    const relationship = relationshipBadge(agent.relationshipConfidence ?? "unknown");
+    if (relationship) select.append(relationship);
+
+    const collapse = document.createElement("button");
+    collapse.type = "button";
+    collapse.className = "agent-collapse";
+    collapse.dataset.agentToggle = agent.agentUiKey;
+    const collapsed = state.collapsedAgents.has(agent.agentUiKey);
+    collapse.setAttribute("aria-expanded", String(!collapsed));
+    collapse.setAttribute("aria-label", collapsed ? "Agent セクションを展開する" : "Agent セクションを折りたたむ");
+    collapse.textContent = collapsed ? "＋" : "−";
+    head.append(select, collapse);
+    return head;
+  }
+
+  function agentMeta(agent) {
+    const detail = agent.agent ?? {};
+    const caller = detail.caller_agent_span_id
+      ? model.agentById.get(detail.caller_agent_span_id)?.agent?.agent_name ?? detail.caller_agent_span_id
+      : "—";
+    const meta = document.createElement("div");
+    meta.className = "agent-container-meta monitor-mono";
+    meta.textContent = [
+      `caller ${caller}`,
+      detail.model ?? "model —",
+      `${fmtClock(agent.startMs)} → ${fmtClock(agent.endMs)}`,
+      fmtDuration(detail.duration_ms ?? agent.durationMs),
+      `${compactTokens(detail.total_tokens)} tok`,
+      detail.status ?? "status —",
+      `子Agent ${detail.child_agent_count ?? 0}`,
+    ].join(" · ");
+    return meta;
+  }
+
+  function renderAgent(agent) {
+    const container = document.createElement("section");
+    container.className = `agent-container relationship-${agent.relationshipConfidence ?? "unknown"}`;
+    container.dataset.agentId = agent.hasUniqueAgentId ? agent.span_id : "";
+    container.append(agentHeader(agent), agentMeta(agent));
+
+    const content = document.createElement("div");
+    content.className = "agent-owned-content";
+    content.hidden = state.collapsedAgents.has(agent.agentUiKey);
+    const start = document.createElement("div");
+    start.className = "agent-terminal agent-start";
+    start.textContent = `◆ ${agent.agent?.agent_name ?? agent.label} 開始 · ${fmtClock(agent.startMs)}`;
+    content.append(start);
+
+    const direct = agent.hasUniqueAgentId ? model.ownedSpans.get(agent.span_id) ?? [] : [];
+    const consumedTools = new Set();
+    for (const span of direct) {
+      if (span.kind === "llm") {
+        const turn = model.turns.find((candidate) => candidate.span.span_id === span.span_id);
+        if (turn && (!state.errorsOnly || turn.matchesFilter)) {
+          appendTurnBranch(content, turn, agent.span_id);
+          turn.tools.filter((tool) => tool.owningAgentSpanId === agent.span_id).forEach((tool) => consumedTools.add(tool.span_id));
+        }
+      } else if (span.kind === "tool" && !consumedTools.has(span.span_id) && (!state.errorsOnly || span.isError)) {
+        const branch = document.createElement("div");
+        branch.className = "tool-branch";
+        branch.append(toolCard(span));
+        content.append(branch);
+      }
+    }
+
+    appendChildAgents(content, agent.span_id);
+    const complete = document.createElement("div");
+    complete.className = `agent-terminal agent-complete${agent.isError ? " agent-error" : ""}`;
+    complete.textContent = `${agent.isError ? "✕" : "✓"} ${agent.agent?.agent_name ?? agent.label} ${agent.isError ? "異常終了" : "完了"} · ${fmtClock(agent.endMs)}`;
+    content.append(complete);
+    container.append(content);
+    return container;
+  }
+
+  function appendChildAgents(container, ownerId) {
+    const children = model.childAgents.get(ownerId) ?? [];
+    const rendered = new Set();
+    for (const group of model.agentGraph?.parallel_groups ?? []) {
+      const members = children.filter((child) => group.includes(child.span_id));
+      if (members.length < 2) continue;
+      const wrapper = document.createElement("div");
+      wrapper.className = "agent-parallel-group";
+      const label = document.createElement("div");
+      label.className = "agent-parallel-label";
+      label.textContent = `⑂ Agent並行 ${members.length}件`;
+      const lanes = document.createElement("div");
+      lanes.className = "agent-parallel-lanes";
+      members.forEach((member) => {
+        rendered.add(member.span_id);
+        lanes.append(renderAgent(member));
+      });
+      wrapper.append(label, lanes);
+      container.append(wrapper);
+    }
+    children.filter((child) => !rendered.has(child.span_id)).forEach((child) => container.append(renderAgent(child)));
+  }
+
+  function renderFlow() {
+    if (!model) return;
+    if (!model.agentGraph || model.agentSpans.length === 0) {
+      renderLegacyFlow();
+      return;
+    }
+
+    flowView.replaceChildren();
+    const execution = document.createElement("div");
+    execution.className = "agent-execution-flow";
+    const start = document.createElement("div");
+    start.className = "flow-terminal flow-start";
+    start.textContent = `copilot-agent 開始 · ${fmtClock(model.range.startMs)}`;
+    execution.append(start);
+    appendChildAgents(execution, null);
+
+    const unowned = model.ownedSpans.get(null) ?? [];
+    const unownedSection = document.createElement("div");
+    unownedSection.className = "unowned-spans";
+    const consumed = new Set();
+    for (const span of unowned) {
+      if (span.kind === "llm") {
+        const turn = model.turns.find((candidate) => candidate.span.span_id === span.span_id);
+        if (turn && (!state.errorsOnly || turn.matchesFilter)) {
+          appendTurnBranch(unownedSection, turn, null);
+          turn.tools.filter((tool) => !tool.owningAgentSpanId).forEach((tool) => consumed.add(tool.span_id));
+        }
+      } else if (span.kind === "tool" && !consumed.has(span.span_id) && (!state.errorsOnly || span.isError)) {
+        unownedSection.append(toolCard(span));
+      }
+    }
+    if (unownedSection.childElementCount > 0) execution.append(unownedSection);
+
+    const end = document.createElement("div");
+    end.className = "flow-terminal flow-end";
+    end.textContent = root.dataset.traceStatus === "unrecovered" ? "異常終了 — トレースは未完了のまま終了" : "完了";
+    execution.append(end);
+    flowView.append(execution);
+    applySelection();
+  }
+
   /* ── View toggle / filter / URL state ── */
 
   function renderAll() {
     renderFlow();
     if (window.caoWaterfall) {
+      model.collapsedAgents = state.collapsedAgents;
       window.caoWaterfall.render(waterfallView, model, state.errorsOnly);
     }
     applySelection();
@@ -423,6 +772,11 @@
 
   function setView(view) {
     state.view = view;
+    if (view === "waterfall" && model && window.caoWaterfall) {
+      model.collapsedAgents = state.collapsedAgents;
+      window.caoWaterfall.render(waterfallView, model, state.errorsOnly);
+      applySelection();
+    }
     flowView.hidden = view !== "flow";
     waterfallView.hidden = view !== "waterfall";
     for (const button of viewToggle.querySelectorAll(".view-btn")) {
@@ -475,6 +829,14 @@
   });
 
   const onSpanClick = (event) => {
+    const agentToggle = event.target.closest("[data-agent-toggle]");
+    if (agentToggle) {
+      const agentId = agentToggle.dataset.agentToggle;
+      if (state.collapsedAgents.has(agentId)) state.collapsedAgents.delete(agentId);
+      else state.collapsedAgents.add(agentId);
+      renderAll();
+      return;
+    }
     const collapsed = event.target.closest(".collapsed-turns");
     if (collapsed) {
       state.expandedRuns.add(collapsed.dataset.runId);
@@ -512,8 +874,9 @@
 
   (async () => {
     try {
-      const spans = await fetchAllSpans();
-      model = buildModel(spans);
+      const [spans, agentGraph] = await Promise.all([fetchAllSpans(), fetchAgentGraph()]);
+      renderAgentSummary(agentGraph);
+      model = buildModel(spans, agentGraph);
       statusLine.hidden = true;
 
       const params = new URLSearchParams(window.location.search);
@@ -530,6 +893,7 @@
       if (window.caoCachePanel) window.caoCachePanel.render(model);
       document.dispatchEvent(new CustomEvent("cao-flow-ready", { detail: { traceId, model } }));
     } catch {
+      renderAgentSummary(null);
       statusLine.textContent = "実行の流れを読み込めませんでした。/api/monitor が応答しているか確認してください。";
     }
   })();

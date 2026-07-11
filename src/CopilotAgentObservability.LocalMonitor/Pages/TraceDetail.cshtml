@@ -57,6 +57,10 @@
             <div class="detail-title-row">
                 <span class="status-pill @statusClass"><span class="trace-status-dot @statusClass" aria-hidden="true"></span>@statusLabel</span>
             </div>
+            <div class="agent-summary" id="agent-summary" aria-live="polite">
+                <strong id="agent-summary-state">Sub-agent利用を確認中…</strong>
+                <span id="agent-summary-meta">Agent実行グラフを読み込み中…</span>
+            </div>
             <p class="detail-meta">
                 <span class="monitor-mono">@MonitorViewFormat.ShortTraceId(Model.TraceId)</span>
                 <span>@(Model.Trace.PrimaryModel ?? "モデル不明")</span>
@@ -102,6 +106,7 @@
                     <button type="button" class="view-btn" data-view="waterfall">waterfall</button>
                 </div>
                 <span class="flow-legend" aria-hidden="true">
+                    <span class="legend-item"><span class="legend-swatch swatch-agent"></span>agent</span>
                     <span class="legend-item"><span class="legend-swatch swatch-input" ></span>llm</span>
                     <span class="legend-item"><span class="legend-swatch swatch-output"></span>tool</span>
                     <span class="legend-item parallel-legend">⑂ 並行分岐</span>

@@ -38,10 +38,11 @@
   }
 
   function row(model, span, options) {
-    const { label, kind, indent, prefix, parallel } = options;
+    const { label, kind, indent, prefix, parallel, ownerAgentId, relationshipConfidence, inconsistent, collapsible, collapsed, agentToggleKey } = options;
     const line = document.createElement("div");
-    line.className = `wf-row wf-${kind}${span.isError ? " wf-error" : ""}`;
-    line.dataset.spanId = span.span_id ?? "";
+    line.className = `wf-row wf-${kind}${span.isError ? " wf-error" : ""}${ownerAgentId ? " wf-owned" : ""}${parallel ? ` wf-${kind}-parallel` : ""}${relationshipConfidence === "unknown" ? " wf-unresolved" : ""}${inconsistent ? " wf-inconsistent" : ""}`;
+    line.dataset.spanId = options.spanId === undefined ? span.span_id ?? "" : options.spanId;
+    if (ownerAgentId) line.dataset.ownerAgentId = ownerAgentId;
 
     const name = document.createElement("span");
     name.className = "wf-name";
@@ -59,6 +60,28 @@
     text.className = "wf-label";
     text.textContent = label;
     name.append(mark, text);
+    if (relationshipConfidence === "inferred" || relationshipConfidence === "unknown") {
+      const relationship = document.createElement("span");
+      relationship.className = `relationship-badge relationship-${relationshipConfidence}`;
+      relationship.textContent = relationshipConfidence === "inferred" ? "推定" : "判定不能";
+      name.append(relationship);
+    }
+    if (inconsistent) {
+      const warning = document.createElement("span");
+      warning.className = "wf-warning";
+      warning.textContent = "時刻矛盾";
+      name.append(warning);
+    }
+    if (collapsible) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "wf-collapse";
+      toggle.dataset.agentToggle = agentToggleKey;
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+      toggle.setAttribute("aria-label", collapsed ? "Agent セクションを展開する" : "Agent セクションを折りたたむ");
+      toggle.textContent = collapsed ? "＋" : "−";
+      name.append(toggle);
+    }
 
     const track = document.createElement("span");
     track.className = "wf-track";
@@ -125,30 +148,146 @@
     head.append(nameHead, axis, tokensHead, durationHead);
     container.append(head);
 
-    for (const agent of model.agentSpans) {
-      container.append(row(model, agent, { label: agent.label, kind: "agent", indent: 0 }));
-    }
+    const isOutsideOwner = (span, owner) => span.startMs !== null && span.endMs !== null
+      && owner.startMs !== null && owner.endMs !== null
+      && (span.startMs < owner.startMs || span.endMs > owner.endMs);
+    const parallelAgents = new Set((model.agentGraph?.parallel_groups ?? []).flat());
+    const renderedSpans = new Set();
 
-    for (const turn of model.turns) {
-      if (filter && !turn.matchesFilter) continue;
-      container.append(row(model, turn.span, { label: turn.title, kind: "llm", indent: 16 }));
+    const appendTurn = (turn, depth, owner) => {
+      if (filter && !turn.matchesFilter) return;
+      renderedSpans.add(turn.span.span_id);
+      container.append(row(model, turn.span, {
+        label: turn.title,
+        kind: "llm",
+        indent: 32 + depth * 16,
+        ownerAgentId: owner.span_id,
+        relationshipConfidence: turn.span.relationshipConfidence,
+        inconsistent: isOutsideOwner(turn.span, owner),
+      }));
       for (const group of turn.groups) {
-        if (group.parallel) {
-          container.append(groupHeader(group));
-          group.tools.forEach((tool, index) => {
+        const tools = group.tools.filter((tool) => tool.owningAgentSpanId === owner.span_id);
+        if (tools.length === 0) continue;
+        if (group.parallel && tools.length > 1) container.append(groupHeader({ tools, maxDurationMs: group.maxDurationMs }));
+        tools.forEach((tool, index) => {
+          renderedSpans.add(tool.span_id);
+          container.append(row(model, tool, {
+            label: tool.label,
+            kind: "tool",
+            indent: 48 + depth * 16,
+            prefix: group.parallel && tools.length > 1 ? (index === tools.length - 1 ? "└─" : "├─") : null,
+            parallel: group.parallel && tools.length > 1,
+            ownerAgentId: owner.span_id,
+            relationshipConfidence: tool.relationshipConfidence,
+            inconsistent: isOutsideOwner(tool, owner),
+          }));
+        });
+      }
+    };
+
+    const appendAgent = (agent, depth) => {
+      renderedSpans.add(agent.span_id);
+      const caller = agent.agent?.caller_agent_span_id ? model.agentById.get(agent.agent.caller_agent_span_id) : null;
+      const collapsed = model.collapsedAgents?.has(agent.agentUiKey) ?? false;
+      container.append(row(model, agent, {
+        label: `${agent.agent?.agent_role ?? "unknown"} · ${agent.agent?.agent_name ?? agent.label}`,
+        kind: "agent",
+        indent: 16 + depth * 16,
+        relationshipConfidence: agent.relationshipConfidence ?? "unknown",
+        inconsistent: caller ? isOutsideOwner(agent, caller) : false,
+        parallel: parallelAgents.has(agent.span_id),
+        collapsible: true,
+        collapsed,
+        agentToggleKey: agent.agentUiKey,
+        spanId: agent.hasUniqueAgentId ? agent.span_id : "",
+      }));
+      if (collapsed) return;
+
+      const direct = agent.hasUniqueAgentId ? model.ownedSpans.get(agent.span_id) ?? [] : [];
+      const children = model.childAgents.get(agent.span_id) ?? [];
+      const timeline = [
+        ...direct.filter((span) => span.kind === "llm" || span.kind === "tool"),
+        ...children,
+      ].sort((a, b) => (a.startMs ?? 0) - (b.startMs ?? 0) || (a.span_ordinal ?? 0) - (b.span_ordinal ?? 0));
+      for (const item of timeline) {
+        if (item.kind === "agent") {
+          appendAgent(item, depth + 1);
+        } else if (item.kind === "llm") {
+          const turn = model.turns.find((candidate) => candidate.span.span_id === item.span_id);
+          if (turn) appendTurn(turn, depth, agent);
+        } else if (!renderedSpans.has(item.span_id) && (!filter || item.isError)) {
+          renderedSpans.add(item.span_id);
+          container.append(row(model, item, {
+            label: item.label,
+            kind: "tool",
+            indent: 48 + depth * 16,
+            ownerAgentId: agent.span_id,
+            relationshipConfidence: item.relationshipConfidence,
+            inconsistent: isOutsideOwner(item, agent),
+          }));
+        }
+      }
+    };
+
+    model.collapsedAgents = model.collapsedAgents ?? new Set();
+    const appendUnownedTurn = (turn) => {
+      if (filter && !turn.matchesFilter) return;
+      renderedSpans.add(turn.span.span_id);
+      container.append(row(model, turn.span, {
+        label: turn.title,
+        kind: "llm",
+        indent: 16,
+        relationshipConfidence: turn.span.relationshipConfidence,
+      }));
+      for (const group of turn.groups) {
+        const unownedTools = group.tools.filter((tool) => !tool.owningAgentSpanId);
+        if (unownedTools.length === 0) continue;
+        if (group.parallel && unownedTools.length > 1) {
+          container.append(groupHeader({ tools: unownedTools, maxDurationMs: group.maxDurationMs }));
+          unownedTools.forEach((tool, index) => {
+            renderedSpans.add(tool.span_id);
             container.append(row(model, tool, {
               label: tool.label,
               kind: "tool",
               indent: 32,
-              prefix: index === group.tools.length - 1 ? "└─" : "├─",
+              prefix: index === unownedTools.length - 1 ? "└─" : "├─",
               parallel: true,
             }));
           });
         } else {
-          for (const tool of group.tools) {
+          for (const tool of unownedTools) {
+            renderedSpans.add(tool.span_id);
             container.append(row(model, tool, { label: tool.label, kind: "tool", indent: 32 }));
           }
         }
+      }
+    };
+
+    const unownedTurns = model.turns.filter((turn) => !turn.span.owningAgentSpanId);
+    const nestedUnownedToolIds = new Set(unownedTurns.flatMap((turn) =>
+      turn.groups.flatMap((group) => group.tools.filter((tool) => !tool.owningAgentSpanId).map((tool) => tool.span_id))));
+    const topLevel = [
+      ...(model.childAgents?.get(null) ?? []).map((agent) => ({ kind: "agent", span: agent, value: agent })),
+      ...unownedTurns.map((turn) => ({ kind: "turn", span: turn.span, value: turn })),
+      ...model.spans
+        .filter((span) => span.kind === "tool" && !span.owningAgentSpanId && !nestedUnownedToolIds.has(span.span_id))
+        .map((span) => ({ kind: "tool", span, value: span })),
+    ].sort((a, b) => (a.span.startMs ?? 0) - (b.span.startMs ?? 0)
+      || (a.span.span_ordinal ?? Number.MAX_SAFE_INTEGER) - (b.span.span_ordinal ?? Number.MAX_SAFE_INTEGER));
+
+    for (const item of topLevel) {
+      if (item.kind === "agent") {
+        appendAgent(item.value, 0);
+      } else if (item.kind === "turn") {
+        appendUnownedTurn(item.value);
+      } else if (!filter || item.value.isError) {
+        renderedSpans.add(item.value.span_id);
+        container.append(row(model, item.value, {
+          label: item.value.label,
+          kind: "tool",
+          indent: 16,
+          relationshipConfidence: item.value.relationshipConfidence,
+        }));
       }
     }
   }
