@@ -141,6 +141,24 @@ public class CanvasExtensionContractTests
     }
 
     [Fact]
+    public void Extension_CapturesSdkSessionEventsFromTheFirstCanvasOpen()
+    {
+        var script = ReadExtension();
+
+        Assert.Contains("createSdkSessionCapture", script);
+        Assert.Contains("nativeSessionId: ctx.sessionId", script);
+        Assert.Contains("ensureSdkSessionCapture(sessionCaptures", script);
+        Assert.Contains("source_adapter: \"copilot-sdk-stream\"", script);
+        Assert.Contains("source_surface: \"copilot-sdk\"", script);
+        Assert.Contains("/api/session-ingest/v1/events", script);
+        Assert.Contains("X-CAO-Session-Event-Version", script);
+        Assert.Contains("gap_before_capture: true", script);
+        Assert.Contains("assistant.usage", script);
+        Assert.Contains("MAX_EVENTS_PER_BATCH = 100", script);
+        Assert.Contains("MAX_BATCH_BYTES = 1_048_576", script);
+    }
+
+    [Fact]
     public void Extension_BoundsTraceTreeAndCacheSummaryOutputs()
     {
         var script = ReadExtension();
@@ -451,8 +469,14 @@ public class CanvasExtensionContractTests
         var helpersCheck = RunNode(directory, "--check", "canvas-helpers.mjs");
         Assert.True(helpersCheck.ExitCode == 0, $"node --check canvas-helpers.mjs failed: {helpersCheck.Output}{helpersCheck.Error}");
 
+        var sessionEventsCheck = RunNode(directory, "--check", "canvas-session-events.mjs");
+        Assert.True(sessionEventsCheck.ExitCode == 0, $"node --check canvas-session-events.mjs failed: {sessionEventsCheck.Output}{sessionEventsCheck.Error}");
+
         var unitSmoke = RunNode(directory, "--test", "canvas-helpers.test.mjs");
         Assert.True(unitSmoke.ExitCode == 0, $"node --test canvas-helpers.test.mjs failed: {unitSmoke.Output}{unitSmoke.Error}");
+
+        var sessionEventsUnitSmoke = RunNode(directory, "--test", "canvas-session-events.test.mjs");
+        Assert.True(sessionEventsUnitSmoke.ExitCode == 0, $"node --test canvas-session-events.test.mjs failed: {sessionEventsUnitSmoke.Output}{sessionEventsUnitSmoke.Error}");
     }
 
     private static string ReadExtension()
@@ -460,7 +484,8 @@ public class CanvasExtensionContractTests
         var directory = ExtensionDirectory();
         var extension = File.ReadAllText(Path.Combine(directory, "extension.mjs"));
         var helpers = File.ReadAllText(Path.Combine(directory, "canvas-helpers.mjs"));
-        return extension + "\n" + helpers;
+        var sessionEvents = File.ReadAllText(Path.Combine(directory, "canvas-session-events.mjs"));
+        return extension + "\n" + helpers + "\n" + sessionEvents;
     }
 
     private static string ExtensionDirectory()

@@ -48,6 +48,7 @@ import {
     PROMPT_TEMPLATE_VERSION,
     MAX_CACHE_TURNS,
 } from "./canvas-helpers.mjs";
+import { ensureSdkSessionCapture } from "./canvas-session-events.mjs";
 
 const DEFAULT_MONITOR_URL = "http://127.0.0.1:4320";
 const TRACE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$";
@@ -72,6 +73,10 @@ const traceIdSchema = {
 
 // Per-instance HTTP servers for the helper page (M5).
 const servers = new Map();
+// Session capture is keyed by the Canvas-native session ID rather than the
+// Canvas instance ID. Re-opening the Canvas must not create a second SDK event
+// subscription for the same session.
+const sessionCaptures = new Map();
 
 // --------------- helpers ---------------
 
@@ -960,6 +965,20 @@ const session = await joinSession({
                         "invalid_monitor_url",
                         `Monitor URL must be loopback (127.0.0.1 / localhost / ::1). Received: ${monitorUrl}`
                     );
+                }
+
+                // The first Canvas open is the capture boundary. Subscribe
+                // before health/helper-page work so events produced while the
+                // Canvas is opening are not missed. Adapter failures are
+                // deliberately fail-open and never affect Canvas behavior.
+                try {
+                    ensureSdkSessionCapture(sessionCaptures, {
+                            session,
+                            nativeSessionId: ctx.sessionId,
+                            monitorUrl,
+                    });
+                } catch {
+                    // Do not log raw SDK or transport failures.
                 }
 
                 // Clean up any previous server for this instance (idempotent).
