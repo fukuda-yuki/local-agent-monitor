@@ -73,14 +73,6 @@ For Aspire AppHost usage decisions, refer to `docs/specifications/layers/telemet
 Ask before irreversible changes, product behavior or public interface changes, security policy changes, dependency additions, source-of-truth conflicts, missing spec decisions, or unclear preserved review records.
 Keep changes minimum, scoped, and traceable to the request.
 
-## Skill Workflow
-
-- Use the enabled Superpowers plugin as the default process framework.
-- At the start of a task, select the relevant Superpowers process skill first, then add any matching repository skill from `.agents/skills/`.
-- Repository instructions and repository skills refine or override generic Superpowers guidance when they conflict.
-- Read the selected `SKILL.md` completely before acting, and follow its referenced resources only as needed.
-- Superpowers workflows that delegate to subagents remain subject to the explicit-user-request rule below.
-
 ## Information Placement
 
 - Production code shows **How**: structure, naming, and types carry it; no comments that restate the code.
