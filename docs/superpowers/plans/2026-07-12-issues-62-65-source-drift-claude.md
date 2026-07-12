@@ -27,36 +27,69 @@
 
 ---
 
-### Task 1: Structural Inventory and Compatibility Domain
+### Task 1A: Freeze the Structural Inventory Redesign
 
-**Owner profile:** `gpt-5.6-sol`, high effort.
+**Owner:** primary orchestrator; independent `gpt-5.6-sol` ultra review.
 
 **Files:**
-- Create: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/SourceCompatibilityModels.cs`
-- Create: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/OtlpStructuralInventoryBuilder.cs`
-- Create: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/SourceCompatibilityEvaluator.cs`
-- Create: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/VerifiedSourceFingerprintRegistry.cs`
+- Modify: `docs/specifications/interfaces/source-schema-drift-claude-code.md`
+- Create: `docs/specifications/contracts/source-capabilities/v1/otlp-trace-structural-v1.md`
+- Modify: this plan
+- Update: `docs/sprints/sprint22-source-drift-claude/ledger.md`
+
+- [ ] Freeze domain-separated producer-name hashing, the shared OTLP descriptor/envelope set, original-input recursive walking, full-set hash semantics, diagnostic bounds, required-signal definition, evaluation precedence, unknown-kind mapping, and closed draft factories.
+- [ ] Independent reviewer confirms the corrected contract removes the two-cycle review premises before production work resumes.
+
+### Task 1B: Closed Compatibility Domain and Evaluator
+
+**Owner profile:** fresh `gpt-5.6-sol`, xhigh effort.
+
+**Files:**
+- Modify: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/SourceCompatibilityModels.cs`
+- Modify: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/SourceCompatibilityEvaluator.cs`
+- Modify: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/VerifiedSourceFingerprintRegistry.cs`
+- Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/SourceCompatibilityTests.cs`
+
+**Interfaces:** private-constructor/factory aggregates produce `SourceCompatibilityDecision`, `SourceObservationBatchDraft`, validated unknown children, fixed capture state, and canonical reason/action pairs. No caller supplies raw state/reason lists, child version labels, arbitrary names, or undefined enums.
+
+`SourceStructuralNameToken`, `SourceOccurrenceCount`, `SourceUnknownIdentity`, and registry evidence are also closed validated values with defensive immutable snapshots. Duplicate/conflicting registry evidence is rejected.
+
+- [ ] Own and add RED tests `InventoryFactory_RejectsInvalidAndDefensivelyCopies`, `Registry_RejectsDuplicateAndConflictingEvidence`, `ObservationFactory_StateReasonAndCaptureAreClosed`, `UnknownFactory_ValidatesNameCountTimeAndReference`, `ReasonSet_DeduplicatesAndOrdersHardCodedVocabulary`, `Assess_VersionAndFingerprintPolicy`, and `Assess_CombinedConditionsFollowCanonicalPrecedence` with independently written expected wire strings.
+- [ ] Implement the minimal closed types/evaluator and split registry evidence into fingerprint, incompatibility, and recognition-profile responsibilities.
+- [ ] Run the focused compatibility tests and `git diff --check`; obtain independent domain/spec review and same-reviewer clearance before commit.
+
+### Task 1C: Original-Input OTLP Structural Walkers
+
+**Owner profile:** fresh `gpt-5.6-sol`, xhigh effort.
+
+**Files:**
+- Create: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/OtlpTraceSchema.cs`
+- Create: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/OtlpJsonStructuralWalker.cs`
+- Create: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/OtlpProtobufStructuralWalker.cs`
+- Replace: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/OtlpStructuralInventoryBuilder.cs`
 - Modify: `src/CopilotAgentObservability.Telemetry/Otlp/OtlpTracePayloadDecoder.cs`
 - Modify: `src/CopilotAgentObservability.Telemetry/Otlp/OtlpProtobufTraceConverter.cs`
-- Create: `tests/CopilotAgentObservability.ConfigCli.Tests/SourceCompatibilityTests.cs`
+- Modify: `src/CopilotAgentObservability.LocalMonitor/MonitorHost.cs`
+- Modify: `src/CopilotAgentObservability.ConfigCli/RawLocalReceiver/RawLocalReceiverHandler.cs`
+- Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/SourceCompatibilityTests.cs`
 - Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/OtlpProtobufTraceConverterTests.cs`
+- Modify: `tests/CopilotAgentObservability.LocalMonitor.Tests/MonitorHostTests.cs`
+- Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/RawLocalReceiverHandlerTests.cs`
 
-**Interfaces:**
-- Produce `DecodedOtlpTracePayload(PayloadJson, StructuralInventory)`.
-- Produce immutable `SourceSchemaObservationDraft`, `SourceUnknownObservationDraft`, and fixed `SourceCompatibilityState` values from the canonical spec.
-- Fingerprint structural names/types before lossy normalization; inventory hash additionally covers bounded counts.
+**Interfaces:** produce `DecodedOtlpTracePayload(PayloadJson, StructuralInventory)` only after a descriptor-driven recursive walk of the original accepted JSON/protobuf. Consumers explicitly select `PayloadJson`; no implicit string conversion or `additionalEntries` path remains.
 
-- [ ] Add RED tests for order-independent JSON fingerprints, protobuf-only unknown fields, name/value safety, deterministic overflow collapse, known fingerprint support, new fingerprint drift, and explicit unsupported-required-signal behavior.
-- [ ] Run `dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SourceCompatibilityTests|FullyQualifiedName~OtlpProtobufTraceConverterTests"` and confirm failures identify missing domain/decoder behavior.
-- [ ] Implement the minimal structural inventory/evaluator and return inventory from both JSON and protobuf decode paths.
-- [ ] Re-run focused tests and `git diff --check`; report RED/GREEN evidence.
-- [ ] Independent reviewer checks structural-only safety, stable ordering, bounds, JSON/protobuf parity, and no heuristic mapping.
+- [ ] Own and implement the descriptor matrix tests from `Build_KnownNestedEnvelope_JsonAndProtobufMatchGoldenFingerprints` through `Build_AggregateUnknownCountsIgnoreRetainedRowLimit`, plus `DecodedPayload_ConsumersExplicitlyUsePayloadJson`. Task 1B exclusively owns the inventory-factory, registry, assessment, observation, unknown-factory, and reason-set tests.
+- [ ] Implement one descriptor model and both transport walkers; correct fixed32 flags and remove duplicated handled-field tables/post-conversion inventory.
+- [ ] Run `dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SourceCompatibilityTests|FullyQualifiedName~OtlpProtobufTraceConverterTests|FullyQualifiedName~RawLocalReceiverHandlerTests"`; `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~MonitorHostTests`; solution build; and `git diff --check`.
+- [ ] Independent transport/security reviewer checks official OTLP wire types, recursive parity scope, full-set hashes, bounds, and absence of every producer literal/value before commit.
 
 ### Task 2: Real Monitor v1-v4 Migration Fixtures
 
 **Owner profile:** `gpt-5.6-sol`, high effort.
 
 **Files:**
+- Create: `scripts/test/GenerateMonitorSchemaFixtures/GenerateMonitorSchemaFixtures.csproj`
+- Create: `scripts/test/GenerateMonitorSchemaFixtures/Program.cs`
 - Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/monitor/manifest.json`
 - Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/monitor/monitor-v1.sqlite`
 - Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/monitor/monitor-v2.sqlite`
@@ -68,9 +101,11 @@
 **Interfaces:**
 - Fixtures are generated by actual `CreateMonitorSchema` implementations at `655e002`, `f91e195`, `9ca613a`, and `65ec872` and include sentinel rows.
 - Manifest records component, version, source commit, SHA-256, generation command, and sentinel IDs.
+- A static reviewed v4 semantic contract is validated against the read-only manifest-hashed v4 fixture and every migrated copy. It covers every `table_list` field (`wr`/`strict` included), every `table_xinfo` field, and every `index_xinfo` key/expression identity, order, collation, and `key`/auxiliary flag, plus origin/partial predicate and foreign keys. Quote-aware table SQL inspection is used only for `AUTOINCREMENT` and CHECK clauses. Internal autoindex names are ignored while their semantics remain contractual.
 
 - [ ] Generate each closed `.sqlite` fixture in disposable historical worktrees; do not hand-author DDL.
-- [ ] Add RED theory tests that verify manifest hashes/provenance and fail before fixtures exist; after generation, copy each fixture, run the current v4 migration, close/reopen, rerun migration, and preserve every sentinel.
+- [ ] Add RED theory tests that verify manifest hashes/provenance and fail before fixtures exist; after generation, copy each fixture, run the current v4 migration, close/reopen, rerun migration, and preserve every complete sentinel snapshot/count.
+- [ ] Add a scratch-schema characterization theory proving the semantic reader detects missing `AUTOINCREMENT`, changed CHECK, changed unique order, `NOCASE`/`DESC` index terms, expression-index identity, `index_xinfo.key = 0` auxiliary-term changes, partial indexes, added foreign keys, and every `table_list`/`table_xinfo` field mutation. Add quote/comment/string-literal decoys for `AUTOINCREMENT`/CHECK and prove equivalent autoindex semantics compare equal despite different internal names.
 - [ ] Run `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~MonitorSchemaMigrationFixtureTests` and finish GREEN against current v4 before Task 3 extends the assertions to v5.
 - [ ] Independent migration reviewer validates every fixture against its historical commit and rejects synthetic/pseudo fixtures.
 - [ ] After that reviewer clears the task, commit only immutable fixtures, manifest, test, and csproj copy metadata; never commit WAL/SHM/runtime output.

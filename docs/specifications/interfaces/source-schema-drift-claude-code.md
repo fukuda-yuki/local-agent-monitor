@@ -76,28 +76,88 @@ known incompatible or a required signal is absent.
 
 ## Fingerprint and unknown representation
 
-The `schema_fingerprint` is deterministic over an emitted semantic-convention
-or schema identifier when present plus the sorted observed structural set:
-signal, record/event name, attribute key, and structural value type. The
-`inventory_hash` additionally covers the bounded occurrence counts observed in
-that ingest batch. Neither includes attribute values, raw bodies, PII,
-credentials, source text, or local paths. Compatibility compares the resulting
-schema fingerprint with fingerprints recorded by verified evidence; the
-inventory hash diagnoses batch-to-batch changes without redefining support.
+The exact descriptor, encoding, hash domains, closed inventory model, required
+Span condition, and executable matrix are frozen in
+`contracts/source-capabilities/v1/otlp-trace-structural-v1.md`. That descriptor
+pins OpenTelemetry Proto `v1.10.0` commit
+`ca839c51f706f5d53bfb46f06c3e90c3af3a52c6`.
 
-For OTLP/JSON, structural inventory is collected from the accepted source JSON
-before normalization. For OTLP/protobuf, the decoder collects structural
-inventory while reading the original wire message, before producing the
-canonical JSON used by the existing raw store. Fingerprinting only the lossy
-canonical JSON is invalid because an unhandled protobuf field could disappear
-before drift evaluation.
+One versioned OTLP descriptor model covers request, resource spans, resource,
+scope spans, instrumentation scope, span, event, link, status, `KeyValue`,
+`AnyValue`, `ArrayValue`, `KeyValueList`, and `EntityRef` envelopes. It defines the accepted
+JSON property/type and protobuf tag/wire type for every known field. The JSON
+and protobuf walkers recursively apply that same model to the original input.
+A known name or tag with the wrong representation is unknown. An unknown
+length-delimited protobuf field is recorded at its containing envelope and is
+never guessed to be another message.
 
-Unknown observations are bounded per ingest batch and identity tuple. They
-contain kind (`span`, `event`, or `attribute`), bounded name or keyed hash,
-count, source version label, first/last observed time, and an opaque sample
-reference. They never contain the source value or raw body. Excess distinct
-unknowns collapse into a single overflow count. Unknown records are never
-classified as recognized operations or used to synthesize hierarchy.
+For OTLP/JSON, structural inventory is completed from the accepted source JSON
+before normalization. For OTLP/protobuf, it is completed while reading the
+original wire message, before producing the canonical JSON used by the existing
+raw store. Fingerprinting only the lossy canonical JSON or merging a second
+post-conversion unknown-field path is invalid. Recognized semantic facts have
+the same canonical identities across JSON and protobuf. Unknown JSON property
+names and unknown protobuf field numbers remain transport-scoped because their
+meaning cannot be safely equated.
+
+Arbitrary producer-controlled names are never retained literally, including
+span/event names, attribute keys, schema URLs, and unknown JSON properties.
+Each becomes:
+
+```text
+sha256:<64 lowercase hexadecimal characters>
+SHA256(UTF8("source-structure-v1\0" + role + "\0" + raw_name))
+```
+
+Only fixed identifiers created by repository code, such as OTLP envelope names
+and protobuf field numbers, remain literal. Known-name allowlists classify a
+token but do not change it; an allowlist update therefore cannot rewrite an old
+fingerprint. Inventory and diagnostic serialization never contain source
+values, raw bodies, PII, credentials, source text, or local paths.
+
+The `schema_fingerprint` hashes a domain/version marker plus every distinct
+canonical structural identity in ordinal order. Counts are excluded. The
+`inventory_hash` hashes every identity plus its bounded occurrence count. Both
+hash the complete structural set before diagnostic truncation. Different
+overflow identities must therefore produce different schema fingerprints even
+when retained rows and overflow counts match.
+
+At most 256 unknown identities are retained per ingest batch in canonical
+order. Each identity count and the aggregate overflow occurrence count are
+capped at 1,000,000. Exact aggregate unknown span/event/attribute occurrence
+counts are tracked separately from retained diagnostic rows. Overflow counts
+describe only truncated diagnostic identities and never redefine support.
+
+Unknown kind is exactly `span`, `event`, or `attribute`. Unrecognized span and
+event identities map respectively to `span` and `event`; unrecognized attribute
+keys or fields at any OTLP envelope map to `attribute`. Unknown children derive
+their version label from their parent observation. Their name is either the
+exact keyed-hash form above or a fixed code-owned transport identifier; count is
+1..1,000,000; first observed time is not after last observed time; and sample
+references use a monitor-generated opaque `sample:v1:<64 lowercase hex>` token.
+Unknown records are never classified as recognized operations or used to
+synthesize hierarchy.
+
+`capture_content_state` is a closed source-capture value: `available`,
+`not_captured`, `redacted`, or `unsupported`. Observation construction derives
+state, its zero-or-one scalar reason, and `next_action` together; callers cannot
+supply arbitrary or inconsistent reason arrays. Pre-persistence adapter failure
+uses a distinct failure draft. Aggregated reason unions de-duplicate only the
+six fixed reason codes and emit their canonical order.
+
+Structural name tokens, occurrence counts, unknown identities, full structural
+inventories, decisions, and drafts are closed validated values. Collections are
+defensively copied to immutable canonical snapshots. Callers cannot supply a
+fingerprint, inventory hash, aggregate unknown count, retained-row set,
+`HasUnknownFields`, state, reason, or action independently.
+
+Successful-batch evaluation uses this precedence: recognized-record drop;
+missing required trace signal or exact incompatible-version evidence; unknown
+fingerprint; known fingerprint with unknown identities; supported. A required
+trace signal means at least one structurally valid Span envelope under the
+standard OTLP trace hierarchy. Missing optional identity/timing fields are
+completeness or mapping evidence, not version rejection. Versions remain
+evidence labels and never become a receive allowlist.
 
 ## Persistence and migration
 
@@ -120,6 +180,19 @@ created by each actual shipped schema implementation or preserved database
 artifact. A current schema with columns manually removed is not valid migration
 evidence. Each fixture is migrated, the store is closed, reopened, and checked
 again.
+
+Fixture verification covers complete SQLite schema semantics: user object
+inventory; every `table_list` field including `wr` and `strict`; ordered
+`table_xinfo` columns including hidden kind; declared types, nullability,
+defaults and primary-key ordinal; `AUTOINCREMENT`; canonical checks;
+primary/unique keys; every `index_xinfo` key or expression identity, ASC/DESC,
+collation, `key` versus auxiliary-term flag, origin and partial predicate; and
+foreign keys. Quote/comment/string-literal decoys cannot satisfy the targeted
+`AUTOINCREMENT` or CHECK parser. Internal autoindex names are not contractual;
+equivalent autoindex semantics compare equal despite different internal names.
+The expected schema is a static reviewed semantic contract checked against the
+read-only, manifest-hashed fixture from the latest shipped schema. It is never
+generated by the current migration under test.
 
 ## Claude producer and authority contract
 
