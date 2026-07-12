@@ -174,6 +174,23 @@ public sealed class SetupContractValidationTests
     }
 
     [Theory]
+    [InlineData("http://127.0.0.1:4320\n")]
+    [InlineData("http://127.0.0.1:4320\r\n")]
+    [InlineData("http://127.0.0.1:4320\r")]
+    [InlineData("http://127.0.0.1:4320\0")]
+    [InlineData("\thttp://127.0.0.1:4320")]
+    [InlineData("http://127.0.0.1:4320\t")]
+    public void Serialize_WhenEndpointContainsControlPrefixOrSuffix_RejectsWithoutEchoingIt(string endpoint)
+    {
+        var result = CreatePlanResult([CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { Endpoint = endpoint }]);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
+        Assert.DoesNotContain(endpoint, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("C:\\Users\\example\\settings.json")]
     [InlineData("Authorization: bearer marker")]
     [InlineData("System.Exception: marker")]
@@ -436,33 +453,28 @@ public sealed class SetupContractValidationTests
         Assert.Equal("setup_contract_invalid", exception.Message);
     }
 
-    [Theory]
-    [InlineData("all_desired", SetupReferenceState.Desired, SetupCurrentState.Current, SetupCurrentState.Current)]
-    [InlineData("all_previous", SetupReferenceState.Previous, SetupCurrentState.Current, SetupCurrentState.Current)]
-    [InlineData("mixed_desired_previous", SetupReferenceState.None, SetupCurrentState.Diverged, SetupCurrentState.Diverged)]
-    [InlineData("third_party", SetupReferenceState.None, SetupCurrentState.Diverged, SetupCurrentState.Diverged)]
-    [InlineData("unavailable", SetupReferenceState.None, SetupCurrentState.Unavailable, SetupCurrentState.Unavailable)]
-    public void Serialize_WhenPartialStatusUsesPublicAggregateStates_PreservesSerialization(
-        string aggregateCase,
-        SetupReferenceState referenceState,
-        SetupCurrentState targetCurrentState,
-        SetupCurrentState changeSetCurrentState)
+    [Fact]
+    public void Serialize_WhenPartialStatusIsDesiredAndCurrent_PreservesEmittedReferenceAndCurrentStates()
     {
-        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
-        {
-            ReferenceState = referenceState,
-            CurrentState = targetCurrentState,
-            RollbackAvailable = false,
-        };
-        var status = new SetupChangeSetStatusResult(
-            "00000000-0000-7000-8000-000000000003", "github-copilot", "all", "2026-07-12T00:00:00Z", "2026-07-12T00:01:00Z",
-            SetupChangeSetState.Partial, SetupCodes.InterruptedRecoveryFailed, changeSetCurrentState, false, [target]);
-        var result = new SetupCommandResult(SetupCommand.Status, true, SetupCodes.StatusReady, null, null, null, "github-copilot", [], [status], [], [], false);
+        AssertPartialStatusSerialization(SetupReferenceState.Desired, SetupCurrentState.Current, "desired", "current");
+    }
 
-        var json = SetupJson.Serialize(result);
+    [Fact]
+    public void Serialize_WhenPartialStatusIsPreviousAndCurrent_PreservesEmittedReferenceAndCurrentStates()
+    {
+        AssertPartialStatusSerialization(SetupReferenceState.Previous, SetupCurrentState.Current, "previous", "current");
+    }
 
-        Assert.Contains("\"state\":\"partial\"", json, StringComparison.Ordinal);
-        Assert.NotEmpty(aggregateCase);
+    [Fact]
+    public void Serialize_WhenPartialStatusIsNoneAndDiverged_PreservesEmittedReferenceAndCurrentStates()
+    {
+        AssertPartialStatusSerialization(SetupReferenceState.None, SetupCurrentState.Diverged, "none", "diverged");
+    }
+
+    [Fact]
+    public void Serialize_WhenPartialStatusIsNoneAndUnavailable_PreservesEmittedReferenceAndCurrentStates()
+    {
+        AssertPartialStatusSerialization(SetupReferenceState.None, SetupCurrentState.Unavailable, "none", "unavailable");
     }
 
     [Theory]
@@ -552,6 +564,30 @@ public sealed class SetupContractValidationTests
         "00000000-0000-7000-8000-000000000003", "github-copilot", "all", createdAt, updatedAt,
         SetupChangeSetState.Applied, null, SetupCurrentState.Current, true,
         [CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { ReferenceState = SetupReferenceState.Desired, CurrentState = SetupCurrentState.Current }]);
+
+    private static void AssertPartialStatusSerialization(
+        SetupReferenceState referenceState,
+        SetupCurrentState currentState,
+        string expectedReferenceState,
+        string expectedCurrentState)
+    {
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
+        {
+            ReferenceState = referenceState,
+            CurrentState = currentState,
+            RollbackAvailable = false,
+        };
+        var status = new SetupChangeSetStatusResult(
+            "00000000-0000-7000-8000-000000000003", "github-copilot", "all", "2026-07-12T00:00:00Z", "2026-07-12T00:01:00Z",
+            SetupChangeSetState.Partial, SetupCodes.InterruptedRecoveryFailed, currentState, false, [target]);
+        var result = new SetupCommandResult(SetupCommand.Status, true, SetupCodes.StatusReady, null, null, null, "github-copilot", [], [status], [], [], false);
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+        var serializedTarget = document.RootElement.GetProperty("change_sets")[0].GetProperty("targets")[0];
+
+        Assert.Equal(expectedReferenceState, serializedTarget.GetProperty("reference_state").GetString());
+        Assert.Equal(expectedCurrentState, serializedTarget.GetProperty("current_state").GetString());
+    }
 
     private static string GetManifestPath(string manifestFileName) => Path.Combine(
         AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "specifications", "contracts", "source-capabilities", "v1", "manifests", manifestFileName);

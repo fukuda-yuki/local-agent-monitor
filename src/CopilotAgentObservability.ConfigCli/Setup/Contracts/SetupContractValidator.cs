@@ -40,7 +40,7 @@ public static class SetupContractValidator
         "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,7})?Z$",
         RegexOptions.CultureInvariant);
     private static readonly Regex CanonicalLoopbackEndpoint = new(
-        "^http://(?:127\\.0\\.0\\.1|localhost|\\[::1\\]):([1-9][0-9]{0,4})$",
+        "\\Ahttp://(?:127\\.0\\.0\\.1|localhost|\\[::1\\]):([1-9][0-9]{0,4})\\z",
         RegexOptions.CultureInvariant);
 
     private static readonly HashSet<string> SuccessCodes = new(StringComparer.Ordinal)
