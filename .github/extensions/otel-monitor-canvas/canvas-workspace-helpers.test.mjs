@@ -359,6 +359,21 @@ test("effect comparison helper proxy accepts only the six token-gated canonical 
     } finally { await new Promise(resolve => helper.server.close(resolve)); }
 });
 
+test("effect comparison helper projects stale and unavailable backend errors without echoing rejected details", async () => {
+    const errors = ["application_not_active", "proposal_revision_stale", "cohort_not_confirmed", "comparison_evidence_stale", "objective_store_unavailable"];
+    let index = 0;
+    const helper = await proposalApplyHelperServer([], { fetchResponse: async () => new Response(JSON.stringify({ error: errors[index++], path: "C:\\secret\\source.diff", raw: "do-not-echo" }), { status: index === errors.length ? 503 : 400, headers: { "content-type": "application/json" } }) });
+    try {
+        for (const error of errors) {
+            const result = await helper.call("POST", "/api/session-workspace/effect-comparisons?t=token", { "content-type": "application/json", "x-canvas-token": "token" }, "{}");
+            assert.equal(result.status, error === "objective_store_unavailable" ? 503 : 400);
+            assert.equal(result.headers["cache-control"], "no-store");
+            assert.equal(result.text, JSON.stringify({ error }));
+            assert.doesNotMatch(result.text, /secret|source|raw/i);
+        }
+    } finally { await new Promise(resolve => helper.server.close(resolve)); }
+});
+
 test("Compare workspace is explicit, inert, and never confirms a candidate automatically", () => {
     const html = renderWorkspaceHtml({ monitorUrl: "http://127.0.0.1:4320", healthState: "ready", token: "synthetic-token" });
     for (const value of ["比較を確定", "not_comparable", "wrong_case", "missing_evidence", "overlaps_application", "user_excluded", "insufficient_evidence", "no_change", "improved", "regressed", "case_key", "evidence_refs", "rollback", "textContent"]) assert.match(html, new RegExp(value));
@@ -407,6 +422,54 @@ test("emitted Compare IIFE waits for manual cohort confirmation and renders the 
     assert.match(textIn(document.body), /改善/); assert.match(textIn(document.body), /無効化済み/);
     assert.equal((textIn(document.body).match(/same-ref/g) || []).length, 2);
 });
+
+test("emitted Compare IIFE renders every remaining verdict, available metrics, and safe terminal errors without authority", async () => {
+    const proposalId = "0197d7c0-0000-7000-8000-000000000001", applyId = "0197d7c0-0000-7000-8000-000000000002", comparisonId = "0197d7c0-0000-7000-8000-000000000003";
+    const candidates = Array.from({ length: 6 }, (_, index) => ({ session_id: `00000000-0000-7000-8000-00000000000${index + 1}`, suggestion_reasons: [] }));
+    const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve)); };
+    const drive = async (detail, candidateResponse = null, receiptsResponse = null) => {
+        const calls = [];
+        const fetch = async (path, init = {}) => {
+            calls.push({ path: String(path), init }); const url = String(path);
+            if (url.includes("/sessions?")) return response({ items: [bound] });
+            if (url.includes("/resolve?")) return response({ binding_status: "bound", session_id: bound.session_id });
+            if (url.includes("/sessions/")) return response({ session: bound, native_ids: [{ binding_kind: "native" }], events: [], runs: [] });
+            if (url.includes("/session-instruction/")) return response({ state: "no_instruction" });
+            if (url.includes("improvement-proposals?")) return response({ items: [{ proposal_id: proposalId, status: "recommended" }] });
+            if (url.includes("proposal-applies/receipts")) return receiptsResponse ?? response({ items: [{ apply_id: applyId, state: "applied" }] });
+            if (url.includes("effect-comparisons/candidates")) return candidateResponse ?? response({ proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, items: candidates });
+            if (url.includes(`effect-comparisons/${comparisonId}`)) return response(detail);
+            if (url.includes("effect-comparisons")) return response({ comparison_id: comparisonId }, 201);
+            return response({ error: "unexpected" }, 404);
+        };
+        const { document } = await runWorkspaceIife(fetch); await settle();
+        await document.querySelectorAll("button").find(item => item.dataset.tab === "improve").click(); await settle();
+        await document.querySelectorAll("button").find(item => item.dataset.tab === "compare").click(); await settle();
+        return { document, calls, settle };
+    };
+    for (const [verdict, reason] of [["no_change", "sub_threshold"], ["regressed", "severe_failure"], ["insufficient_evidence", "comparison_evidence_stale"]]) {
+        const detail = { receipt: { comparison_id: comparisonId, verdict }, summary: { verdict, reasons: [reason], pre_pass: 3, pre_count: 3, post_pass: 3, post_count: 3, pre_duration_median: 100, post_duration_median: 90, duration_delta: 0.1, pre_token_median: 200, post_token_median: 180, token_delta: 0.1 }, evidence: [{ kind: "event", reference_id: "<same-ref>" }], case_key_groups: [{ case_key: "case-a", evidence: [{ kind: "event", reference_id: "<same-ref>" }] }] };
+        const run = await drive(detail); await run.document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await run.settle(); await run.document.querySelectorAll("button").find(item => item.textContent.startsWith("適用記録 ·")).click(); await run.settle();
+        const selects = run.document.querySelectorAll("select"), inputs = run.document.querySelectorAll("input");
+        for (let index = 0; index < candidates.length; index++) { selects[index * 2].value = index < 3 ? "pre" : "post"; inputs[index].value = "case-a"; }
+        await run.document.querySelectorAll("button").find(item => item.textContent === "比較を確定").click(); await run.settle();
+        const panel = textIn(run.document.getElementById("workspace-panel"));
+        assert.match(panel, new RegExp(comparisonTextForTest(verdict))); assert.match(panel, new RegExp(reason));
+        for (const metric of ["3 / 3", "100", "90", "200", "180", "0.1"]) assert.match(panel, new RegExp(metric));
+        assert.equal((panel.match(/same-ref/g) || []).length, 2, "summary and matching case drill-down preserve the same evidence identity");
+        assert.equal(run.calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons")).length, 1);
+        assert.equal(run.calls.filter(call => /session\.send|canvas/i.test(call.path)).length, 0);
+    }
+    const absent = await drive({}, null, response({ items: [] })); await absent.document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await absent.settle();
+    assert.equal(absent.document.querySelectorAll("button").find(item => item.textContent === "比較を確定"), undefined);
+    assert.equal(absent.calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons")).length, 0);
+    for (const error of ["application_not_active", "proposal_revision_stale", "cohort_not_confirmed", "comparison_evidence_stale", "objective_store_unavailable"]) {
+        const failed = await drive({}, response({ error, secret_path: "C:\\secret\\raw" }, error === "objective_store_unavailable" ? 503 : 400)); await failed.document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await failed.settle(); await failed.document.querySelectorAll("button").find(item => item.textContent.startsWith("適用記録 ·")).click(); await failed.settle();
+        const panel = textIn(failed.document.getElementById("workspace-panel")); assert.match(panel, new RegExp(error)); assert.doesNotMatch(panel, /secret|raw/i); assert.equal(failed.calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons")).length, 0);
+    }
+});
+
+function comparisonTextForTest(value) { return ({ no_change: "変化なし", regressed: "悪化", insufficient_evidence: "証拠不足" })[value]; }
 
 test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, and gives rollback failures terminal precedence", async () => {
     const calls = [];
