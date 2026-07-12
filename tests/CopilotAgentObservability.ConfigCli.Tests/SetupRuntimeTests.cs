@@ -101,24 +101,24 @@ public sealed class SetupRuntimeTests
         var first = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
             callbackEntered.Set();
-            releaseCallback.Wait();
+            WaitOrFail(releaseCallback, "the first setup callback release");
         }));
-        callbackEntered.Wait();
+        WaitOrFail(callbackEntered, "the first setup callback entry");
 
         var second = Task.Run(() =>
         {
             secondAttempted.Set();
             setupLock.ExecuteWhileHeld(platform, paths, secondCallbackEntered.Set);
         });
-        secondAttempted.Wait();
+        WaitOrFail(secondAttempted, "the second setup callback attempt");
         Assert.False(secondCallbackEntered.IsSet);
         using var contended = SetupLock.TryAcquire(platform, paths);
         Assert.False(contended.Acquired);
         Assert.Equal(SetupCodes.SetupBusy, contended.Code);
 
         releaseCallback.Set();
-        await first;
-        await second;
+        await AwaitOrFail(first, "the first setup callback completion");
+        await AwaitOrFail(second, "the second setup callback completion");
         Assert.True(secondCallbackEntered.IsSet);
 
         callbackEntered.Reset();
@@ -126,9 +126,9 @@ public sealed class SetupRuntimeTests
         var third = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
             callbackEntered.Set();
-            releaseCallback.Wait();
+            WaitOrFail(releaseCallback, "the third setup callback release");
         }));
-        callbackEntered.Wait();
+        WaitOrFail(callbackEntered, "the third setup callback entry");
         var dispose = Task.Factory.StartNew(
             () =>
             {
@@ -138,15 +138,143 @@ public sealed class SetupRuntimeTests
             CancellationToken.None,
             TaskCreationOptions.LongRunning,
             TaskScheduler.Default);
-        disposeStarted.Wait();
+        WaitOrFail(disposeStarted, "the external Dispose start");
         Assert.False(dispose.IsCompleted);
 
         releaseCallback.Set();
-        await third;
-        await dispose;
+        await AwaitOrFail(third, "the third setup callback completion");
+        await AwaitOrFail(dispose, "the external Dispose completion");
         AssertLockRequired(() => setupLock.ExecuteWhileHeld(platform, paths, () => { }));
         using var reacquired = SetupLock.TryAcquire(platform, paths);
         Assert.True(reacquired.Acquired);
+    }
+
+    [Fact]
+    public async Task SetupLock_DisposeRequestRejectsAnAlreadyQueuedExecuteBeforeReleasingTheHandle()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        using var disposeRequested = new ManualResetEventSlim();
+        var handle = new CountingSetupExclusiveFileLock();
+        var setupLock = SetupLock.CreateForTesting(handle, platform, paths, disposeRequested.Set);
+        using var callbackEntered = new ManualResetEventSlim();
+        using var releaseCallback = new ManualResetEventSlim();
+        using var queuedAttempted = new ManualResetEventSlim();
+
+        var active = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
+        {
+            callbackEntered.Set();
+            WaitOrFail(releaseCallback, "the active setup callback release");
+        }));
+        WaitOrFail(callbackEntered, "the active setup callback entry");
+        var queued = Task.Run(() =>
+        {
+            queuedAttempted.Set();
+            setupLock.ExecuteWhileHeld(platform, paths, () => { });
+        });
+        WaitOrFail(queuedAttempted, "the queued setup callback attempt");
+
+        var dispose = Task.Run(setupLock.Dispose);
+        WaitOrFail(disposeRequested, "the DisposeRequested lifecycle transition");
+        Assert.Equal(0, handle.DisposeCount);
+
+        releaseCallback.Set();
+        await AwaitOrFail(active, "the active setup callback completion");
+        var rejected = await Assert.ThrowsAsync<SetupStorageException>(
+            () => AwaitOrFail(queued, "the queued setup callback rejection"));
+        Assert.Equal(SetupStorageCodes.LockRequired, rejected.Code);
+        await AwaitOrFail(dispose, "the external Dispose completion");
+        Assert.Equal(1, handle.DisposeCount);
+    }
+
+    [Fact]
+    public async Task SetupLock_ConcurrentAndRepeatedDisposeCallsReleaseANonIdempotentHandleExactlyOnce()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        var handle = new CountingSetupExclusiveFileLock();
+        var setupLock = SetupLock.CreateForTesting(handle, platform, paths);
+
+        var disposals = Enumerable.Range(0, 8).Select(_ => Task.Run(setupLock.Dispose)).ToArray();
+        await AwaitOrFail(Task.WhenAll(disposals), "all concurrent Dispose calls");
+        setupLock.Dispose();
+
+        Assert.Equal(1, handle.DisposeCount);
+    }
+
+    [Fact]
+    public async Task SetupLock_ExternalDisposeOwnsTheHandleReleaseExceptionAfterTheCallbackCompletes()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        var releaseFailure = new IOException("synthetic handle release failure");
+        var handle = new CountingSetupExclusiveFileLock(releaseFailure);
+        using var disposeRequested = new ManualResetEventSlim();
+        var setupLock = SetupLock.CreateForTesting(handle, platform, paths, disposeRequested.Set);
+        using var callbackEntered = new ManualResetEventSlim();
+        using var releaseCallback = new ManualResetEventSlim();
+
+        var callback = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
+        {
+            callbackEntered.Set();
+            WaitOrFail(releaseCallback, "the callback release before throwing-handle disposal");
+        }));
+        WaitOrFail(callbackEntered, "the callback entry before throwing-handle disposal");
+        var dispose = Task.Run(setupLock.Dispose);
+        WaitOrFail(disposeRequested, "the throwing-handle DisposeRequested transition");
+
+        releaseCallback.Set();
+        await AwaitOrFail(callback, "the callback completion before external release failure");
+        var actual = await Assert.ThrowsAsync<IOException>(
+            () => AwaitOrFail(dispose, "the external throwing-handle Dispose completion"));
+        setupLock.Dispose();
+
+        Assert.Same(releaseFailure, actual);
+        Assert.Equal(1, handle.DisposeCount);
+    }
+
+    [Fact]
+    public void SetupLock_ReentrantDisposeReleasesANonIdempotentHandleOnceAtTheOutermostExit()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        var handle = new CountingSetupExclusiveFileLock();
+        var setupLock = SetupLock.CreateForTesting(handle, platform, paths);
+
+        setupLock.ExecuteWhileHeld(platform, paths, () =>
+        {
+            setupLock.ExecuteWhileHeld(platform, paths, () =>
+            {
+                setupLock.Dispose();
+                Assert.Equal(0, handle.DisposeCount);
+            });
+            Assert.Equal(0, handle.DisposeCount);
+        });
+        setupLock.Dispose();
+
+        Assert.Equal(1, handle.DisposeCount);
+    }
+
+    [Fact]
+    public void SetupLock_CallbackExceptionTakesPrecedenceOverADeferredHandleReleaseException()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        var callbackFailure = new InvalidOperationException("synthetic callback failure");
+        var releaseFailure = new IOException("synthetic handle release failure");
+        var handle = new CountingSetupExclusiveFileLock(releaseFailure);
+        var setupLock = SetupLock.CreateForTesting(handle, platform, paths);
+
+        var actual = Assert.Throws<InvalidOperationException>(() =>
+            setupLock.ExecuteWhileHeld(platform, paths, () =>
+            {
+                setupLock.Dispose();
+                throw callbackFailure;
+            }));
+        setupLock.Dispose();
+
+        Assert.Same(callbackFailure, actual);
+        Assert.Equal(1, handle.DisposeCount);
     }
 
     [Fact]
@@ -256,16 +384,16 @@ public sealed class SetupRuntimeTests
             lock (setupLock)
             {
                 publicMonitorEntered.Set();
-                releasePublicMonitor.Wait();
+                WaitOrFail(releasePublicMonitor, "the public monitor release");
             }
         });
-        publicMonitorEntered.Wait();
+        WaitOrFail(publicMonitorEntered, "the public monitor entry");
 
         var operation = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () => 11));
-        Assert.Equal(11, await operation);
+        Assert.Equal(11, await AwaitOrFail(operation, "the privately gated setup operation"));
 
         releasePublicMonitor.Set();
-        await monitorHolder;
+        await AwaitOrFail(monitorHolder, "the public monitor holder completion");
     }
 
     [Fact]
@@ -401,6 +529,33 @@ public sealed class SetupRuntimeTests
         Assert.Equal(SetupStorageCodes.LockRequired, exception.Code);
     }
 
+    private static void WaitOrFail(ManualResetEventSlim signal, string description) =>
+        Assert.True(signal.Wait(TimeSpan.FromSeconds(10)), $"Timed out waiting for {description}.");
+
+    private static async Task AwaitOrFail(Task task, string description)
+    {
+        try
+        {
+            await task.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (TimeoutException exception)
+        {
+            throw new InvalidOperationException($"Timed out waiting for {description}.", exception);
+        }
+    }
+
+    private static async Task<T> AwaitOrFail<T>(Task<T> task, string description)
+    {
+        try
+        {
+            return await task.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (TimeoutException exception)
+        {
+            throw new InvalidOperationException($"Timed out waiting for {description}.", exception);
+        }
+    }
+
     private static Process StartLockHoldingPowerShell(string lockPath)
     {
         const string command = "${stream} = [System.IO.File]::Open($env:CAO_SETUP_LOCK_TEST_PATH, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); try { [Console]::Out.WriteLine('READY'); [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null } finally { ${stream}.Dispose() }";
@@ -437,5 +592,21 @@ public sealed class SetupRuntimeTests
         startInfo.ArgumentList.Add(command);
 
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start pwsh.");
+    }
+
+    private sealed class CountingSetupExclusiveFileLock(Exception? disposeFailure = null) : ISetupExclusiveFileLock
+    {
+        private int disposeCount;
+
+        public int DisposeCount => Volatile.Read(ref disposeCount);
+
+        public void Dispose()
+        {
+            Interlocked.Increment(ref disposeCount);
+            if (disposeFailure is not null)
+            {
+                throw disposeFailure;
+            }
+        }
     }
 }

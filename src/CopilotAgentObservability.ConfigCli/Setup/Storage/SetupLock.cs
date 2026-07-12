@@ -12,16 +12,22 @@ public sealed class SetupLock : IDisposable
     private readonly ISetupExclusiveFileLock fileLock;
     private readonly ISetupPlatform platform;
     private readonly string runtimeRoot;
+    private readonly Action? disposeRequestedObserver;
     private readonly object operationGate = new();
     private int lifecycle = Held;
     private int operationDepth;
     private bool releaseOnOperationExit;
 
-    private SetupLock(ISetupExclusiveFileLock fileLock, ISetupPlatform platform, string runtimeRoot)
+    private SetupLock(
+        ISetupExclusiveFileLock fileLock,
+        ISetupPlatform platform,
+        string runtimeRoot,
+        Action? disposeRequestedObserver = null)
     {
         this.fileLock = fileLock;
         this.platform = platform;
         this.runtimeRoot = runtimeRoot;
+        this.disposeRequestedObserver = disposeRequestedObserver;
     }
 
     public static SetupLockAcquireResult TryAcquire(ISetupPlatform platform, SetupRuntimePaths paths)
@@ -32,6 +38,13 @@ public sealed class SetupLock : IDisposable
             ? SetupLockAcquireResult.Busy
             : SetupLockAcquireResult.Success(new SetupLock(fileLock, platform, paths.Root));
     }
+
+    internal static SetupLock CreateForTesting(
+        ISetupExclusiveFileLock fileLock,
+        ISetupPlatform platform,
+        SetupRuntimePaths paths,
+        Action? disposeRequestedObserver = null) =>
+        new(fileLock, platform, paths.Root, disposeRequestedObserver);
 
     internal void AssertHeld(ISetupPlatform expectedPlatform, SetupRuntimePaths expectedPaths)
     {
@@ -68,16 +81,36 @@ public sealed class SetupLock : IDisposable
             }
 
             operationDepth++;
+            Exception? callbackException = null;
             try
             {
                 return action();
+            }
+            catch (Exception exception)
+            {
+                callbackException = exception;
+                throw;
             }
             finally
             {
                 operationDepth--;
                 if (operationDepth == 0 && releaseOnOperationExit)
                 {
-                    ReleaseUnderGate();
+                    if (callbackException is null)
+                    {
+                        ReleaseUnderGate();
+                    }
+                    else
+                    {
+                        try
+                        {
+                            ReleaseUnderGate();
+                        }
+                        catch
+                        {
+                            // The callback failure remains the operation's primary failure.
+                        }
+                    }
                 }
             }
         }
@@ -89,6 +122,8 @@ public sealed class SetupLock : IDisposable
         {
             return;
         }
+
+        disposeRequestedObserver?.Invoke();
 
         if (Monitor.IsEntered(operationGate))
         {
