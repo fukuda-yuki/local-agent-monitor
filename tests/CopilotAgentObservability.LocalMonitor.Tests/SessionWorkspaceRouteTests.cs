@@ -25,10 +25,14 @@ public sealed class SessionWorkspaceRouteTests
         using var list = await host.Client.GetFromJsonAsync<JsonDocument>("/api/session-workspace/sessions");
         var item = Assert.Single(list!.RootElement.GetProperty("items").EnumerateArray());
         Assert.Equal(
-            ["session_id", "status", "completeness", "source_surfaces", "repository", "workspace", "started_at", "ended_at", "last_seen_at", "raw_retention_state"],
+            ["session_id", "status", "completeness", "source_surfaces", "repository", "workspace", "started_at", "ended_at", "last_seen_at", "raw_retention_state", "source_diagnostic", "binding_state", "completeness_reason_codes", "content_state"],
             item.EnumerateObject().Select(property => property.Name));
         var sessionId = item.GetProperty("session_id").GetString();
         Assert.Equal("partial", item.GetProperty("completeness").GetString());
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("source_diagnostic").ValueKind);
+        Assert.Equal("otel_only", item.GetProperty("binding_state").GetString());
+        Assert.Empty(item.GetProperty("completeness_reason_codes").EnumerateArray());
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("content_state").ValueKind);
         Assert.False(item.TryGetProperty("payload", out _));
 
         using var detail = await host.Client.GetFromJsonAsync<JsonDocument>($"/api/session-workspace/sessions/{sessionId}");

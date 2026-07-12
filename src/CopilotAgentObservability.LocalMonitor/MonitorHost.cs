@@ -6,6 +6,7 @@ using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.LocalMonitor.Sessions;
+using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -78,6 +79,7 @@ internal static class MonitorHost
 
         var compatibilityStore = testOptions?.SourceCompatibilityStore
             ?? new SqliteSourceCompatibilityStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        compatibilityStore.CreateSchema();
         if (testOptions?.StartWriter ?? true)
         {
             var commitStore = testOptions?.IngestionCommitStore
@@ -135,6 +137,17 @@ internal static class MonitorHost
         }
 
         var app = builder.Build();
+        SourceProjectionState ProjectTrace(MonitorTraceRow row)
+        {
+            var observations = projectionStore.ListRawRecordsByTraceId(row.TraceId, 200)
+                .Select(record => record.Id is { } id ? compatibilityStore.GetByRawRecordId(id) : null)
+                .Where(observation => observation is not null)
+                .Cast<SourceCompatibilityRow>()
+                .ToArray();
+            var session = FindSessionForTrace(sessionStore, row.TraceId);
+            return SourceProjectionStateBuilder.Build(observations, session);
+        }
+
         app.UseExceptionHandler(errorApp =>
         {
             errorApp.Run(async context =>
@@ -185,7 +198,9 @@ internal static class MonitorHost
             proposalApplyService,
             sessionOtelEnricher,
             testOptions?.SessionCommitTimeout ?? DefaultCommitTimeout,
-            sessionTimeProvider);
+            sessionTimeProvider,
+            projectionStore,
+            compatibilityStore);
         app.MapGet("/api/monitor/ingestions", async context =>
         {
             if (!TryParseCursorQuery(context, out var after, out var limit))
@@ -265,7 +280,7 @@ internal static class MonitorHost
             try
             {
                 var page = projectionStore.ListMonitorTraces(after, limit);
-                var items = page.Items.Select(ToTraceDto);
+                var items = page.Items.Select(row => ToTraceDto(row, ProjectTrace(row)));
                 long? nextCursor = page.HasMore && page.Items.Count > 0 ? page.Items[^1].Id : null;
                 await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
             }
@@ -398,9 +413,9 @@ internal static class MonitorHost
                 await WriteJsonAsync(context, new
                 {
                     scope = new { limit, trace_count = summary.TraceCount },
-                    latest_trace = ToTraceDto(summary.LatestTrace),
-                    top_token_trace = ToTraceDto(summary.TopTokenTrace),
-                    error_trace = ToTraceDto(summary.ErrorTrace),
+                    latest_trace = ToTraceDto(summary.LatestTrace, summary.LatestTrace is null ? null : ProjectTrace(summary.LatestTrace)),
+                    top_token_trace = ToTraceDto(summary.TopTokenTrace, summary.TopTokenTrace is null ? null : ProjectTrace(summary.TopTokenTrace)),
+                    error_trace = ToTraceDto(summary.ErrorTrace, summary.ErrorTrace is null ? null : ProjectTrace(summary.ErrorTrace)),
                     per_model_summary = summary.PerModelSummary.Select(m => new
                     {
                         model = m.Model,
@@ -498,7 +513,7 @@ internal static class MonitorHost
             try
             {
                 var page = projectionStore.ListMonitorTracesFiltered(query);
-                var items = page.Items.Select(ToTraceListDto);
+                var items = page.Items.Select(row => ToTraceListDto(row, ProjectTrace(row)));
                 await WriteJsonAsync(context, new
                 {
                     items,
@@ -1127,7 +1142,7 @@ internal static class MonitorHost
         string.Equals(context.Request.Headers["x-monitor-csrf"].ToString(), "local-monitor", StringComparison.Ordinal);
 
     /// <summary>The same <c>compactTrace</c>-shaped projection <c>/api/monitor/traces</c> emits per item, reused for the summary's embedded highlight traces.</summary>
-    private static object? ToTraceDto(MonitorTraceRow? row) => row is null ? null : new
+    private static object? ToTraceDto(MonitorTraceRow? row, SourceProjectionState? state = null) => row is null ? null : new
     {
         id = row.Id,
         trace_id = row.TraceId,
@@ -1153,6 +1168,11 @@ internal static class MonitorHost
         repository_name = row.RepositoryName,
         workspace_label = row.WorkspaceLabel,
         repo_snapshot = row.RepoSnapshot,
+        source_diagnostic = state?.SourceDiagnostic?.ToWire(),
+        binding_state = state?.BindingState ?? "otel_only",
+        completeness = state?.Completeness ?? "unbound",
+        completeness_reason_codes = state?.CompletenessReasonCodes ?? ["missing_native_session_id"],
+        content_state = state?.ContentState,
     };
 
     /// <summary>
@@ -1161,7 +1181,7 @@ internal static class MonitorHost
     /// <see cref="ToTraceDto"/> consumers (`/api/monitor/traces`, `/api/monitor/summary`)
     /// keep their pinned shape/ordering (D042 C6).
     /// </summary>
-    private static object ToTraceListDto(MonitorTraceRow row) => new
+    private static object ToTraceListDto(MonitorTraceRow row, SourceProjectionState? state = null) => new
     {
         id = row.Id,
         trace_id = row.TraceId,
@@ -1190,7 +1210,27 @@ internal static class MonitorHost
         cache_read_tokens = row.CacheReadTokens,
         cache_creation_tokens = row.CacheCreationTokens,
         trace_status = row.TraceStatus,
+        source_diagnostic = state?.SourceDiagnostic?.ToWire(),
+        binding_state = state?.BindingState ?? "otel_only",
+        completeness = state?.Completeness ?? "unbound",
+        completeness_reason_codes = state?.CompletenessReasonCodes ?? ["missing_native_session_id"],
+        content_state = state?.ContentState,
     };
+
+    private static SessionDetail? FindSessionForTrace(ISessionStore store, string traceId)
+    {
+        try
+        {
+            return store.ListMostRecent(200)
+                .Select(item => store.GetDetail(item.SessionId))
+                .FirstOrDefault(detail => detail is not null
+                    && (detail.Runs.Any(run => run.TraceId == traceId) || detail.Events.Any(eventItem => eventItem.TraceId == traceId)));
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
 
     private static bool TryParseTraceListQuery(HttpContext context, MonitorOverviewService overviewService, out MonitorTraceListQuery query)
     {

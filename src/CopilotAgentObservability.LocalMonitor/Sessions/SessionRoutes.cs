@@ -2,6 +2,9 @@ using System.Text.Json.Serialization;
 using CopilotAgentObservability.Telemetry.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
+using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
+using CopilotAgentObservability.Persistence.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions;
 
@@ -24,7 +27,9 @@ internal static class SessionRoutes
         ProposalApplyService proposalApplyService,
         SqliteSessionOtelEnricher otelEnricher,
         TimeSpan commitTimeout,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        IMonitorProjectionStore projectionStore,
+        ISourceCompatibilityStore compatibilityStore)
     {
         MapProposalApplyRoutes(app, store, proposalApplyService);
         EffectComparisonRoutes.Map(app, store, proposalApplyService, timeProvider);
@@ -140,7 +145,15 @@ internal static class SessionRoutes
                 await Failure(context, 400, "invalid_session_workspace_query");
                 return;
             }
-            var items = store.ListMostRecent(limit).Select(item => SessionDto(item, store.GetDetail(item.SessionId)?.NativeIds ?? [], store.GetRawRetentionState(item.SessionId)));
+            var items = store.ListMostRecent(limit).Select(item =>
+            {
+                var detail = store.GetDetail(item.SessionId);
+                return SessionDto(
+                    item,
+                    detail?.NativeIds ?? [],
+                    store.GetRawRetentionState(item.SessionId),
+                    ProjectSession(detail, projectionStore, compatibilityStore));
+            });
             await Json(context, new { items });
         });
 
@@ -220,7 +233,11 @@ internal static class SessionRoutes
             }
             await Json(context, new
             {
-                session = SessionDto(detail.Session, detail.NativeIds, store.GetRawRetentionState(detail.Session.SessionId)),
+                session = SessionDto(
+                    detail.Session,
+                    detail.NativeIds,
+                    store.GetRawRetentionState(detail.Session.SessionId),
+                    ProjectSession(detail, projectionStore, compatibilityStore)),
                 human_evaluation = store.GetHumanEvaluation(id) is { } evaluation ? new
                 {
                     verdict = evaluation.Verdict,
@@ -476,7 +493,11 @@ internal static class SessionRoutes
     private static object DraftDto(ProposalApplyDraft draft) => new { draft_id = draft.DraftId, proposal_id = draft.ProposalId, root_id = draft.RootId, selection_revision = draft.SelectionRevision, approval_digest = draft.ApprovalDigest, state = draft.IsApproved ? "approved" : "draft", diff = string.Concat(draft.Files.OrderBy(file => file.RelativePath, StringComparer.Ordinal).Select(file => LineDiff.Unified(file.RelativePath, file.OriginalText, file.ReplacementText))), files = draft.Files.Select(file => new { relative_path = file.RelativePath, base_sha256 = file.BaseSha256, replacement_sha256 = file.ReplacementSha256 }), hunks = draft.Hunks.Select(hunk => new { hunk_id = hunk.HunkId, relative_path = hunk.RelativePath, start_line = hunk.StartLine, base_line_count = hunk.BaseLineCount, replacement_text = hunk.ReplacementText, selected = hunk.Selected }) };
     private static object DraftStateDto(ProposalApplyDraft draft) => new { draft_id = draft.DraftId, proposal_id = draft.ProposalId, root_id = draft.RootId, selection_revision = draft.SelectionRevision, approval_digest = draft.ApprovalDigest, state = draft.IsApproved ? "approved" : "draft", files = draft.Files.Select(file => new { base_sha256 = file.BaseSha256, replacement_sha256 = file.ReplacementSha256 }), hunks = draft.Hunks.Select(hunk => new { hunk_id = hunk.HunkId, selected = hunk.Selected }) };
 
-    private static object SessionDto(ObservedSession item, IReadOnlyList<SessionNativeId> nativeIds, SessionRawRetentionState rawRetentionState) => new
+    private static object SessionDto(
+        ObservedSession item,
+        IReadOnlyList<SessionNativeId> nativeIds,
+        SessionRawRetentionState rawRetentionState,
+        SourceProjectionState state) => new
     {
         session_id = item.SessionId,
         status = SessionWire.ToWire(item.Status),
@@ -488,7 +509,39 @@ internal static class SessionRoutes
         ended_at = item.EndedAt,
         last_seen_at = item.LastSeenAt,
         raw_retention_state = SessionWire.ToWire(rawRetentionState),
+        source_diagnostic = state.SourceDiagnostic?.ToWire(),
+        binding_state = state.BindingState,
+        completeness_reason_codes = state.CompletenessReasonCodes,
+        content_state = state.ContentState,
     };
+
+    private static SourceProjectionState ProjectSession(
+        SessionDetail? detail,
+        IMonitorProjectionStore projectionStore,
+        ISourceCompatibilityStore compatibilityStore)
+    {
+        if (detail is null)
+        {
+            return SourceProjectionState.Unavailable;
+        }
+
+        var traceIds = detail.Runs
+            .Select(run => run.TraceId)
+            .Concat(detail.Events.Select(item => item.TraceId))
+            .Where(traceId => !string.IsNullOrWhiteSpace(traceId))
+            .Distinct(StringComparer.Ordinal)
+            .Cast<string>()
+            .ToArray();
+        var observations = traceIds
+            .SelectMany(traceId => projectionStore.ListRawRecordsByTraceId(traceId, 200))
+            .Select(record => record.Id is { } id ? compatibilityStore.GetByRawRecordId(id) : null)
+            .Where(observation => observation is not null)
+            .Cast<SourceCompatibilityRow>()
+            .GroupBy(observation => observation.Id)
+            .Select(group => group.First())
+            .ToArray();
+        return SourceProjectionStateBuilder.Build(observations, detail);
+    }
 
     private static bool HasValidExplicitBinding(ISessionStore store, SessionIngestEnvelope envelope)
     {
