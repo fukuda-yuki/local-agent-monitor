@@ -88,14 +88,21 @@ public sealed class SessionEffectComparisonRouteTests
             Request("{}", origin: null, csrf: true, media: false),
             Request(new string('x', 1_048_577), origin: null, csrf: true, media: true),
         };
-        var expected = new[] { "cross_origin_forbidden", "csrf_required", "unsupported_media_type", "request_too_large" };
-        foreach (var (request, error) in cases.Zip(expected))
+        var expected = new[]
+        {
+            (HttpStatusCode.Forbidden, "cross_origin_forbidden"),
+            (HttpStatusCode.Forbidden, "csrf_required"),
+            (HttpStatusCode.UnsupportedMediaType, "unsupported_media_type"),
+            (HttpStatusCode.RequestEntityTooLarge, "request_too_large"),
+        };
+        foreach (var (request, expectation) in cases.Zip(expected))
         {
             using (request)
             {
                 using var response = await host.Client.SendAsync(request);
+                Assert.Equal(expectation.Item1, response.StatusCode);
                 Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
-                Assert.Equal($"{{\"error\":\"{error}\"}}", await response.Content.ReadAsStringAsync());
+                Assert.Equal($"{{\"error\":\"{expectation.Item2}\"}}", await response.Content.ReadAsStringAsync());
             }
         }
         Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM effect_comparisons;"));
@@ -216,8 +223,13 @@ public sealed class SessionEffectComparisonRouteTests
         using var beforeRestart = await fixture.Host.Client.GetAsync($"/api/session-workspace/effect-comparisons/{comparisonId:D}");
         var detail = await beforeRestart.Content.ReadAsStringAsync();
         Assert.Equal("no-store", beforeRestart.Headers.CacheControl?.ToString());
-        Assert.Equal(6, JsonDocument.Parse(detail).RootElement.GetProperty("sessions").GetArrayLength());
-        Assert.Equal(6, JsonDocument.Parse(detail).RootElement.GetProperty("evidence").GetArrayLength());
+        using (var parsed = JsonDocument.Parse(detail))
+        {
+            var comparison = parsed.RootElement;
+            Assert.Equal(6, comparison.GetProperty("sessions").GetArrayLength());
+            Assert.Equal(6, comparison.GetProperty("evidence").GetArrayLength());
+            AssertCaseKeyDrillDownMatchesStoredEvidence(comparison, pre, post);
+        }
         await fixture.RestartAsync();
         using var afterRestart = await fixture.Host.Client.GetAsync($"/api/session-workspace/effect-comparisons/{comparisonId:D}");
         Assert.Equal(detail, await afterRestart.Content.ReadAsStringAsync());
@@ -470,6 +482,46 @@ public sealed class SessionEffectComparisonRouteTests
         connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
         return (long)command.ExecuteScalar()!;
     }
+
+    private static void AssertCaseKeyDrillDownMatchesStoredEvidence(JsonElement comparison, IReadOnlyList<Guid> pre, IReadOnlyList<Guid> post)
+    {
+        var expectedSessionsByCaseKey = Enumerable.Range(0, pre.Count).ToDictionary(
+            index => $"case-{index}",
+            index => new[] { pre[index].ToString("D"), post[index].ToString("D") }.OrderBy(id => id, StringComparer.Ordinal).ToArray(),
+            StringComparer.Ordinal);
+        var storedEvidenceBySession = comparison.GetProperty("evidence").EnumerateArray()
+            .GroupBy(item => item.GetProperty("session_id").GetGuid().ToString("D"), StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Select(EvidenceFacts).OrderBy(value => value, StringComparer.Ordinal).ToArray(), StringComparer.Ordinal);
+        var groups = comparison.GetProperty("case_key_groups").EnumerateArray().ToArray();
+
+        Assert.Equal(expectedSessionsByCaseKey.Count, groups.Length);
+        var groupEvidence = new List<string>();
+        foreach (var group in groups)
+        {
+            var caseKey = group.GetProperty("case_key").GetString();
+            Assert.NotNull(caseKey);
+            var expectedSessionIds = expectedSessionsByCaseKey[caseKey!];
+            var groupSessionIds = group.GetProperty("sessions").EnumerateArray().Select(item => item.GetGuid().ToString("D")).OrderBy(id => id, StringComparer.Ordinal).ToArray();
+            Assert.Equal(expectedSessionIds, groupSessionIds);
+
+            var expectedEvidence = expectedSessionIds.SelectMany(sessionId => storedEvidenceBySession[sessionId]).OrderBy(value => value, StringComparer.Ordinal).ToArray();
+            var actualEvidence = group.GetProperty("evidence").EnumerateArray().Select(EvidenceFacts).OrderBy(value => value, StringComparer.Ordinal).ToArray();
+            Assert.Equal(expectedEvidence, actualEvidence);
+            groupEvidence.AddRange(actualEvidence);
+        }
+
+        var storedEvidence = storedEvidenceBySession.Values.SelectMany(value => value).OrderBy(value => value, StringComparer.Ordinal).ToArray();
+        Assert.Equal(storedEvidence, groupEvidence.OrderBy(value => value, StringComparer.Ordinal).ToArray());
+    }
+
+    private static string EvidenceFacts(JsonElement evidence) => string.Join("|", new[]
+    {
+        evidence.GetProperty("session_id").GetGuid().ToString("D"),
+        evidence.GetProperty("kind").GetString(),
+        evidence.GetProperty("reference_id").GetString(),
+        evidence.GetProperty("recorded_at").GetString(),
+        evidence.GetProperty("human_verdict").GetString(),
+    });
 
     private static void AssertRejectedWithoutReceiptOrMaturityChange(string databasePath, Guid proposalId, string responseBody, string rejectedValue)
     {
