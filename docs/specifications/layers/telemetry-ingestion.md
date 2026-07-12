@@ -502,12 +502,25 @@ the envelope/event shape, and read interfaces are defined in
 The installed Local Monitor also provides:
 
 ```text
-hook-forward --endpoint <loopback-url> --timeout-ms 250
+hook-forward --endpoint <loopback-url> --timeout-ms 250 \
+  [--source claude-code \
+    [--source-version <metadata-token>] \
+    [--schema-fingerprint <64-lowercase-hex>]]
 ```
 
 The forwarder reads one stdin JSON payload. Invalid input, network failure, and
 timeout always exit `0`; stdout and stderr remain empty; the forwarder never
 influences the agent Hook decision. The endpoint must be loopback.
+
+Omitting `--source` selects the unchanged Copilot Hook path. Exact
+`--source claude-code` selects Claude before stdin is interpreted; no payload
+shape may select the source. Provenance flags are valid only in Claude mode,
+which requires at least one trusted out-of-band value: the emitting application
+version or an approved Hook schema fingerprint. The forwarder does not infer
+either value from payloads, documentation labels, or inventory-only evidence.
+Missing, unknown, or duplicate selector state, a provenance flag without the
+Claude selector, or missing/invalid Claude provenance suppresses forwarding
+while retaining exit `0` and silent output. Copilot Hook behavior is unchanged.
 
 Copilot CLI and VS Code share PascalCase Hooks. When Hook evidence does not
 identify the source exactly, ingestion records `hook-unknown`. Environment,

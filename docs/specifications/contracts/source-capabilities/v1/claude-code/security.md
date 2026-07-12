@@ -10,7 +10,10 @@ repository-safe metadata only.
 
 - Claude OTel traces use the existing Local Monitor `POST /v1/traces`
   `otel-http` transport path while recording `claude-code-otel` provenance.
-- Claude command/HTTP Hooks use `hook-forward`, which converts exactly one
+- Claude command/HTTP Hooks use `hook-forward --source claude-code` plus at
+  least one of the out-of-band `--source-version` or `--schema-fingerprint`
+  provenance arguments. The selector is evaluated before stdin, and the
+  forwarder never infers Claude from payload shape. It converts exactly one
   producer JSON object into the existing strict
   `POST /api/session-ingest/v1/events` envelope with
   `X-CAO-Session-Event-Version: 1`, `schema_version = 1`,
@@ -24,6 +27,13 @@ repository-safe metadata only.
   timeout exit `0`, stdout/stderr remain empty, and no outcome changes the
   Claude Hook decision. This fail-open behavior does not weaken ingest
   validation or storage safety.
+
+Omitting `--source` preserves the existing Copilot Hook path. Claude provenance
+flags are invalid without exact `--source claude-code`; a missing selector value,
+unknown or duplicate selector, and missing or invalid provenance suppress the
+intended Claude forwarding silently. Provenance comes only from the actually
+emitting installation or an approved Hook fingerprint, never from the Hook
+payload, documentation/fixture labels, or inventory-only evidence.
 
 The composite `claude-code-otel+claude-code-hook` value is a manifest registry
 label only. Per-observation and per-field provenance is always the actual

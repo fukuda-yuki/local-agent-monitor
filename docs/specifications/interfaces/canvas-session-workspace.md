@@ -258,7 +258,10 @@ or raw exception messages.
 The installed Local Monitor provides this mode:
 
 ```text
-hook-forward --endpoint <loopback-url> --timeout-ms 250
+hook-forward --endpoint <loopback-url> --timeout-ms 250 \
+  [--source claude-code \
+    [--source-version <metadata-token>] \
+    [--schema-fingerprint <64-lowercase-hex>]]
 ```
 
 It reads exactly one JSON payload from stdin and forwards it to the Session
@@ -266,6 +269,45 @@ event ingest endpoint. It always exits `0` for invalid input, network failure,
 or timeout, writes nothing to stdout or stderr, and never influences the agent
 Hook decision. The endpoint must be loopback. No permissive alternate parser,
 retry path, or agent-decision fallback is added.
+
+Omitting `--source` selects the existing Copilot Hook mode and preserves its
+no-new-argument behavior. The only accepted selector is the exact pair
+`--source claude-code`; it selects Claude mode before stdin is interpreted.
+The forwarder never infers the source from Hook payload shape. Provenance flags
+are valid only in Claude mode. A provenance flag without the selector, a
+missing selector value, any selector value other than `claude-code`, or a
+duplicate selector is invalid input.
+The selector and provenance option pairs may each appear at most once and may
+appear in any option order; existing endpoint and timeout parsing is unchanged.
+
+Claude mode requires at least one of `--source-version` or
+`--schema-fingerprint`. Both use the exact Session provenance validation above.
+The value is supplied out-of-band from the actually emitting Claude
+installation or an approved Hook schema fingerprint. The forwarder never
+derives it from Hook payload/content, documentation/fixture labels, or
+inventory-only executable evidence. Missing or invalid Claude provenance means
+the payload is not forwarded; if both values are supplied, either invalid value
+invalidates the command rather than being ignored. Fail-open exit `0` and silent
+stdout/stderr remain unchanged. Adapter and normalization versions remain
+installed adapter constants, not CLI input.
+
+The command acceptance matrix is exact:
+
+| Mode and arguments | Result |
+| --- | --- |
+| `--source` omitted; no provenance flags; valid Copilot payload | Preserve the existing Copilot envelope and forward once. |
+| `--source claude-code` plus valid `--source-version` only | Forward one Claude envelope with the version copied unchanged and null fingerprint. |
+| `--source claude-code` plus valid `--schema-fingerprint` only | Forward one Claude envelope with null application version and the fingerprint copied unchanged. |
+| `--source claude-code` plus both valid provenance flags | Forward one Claude envelope with both values copied unchanged. |
+| Claude selector with neither provenance flag | Do not forward; exit `0` with empty stdout/stderr. |
+| Provenance flag without the Claude selector | Do not forward; exit `0` with empty stdout/stderr. |
+| Missing selector value, unknown or duplicate selector, duplicate provenance option, or any supplied invalid provenance value | Do not forward; exit `0` with empty stdout/stderr. |
+| Valid mode metadata with invalid stdin, non-loopback endpoint, invalid timeout, network failure, or timeout | Keep the existing fail-open/silent behavior; network and timeout receive no retry. |
+
+Every forwarded Claude envelope uses `source_adapter = claude-code-hook`,
+`source_surface = claude-code`, header/schema version `1`, and installed
+adapter/normalization constants. Payload fields that resemble a source,
+version, or fingerprint never select the mode or populate provenance.
 
 GitHub Copilot CLI and VS Code use the same PascalCase Hooks contract.
 Ambiguous Hook input is recorded as `hook-unknown`; its surface must not be

@@ -272,6 +272,14 @@ the standard existing `POST /v1/traces` receiver. Claude command/HTTP Hook
 input is converted by the installed `hook-forward` path into the existing
 strict `POST /api/session-ingest/v1/events` envelope with distinct
 `source_adapter = claude-code-hook` and `source_surface = claude-code`.
+Claude Hook mode is selected only by exact `--source claude-code`; omitting
+`--source` preserves the existing Copilot Hook mode. `--source-version` and
+`--schema-fingerprint` are valid only with that Claude selector, and at least
+one is required. The forwarder never selects Claude from payload shape and never
+promotes documentation/fixture labels, inventory-only version evidence, or Hook
+payload values into provenance. Missing or invalid selector/provenance suppresses
+the intended Claude forwarding with the existing fail-open/silent behavior and
+becomes a named live configuration follow-up, not invented evidence.
 
 The Claude manifest registry label is
 `claude-code-otel+claude-code-hook`. It describes registered input paths only.
