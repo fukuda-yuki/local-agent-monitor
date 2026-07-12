@@ -44,6 +44,45 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
         }
     }
 
+    public void CreateOrValidateBackup(string backupPath, AtomicFileCapture expected)
+    {
+        var expectedBytes = SerializeBackup(expected.Exists, expected.CopyBytes());
+        try
+        {
+            var metadata = platform.FileSystem.GetPathMetadata(backupPath);
+            if (metadata.Exists)
+            {
+                ValidateExistingBackup(backupPath, expectedBytes, metadata);
+                return;
+            }
+
+            try
+            {
+                platform.FileSystem.WriteNewAllBytes(backupPath, expectedBytes);
+            }
+            catch (Exception)
+            {
+                ValidateExistingBackup(backupPath, expectedBytes);
+            }
+
+            try
+            {
+                platform.FileSystem.FlushFile(backupPath);
+            }
+            catch (Exception)
+            {
+                ValidateExistingBackup(backupPath, expectedBytes);
+                throw;
+            }
+
+            ValidateExistingBackup(backupPath, expectedBytes);
+        }
+        catch (Exception)
+        {
+            throw new SetupFileStepException(SetupCodes.InternalError);
+        }
+    }
+
     public AtomicFileApplyResult Apply(
         string allowedRoot,
         string targetPath,
@@ -208,6 +247,32 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
 
     private string CreateTemporaryPath(string target) =>
         target + ".cao-" + platform.Identifiers.CreateUuidV7().ToString("D") + ".tmp";
+
+    private void ValidateExistingBackup(
+        string backupPath,
+        byte[] expectedBytes,
+        SetupPathMetadata? initialMetadata = null)
+    {
+        var before = initialMetadata ?? platform.FileSystem.GetPathMetadata(backupPath);
+        ValidateBackupMetadata(before);
+        var read = platform.FileSystem.ReadAtMostBytes(backupPath, expectedBytes.Length);
+        if (!read.IsComplete || !read.Bytes.AsSpan().SequenceEqual(expectedBytes))
+        {
+            throw new FormatException();
+        }
+
+        ValidateBackupMetadata(platform.FileSystem.GetPathMetadata(backupPath));
+    }
+
+    private static void ValidateBackupMetadata(SetupPathMetadata metadata)
+    {
+        if (!metadata.Exists ||
+            metadata.Kind != SetupPathKind.File ||
+            (metadata.Attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new FormatException();
+        }
+    }
 
     private static byte[] SerializeBackup(bool exists, byte[] content)
     {

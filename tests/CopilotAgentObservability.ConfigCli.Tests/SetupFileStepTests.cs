@@ -122,6 +122,125 @@ public sealed class SetupFileStepTests
     }
 
     [Fact]
+    public void CreateOrValidateBackup_CreatesThenReusesExactArtifactWithoutWriting()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        platform.SeedFile(target, [0, 255]);
+        var step = new AtomicFileSetupStep(platform);
+        var capture = step.Capture("C:\\allowed", target);
+
+        step.CreateOrValidateBackup(backup, capture);
+        var exact = platform.ReadSeededFile(backup);
+        var operationCount = platform.Operations.Count;
+        new AtomicFileSetupStep(platform).CreateOrValidateBackup(backup, capture);
+
+        Assert.Equal(exact, platform.ReadSeededFile(backup));
+        Assert.Contains($"file.write-new:{backup}", platform.Operations.Take(operationCount));
+        Assert.Contains($"file.flush:{backup}", platform.Operations.Take(operationCount));
+        Assert.Contains($"file.read-bounded:{backup}:{exact.Length}", platform.Operations.Skip(operationCount));
+        Assert.DoesNotContain(platform.Operations.Skip(operationCount), operation =>
+            operation.StartsWith("file.write", StringComparison.Ordinal) ||
+            operation.StartsWith("file.flush", StringComparison.Ordinal) ||
+            operation.StartsWith("file.delete", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("mismatch")]
+    [InlineData("malformed")]
+    [InlineData("oversize")]
+    [InlineData("reparse")]
+    [InlineData("directory")]
+    [InlineData("device")]
+    [InlineData("unreadable")]
+    public void CreateOrValidateBackup_RejectsInexactOrUnsafeArtifactWithoutMutation(string fixture)
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        platform.SeedFile(target, Encoding.UTF8.GetBytes("previous"));
+        var step = new AtomicFileSetupStep(platform);
+        var capture = step.Capture("C:\\allowed", target);
+        step.CreateBackup(backup, capture);
+        var exact = platform.ReadSeededFile(backup);
+        var candidate = fixture switch
+        {
+            "mismatch" => exact[..^1].Concat([(byte)(exact[^1] ^ 1)]).ToArray(),
+            "malformed" => Encoding.UTF8.GetBytes("malformed private value"),
+            "oversize" => exact.Concat(new byte[] { 0 }).ToArray(),
+            _ => exact,
+        };
+        platform.SeedFile(backup, candidate);
+        if (fixture == "reparse") platform.SeedPathMetadata(backup, new(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        if (fixture == "directory") platform.SeedPathMetadata(backup, new(true, SetupPathKind.Directory, FileAttributes.Directory));
+        if (fixture == "device") platform.SeedPathMetadata(backup, new(true, SetupPathKind.Other, FileAttributes.Normal));
+        if (fixture == "unreadable") platform.InjectFault($"file.read-bounded:{backup}:{exact.Length}", new IOException("raw secret"));
+        var operationCount = platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupFileStepException>(() => step.CreateOrValidateBackup(backup, capture));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(SetupCodes.InternalError, exception.Message);
+        Assert.DoesNotContain("secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(candidate, platform.ReadSeededFile(backup));
+        Assert.DoesNotContain(platform.Operations.Skip(operationCount), operation =>
+            operation.StartsWith("file.write", StringComparison.Ordinal) ||
+            operation.StartsWith("file.flush", StringComparison.Ordinal) ||
+            operation.StartsWith("file.delete", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CreateOrValidateBackup_RejectsDifferentMissingVersusEmptyCaptureType()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var step = new AtomicFileSetupStep(platform);
+        step.CreateBackup(backup, step.Capture("C:\\allowed", target));
+        var original = platform.ReadSeededFile(backup);
+        platform.SeedFile(target, []);
+
+        var exception = Assert.Throws<SetupFileStepException>(() =>
+            step.CreateOrValidateBackup(backup, step.Capture("C:\\allowed", target)));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(original, platform.ReadSeededFile(backup));
+        Assert.DoesNotContain($"file.delete:{backup}", platform.Operations);
+    }
+
+    [Theory]
+    [InlineData("write-before", false)]
+    [InlineData("write-after", true)]
+    [InlineData("write-after-rebind", false)]
+    [InlineData("flush-before", false)]
+    [InlineData("flush-after", false)]
+    [InlineData("flush-after-rebind", false)]
+    public void CreateOrValidateBackup_ClassifiesCreateFaultWithoutRetryOrDeletion(string boundary, bool succeeds)
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var foreign = Encoding.UTF8.GetBytes("foreign private value");
+        platform.SeedFile(target, Encoding.UTF8.GetBytes("previous"));
+        var step = new AtomicFileSetupStep(platform);
+        var capture = step.Capture("C:\\allowed", target);
+        var operation = boundary.StartsWith("write", StringComparison.Ordinal) ? $"file.write-new:{backup}" : $"file.flush:{backup}";
+        var rebind = boundary.EndsWith("rebind", StringComparison.Ordinal) ? () => platform.SeedFile(backup, foreign) : (Action?)null;
+        if (boundary.EndsWith("before", StringComparison.Ordinal)) platform.InjectFault(operation, new IOException("raw"));
+        else platform.InjectAfterEffectFault(operation, new IOException("raw"), rebind);
+
+        var exception = Record.Exception(() => step.CreateOrValidateBackup(backup, capture));
+
+        if (succeeds) Assert.Null(exception);
+        else Assert.Equal(SetupCodes.InternalError, Assert.IsType<SetupFileStepException>(exception).Code);
+        Assert.Equal(1, platform.Operations.Count(item => item == $"file.write-new:{backup}"));
+        Assert.True(boundary == "write-before" || platform.FileSystem.FileExists(backup));
+        if (boundary.EndsWith("rebind", StringComparison.Ordinal)) Assert.Equal(foreign, platform.ReadSeededFile(backup));
+        Assert.DoesNotContain($"file.delete:{backup}", platform.Operations);
+    }
+
+    [Fact]
     public void Apply_RejectsTargetChangedAfterCaptureWithoutBackupOperations()
     {
         var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
@@ -754,6 +873,33 @@ public sealed class SetupFileStepTests
 
             Assert.Equal(apply.PreviousHash, restore.RestoredHash);
             Assert.Equal(previous, File.ReadAllBytes(target));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SystemPlatform_CloseReopenReusesExactBackupWithoutWriting()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-setup-backup-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var target = Path.Combine(directory, "settings.bin");
+            var backup = Path.Combine(directory, "record.backup");
+            File.WriteAllBytes(target, [0, 255]);
+            var first = new AtomicFileSetupStep(new SystemSetupPlatform());
+            var capture = first.Capture(directory, target);
+            first.CreateOrValidateBackup(backup, capture);
+            var exact = File.ReadAllBytes(backup);
+            var lastWrite = File.GetLastWriteTimeUtc(backup);
+
+            new AtomicFileSetupStep(new SystemSetupPlatform()).CreateOrValidateBackup(backup, capture);
+
+            Assert.Equal(exact, File.ReadAllBytes(backup));
+            Assert.Equal(lastWrite, File.GetLastWriteTimeUtc(backup));
         }
         finally
         {
