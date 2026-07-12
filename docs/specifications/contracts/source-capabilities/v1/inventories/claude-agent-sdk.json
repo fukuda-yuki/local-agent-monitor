@@ -1,0 +1,119 @@
+{
+  "inventory_version": "v1",
+  "source_surface": "claude-code",
+  "surface_mode": "agent-sdk",
+  "execution": {
+    "status": "blocked",
+    "observed_date": "2026-07-12",
+    "executable": null,
+    "version": null,
+    "interactive_terminal": "not_required",
+    "authentication": "agent_sdk_credential_unavailable",
+    "bounded_timeout_seconds": 60
+  },
+  "settings_labels": {
+    "telemetry_enable": "CLAUDE_CODE_ENABLE_TELEMETRY",
+    "enhanced_trace_enable": "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
+    "traces_exporter": "OTEL_TRACES_EXPORTER",
+    "logs_exporter": "OTEL_LOGS_EXPORTER",
+    "metrics_exporter": "OTEL_METRICS_EXPORTER",
+    "otlp_protocol": "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "otlp_endpoint": "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "trace_content": "OTEL_LOG_TOOL_CONTENT",
+    "prompt_content": "OTEL_LOG_USER_PROMPTS",
+    "assistant_response_content": "OTEL_LOG_ASSISTANT_RESPONSES",
+    "tool_detail": "OTEL_LOG_TOOL_DETAILS"
+  },
+  "settings_evidence_status": "documented_only_not_effective_settings",
+  "hook_configuration_evidence_status": "documented_only_not_executed",
+  "content_capture_modes": {
+    "content_disabled": {
+      "execution_status": "not_executed",
+      "otel_structure_fixture": null,
+      "hook_structure_fixture": null,
+      "verified_fingerprints": []
+    },
+    "content_enabled_with_synthetic_markers_only": {
+      "execution_status": "not_executed",
+      "otel_structure_fixture": null,
+      "hook_structure_fixture": null,
+      "verified_fingerprints": []
+    }
+  },
+  "observed_capabilities": {
+    "otel_traces": "not_observed",
+    "otel_logs": "not_observed",
+    "otel_metrics": "not_observed",
+    "hook_events": "not_observed",
+    "native_session_identity": "not_observed",
+    "trace_span_identity": "not_observed",
+    "content_capture_gate": "not_observed",
+    "active_parent_traceparent_relationship": "not_observed"
+  },
+  "missing_structural_evidence": [
+    "content-disabled OTel structure",
+    "content-enabled OTel structure",
+    "Hook event structure",
+    "OTel schema fingerprints",
+    "Hook schema fingerprints",
+    "active parent TRACEPARENT relationship"
+  ],
+  "documentation_provenance": [
+    {
+      "source": "Claude Agent SDK overview",
+      "url": "https://code.claude.com/docs/en/agent-sdk/overview",
+      "supports": [
+        "Python package claude-agent-sdk and TypeScript package @anthropic-ai/claude-agent-sdk are the supported Agent SDK runtimes",
+        "Agent SDK authentication requires an API key or a documented third-party provider",
+        "Agent SDK supports programmatic hooks"
+      ]
+    },
+    {
+      "source": "Claude Agent SDK OpenTelemetry documentation",
+      "url": "https://code.claude.com/docs/en/agent-sdk/observability",
+      "supports": [
+        "the Agent SDK passes OTel configuration to a Claude Code child process",
+        "trace, metric, and log-event exporter labels",
+        "content capture is disabled by default and enabled only by opt-in labels",
+        "an active application span is documented to propagate TRACEPARENT and TRACESTATE to the child process"
+      ]
+    },
+    {
+      "source": "Claude Agent SDK hooks documentation",
+      "url": "https://code.claude.com/docs/en/agent-sdk/hooks",
+      "supports": [
+        "Agent SDK Hook callbacks are configured programmatically",
+        "Hook lifecycle and input are producer-defined"
+      ]
+    }
+  ],
+  "blocker": {
+    "code": "agent_sdk_package_and_credential_unavailable",
+    "evidence": "Node.js, Python, and .NET runtimes are available, but repository and installed-package checks found neither @anthropic-ai/claude-agent-sdk nor claude-agent-sdk and found no .NET Agent SDK reference. The installed @anthropic-ai/claude-code 2.1.207 package exposes only the claude CLI and has no Agent SDK dependency. No Agent SDK API-key or documented provider credential was present. No SDK query was started.",
+    "not_substituted": "the installed Claude Code CLI, claude -p, an Anthropic client SDK, Managed Agents, or emulated telemetry"
+  },
+  "named_follow_up": {
+    "name": "#63-live-agent-sdk-inventory",
+    "required_preconditions": [
+      "an already-provided Python claude-agent-sdk or TypeScript @anthropic-ai/claude-agent-sdk package with its exact version recordable",
+      "a supported runtime for that package",
+      "an Agent SDK API key or documented provider credential authorized for one bounded synthetic query",
+      "an already-provided OpenTelemetry SDK capable of creating an active parent span in the selected runtime",
+      "a disposable local OTLP capture sink and programmatic Hook callbacks with no persisted raw content"
+    ],
+    "required_execution": [
+      "start an active application parent span and run one bounded synthetic Agent SDK query with content disabled",
+      "run a separate bounded synthetic-marker query with content enabled only if explicitly authorized",
+      "record whether the Agent SDK trace is a child of the active parent by byte-equivalent trace context",
+      "record only structural OTel and Hook inventories, settings labels, counts, types, and fingerprints",
+      "remove only artifacts created by the follow-up"
+    ]
+  },
+  "repository_safety": {
+    "contains_raw_content": false,
+    "contains_attribute_values": false,
+    "contains_credentials_or_tokens": false,
+    "contains_pii": false,
+    "contains_local_paths": false
+  }
+}
