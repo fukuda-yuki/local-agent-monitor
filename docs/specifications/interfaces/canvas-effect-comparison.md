@@ -182,8 +182,12 @@ GET  /api/session-workspace/effect-comparisons/{comparisonId}
 
 The proposal-apply receipt response is sanitized and contains only opaque IDs,
 proposal revision, application state/time, file count, and derived active /
-stale / invalidated state. Candidate and comparison responses contain only
-sanitized Session metadata and evidence identifiers.
+stale / invalidated state. A successful candidate response contains its
+requested `proposal_id`, `apply_id`, and the exact persisted
+`proposal_revision` from that active application receipt; the value is the
+authoritative proposal/application linkage for the subsequent confirmation and
+is not browser-supplied or inferred. Candidate and comparison responses
+contain only sanitized Session metadata and evidence identifiers.
 
 Fixed errors include `invalid_objective_evaluation`,
 `objective_evidence_not_exact`, `objective_store_unavailable`,

@@ -14,7 +14,7 @@ internal static class EffectComparisonRoutes
                 || !SessionRoutes.TryUuidV7(context.Request.Query["apply_id"].ToString(), out var applyId)) { await SessionRoutes.Failure(context, 400, "invalid_comparison_request"); return; }
             if (!applies.TryGetCurrentApplication(proposalId, applyId, out var application)) { await SessionRoutes.Failure(context, 400, "application_not_active"); return; }
             var items = store.ListMostRecent(200).Select(session => Candidate(store, session, application.AppliedAt));
-            await SessionRoutes.Json(context, new { proposal_id = proposalId, apply_id = applyId, items });
+            await SessionRoutes.Json(context, new { proposal_id = proposalId, apply_id = applyId, proposal_revision = application.ProposalRevision, items });
         });
 
         app.MapPost("/api/session-workspace/effect-comparisons", async context =>

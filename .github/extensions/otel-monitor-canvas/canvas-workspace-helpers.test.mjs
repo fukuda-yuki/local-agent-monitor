@@ -442,7 +442,11 @@ test("emitted Compare IIFE waits for manual cohort confirmation and renders the 
 
 test("emitted Compare IIFE crosses the real helper with an exact upstream contract and strips nested extras", async () => {
     const proposalId = "0197d7c0-0000-7000-8000-000000000001", applyId = "0197d7c0-0000-7000-8000-000000000002", comparisonId = "0197d7c0-0000-7000-8000-000000000003";
-    const candidates = [{ session_id: "11111111-1111-7111-8111-111111111111", suggestion_reasons: [] }, { session_id: "22222222-2222-7222-8222-222222222222", suggestion_reasons: ["not_exact_bound", "unapproved_reason"] }, { session_id: "33333333-3333-7333-8333-333333333333", suggestion_reasons: ["not_comparable"] }];
+    const candidates = [
+        { session_id: "11111111-1111-7111-8111-111111111111", status: "completed", completeness: "full", started_at: "2026-07-11T00:00:00+00:00", ended_at: "2026-07-11T00:01:00+00:00", exact_bound: true, evidence_available: true, boundary_eligibility: "pre", suggestion_reasons: [] },
+        { session_id: "22222222-2222-7222-8222-222222222222", status: "completed", completeness: "full", started_at: "2026-07-11T00:02:00+00:00", ended_at: "2026-07-11T00:03:00+00:00", exact_bound: false, evidence_available: true, boundary_eligibility: "post", suggestion_reasons: ["not_exact_bound", "unapproved_reason"] },
+        { session_id: "33333333-3333-7333-8333-333333333333", status: "failed", completeness: "partial", started_at: "2026-07-11T00:04:00+00:00", ended_at: "2026-07-11T00:05:00+00:00", exact_bound: true, evidence_available: false, boundary_eligibility: "not_eligible", suggestion_reasons: ["not_comparable", "missing_evidence", "overlaps_application"] },
+    ];
     const upstream = [], helper = await proposalApplyHelperServer(upstream, { fetchResponse: (target, init = {}) => {
         const path = new URL(target).pathname;
         if (path.endsWith("/sessions")) return new Response(JSON.stringify({ items: [bound] }));
@@ -451,7 +455,7 @@ test("emitted Compare IIFE crosses the real helper with an exact upstream contra
         if (path.includes("session-instruction")) return new Response(JSON.stringify({ state: "no_instruction" }));
         if (path.includes("improvement-proposals")) return new Response(JSON.stringify({ items: [{ proposal_id: proposalId, status: "recommended" }] }));
         if (path.endsWith("/receipts")) return new Response(JSON.stringify({ items: [{ apply_id: applyId, state: "applied" }] }));
-        if (path.endsWith("/candidates")) return new Response(JSON.stringify({ proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, items: candidates }));
+        if (path.endsWith("/candidates")) return new Response(JSON.stringify({ proposal_id: proposalId, apply_id: applyId, proposal_revision: 2, items: candidates }));
         if (path.endsWith(`/effect-comparisons/${comparisonId}`)) return new Response(JSON.stringify({ receipt: { comparison_id: comparisonId, verdict: "improved", verification_state: "invalidated", extra: "hidden" }, summary: { verdict: "improved", reasons: ["missing_evidence", "hidden"], nested: { unapproved: "hidden" } }, evidence: [{ kind: "event", reference_id: "same-ref", unapproved: "hidden" }], case_key_groups: [{ case_key: "case-a", sessions: [candidates[0].session_id], evidence: [{ kind: "event", reference_id: "same-ref", unapproved: "hidden" }], unapproved: "hidden" }] }));
         if (path.endsWith("/effect-comparisons")) {
             const value = JSON.parse(init.body);
@@ -486,11 +490,22 @@ test("emitted Compare IIFE crosses the real helper with an exact upstream contra
     } finally { await new Promise(resolve => helper.server.close(resolve)); }
 });
 
-test("emitted Compare IIFE renders every remaining verdict, available metrics, and safe terminal errors without authority", async () => {
+test("emitted Compare IIFE renders every canonical engine reason through the proxy and drops arbitrary reasons", async () => {
     const proposalId = "0197d7c0-0000-7000-8000-000000000001", applyId = "0197d7c0-0000-7000-8000-000000000002", comparisonId = "0197d7c0-0000-7000-8000-000000000003";
     const candidates = Array.from({ length: 6 }, (_, index) => ({ session_id: `00000000-0000-7000-8000-00000000000${index + 1}`, suggestion_reasons: [] }));
     const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve)); };
-    const drive = async (detail, candidateResponse = null, receiptsResponse = null) => {
+    let comparisonDetail = {}, candidateResponse = null, receiptsResponse = null;
+    const helper = await proposalApplyHelperServer([], { fetchResponse: (target, init = {}) => {
+        const path = new URL(target).pathname;
+        if (path.endsWith("/receipts")) return new Response(JSON.stringify(receiptsResponse ?? { items: [{ apply_id: applyId, state: "applied" }] }));
+        if (path.endsWith("/candidates")) return candidateResponse?.error
+            ? new Response(JSON.stringify(candidateResponse), { status: candidateResponse.error === "objective_store_unavailable" ? 503 : 400 })
+            : new Response(JSON.stringify(candidateResponse ?? { proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, items: candidates }));
+        if (path.endsWith(`/effect-comparisons/${comparisonId}`)) return new Response(JSON.stringify(comparisonDetail));
+        if (path.endsWith("/effect-comparisons")) return new Response(JSON.stringify({ comparison_id: comparisonId }), { status: 201 });
+        return new Response(JSON.stringify({ error: "unexpected" }), { status: 404 });
+    } });
+    const drive = async () => {
         const calls = [];
         const fetch = async (path, init = {}) => {
             calls.push({ path: String(path), init }); const url = String(path);
@@ -499,10 +514,7 @@ test("emitted Compare IIFE renders every remaining verdict, available metrics, a
             if (url.includes("/sessions/")) return response({ session: bound, native_ids: [{ binding_kind: "native" }], events: [], runs: [] });
             if (url.includes("/session-instruction/")) return response({ state: "no_instruction" });
             if (url.includes("improvement-proposals?")) return response({ items: [{ proposal_id: proposalId, status: "recommended" }] });
-            if (url.includes("proposal-applies/receipts")) return receiptsResponse ?? response({ items: [{ apply_id: applyId, state: "applied" }] });
-            if (url.includes("effect-comparisons/candidates")) return candidateResponse ?? response({ proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, items: candidates });
-            if (url.includes(`effect-comparisons/${comparisonId}`)) return response(detail);
-            if (url.includes("effect-comparisons")) return response({ comparison_id: comparisonId }, 201);
+            if (url.includes("effect-comparisons") || url.includes("proposal-applies/receipts")) { const clean = url.replace(/([?&])t=[^&]*/, "$1").replace(/[?&]$/, ""); const value = await helper.call(init.method ?? "GET", `${clean}${clean.includes("?") ? "&" : "?"}t=token`, { ...(init.headers ?? {}), "x-canvas-token": "token" }, init.body); return { status: value.status, json: async () => JSON.parse(value.text) }; }
             return response({ error: "unexpected" }, 404);
         };
         const { document } = await runWorkspaceIife(fetch); await settle();
@@ -510,29 +522,32 @@ test("emitted Compare IIFE renders every remaining verdict, available metrics, a
         await document.querySelectorAll("button").find(item => item.dataset.tab === "compare").click(); await settle();
         return { document, calls, settle };
     };
-    for (const [verdict, reason] of [["no_change", "sub_threshold"], ["regressed", "severe_failure"], ["insufficient_evidence", "comparison_evidence_stale"]]) {
-        const detail = { receipt: { comparison_id: comparisonId, verdict }, summary: { verdict, reasons: [reason], pre_pass: 3, pre_count: 3, post_pass: 3, post_count: 3, pre_duration_median: 100, post_duration_median: 90, duration_delta: 0.1, pre_token_median: 200, post_token_median: 180, token_delta: 0.1 }, evidence: [{ kind: "event", reference_id: "<same-ref>" }], case_key_groups: [{ case_key: "case-a", evidence: [{ kind: "event", reference_id: "<same-ref>" }] }] };
-        const run = await drive(detail); await run.document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await run.settle(); await run.document.querySelectorAll("button").find(item => item.textContent.startsWith("適用記録 ·")).click(); await run.settle();
+    try {
+      for (const [verdict, reason, label] of [["insufficient_evidence", "invalid_linkage", "比較の紐付けが無効"], ["insufficient_evidence", "insufficient_cohort", "比較対象セッション数が不足"], ["insufficient_evidence", "missing_quality_evidence", "品質評価の証拠が不足"], ["regressed", "post_severe_failure", "変更後に重大な失敗"], ["improved", "quality_improved", "品質が改善"], ["regressed", "quality_regressed", "品質が悪化"], ["insufficient_evidence", "missing_efficiency_evidence", "効率評価の証拠が不足"], ["improved", "duration_improved", "所要時間が改善"], ["regressed", "duration_regressed", "所要時間が悪化"], ["improved", "tokens_improved", "総トークンが改善"], ["regressed", "tokens_regressed", "総トークンが悪化"]]) {
+        comparisonDetail = { receipt: { comparison_id: comparisonId, verdict }, summary: { verdict, reasons: [reason, "unapproved_reason"], pre_pass: 3, pre_count: 3, post_pass: 3, post_count: 3, pre_duration_median: 100, post_duration_median: 90, duration_delta: 0.1, pre_token_median: 200, post_token_median: 180, token_delta: 0.1 }, evidence: [{ kind: "event", reference_id: "<same-ref>" }], case_key_groups: [{ case_key: "case-a", evidence: [{ kind: "event", reference_id: "<same-ref>" }] }] };
+        candidateResponse = null; receiptsResponse = null;
+        const run = await drive(); await run.document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await run.settle(); await run.document.querySelectorAll("button").find(item => item.textContent.startsWith("適用記録 ·")).click(); await run.settle();
         const selects = run.document.querySelectorAll("select"), inputs = run.document.querySelectorAll("input");
         for (let index = 0; index < candidates.length; index++) { selects[index * 2].value = index < 3 ? "pre" : "post"; inputs[index].value = "case-a"; }
         await run.document.querySelectorAll("button").find(item => item.textContent === "比較を確定").click(); await run.settle();
         const panel = textIn(run.document.getElementById("workspace-panel"));
-        assert.match(panel, new RegExp(comparisonTextForTest(verdict))); assert.match(panel, new RegExp(reason));
+        assert.match(panel, new RegExp(comparisonTextForTest(verdict))); assert.match(panel, new RegExp(label)); assert.doesNotMatch(panel, /unapproved_reason/);
         for (const metric of ["3 / 3", "100", "90", "200", "180", "0.1"]) assert.match(panel, new RegExp(metric));
         assert.equal((panel.match(/same-ref/g) || []).length, 2, "summary and matching case drill-down preserve the same evidence identity");
         assert.equal(run.calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons")).length, 1);
         assert.equal(run.calls.filter(call => /session\.send|canvas/i.test(call.path)).length, 0);
-    }
-    const absent = await drive({}, null, response({ items: [] })); await absent.document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await absent.settle();
+      }
+    receiptsResponse = { items: [] }; const absent = await drive(); await absent.document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await absent.settle();
     assert.equal(absent.document.querySelectorAll("button").find(item => item.textContent === "比較を確定"), undefined);
     assert.equal(absent.calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons")).length, 0);
     for (const error of ["application_not_active", "proposal_revision_stale", "cohort_not_confirmed", "comparison_evidence_stale", "objective_store_unavailable"]) {
-        const failed = await drive({}, response({ error, secret_path: "C:\\secret\\raw" }, error === "objective_store_unavailable" ? 503 : 400)); await failed.document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await failed.settle(); await failed.document.querySelectorAll("button").find(item => item.textContent.startsWith("適用記録 ·")).click(); await failed.settle();
+        receiptsResponse = null; candidateResponse = { error, secret_path: "C:\\secret\\raw" }; const failed = await drive(); await failed.document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await failed.settle(); await failed.document.querySelectorAll("button").find(item => item.textContent.startsWith("適用記録 ·")).click(); await failed.settle();
         const panel = textIn(failed.document.getElementById("workspace-panel")); assert.match(panel, new RegExp(error)); assert.doesNotMatch(panel, /secret|raw/i); assert.equal(failed.calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons")).length, 0);
     }
+    } finally { await new Promise(resolve => helper.server.close(resolve)); }
 });
 
-function comparisonTextForTest(value) { return ({ no_change: "変化なし", regressed: "悪化", insufficient_evidence: "証拠不足" })[value]; }
+function comparisonTextForTest(value) { return ({ improved: "改善", no_change: "変化なし", regressed: "悪化", insufficient_evidence: "証拠不足" })[value]; }
 
 test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, and gives rollback failures terminal precedence", async () => {
     const calls = [];

@@ -193,6 +193,9 @@ public sealed class SessionEffectComparisonRouteTests
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         var body = await response.Content.ReadAsStringAsync();
         using var json = JsonDocument.Parse(body);
+        Assert.Equal(proposalId, json.RootElement.GetProperty("proposal_id").GetGuid());
+        Assert.Equal(applyId, json.RootElement.GetProperty("apply_id").GetGuid());
+        Assert.Equal(1, json.RootElement.GetProperty("proposal_revision").GetInt32());
         var item = Assert.Single(json.RootElement.GetProperty("items").EnumerateArray());
         Assert.Equal(sessionId, item.GetProperty("session_id").GetGuid());
         Assert.Equal("pre", item.GetProperty("boundary_eligibility").GetString());
