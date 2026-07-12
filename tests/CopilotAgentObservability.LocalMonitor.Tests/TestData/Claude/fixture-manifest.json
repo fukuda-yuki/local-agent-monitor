@@ -8,11 +8,23 @@
     "canonical_mapping": "docs/specifications/contracts/source-capabilities/v1/claude-code/hook-mapping.json",
     "evidence_status": "documented_not_live_observed"
   },
+  "otel_producer_contract": {
+    "label": "current-unversioned-claude-code-monitoring-documentation",
+    "version": null,
+    "source_document": "https://code.claude.com/docs/en/monitoring-usage",
+    "canonical_mapping": "docs/specifications/contracts/source-capabilities/v1/claude-code/otel-mapping.json",
+    "otlp_descriptor_release": "v1.10.0",
+    "otlp_descriptor_commit": "ca839c51f706f5d53bfb46f06c3e90c3af3a52c6",
+    "evidence_status": "documented_not_live_observed",
+    "live_capture_observed": false,
+    "conformance_basis": "documentation-derived synthetic conformance envelopes, not captured producer payloads; matching protobuf files are descriptor-generated from the JSON semantics and byte-reproduced by ClaudeProducerFixtureContractTests"
+  },
   "installed_executable_evidence": {
     "version": "2.1.207",
     "meaning": "inventory_label_only_not_hook_producer_version"
   },
   "verified_hook_producer_version": null,
+  "verified_otel_producer_version": null,
   "surface_evidence": {
     "interactive": {
       "state": "unverified",
@@ -49,6 +61,73 @@
     "fixture": "hooks/stop-failure.json",
     "stop_error_alias": "unavailable_not_documented"
   },
+  "otel_fixtures": [
+    {
+      "path": "otel/content-disabled.json",
+      "encoding": "json",
+      "source_version_label": "documented-current-unversioned",
+      "content_gate": "disabled_redacted_prompt",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "sha256": "53e33786c9723f662df492467fc3fb2b2ebd1f1cc27ab05983c70e329b44977b"
+    },
+    {
+      "path": "otel/content-enabled.json",
+      "encoding": "json",
+      "source_version_label": "documented-current-unversioned",
+      "content_gate": "enabled_synthetic_markers",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "sha256": "5d910f943495a3eb98c7ec4ba3eca8d674bfbb1c72740b26bcc2049b61665d5c"
+    },
+    {
+      "path": "otel/unsupported-version.json",
+      "encoding": "json",
+      "source_version_label": "synthetic-unverified-version",
+      "content_gate": "disabled_redacted_prompt",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "evidence_label": "same_schema_unverified_evidence",
+      "version_policy": "version_not_receive_allowlist",
+      "sha256": "7fb9af4d966dabac36e97dd2b98e2da391c2a7d6ac769576d2da4d09340425bc"
+    },
+    {
+      "path": "otel/schema-drift.json",
+      "encoding": "json",
+      "source_version_label": "documented-current-unversioned",
+      "content_gate": "disabled_redacted_prompt",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "drift_marker": "one synthetic unknown span attribute; all documented structure is unchanged",
+      "sha256": "d0dfa8a43b848344af783771db9496c699fbe2200d90a983626c1bce68c52fd0"
+    },
+    {
+      "path": "otel/content-disabled.bin",
+      "encoding": "protobuf",
+      "source_version_label": "documented-current-unversioned",
+      "content_gate": "disabled_redacted_prompt",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "semantic_source": "otel/content-disabled.json",
+      "sha256": "84d1b889e76cd2256ab446b51bd6b29a978e32e98b509d3d4c1e90825eef666e"
+    },
+    {
+      "path": "otel/content-enabled.bin",
+      "encoding": "protobuf",
+      "source_version_label": "documented-current-unversioned",
+      "content_gate": "enabled_synthetic_markers",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "semantic_source": "otel/content-enabled.json",
+      "sha256": "9aee615fa15e98d8fe8e00941fa34a9912a48d9ae8600bb9d49f31f45167b5c6"
+    }
+  ],
   "fixtures": [
     {
       "path": "hooks/session-start.json",

@@ -1,4 +1,6 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -104,6 +106,16 @@ public sealed class ClaudeProducerFixtureContractTests
             ["hook.session_id", "hook.event_name", "hook.transcript_path", "hook.cwd", "hook.session_end.reason"]),
         Rejected("hooks/unsupported-event.json", "Notification",
             [S("session_id"), S("prompt_id"), S("transcript_path"), S("cwd"), S("permission_mode"), S("hook_event_name"), S("message"), S("title"), S("notification_type")]),
+    ];
+
+    private static readonly OtelFixtureContract[] OtelFixtureContracts =
+    [
+        new("otel/content-disabled.json", "json", "documented-current-unversioned", "disabled_redacted_prompt", "schema_drift_detected"),
+        new("otel/content-enabled.json", "json", "documented-current-unversioned", "enabled_synthetic_markers", "schema_drift_detected"),
+        new("otel/unsupported-version.json", "json", "synthetic-unverified-version", "disabled_redacted_prompt", "schema_drift_detected"),
+        new("otel/schema-drift.json", "json", "documented-current-unversioned", "disabled_redacted_prompt", "schema_drift_detected"),
+        new("otel/content-disabled.bin", "protobuf", "documented-current-unversioned", "disabled_redacted_prompt", "schema_drift_detected"),
+        new("otel/content-enabled.bin", "protobuf", "documented-current-unversioned", "enabled_synthetic_markers", "schema_drift_detected"),
     ];
 
     [Fact]
@@ -270,6 +282,207 @@ public sealed class ClaudeProducerFixtureContractTests
         AssertSyntheticMarker(fixture["error_details"]);
     }
 
+    [Fact]
+    public void Otel_manifest_pins_documented_provenance_without_claiming_live_capture()
+    {
+        var manifest = ReadObject(ManifestPath);
+        var contract = manifest["otel_producer_contract"]!.AsObject();
+        Assert.Equal("current-unversioned-claude-code-monitoring-documentation", contract["label"]!.GetValue<string>());
+        Assert.Null(contract["version"]);
+        Assert.Equal("https://code.claude.com/docs/en/monitoring-usage", contract["source_document"]!.GetValue<string>());
+        Assert.Equal("docs/specifications/contracts/source-capabilities/v1/claude-code/otel-mapping.json", contract["canonical_mapping"]!.GetValue<string>());
+        Assert.Equal(OtlpTraceSchema.Release, contract["otlp_descriptor_release"]!.GetValue<string>());
+        Assert.Equal(OtlpTraceSchema.Commit, contract["otlp_descriptor_commit"]!.GetValue<string>());
+        Assert.Equal("documented_not_live_observed", contract["evidence_status"]!.GetValue<string>());
+        Assert.Null(manifest["verified_otel_producer_version"]);
+        Assert.False(contract["live_capture_observed"]!.GetValue<bool>());
+        Assert.Equal(
+            "documentation-derived synthetic conformance envelopes, not captured producer payloads; matching protobuf files are descriptor-generated from the JSON semantics and byte-reproduced by ClaudeProducerFixtureContractTests",
+            contract["conformance_basis"]!.GetValue<string>());
+
+        var fixtures = manifest["otel_fixtures"]!.AsArray();
+        Assert.Equal(OtelFixtureContracts.Select(item => item.Path), fixtures.Select(fixture => FixturePath(fixture!)));
+    }
+
+    [Fact]
+    public void Otel_manifest_hashes_adapter_outcomes_and_unverified_version_policy_are_reproducible()
+    {
+        var fixtures = ReadObject(ManifestPath)["otel_fixtures"]!.AsArray();
+        foreach (var contract in OtelFixtureContracts)
+        {
+            var entry = Assert.Single(fixtures, candidate => FixturePath(candidate!) == contract.Path)!.AsObject();
+            var actualHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(FixturePathOnDisk(contract.Path)))).ToLowerInvariant();
+            Assert.Equal(contract.Encoding, entry["encoding"]!.GetValue<string>());
+            Assert.Equal(contract.SourceVersionLabel, entry["source_version_label"]!.GetValue<string>());
+            Assert.Equal(contract.ContentGate, entry["content_gate"]!.GetValue<string>());
+            Assert.Equal(contract.ExpectedEmptyRegistryState, entry["expected_empty_registry_state"]!.GetValue<string>());
+            Assert.Equal("claude-code-otel", entry["expected_source_adapter"]!.GetValue<string>());
+            Assert.Equal("documentation_derived_conformance_fixture", entry["provenance"]!.GetValue<string>());
+            Assert.Equal(actualHash, entry["sha256"]!.GetValue<string>());
+        }
+
+        var unverified = Assert.Single(fixtures, candidate => FixturePath(candidate!) == "otel/unsupported-version.json")!.AsObject();
+        Assert.Equal("same_schema_unverified_evidence", unverified["evidence_label"]!.GetValue<string>());
+        Assert.Equal("version_not_receive_allowlist", unverified["version_policy"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("otel/content-disabled.json")]
+    [InlineData("otel/content-enabled.json")]
+    [InlineData("otel/unsupported-version.json")]
+    [InlineData("otel/schema-drift.json")]
+    public void Otel_json_fixture_is_a_complete_export_trace_service_request(string fixturePath)
+    {
+        var request = ReadObject(FixturePathOnDisk(fixturePath));
+        var resourceSpans = Assert.Single(request["resourceSpans"]!.AsArray())!.AsObject();
+        Assert.NotNull(resourceSpans["resource"]!["attributes"]);
+        var scopeSpans = Assert.Single(resourceSpans["scopeSpans"]!.AsArray())!.AsObject();
+        Assert.Equal("com.anthropic.claude_code", scopeSpans["scope"]!["name"]!.GetValue<string>());
+        Assert.NotEmpty(scopeSpans["scope"]!["version"]!.GetValue<string>());
+        var spans = scopeSpans["spans"]!.AsArray();
+        Assert.Equal(6, spans.Count);
+        Assert.All(spans, span =>
+        {
+            var item = span!.AsObject();
+            Assert.Matches("^[0-9a-f]{32}$", item["traceId"]!.GetValue<string>());
+            Assert.Matches("^[0-9a-f]{16}$", item["spanId"]!.GetValue<string>());
+            Assert.True(ulong.TryParse(item["startTimeUnixNano"]!.GetValue<string>(), out _));
+            Assert.True(ulong.TryParse(item["endTimeUnixNano"]!.GetValue<string>(), out _));
+        });
+    }
+
+    [Fact]
+    public void Content_disabled_and_enabled_share_source_identity_and_recognized_semantics_but_gate_raw_content()
+    {
+        var disabled = ReadObject(FixturePathOnDisk("otel/content-disabled.json"));
+        var enabled = ReadObject(FixturePathOnDisk("otel/content-enabled.json"));
+        var disabledSpans = Spans(disabled);
+        var enabledSpans = Spans(enabled);
+        Assert.Equal(disabledSpans.Select(SourceIdentity), enabledSpans.Select(SourceIdentity));
+
+        var disabledPrompt = Assert.Single(Attributes(disabledSpans[0]), pair => pair.Key == "user_prompt");
+        Assert.Equal("<REDACTED>", StringValue(disabledPrompt.Value));
+        var enabledPrompt = Assert.Single(Attributes(enabledSpans[0]), pair => pair.Key == "user_prompt");
+        Assert.Equal("SYNTHETIC_USER_PROMPT", StringValue(enabledPrompt.Value));
+
+        var gatedKeys = new[] { "file_path", "subagent_type", "response.model_output", "hook_definitions" };
+        foreach (var key in gatedKeys)
+        {
+            Assert.DoesNotContain(disabledSpans.SelectMany(Attributes), pair => pair.Key == key);
+            Assert.Contains(enabledSpans.SelectMany(Attributes), pair => pair.Key == key && StringValue(pair.Value).StartsWith("SYNTHETIC_", StringComparison.Ordinal));
+        }
+        Assert.DoesNotContain(disabledSpans.SelectMany(Events), item => item["name"]!.GetValue<string>() == "tool.output");
+        var output = Assert.Single(enabledSpans.SelectMany(Events), item => item["name"]!.GetValue<string>() == "tool.output");
+        Assert.StartsWith("SYNTHETIC_", StringValue(Assert.Single(Attributes(output), pair => pair.Key == "content").Value), StringComparison.Ordinal);
+
+        AssertRecognizedSemanticsEqual(disabledSpans, enabledSpans, [.. gatedKeys, "user_prompt"]);
+    }
+
+    [Theory]
+    [InlineData("otel/content-disabled.json", false)]
+    [InlineData("otel/content-enabled.json", true)]
+    public void Otel_fixture_matches_independent_official_per_span_matrix(string fixturePath, bool contentEnabled)
+    {
+        var spans = Spans(ReadObject(FixturePathOnDisk(fixturePath)));
+        var expected = new[]
+        {
+            OfficialSpan("claude_code.interaction", "1111111111111111", null, "1000000000", "1600000000",
+                CommonAttributes("claude_code.interaction", ("user_prompt", contentEnabled ? "SYNTHETIC_USER_PROMPT" : "<REDACTED>"))),
+            OfficialSpan("claude_code.llm_request", "2222222222222222", "1111111111111111", "1050000000", "1300000000",
+                CommonAttributes("claude_code.llm_request", ("gen_ai.request.model", "SYNTHETIC_MODEL"), ("ttft_ms", 12.5),
+                    ("input_tokens", 12L), ("output_tokens", 7L), ("cache_read_tokens", 3L), ("cache_creation_tokens", 2L),
+                    ("attempt", 2L), ("agent_id", "SYNTHETIC_AGENT_001"), ("parent_agent_id", "SYNTHETIC_AGENT_PARENT"),
+                    contentEnabled ? ("response.model_output", "SYNTHETIC_MODEL_OUTPUT") : default),
+                expectedEvents: [OfficialEvent("gen_ai.request.attempt", "1060000000", new Dictionary<string, object> { ["attempt"] = 2L })]),
+            OfficialSpan("claude_code.tool", "3333333333333333", "1111111111111111", "1310000000", "1500000000",
+                CommonAttributes("claude_code.tool", ("tool_name", "SYNTHETIC_TOOL"), ("tool_use_id", "SYNTHETIC_TOOL_USE_001"),
+                    contentEnabled ? ("file_path", "SYNTHETIC_RELATIVE_PATH") : default,
+                    contentEnabled ? ("subagent_type", "SYNTHETIC_SUBAGENT_TYPE") : default),
+                expectedEvents: contentEnabled ? [OfficialEvent("tool.output", "1490000000", new Dictionary<string, object> { ["content"] = "SYNTHETIC_TOOL_OUTPUT" })] : []),
+            OfficialSpan("claude_code.tool.blocked_on_user", "4444444444444444", "3333333333333333", "1320000000", "1360000000",
+                CommonAttributes("claude_code.tool.blocked_on_user", ("duration_ms", 40.0), ("decision", "accept"))),
+            OfficialSpan("claude_code.tool.execution", "5555555555555555", "3333333333333333", "1370000000", "1490000000",
+                CommonAttributes("claude_code.tool.execution", ("success", true))),
+            OfficialSpan("claude_code.hook", "6666666666666666", "1111111111111111", "1510000000", "1550000000",
+                CommonAttributes("claude_code.hook", contentEnabled ? ("hook_definitions", "SYNTHETIC_HOOK_DEFINITIONS") : default)),
+        };
+
+        Assert.Equal(expected.Length, spans.Count);
+        for (var index = 0; index < expected.Length; index++) AssertOfficialSpan(expected[index], spans[index]!.AsObject());
+        Assert.DoesNotContain(spans.SelectMany(Attributes), pair => pair.Key == "reasoning_tokens");
+    }
+
+    [Fact]
+    public void Unverified_version_and_drift_fixtures_use_actual_empty_registry_compatibility_policy()
+    {
+        const string ExpectedBaselineFingerprint = "1086ea6fa32981e7430d1fc314824c3a10a2c24840876ffc376a5bdf37001154";
+        const string ExpectedDriftFingerprint = "d4693fd54ceb9989084e2da663e2e59dd9d7f27ac45a658c490182b1f199ea49";
+        var baseline = OtlpJsonStructuralWalker.Build(File.ReadAllText(FixturePathOnDisk("otel/content-disabled.json")));
+        var unverified = OtlpJsonStructuralWalker.Build(File.ReadAllText(FixturePathOnDisk("otel/unsupported-version.json")));
+        var drift = OtlpJsonStructuralWalker.Build(File.ReadAllText(FixturePathOnDisk("otel/schema-drift.json")));
+        Assert.Equal(ExpectedBaselineFingerprint, baseline.SchemaFingerprint);
+        Assert.Equal(ExpectedBaselineFingerprint, unverified.SchemaFingerprint);
+        Assert.Equal(ExpectedDriftFingerprint, drift.SchemaFingerprint);
+        Assert.NotEqual(baseline.SchemaFingerprint, drift.SchemaFingerprint);
+
+        var emptyRegistry = VerifiedSourceFingerprintRegistry.Create([], [], []);
+        foreach (var (inventory, version) in new[] { (baseline, "documented-current-unversioned"), (unverified, "synthetic-unverified-version"), (drift, "documented-current-unversioned") })
+        {
+            var decision = SourceCompatibilityEvaluator.Assess("claude-code", version, inventory, 0, emptyRegistry);
+            Assert.Equal(SourceCompatibilityState.SchemaDriftDetected, decision.State);
+            Assert.NotEqual(SourceCompatibilityState.UnsupportedSourceVersion, decision.State);
+        }
+    }
+
+    [Theory]
+    [InlineData("content-disabled")]
+    [InlineData("content-enabled")]
+    public void Json_and_protobuf_fixtures_are_semantically_equivalent_and_binary_is_reproducible(string fixtureName)
+    {
+        var json = ReadObject(FixturePathOnDisk($"otel/{fixtureName}.json"));
+        var expectedBinary = EncodeEnvelope(json, SourceStructuralEnvelope.Request);
+        var committedBinary = File.ReadAllBytes(FixturePathOnDisk($"otel/{fixtureName}.bin"));
+        Assert.Equal(expectedBinary, committedBinary);
+
+        var decoded = JsonNode.Parse(OtlpProtobufTraceConverter.ConvertTraceRequestToRawOtlpJson(committedBinary))!.AsObject();
+        Assert.True(JsonNode.DeepEquals(json, decoded), $"Decoded protobuf differs from {fixtureName}.json");
+    }
+
+    [Fact]
+    public void Version_and_schema_variants_change_only_the_cited_version_or_unknown_structure()
+    {
+        var baseline = ReadObject(FixturePathOnDisk("otel/content-disabled.json"));
+        var unverified = ReadObject(FixturePathOnDisk("otel/unsupported-version.json"));
+        var drift = ReadObject(FixturePathOnDisk("otel/schema-drift.json"));
+
+        Assert.Equal("documented-current-unversioned", ResourceString(baseline, "service.version"));
+        Assert.Equal("synthetic-unverified-version", ResourceString(unverified, "service.version"));
+        SetResourceString(unverified, "service.version", "documented-current-unversioned");
+        Assert.True(JsonNode.DeepEquals(baseline, unverified));
+
+        var driftAttributes = Spans(drift)[0]!["attributes"]!.AsArray();
+        var driftAttribute = Assert.Single(driftAttributes, item => item!["key"]!.GetValue<string>() == "synthetic.schema_drift_marker");
+        driftAttributes.Remove(driftAttribute);
+        Assert.True(JsonNode.DeepEquals(baseline, drift));
+    }
+
+    [Theory]
+    [MemberData(nameof(OtelFixturePaths))]
+    public void Otel_fixture_contains_only_bounded_synthetic_content_and_no_sensitive_material(string fixturePath)
+    {
+        var bytes = File.ReadAllBytes(FixturePathOnDisk(fixturePath));
+        Assert.InRange(bytes.Length, 1, 32 * 1024);
+        var searchable = fixturePath.EndsWith(".json", StringComparison.Ordinal) ? Encoding.UTF8.GetString(bytes) : OtlpProtobufTraceConverter.ConvertTraceRequestToRawOtlpJson(bytes);
+        Assert.DoesNotContain("@", searchable, StringComparison.Ordinal);
+        Assert.DoesNotContain("api_key", searchable, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("authorization", searchable, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("bearer", searchable, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("C:\\", searchable, StringComparison.Ordinal);
+        Assert.DoesNotContain("/Users/", searchable, StringComparison.Ordinal);
+        Assert.DoesNotContain("/home/", searchable, StringComparison.Ordinal);
+        Assert.DoesNotContain("sk-ant-", searchable, StringComparison.OrdinalIgnoreCase);
+    }
+
     public static TheoryData<string> FixturePaths
     {
         get
@@ -279,6 +492,16 @@ public sealed class ClaudeProducerFixtureContractTests
             {
                 data.Add(contract.Path);
             }
+            return data;
+        }
+    }
+
+    public static TheoryData<string> OtelFixturePaths
+    {
+        get
+        {
+            var data = new TheoryData<string>();
+            foreach (var contract in OtelFixtureContracts) data.Add(contract.Path);
             return data;
         }
     }
@@ -392,9 +615,203 @@ public sealed class ClaudeProducerFixtureContractTests
         if (node is not null) Assert.StartsWith("SYNTHETIC_", node.GetValue<string>(), StringComparison.Ordinal);
     }
 
+    private static JsonArray Spans(JsonObject request) => request["resourceSpans"]![0]!["scopeSpans"]![0]!["spans"]!.AsArray();
+    private static string SourceIdentity(JsonNode? span) => $"{span!["traceId"]}:{span["spanId"]}:{span["parentSpanId"]}:{span["name"]}:{span["startTimeUnixNano"]}:{span["endTimeUnixNano"]}";
+    private static IEnumerable<KeyValuePair<string, JsonObject>> Attributes(JsonNode? envelope) =>
+        envelope!["attributes"]?.AsArray().Select(item => item!.AsObject()).Select(item => KeyValuePair.Create(item["key"]!.GetValue<string>(), item["value"]!.AsObject())) ?? [];
+    private static IEnumerable<JsonObject> Events(JsonNode? span) => span!["events"]?.AsArray().Select(item => item!.AsObject()) ?? [];
+    private static string StringValue(JsonObject anyValue) => anyValue["stringValue"]!.GetValue<string>();
+
+    private static void AssertRecognizedSemanticsEqual(JsonArray disabled, JsonArray enabled, IReadOnlyCollection<string> gatedKeys)
+    {
+        for (var index = 0; index < disabled.Count; index++)
+        {
+            var left = disabled[index]!.DeepClone().AsObject();
+            var right = enabled[index]!.DeepClone().AsObject();
+            left["attributes"] = new JsonArray(left["attributes"]!.AsArray()
+                .Where(item => !gatedKeys.Contains(item!["key"]!.GetValue<string>(), StringComparer.Ordinal))
+                .Select(item => item!.DeepClone()).ToArray());
+            right["attributes"] = new JsonArray(right["attributes"]!.AsArray()
+                .Where(item => !gatedKeys.Contains(item!["key"]!.GetValue<string>(), StringComparer.Ordinal))
+                .Select(item => item!.DeepClone()).ToArray());
+            var retainedEvents = new JsonArray((right["events"]?.AsArray() ?? [])
+                .Where(item => item!["name"]!.GetValue<string>() != "tool.output")
+                .Select(item => item!.DeepClone()).ToArray());
+            if (retainedEvents.Count == 0 && left["events"] is null) right.Remove("events");
+            else right["events"] = retainedEvents;
+            Assert.True(JsonNode.DeepEquals(left, right), $"Recognized semantics differ for span {index}.");
+        }
+    }
+
+    private static string ResourceString(JsonObject request, string key) =>
+        StringValue(Assert.Single(Attributes(request["resourceSpans"]![0]!["resource"]), pair => pair.Key == key).Value);
+
+    private static void SetResourceString(JsonObject request, string key, string value) =>
+        Assert.Single(Attributes(request["resourceSpans"]![0]!["resource"]), pair => pair.Key == key).Value["stringValue"] = value;
+
+    private static ExpectedOfficialSpan OfficialSpan(
+        string name,
+        string spanId,
+        string? parentSpanId,
+        string startTimeUnixNano,
+        string endTimeUnixNano,
+        IReadOnlyDictionary<string, object> attributes,
+        IReadOnlyList<ExpectedOfficialEvent>? expectedEvents = null) =>
+        new(name, spanId, parentSpanId, startTimeUnixNano, endTimeUnixNano, attributes, expectedEvents ?? []);
+
+    private static ExpectedOfficialEvent OfficialEvent(
+        string name,
+        string timeUnixNano,
+        IReadOnlyDictionary<string, object> attributes) => new(name, timeUnixNano, attributes);
+
+    private static IReadOnlyDictionary<string, object> CommonAttributes(string spanName, params (string? Key, object? Value)[] extras)
+    {
+        var attributes = new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["span.type"] = spanName,
+            ["session.id"] = "SYNTHETIC_SESSION_001",
+        };
+        foreach (var (key, value) in extras)
+        {
+            if (key is not null) attributes.Add(key, value!);
+        }
+        return attributes;
+    }
+
+    private static void AssertOfficialSpan(ExpectedOfficialSpan expected, JsonObject actual)
+    {
+        var expectedFields = new List<string> { "traceId", "spanId" };
+        if (expected.ParentSpanId is not null) expectedFields.Add("parentSpanId");
+        expectedFields.AddRange(["name", "kind", "startTimeUnixNano", "endTimeUnixNano", "attributes"]);
+        if (expected.Events.Count != 0) expectedFields.Add("events");
+        expectedFields.Add("status");
+        Assert.Equal(expectedFields.Order(), actual.Select(property => property.Key).Order());
+        Assert.Equal("11111111111111111111111111111111", actual["traceId"]!.GetValue<string>());
+        Assert.Equal(expected.SpanId, actual["spanId"]!.GetValue<string>());
+        Assert.Equal(expected.ParentSpanId, actual["parentSpanId"]?.GetValue<string>());
+        Assert.Equal(expected.Name, actual["name"]!.GetValue<string>());
+        Assert.Equal(1, actual["kind"]!.GetValue<int>());
+        Assert.Equal(expected.StartTimeUnixNano, actual["startTimeUnixNano"]!.GetValue<string>());
+        Assert.Equal(expected.EndTimeUnixNano, actual["endTimeUnixNano"]!.GetValue<string>());
+        Assert.Equal(["code"], actual["status"]!.AsObject().Select(property => property.Key));
+        Assert.Equal(0, actual["status"]!["code"]!.GetValue<int>());
+
+        var actualAttributes = Attributes(actual).ToDictionary(pair => pair.Key, pair => AnyValue(pair.Value), StringComparer.Ordinal);
+        Assert.Equal(expected.Attributes.Keys.Order(), actualAttributes.Keys.Order());
+        foreach (var pair in expected.Attributes) Assert.Equal(pair.Value, actualAttributes[pair.Key]);
+
+        var actualEvents = Events(actual).ToArray();
+        Assert.Equal(expected.Events.Count, actualEvents.Length);
+        for (var index = 0; index < expected.Events.Count; index++)
+        {
+            var expectedEvent = expected.Events[index];
+            Assert.Equal(["timeUnixNano", "name", "attributes"], actualEvents[index].Select(property => property.Key));
+            Assert.Equal(expectedEvent.TimeUnixNano, actualEvents[index]["timeUnixNano"]!.GetValue<string>());
+            Assert.Equal(expectedEvent.Name, actualEvents[index]["name"]!.GetValue<string>());
+            var eventAttributes = Attributes(actualEvents[index]).ToDictionary(pair => pair.Key, pair => AnyValue(pair.Value), StringComparer.Ordinal);
+            Assert.Equal(expectedEvent.Attributes.Keys.Order(), eventAttributes.Keys.Order());
+            foreach (var pair in expectedEvent.Attributes) Assert.Equal(pair.Value, eventAttributes[pair.Key]);
+        }
+    }
+
+    private static object AnyValue(JsonObject value)
+    {
+        Assert.Single(value);
+        if (value["stringValue"] is JsonNode stringValue) return stringValue.GetValue<string>();
+        if (value["intValue"] is JsonNode intValue) return long.Parse(intValue.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture);
+        if (value["doubleValue"] is JsonNode doubleValue) return doubleValue.GetValue<double>();
+        if (value["boolValue"] is JsonNode boolValue) return boolValue.GetValue<bool>();
+        throw new Xunit.Sdk.XunitException($"Unsupported independent-matrix AnyValue: {value.ToJsonString()}");
+    }
+
+    private static byte[] EncodeEnvelope(JsonObject value, SourceStructuralEnvelope envelope)
+    {
+        using var stream = new MemoryStream();
+        foreach (var property in value)
+        {
+            Assert.True(OtlpTraceSchema.TryGetField(envelope, property.Key, out var field), $"No OTLP descriptor field for {envelope}.{property.Key}");
+            var nodes = field.JsonRepresentation == OtlpJsonRepresentation.Array ? property.Value!.AsArray().OfType<JsonNode>() : [property.Value!];
+            foreach (var node in nodes) stream.Write(EncodeField(field, node));
+        }
+        return stream.ToArray();
+    }
+
+    private static byte[] EncodeField(OtlpTraceField field, JsonNode node)
+    {
+        var raw = field.Disposition == OtlpTraceFieldDisposition.ChildEnvelope
+            ? EncodeEnvelope(node.AsObject(), field.ChildEnvelope!.Value)
+            : EncodeScalar(field, node);
+        return field.ProtobufWireType switch
+        {
+            OtlpProtobufWireType.LengthDelimited => LengthDelimited(field.ProtobufTag, raw),
+            OtlpProtobufWireType.Varint => VarintField(field.ProtobufTag, ParseUInt64(field, node)),
+            OtlpProtobufWireType.Fixed64 => Fixed64Field(field.ProtobufTag, ParseFixed64(field, node)),
+            OtlpProtobufWireType.Fixed32 => Fixed32Field(field.ProtobufTag, node.GetValue<uint>()),
+            _ => throw new ArgumentOutOfRangeException(),
+        };
+    }
+
+    private static byte[] EncodeScalar(OtlpTraceField field, JsonNode node) => field.SemanticType switch
+    {
+        SourceStructuralType.String => Encoding.UTF8.GetBytes(node.GetValue<string>()),
+        SourceStructuralType.Bytes when field.FieldCode == "any_value.bytes" => Convert.FromBase64String(node.GetValue<string>()),
+        SourceStructuralType.Bytes => Convert.FromHexString(node.GetValue<string>()),
+        _ => [],
+    };
+
+    private static ulong ParseUInt64(OtlpTraceField field, JsonNode node) => field.SemanticType switch
+    {
+        SourceStructuralType.Bool => node.GetValue<bool>() ? 1UL : 0UL,
+        SourceStructuralType.Int when field.FieldCode == "any_value.int" => unchecked((ulong)long.Parse(node.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture)),
+        _ => node.GetValue<ulong>(),
+    };
+
+    private static ulong ParseFixed64(OtlpTraceField field, JsonNode node) => field.SemanticType switch
+    {
+        SourceStructuralType.Double => unchecked((ulong)BitConverter.DoubleToInt64Bits(node.GetValue<double>())),
+        _ => ulong.Parse(node.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture),
+    };
+
+    private static byte[] LengthDelimited(int tag, byte[] value) => Message(Varint(((ulong)tag << 3) | 2), Varint((ulong)value.Length), value);
+    private static byte[] VarintField(int tag, ulong value) => Message(Varint((ulong)tag << 3), Varint(value));
+    private static byte[] Fixed64Field(int tag, ulong value)
+    {
+        var bytes = new byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        return Message(Varint(((ulong)tag << 3) | 1), bytes);
+    }
+    private static byte[] Fixed32Field(int tag, uint value)
+    {
+        var bytes = new byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        return Message(Varint(((ulong)tag << 3) | 5), bytes);
+    }
+    private static byte[] Message(params byte[][] values) => values.SelectMany(value => value).ToArray();
+    private static byte[] Varint(ulong value)
+    {
+        var bytes = new List<byte>();
+        do
+        {
+            var next = (byte)(value & 0x7f);
+            value >>= 7;
+            bytes.Add(value == 0 ? next : (byte)(next | 0x80));
+        } while (value != 0);
+        return bytes.ToArray();
+    }
+
     private enum Requirement { Required, Optional, Conditional }
     private enum J { String, Object, Array, Number, Boolean, Any }
     private sealed record MappingRow(string FieldId, string ProducerPath, string Selector, string ProducerType, Requirement Requirement, string ContentGate, J JsonType);
     private sealed record FixtureField(string Name, J Type);
     private sealed record FixtureContract(string Path, string EventName, bool Accepted, FixtureField[] Fields, string[] MappingFieldIds);
+    private sealed record OtelFixtureContract(string Path, string Encoding, string SourceVersionLabel, string ContentGate, string ExpectedEmptyRegistryState);
+    private sealed record ExpectedOfficialSpan(
+        string Name,
+        string SpanId,
+        string? ParentSpanId,
+        string StartTimeUnixNano,
+        string EndTimeUnixNano,
+        IReadOnlyDictionary<string, object> Attributes,
+        IReadOnlyList<ExpectedOfficialEvent> Events);
+    private sealed record ExpectedOfficialEvent(string Name, string TimeUnixNano, IReadOnlyDictionary<string, object> Attributes);
 }
