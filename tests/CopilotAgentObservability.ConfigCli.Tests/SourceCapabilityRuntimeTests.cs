@@ -5,6 +5,10 @@ using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[CollectionDefinition(nameof(SourceCapabilityManifestCurrentDirectoryCollection), DisableParallelization = true)]
+public sealed class SourceCapabilityManifestCurrentDirectoryCollection;
+
+[Collection(nameof(SourceCapabilityManifestCurrentDirectoryCollection))]
 public sealed class SourceCapabilityRuntimeTests
 {
     private const string VsCodeResourceName = "CopilotAgentObservability.ConfigCli.Setup.Capabilities.Manifests.github-copilot-vscode.json";
