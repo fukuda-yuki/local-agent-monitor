@@ -12,6 +12,16 @@ public static class SetupContractValidator
     private const int MaximumTargets = 16;
     private const int MaximumChangesPerTarget = 32;
     private const int MaximumStatusEntries = 100;
+    private const string AppSdkGuidanceSample = """
+        new CopilotClientOptions
+        {
+            Telemetry = new TelemetryConfig
+            {
+                OtlpEndpoint = "http://127.0.0.1:4320",
+                OtlpProtocol = "http/protobuf"
+            }
+        }
+        """;
 
     private static readonly Regex UuidV7 = new(
         "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -28,9 +38,6 @@ public static class SetupContractValidator
     private static readonly Regex Timestamp = new(
         "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,7})?Z$",
         RegexOptions.CultureInvariant);
-    private static readonly Regex UnsafeMarker = new(
-        "(?<![A-Za-z0-9])(secret|token|authorization|header|raw|exception|stacktrace|bearer)(?![A-Za-z0-9])",
-        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private static readonly HashSet<string> SuccessCodes = new(StringComparer.Ordinal)
     {
@@ -67,6 +74,16 @@ public static class SetupContractValidator
         SetupCodes.RerunRequestedSetupCommand,
     };
 
+    private static readonly HashSet<string> AvailabilityValues = new(StringComparer.Ordinal)
+    {
+        "available", "unavailable", "unknown",
+    };
+
+    private static readonly HashSet<string> GitHubCopilotSourceSurfaces = new(StringComparer.Ordinal)
+    {
+        "github-copilot-vscode", "github-copilot-cli",
+    };
+
     public static void Validate(SetupCommandResult result)
     {
         if (result is null ||
@@ -84,7 +101,7 @@ public static class SetupContractValidator
         ValidateOptionalIdentifier(result.Adapter);
         ValidateStringList(result.Warnings, WarningCodes);
         ValidateStringList(result.NextActions, NextActionCodes);
-        ValidateSuccessCodeForCommand(result.Command, result.Code, result.Success);
+        ValidateResultCodeForCommand(result.Command, result.Code, result.Success);
         ValidateCorrelation(result);
 
         if (result.Targets.Count > MaximumTargets || result.ChangeSets.Count > MaximumStatusEntries)
@@ -103,6 +120,8 @@ public static class SetupContractValidator
             {
                 ValidateStatusChangeSet(changeSet);
             }
+
+            ValidateInterruptedRecoveryFailureProjection(result);
         }
         else
         {
@@ -162,6 +181,11 @@ public static class SetupContractValidator
             Reject();
         }
 
+        if (recoveryCode && !result.NextActions.Contains(SetupCodes.RerunRequestedSetupCommand, StringComparer.Ordinal))
+        {
+            Reject();
+        }
+
         if (result.Command == SetupCommand.Status)
         {
             return;
@@ -183,27 +207,42 @@ public static class SetupContractValidator
         }
     }
 
-    private static void ValidateSuccessCodeForCommand(SetupCommand command, string code, bool success)
+    private static void ValidateResultCodeForCommand(SetupCommand command, string code, bool success)
     {
-        if (!success || code is SetupCodes.InterruptedApplyRecovered or SetupCodes.InterruptedRollbackRecovered)
-        {
-            return;
-        }
-
-        var valid = command switch
-        {
-            SetupCommand.Plan => code is SetupCodes.PlanReady or SetupCodes.NoChanges,
-            SetupCommand.Apply => code is SetupCodes.ApplySucceeded or SetupCodes.NoChanges,
-            SetupCommand.Rollback => code == SetupCodes.RollbackSucceeded,
-            SetupCommand.Status => code == SetupCodes.StatusReady,
-            _ => false,
-        };
+        var valid = success
+            ? command switch
+            {
+                SetupCommand.Plan => code is SetupCodes.PlanReady or SetupCodes.NoChanges or SetupCodes.InterruptedApplyRecovered or SetupCodes.InterruptedRollbackRecovered,
+                SetupCommand.Apply => code is SetupCodes.ApplySucceeded or SetupCodes.NoChanges or SetupCodes.InterruptedApplyRecovered or SetupCodes.InterruptedRollbackRecovered,
+                SetupCommand.Rollback => code is SetupCodes.RollbackSucceeded or SetupCodes.InterruptedApplyRecovered or SetupCodes.InterruptedRollbackRecovered,
+                SetupCommand.Status => code is SetupCodes.StatusReady or SetupCodes.InterruptedApplyRecovered or SetupCodes.InterruptedRollbackRecovered,
+                _ => false,
+            }
+            : command switch
+            {
+                SetupCommand.Plan => IsCommonFailure(code) || code is SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget or SetupCodes.TargetNotInstalled or SetupCodes.UnsupportedVersion or SetupCodes.ManagedPolicyConflict or SetupCodes.MalformedSettings or SetupCodes.PortOwnedByForeignProcess,
+                SetupCommand.Apply => IsCommonFailure(code) || code is SetupCodes.TargetNotInstalled or SetupCodes.UnsupportedVersion or SetupCodes.ManagedPolicyConflict or SetupCodes.MalformedSettings or SetupCodes.StalePlan or SetupCodes.PortOwnedByForeignProcess or SetupCodes.PartialApply,
+                SetupCommand.Rollback => IsCommonFailure(code) || code is SetupCodes.RollbackStale or SetupCodes.RollbackNotAvailable or SetupCodes.PartialRollback,
+                SetupCommand.Status => code is SetupCodes.SetupBusy or SetupCodes.RecoveryRequired or SetupCodes.InterruptedRecoveryFailed or SetupCodes.LedgerCorrupt or SetupCodes.LedgerVersionUnsupported or SetupCodes.InternalError,
+                _ => false,
+            };
 
         if (!valid)
         {
             Reject();
         }
     }
+
+    private static bool IsCommonFailure(string code) => code is
+        SetupCodes.InvalidArguments or
+        SetupCodes.PermissionDenied or
+        SetupCodes.UnsafePath or
+        SetupCodes.SetupBusy or
+        SetupCodes.RecoveryRequired or
+        SetupCodes.InterruptedRecoveryFailed or
+        SetupCodes.LedgerCorrupt or
+        SetupCodes.LedgerVersionUnsupported or
+        SetupCodes.InternalError;
 
     private static void ValidateStatusChangeSet(SetupChangeSetStatusResult? changeSet)
     {
@@ -248,6 +287,22 @@ public static class SetupContractValidator
         }
     }
 
+    private static void ValidateInterruptedRecoveryFailureProjection(SetupCommandResult result)
+    {
+        if (result.Code != SetupCodes.InterruptedRecoveryFailed)
+        {
+            return;
+        }
+
+        if (result.RecoveredChangeSetId is null ||
+            result.ChangeSets.Count(changeSet => changeSet.ChangeSetId == result.RecoveredChangeSetId &&
+                changeSet.State == SetupChangeSetState.Partial &&
+                changeSet.OutcomeCode == SetupCodes.InterruptedRecoveryFailed) != 1)
+        {
+            Reject();
+        }
+    }
+
     private static void ValidateTarget(SetupTargetResult? target, SetupCommand command, bool isStatusTarget)
     {
         if (target is null ||
@@ -270,6 +325,12 @@ public static class SetupContractValidator
         }
 
         if (!isStatusTarget && (target.ReferenceState is not null || target.CurrentState is not null))
+        {
+            Reject();
+        }
+
+        if (isStatusTarget && target.TargetKind != SetupTargetKind.Guidance &&
+            (target.ReferenceState is null || target.CurrentState is null))
         {
             Reject();
         }
@@ -324,7 +385,7 @@ public static class SetupContractValidator
 
         ValidateFixedIdentifier(target.Guidance.Kind);
         ValidateFixedIdentifier(target.Guidance.Language);
-        if (command == SetupCommand.Plan && !IsRepositorySafeText(target.Guidance.Sample))
+        if ((!isStatusTarget || target.Guidance.Sample is not null) && target.Guidance.Sample != AppSdkGuidanceSample)
         {
             Reject();
         }
@@ -457,47 +518,113 @@ public static class SetupContractValidator
             return;
         }
 
-        ValidateJsonValue(value);
+        ValidateSourceCapabilityManifest(value);
     }
 
-    private static void ValidateJsonValue(JsonElement value)
+    private static void ValidateSourceCapabilityManifest(JsonElement manifest)
     {
-        switch (value.ValueKind)
+        RequireObjectProperties(manifest,
+            "contract_version", "source_surface", "source_adapter", "support_status", "stability", "source_version_detector",
+            "signals", "native_session_identity", "trace_span_identity", "timing_ttft", "model_tokens", "retry_attempt",
+            "tool_calls", "permission", "errors", "agent_ownership", "prompt_response", "file_diff", "content_capture_gate",
+            "provenance", "completeness");
+        RequireString(manifest, "contract_version", "v1");
+        RequireOneOf(manifest, "source_surface", GitHubCopilotSourceSurfaces);
+        RequireString(manifest, "source_adapter", "otel-http+copilot-compatible-hook");
+        RequireString(manifest, "support_status", "active");
+        RequireString(manifest, "stability", "stable");
+        ValidateCapability(manifest.GetProperty("source_version_detector"));
+        ValidateCapability(manifest.GetProperty("native_session_identity"));
+        ValidateCapability(manifest.GetProperty("errors"));
+        ValidateCapability(manifest.GetProperty("content_capture_gate"));
+        ValidateCapabilityGroup(manifest.GetProperty("signals"), "trace", "log", "metric", "hook", "sdk_event", "saved_raw");
+        ValidateCapabilityGroup(manifest.GetProperty("trace_span_identity"), "trace_id", "span_id", "parentage");
+        ValidateCapabilityGroup(manifest.GetProperty("timing_ttft"), "timing", "ttft");
+        ValidateCapabilityGroup(manifest.GetProperty("model_tokens"), "model", "input_tokens", "output_tokens", "total_tokens", "cache_tokens", "reasoning_tokens");
+        ValidateCapabilityGroup(manifest.GetProperty("retry_attempt"), "retry", "attempt");
+        ValidateCapabilityGroup(manifest.GetProperty("tool_calls"), "identity", "input", "output");
+        ValidateCapabilityGroup(manifest.GetProperty("permission"), "wait", "decision");
+        ValidateCapabilityGroup(manifest.GetProperty("agent_ownership"), "main_agent", "sub_agent");
+        ValidateCapabilityGroup(manifest.GetProperty("prompt_response"), "prompt", "response");
+        ValidateCapabilityGroup(manifest.GetProperty("file_diff"), "file", "diff");
+
+        var provenance = manifest.GetProperty("provenance");
+        RequireObjectProperties(provenance, "required_keys");
+        RequireStringArray(provenance.GetProperty("required_keys"), "source_adapter", "source_version_or_schema_fingerprint", "source_event_or_trace_span_id", "capture_content_state", "normalization_version");
+
+        var completeness = manifest.GetProperty("completeness");
+        RequireObjectProperties(completeness, "statuses", "reason_codes");
+        RequireStringArray(completeness.GetProperty("statuses"), "unbound", "partial", "rich", "full");
+        RequireStringArray(completeness.GetProperty("reason_codes"), "missing_native_session_id", "missing_trace_context", "trace_signal_disabled", "content_capture_disabled", "unsupported_source_version", "ingest_gap", "hook_only", "historical_summary_only", "unknown_span_kind", "schema_drift_detected", "planned_source_not_enabled");
+    }
+
+    private static void ValidateCapabilityGroup(JsonElement group, params string[] propertyNames)
+    {
+        RequireObjectProperties(group, propertyNames);
+        foreach (var propertyName in propertyNames)
         {
-            case JsonValueKind.Object:
-                foreach (var property in value.EnumerateObject())
-                {
-                    if (!IsRepositorySafeText(property.Name))
-                    {
-                        Reject();
-                    }
+            ValidateCapability(group.GetProperty(propertyName));
+        }
+    }
 
-                    ValidateJsonValue(property.Value);
-                }
+    private static void ValidateCapability(JsonElement capability)
+    {
+        RequireObjectProperties(capability, "availability");
+        RequireOneOf(capability, "availability", AvailabilityValues);
+    }
 
-                break;
-            case JsonValueKind.Array:
-                foreach (var item in value.EnumerateArray())
-                {
-                    ValidateJsonValue(item);
-                }
+    private static void RequireObjectProperties(JsonElement value, params string[] propertyNames)
+    {
+        if (value.ValueKind != JsonValueKind.Object || value.EnumerateObject().Count() != propertyNames.Length)
+        {
+            Reject();
+        }
 
-                break;
-            case JsonValueKind.String:
-                if (!IsRepositorySafeText(value.GetString()))
-                {
-                    Reject();
-                }
-
-                break;
-            case JsonValueKind.Number:
-            case JsonValueKind.True:
-            case JsonValueKind.False:
-            case JsonValueKind.Null:
-                break;
-            default:
+        foreach (var propertyName in propertyNames)
+        {
+            if (!value.TryGetProperty(propertyName, out _))
+            {
                 Reject();
-                break;
+            }
+        }
+    }
+
+    private static void RequireString(JsonElement objectValue, string propertyName, string expected)
+    {
+        if (!objectValue.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.String || value.GetString() != expected)
+        {
+            Reject();
+        }
+    }
+
+    private static void RequireOneOf(JsonElement objectValue, string propertyName, ISet<string> allowedValues)
+    {
+        if (!objectValue.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.String ||
+            value.GetString() is not { } stringValue || !allowedValues.Contains(stringValue))
+        {
+            Reject();
+        }
+    }
+
+    private static void RequireStringArray(JsonElement value, params string[] expectedValues)
+    {
+        if (value.ValueKind != JsonValueKind.Array)
+        {
+            Reject();
+        }
+
+        var values = value.EnumerateArray().ToArray();
+        if (values.Length != expectedValues.Length)
+        {
+            Reject();
+        }
+
+        for (var index = 0; index < expectedValues.Length; index++)
+        {
+            if (values[index].ValueKind != JsonValueKind.String || values[index].GetString() != expectedValues[index])
+            {
+                Reject();
+            }
         }
     }
 
@@ -551,28 +678,9 @@ public static class SetupContractValidator
         }
     }
 
-    private static bool IsSafeSettingKey(string? value) => value is not null &&
-        SettingKey.IsMatch(value) &&
-        !ContainsUnsafeMarker(value);
+    private static bool IsSafeSettingKey(string? value) => value is not null && SettingKey.IsMatch(value);
 
-    private static bool IsSafeFixedValue(string? value) => value is not null &&
-        FixedIdentifier.IsMatch(value) &&
-        !ContainsUnsafeMarker(value);
-
-    private static bool IsRepositorySafeText(string? value) => value is not null &&
-        value.Length > 0 &&
-        !ContainsAbsolutePath(value) &&
-        !ContainsUnsafeMarker(value);
-
-    private static bool ContainsUnsafeMarker(string value) => UnsafeMarker.IsMatch(value) ||
-        value.Contains("stack trace", StringComparison.OrdinalIgnoreCase);
-
-    private static bool ContainsAbsolutePath(string value) =>
-        value.StartsWith("/", StringComparison.Ordinal) ||
-        value.StartsWith("\\", StringComparison.Ordinal) ||
-        value.StartsWith("~/", StringComparison.Ordinal) ||
-        value.StartsWith("~\\", StringComparison.Ordinal) ||
-        Regex.IsMatch(value, "(?:^|[^A-Za-z0-9_])[A-Za-z]:[\\\\/]", RegexOptions.CultureInvariant);
+    private static bool IsSafeFixedValue(string? value) => value is not null && FixedIdentifier.IsMatch(value);
 
     private static bool IsCredentialFreeLoopbackHttpEndpoint(string value)
     {

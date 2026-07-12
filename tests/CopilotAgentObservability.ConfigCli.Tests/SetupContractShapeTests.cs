@@ -6,10 +6,22 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SetupContractShapeTests
 {
+    private const string AppSdkGuidanceSample = """
+        new CopilotClientOptions
+        {
+            Telemetry = new TelemetryConfig
+            {
+                OtlpEndpoint = "http://127.0.0.1:4320",
+                OtlpProtocol = "http/protobuf"
+            }
+        }
+        """;
+
     [Fact]
     public void Serialize_RichPlan_WritesCompleteSetupV1StructureInContractOrder()
     {
-        using var expectedResultDocument = JsonDocument.Parse("""{"source_surface":"github-copilot-vscode"}""");
+        using var expectedResultDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "specifications", "contracts", "source-capabilities", "v1", "manifests", "github-copilot-vscode.json")));
         var writableTarget = new SetupTargetResult(
             "00000000-0000-7000-8000-000000000001", SetupTargetKind.Json, "vscode-user-settings", true, "1.128.0",
             SetupOperation.Replace, SetupEffectiveSource.UserSetting, null, null, SetupRestartRequirement.RestartVsCode, true,
@@ -18,7 +30,7 @@ public sealed class SetupContractShapeTests
         var guidanceTarget = new SetupTargetResult(
             "00000000-0000-7000-8000-000000000002", SetupTargetKind.Guidance, "app-sdk-guidance", false, null,
             SetupOperation.NoOp, null, null, null, SetupRestartRequirement.None, false, null, null,
-            new SetupGuidance("caller_managed_sample", "dotnet", "new CopilotClientOptions()"), []);
+            new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), []);
         var result = new SetupCommandResult(
             SetupCommand.Plan, true, "plan_ready", "00000000-0000-7000-8000-000000000003", null, null, "github-copilot",
             [writableTarget, guidanceTarget], [], ["monitor_not_running"], ["start_local_monitor"], false);
@@ -84,7 +96,7 @@ public sealed class SetupContractShapeTests
         AssertPropertyOrder(planGuidance, "kind", "language", "sample");
         Assert.Equal("caller_managed_sample", planGuidance.GetProperty("kind").GetString());
         Assert.Equal("dotnet", planGuidance.GetProperty("language").GetString());
-        Assert.Equal("new CopilotClientOptions()", planGuidance.GetProperty("sample").GetString());
+        Assert.Equal(AppSdkGuidanceSample, planGuidance.GetProperty("sample").GetString());
     }
 
     [Fact]
@@ -305,7 +317,7 @@ public sealed class SetupContractShapeTests
 
     private static SetupTargetResult CreateStatusWritableTarget(SetupReferenceState referenceState = SetupReferenceState.Desired, SetupCurrentState currentState = SetupCurrentState.Current, bool rollbackAvailable = true) => new("00000000-0000-7000-8000-000000000020", SetupTargetKind.Json, "vscode-user-settings", true, "1.128.0", SetupOperation.Replace, SetupEffectiveSource.UserSetting, referenceState, currentState, SetupRestartRequirement.RestartVsCode, rollbackAvailable, "http://127.0.0.1:4320", null, null, [new SetupMemberChangeResult("setting", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
 
-    private static SetupTargetResult CreateStatusGuidanceTarget() => new("00000000-0000-7000-8000-000000000021", SetupTargetKind.Guidance, "app-sdk-guidance", false, null, SetupOperation.NoOp, null, SetupReferenceState.None, SetupCurrentState.NotApplicable, SetupRestartRequirement.None, false, null, null, new SetupGuidance("caller_managed_sample", "dotnet", "new CopilotClientOptions()"), []);
+    private static SetupTargetResult CreateStatusGuidanceTarget() => new("00000000-0000-7000-8000-000000000021", SetupTargetKind.Guidance, "app-sdk-guidance", false, null, SetupOperation.NoOp, null, SetupReferenceState.None, SetupCurrentState.NotApplicable, SetupRestartRequirement.None, false, null, null, new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), []);
 
     private static SetupCommandResult CreateCommandWireResult(SetupCommand command) => command switch
     {
@@ -351,7 +363,7 @@ public sealed class SetupContractShapeTests
         rollbackAvailable: state == SetupChangeSetState.Applied);
 
     private static SetupTargetResult CreatePlanTarget(SetupTargetKind targetKind = SetupTargetKind.Json, SetupOperation operation = SetupOperation.Replace, SetupEffectiveSource? effectiveSource = SetupEffectiveSource.UserSetting, SetupRestartRequirement restartRequirement = SetupRestartRequirement.RestartVsCode) => targetKind == SetupTargetKind.Guidance
-        ? new SetupTargetResult("00000000-0000-7000-8000-000000000032", targetKind, "app-sdk-guidance", false, null, SetupOperation.NoOp, null, null, null, SetupRestartRequirement.None, false, null, null, new SetupGuidance("caller_managed_sample", "dotnet", "new CopilotClientOptions()"), [])
+        ? new SetupTargetResult("00000000-0000-7000-8000-000000000032", targetKind, "app-sdk-guidance", false, null, SetupOperation.NoOp, null, null, null, SetupRestartRequirement.None, false, null, null, new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), [])
         : new SetupTargetResult("00000000-0000-7000-8000-000000000032", targetKind, "target", true, "1.128.0", operation, effectiveSource, null, null, restartRequirement, true, "http://127.0.0.1:4320", null, null, [new SetupMemberChangeResult("setting", operation, "present_different", "configured_loopback", "none", false)]);
 
     private static void AssertWire(SetupCommandResult result, string property, string expected)
