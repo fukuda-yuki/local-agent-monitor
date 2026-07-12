@@ -40,16 +40,7 @@ internal sealed class SetupPlanStore
 
     public void Create(SetupLock setupLock, SetupPrivatePlan plan)
     {
-        setupLock.AssertHeld(platform, paths);
-        SetupStorageValidation.ValidatePlan(plan);
-        var destination = paths.GetPlan(plan.ChangeSetId);
-        if (platform.FileSystem.FileExists(destination))
-        {
-            throw new SetupStorageException(SetupStorageCodes.PlanAlreadyExists);
-        }
-
-        platform.FileSystem.CreateDirectory(paths.Plans);
-        SetupStorageFile.WriteNew(platform, destination, Serialize(plan));
+        setupLock.ExecuteWhileHeld(platform, paths, () => CreateCore(plan));
     }
 
     public SetupPrivatePlan? Load(Guid changeSetId)
@@ -78,7 +69,24 @@ internal sealed class SetupPlanStore
 
     public void Delete(SetupLock setupLock, Guid changeSetId)
     {
-        setupLock.AssertHeld(platform, paths);
+        setupLock.ExecuteWhileHeld(platform, paths, () => DeleteCore(changeSetId));
+    }
+
+    internal void CreateCore(SetupPrivatePlan plan)
+    {
+        SetupStorageValidation.ValidatePlan(plan);
+        var destination = paths.GetPlan(plan.ChangeSetId);
+        if (platform.FileSystem.FileExists(destination))
+        {
+            throw new SetupStorageException(SetupStorageCodes.PlanAlreadyExists);
+        }
+
+        platform.FileSystem.CreateDirectory(paths.Plans);
+        SetupStorageFile.WriteNew(platform, destination, Serialize(plan));
+    }
+
+    internal void DeleteCore(Guid changeSetId)
+    {
         try
         {
             platform.FileSystem.DeleteFile(paths.GetPlan(changeSetId));

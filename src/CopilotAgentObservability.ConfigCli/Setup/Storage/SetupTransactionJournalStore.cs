@@ -101,25 +101,27 @@ internal sealed partial class SetupTransactionJournalStore
         SetupJournalOperation operation,
         IReadOnlyList<SetupJournalTarget> targets)
     {
-        setupLock.AssertHeld(platform, paths);
-        var journal = new SetupTransactionJournal(
-            1,
-            changeSetId,
-            operation,
-            platform.Clock.UtcNow,
-            SetupJournalPhase.Prepared,
-            targets);
-        ValidateForWrite(journal);
-
-        var destination = paths.GetTransactionJournal(changeSetId);
-        if (platform.FileSystem.FileExists(destination))
+        return setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
-            throw new SetupStorageException(SetupJournalStorageCodes.AlreadyExists);
-        }
+            var journal = new SetupTransactionJournal(
+                1,
+                changeSetId,
+                operation,
+                platform.Clock.UtcNow,
+                SetupJournalPhase.Prepared,
+                targets);
+            ValidateForWrite(journal);
 
-        platform.FileSystem.CreateDirectory(paths.Transactions);
-        WriteCreateNew(destination, Serialize(journal));
-        return journal;
+            var destination = paths.GetTransactionJournal(changeSetId);
+            if (platform.FileSystem.FileExists(destination))
+            {
+                throw new SetupStorageException(SetupJournalStorageCodes.AlreadyExists);
+            }
+
+            platform.FileSystem.CreateDirectory(paths.Transactions);
+            WriteCreateNew(destination, Serialize(journal));
+            return journal;
+        });
     }
 
     public SetupPreparedJournalOpenResult OpenOrCreatePrepared(
@@ -128,9 +130,8 @@ internal sealed partial class SetupTransactionJournalStore
         SetupJournalOperation operation,
         IReadOnlyList<SetupJournalTarget> targets)
     {
-        lock (setupLock)
+        return setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
-            setupLock.AssertHeld(platform, paths);
             try
             {
                 var expected = new SetupTransactionJournal(
@@ -168,7 +169,7 @@ internal sealed partial class SetupTransactionJournalStore
             {
                 throw new SetupStorageException(SetupStorageCodes.WriteFailed);
             }
-        }
+        });
     }
 
     public SetupTransactionJournal? Load(Guid changeSetId)
@@ -207,20 +208,22 @@ internal sealed partial class SetupTransactionJournalStore
 
     public void MarkTransactionPhase(SetupLock setupLock, Guid changeSetId, SetupJournalPhase nextPhase)
     {
-        setupLock.AssertHeld(platform, paths);
-        var journal = LoadRequired(changeSetId);
-        if (!IsTransactionTransition(journal.Operation, journal.Phase, nextPhase))
+        setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
-            throw new SetupStorageException(SetupJournalStorageCodes.TransitionInvalid);
-        }
+            var journal = LoadRequired(changeSetId);
+            if (!IsTransactionTransition(journal.Operation, journal.Phase, nextPhase))
+            {
+                throw new SetupStorageException(SetupJournalStorageCodes.TransitionInvalid);
+            }
 
-        var updated = journal with { Phase = nextPhase };
-        if (!IsTerminalCoherent(updated))
-        {
-            throw new SetupStorageException(SetupJournalStorageCodes.TransitionInvalid);
-        }
+            var updated = journal with { Phase = nextPhase };
+            if (!IsTerminalCoherent(updated))
+            {
+                throw new SetupStorageException(SetupJournalStorageCodes.TransitionInvalid);
+            }
 
-        Save(updated);
+            Save(updated);
+        });
     }
 
     public void MarkStepPhase(
@@ -231,49 +234,53 @@ internal sealed partial class SetupTransactionJournalStore
         SetupJournalStepPhase expectedPhase,
         SetupJournalStepPhase nextPhase)
     {
-        setupLock.AssertHeld(platform, paths);
-        var journal = LoadRequired(changeSetId);
-        var targetIndex = FindTarget(journal, recordId);
-        var target = journal.Targets[targetIndex];
-        var stepIndex = FindStep(target, memberKey);
-        var step = target.Steps[stepIndex];
-        if (step.Phase != expectedPhase)
+        setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
-            throw new SetupStorageException(SetupJournalStorageCodes.StaleUpdate);
-        }
+            var journal = LoadRequired(changeSetId);
+            var targetIndex = FindTarget(journal, recordId);
+            var target = journal.Targets[targetIndex];
+            var stepIndex = FindStep(target, memberKey);
+            var step = target.Steps[stepIndex];
+            if (step.Phase != expectedPhase)
+            {
+                throw new SetupStorageException(SetupJournalStorageCodes.StaleUpdate);
+            }
 
-        if (!IsStepTransition(journal.Operation, journal.Phase, expectedPhase, nextPhase))
-        {
-            throw new SetupStorageException(SetupJournalStorageCodes.TransitionInvalid);
-        }
+            if (!IsStepTransition(journal.Operation, journal.Phase, expectedPhase, nextPhase))
+            {
+                throw new SetupStorageException(SetupJournalStorageCodes.TransitionInvalid);
+            }
 
-        var steps = target.Steps.ToArray();
-        steps[stepIndex] = step with { Phase = nextPhase };
-        var targets = journal.Targets.ToArray();
-        targets[targetIndex] = target with { Steps = steps };
-        var notification = target.TargetKind == SetupTargetKind.Env &&
-            nextPhase is SetupJournalStepPhase.MutationStarted or SetupJournalStepPhase.RestoreStarted &&
-            journal.EnvironmentNotification == SetupEnvironmentNotification.NotRequired
-                ? SetupEnvironmentNotification.Pending
-                : journal.EnvironmentNotification;
-        Save(journal with { Targets = targets, EnvironmentNotification = notification });
+            var steps = target.Steps.ToArray();
+            steps[stepIndex] = step with { Phase = nextPhase };
+            var targets = journal.Targets.ToArray();
+            targets[targetIndex] = target with { Steps = steps };
+            var notification = target.TargetKind == SetupTargetKind.Env &&
+                nextPhase is SetupJournalStepPhase.MutationStarted or SetupJournalStepPhase.RestoreStarted &&
+                journal.EnvironmentNotification == SetupEnvironmentNotification.NotRequired
+                    ? SetupEnvironmentNotification.Pending
+                    : journal.EnvironmentNotification;
+            Save(journal with { Targets = targets, EnvironmentNotification = notification });
+        });
     }
 
     public void MarkEnvironmentNotificationCompleted(SetupLock setupLock, Guid changeSetId)
     {
-        setupLock.AssertHeld(platform, paths);
-        var journal = LoadRequired(changeSetId);
-        if (journal.EnvironmentNotification != SetupEnvironmentNotification.Pending)
+        setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
-            throw new SetupStorageException(SetupJournalStorageCodes.StaleUpdate);
-        }
+            var journal = LoadRequired(changeSetId);
+            if (journal.EnvironmentNotification != SetupEnvironmentNotification.Pending)
+            {
+                throw new SetupStorageException(SetupJournalStorageCodes.StaleUpdate);
+            }
 
-        if (journal.Phase is not (SetupJournalPhase.Committed or SetupJournalPhase.Restored))
-        {
-            throw new SetupStorageException(SetupJournalStorageCodes.TransitionInvalid);
-        }
+            if (journal.Phase is not (SetupJournalPhase.Committed or SetupJournalPhase.Restored))
+            {
+                throw new SetupStorageException(SetupJournalStorageCodes.TransitionInvalid);
+            }
 
-        Save(journal with { EnvironmentNotification = SetupEnvironmentNotification.Completed });
+            Save(journal with { EnvironmentNotification = SetupEnvironmentNotification.Completed });
+        });
     }
 
     private void Save(SetupTransactionJournal journal)

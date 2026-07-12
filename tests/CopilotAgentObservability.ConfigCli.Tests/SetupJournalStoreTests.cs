@@ -105,24 +105,81 @@ public sealed class SetupJournalStoreTests
         var first = Task.Run(() => context.Store.OpenOrCreatePrepared(
             context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
         barrier.WaitUntilReached(CancellationToken.None);
-        var monitorWasAvailable = Monitor.TryEnter(context.Lock);
-        if (monitorWasAvailable)
-        {
-            Monitor.Exit(context.Lock);
-        }
 
         using var secondStarted = new ManualResetEventSlim();
         var second = Task.Run(() => new SetupTransactionJournalStore(context.Platform, context.Paths).OpenOrCreatePrepared(
             StartedLock(secondStarted, context.Lock), ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
         Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(10)));
+        Assert.False(second.IsCompleted);
         barrier.Release();
         var results = await Task.WhenAll(first, second);
 
-        Assert.False(monitorWasAvailable);
         Assert.Equal(1, results.Count(result => result == SetupPreparedJournalOpenResult.Created));
         Assert.Equal(1, results.Count(result => result == SetupPreparedJournalOpenResult.Reused));
         Assert.Equal(1, context.Platform.Operations.Count(operation => operation == $"file.try-write-new-flushed:{destination}"));
         Assert.NotNull(context.Store.Load(ChangeSetId));
+    }
+
+    [Fact]
+    public async Task JournalCreate_ExternalDisposeKeepsExclusiveLockUntilCreateExits()
+    {
+        using var disposeRequested = new ManualResetEventSlim();
+        var context = CreateContext(disposeRequested.Set);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        using var barrier = context.Platform.AddBarrier($"file.try-write-new-flushed:{destination}");
+
+        var write = Task.Run(() => context.Store.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+        barrier.WaitUntilReached(CancellationToken.None);
+        var dispose = Task.Run(context.Lock.Dispose);
+        try
+        {
+            Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+            using var contended = SetupLock.TryAcquire(context.Platform, context.Paths);
+            Assert.False(contended.Acquired);
+        }
+        finally
+        {
+            barrier.Release();
+        }
+
+        await Task.WhenAll(write, dispose);
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying)).Code);
+        using var reacquired = SetupLock.TryAcquire(context.Platform, context.Paths);
+        Assert.True(reacquired.Acquired);
+    }
+
+    [Fact]
+    public async Task JournalUpdate_ExternalDisposeKeepsExclusiveLockUntilReplaceExits()
+    {
+        using var disposeRequested = new ManualResetEventSlim();
+        var context = CreateContext(disposeRequested.Set);
+        context.Store.OpenOrCreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        using var barrier = context.Platform.AddBarrier($"file.replace:{Temporary(destination, 1)}->{destination}");
+
+        var write = Task.Run(() => context.Store.MarkTransactionPhase(
+            context.Lock, ChangeSetId, SetupJournalPhase.Applying));
+        barrier.WaitUntilReached(CancellationToken.None);
+        var dispose = Task.Run(context.Lock.Dispose);
+        try
+        {
+            Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+            using var contended = SetupLock.TryAcquire(context.Platform, context.Paths);
+            Assert.False(contended.Acquired);
+        }
+        finally
+        {
+            barrier.Release();
+        }
+
+        await Task.WhenAll(write, dispose);
+        Assert.Equal(SetupJournalPhase.Applying, context.Store.Load(ChangeSetId)!.Phase);
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Compensating)).Code);
+        using var reacquired = SetupLock.TryAcquire(context.Platform, context.Paths);
+        Assert.True(reacquired.Acquired);
     }
 
     [Theory]
@@ -1283,12 +1340,23 @@ public sealed class SetupJournalStoreTests
         return Encoding.UTF8.GetString(context.Platform.ReadSeededFile(context.Paths.GetTransactionJournal(ChangeSetId)));
     }
 
-    private static TestContext CreateContext()
+    private static TestContext CreateContext(Action? disposeRequestedObserver = null)
     {
         var platform = new SetupTestPlatform(CreatedAt);
         var paths = new SetupRuntimePaths(platform);
-        var acquired = SetupLock.TryAcquire(platform, paths);
-        return new TestContext(platform, paths, acquired.Lock!, new SetupTransactionJournalStore(platform, paths));
+        SetupLock setupLock;
+        if (disposeRequestedObserver is null)
+        {
+            setupLock = SetupLock.TryAcquire(platform, paths).Lock!;
+        }
+        else
+        {
+            paths.EnsureRoot();
+            var handle = platform.FileSystem.TryAcquireExclusiveFileLock(paths.Lock)!;
+            setupLock = SetupLock.CreateForTesting(handle, platform, paths, disposeRequestedObserver);
+        }
+
+        return new TestContext(platform, paths, setupLock, new SetupTransactionJournalStore(platform, paths));
     }
 
     private static TestContext CreateCommittedApplyContext()

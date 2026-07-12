@@ -118,62 +118,68 @@ internal sealed class SetupLedgerStore
 
     public void Save(SetupLock setupLock, SetupOwnershipLedger ledger)
     {
-        setupLock.AssertHeld(platform, paths);
+        setupLock.ExecuteWhileHeld(platform, paths, () => SaveCore(ledger));
+    }
+
+    public void PersistPlannedChangeSet(SetupLock setupLock, SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
+    {
+        setupLock.ExecuteWhileHeld(platform, paths, () =>
+        {
+            SetupStorageValidation.ValidatePlanAndLedger(plan, plannedChangeSet);
+            var ledger = Load();
+            if (ledger.ChangeSets.Any(changeSet => changeSet.ChangeSetId == plan.ChangeSetId))
+            {
+                throw new SetupStorageException(SetupStorageCodes.ChangeSetAlreadyExists);
+            }
+
+            var planCreated = false;
+            try
+            {
+                planStore.CreateCore(plan);
+                planCreated = true;
+                platform.Execution.Checkpoint("after-plan-persisted-before-ledger");
+                SaveCore(ledger with { ChangeSets = [.. ledger.ChangeSets, plannedChangeSet] });
+            }
+            catch (SetupStorageException exception)
+            {
+                if (!planCreated && exception.Code == SetupStorageCodes.WriteFailed)
+                {
+                    planStore.DeleteCore(plan.ChangeSetId);
+                }
+                else if (planCreated)
+                {
+                    DeletePlanWhenLedgerDefinitelyDoesNotReference(plan.ChangeSetId);
+                }
+
+                throw;
+            }
+            catch (Exception)
+            {
+                if (planCreated)
+                {
+                    DeletePlanWhenLedgerDefinitelyDoesNotReference(plan.ChangeSetId);
+                }
+
+                throw new SetupStorageException(SetupStorageCodes.WriteFailed);
+            }
+        });
+    }
+
+    private void SaveCore(SetupOwnershipLedger ledger)
+    {
         var bytes = Serialize(ledger);
         paths.EnsureRoot();
         SetupStorageFile.WriteAtomic(platform, paths.OwnershipLedger, bytes);
     }
 
-    public void PersistPlannedChangeSet(SetupLock setupLock, SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
-    {
-        setupLock.AssertHeld(platform, paths);
-        SetupStorageValidation.ValidatePlanAndLedger(plan, plannedChangeSet);
-        var ledger = Load();
-        if (ledger.ChangeSets.Any(changeSet => changeSet.ChangeSetId == plan.ChangeSetId))
-        {
-            throw new SetupStorageException(SetupStorageCodes.ChangeSetAlreadyExists);
-        }
-
-        var planCreated = false;
-        try
-        {
-            planStore.Create(setupLock, plan);
-            planCreated = true;
-            platform.Execution.Checkpoint("after-plan-persisted-before-ledger");
-            Save(setupLock, ledger with { ChangeSets = [.. ledger.ChangeSets, plannedChangeSet] });
-        }
-        catch (SetupStorageException exception)
-        {
-            if (!planCreated && exception.Code == SetupStorageCodes.WriteFailed)
-            {
-                planStore.Delete(setupLock, plan.ChangeSetId);
-            }
-            else if (planCreated)
-            {
-                DeletePlanWhenLedgerDefinitelyDoesNotReference(setupLock, plan.ChangeSetId);
-            }
-
-            throw;
-        }
-        catch (Exception)
-        {
-            if (planCreated)
-            {
-                DeletePlanWhenLedgerDefinitelyDoesNotReference(setupLock, plan.ChangeSetId);
-            }
-
-            throw new SetupStorageException(SetupStorageCodes.WriteFailed);
-        }
-    }
-
-    private void DeletePlanWhenLedgerDefinitelyDoesNotReference(SetupLock setupLock, Guid changeSetId)
+    private void DeletePlanWhenLedgerDefinitelyDoesNotReference(Guid changeSetId)
     {
         try
         {
             var durableLedger = Load();
             if (durableLedger.ChangeSets.All(changeSet => changeSet.ChangeSetId != changeSetId))
             {
-                planStore.Delete(setupLock, changeSetId);
+                planStore.DeleteCore(changeSetId);
             }
         }
         catch (Exception)

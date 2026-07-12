@@ -336,6 +336,111 @@ public sealed class SetupStorageTests
         Assert.DoesNotContain(context.Platform.Operations, operation => operation.Contains(".tmp", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task PlanCreate_ExternalDisposeKeepsExclusiveLockUntilAtomicMoveExits()
+    {
+        using var disposeRequested = new ManualResetEventSlim();
+        var context = CreateContext(disposeRequested.Set);
+        var destination = context.Paths.GetPlan(ChangeSetId);
+        using var barrier = context.Platform.AddBarrier($"file.move:{destination}.tmp->{destination}");
+
+        var write = Task.Run(() => context.PlanStore.Create(context.Lock, CreatePlan()));
+        barrier.WaitUntilReached(CancellationToken.None);
+        var dispose = Task.Run(context.Lock.Dispose);
+        try
+        {
+            Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+            using var contended = SetupLock.TryAcquire(context.Platform, context.Paths);
+            Assert.False(contended.Acquired);
+        }
+        finally
+        {
+            barrier.Release();
+        }
+
+        await Task.WhenAll(write, dispose);
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.PlanStore.Delete(context.Lock, ChangeSetId)).Code);
+        using var reacquired = SetupLock.TryAcquire(context.Platform, context.Paths);
+        Assert.True(reacquired.Acquired);
+    }
+
+    [Fact]
+    public async Task LedgerSave_ExternalDisposeKeepsExclusiveLockUntilAtomicReplaceExits()
+    {
+        using var disposeRequested = new ManualResetEventSlim();
+        var context = CreateContext(disposeRequested.Set);
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, []));
+        var destination = context.Paths.OwnershipLedger;
+        using var barrier = context.Platform.AddBarrier($"file.replace:{destination}.tmp->{destination}");
+
+        var write = Task.Run(() => context.Store.Save(
+            context.Lock,
+            new SetupOwnershipLedger(1, [CreateAppliedChangeSet()])));
+        barrier.WaitUntilReached(CancellationToken.None);
+        var dispose = Task.Run(context.Lock.Dispose);
+        try
+        {
+            Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+            using var contended = SetupLock.TryAcquire(context.Platform, context.Paths);
+            Assert.False(contended.Acquired);
+        }
+        finally
+        {
+            barrier.Release();
+        }
+
+        await Task.WhenAll(write, dispose);
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.Store.Save(context.Lock, new SetupOwnershipLedger(1, []))).Code);
+        using var reacquired = SetupLock.TryAcquire(context.Platform, context.Paths);
+        Assert.True(reacquired.Acquired);
+    }
+
+    [Fact]
+    public async Task PersistPlannedChangeSet_DisposeRequestBetweenPlanAndLedgerDoesNotInterruptTheTransaction()
+    {
+        using var disposeRequested = new ManualResetEventSlim();
+        var context = CreateContext(disposeRequested.Set);
+        using var barrier = context.Platform.AddBarrier("checkpoint:after-plan-persisted-before-ledger");
+
+        var write = Task.Run(() => context.Store.PersistPlannedChangeSet(
+            context.Lock, CreatePlan(), CreatePlannedChangeSet()));
+        barrier.WaitUntilReached(CancellationToken.None);
+        var dispose = Task.Run(context.Lock.Dispose);
+        try
+        {
+            Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+            using var contended = SetupLock.TryAcquire(context.Platform, context.Paths);
+            Assert.False(contended.Acquired);
+        }
+        finally
+        {
+            barrier.Release();
+        }
+
+        await Task.WhenAll(write, dispose);
+        Assert.NotNull(context.PlanStore.Load(ChangeSetId));
+        Assert.Single(context.Store.Load().ChangeSets);
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.Store.Save(context.Lock, new SetupOwnershipLedger(1, []))).Code);
+    }
+
+    [Fact]
+    public void PlanCreate_WriteFailureUnwindsOperationButKeepsTokenHeld()
+    {
+        var context = CreateContext();
+        var destination = context.Paths.GetPlan(ChangeSetId);
+        context.Platform.InjectFault($"file.flush:{destination}.tmp", new IOException("PRIVATE_MARKER"));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.PlanStore.Create(context.Lock, CreatePlan()));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, []));
+        using var contended = SetupLock.TryAcquire(context.Platform, context.Paths);
+        Assert.False(contended.Acquired);
+    }
+
     [Theory]
     [InlineData("write", false)]
     [InlineData("write", true)]
@@ -490,13 +595,24 @@ public sealed class SetupStorageTests
         }
     }
 
-    private static StorageContext CreateContext()
+    private static StorageContext CreateContext(Action? disposeRequestedObserver = null)
     {
         var platform = new SetupTestPlatform(CreatedAt);
         var paths = new SetupRuntimePaths(platform);
         var planStore = new SetupPlanStore(platform, paths);
-        var acquired = SetupLock.TryAcquire(platform, paths);
-        return new StorageContext(platform, paths, acquired.Lock!, planStore, new SetupLedgerStore(platform, paths, planStore));
+        SetupLock setupLock;
+        if (disposeRequestedObserver is null)
+        {
+            setupLock = SetupLock.TryAcquire(platform, paths).Lock!;
+        }
+        else
+        {
+            paths.EnsureRoot();
+            var handle = platform.FileSystem.TryAcquireExclusiveFileLock(paths.Lock)!;
+            setupLock = SetupLock.CreateForTesting(handle, platform, paths, disposeRequestedObserver);
+        }
+
+        return new StorageContext(platform, paths, setupLock, planStore, new SetupLedgerStore(platform, paths, planStore));
     }
 
     private static SetupPrivatePlan CreatePlan() => new(
