@@ -7,6 +7,8 @@ public static class SetupJson
 {
     public static string Serialize(SetupCommandResult result)
     {
+        SetupContractValidator.Validate(result);
+
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
         {

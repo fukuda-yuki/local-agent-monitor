@@ -261,11 +261,11 @@ public sealed class SetupContractShapeTests
 
     [Theory]
     [MemberData(nameof(ReferenceStateWireValues))]
-    public void Serialize_ReferenceState_MapsEveryExplicitEnumValue(SetupReferenceState value, string expected) => AssertNestedStatusTargetWire(CreateStatusResult(CreateStatusWritableTarget(referenceState: value)), "reference_state", expected);
+    public void Serialize_ReferenceState_MapsEveryExplicitEnumValue(SetupReferenceState value, string expected) => AssertNestedStatusTargetWire(CreateReferenceStateWireResult(value), "reference_state", expected);
 
     [Theory]
     [MemberData(nameof(CurrentStateWireValues))]
-    public void Serialize_CurrentState_MapsEveryExplicitEnumValue(SetupCurrentState value, string expected) => AssertNestedStatusTargetWire(CreateStatusResult(CreateStatusWritableTarget(currentState: value)), "current_state", expected);
+    public void Serialize_CurrentState_MapsEveryExplicitEnumValue(SetupCurrentState value, string expected) => AssertNestedStatusTargetWire(CreateCurrentStateWireResult(value), "current_state", expected);
 
     [Theory]
     [MemberData(nameof(RestartRequirementWireValues))]
@@ -320,7 +320,26 @@ public sealed class SetupContractShapeTests
 
     private static SetupCommandResult CreatePlanResult(SetupTargetResult target) => new(SetupCommand.Plan, true, "plan_ready", "00000000-0000-7000-8000-000000000030", null, null, "github-copilot", [target], [], [], [], false);
 
-    private static SetupCommandResult CreateStatusResult(SetupTargetResult target, SetupChangeSetState state = SetupChangeSetState.Applied) => new(SetupCommand.Status, true, "status_ready", null, null, null, "github-copilot", [], [new SetupChangeSetStatusResult("00000000-0000-7000-8000-000000000031", "github-copilot", "all", "2026-07-12T00:00:00Z", "2026-07-12T00:00:00Z", state, null, SetupCurrentState.Current, state == SetupChangeSetState.Applied, [target])], [], [], false);
+    private static SetupCommandResult CreateStatusResult(SetupTargetResult target, SetupChangeSetState state = SetupChangeSetState.Applied) => new(SetupCommand.Status, true, "status_ready", null, null, null, "github-copilot", [], [new SetupChangeSetStatusResult("00000000-0000-7000-8000-000000000031", "github-copilot", "all", "2026-07-12T00:00:00Z", "2026-07-12T00:00:00Z", state, null, target.TargetKind == SetupTargetKind.Guidance ? SetupCurrentState.NotApplicable : target.CurrentState!.Value, state == SetupChangeSetState.Applied && target.TargetKind != SetupTargetKind.Guidance && target.CurrentState == SetupCurrentState.Current && target.RollbackAvailable, [target])], [], [], false);
+
+    private static SetupCommandResult CreateReferenceStateWireResult(SetupReferenceState value) => value switch
+    {
+        SetupReferenceState.Base => CreateStatusResult(CreateStatusWritableTarget(SetupReferenceState.Base, rollbackAvailable: false), SetupChangeSetState.Planned),
+        SetupReferenceState.Desired => CreateStatusResult(CreateStatusWritableTarget(SetupReferenceState.Desired), SetupChangeSetState.Applied),
+        SetupReferenceState.Previous => CreateStatusResult(CreateStatusWritableTarget(SetupReferenceState.Previous, rollbackAvailable: false), SetupChangeSetState.Restored),
+        SetupReferenceState.None => CreateStatusResult(CreateStatusGuidanceTarget(), SetupChangeSetState.Planned),
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    private static SetupCommandResult CreateCurrentStateWireResult(SetupCurrentState value) => value switch
+    {
+        SetupCurrentState.Current => CreateStatusResult(CreateStatusWritableTarget()),
+        SetupCurrentState.Stale => CreateStatusResult(CreateStatusWritableTarget(SetupReferenceState.Desired, SetupCurrentState.Stale, rollbackAvailable: false)),
+        SetupCurrentState.Diverged => CreateStatusResult(CreateStatusWritableTarget(SetupReferenceState.None, SetupCurrentState.Diverged, rollbackAvailable: false)),
+        SetupCurrentState.Unavailable => CreateStatusResult(CreateStatusWritableTarget(SetupReferenceState.None, SetupCurrentState.Unavailable, rollbackAvailable: false)),
+        SetupCurrentState.NotApplicable => CreateStatusResult(CreateStatusGuidanceTarget()),
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
 
     private static SetupTargetResult CreateLifecycleStatusTarget(SetupChangeSetState state) => CreateStatusWritableTarget(
         state switch
