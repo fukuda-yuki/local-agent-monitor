@@ -400,9 +400,11 @@ Lifecycle transitions are:
 planned -> applying -> applied
                     -> compensating -> restored
                                     -> partial
+                       partial -> compensating
 
 applied -> rolling_back -> rolled_back
                         -> partial
+           partial -> rolling_back
 ```
 
 A no-write stale apply remains `planned` with outcome `stale_plan`. A no-write
@@ -410,6 +412,18 @@ stale or unavailable rollback retains its prior lifecycle state and records
 `rollback_stale` or `rollback_not_available` as its outcome. Attempt outcomes are
 not additional lifecycle states. `partial` is the only unresolved mutation-
 blocking state.
+
+An exact apply journal in `prepared` paired with its `planned` ledger row is a
+dormant, resumable pre-mutation attempt. Every step is `pending`, notification
+state is `not_required`, and its immutable targets, hashes, member keys, backup
+references, and no-follow backups must exactly match the current private plan
+and freshly captured base state. Recovery ignores that exact pair. A repeated
+apply performs full preflight again and reuses the exact journal and backups;
+it never deletes or overwrites them. Exact orphan backups created before the
+journal are reused under the same validation. Missing, rebound, malformed, or
+mismatched artifacts fail closed without a target write. A `prepared` journal
+paired with an `applying` ledger row is not resumable forward; recovery advances
+it into compensation.
 
 Apply rules:
 
@@ -449,6 +463,16 @@ an independently changed third value is preserved and reported partial. A
 committed journal with a stale ledger is reconciled to `applied` only when every
 file/member equals desired state.
 
+A `pending` step has no transaction ownership because no write intent was
+persisted. Recovery accepts it only when its current state is prior. Current
+desired, third-party, or unavailable state is preserved and makes recovery
+partial; desired bytes alone never grant ownership. Recovery of an apply
+journal visits owned steps in reverse order and may reopen `partial` only into
+`compensating`; rollback recovery may reopen `partial` only into
+`rolling_back`. Terminal verification for an environment target always uses
+the private plan's full ordered member list, including no-op members, while
+journal restore steps remain limited to changed members.
+
 Rollback first flushes its journal, atomically sets ledger state
 `rolling_back`, and uses the same `restore_started`/`restore_completed` protocol
 for every file/member restore. Immediately before every normal or recovered
@@ -464,6 +488,20 @@ only when every file/member equals previous state. Successful recovery records
 mutation command until the private local failure is resolved; `status` remains
 available. Recovery never searches a remembered path outside the private plan
 or bypasses path/reparse/hash validation.
+
+Recovery discovers candidates from ledger rows, orders them by immutable
+`created_at` ascending and then canonical lowercase UUID ordinal ascending,
+attempts at most one candidate per command invocation, and returns immediately
+after success or failure. The oldest failed candidate continues to block later
+candidates. A terminal journal whose only unresolved work is a pending
+environment notification is notification-only recovery: the journal and ledger
+retain their truthful `committed`/`applied`, `restored`, or `rolled_back`
+lifecycle, while the returned projection overlays that row as effective
+`partial`, `interrupted_recovery_failed`, and rollback unavailable if replay
+cannot be proven. Target state is not reconciled again for notification-only
+recovery. Successful replay persists the recovered terminal ledger result,
+attempts notification, then marks notification complete last; any delivery or
+completion ambiguity remains pending and permits a duplicate replay.
 
 When recovery changes or reconciles state, the command returns the corresponding
 `interrupted_*_recovered` result immediately with next action
@@ -503,6 +541,13 @@ Rollback validates that every current hash equals its applied hash before the
 first restore. One mismatch returns `rollback_stale` and performs no write.
 Force rollback is absent. DB, telemetry, logs, and other runtime data are never
 deleted by setup rollback.
+
+Because one journal pathname is retained per change set, rollback does not
+delete or overwrite the apply journal opportunistically. After rollback
+preflight it atomically supersedes only an exact terminal apply journal whose
+notification is complete with a prepared rollback journal. A prepared rollback
+journal paired with an `applied` ledger is the rollback equivalent of the
+dormant resumable apply state.
 
 Repeated plan/apply against the desired state produces `no-op` member changes and
 `no_changes`; it creates no second ownership claim and does not rewrite files or
