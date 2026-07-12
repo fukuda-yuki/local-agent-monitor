@@ -113,9 +113,10 @@ identity to `missing_trace_context`, missing capture/content state to
 `content_capture_disabled`, and missing adapter/version/fingerprint/
 normalization version to `schema_drift_detected`.
 
-The contract is an adapter handoff requirement, not an Issue #61 change to this
-ingest API, its sanitized read DTOs, raw-content route, Session/Run/Event
-identity, or Issue #49 Agent ownership.
+The contract is an adapter handoff requirement. Task 15 adds only the v1 ingest
+envelope provenance fields defined below; it does not change sanitized read
+DTOs, the raw-content route, Session/Run/Event identity, or Issue #49 Agent
+ownership.
 
 ## Session Event Ingest
 
@@ -148,6 +149,24 @@ The v1 envelope has these fields:
 | `native_session_id` | yes | Nonblank string, 1..256 characters. |
 | `events` | yes | JSON array with 1..100 entries. |
 | `explicit_link` | no | The sole v1 wire representation of explicit resume/handoff linkage; shape below. |
+| `source_application_version` | conditional | JSON null or an adapter-generated metadata token. Required for `claude-code-hook` when `schema_fingerprint` is absent; legacy Copilot envelopes may omit it. |
+| `adapter_version` | conditional | Adapter-generated metadata token. Required for `claude-code-hook`; legacy Copilot envelopes may omit it. |
+| `schema_fingerprint` | conditional | JSON null or exactly 64 lowercase hexadecimal characters. Required for `claude-code-hook` when `source_application_version` is absent; legacy Copilot envelopes may omit it. |
+| `normalization_version` | conditional | Adapter-generated metadata token. Required for `claude-code-hook`; legacy Copilot envelopes may omit it. |
+
+An adapter-generated metadata token matches
+`^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$`. The receiver never derives these fields
+from `payload`, content, a path, prompt/response text, tool input/output, or an
+exception. Control characters, whitespace, path separators, URI separators,
+and other free-form text are invalid. The four envelope values are copied
+unchanged to every accepted event in the batch. They do not participate in
+Session/Event IDs, binding, ownership, or content storage.
+
+For `claude-code-hook`, `adapter_version` and `normalization_version` are
+required and at least one of `source_application_version` or
+`schema_fingerprint` is required. `claude-code-otel` is not valid on this
+endpoint and remains an OTLP `/v1/traces` adapter. The composite registry label
+`claude-code-otel+claude-code-hook` is never a persisted adapter value.
 
 `explicit_link`, when present, is exactly:
 
@@ -166,12 +185,16 @@ The v1 envelope example is:
 ```json
 {
   "schema_version": 1,
-  "source_adapter": "copilot-sdk-stream|copilot-compatible-hook|claude-code-hook",
-  "source_surface": "copilot-sdk|copilot-cli|vscode|hook-unknown|claude-code",
-  "native_session_id": "nonblank 1..256 characters",
+  "source_adapter": "claude-code-hook",
+  "source_surface": "claude-code",
+  "native_session_id": "claude-session-example",
+  "source_application_version": "2.1.207",
+  "adapter_version": "claude-hook-v1",
+  "schema_fingerprint": null,
+  "normalization_version": "session-normalization-v1",
   "explicit_link": {
-    "source_surface": "copilot-cli",
-    "native_session_id": "nonblank 1..256 characters",
+    "source_surface": "claude-code",
+    "native_session_id": "prior-claude-session",
     "kind": "resume"
   },
   "events": [

@@ -700,6 +700,16 @@ and 1..100 events, and return `204` only after commit. Fixed error responses use
 only `{ "error": "<code>" }`; responses and logs never echo payloads, raw
 exception details, PII, credentials, tokens, or local paths.
 
+Claude Hook provenance in that envelope is sanitized metadata, not content.
+`source_application_version`, `adapter_version`, and `normalization_version`
+accept only the closed metadata-token grammar in the Session ingest interface;
+`schema_fingerprint` accepts only 64 lowercase hexadecimal characters. The
+adapter constructs these values independently of Hook payload/content. The
+receiver rejects control characters, whitespace, path or URI separators, and
+free-form prompt/response/tool/error/path text rather than promoting it into
+event provenance. Provenance never changes identity, binding, ownership, or
+content authority and is not written to logs.
+
 Session metadata and content are separated. `session_events` and sanitized
 `/api/session-workspace` reads do not contain event payload/content. Raw content
 is secret-filtered before storage in `session_event_content` and receives
