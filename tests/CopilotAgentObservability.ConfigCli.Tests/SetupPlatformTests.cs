@@ -56,6 +56,30 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    public void SystemPlatform_ReportsPathKindsAndCreatesNewFilesOnly()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-platform-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var file = Path.Combine(directory, "file.bin");
+            var platform = new SystemSetupPlatform();
+
+            platform.FileSystem.WriteNewAllBytes(file, [1, 2, 3]);
+
+            Assert.Equal(SetupPathKind.Directory, platform.FileSystem.GetPathMetadata(directory).Kind);
+            Assert.Equal(SetupPathKind.File, platform.FileSystem.GetPathMetadata(file).Kind);
+            Assert.Equal(SetupPathKind.Missing, platform.FileSystem.GetPathMetadata(Path.Combine(directory, "missing")).Kind);
+            Assert.Throws<IOException>(() => platform.FileSystem.WriteNewAllBytes(file, [4]));
+            Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(file));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void SystemPlatform_MapsFailedEnvironmentNotificationToFixedSafeError()
     {
         var platform = new SystemSetupPlatform(notificationAttempt: () => false);

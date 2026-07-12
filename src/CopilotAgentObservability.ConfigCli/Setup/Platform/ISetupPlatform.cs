@@ -2,6 +2,8 @@ namespace CopilotAgentObservability.ConfigCli.Setup.Platform;
 
 public interface ISetupPlatform
 {
+    SetupPathStyle PathStyle { get; }
+
     string LocalApplicationData { get; }
 
     ISetupFileSystem FileSystem { get; }
@@ -25,6 +27,8 @@ public interface ISetupFileSystem
 
     void WriteAllBytes(string path, ReadOnlySpan<byte> bytes);
 
+    void WriteNewAllBytes(string path, ReadOnlySpan<byte> bytes);
+
     void FlushFile(string path);
 
     void ReplaceFile(string sourcePath, string destinationPath);
@@ -33,7 +37,7 @@ public interface ISetupFileSystem
 
     void DeleteFile(string path);
 
-    SetupFileMetadata GetFileMetadata(string path);
+    SetupPathMetadata GetPathMetadata(string path);
 
     ISetupExclusiveFileLock? TryAcquireExclusiveFileLock(string path);
 }
@@ -66,11 +70,21 @@ public interface ISetupExecution
     void Checkpoint(string operation);
 }
 
-public sealed record SetupFileMetadata(
-    bool Exists,
-    long Length,
-    FileAttributes Attributes,
-    DateTimeOffset LastWriteTimeUtc)
+public enum SetupPathStyle
 {
-    public static SetupFileMetadata Missing { get; } = new(false, 0, 0, DateTimeOffset.UnixEpoch);
+    Windows,
+    Unix,
+}
+
+public enum SetupPathKind
+{
+    Missing,
+    File,
+    Directory,
+    Other,
+}
+
+public sealed record SetupPathMetadata(bool Exists, SetupPathKind Kind, FileAttributes Attributes)
+{
+    public static SetupPathMetadata Missing { get; } = new(false, SetupPathKind.Missing, 0);
 }

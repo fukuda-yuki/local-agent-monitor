@@ -10,13 +10,19 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     private readonly Dictionary<string, Queue<Exception>> faults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<(Exception Exception, Action? Callback)>> afterEffectFaults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SetupTestBarrierState> barriers = new(StringComparer.Ordinal);
-    private readonly HashSet<string> directories = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SetupPathMetadata> pathMetadata;
     private readonly HashSet<string> exclusiveLocks = new(StringComparer.Ordinal);
     private readonly List<string> operations = [];
 
-    public SetupTestPlatform(DateTimeOffset utcNow, string localApplicationData = "C:\\setup-test-local-app-data")
+    public SetupTestPlatform(
+        DateTimeOffset utcNow,
+        string localApplicationData = "C:\\setup-test-local-app-data",
+        SetupPathStyle pathStyle = SetupPathStyle.Windows)
     {
         LocalApplicationData = localApplicationData;
+        PathStyle = pathStyle;
+        pathMetadata = new Dictionary<string, SetupPathMetadata>(
+            pathStyle == SetupPathStyle.Windows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         Clock = new SetupTestClock(utcNow);
         Identifiers = new SetupTestIdentifierGenerator();
         FileSystem = new SetupTestFileSystem(this);
@@ -25,6 +31,8 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     }
 
     public string LocalApplicationData { get; }
+
+    public SetupPathStyle PathStyle { get; }
 
     public ISetupFileSystem FileSystem { get; }
 
@@ -89,7 +97,16 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         return new SetupTestBarrier(this, operation, state);
     }
 
-    public void SeedFile(string path, byte[] bytes) => files[path] = bytes.ToArray();
+    public void SeedFile(string path, byte[] bytes)
+    {
+        files[path] = bytes.ToArray();
+        pathMetadata[path] = new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal);
+    }
+
+    public void SeedDirectory(string path) =>
+        pathMetadata[path] = new SetupPathMetadata(true, SetupPathKind.Directory, FileAttributes.Directory);
+
+    public void SeedPathMetadata(string path, SetupPathMetadata metadata) => pathMetadata[path] = metadata;
 
     public byte[] ReadSeededFile(string path) => files[path].ToArray();
 
@@ -234,7 +251,7 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             platform.Record($"directory.create:{path}");
             lock (platform.gate)
             {
-                platform.directories.Add(path);
+                platform.pathMetadata[path] = new SetupPathMetadata(true, SetupPathKind.Directory, FileAttributes.Directory);
             }
         }
 
@@ -255,6 +272,21 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             var operation = $"file.write:{path}";
             platform.Record(operation);
             platform.files[path] = bytes.ToArray();
+            platform.pathMetadata[path] = new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal);
+            platform.RecordAfterEffect(operation);
+        }
+
+        public void WriteNewAllBytes(string path, ReadOnlySpan<byte> bytes)
+        {
+            var operation = $"file.write-new:{path}";
+            platform.Record(operation);
+            if (platform.files.ContainsKey(path) || platform.pathMetadata.TryGetValue(path, out var metadata) && metadata.Exists)
+            {
+                throw new IOException("Destination already exists.");
+            }
+
+            platform.files[path] = bytes.ToArray();
+            platform.pathMetadata[path] = new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal);
             platform.RecordAfterEffect(operation);
         }
 
@@ -271,6 +303,8 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             platform.Record(operation);
             platform.files[destinationPath] = platform.files[sourcePath];
             platform.files.Remove(sourcePath);
+            platform.pathMetadata[destinationPath] = new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal);
+            platform.pathMetadata.Remove(sourcePath);
             platform.RecordAfterEffect(operation);
         }
 
@@ -285,6 +319,8 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 
             platform.files[destinationPath] = platform.files[sourcePath];
             platform.files.Remove(sourcePath);
+            platform.pathMetadata[destinationPath] = new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal);
+            platform.pathMetadata.Remove(sourcePath);
             platform.RecordAfterEffect(operation);
         }
 
@@ -292,14 +328,16 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         {
             platform.Record($"file.delete:{path}");
             platform.files.Remove(path);
+            platform.pathMetadata.Remove(path);
+            platform.RecordAfterEffect($"file.delete:{path}");
         }
 
-        public SetupFileMetadata GetFileMetadata(string path)
+        public SetupPathMetadata GetPathMetadata(string path)
         {
             platform.Record($"file.metadata:{path}");
-            return platform.files.TryGetValue(path, out var bytes)
-                ? new SetupFileMetadata(true, bytes.Length, FileAttributes.Normal, platform.Clock.UtcNow)
-                : SetupFileMetadata.Missing;
+            return platform.pathMetadata.TryGetValue(path, out var metadata)
+                ? metadata
+                : SetupPathMetadata.Missing;
         }
 
         public ISetupExclusiveFileLock? TryAcquireExclusiveFileLock(string path)

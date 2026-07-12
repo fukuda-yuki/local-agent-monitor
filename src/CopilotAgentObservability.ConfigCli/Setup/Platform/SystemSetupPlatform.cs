@@ -20,6 +20,8 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
     public string LocalApplicationData { get; }
 
+    public SetupPathStyle PathStyle => OperatingSystem.IsWindows() ? SetupPathStyle.Windows : SetupPathStyle.Unix;
+
     public ISetupFileSystem FileSystem { get; }
 
     public ISetupUserEnvironment UserEnvironment { get; }
@@ -67,6 +69,12 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
         public void WriteAllBytes(string path, ReadOnlySpan<byte> bytes) => File.WriteAllBytes(path, bytes);
 
+        public void WriteNewAllBytes(string path, ReadOnlySpan<byte> bytes)
+        {
+            using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            stream.Write(bytes);
+        }
+
         public void FlushFile(string path)
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
@@ -79,19 +87,26 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
         public void DeleteFile(string path) => File.Delete(path);
 
-        public SetupFileMetadata GetFileMetadata(string path)
+        public SetupPathMetadata GetPathMetadata(string path)
         {
-            if (!File.Exists(path))
+            FileAttributes attributes;
+            try
             {
-                return SetupFileMetadata.Missing;
+                attributes = File.GetAttributes(path);
+            }
+            catch (FileNotFoundException)
+            {
+                return SetupPathMetadata.Missing;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return SetupPathMetadata.Missing;
             }
 
-            var file = new FileInfo(path);
-            return new SetupFileMetadata(
-                true,
-                file.Length,
-                file.Attributes,
-                new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero));
+            var kind = (attributes & FileAttributes.Directory) != 0
+                ? SetupPathKind.Directory
+                : SetupPathKind.File;
+            return new SetupPathMetadata(true, kind, attributes);
         }
 
         public ISetupExclusiveFileLock? TryAcquireExclusiveFileLock(string path)
