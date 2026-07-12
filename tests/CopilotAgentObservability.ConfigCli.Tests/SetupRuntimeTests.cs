@@ -1,4 +1,3 @@
-using System.ComponentModel;
 using System.Diagnostics;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
@@ -130,11 +129,6 @@ public sealed class SetupRuntimeTests
     [Fact]
     public async Task SetupLock_SystemPlatformCoordinatesExclusiveFileShareAcrossProcesses()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw Xunit.Sdk.SkipException.ForSkip("FileShare.None cross-process semantics are verified on Windows.");
-        }
-
         var temporaryRoot = Path.Combine(Path.GetTempPath(), $"cao-setup-runtime-{Guid.NewGuid():N}");
         var platform = new SystemSetupPlatform(localApplicationData: temporaryRoot);
         var paths = new SetupRuntimePaths(platform);
@@ -190,13 +184,6 @@ public sealed class SetupRuntimeTests
         startInfo.ArgumentList.Add("-Command");
         startInfo.ArgumentList.Add(command);
 
-        try
-        {
-            return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start pwsh.");
-        }
-        catch (Win32Exception exception) when (exception.NativeErrorCode == 2)
-        {
-            throw Xunit.Sdk.SkipException.ForSkip("pwsh is unavailable for the required cross-process lock test.");
-        }
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start pwsh.");
     }
 }
