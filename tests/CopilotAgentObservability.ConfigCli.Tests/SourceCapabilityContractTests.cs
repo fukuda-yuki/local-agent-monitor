@@ -285,7 +285,9 @@ public sealed class SourceCapabilityContractTests
         AssertAdapterHandoffChecklist(telemetryContract, decision);
 
         var issue61Row = Assert.Single(
-            ReadRepositoryDocument("docs/task.md").Split('\n'),
+            ReadRepositoryDocument("docs/task.md")
+                .Split('\n')
+                .Select(line => line.TrimEnd('\r')),
             line => line.Contains("Source capability contract (Issue #61)", StringComparison.Ordinal));
         const string completedIssue61RoadmapRow = "| Source capability contract (Issue #61) | **完了** | JSON Schema 2020-12 と 5 surface の manifest による committed structural/capability contract、canonical semantic contract の authority / provenance / deterministic completeness / safety、cross-reference tests、adapter handoff を確定した。Issue #51 exact identity と Issue #49 ownership を保持し、receiver / adapter / DB / migration / HTTP / proxy / UI DTO は変更しない。仕様・品質・最終統合レビュー済み（live validation は scope 外）。focused SourceCapabilityContractTests 13/13、build 0 warnings/0 errors、Playwright install exit 0、full solution tests 1,250（ConfigCli 314 + LocalMonitor 936）が成功。 |";
         Assert.Equal(completedIssue61RoadmapRow, issue61Row);
