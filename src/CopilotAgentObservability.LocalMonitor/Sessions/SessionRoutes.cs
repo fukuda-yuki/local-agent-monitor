@@ -27,6 +27,7 @@ internal static class SessionRoutes
         TimeProvider timeProvider)
     {
         MapProposalApplyRoutes(app, store, proposalApplyService);
+        EffectComparisonRoutes.Map(app, store, proposalApplyService, timeProvider);
         app.MapPost("/api/session-workspace/objective-evaluations", async context =>
         {
             context.Response.Headers.CacheControl = "no-store";
@@ -510,10 +511,10 @@ internal static class SessionRoutes
 
     private static bool IsBounded(string? value, int maximum) => !string.IsNullOrWhiteSpace(value) && value.Length <= maximum;
 
-    private static bool IsJson(HttpRequest request) =>
+    internal static bool IsJson(HttpRequest request) =>
         string.Equals(request.ContentType?.Split(';', 2)[0], "application/json", StringComparison.OrdinalIgnoreCase);
 
-    private static bool TryUuidV7(string value, out Guid id) =>
+    internal static bool TryUuidV7(string value, out Guid id) =>
         Guid.TryParseExact(value, "D", out id) && id != Guid.Empty && id.ToString("D")[14] == '7';
 
     private static bool TryParseProposal(byte[] body, out ImprovementProposalRequest? request)
@@ -688,7 +689,7 @@ internal static class SessionRoutes
         }
     }
 
-    private static async Task<byte[]?> ReadBoundedBody(HttpRequest request, int maximumBytes, CancellationToken cancellationToken)
+    internal static async Task<byte[]?> ReadBoundedBody(HttpRequest request, int maximumBytes, CancellationToken cancellationToken)
     {
         if (request.ContentLength > maximumBytes) return null;
         using var buffer = new MemoryStream();
@@ -718,19 +719,19 @@ internal static class SessionRoutes
         catch { return 0; }
     }
 
-    private static Task Failure(HttpContext context, int status, string error)
+    internal static Task Failure(HttpContext context, int status, string error)
     {
         context.Response.StatusCode = status;
         return JsonBody(context, new { error });
     }
 
-    private static Task Json(HttpContext context, object value)
+    internal static Task Json(HttpContext context, object value)
     {
         context.Response.StatusCode = 200;
         return JsonBody(context, value);
     }
 
-    private static async Task JsonBody(HttpContext context, object value)
+    internal static async Task JsonBody(HttpContext context, object value)
     {
         context.Response.ContentType = "application/json";
         await context.Response.WriteAsync(JsonSerializer.Serialize(value));

@@ -7,6 +7,7 @@ namespace CopilotAgentObservability.LocalMonitor.ProposalApply;
 
 internal sealed record ProposalApplyFileInput(string RelativePath, string ReplacementText);
 internal sealed record ProposalApplyDraft(Guid DraftId, Guid ProposalId, int ProposalRevision, Guid RootId, int SelectionRevision, string ApprovalDigest, bool IsApproved, IReadOnlyList<ApplyTarget> Files, IReadOnlyList<ApplyHunk> Hunks);
+internal sealed class CurrentApplicationException : InvalidOperationException { }
 
 internal sealed class ProposalApplyService
 {
@@ -24,6 +25,22 @@ internal sealed class ProposalApplyService
         draftPath = Path.Combine(runtimePath, "drafts"); Directory.CreateDirectory(draftPath); transaction.RecoverUncommitted(); ReconcilePending(); MigrateLegacyDraftRevisions(); LoadDrafts(); LoadAppliedLinkages();
     }
     public IReadOnlyList<ConfiguredApplyRoot> Roots { get; }
+
+    public bool TryGetCurrentApplication(Guid proposalId, Guid applyId, out ProposalApplicationReceipt receipt)
+    {
+        lock (sync) return TryGetCurrentApplicationUnsafe(proposalId, applyId, out receipt);
+    }
+
+    public EffectReceipt RecordCurrentEffectComparison(EffectComparisonRequest request, DateTimeOffset recordedAt)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        lock (sync)
+        {
+            if (store is null || !TryGetCurrentApplicationUnsafe(request.ProposalId, request.ApplyId, out _)) throw new CurrentApplicationException();
+            // This lock covers both post-hash validation and the SQLite effect receipt transaction.
+            return store.RecordEffectComparison(request, recordedAt);
+        }
+    }
 
     public ProposalApplyDraft CreateDraft(Guid proposalId, Guid rootId, IReadOnlyList<ProposalApplyFileInput> inputs)
     {
@@ -195,6 +212,11 @@ internal sealed class ProposalApplyService
         catch (ApplyPathException) { return "unavailable"; }
         catch (IOException) { return "unavailable"; }
         catch (UnauthorizedAccessException) { return "unavailable"; }
+    }
+    private bool TryGetCurrentApplicationUnsafe(Guid proposalId, Guid applyId, out ProposalApplicationReceipt receipt)
+    {
+        receipt = store!.ListApplicationReceipts(proposalId).SingleOrDefault(item => item.ApplyId == applyId)!;
+        return receipt is not null && receipt.ProposalId == proposalId && CurrentReceiptState(receipt) == "active";
     }
     private ProposalApplyDraft? ReadReceiptDraft(Guid draftId)
     {
