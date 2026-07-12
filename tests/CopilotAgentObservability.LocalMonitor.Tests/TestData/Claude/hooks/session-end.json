@@ -1,0 +1,7 @@
+{
+  "session_id": "SYNTHETIC_SESSION_0001",
+  "transcript_path": "SYNTHETIC_TRANSCRIPT_PATH",
+  "cwd": "SYNTHETIC_WORKING_DIRECTORY",
+  "hook_event_name": "SessionEnd",
+  "reason": "other"
+}

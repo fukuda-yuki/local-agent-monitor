@@ -1,0 +1,9 @@
+{
+  "session_id": "SYNTHETIC_SESSION_0001",
+  "prompt_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "SYNTHETIC_TRANSCRIPT_PATH",
+  "cwd": "SYNTHETIC_WORKING_DIRECTORY",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "SYNTHETIC_PROMPT_MARKER"
+}

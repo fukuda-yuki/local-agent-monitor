@@ -1,0 +1,162 @@
+{
+  "manifest_version": "v1",
+  "source_surface": "claude-code",
+  "producer_contract": {
+    "label": "current-unversioned-claude-code-hooks-documentation",
+    "version": null,
+    "source_document": "https://code.claude.com/docs/en/hooks",
+    "canonical_mapping": "docs/specifications/contracts/source-capabilities/v1/claude-code/hook-mapping.json",
+    "evidence_status": "documented_not_live_observed"
+  },
+  "installed_executable_evidence": {
+    "version": "2.1.207",
+    "meaning": "inventory_label_only_not_hook_producer_version"
+  },
+  "verified_hook_producer_version": null,
+  "surface_evidence": {
+    "interactive": {
+      "state": "unverified",
+      "inventory": "docs/specifications/contracts/source-capabilities/v1/inventories/claude-code-interactive.json",
+      "hook_capture_observed": false
+    },
+    "print": {
+      "state": "executed_no_hook_capture",
+      "inventory": "docs/specifications/contracts/source-capabilities/v1/inventories/claude-code-print.json",
+      "hook_capture_observed": false
+    },
+    "agent-sdk": {
+      "state": "unverified",
+      "inventory": "docs/specifications/contracts/source-capabilities/v1/inventories/claude-agent-sdk.json",
+      "hook_capture_observed": false
+    }
+  },
+  "ordered_event_allowlist": [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+    "StopFailure",
+    "SessionEnd"
+  ],
+  "error_envelope_capability": {
+    "documented_event_name": "StopFailure",
+    "availability": "documented",
+    "fixture": "hooks/stop-failure.json",
+    "stop_error_alias": "unavailable_not_documented"
+  },
+  "fixtures": [
+    {
+      "path": "hooks/session-start.json",
+      "hook_event_name": "SessionStart",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "a11c1125641357030ffd9717e6bd2150ce4c81511b05e0a0c288fe45512450f4"
+    },
+    {
+      "path": "hooks/user-prompt-submit.json",
+      "hook_event_name": "UserPromptSubmit",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "1d8ac279cf5cb868c8307a6d486966cf954b97d3c30d1554ce97166aeb31a91b"
+    },
+    {
+      "path": "hooks/pre-tool-use.json",
+      "hook_event_name": "PreToolUse",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "4d2991b45658504e5dd4ca1a5588d1d9d75197f995d3e5f8402af15707ebc895"
+    },
+    {
+      "path": "hooks/permission-request.json",
+      "hook_event_name": "PermissionRequest",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "342b6ccbeacaa36a859ac23baba0c0267477a8a3edee627c563a50fedc23a20d"
+    },
+    {
+      "path": "hooks/post-tool-use.json",
+      "hook_event_name": "PostToolUse",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "e52759ce498b2bbe0463640cb670b8ca9b2231b493b70f8882acf338d6d01242"
+    },
+    {
+      "path": "hooks/post-tool-use-failure.json",
+      "hook_event_name": "PostToolUseFailure",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "802180518710a73c959c2cd54620d84f86e79f81f31e7bde981c88250492c658"
+    },
+    {
+      "path": "hooks/subagent-start.json",
+      "hook_event_name": "SubagentStart",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "bbe95057c5244c38f55fb02d022a75f5694a551219e0684a3687831ad8a3c679"
+    },
+    {
+      "path": "hooks/subagent-stop.json",
+      "hook_event_name": "SubagentStop",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "3715561581bbd05b182436b1ef7cec4129a68168dde8f90a1ba2749048b222b1"
+    },
+    {
+      "path": "hooks/stop.json",
+      "hook_event_name": "Stop",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "f7cfe2499016009fee0c2aa54d8175ac7b895959cc534b4226998933e52518fd"
+    },
+    {
+      "path": "hooks/stop-failure.json",
+      "hook_event_name": "StopFailure",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "d2d8f962978abe586df7eac026cdead6ab1dda42f7511ed4cd69701e26bc93b4"
+    },
+    {
+      "path": "hooks/session-end.json",
+      "hook_event_name": "SessionEnd",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "b8a19209fc6717a7c8c992166b3c7026e18fe5dc33014affb0feaa0e4baa266d"
+    },
+    {
+      "path": "hooks/unsupported-event.json",
+      "hook_event_name": "Notification",
+      "expected_acceptance": false,
+      "expected_rejection_reason": "event_name_not_allowlisted",
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "25b5bd90f748aa91037be23f67ef7fe9666735380c4068b718b17ae46fb1c8df"
+    }
+  ]
+}
