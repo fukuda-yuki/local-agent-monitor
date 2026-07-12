@@ -30,4 +30,8 @@
     <ProjectReference Include="..\..\src\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="TestData\SchemaMigrations\monitor\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
