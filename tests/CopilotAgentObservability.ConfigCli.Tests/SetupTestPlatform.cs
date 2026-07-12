@@ -4,10 +4,11 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 internal sealed class SetupTestPlatform : ISetupPlatform
 {
+    private readonly object gate = new();
     private readonly Dictionary<string, byte[]> files = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string?> environment = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<Exception>> faults = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, SetupTestBarrier> barriers = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SetupTestBarrierState> barriers = new(StringComparer.Ordinal);
     private readonly List<string> operations = [];
 
     public SetupTestPlatform(DateTimeOffset utcNow)
@@ -29,17 +30,29 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 
     public ISetupExecution Execution { get; }
 
-    public IReadOnlyList<string> Operations => operations;
+    public IReadOnlyList<string> Operations
+    {
+        get
+        {
+            lock (gate)
+            {
+                return operations.ToArray();
+            }
+        }
+    }
 
     public void InjectFault(string operation, Exception exception)
     {
-        if (!faults.TryGetValue(operation, out var queuedFaults))
+        lock (gate)
         {
-            queuedFaults = new Queue<Exception>();
-            faults.Add(operation, queuedFaults);
-        }
+            if (!faults.TryGetValue(operation, out var queuedFaults))
+            {
+                queuedFaults = new Queue<Exception>();
+                faults.Add(operation, queuedFaults);
+            }
 
-        queuedFaults.Enqueue(exception);
+            queuedFaults.Enqueue(exception);
+        }
     }
 
     public SetupTestBarrier AddBarrier(
@@ -47,9 +60,13 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         CancellationToken cancellationToken = default,
         TimeSpan? maximumWait = null)
     {
-        var barrier = new SetupTestBarrier(cancellationToken, maximumWait ?? TimeSpan.FromSeconds(10));
-        barriers.Add(operation, barrier);
-        return barrier;
+        var state = new SetupTestBarrierState(cancellationToken, maximumWait ?? TimeSpan.FromSeconds(10));
+        lock (gate)
+        {
+            barriers.Add(operation, state);
+        }
+
+        return new SetupTestBarrier(this, operation, state);
     }
 
     public void SeedFile(string path, byte[] bytes) => files[path] = bytes.ToArray();
@@ -62,15 +79,105 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 
     private void Record(string operation)
     {
-        operations.Add(operation);
-        if (faults.TryGetValue(operation, out var queuedFaults) && queuedFaults.TryDequeue(out var exception))
+        SetupTestBarrierState? barrier;
+        lock (gate)
         {
-            throw exception;
+            operations.Add(operation);
+            if (faults.TryGetValue(operation, out var queuedFaults) && queuedFaults.TryDequeue(out var exception))
+            {
+                throw exception;
+            }
+
+            barriers.TryGetValue(operation, out barrier);
+            barrier?.AcquireLease();
         }
 
-        if (barriers.TryGetValue(operation, out var barrier))
+        if (barrier is null)
         {
-            barrier.ArriveAndWait();
+            return;
+        }
+
+        try
+        {
+            lock (gate)
+            {
+                barrier.Arrive();
+            }
+
+            barrier.WaitForRelease();
+        }
+        finally
+        {
+            lock (gate)
+            {
+                barrier.ReleaseLease();
+            }
+        }
+    }
+
+    internal bool HasReached(SetupTestBarrierState state)
+    {
+        lock (gate)
+        {
+            return state.HasReached;
+        }
+    }
+
+    internal void WaitUntilReached(SetupTestBarrierState state, CancellationToken cancellationToken)
+    {
+        WaitWithLease(state, barrier => barrier.WaitUntilReached(cancellationToken));
+    }
+
+    internal void WaitUntilArrivals(SetupTestBarrierState state, int expectedArrivals, CancellationToken cancellationToken)
+    {
+        WaitWithLease(state, barrier => barrier.WaitUntilArrivals(expectedArrivals, cancellationToken));
+    }
+
+    internal void ReleaseBarrier(SetupTestBarrierState state)
+    {
+        lock (gate)
+        {
+            state.Release();
+            state.DisposeHandlesWhenUnleased();
+        }
+    }
+
+    internal void DisposeBarrier(string operation, SetupTestBarrierState state)
+    {
+        lock (gate)
+        {
+            if (barriers.TryGetValue(operation, out var registered) && ReferenceEquals(registered, state))
+            {
+                barriers.Remove(operation);
+            }
+
+            state.Retire();
+            state.DisposeHandlesWhenUnleased();
+        }
+    }
+
+    private void WaitWithLease(SetupTestBarrierState state, Action<SetupTestBarrierState> wait)
+    {
+        lock (gate)
+        {
+            if (state.IsRetired)
+            {
+                return;
+            }
+
+            state.AcquireLease();
+        }
+
+        try
+        {
+            wait(state);
+        }
+        finally
+        {
+            lock (gate)
+            {
+                state.ReleaseLease();
+            }
         }
     }
 
@@ -171,20 +278,63 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     }
 }
 
-internal sealed class SetupTestBarrier : IDisposable
+internal sealed class SetupTestBarrier(SetupTestPlatform platform, string operation, SetupTestBarrierState state) : IDisposable
+{
+    private int disposed;
+
+    public bool HasReached => platform.HasReached(state);
+
+    public void WaitUntilReached(CancellationToken cancellationToken) => platform.WaitUntilReached(state, cancellationToken);
+
+    public void WaitUntilArrivals(int expectedArrivals, CancellationToken cancellationToken) => platform.WaitUntilArrivals(state, expectedArrivals, cancellationToken);
+
+    public void Release() => platform.ReleaseBarrier(state);
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) == 0)
+        {
+            platform.DisposeBarrier(operation, state);
+        }
+    }
+}
+
+internal sealed class SetupTestBarrierState
 {
     private readonly ManualResetEventSlim reached = new(false);
     private readonly ManualResetEventSlim release = new(false);
+    private readonly SemaphoreSlim arrivals = new(0);
     private readonly CancellationToken cancellationToken;
     private readonly TimeSpan maximumWait;
+    private int arrivalCount;
+    private int leaseCount;
+    private bool retired;
+    private bool handlesDisposed;
 
-    public SetupTestBarrier(CancellationToken cancellationToken, TimeSpan maximumWait)
+    public SetupTestBarrierState(CancellationToken cancellationToken, TimeSpan maximumWait)
     {
         this.cancellationToken = cancellationToken;
         this.maximumWait = maximumWait;
     }
 
-    public bool HasReached => reached.IsSet;
+    public bool HasReached => arrivalCount > 0;
+
+    public bool IsRetired => retired;
+
+    public void AcquireLease() => leaseCount++;
+
+    public void ReleaseLease()
+    {
+        leaseCount--;
+        DisposeHandlesWhenUnleased();
+    }
+
+    public void Arrive()
+    {
+        Interlocked.Increment(ref arrivalCount);
+        reached.Set();
+        arrivals.Release();
+    }
 
     public void WaitUntilReached(CancellationToken cancellationToken)
     {
@@ -194,21 +344,50 @@ internal sealed class SetupTestBarrier : IDisposable
         }
     }
 
-    public void Release() => release.Set();
-
-    internal void ArriveAndWait()
+    public void WaitUntilArrivals(int expectedArrivals, CancellationToken cancellationToken)
     {
-        reached.Set();
+        while (Volatile.Read(ref arrivalCount) < expectedArrivals)
+        {
+            if (!arrivals.Wait(maximumWait, cancellationToken))
+            {
+                throw new TimeoutException("Setup test barrier did not receive every expected checkpoint.");
+            }
+        }
+    }
+
+    public void Release()
+    {
+        if (!handlesDisposed)
+        {
+            release.Set();
+        }
+    }
+
+    public void Retire()
+    {
+        retired = true;
+        Release();
+    }
+
+    public void WaitForRelease()
+    {
         if (!release.Wait(maximumWait, cancellationToken))
         {
             throw new TimeoutException("Setup test barrier was not released.");
         }
     }
 
-    public void Dispose()
+    public void DisposeHandlesWhenUnleased()
     {
-        Release();
+        if (!retired || leaseCount != 0 || handlesDisposed)
+        {
+            return;
+        }
+
+        handlesDisposed = true;
         reached.Dispose();
         release.Dispose();
+        arrivals.Dispose();
     }
+
 }

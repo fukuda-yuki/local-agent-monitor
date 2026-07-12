@@ -91,13 +91,14 @@ public sealed class SetupPlatformTests
         {
             await Task.Run(() => barrier.WaitUntilReached(CancellationToken.None));
             Assert.False(task.IsCompleted);
+            barrier.Release();
+            await task;
         }
         finally
         {
             barrier.Release();
+            await ObserveWorkersAsync(task);
         }
-
-        await task;
 
         Assert.Equal(["checkpoint:before-final-verification"], platform.Operations);
     }
@@ -153,6 +154,7 @@ public sealed class SetupPlatformTests
         finally
         {
             barrier.Release();
+            await ObserveWorkersAsync(task);
         }
     }
 
@@ -175,6 +177,108 @@ public sealed class SetupPlatformTests
         finally
         {
             barrier.Release();
+            await ObserveWorkersAsync(task);
+        }
+    }
+
+    [Fact]
+    public async Task TestPlatform_DisposedBarrierNameCanBeReusedByAFreshBarrier()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        using var previous = platform.AddBarrier("checkpoint:reused");
+        previous.Dispose();
+        using var current = platform.AddBarrier("checkpoint:reused");
+        var task = Task.Run(() => platform.Execution.Checkpoint("reused"));
+
+        try
+        {
+            await Task.Run(() => current.WaitUntilReached(CancellationToken.None));
+            Assert.False(task.IsCompleted);
+            current.Release();
+            await task;
+        }
+        finally
+        {
+            current.Release();
+            previous.Release();
+            await ObserveWorkersAsync(task);
+        }
+    }
+
+    [Fact]
+    public async Task TestPlatform_PreDisposeLeaseRemainsWithOldBarrierAfterNameReuse()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        using var previous = platform.AddBarrier("checkpoint:reused");
+        SetupTestBarrier? current = null;
+        var previousTask = Task.Run(() => platform.Execution.Checkpoint("reused"));
+        Task? currentTask = null;
+
+        try
+        {
+            await Task.Run(() => previous.WaitUntilReached(CancellationToken.None));
+            previous.Dispose();
+            current = platform.AddBarrier("checkpoint:reused");
+            currentTask = Task.Run(() => platform.Execution.Checkpoint("reused"));
+
+            await previousTask;
+            await Task.Run(() => current.WaitUntilReached(CancellationToken.None));
+            Assert.False(currentTask.IsCompleted);
+            current.Release();
+            await currentTask;
+        }
+        finally
+        {
+            current?.Release();
+            previous.Release();
+            await ObserveWorkersAsync(previousTask, currentTask);
+        }
+    }
+
+    [Fact]
+    public async Task TestPlatform_BarrierWaitsForEveryArrivalBeforeRelease()
+    {
+        const int workerCount = 4;
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        using var barrier = platform.AddBarrier("checkpoint:many");
+        var tasks = Enumerable.Range(0, workerCount)
+            .Select(_ => Task.Run(() => platform.Execution.Checkpoint("many")))
+            .ToArray();
+
+        try
+        {
+            await Task.Run(() => barrier.WaitUntilArrivals(workerCount, CancellationToken.None));
+            Assert.All(tasks, task => Assert.False(task.IsCompleted));
+            barrier.Release();
+            await Task.WhenAll(tasks);
+        }
+        finally
+        {
+            barrier.Release();
+            await ObserveWorkersAsync(tasks);
+        }
+    }
+
+    [Fact]
+    public async Task TestPlatform_ConcurrentDisposeReleasesAllWorkersWithoutObjectDisposedExceptions()
+    {
+        const int workerCount = 4;
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        using var barrier = platform.AddBarrier("checkpoint:dispose");
+        var tasks = Enumerable.Range(0, workerCount)
+            .Select(_ => Task.Run(() => platform.Execution.Checkpoint("dispose")))
+            .ToArray();
+
+        try
+        {
+            await Task.Run(() => barrier.WaitUntilArrivals(workerCount, CancellationToken.None));
+            barrier.Dispose();
+            await Task.WhenAll(tasks);
+        }
+        finally
+        {
+            barrier.Release();
+            await ObserveWorkersAsync(tasks);
         }
     }
 
@@ -188,5 +292,24 @@ public sealed class SetupPlatformTests
 
         Assert.Equal("00000000-0000-7000-8000-000000000001", first.ToString("D"));
         Assert.Equal("00000000-0000-7000-8000-000000000002", second.ToString("D"));
+    }
+
+    private static async Task ObserveWorkersAsync(params Task?[] tasks)
+    {
+        foreach (var task in tasks)
+        {
+            if (task is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                await task;
+            }
+            catch (Exception)
+            {
+            }
+        }
     }
 }
