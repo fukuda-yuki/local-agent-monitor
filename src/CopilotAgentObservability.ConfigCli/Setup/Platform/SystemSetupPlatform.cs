@@ -1,3 +1,4 @@
+using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Platform;
@@ -89,45 +90,233 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
         public SetupPathMetadata GetPathMetadata(string path)
         {
-            FileAttributes attributes;
             try
             {
-                attributes = File.GetAttributes(path);
+                if (OperatingSystem.IsWindows())
+                {
+                    return WindowsPathMetadata.Read(path);
+                }
+
+                if (OperatingSystem.IsLinux())
+                {
+                    return LinuxPathMetadata.Read(path);
+                }
+
+                if (OperatingSystem.IsMacOS())
+                {
+                    return MacOsPathMetadata.Read(path);
+                }
             }
-            catch (FileNotFoundException)
+            catch (Exception)
             {
-                return SetupPathMetadata.Missing;
-            }
-            catch (DirectoryNotFoundException)
-            {
-                return SetupPathMetadata.Missing;
             }
 
-            var kind = (attributes & FileAttributes.Directory) != 0
-                ? SetupPathKind.Directory
-                : OperatingSystem.IsWindows()
-                    ? SetupPathKind.File
-                    : GetUnixPathKind(path);
-            return new SetupPathMetadata(true, kind, attributes);
+            return ExistingOther();
         }
 
-        private static SetupPathKind GetUnixPathKind(string path)
+        private static SetupPathMetadata ExistingOther(FileAttributes attributes = 0) =>
+            new(true, SetupPathKind.Other, attributes);
+
+        private static class WindowsPathMetadata
         {
-            try
+            private const uint FileReadAttributes = 0x00000080;
+            private const uint FileShareRead = 0x00000001;
+            private const uint FileShareWrite = 0x00000002;
+            private const uint FileShareDelete = 0x00000004;
+            private const uint OpenExisting = 3;
+            private const uint OpenReparsePoint = 0x00200000;
+            private const uint BackupSemantics = 0x02000000;
+            private const int FileAttributeTagInfoClass = 9;
+            private const uint FileTypeDisk = 0x0001;
+            private const int ErrorFileNotFound = 2;
+            private const int ErrorPathNotFound = 3;
+
+            public static SetupPathMetadata Read(string path)
             {
-                using var stream = File.Open(path, new FileStreamOptions
+                using var handle = CreateFile(
+                    path,
+                    FileReadAttributes,
+                    FileShareRead | FileShareWrite | FileShareDelete,
+                    IntPtr.Zero,
+                    OpenExisting,
+                    OpenReparsePoint | BackupSemantics,
+                    IntPtr.Zero);
+                if (handle.IsInvalid)
                 {
-                    Mode = FileMode.Open,
-                    Access = FileAccess.ReadWrite,
-                    Share = FileShare.ReadWrite | FileShare.Delete,
-                    BufferSize = 1,
-                });
-                return stream.CanSeek ? SetupPathKind.File : SetupPathKind.Other;
+                    return IsMissing(Marshal.GetLastPInvokeError()) ? SetupPathMetadata.Missing : ExistingOther();
+                }
+
+                if (!GetFileInformationByHandleEx(
+                    handle,
+                    FileAttributeTagInfoClass,
+                    out var info,
+                    (uint)Marshal.SizeOf<FileAttributeTagInfo>()))
+                {
+                    return ExistingOther();
+                }
+
+                var attributes = (FileAttributes)info.FileAttributes;
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    return ExistingOther(attributes);
+                }
+
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    return new SetupPathMetadata(true, SetupPathKind.Directory, attributes);
+                }
+
+                return GetFileType(handle) == FileTypeDisk
+                    ? new SetupPathMetadata(true, SetupPathKind.File, attributes)
+                    : ExistingOther(attributes);
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+
+            private static bool IsMissing(int error) => error is ErrorFileNotFound or ErrorPathNotFound;
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct FileAttributeTagInfo
             {
-                return SetupPathKind.Other;
+                public uint FileAttributes;
+                public uint ReparseTag;
             }
+
+            [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern SafeFileHandle CreateFile(
+                string fileName,
+                uint desiredAccess,
+                uint shareMode,
+                IntPtr securityAttributes,
+                uint creationDisposition,
+                uint flagsAndAttributes,
+                IntPtr templateFile);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            private static extern bool GetFileInformationByHandleEx(
+                SafeFileHandle file,
+                int fileInformationClass,
+                out FileAttributeTagInfo fileInformation,
+                uint bufferSize);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern uint GetFileType(SafeFileHandle file);
+        }
+
+        private static class LinuxPathMetadata
+        {
+            private const int AtFileDescriptorCurrentWorkingDirectory = -100;
+            private const int AtSymlinkNoFollow = 0x100;
+            private const uint StatxType = 0x00000001;
+            private const int ErrorNoEntry = 2;
+            private const int ErrorNotDirectory = 20;
+            private const ushort FileTypeMask = 0xf000;
+            private const ushort FileTypeFifo = 0x1000;
+            private const ushort FileTypeCharacter = 0x2000;
+            private const ushort FileTypeDirectory = 0x4000;
+            private const ushort FileTypeBlock = 0x6000;
+            private const ushort FileTypeRegular = 0x8000;
+            private const ushort FileTypeLink = 0xa000;
+            private const ushort FileTypeSocket = 0xc000;
+            private const int StatxBufferSize = 256;
+            private const int StatxModeOffset = 28;
+
+            public static SetupPathMetadata Read(string path)
+            {
+                var buffer = new byte[StatxBufferSize];
+                if (Statx(
+                    AtFileDescriptorCurrentWorkingDirectory,
+                    path,
+                    AtSymlinkNoFollow,
+                    StatxType,
+                    buffer) != 0)
+                {
+                    var error = Marshal.GetLastPInvokeError();
+                    return error is ErrorNoEntry or ErrorNotDirectory ? SetupPathMetadata.Missing : ExistingOther();
+                }
+
+                var mode = BitConverter.ToUInt16(buffer, StatxModeOffset);
+                return (ushort)(mode & FileTypeMask) switch
+                {
+                    FileTypeRegular => new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal),
+                    FileTypeDirectory => new SetupPathMetadata(true, SetupPathKind.Directory, FileAttributes.Directory),
+                    FileTypeLink => ExistingOther(FileAttributes.ReparsePoint),
+                    FileTypeFifo or FileTypeSocket or FileTypeCharacter or FileTypeBlock => ExistingOther(),
+                    _ => ExistingOther(),
+                };
+            }
+
+            [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+            private static extern int Statx(
+                int directoryFileDescriptor,
+                [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                int flags,
+                uint mask,
+                [Out] byte[] buffer);
+        }
+
+        private static class MacOsPathMetadata
+        {
+            private const ushort AttributeBitmapCount = 5;
+            private const uint AttributeCommonObjectType = 0x00000008;
+            private const ulong FileSystemOptionNoFollow = 0x00000001;
+            private const int ErrorNoEntry = 2;
+            private const int ErrorNotDirectory = 20;
+            private const uint VnodeTypeRegular = 1;
+            private const uint VnodeTypeDirectory = 2;
+            private const uint VnodeTypeBlock = 3;
+            private const uint VnodeTypeCharacter = 4;
+            private const uint VnodeTypeLink = 5;
+            private const uint VnodeTypeSocket = 6;
+            private const uint VnodeTypeFifo = 7;
+
+            public static SetupPathMetadata Read(string path)
+            {
+                var attributes = new AttributeList
+                {
+                    BitmapCount = AttributeBitmapCount,
+                    CommonAttributes = AttributeCommonObjectType,
+                };
+                var buffer = new byte[8];
+                if (GetAttributeList(path, ref attributes, buffer, (nuint)buffer.Length, FileSystemOptionNoFollow) != 0)
+                {
+                    var error = Marshal.GetLastPInvokeError();
+                    return error is ErrorNoEntry or ErrorNotDirectory ? SetupPathMetadata.Missing : ExistingOther();
+                }
+
+                if (BitConverter.ToUInt32(buffer, 0) < buffer.Length)
+                {
+                    return ExistingOther();
+                }
+
+                return BitConverter.ToUInt32(buffer, 4) switch
+                {
+                    VnodeTypeRegular => new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal),
+                    VnodeTypeDirectory => new SetupPathMetadata(true, SetupPathKind.Directory, FileAttributes.Directory),
+                    VnodeTypeLink => ExistingOther(FileAttributes.ReparsePoint),
+                    VnodeTypeFifo or VnodeTypeSocket or VnodeTypeCharacter or VnodeTypeBlock => ExistingOther(),
+                    _ => ExistingOther(),
+                };
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct AttributeList
+            {
+                public ushort BitmapCount;
+                public ushort Reserved;
+                public uint CommonAttributes;
+                public uint VolumeAttributes;
+                public uint DirectoryAttributes;
+                public uint FileAttributes;
+                public uint ForkAttributes;
+            }
+
+            [DllImport("libSystem.B.dylib", EntryPoint = "getattrlist", SetLastError = true)]
+            private static extern int GetAttributeList(
+                [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                ref AttributeList attributes,
+                [Out] byte[] buffer,
+                nuint bufferSize,
+                ulong options);
         }
 
         public ISetupExclusiveFileLock? TryAcquireExclusiveFileLock(string path)

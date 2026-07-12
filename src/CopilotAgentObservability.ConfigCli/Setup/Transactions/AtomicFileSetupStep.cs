@@ -53,11 +53,9 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
         }
 
         var temporary = CreateTemporaryPath(target);
-        var ownsTemporary = false;
         try
         {
             platform.FileSystem.WriteNewAllBytes(temporary, desired);
-            ownsTemporary = true;
             platform.FileSystem.FlushFile(temporary);
             target = SetupPathPolicy.ValidateFileTarget(platform, allowedRoot, targetPath);
             current = ReadTarget(target);
@@ -77,12 +75,10 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
         }
         catch (SetupFileStepException)
         {
-            CleanupTemporaryWhenTargetIsExpected(temporary, target, expectedBaseHash, ownsTemporary);
             throw;
         }
         catch (Exception)
         {
-            CleanupTemporaryWhenTargetIsExpected(temporary, target, expectedBaseHash, ownsTemporary);
             throw new SetupFileStepException(SetupCodes.InternalError);
         }
 
@@ -145,11 +141,9 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
         }
 
         var temporary = CreateTemporaryPath(target);
-        var ownsTemporary = false;
         try
         {
             platform.FileSystem.WriteNewAllBytes(temporary, backup.Bytes);
-            ownsTemporary = true;
             platform.FileSystem.FlushFile(temporary);
             target = SetupPathPolicy.ValidateFileTarget(platform, allowedRoot, targetPath);
             current = ReadTarget(target);
@@ -162,12 +156,10 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
         }
         catch (SetupFileStepException)
         {
-            CleanupTemporaryWhenTargetIsExpected(temporary, target, expectedAppliedHash, ownsTemporary);
             throw;
         }
         catch (Exception)
         {
-            CleanupTemporaryWhenTargetIsExpected(temporary, target, expectedAppliedHash, ownsTemporary);
             throw new SetupFileStepException(SetupCodes.InternalError);
         }
 
@@ -203,32 +195,6 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
 
     private string CreateTemporaryPath(string target) =>
         target + ".cao-" + platform.Identifiers.CreateUuidV7().ToString("D") + ".tmp";
-
-    private void CleanupTemporaryWhenTargetIsExpected(
-        string temporary,
-        string target,
-        string expectedTargetHash,
-        bool ownsTemporary)
-    {
-        if (!ownsTemporary)
-        {
-            return;
-        }
-
-        try
-        {
-            var current = ReadTarget(target);
-            var temporaryMetadata = platform.FileSystem.GetPathMetadata(temporary);
-            if (temporaryMetadata.Exists && temporaryMetadata.Kind == SetupPathKind.File &&
-                string.Equals(SetupHash.File(current.Exists, current.Bytes), expectedTargetHash, StringComparison.Ordinal))
-            {
-                platform.FileSystem.DeleteFile(temporary);
-            }
-        }
-        catch (Exception)
-        {
-        }
-    }
 
     private static byte[] SerializeBackup(TargetState state)
     {

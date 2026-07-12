@@ -91,9 +91,19 @@ public sealed class SetupPlatformTests
         }
 
         var directory = Path.Combine(Path.GetTempPath(), $"cao-platform-special-{Guid.NewGuid():N}");
+        var regular = Path.Combine(directory, "regular.bin");
+        var readOnly = Path.Combine(directory, "read-only.bin");
+        var childDirectory = Path.Combine(directory, "child");
+        var link = Path.Combine(directory, "regular-link");
+        var danglingLink = Path.Combine(directory, "dangling-link");
         var fifo = Path.Combine(directory, "input.fifo");
         var socketPath = Path.Combine(directory, "input.socket");
-        Directory.CreateDirectory(directory);
+        Directory.CreateDirectory(childDirectory);
+        File.WriteAllBytes(regular, [1]);
+        File.WriteAllBytes(readOnly, [2]);
+        File.SetUnixFileMode(readOnly, UnixFileMode.UserRead);
+        File.CreateSymbolicLink(link, regular);
+        File.CreateSymbolicLink(danglingLink, Path.Combine(directory, "absent"));
         Socket? socket = null;
         try
         {
@@ -116,15 +126,70 @@ public sealed class SetupPlatformTests
             socket.Bind(new UnixDomainSocketEndPoint(socketPath));
             var platform = new SystemSetupPlatform();
 
+            Assert.Equal(SetupPathKind.File, platform.FileSystem.GetPathMetadata(regular).Kind);
+            Assert.Equal(SetupPathKind.File, platform.FileSystem.GetPathMetadata(readOnly).Kind);
+            Assert.Equal(SetupPathKind.Directory, platform.FileSystem.GetPathMetadata(childDirectory).Kind);
+            Assert.False(platform.FileSystem.GetPathMetadata(Path.Combine(directory, "missing")).Exists);
+            AssertNoFollowReparse(platform.FileSystem.GetPathMetadata(link));
+            AssertNoFollowReparse(platform.FileSystem.GetPathMetadata(danglingLink));
             Assert.Equal(SetupPathKind.Other, platform.FileSystem.GetPathMetadata(fifo).Kind);
             Assert.Equal(SetupPathKind.Other, platform.FileSystem.GetPathMetadata(socketPath).Kind);
+            Assert.Equal(SetupPathKind.Other, platform.FileSystem.GetPathMetadata("/dev/null").Kind);
         }
         finally
         {
             socket?.Dispose();
+            File.SetUnixFileMode(readOnly, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.Delete(link);
+            File.Delete(danglingLink);
             File.Delete(fifo);
             File.Delete(socketPath);
-            Directory.Delete(directory);
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SystemPlatform_WindowsUsesNoFollowMetadataForRegularDirectoryAndLinks()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.NotEqual(SetupPathStyle.Windows, new SystemSetupPlatform().PathStyle);
+            return;
+        }
+
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-platform-native-{Guid.NewGuid():N}");
+        var regular = Path.Combine(directory, "regular.bin");
+        var readOnly = Path.Combine(directory, "read-only.bin");
+        var childDirectory = Path.Combine(directory, "child");
+        var fileLink = Path.Combine(directory, "file-link");
+        var directoryLink = Path.Combine(directory, "directory-link");
+        var danglingLink = Path.Combine(directory, "dangling-link");
+        Directory.CreateDirectory(childDirectory);
+        File.WriteAllBytes(regular, [1]);
+        File.WriteAllBytes(readOnly, [2]);
+        File.SetAttributes(readOnly, FileAttributes.ReadOnly);
+        try
+        {
+            File.CreateSymbolicLink(fileLink, regular);
+            Directory.CreateSymbolicLink(directoryLink, childDirectory);
+            File.CreateSymbolicLink(danglingLink, Path.Combine(directory, "absent"));
+            var platform = new SystemSetupPlatform();
+
+            Assert.Equal(SetupPathKind.File, platform.FileSystem.GetPathMetadata(regular).Kind);
+            Assert.Equal(SetupPathKind.File, platform.FileSystem.GetPathMetadata(readOnly).Kind);
+            Assert.Equal(SetupPathKind.Directory, platform.FileSystem.GetPathMetadata(childDirectory).Kind);
+            Assert.False(platform.FileSystem.GetPathMetadata(Path.Combine(directory, "missing")).Exists);
+            AssertNoFollowReparse(platform.FileSystem.GetPathMetadata(fileLink));
+            AssertNoFollowReparse(platform.FileSystem.GetPathMetadata(directoryLink));
+            AssertNoFollowReparse(platform.FileSystem.GetPathMetadata(danglingLink));
+        }
+        finally
+        {
+            File.SetAttributes(readOnly, FileAttributes.Normal);
+            File.Delete(fileLink);
+            Directory.Delete(directoryLink);
+            File.Delete(danglingLink);
+            Directory.Delete(directory, recursive: true);
         }
     }
 
@@ -525,5 +590,12 @@ public sealed class SetupPlatformTests
             {
             }
         }
+    }
+
+    private static void AssertNoFollowReparse(SetupPathMetadata metadata)
+    {
+        Assert.True(metadata.Exists);
+        Assert.Equal(SetupPathKind.Other, metadata.Kind);
+        Assert.True((metadata.Attributes & FileAttributes.ReparsePoint) != 0);
     }
 }

@@ -126,6 +126,9 @@ public sealed class SetupFileStepTests
         Assert.Contains($"file.write-new:{backup}", platform.Operations);
         Assert.Contains($"file.flush:{backup}", platform.Operations);
         Assert.Contains(platform.Operations, operation => operation.StartsWith(existed ? "file.replace:" : "file.move:", StringComparison.Ordinal));
+        var temporary = target + ".cao-00000000-0000-7000-8000-000000000001.tmp";
+        Assert.False(platform.FileSystem.FileExists(temporary));
+        Assert.DoesNotContain($"file.delete:{temporary}", platform.Operations);
     }
 
     [Fact]
@@ -161,6 +164,9 @@ public sealed class SetupFileStepTests
             if (previous is not null)
             {
                 Assert.Empty(platform.ReadSeededFile(target));
+                var temporary = target + ".cao-00000000-0000-7000-8000-000000000002.tmp";
+                Assert.False(platform.FileSystem.FileExists(temporary));
+                Assert.DoesNotContain($"file.delete:{temporary}", platform.Operations);
             }
         }
     }
@@ -212,7 +218,7 @@ public sealed class SetupFileStepTests
     [InlineData("temp-write")]
     [InlineData("temp-flush")]
     [InlineData("replace")]
-    public void Apply_PreEffectFaultPreservesOldTargetAndCleansTemporaryFile(string boundary)
+    public void Apply_PreEffectFaultPreservesOldTargetWithoutDeletingTemporaryPath(string boundary)
     {
         var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
         var target = "C:\\allowed\\settings.json";
@@ -235,7 +241,8 @@ public sealed class SetupFileStepTests
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
         Assert.Equal(old, platform.ReadSeededFile(target));
-        Assert.False(platform.FileSystem.FileExists(temporary));
+        Assert.Equal(boundary is "temp-flush" or "replace", platform.FileSystem.FileExists(temporary));
+        Assert.DoesNotContain($"file.delete:{temporary}", platform.Operations);
         Assert.DoesNotContain("secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
@@ -323,12 +330,14 @@ public sealed class SetupFileStepTests
         Assert.Equal(old, platform.ReadSeededFile(target));
         if (boundary.StartsWith("temp", StringComparison.Ordinal))
         {
-            Assert.Equal(boundary == "temp-write", platform.FileSystem.FileExists(temporary));
+            Assert.True(platform.FileSystem.FileExists(temporary));
         }
         else
         {
             Assert.True(platform.FileSystem.FileExists(backup));
         }
+
+        Assert.DoesNotContain($"file.delete:{temporary}", platform.Operations);
     }
 
     [Fact]
@@ -371,7 +380,7 @@ public sealed class SetupFileStepTests
     [InlineData("temp-write")]
     [InlineData("temp-flush")]
     [InlineData("replace")]
-    public void Restore_PreEffectFaultPreservesAppliedTargetAndCleansTemporaryFile(string boundary)
+    public void Restore_PreEffectFaultPreservesAppliedTargetWithoutDeletingTemporaryPath(string boundary)
     {
         var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
         var target = "C:\\allowed\\settings.json";
@@ -395,13 +404,14 @@ public sealed class SetupFileStepTests
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
         Assert.Equal(desired, platform.ReadSeededFile(target));
-        Assert.False(platform.FileSystem.FileExists(restoreTemporary));
+        Assert.Equal(boundary is "temp-flush" or "replace", platform.FileSystem.FileExists(restoreTemporary));
+        Assert.DoesNotContain($"file.delete:{restoreTemporary}", platform.Operations);
     }
 
     [Theory]
     [InlineData("temp-write")]
     [InlineData("temp-flush")]
-    public void Restore_AfterEffectPreReplaceFaultPreservesAppliedTargetAndOnlyCleansOwnedTemporaryFile(string boundary)
+    public void Restore_AfterEffectPreReplaceFaultPreservesAppliedTargetWithoutDeletingTemporaryPath(string boundary)
     {
         var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
         var target = "C:\\allowed\\settings.json";
@@ -422,7 +432,8 @@ public sealed class SetupFileStepTests
             Assert.Throws<SetupFileStepException>(() => step.Restore(
                 "C:\\allowed", target, backup, applied.AppliedHash, applied.PreviousHash)).Code);
         Assert.Equal(desired, platform.ReadSeededFile(target));
-        Assert.Equal(boundary == "temp-write", platform.FileSystem.FileExists(restoreTemporary));
+        Assert.True(platform.FileSystem.FileExists(restoreTemporary));
+        Assert.DoesNotContain($"file.delete:{restoreTemporary}", platform.Operations);
     }
 
     [Fact]
@@ -523,6 +534,7 @@ public sealed class SetupFileStepTests
                 "C:\\allowed", target, backup, SetupHash.File(true, previous), desired)).Code);
         Assert.Equal(previous, platform.ReadSeededFile(target));
         Assert.Equal(desired, platform.ReadSeededFile(temporary));
+        Assert.DoesNotContain($"file.delete:{temporary}", platform.Operations);
     }
 
     [Fact]
@@ -568,6 +580,56 @@ public sealed class SetupFileStepTests
                 "C:\\allowed", target, backup, applied.AppliedHash, applied.PreviousHash)).Code);
         Assert.Equal(desired, platform.ReadSeededFile(target));
         Assert.Equal(previous, platform.ReadSeededFile(restoreTemporary));
+        Assert.DoesNotContain($"file.delete:{restoreTemporary}", platform.Operations);
+    }
+
+    [Fact]
+    public void Apply_AfterFlushRebindingPreservesForeignTemporaryBytesWithoutDelete()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var temporary = target + ".cao-00000000-0000-7000-8000-000000000001.tmp";
+        var previous = Encoding.UTF8.GetBytes("previous");
+        var foreign = Encoding.UTF8.GetBytes("foreign");
+        platform.SeedFile(target, previous);
+        platform.InjectAfterEffectFault(
+            $"file.flush:{temporary}",
+            new IOException("ambiguous flush"),
+            () => platform.SeedFile(temporary, foreign));
+
+        Assert.Equal(
+            SetupCodes.InternalError,
+            Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+                "C:\\allowed", target, backup, SetupHash.File(true, previous), Encoding.UTF8.GetBytes("desired"))).Code);
+        Assert.Equal(foreign, platform.ReadSeededFile(temporary));
+        Assert.DoesNotContain($"file.delete:{temporary}", platform.Operations);
+    }
+
+    [Fact]
+    public void Restore_AfterFlushRebindingPreservesForeignTemporaryBytesWithoutDelete()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var temporary = target + ".cao-00000000-0000-7000-8000-000000000002.tmp";
+        var previous = Encoding.UTF8.GetBytes("previous");
+        var desired = Encoding.UTF8.GetBytes("desired");
+        var foreign = Encoding.UTF8.GetBytes("foreign");
+        platform.SeedFile(target, previous);
+        var step = new AtomicFileSetupStep(platform);
+        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, previous), desired);
+        platform.InjectAfterEffectFault(
+            $"file.flush:{temporary}",
+            new IOException("ambiguous flush"),
+            () => platform.SeedFile(temporary, foreign));
+
+        Assert.Equal(
+            SetupCodes.InternalError,
+            Assert.Throws<SetupFileStepException>(() => step.Restore(
+                "C:\\allowed", target, backup, applied.AppliedHash, applied.PreviousHash)).Code);
+        Assert.Equal(foreign, platform.ReadSeededFile(temporary));
+        Assert.DoesNotContain($"file.delete:{temporary}", platform.Operations);
     }
 
     [Fact]
