@@ -258,6 +258,11 @@ public sealed class SetupApplyTests
     [InlineData(SetupCodes.ManagedPolicyConflict)]
     [InlineData(SetupCodes.PortOwnedByForeignProcess)]
     [InlineData(SetupCodes.UnsafePath)]
+    [InlineData(SetupCodes.TargetNotInstalled)]
+    [InlineData(SetupCodes.MalformedSettings)]
+    [InlineData(SetupCodes.PermissionDenied)]
+    [InlineData(SetupCodes.StalePlan)]
+    [InlineData(SetupCodes.InternalError)]
     public void Apply_AllAdapterPreflightFailuresAreFixedAndArtifactFree(string code)
     {
         var fixture = ApplyFixture.Create();
@@ -343,6 +348,125 @@ public sealed class SetupApplyTests
         Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
     }
 
+    [Fact]
+    public void Apply_MixedTransactionDoesNotBackUpJournalOrClaimOwnershipForNoOpTarget()
+    {
+        var fixture = ApplyFixture.Create(fileNoChange: true);
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
+        var file = result.Targets.Single(target => target.RecordId == fixture.FileRecordId);
+        Assert.Null(file.BackupReference);
+        Assert.Null(file.AppliedStateHash);
+        Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, file.RollbackStatus);
+        Assert.False(fixture.Platform.FileSystem.FileExists(fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId)));
+        var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
+        Assert.Equal([fixture.EnvironmentRecordId], journal.Targets.Select(target => target.RecordId));
+    }
+
+    [Fact]
+    public void Apply_MixedEnvironmentTargetJournalsAndWritesOnlyActuallyChangedMembers()
+    {
+        var fixture = ApplyFixture.Create(environmentANoChange: true);
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
+        var environmentJournal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths)
+            .Load(fixture.ChangeSetId)!.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId);
+        Assert.Equal(["ENV_B"], environmentJournal.Steps.Select(step => step.MemberKey));
+        Assert.Equal(
+            ["ENV_B"],
+            result.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId).Members.Select(member => member.SettingKey));
+        Assert.DoesNotContain("environment.set:ENV_A", fixture.Platform.Operations);
+        Assert.Contains("environment.set:ENV_B", fixture.Platform.Operations);
+        Assert.Equal(1, fixture.Platform.Operations.Count(operation => operation == "environment.notify"));
+    }
+
+    [Fact]
+    public void Apply_NoOpEnvironmentTargetInMixedTransactionDoesNotNotifyOrClaimOwnership()
+    {
+        var fixture = ApplyFixture.Create(environmentNoChange: true);
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        var environment = result.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId);
+        Assert.Null(environment.BackupReference);
+        Assert.Null(environment.AppliedStateHash);
+        Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, environment.RollbackStatus);
+        Assert.False(fixture.Platform.FileSystem.FileExists(fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.EnvironmentRecordId)));
+        var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
+        Assert.Equal([fixture.FileRecordId], journal.Targets.Select(target => target.RecordId));
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, journal.EnvironmentNotification);
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public void Apply_FileOnlySuccessNeverMakesEnvironmentNotificationRequired()
+    {
+        var fixture = ApplyFixture.Create(includeEnvironment: false);
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
+        var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, journal.EnvironmentNotification);
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public void Apply_RealCapturePathFailureBeforeArtifactsPreservesSafeCode()
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.Revalidator.OnRevalidate = (_, _) => fixture.Platform.SeedPathMetadata(
+            fixture.TargetPath,
+            new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.UnsafePath, exception.Code);
+        AssertNoTransactionArtifacts(fixture);
+        Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
+    }
+
+    [Theory]
+    [InlineData(SetupCodes.ApplySucceeded)]
+    [InlineData(SetupCodes.PlanReady)]
+    [InlineData(SetupCodes.NoChanges)]
+    [InlineData(SetupCodes.RollbackSucceeded)]
+    [InlineData(SetupCodes.StatusReady)]
+    [InlineData(SetupCodes.InterruptedApplyRecovered)]
+    [InlineData(SetupCodes.InterruptedRollbackRecovered)]
+    [InlineData(SetupCodes.InvalidArguments)]
+    [InlineData(SetupCodes.UnsupportedAdapter)]
+    [InlineData(SetupCodes.UnsupportedTarget)]
+    [InlineData(SetupCodes.RollbackStale)]
+    [InlineData(SetupCodes.RollbackNotAvailable)]
+    [InlineData(SetupCodes.PartialApply)]
+    [InlineData(SetupCodes.PartialRollback)]
+    [InlineData(SetupCodes.SetupBusy)]
+    [InlineData(SetupCodes.RecoveryRequired)]
+    [InlineData(SetupCodes.InterruptedRecoveryFailed)]
+    [InlineData(SetupCodes.LedgerCorrupt)]
+    [InlineData(SetupCodes.LedgerVersionUnsupported)]
+    public void Apply_MapsKnownNonPreflightRevalidatorCodesToInternalError(string wrongCode)
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.Revalidator.OnRevalidate = (_, _) => throw new SetupApplyException(wrongCode);
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        AssertNoTransactionArtifacts(fixture);
+    }
+
     private static int IndexOf(IReadOnlyList<string> values, string value, int start)
     {
         for (var index = start; index < values.Count; index++)
@@ -365,7 +489,12 @@ public sealed class SetupApplyTests
 
     private sealed class ApplyFixture
     {
-        private ApplyFixture(bool noChanges)
+        private ApplyFixture(
+            bool noChanges,
+            bool fileNoChange,
+            bool environmentANoChange,
+            bool environmentNoChange,
+            bool includeEnvironment)
         {
             Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 12, 1, 2, 3, TimeSpan.Zero));
             Paths = new SetupRuntimePaths(Platform);
@@ -379,11 +508,25 @@ public sealed class SetupApplyTests
             Platform.SeedUserEnvironment("ENV_A", "old-a");
             Platform.SeedUserEnvironment("ENV_B", "old-b");
             var environmentCapture = new UserEnvironmentSetupStep(Platform).Capture(["ENV_A", "ENV_B"]);
-            var fileDesired = noChanges ? "old" : "new";
-            var fileOperation = noChanges ? SetupOperation.NoOp : SetupOperation.Replace;
-            var environmentAOperation = noChanges ? SetupOperation.NoOp : SetupOperation.Replace;
-            var environmentBOperation = noChanges ? SetupOperation.NoOp : SetupOperation.Remove;
-            var environmentBDesired = noChanges ? "old-b" : null;
+            var fileDesired = noChanges || fileNoChange ? "old" : "new";
+            var fileOperation = noChanges || fileNoChange ? SetupOperation.NoOp : SetupOperation.Replace;
+            var environmentAOperation = noChanges || environmentANoChange || environmentNoChange ? SetupOperation.NoOp : SetupOperation.Replace;
+            var environmentBOperation = noChanges || environmentNoChange ? SetupOperation.NoOp : SetupOperation.Remove;
+            var environmentBDesired = noChanges || environmentNoChange ? "old-b" : null;
+            var planTargets = new List<SetupPrivatePlanTarget>
+            {
+                new(FileRecordId, SetupTargetKind.Json, TargetPath,
+                    SetupHash.File(true, Encoding.UTF8.GetBytes("old")), fileDesired,
+                    [new SetupPrivatePlanMember("setting", fileOperation, fileDesired)]),
+            };
+            if (includeEnvironment)
+            {
+                planTargets.Add(new SetupPrivatePlanTarget(EnvironmentRecordId, SetupTargetKind.Env, "current-user",
+                    environmentCapture.AggregateHash, "environment-allowlist",
+                    [new SetupPrivatePlanMember("ENV_A", environmentAOperation, noChanges || environmentANoChange || environmentNoChange ? "old-a" : "desired-a"),
+                     new SetupPrivatePlanMember("ENV_B", environmentBOperation, environmentBDesired)]));
+            }
+
             var plan = new SetupPrivatePlan(
                 1,
                 ChangeSetId,
@@ -391,23 +534,24 @@ public sealed class SetupApplyTests
                 "vscode",
                 Platform.Clock.UtcNow,
                 "1.0.0",
-                [new SetupPrivatePlanTarget(FileRecordId, SetupTargetKind.Json, TargetPath,
-                    SetupHash.File(true, Encoding.UTF8.GetBytes("old")), fileDesired,
-                    [new SetupPrivatePlanMember("setting", fileOperation, fileDesired)]),
-                 new SetupPrivatePlanTarget(EnvironmentRecordId, SetupTargetKind.Env, "current-user",
-                    environmentCapture.AggregateHash, "environment-allowlist",
-                    [new SetupPrivatePlanMember("ENV_A", environmentAOperation, noChanges ? "old-a" : "desired-a"),
-                     new SetupPrivatePlanMember("ENV_B", environmentBOperation, environmentBDesired)])]);
+                planTargets);
+            var ledgerTargets = new List<SetupLedgerTarget>
+            {
+                new(FileRecordId, SetupTargetKind.Json, "settings", "github-copilot",
+                    [new SetupLedgerMember("setting", fileOperation)], plan.Targets[0].BaseStateHash,
+                    null, null, null, SetupLedgerRollbackStatus.NotAvailable, SetupRestartRequirement.RestartVsCode, "1.0.0"),
+            };
+            if (includeEnvironment)
+            {
+                ledgerTargets.Add(new SetupLedgerTarget(EnvironmentRecordId, SetupTargetKind.Env, "user-environment", "github-copilot",
+                    [new SetupLedgerMember("ENV_A", environmentAOperation), new SetupLedgerMember("ENV_B", environmentBOperation)],
+                    plan.Targets[1].BaseStateHash, null, null, null, SetupLedgerRollbackStatus.NotAvailable,
+                    SetupRestartRequirement.RestartTerminalSession, "1.0.0"));
+            }
             var ledgerChangeSet = new SetupLedgerChangeSet(
                 ChangeSetId, "github-copilot", "vscode", Platform.Clock.UtcNow, Platform.Clock.UtcNow,
                 "1.0.0", null, SetupChangeSetState.Planned,
-                [new SetupLedgerTarget(FileRecordId, SetupTargetKind.Json, "settings", "github-copilot",
-                    [new SetupLedgerMember("setting", fileOperation)], plan.Targets[0].BaseStateHash,
-                    null, null, null, SetupLedgerRollbackStatus.NotAvailable, SetupRestartRequirement.RestartVsCode, "1.0.0"),
-                 new SetupLedgerTarget(EnvironmentRecordId, SetupTargetKind.Env, "user-environment", "github-copilot",
-                    [new SetupLedgerMember("ENV_A", environmentAOperation), new SetupLedgerMember("ENV_B", environmentBOperation)],
-                    plan.Targets[1].BaseStateHash, null, null, null, SetupLedgerRollbackStatus.NotAvailable,
-                    SetupRestartRequirement.RestartTerminalSession, "1.0.0")]);
+                ledgerTargets);
             var planStore = new SetupPlanStore(Platform, Paths);
             var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
             using var setupLock = SetupLock.TryAcquire(Platform, Paths);
@@ -427,7 +571,17 @@ public sealed class SetupApplyTests
         public RecordingRevalidator Revalidator { get; }
         public SetupApplyCoordinator Coordinator { get; }
 
-        public static ApplyFixture Create(bool noChanges = false) => new(noChanges);
+        public static ApplyFixture Create(
+            bool noChanges = false,
+            bool fileNoChange = false,
+            bool environmentANoChange = false,
+            bool environmentNoChange = false,
+            bool includeEnvironment = true) => new(
+                noChanges,
+                fileNoChange,
+                environmentANoChange,
+                environmentNoChange,
+                includeEnvironment);
 
         public SetupLedgerChangeSet LoadChangeSet()
         {

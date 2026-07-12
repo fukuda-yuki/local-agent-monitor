@@ -7,6 +7,19 @@ namespace CopilotAgentObservability.ConfigCli.Setup.Transactions;
 
 internal sealed class SetupApplyCoordinator
 {
+    private static readonly HashSet<string> ApplyPreflightCodes = new(StringComparer.Ordinal)
+    {
+        SetupCodes.TargetNotInstalled,
+        SetupCodes.UnsupportedVersion,
+        SetupCodes.ManagedPolicyConflict,
+        SetupCodes.MalformedSettings,
+        SetupCodes.PermissionDenied,
+        SetupCodes.UnsafePath,
+        SetupCodes.StalePlan,
+        SetupCodes.PortOwnedByForeignProcess,
+        SetupCodes.InternalError,
+    };
+
     private readonly ISetupPlatform platform;
     private readonly SetupRuntimePaths paths;
     private readonly SetupPlanStore planStore;
@@ -49,28 +62,29 @@ internal sealed class SetupApplyCoordinator
                 throw new SetupApplyException(SetupCodes.RecoveryRequired);
             }
 
-            revalidator.Revalidate(plan, planned);
+            RunRevalidation(plan, planned);
             var captures = CaptureAndValidateBases(plan);
-            if (!captures.Any(HasChanges))
+            var changedCaptures = captures.Where(capture => capture.HasChanges).ToArray();
+            if (changedCaptures.Length == 0)
             {
                 var noChanges = CreateNoChangesChangeSet(planned);
                 SaveChangedSet(setupLock, ledger, changeSetIndex, noChanges);
                 return noChanges;
             }
 
-            CreateBackups(plan, captures);
+            CreateBackups(plan, changedCaptures);
 
-            var journalTargets = CreateJournalTargets(plan, captures);
+            var journalTargets = CreateJournalTargets(changedCaptures);
             journalStore.CreatePrepared(setupLock, changeSetId, SetupJournalOperation.Apply, journalTargets);
             platform.Execution.Checkpoint(SetupFaultPoint.AfterJournalPreparedBeforeLedger);
 
-            var applying = CreateApplyingChangeSet(planned);
+            var applying = CreateApplyingChangeSet(planned, changedCaptures);
             SaveChangedSet(setupLock, ledger, changeSetIndex, applying);
             journalStore.MarkTransactionPhase(setupLock, changeSetId, SetupJournalPhase.Applying);
             platform.Execution.Checkpoint(SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent);
 
-            ApplyForwardSteps(setupLock, plan, captures);
-            var appliedHashes = VerifyDesiredStates(plan);
+            ApplyForwardSteps(setupLock, plan, changedCaptures);
+            var appliedHashes = VerifyDesiredStates(plan, changedCaptures);
             platform.Execution.Checkpoint(SetupFaultPoint.AfterCompletionBeforeCommit);
             journalStore.MarkTransactionPhase(setupLock, changeSetId, SetupJournalPhase.Committed);
             platform.Execution.Checkpoint(SetupFaultPoint.AfterCommitBeforeLedger);
@@ -113,6 +127,20 @@ internal sealed class SetupApplyCoordinator
         }
     }
 
+    private void RunRevalidation(SetupPrivatePlan plan, SetupLedgerChangeSet planned)
+    {
+        try
+        {
+            revalidator.Revalidate(plan, planned);
+        }
+        catch (SetupApplyException exception)
+        {
+            throw ApplyPreflightCodes.Contains(exception.Code)
+                ? exception
+                : new SetupApplyException(SetupCodes.InternalError);
+        }
+    }
+
     private IReadOnlyList<TargetCapture> CaptureAndValidateBases(SetupPrivatePlan plan)
     {
         var captures = new List<TargetCapture>();
@@ -128,42 +156,49 @@ internal sealed class SetupApplyCoordinator
                         throw new SetupApplyException(SetupCodes.StalePlan);
                     }
 
-                    captures.Add(new TargetCapture(target, null, capture));
+                    var changedMembers = target.Members
+                        .Select((member, index) => (member, index))
+                        .Where(item => !string.Equals(
+                            capture.Members[item.index].Hash,
+                            environmentStep.HashMember(item.member.SettingKey, DesiredEnvironmentValue(item.member)),
+                            StringComparison.Ordinal))
+                        .Select(item => item.index)
+                        .ToArray();
+                    captures.Add(new TargetCapture(target, null, capture, false, changedMembers));
                     break;
                 }
                 case SetupTargetKind.Guidance:
                     break;
                 default:
                 {
-                    var capture = fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation);
+                    AtomicFileCapture capture;
+                    try
+                    {
+                        capture = fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation);
+                    }
+                    catch (SetupFileStepException exception)
+                    {
+                        throw new SetupApplyException(MapPreflightStepCode(exception.Code));
+                    }
+
                     if (!string.Equals(capture.Hash, target.BaseStateHash, StringComparison.Ordinal))
                     {
                         throw new SetupApplyException(SetupCodes.StalePlan);
                     }
 
-                    captures.Add(new TargetCapture(target, capture, null));
+                    var desiredHash = SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState));
+                    captures.Add(new TargetCapture(
+                        target,
+                        capture,
+                        null,
+                        !string.Equals(capture.Hash, desiredHash, StringComparison.Ordinal),
+                        []));
                     break;
                 }
             }
         }
 
         return captures;
-    }
-
-    private bool HasChanges(TargetCapture capture)
-    {
-        if (capture.File is not null)
-        {
-            return !string.Equals(
-                capture.File.Hash,
-                SetupHash.File(true, Encoding.UTF8.GetBytes(capture.Target.DesiredState)),
-                StringComparison.Ordinal);
-        }
-
-        return capture.Target.Members.Where((member, index) => !string.Equals(
-            capture.Environment!.Members[index].Hash,
-            environmentStep.HashMember(member.SettingKey, DesiredEnvironmentValue(member)),
-            StringComparison.Ordinal)).Any();
     }
 
     private SetupLedgerChangeSet CreateNoChangesChangeSet(SetupLedgerChangeSet planned) => planned with
@@ -193,7 +228,6 @@ internal sealed class SetupApplyCoordinator
     }
 
     private IReadOnlyList<SetupJournalTarget> CreateJournalTargets(
-        SetupPrivatePlan plan,
         IReadOnlyList<TargetCapture> captures) => captures.Select(capture =>
     {
         var backupReference = capture.Target.RecordId.ToString("D");
@@ -209,29 +243,42 @@ internal sealed class SetupApplyCoordinator
         }
         else
         {
-            steps = capture.Target.Members.Select((member, index) => new SetupJournalStep(
-                member.SettingKey,
-                capture.Environment!.Members[index].Hash,
-                environmentStep.HashMember(member.SettingKey, DesiredEnvironmentValue(member)),
-                backupReference,
-                SetupJournalStepPhase.Pending)).ToArray();
+            steps = capture.ChangedMemberIndices.Select(index =>
+            {
+                var member = capture.Target.Members[index];
+                return new SetupJournalStep(
+                    member.SettingKey,
+                    capture.Environment!.Members[index].Hash,
+                    environmentStep.HashMember(member.SettingKey, DesiredEnvironmentValue(member)),
+                    backupReference,
+                    SetupJournalStepPhase.Pending);
+            }).ToArray();
         }
 
         return new SetupJournalTarget(capture.Target.RecordId, capture.Target.TargetKind, steps);
     }).ToArray();
 
-    private SetupLedgerChangeSet CreateApplyingChangeSet(SetupLedgerChangeSet planned) => planned with
+    private SetupLedgerChangeSet CreateApplyingChangeSet(
+        SetupLedgerChangeSet planned,
+        IReadOnlyList<TargetCapture> changedCaptures)
     {
-        UpdatedAt = platform.Clock.UtcNow,
-        State = SetupChangeSetState.Applying,
-        Targets = planned.Targets.Select(target => target.TargetKind == SetupTargetKind.Guidance
-            ? target
-            : target with
-            {
-                BackupReference = target.RecordId.ToString("D"),
-                RollbackStatus = SetupLedgerRollbackStatus.Pending,
-            }).ToArray(),
-    };
+        var capturesByRecordId = changedCaptures.ToDictionary(capture => capture.Target.RecordId);
+        return planned with
+        {
+            UpdatedAt = platform.Clock.UtcNow,
+            State = SetupChangeSetState.Applying,
+            Targets = planned.Targets.Select(target => capturesByRecordId.TryGetValue(target.RecordId, out var capture)
+                ? target with
+                {
+                    Members = capture.Environment is null
+                        ? target.Members
+                        : capture.ChangedMemberIndices.Select(index => target.Members[index]).ToArray(),
+                    BackupReference = target.RecordId.ToString("D"),
+                    RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                }
+                : target).ToArray(),
+        };
+    }
 
     private void ApplyForwardSteps(
         SetupLock setupLock,
@@ -252,7 +299,7 @@ internal sealed class SetupApplyCoordinator
                 continue;
             }
 
-            for (var index = 0; index < capture.Target.Members.Count; index++)
+            foreach (var index in capture.ChangedMemberIndices)
             {
                 var member = capture.Target.Members[index];
                 MarkMutationStarted(setupLock, plan.ChangeSetId, capture.Target.RecordId, member.SettingKey);
@@ -265,8 +312,11 @@ internal sealed class SetupApplyCoordinator
         }
     }
 
-    private IReadOnlyDictionary<Guid, string> VerifyDesiredStates(SetupPrivatePlan plan)
+    private IReadOnlyDictionary<Guid, string> VerifyDesiredStates(
+        SetupPrivatePlan plan,
+        IReadOnlyList<TargetCapture> changedCaptures)
     {
+        var changedRecordIds = changedCaptures.Select(capture => capture.Target.RecordId).ToHashSet();
         var hashes = new Dictionary<Guid, string>();
         foreach (var target in plan.Targets)
         {
@@ -287,7 +337,10 @@ internal sealed class SetupApplyCoordinator
                         }
                     }
 
-                    hashes.Add(target.RecordId, capture.AggregateHash);
+                    if (changedRecordIds.Contains(target.RecordId))
+                    {
+                        hashes.Add(target.RecordId, capture.AggregateHash);
+                    }
                     break;
                 }
                 default:
@@ -299,7 +352,10 @@ internal sealed class SetupApplyCoordinator
                         throw new SetupApplyException(SetupCodes.InternalError);
                     }
 
-                    hashes.Add(target.RecordId, capture.Hash);
+                    if (changedRecordIds.Contains(target.RecordId))
+                    {
+                        hashes.Add(target.RecordId, capture.Hash);
+                    }
                     break;
                 }
             }
@@ -427,10 +483,22 @@ internal sealed class SetupApplyCoordinator
         _ => SetupCodes.InternalError,
     };
 
+    private static string MapPreflightStepCode(string code) => code switch
+    {
+        SetupCodes.UnsafePath => SetupCodes.UnsafePath,
+        SetupCodes.StalePlan => SetupCodes.StalePlan,
+        _ => SetupCodes.InternalError,
+    };
+
     private static string MapMutationCode(string _) => SetupCodes.InternalError;
 
     private sealed record TargetCapture(
         SetupPrivatePlanTarget Target,
         AtomicFileCapture? File,
-        UserEnvironmentCapture? Environment);
+        UserEnvironmentCapture? Environment,
+        bool FileChanged,
+        IReadOnlyList<int> ChangedMemberIndices)
+    {
+        public bool HasChanges => File is not null ? FileChanged : ChangedMemberIndices.Count > 0;
+    }
 }
