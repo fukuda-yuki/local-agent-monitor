@@ -1334,6 +1334,7 @@ public sealed class SqliteSessionStore : ISessionStore
     private static void AddProposalRevisionColumns(SqliteConnection connection, SqliteTransaction transaction)
     {
         AddColumnIfMissing(connection, transaction, "improvement_proposals", "revision", "INTEGER NOT NULL DEFAULT 1");
+        AddColumnIfMissing(connection, transaction, "improvement_proposal_sessions", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
         AddColumnIfMissing(connection, transaction, "proposal_apply_drafts", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
         AddColumnIfMissing(connection, transaction, "proposal_applies", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
     }
@@ -1343,6 +1344,7 @@ public sealed class SqliteSessionStore : ISessionStore
         var revisionColumns = new HashSet<(string Table, string Column)>
         {
             ("improvement_proposals", "revision"),
+            ("improvement_proposal_sessions", "proposal_revision"),
             ("proposal_apply_drafts", "proposal_revision"),
             ("proposal_applies", "proposal_revision"),
         };

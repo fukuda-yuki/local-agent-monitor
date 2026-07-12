@@ -946,6 +946,7 @@ public sealed class SqliteSessionStoreTests
         using var verify = database.Open();
         Assert.Equal(10L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT revision FROM improvement_proposals;"));
+        Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM pragma_table_info('improvement_proposal_sessions') WHERE name='proposal_revision';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT proposal_revision FROM proposal_apply_drafts;"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT proposal_revision FROM proposal_applies;"));
         var receipt = Assert.Single(store.ListApplicationReceipts(proposalId));
@@ -999,6 +1000,9 @@ public sealed class SqliteSessionStoreTests
                 target_kind TEXT NOT NULL, target_label TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
                 expected_effect TEXT NOT NULL, risk_note TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                 recommended_at TEXT NULL, verified_at TEXT NULL);
+            CREATE TABLE improvement_proposal_sessions (
+                proposal_id TEXT NOT NULL, session_id TEXT NOT NULL, source_order INTEGER NOT NULL,
+                PRIMARY KEY(proposal_id,session_id));
             CREATE TABLE proposal_apply_drafts (
                 draft_id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL, root_id TEXT NOT NULL,
                 selection_revision INTEGER NOT NULL CHECK (selection_revision > 0), approval_digest TEXT NOT NULL,
