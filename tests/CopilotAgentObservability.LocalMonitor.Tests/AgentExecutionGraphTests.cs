@@ -155,6 +155,85 @@ public class AgentExecutionGraphBuilderTests
     }
 
     [Fact]
+    public void Build_ClaudeMissingParent_DoesNotInferTimeRangeOwnership()
+    {
+        var graph = AgentExecutionGraphBuilder.Build(
+        [
+            Span("main", null, agent: true, start: 0, end: 100, rawRecordId: 42),
+            Span("orphan", "missing", agent: false, start: 20, end: 30, rawRecordId: 42),
+        ],
+        new HashSet<long> { 42 });
+
+        var ownership = Assert.Single(graph.SpanOwnership);
+        Assert.Null(ownership.OwningAgentSpanId);
+        Assert.Equal("unresolved", ownership.RelationshipSource);
+        Assert.Equal("unknown", ownership.RelationshipConfidence);
+        Assert.Equal("undeterminable", graph.Summary.RelationshipQuality);
+        Assert.Contains("unknown_parent", graph.GraphWarnings);
+    }
+
+    [Fact]
+    public void Build_MixedSourceRows_ApplyExactPolicyOnlyToClaudeRecordIds()
+    {
+        var graph = AgentExecutionGraphBuilder.Build(
+        [
+            Span("claude-agent", null, agent: true, start: 0, end: 100, rawRecordId: 42),
+            Span("claude-orphan", "missing-claude", agent: false, start: 20, end: 30, rawRecordId: 42),
+            Span("copilot-agent", null, agent: true, start: 200, end: 300, rawRecordId: 99),
+            Span("copilot-orphan", "missing-copilot", agent: false, start: 220, end: 230, rawRecordId: 99),
+        ],
+        new HashSet<long> { 42 });
+
+        var claude = Assert.Single(graph.SpanOwnership, item => item.SpanId == "claude-orphan");
+        Assert.Null(claude.OwningAgentSpanId);
+        Assert.Equal("unresolved", claude.RelationshipSource);
+        Assert.Equal("unknown", claude.RelationshipConfidence);
+
+        var copilot = Assert.Single(graph.SpanOwnership, item => item.SpanId == "copilot-orphan");
+        Assert.Equal("copilot-agent", copilot.OwningAgentSpanId);
+        Assert.Equal("time_inferred", copilot.RelationshipSource);
+        Assert.Equal("inferred", copilot.RelationshipConfidence);
+    }
+
+    [Fact]
+    public void Build_ClaudeDuplicateParentEvidence_RemainsUnresolved()
+    {
+        var graph = AgentExecutionGraphBuilder.Build(
+        [
+            Span("duplicate", null, agent: true, start: 0, end: 100, rawRecordId: 42),
+            Span("duplicate", null, agent: true, start: 0, end: 100, rawRecordId: 42),
+            Span("orphan", "duplicate", agent: false, start: 20, end: 30, rawRecordId: 42),
+        ],
+        new HashSet<long> { 42 });
+
+        var ownership = Assert.Single(graph.SpanOwnership);
+        Assert.Null(ownership.OwningAgentSpanId);
+        Assert.Equal("unresolved", ownership.RelationshipSource);
+        Assert.Equal("unknown", ownership.RelationshipConfidence);
+        Assert.Contains("duplicate_span_id", graph.GraphWarnings);
+    }
+
+    [Fact]
+    public void Build_ClaudeCyclicParentEvidence_RemainsUnresolved()
+    {
+        var graph = AgentExecutionGraphBuilder.Build(
+        [
+            Span("first", "second", agent: true, start: 0, end: 100, rawRecordId: 42),
+            Span("second", "first", agent: true, start: 10, end: 90, rawRecordId: 42),
+        ],
+        new HashSet<long> { 42 });
+
+        Assert.All(graph.Agents, agent =>
+        {
+            Assert.Equal("unknown", agent.AgentRole);
+            Assert.Null(agent.AgentDepth);
+            Assert.Equal("unresolved", agent.RelationshipSource);
+            Assert.Equal("unknown", agent.RelationshipConfidence);
+        });
+        Assert.Contains("cycle_detected", graph.GraphWarnings);
+    }
+
+    [Fact]
     public void Build_AgentWithMissingParent_DoesNotInferItselfAsItsOwner()
     {
         var graph = AgentExecutionGraphBuilder.Build([
@@ -347,10 +426,10 @@ public class AgentExecutionGraphBuilderTests
         Assert.Equal("undeterminable", graph.Summary.RelationshipQuality);
     }
 
-    private static MonitorSpanRow Span(string spanId, string? parentSpanId, bool agent, int? start, int? end, string? name = null) =>
+    private static MonitorSpanRow Span(string spanId, string? parentSpanId, bool agent, int? start, int? end, string? name = null, long rawRecordId = 0) =>
         new(
             Id: 0,
-            RawRecordId: 0,
+            RawRecordId: rawRecordId,
             TraceId: "graph-trace",
             SpanId: spanId,
             ParentSpanId: parentSpanId,

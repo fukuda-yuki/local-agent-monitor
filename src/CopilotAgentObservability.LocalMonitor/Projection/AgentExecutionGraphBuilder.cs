@@ -67,8 +67,28 @@ internal static class AgentExecutionGraphBuilder
     ];
 
     public static AgentExecutionGraph Build(IReadOnlyList<MonitorSpanRow> spans)
+        => BuildCore(spans, exactParentageRawRecordIds: null);
+
+    /// <summary>
+    /// Builds a graph using source-specific ownership policy. Rows whose raw
+    /// record id is in <paramref name="exactParentageRawRecordIds"/> are
+    /// treated as Claude rows: a missing parent is unresolved and never falls
+    /// back to time-range inference. Rows outside the set retain the existing
+    /// Copilot inference behavior.
+    /// </summary>
+    public static AgentExecutionGraph Build(
+        IReadOnlyList<MonitorSpanRow> spans,
+        IReadOnlySet<long> exactParentageRawRecordIds)
+        => BuildCore(spans, exactParentageRawRecordIds);
+
+    private static AgentExecutionGraph BuildCore(
+        IReadOnlyList<MonitorSpanRow> spans,
+        IReadOnlySet<long>? exactParentageRawRecordIds)
     {
-        var states = spans.Select(span => new SpanState(span, IsAgent(span))).ToList();
+        var states = spans.Select(span => new SpanState(
+            span,
+            IsAgent(span),
+            exactParentageRawRecordIds?.Contains(span.RawRecordId) == true)).ToList();
         var warnings = new HashSet<string>(StringComparer.Ordinal);
         var bySpanId = states
             .Where(state => !string.IsNullOrWhiteSpace(state.Row.SpanId))
@@ -208,7 +228,9 @@ internal static class AgentExecutionGraphBuilder
             if (!bySpanId.TryGetValue(parentSpanId, out var parentMatches))
             {
                 warnings.Add("unknown_parent");
-                return InferRelationship(state, states, bySpanId);
+                return state.ExactParentageOnly
+                    ? Relationship.Unresolved
+                    : InferRelationship(state, states, bySpanId);
             }
 
             if (parentMatches.Count != 1)
@@ -386,14 +408,16 @@ internal static class AgentExecutionGraphBuilder
 
     private sealed class SpanState
     {
-        public SpanState(MonitorSpanRow row, bool isAgent)
+        public SpanState(MonitorSpanRow row, bool isAgent, bool exactParentageOnly)
         {
             Row = row;
             IsAgent = isAgent;
+            ExactParentageOnly = exactParentageOnly;
         }
 
         public MonitorSpanRow Row { get; }
         public bool IsAgent { get; }
+        public bool ExactParentageOnly { get; }
         public SpanTime Time { get; set; }
         public Relationship Relationship { get; set; } = Relationship.Unresolved;
         public string AgentRole { get; set; } = "unknown";
