@@ -94,4 +94,3 @@
 - [ ] Run the focused contract test, `dotnet build CopilotAgentObservability.slnx`, `pwsh scripts\test\install-playwright-chromium.ps1`, `dotnet test CopilotAgentObservability.slnx`, and `git diff --check` without substitution.
 - [ ] Audit every Issue #61 acceptance criterion against an exact document location and executable assertion or recorded cross-reference evidence.
 - [ ] Commit the reviewed coherent change with the `Issue #61:` prefix; do not push or create a PR.
-

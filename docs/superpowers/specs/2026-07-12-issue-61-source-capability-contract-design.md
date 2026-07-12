@@ -86,4 +86,3 @@ dependency is required.
 Issue #61 has no schema migration, concurrent state mutation, rollback, or
 stale-state implementation. Review must explicitly confirm these remain out of
 scope and that the contract does not silently authorize them.
-
