@@ -18,6 +18,7 @@ internal static class EffectComparisonRequestParser
             if (!ExactObject(root, RequestNames) || !String(root, "proposal_id", out var proposalText)
                 || !String(root, "apply_id", out var applyText) || !root.TryGetProperty("proposal_revision", out var revision)
                 || revision.ValueKind != JsonValueKind.Number || !revision.TryGetInt32(out var proposalRevision)
+                || proposalRevision < 1
                 || !root.TryGetProperty("sessions", out var sessionsElement) || sessionsElement.ValueKind != JsonValueKind.Array
                 || proposalText is null || applyText is null || !UuidV7(proposalText, out var proposalId) || !UuidV7(applyText, out var applyId)) return false;
 
