@@ -215,6 +215,33 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    public void SystemPlatform_UserEnvironmentSeamAlwaysUsesCurrentUserTargetWithoutRealMutation()
+    {
+        var operations = new List<string>();
+        var platform = new SystemSetupPlatform(
+            userEnvironmentRead: (name, target) =>
+            {
+                operations.Add($"get:{name}:{target}");
+                return "before";
+            },
+            userEnvironmentWrite: (name, value, target) =>
+                operations.Add($"set:{name}:{value}:{target}"));
+
+        var value = platform.UserEnvironment.Get("VALUE");
+        platform.UserEnvironment.Set("VALUE", "after");
+        platform.UserEnvironment.Set("VALUE", null);
+
+        Assert.Equal("before", value);
+        Assert.Equal(
+        [
+            "get:VALUE:User",
+            "set:VALUE:after:User",
+            "set:VALUE::User",
+        ],
+        operations);
+    }
+
+    [Fact]
     public void TestPlatform_RecordsFilesystemEnvironmentAndCheckpointOperationsInOrder()
     {
         var platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero));

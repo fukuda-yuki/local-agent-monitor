@@ -9,11 +9,13 @@ public sealed class SystemSetupPlatform : ISetupPlatform
         ISetupExecution? execution = null,
         Func<bool>? notificationAttempt = null,
         string? localApplicationData = null,
-        Func<string, FileStream>? exclusiveFileLockAttempt = null)
+        Func<string, FileStream>? exclusiveFileLockAttempt = null,
+        Func<string, EnvironmentVariableTarget, string?>? userEnvironmentRead = null,
+        Action<string, string?, EnvironmentVariableTarget>? userEnvironmentWrite = null)
     {
         LocalApplicationData = localApplicationData ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         FileSystem = new SystemSetupFileSystem(exclusiveFileLockAttempt);
-        UserEnvironment = new SystemSetupUserEnvironment(notificationAttempt);
+        UserEnvironment = new SystemSetupUserEnvironment(notificationAttempt, userEnvironmentRead, userEnvironmentWrite);
         Clock = new SystemSetupClock();
         Identifiers = new SystemSetupIdentifierGenerator();
         Execution = execution ?? NoOpSetupExecution.Instance;
@@ -343,15 +345,22 @@ public sealed class SystemSetupPlatform : ISetupPlatform
     {
         private const string NotificationFailureCode = "setup_environment_notification_failed";
         private readonly Func<bool> notificationAttempt;
+        private readonly Func<string, EnvironmentVariableTarget, string?> read;
+        private readonly Action<string, string?, EnvironmentVariableTarget> write;
 
-        public SystemSetupUserEnvironment(Func<bool>? notificationAttempt)
+        public SystemSetupUserEnvironment(
+            Func<bool>? notificationAttempt,
+            Func<string, EnvironmentVariableTarget, string?>? read,
+            Action<string, string?, EnvironmentVariableTarget>? write)
         {
             this.notificationAttempt = notificationAttempt ?? TryNotifyChange;
+            this.read = read ?? Environment.GetEnvironmentVariable;
+            this.write = write ?? Environment.SetEnvironmentVariable;
         }
 
-        public string? Get(string name) => Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.User);
+        public string? Get(string name) => read(name, EnvironmentVariableTarget.User);
 
-        public void Set(string name, string? value) => Environment.SetEnvironmentVariable(name, value, EnvironmentVariableTarget.User);
+        public void Set(string name, string? value) => write(name, value, EnvironmentVariableTarget.User);
 
         public void NotifyChange()
         {

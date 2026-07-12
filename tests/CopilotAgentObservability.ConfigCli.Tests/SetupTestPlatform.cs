@@ -409,17 +409,26 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 
         public void Set(string name, string? value)
         {
-            platform.Record($"environment.set:{name}");
+            var operation = $"environment.set:{name}";
+            platform.Record(operation);
             if (value is null)
             {
                 platform.environment.Remove(name);
-                return;
+            }
+            else
+            {
+                platform.environment[name] = value;
             }
 
-            platform.environment[name] = value;
+            platform.RecordAfterEffect(operation);
         }
 
-        public void NotifyChange() => platform.Record("environment.notify");
+        public void NotifyChange()
+        {
+            const string operation = "environment.notify";
+            platform.Record(operation);
+            platform.RecordAfterEffect(operation);
+        }
     }
 
     private sealed class SetupTestClock(DateTimeOffset utcNow) : ISetupClock
