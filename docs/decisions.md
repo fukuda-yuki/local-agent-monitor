@@ -1824,3 +1824,35 @@ not an implementation authorization and does not change Issue #51 or #49.
 [Canvas Session workspace](specifications/interfaces/canvas-session-workspace.md)、
 および [security data boundaries](specifications/security-data-boundaries.md)
 とする。
+
+## D057: Source compatibility is fingerprint-based and Claude hierarchy is exact-only
+
+Status: Accepted
+
+Issues #62-#65 implement the Issue #61 contract with the following boundaries:
+
+- The immutable compatibility observation is recorded per committed ingest
+  batch. Session-level schema state is derived and never becomes a second
+  authority.
+- Verified application versions are evidence labels, not a receive allowlist.
+  An unverified version whose observed fingerprint matches a verified
+  fingerprint is processed normally. A new fingerprint is retained and
+  reported as `schema_drift_detected`; it is not silently dropped.
+  `unsupported_source_version` is reserved for a known incompatibility or a
+  missing required signal.
+- Claude Code OTel owns source trace/span identity, parentage, and timing.
+  Claude Hook events own native lifecycle and explicit event identity. Hook
+  input cannot synthesize spans, duration, tokens, or hierarchy.
+- Claude Session binding uses only identical native session ID, explicit
+  resume/handoff, or byte-equivalent trace context. Repository, cwd,
+  transcript path, process identity, and timestamp proximity are forbidden.
+- Claude Agent ownership and UI hierarchy use exact source parentage only.
+  Missing or ambiguous parentage remains unresolved; Issue #49 time-range
+  inference is not applied to Claude records.
+- If interactive CLI, `claude -p`, or Agent SDK live execution is unavailable,
+  the exact blocker and a separate follow-up task are recorded. This does not
+  replace fixture-backed implementation, security, migration, regression, or
+  full-suite validation.
+
+The canonical field, state, storage, HTTP, UI, safety, and test contract is
+[Source Schema Drift and Claude Code](specifications/interfaces/source-schema-drift-claude-code.md).

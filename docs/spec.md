@@ -85,6 +85,26 @@ proxy, or UI DTO. The semantic rules and canonical locations are defined by
 [Canvas Session workspace](specifications/interfaces/canvas-session-workspace.md),
 and [security data boundaries](specifications/security-data-boundaries.md).
 
+## Source schema drift and Claude Code P0
+
+Issue #62 stores immutable source-schema observations per committed ingest
+batch. Session/schema status is derived from those observations rather than
+becoming a second authority. Compatibility is fingerprint based: verified
+application versions are evidence labels, an unverified version with a known
+fingerprint remains processable, and a new fingerprint is retained and
+reported as `schema_drift_detected`. A source version is unsupported only when
+it is known incompatible or lacks a required signal.
+
+Issues #63-#65 add Claude Code through a source-specific adapter without
+changing source identifiers. OTel owns trace/span identity, parentage, and
+timing. Hook data owns native lifecycle and explicit event identity and cannot
+create spans, duration, tokens, or hierarchy. Exact Session binding uses only
+identical native session identity, explicit resume/handoff, or byte-equivalent
+trace context. Claude ownership views use exact source parentage only; missing
+parentage remains unresolved. Public monitor DTO changes are additive and
+sanitized. The canonical contract is
+[source schema drift and Claude Code](specifications/interfaces/source-schema-drift-claude-code.md).
+
 ## Specification Map
 
 | Area | Spec |
@@ -102,6 +122,7 @@ and [security data boundaries](specifications/security-data-boundaries.md).
 | Human-review record interfaces | [specifications/interfaces/human-review-records.md](specifications/interfaces/human-review-records.md) |
 | Dashboard dataset interface | [specifications/interfaces/dashboard-dataset.md](specifications/interfaces/dashboard-dataset.md) |
 | Instruction diagnosis analysis interface | [specifications/interfaces/instruction-diagnosis-analysis.md](specifications/interfaces/instruction-diagnosis-analysis.md) |
+| Source schema drift and Claude Code interface | [specifications/interfaces/source-schema-drift-claude-code.md](specifications/interfaces/source-schema-drift-claude-code.md) |
 | Canvas Session workspace interface | [specifications/interfaces/canvas-session-workspace.md](specifications/interfaces/canvas-session-workspace.md) |
 | Canvas Session Evidence interface | [specifications/interfaces/canvas-session-evidence.md](specifications/interfaces/canvas-session-evidence.md) |
 | Canvas Effect Comparison interface | [specifications/interfaces/canvas-effect-comparison.md](specifications/interfaces/canvas-effect-comparison.md) |

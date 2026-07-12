@@ -14,6 +14,8 @@
 
 ## Interfaces
 
+- [Source schema drift and Claude Code](interfaces/source-schema-drift-claude-code.md)
+
 | Interface | Spec |
 | --- | --- |
 | Collection profiles | [interfaces/collection-profiles.md](interfaces/collection-profiles.md) |
