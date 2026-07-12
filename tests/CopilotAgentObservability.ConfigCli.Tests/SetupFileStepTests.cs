@@ -96,6 +96,51 @@ public sealed class SetupFileStepTests
             Assert.Throws<SetupFileStepException>(() => SetupPathPolicy.ValidateFileTarget(platform, "/allowed", "/allowed/device")).Code);
     }
 
+    [Fact]
+    public void CaptureAndBackup_AreDurableBeforeBackupFreeApply()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var previous = Encoding.UTF8.GetBytes("previous");
+        var desired = Encoding.UTF8.GetBytes("desired");
+        platform.SeedFile(target, previous);
+        var step = new AtomicFileSetupStep(platform);
+
+        var capture = step.Capture("C:\\allowed", target);
+        step.CreateBackup(backup, capture);
+        var operationCount = platform.Operations.Count;
+        var result = step.Apply("C:\\allowed", target, capture.Hash, desired);
+
+        Assert.Equal(SetupHash.File(true, previous), capture.Hash);
+        Assert.True(result.Changed);
+        Assert.Contains($"file.write-new:{backup}", platform.Operations.Take(operationCount));
+        Assert.Contains($"file.flush:{backup}", platform.Operations.Take(operationCount));
+        Assert.DoesNotContain(platform.Operations.Skip(operationCount), operation =>
+            operation.Contains(backup, StringComparison.Ordinal));
+        Assert.Equal(desired, platform.ReadSeededFile(target));
+    }
+
+    [Fact]
+    public void Apply_RejectsTargetChangedAfterCaptureWithoutBackupOperations()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        platform.SeedFile(target, Encoding.UTF8.GetBytes("previous"));
+        var step = new AtomicFileSetupStep(platform);
+        var capture = step.Capture("C:\\allowed", target);
+        platform.SeedFile(target, Encoding.UTF8.GetBytes("third-party"));
+        var operationCount = platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupFileStepException>(() =>
+            step.Apply("C:\\allowed", target, capture.Hash, Encoding.UTF8.GetBytes("desired")));
+
+        Assert.Equal(SetupCodes.StalePlan, exception.Code);
+        Assert.DoesNotContain(platform.Operations.Skip(operationCount), operation =>
+            operation.Contains("backup", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("third-party", Encoding.UTF8.GetString(platform.ReadSeededFile(target)));
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -112,7 +157,7 @@ public sealed class SetupFileStepTests
         }
 
         var step = new AtomicFileSetupStep(platform);
-        var result = step.Apply(
+        var result = ApplyWithBackup(step,
             "C:\\allowed",
             target,
             backup,
@@ -145,7 +190,7 @@ public sealed class SetupFileStepTests
             }
 
             var step = new AtomicFileSetupStep(platform);
-            var applied = step.Apply(
+            var applied = ApplyWithBackup(step,
                 "C:\\allowed",
                 target,
                 backup,
@@ -182,7 +227,6 @@ public sealed class SetupFileStepTests
         var exception = Assert.Throws<SetupFileStepException>(() => step.Apply(
             "C:\\allowed",
             target,
-            "C:\\private\\record.backup",
             SetupHash.File(true, Encoding.UTF8.GetBytes("planned")),
             Encoding.UTF8.GetBytes("desired")));
 
@@ -199,7 +243,7 @@ public sealed class SetupFileStepTests
         var backup = "C:\\private\\record.backup";
         var step = new AtomicFileSetupStep(platform);
         platform.SeedFile(target, Encoding.UTF8.GetBytes("before"));
-        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, Encoding.UTF8.GetBytes("before")), Encoding.UTF8.GetBytes("applied"));
+        var applied = ApplyWithBackup(step, "C:\\allowed", target, backup, SetupHash.File(true, Encoding.UTF8.GetBytes("before")), Encoding.UTF8.GetBytes("applied"));
         platform.SeedFile(target, Encoding.UTF8.GetBytes("third-party"));
         var operationCount = platform.Operations.Count;
 
@@ -236,7 +280,7 @@ public sealed class SetupFileStepTests
         };
         platform.InjectFault(operation, new IOException("raw path C:\\secret"));
 
-        var exception = Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+        var exception = Assert.Throws<SetupFileStepException>(() => ApplyWithBackup(new AtomicFileSetupStep(platform),
             "C:\\allowed", target, backup, SetupHash.File(true, old), Encoding.UTF8.GetBytes("desired")));
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
@@ -258,7 +302,7 @@ public sealed class SetupFileStepTests
         platform.SeedFile(target, old);
         platform.InjectAfterEffectFault($"file.replace:{temporary}->{target}", new IOException("raw"));
 
-        var exception = Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+        var exception = Assert.Throws<SetupFileStepException>(() => ApplyWithBackup(new AtomicFileSetupStep(platform),
             "C:\\allowed", target, backup, SetupHash.File(true, old), desired));
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
@@ -275,7 +319,7 @@ public sealed class SetupFileStepTests
         var old = Encoding.UTF8.GetBytes("old");
         platform.SeedFile(target, old);
 
-        new AtomicFileSetupStep(platform).Apply(
+        ApplyWithBackup(new AtomicFileSetupStep(platform),
             "C:\\allowed", target, backup, SetupHash.File(true, old), Encoding.UTF8.GetBytes("desired"));
 
         var operations = platform.Operations.ToList();
@@ -294,7 +338,7 @@ public sealed class SetupFileStepTests
         platform.SeedFile(target, desired);
 
         var result = new AtomicFileSetupStep(platform).Apply(
-            "C:\\allowed", target, "C:\\private\\record.backup", SetupHash.File(true, desired), desired);
+            "C:\\allowed", target, SetupHash.File(true, desired), desired);
 
         Assert.False(result.Changed);
         Assert.Equal(result.PreviousHash, result.AppliedHash);
@@ -323,7 +367,7 @@ public sealed class SetupFileStepTests
         };
         platform.InjectAfterEffectFault(operation, new IOException("raw"));
 
-        var exception = Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+        var exception = Assert.Throws<SetupFileStepException>(() => ApplyWithBackup(new AtomicFileSetupStep(platform),
             "C:\\allowed", target, backup, SetupHash.File(true, old), Encoding.UTF8.GetBytes("desired")));
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
@@ -350,7 +394,7 @@ public sealed class SetupFileStepTests
         var desired = Encoding.UTF8.GetBytes("desired");
         platform.InjectAfterEffectFault($"file.move:{temporary}->{target}", new IOException("raw"));
 
-        var exception = Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+        var exception = Assert.Throws<SetupFileStepException>(() => ApplyWithBackup(new AtomicFileSetupStep(platform),
             "C:\\allowed", target, backup, SetupHash.File(false, []), desired));
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
@@ -365,7 +409,7 @@ public sealed class SetupFileStepTests
         var target = "C:\\allowed\\settings.json";
         var backup = "C:\\private\\record.backup";
         var step = new AtomicFileSetupStep(platform);
-        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(false, []), Encoding.UTF8.GetBytes("desired"));
+        var applied = ApplyWithBackup(step, "C:\\allowed", target, backup, SetupHash.File(false, []), Encoding.UTF8.GetBytes("desired"));
         platform.InjectAfterEffectFault($"file.delete:{target}", new IOException("raw"));
 
         var exception = Assert.Throws<SetupFileStepException>(() => step.Restore(
@@ -390,7 +434,7 @@ public sealed class SetupFileStepTests
         var desired = Encoding.UTF8.GetBytes("desired");
         platform.SeedFile(target, before);
         var step = new AtomicFileSetupStep(platform);
-        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, before), desired);
+        var applied = ApplyWithBackup(step, "C:\\allowed", target, backup, SetupHash.File(true, before), desired);
         var operation = boundary switch
         {
             "temp-write" => $"file.write-new:{restoreTemporary}",
@@ -421,7 +465,7 @@ public sealed class SetupFileStepTests
         var desired = Encoding.UTF8.GetBytes("desired");
         platform.SeedFile(target, before);
         var step = new AtomicFileSetupStep(platform);
-        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, before), desired);
+        var applied = ApplyWithBackup(step, "C:\\allowed", target, backup, SetupHash.File(true, before), desired);
         var operation = boundary == "temp-write"
             ? $"file.write-new:{restoreTemporary}"
             : $"file.flush:{restoreTemporary}";
@@ -446,7 +490,7 @@ public sealed class SetupFileStepTests
         var before = Encoding.UTF8.GetBytes("before");
         platform.SeedFile(target, before);
         var step = new AtomicFileSetupStep(platform);
-        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, before), Encoding.UTF8.GetBytes("desired"));
+        var applied = ApplyWithBackup(step, "C:\\allowed", target, backup, SetupHash.File(true, before), Encoding.UTF8.GetBytes("desired"));
         platform.InjectAfterEffectFault($"file.replace:{restoreTemporary}->{target}", new IOException("raw"));
 
         var exception = Assert.Throws<SetupFileStepException>(() => step.Restore(
@@ -464,7 +508,7 @@ public sealed class SetupFileStepTests
         var backup = "C:\\private\\record.backup";
         var desired = Encoding.UTF8.GetBytes("desired");
         var step = new AtomicFileSetupStep(platform);
-        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(false, []), desired);
+        var applied = ApplyWithBackup(step, "C:\\allowed", target, backup, SetupHash.File(false, []), desired);
         platform.InjectFault($"file.delete:{target}", new IOException("raw"));
 
         Assert.Equal(
@@ -485,7 +529,7 @@ public sealed class SetupFileStepTests
         platform.SeedFile(target, Encoding.UTF8.GetBytes("before"));
         platform.SeedFile(unrelated, unrelatedBytes);
         var step = new AtomicFileSetupStep(platform);
-        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, Encoding.UTF8.GetBytes("before")), Encoding.UTF8.GetBytes("desired"));
+        var applied = ApplyWithBackup(step, "C:\\allowed", target, backup, SetupHash.File(true, Encoding.UTF8.GetBytes("before")), Encoding.UTF8.GetBytes("desired"));
         platform.SeedFile(backup, Encoding.UTF8.GetBytes("corrupt"));
 
         var exception = Assert.Throws<SetupFileStepException>(() => step.Restore(
@@ -508,7 +552,7 @@ public sealed class SetupFileStepTests
         platform.SeedFile(target, previous);
         platform.SeedFile(temporary, unrelated);
 
-        var exception = Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+        var exception = Assert.Throws<SetupFileStepException>(() => ApplyWithBackup(new AtomicFileSetupStep(platform),
             "C:\\allowed", target, backup, SetupHash.File(true, previous), Encoding.UTF8.GetBytes("desired")));
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
@@ -530,7 +574,7 @@ public sealed class SetupFileStepTests
 
         Assert.Equal(
             SetupCodes.InternalError,
-            Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+            Assert.Throws<SetupFileStepException>(() => ApplyWithBackup(new AtomicFileSetupStep(platform),
                 "C:\\allowed", target, backup, SetupHash.File(true, previous), desired)).Code);
         Assert.Equal(previous, platform.ReadSeededFile(target));
         Assert.Equal(desired, platform.ReadSeededFile(temporary));
@@ -549,7 +593,7 @@ public sealed class SetupFileStepTests
         var unrelated = Encoding.UTF8.GetBytes("unrelated");
         platform.SeedFile(target, previous);
         var step = new AtomicFileSetupStep(platform);
-        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, previous), desired);
+        var applied = ApplyWithBackup(step, "C:\\allowed", target, backup, SetupHash.File(true, previous), desired);
         platform.SeedFile(restoreTemporary, unrelated);
 
         var exception = Assert.Throws<SetupFileStepException>(() => step.Restore(
@@ -571,7 +615,7 @@ public sealed class SetupFileStepTests
         var desired = Encoding.UTF8.GetBytes("desired");
         platform.SeedFile(target, previous);
         var step = new AtomicFileSetupStep(platform);
-        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, previous), desired);
+        var applied = ApplyWithBackup(step, "C:\\allowed", target, backup, SetupHash.File(true, previous), desired);
         platform.InjectAfterEffectFault($"file.write-new:{restoreTemporary}", new IOException("ambiguous create"));
 
         Assert.Equal(
@@ -600,7 +644,7 @@ public sealed class SetupFileStepTests
 
         Assert.Equal(
             SetupCodes.InternalError,
-            Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+            Assert.Throws<SetupFileStepException>(() => ApplyWithBackup(new AtomicFileSetupStep(platform),
                 "C:\\allowed", target, backup, SetupHash.File(true, previous), Encoding.UTF8.GetBytes("desired"))).Code);
         Assert.Equal(foreign, platform.ReadSeededFile(temporary));
         Assert.DoesNotContain($"file.delete:{temporary}", platform.Operations);
@@ -618,7 +662,7 @@ public sealed class SetupFileStepTests
         var foreign = Encoding.UTF8.GetBytes("foreign");
         platform.SeedFile(target, previous);
         var step = new AtomicFileSetupStep(platform);
-        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, previous), desired);
+        var applied = ApplyWithBackup(step, "C:\\allowed", target, backup, SetupHash.File(true, previous), desired);
         platform.InjectAfterEffectFault(
             $"file.flush:{temporary}",
             new IOException("ambiguous flush"),
@@ -645,7 +689,7 @@ public sealed class SetupFileStepTests
 
         Assert.Equal(
             SetupCodes.InternalError,
-            Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+            Assert.Throws<SetupFileStepException>(() => ApplyWithBackup(new AtomicFileSetupStep(platform),
                 "C:\\allowed", target, backup, SetupHash.File(true, previous), Encoding.UTF8.GetBytes("desired"))).Code);
         Assert.Equal(previous, platform.ReadSeededFile(target));
         Assert.Equal(unrelated, platform.ReadSeededFile(backup));
@@ -703,7 +747,7 @@ public sealed class SetupFileStepTests
             var desired = new byte[] { 255, 0xef, 0xbb, 0xbf, 0 };
             File.WriteAllBytes(target, previous);
 
-            var apply = new AtomicFileSetupStep(new SystemSetupPlatform()).Apply(
+            var apply = ApplyWithBackup(new AtomicFileSetupStep(new SystemSetupPlatform()),
                 directory, target, backup, SetupHash.File(true, previous), desired);
             var restore = new AtomicFileSetupStep(new SystemSetupPlatform()).Restore(
                 directory, target, backup, apply.AppliedHash, apply.PreviousHash);
@@ -795,5 +839,19 @@ public sealed class SetupFileStepTests
         platform.SeedDirectory(style == SetupPathStyle.Windows ? "C:\\" : "/");
         platform.SeedDirectory(root);
         return platform;
+    }
+
+    private static AtomicFileApplyResult ApplyWithBackup(
+        AtomicFileSetupStep step,
+        string allowedRoot,
+        string targetPath,
+        string backupPath,
+        string expectedBaseHash,
+        byte[] desiredBytes)
+    {
+        var capture = step.Capture(allowedRoot, targetPath);
+        Assert.Equal(expectedBaseHash, capture.Hash);
+        step.CreateBackup(backupPath, capture);
+        return step.Apply(allowedRoot, targetPath, expectedBaseHash, desiredBytes);
     }
 }

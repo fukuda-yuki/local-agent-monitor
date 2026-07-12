@@ -9,14 +9,44 @@ internal sealed record AtomicFileApplyResult(string PreviousHash, string Applied
 
 internal sealed record AtomicFileRestoreResult(string RestoredHash);
 
+internal sealed class AtomicFileCapture(bool exists, byte[] bytes)
+{
+    private readonly byte[] bytes = bytes.ToArray();
+
+    public string Hash { get; } = SetupHash.File(exists, bytes);
+
+    internal bool Exists { get; } = exists;
+
+    internal byte[] CopyBytes() => bytes.ToArray();
+}
+
 internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
 {
     private static readonly byte[] BackupMagic = Encoding.ASCII.GetBytes("CAOSETUP1");
 
+    public AtomicFileCapture Capture(string allowedRoot, string targetPath)
+    {
+        var target = SetupPathPolicy.ValidateFileTarget(platform, allowedRoot, targetPath);
+        var current = ReadTarget(target);
+        return new AtomicFileCapture(current.Exists, current.Bytes);
+    }
+
+    public void CreateBackup(string backupPath, AtomicFileCapture capture)
+    {
+        try
+        {
+            platform.FileSystem.WriteNewAllBytes(backupPath, SerializeBackup(capture.Exists, capture.CopyBytes()));
+            platform.FileSystem.FlushFile(backupPath);
+        }
+        catch (Exception)
+        {
+            throw new SetupFileStepException(SetupCodes.InternalError);
+        }
+    }
+
     public AtomicFileApplyResult Apply(
         string allowedRoot,
         string targetPath,
-        string backupPath,
         string expectedBaseHash,
         ReadOnlySpan<byte> desiredBytes)
     {
@@ -33,23 +63,6 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
         if (string.Equals(previousHash, appliedHash, StringComparison.Ordinal))
         {
             return new AtomicFileApplyResult(previousHash, appliedHash, false);
-        }
-
-        try
-        {
-            platform.FileSystem.WriteNewAllBytes(backupPath, SerializeBackup(current));
-            platform.FileSystem.FlushFile(backupPath);
-        }
-        catch (Exception)
-        {
-            throw new SetupFileStepException(SetupCodes.InternalError);
-        }
-
-        target = SetupPathPolicy.ValidateFileTarget(platform, allowedRoot, targetPath);
-        current = ReadTarget(target);
-        if (!string.Equals(SetupHash.File(current.Exists, current.Bytes), expectedBaseHash, StringComparison.Ordinal))
-        {
-            throw new SetupFileStepException(SetupCodes.StalePlan);
         }
 
         var temporary = CreateTemporaryPath(target);
@@ -196,15 +209,15 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
     private string CreateTemporaryPath(string target) =>
         target + ".cao-" + platform.Identifiers.CreateUuidV7().ToString("D") + ".tmp";
 
-    private static byte[] SerializeBackup(TargetState state)
+    private static byte[] SerializeBackup(bool exists, byte[] content)
     {
-        var bytes = new byte[BackupMagic.Length + 9 + state.Bytes.Length];
+        var bytes = new byte[BackupMagic.Length + 9 + content.Length];
         BackupMagic.CopyTo(bytes, 0);
-        bytes[BackupMagic.Length] = state.Exists ? (byte)1 : (byte)0;
-        BinaryPrimitives.WriteUInt64BigEndian(bytes.AsSpan(BackupMagic.Length + 1, 8), state.Exists ? (ulong)state.Bytes.Length : 0);
-        if (state.Exists)
+        bytes[BackupMagic.Length] = exists ? (byte)1 : (byte)0;
+        BinaryPrimitives.WriteUInt64BigEndian(bytes.AsSpan(BackupMagic.Length + 1, 8), exists ? (ulong)content.Length : 0);
+        if (exists)
         {
-            state.Bytes.CopyTo(bytes, BackupMagic.Length + 9);
+            content.CopyTo(bytes, BackupMagic.Length + 9);
         }
 
         return bytes;
