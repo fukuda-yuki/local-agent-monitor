@@ -1,0 +1,90 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "client.kind", "value": { "stringValue": "vscode-copilot-chat" } },
+          { "key": "user.email", "value": { "stringValue": "fidelity-user@example.invalid" } },
+          { "key": "user.id", "value": { "stringValue": "SYNTHETIC_USER_ID_MARKER_62" } },
+          { "key": "authorization.token", "value": { "stringValue": "SYNTHETIC_TOKEN_MARKER_62" } },
+          { "key": "credential.value", "value": { "stringValue": "SYNTHETIC_CREDENTIAL_MARKER_62" } },
+          { "key": "jwt.value", "value": { "stringValue": "SYNTHETIC_JWT_MARKER_62" } },
+          { "key": "workspace.path", "value": { "stringValue": "C:\\synthetic-sensitive\\issue-62" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "d5f1e865c74fb247793c070f550de290",
+              "spanId": "f69922281b20578c",
+              "name": "invoke_agent GitHub Copilot Chat",
+              "startTimeUnixNano": "1783814400000000000",
+              "endTimeUnixNano": "1783814410000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "invoke_agent" } },
+                { "key": "gen_ai.agent.name", "value": { "stringValue": "GitHub Copilot Chat" } },
+                { "key": "gen_ai.usage.total_tokens", "value": { "intValue": "146074" } }
+              ]
+            },
+            {
+              "traceId": "d5f1e865c74fb247793c070f550de290",
+              "spanId": "395f9b6f48512b1a",
+              "parentSpanId": "f69922281b20578c",
+              "name": "chat",
+              "startTimeUnixNano": "1783814401000000000",
+              "endTimeUnixNano": "1783814403000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.agent.name", "value": { "stringValue": "panel/editAgent" } },
+                { "key": "gen_ai.usage.total_tokens", "value": { "intValue": "28577" } },
+                { "key": "gen_ai.prompt", "value": { "stringValue": "SYNTHETIC_RAW_PROMPT_MARKER_62" } },
+                { "key": "gen_ai.response.text", "value": { "stringValue": "SYNTHETIC_RAW_RESPONSE_MARKER_62" } }
+              ]
+            },
+            {
+              "traceId": "d5f1e865c74fb247793c070f550de290",
+              "spanId": "9a98baa9f96a6b94",
+              "parentSpanId": "f69922281b20578c",
+              "name": "execute_tool runSubagent",
+              "startTimeUnixNano": "1783814404000000000",
+              "endTimeUnixNano": "1783814409000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "execute_tool" } },
+                { "key": "gen_ai.tool.name", "value": { "stringValue": "runSubagent" } },
+                { "key": "gen_ai.tool.call.arguments", "value": { "stringValue": "SYNTHETIC_TOOL_ARGUMENTS_MARKER_62" } },
+                { "key": "gen_ai.tool.call.result", "value": { "stringValue": "SYNTHETIC_TOOL_RESULT_MARKER_62" } }
+              ]
+            },
+            {
+              "traceId": "d5f1e865c74fb247793c070f550de290",
+              "spanId": "d6db467b4e142d9f",
+              "parentSpanId": "9a98baa9f96a6b94",
+              "name": "invoke_agent Explore",
+              "startTimeUnixNano": "1783814405000000000",
+              "endTimeUnixNano": "1783814408000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "invoke_agent" } },
+                { "key": "gen_ai.agent.name", "value": { "stringValue": "Explore" } },
+                { "key": "gen_ai.usage.total_tokens", "value": { "intValue": "29774" } }
+              ]
+            },
+            {
+              "traceId": "d5f1e865c74fb247793c070f550de290",
+              "spanId": "bffd7d8419784e79",
+              "parentSpanId": "d6db467b4e142d9f",
+              "name": "chat",
+              "startTimeUnixNano": "1783814406000000000",
+              "endTimeUnixNano": "1783814407000000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.agent.name", "value": { "stringValue": "tool/runSubagent-Explore" } },
+                { "key": "gen_ai.usage.total_tokens", "value": { "intValue": "14637" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

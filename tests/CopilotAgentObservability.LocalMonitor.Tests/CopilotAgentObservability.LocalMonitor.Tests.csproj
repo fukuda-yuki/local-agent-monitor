@@ -31,6 +31,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="TestData\Fidelity\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\SchemaMigrations\monitor\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\SchemaMigrations\session\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
