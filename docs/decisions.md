@@ -1796,10 +1796,17 @@ the semantic rules below.
 - Completeness is a deterministic pure decision over declared requirements and
   observed facts. It uses only `unbound`, `partial`, `rich`, and `full`, and the
   eleven ordered, de-duplicated reasons in the Session workspace specification.
-  `missing_native_session_id` forces `unbound`; missing lifecycle/input or a
-  planned source caps `partial`; missing content/terminal caps `rich`; every
-  declared blocking condition prevents `full`; `historical_summary_only` never
-  reaches `full`.
+  Ranks are `unbound < partial < rich < full`: calculate the base status from
+  native ID, required lifecycle/input, and required content/terminal facts,
+  then select the minimum of that base rank and every present reason maximum in
+  the canonical reason-to-maximum-status table. Unknown reasons are invalid
+  schema drift and are rejected rather than ignored. This selection rule makes
+  overlapping reasons deterministic, including `unbound` plus `rich` and
+  `partial` plus `rich`. Existing #51 unsupported-version and ingest-gap full
+  blockers retain the table's `rich` maximum after the `partial` checks;
+  `historical_summary_only` and `schema_drift_detected` are future
+  adapter-handoff `partial` reasons with no distinct current calculator boolean.
+  `historical_summary_only` never reaches `full`.
 - The schema/manifests are repository-safe metadata. They contain no raw/PII
   and manifest grants no content authority. Existing raw/sanitized, loopback,
   same-origin, no-store, retention, and `--sanitized-only` policy remains the

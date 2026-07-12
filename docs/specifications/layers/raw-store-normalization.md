@@ -446,17 +446,39 @@ whether evidence is Hook-only or historical-summary-only; recognized span kind;
 schema agreement; and whether the declared source is enabled. It neither
 reconstructs missed events nor guesses a span or source field.
 
-Apply caps in this order, choosing the lowest status: absent native session ID
-forces `unbound`; otherwise missing required lifecycle or input evidence, or a
-source that is planned/not enabled, caps at `partial`; otherwise missing
-required content or terminal evidence caps at `rich`; `full` requires all
-surface-required start-to-end facts, exact-linked OTel enrichment, and no
-blocking condition. `missing_trace_context`, `trace_signal_disabled`,
-`content_capture_disabled`, `unsupported_source_version`, `ingest_gap`,
-`hook_only`, `historical_summary_only`, `unknown_span_kind`, and
-`schema_drift_detected` each prevent `full`; `historical_summary_only` never
-reaches `full`. No twelfth reason code is invented when a lifecycle/input fact
-is absent; the result carries each applicable fixed condition below.
+Status ranks are ordered `unbound < partial < rich < full`. First calculate the
+base status: missing native ID is `unbound`; otherwise missing required
+lifecycle, input, or SDK/Hook/OTel evidence-family fact is `partial`; otherwise
+missing required content, terminal, exact-enrichment, or surface-required
+evidence, or an unsupported source version or ingest gap, is `rich`; otherwise
+it is `full`. A missing lifecycle/input fact does not introduce a twelfth
+reason code.
+
+Every schema reason has exactly one maximum status:
+
+| Reason code | Maximum status | Why it cannot be higher |
+| --- | --- | --- |
+| `missing_native_session_id` | `unbound` | No native Session can bind the evidence. |
+| `missing_trace_context` | `rich` | Exact-linked OTel enrichment is absent. |
+| `trace_signal_disabled` | `rich` | Exact-linked OTel enrichment cannot be obtained. |
+| `content_capture_disabled` | `rich` | Required captured content is unavailable. |
+| `unsupported_source_version` | `rich` | It is an existing #51 full blocker after the `partial` checks. |
+| `ingest_gap` | `rich` | With lifecycle/input present it is an existing #51 full blocker; a missing start remains a `partial` base fact. |
+| `hook_only` | `rich` | Native Hook evidence may exist, but exact-linked OTel enrichment is absent. |
+| `historical_summary_only` | `partial` | Allowlisted summaries cannot establish lifecycle or explicit event input. |
+| `unknown_span_kind` | `rich` | The span cannot qualify as required exact enrichment. |
+| `schema_drift_detected` | `partial` | Required declared input agreement is not established. |
+| `planned_source_not_enabled` | `unbound` | A disabled planned source supplies no observed native Session input. |
+
+For a valid fact/reason combination, final status is the minimum rank of the
+base status and every present reason maximum. An unknown reason is invalid
+schema drift and must be rejected, never ignored. Reasons are de-duplicated
+and emitted in the canonical schema order below, never observation order. Thus
+an `unbound` base plus a `rich` reason remains `unbound`, and a `partial` base
+plus a `rich` reason remains `partial`; `historical_summary_only` can never
+reach `full`. `historical_summary_only` and `schema_drift_detected` are future
+adapter-handoff `partial` reasons with no distinct current #51 calculator
+boolean; they must not be conflated with `unsupported_source_version`.
 
 The output reason list is de-duplicated and emitted in this stable canonical
 order, never observation order:

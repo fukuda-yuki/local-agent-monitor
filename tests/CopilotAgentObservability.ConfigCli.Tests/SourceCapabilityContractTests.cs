@@ -1,10 +1,34 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.Telemetry.Sessions;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SourceCapabilityContractTests
 {
+    private static readonly SessionCompletenessEvidence FullCompletenessEvidence = new(
+        HasNativeId: true,
+        HasLifecycleStart: true,
+        HasUserInstruction: true,
+        HasSdkHookOrOtelEvidence: true,
+        HasTerminalEvidence: true,
+        HasExactLinkedOtelEnrichment: true,
+        HasAllSurfaceRequiredEvidence: true,
+        HasUnsupportedVersion: false,
+        HasIngestGap: false);
+
+    public static TheoryData<string, SessionCompletenessEvidence> RuntimeEquivalentReasons => new()
+    {
+        { "missing_native_session_id", FullCompletenessEvidence with { HasNativeId = false } },
+        { "missing_trace_context", FullCompletenessEvidence with { HasExactLinkedOtelEnrichment = false } },
+        { "trace_signal_disabled", FullCompletenessEvidence with { HasExactLinkedOtelEnrichment = false } },
+        { "content_capture_disabled", FullCompletenessEvidence with { HasAllSurfaceRequiredEvidence = false } },
+        { "unsupported_source_version", FullCompletenessEvidence with { HasUnsupportedVersion = true } },
+        { "ingest_gap", FullCompletenessEvidence with { HasIngestGap = true } },
+        { "hook_only", FullCompletenessEvidence with { HasExactLinkedOtelEnrichment = false } },
+        { "unknown_span_kind", FullCompletenessEvidence with { HasExactLinkedOtelEnrichment = false } }
+    };
+
     private static readonly string SchemaPath = Path.Combine(
         AppContext.BaseDirectory,
         "..", "..", "..", "..", "..",
@@ -198,7 +222,7 @@ public sealed class SourceCapabilityContractTests
             ["docs/specifications/interfaces/canvas-session-workspace.md"] = ["Completeness input facts and decision order", "historical_summary_only"],
             ["docs/specifications/security-data-boundaries.md"] = ["Source capability semantic contract v1", "manifest grants no content authority"],
             ["docs/decisions.md"] = ["D056: Source capability semantic contract v1", "adapter handoff checklist"],
-            ["docs/task.md"] = ["Source capability contract (Issue #61)", "実装中"]
+            ["docs/task.md"] = ["Source capability contract (Issue #61)", "完了"]
         };
 
         foreach (var (relativePath, requiredIdentifiers) in canonicalDocuments)
@@ -217,25 +241,24 @@ public sealed class SourceCapabilityContractTests
         var expectedReasons = completeness.GetProperty("reason_codes").GetProperty("prefixItems")
             .EnumerateArray().Select(item => item.GetProperty("const").GetString()!).ToArray();
 
-        var workspaceCompleteness = GetMarkdownSection(
+        var workspaceCompletenessRaw = GetMarkdownSectionRaw(
             ReadRepositoryDocument("docs/specifications/interfaces/canvas-session-workspace.md"),
             "### Completeness input facts and decision order",
             "\n## ");
-        var normalizationCompleteness = GetMarkdownSection(
+        var normalizationCompletenessRaw = GetMarkdownSectionRaw(
             ReadRepositoryDocument("docs/specifications/layers/raw-store-normalization.md"),
             "### Deterministic completeness decision",
             "\n## ");
+        var workspaceCompleteness = NormalizeMarkdown(workspaceCompletenessRaw);
+        var normalizationCompleteness = NormalizeMarkdown(normalizationCompletenessRaw);
 
         AssertMarkdownCompletenessMatchesSchema(workspaceCompleteness, expectedStatuses, expectedReasons);
         AssertMarkdownCompletenessMatchesSchema(normalizationCompleteness, expectedStatuses, expectedReasons);
-        Assert.Contains("The reasons are de-duplicated and ordered exactly as listed, never by arrival order:", workspaceCompleteness, StringComparison.Ordinal);
-        Assert.Contains("`missing_native_session_id` has first precedence and forces `unbound`.", workspaceCompleteness, StringComparison.Ordinal);
-        Assert.Contains("caps at `partial`", workspaceCompleteness, StringComparison.Ordinal);
-        Assert.Contains("caps at `rich`", workspaceCompleteness, StringComparison.Ordinal);
-        Assert.Contains("`historical_summary_only` never reaches `full`.", workspaceCompleteness, StringComparison.Ordinal);
-        Assert.Contains("Apply caps in this order, choosing the lowest status:", normalizationCompleteness, StringComparison.Ordinal);
-        Assert.Contains("The output reason list is de-duplicated and emitted in this stable canonical order, never observation order:", normalizationCompleteness, StringComparison.Ordinal);
-        Assert.Contains("`historical_summary_only` never reaches `full`.", normalizationCompleteness, StringComparison.Ordinal);
+        var workspaceReasonCaps = ParseCompletenessReasonCaps(workspaceCompletenessRaw);
+        var normalizationReasonCaps = ParseCompletenessReasonCaps(normalizationCompletenessRaw);
+        AssertCompletenessDecisionIsTotal(expectedStatuses, expectedReasons, workspaceReasonCaps);
+        AssertCompletenessDecisionIsTotal(expectedStatuses, expectedReasons, normalizationReasonCaps);
+        Assert.Equal(workspaceReasonCaps, normalizationReasonCaps);
 
         var telemetryContract = GetMarkdownSection(
             ReadRepositoryDocument("docs/specifications/layers/telemetry-ingestion.md"),
@@ -253,12 +276,42 @@ public sealed class SourceCapabilityContractTests
         AssertActualAdapterProvenance(telemetryContract);
         AssertActualAdapterProvenance(normalizationContract);
         AssertActualAdapterProvenance(decision);
+        AssertAuthorityAllowlist(telemetryContract);
+        AssertNoHeuristicMergeOrSyntheticSpan(workspaceCompleteness, telemetryContract, normalizationContract);
+        AssertNoContentAuthority(GetMarkdownSection(
+            ReadRepositoryDocument("docs/specifications/security-data-boundaries.md"),
+            "### Source capability semantic contract v1",
+            "\n`POST /api/session-ingest/v1/events`"));
+        AssertAdapterHandoffChecklist(telemetryContract, decision);
 
         var issue61Row = Assert.Single(
             ReadRepositoryDocument("docs/task.md").Split('\n'),
             line => line.Contains("Source capability contract (Issue #61)", StringComparison.Ordinal));
-        Assert.Contains("**実装中**", issue61Row, StringComparison.Ordinal);
-        Assert.DoesNotContain("**完了", issue61Row, StringComparison.Ordinal);
+        const string completedIssue61RoadmapRow = "| Source capability contract (Issue #61) | **完了** | JSON Schema 2020-12 と 5 surface の manifest による committed structural/capability contract、canonical semantic contract の authority / provenance / deterministic completeness / safety、cross-reference tests、adapter handoff を確定した。Issue #51 exact identity と Issue #49 ownership を保持し、receiver / adapter / DB / migration / HTTP / proxy / UI DTO は変更しない。仕様・品質・最終統合レビュー済み（live validation は scope 外）。focused SourceCapabilityContractTests 13/13、build 0 warnings/0 errors、Playwright install exit 0、full solution tests 1,250（ConfigCli 314 + LocalMonitor 936）が成功。 |";
+        Assert.Equal(completedIssue61RoadmapRow, issue61Row);
+        Assert.DoesNotContain("final validation pending", issue61Row, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("最終 validation 待ち", issue61Row, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(RuntimeEquivalentReasons))]
+    public void Markdown_reason_caps_match_existing_session_completeness_for_runtime_equivalent_facts(
+        string reason,
+        SessionCompletenessEvidence evidence)
+    {
+        var workspaceReasonCaps = ParseCompletenessReasonCaps(GetMarkdownSectionRaw(
+            ReadRepositoryDocument("docs/specifications/interfaces/canvas-session-workspace.md"),
+            "### Completeness input facts and decision order",
+            "\n## "));
+        var normalizationReasonCaps = ParseCompletenessReasonCaps(GetMarkdownSectionRaw(
+            ReadRepositoryDocument("docs/specifications/layers/raw-store-normalization.md"),
+            "### Deterministic completeness decision",
+            "\n## "));
+
+        Assert.Equal(workspaceReasonCaps, normalizationReasonCaps);
+        Assert.Equal(
+            SessionWire.ToWire(SessionCompletenessCalculator.Calculate(evidence)),
+            workspaceReasonCaps[reason]);
     }
 
     private static string ReadRepositoryDocument(string relativePath)
@@ -270,6 +323,11 @@ public sealed class SourceCapabilityContractTests
 
     private static string GetMarkdownSection(string document, string heading, string? endHeading)
     {
+        return NormalizeMarkdown(GetMarkdownSectionRaw(document, heading, endHeading));
+    }
+
+    private static string GetMarkdownSectionRaw(string document, string heading, string? endHeading)
+    {
         var start = document.IndexOf(heading, StringComparison.Ordinal);
         Assert.True(start >= 0, $"Missing Markdown section: {heading}");
 
@@ -277,8 +335,10 @@ public sealed class SourceCapabilityContractTests
             ? document.Length
             : document.IndexOf(endHeading, start + heading.Length, StringComparison.Ordinal);
         Assert.True(endHeading is null || end >= 0, $"Missing section terminator after {heading}: {endHeading}");
-        return Regex.Replace(document[start..(endHeading is null ? document.Length : end)], "\\s+", " ");
+        return document[start..(endHeading is null ? document.Length : end)];
     }
+
+    private static string NormalizeMarkdown(string markdown) => Regex.Replace(markdown, "\\s+", " ");
 
     private static void AssertMarkdownCompletenessMatchesSchema(string section, IReadOnlyList<string> expectedStatuses, IReadOnlyList<string> expectedReasons)
     {
@@ -294,6 +354,174 @@ public sealed class SourceCapabilityContractTests
             Assert.True(position >= 0, $"Missing ordered completeness status: {status}");
             position++;
         }
+    }
+
+    private static Dictionary<string, string> ParseCompletenessReasonCaps(string section)
+    {
+        const string heading = "| Reason code | Maximum status |";
+        var tableStart = section.IndexOf(heading, StringComparison.Ordinal);
+        Assert.True(tableStart >= 0, "Missing completeness reason-to-maximum-status table.");
+
+        var caps = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (Match match in Regex.Matches(
+                     section[tableStart..],
+                     "(?m)^\\| `([^`]+)` \\| `(unbound|partial|rich|full)` \\|[^\\r\\n]*\\|$"))
+        {
+            Assert.True(caps.TryAdd(match.Groups[1].Value, match.Groups[2].Value),
+                $"Completeness reason '{match.Groups[1].Value}' has more than one maximum status.");
+        }
+
+        return caps;
+    }
+
+    private static void AssertCompletenessDecisionIsTotal(
+        IReadOnlyList<string> statuses,
+        IReadOnlyList<string> expectedReasons,
+        IReadOnlyDictionary<string, string> reasonCaps)
+    {
+        Assert.Equal(["unbound", "partial", "rich", "full"], statuses);
+        Assert.Equal(expectedReasons.OrderBy(reason => reason, StringComparer.Ordinal), reasonCaps.Keys.OrderBy(reason => reason, StringComparer.Ordinal));
+
+        var expectedCaps = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["missing_native_session_id"] = "unbound",
+            ["missing_trace_context"] = "rich",
+            ["trace_signal_disabled"] = "rich",
+            ["content_capture_disabled"] = "rich",
+            ["unsupported_source_version"] = "rich",
+            ["ingest_gap"] = "rich",
+            ["hook_only"] = "rich",
+            ["historical_summary_only"] = "partial",
+            ["unknown_span_kind"] = "rich",
+            ["schema_drift_detected"] = "partial",
+            ["planned_source_not_enabled"] = "unbound"
+        };
+        Assert.Equal(expectedCaps, reasonCaps);
+
+        Assert.Equal("unbound", CalculateBaseStatus(hasNativeSessionId: false, hasRequiredLifecycleAndInput: true, hasRequiredContentAndTerminal: true));
+        Assert.Equal("partial", CalculateBaseStatus(hasNativeSessionId: true, hasRequiredLifecycleAndInput: false, hasRequiredContentAndTerminal: true));
+        Assert.Equal("rich", CalculateBaseStatus(hasNativeSessionId: true, hasRequiredLifecycleAndInput: true, hasRequiredContentAndTerminal: false));
+        Assert.Equal("full", CalculateBaseStatus(hasNativeSessionId: true, hasRequiredLifecycleAndInput: true, hasRequiredContentAndTerminal: true));
+
+        foreach (var reason in expectedReasons)
+        {
+            var evaluation = CalculateCompleteness("full", [reason], expectedReasons, reasonCaps);
+            Assert.Equal(expectedCaps[reason], evaluation.Status);
+            Assert.Equal([reason], evaluation.Reasons);
+        }
+
+        Assert.Equal("unbound", CalculateCompleteness("unbound", ["content_capture_disabled"], expectedReasons, reasonCaps).Status);
+        Assert.Equal("partial", CalculateCompleteness("partial", ["content_capture_disabled"], expectedReasons, reasonCaps).Status);
+        Assert.Equal("partial", CalculateCompleteness("full", ["historical_summary_only"], expectedReasons, reasonCaps).Status);
+        Assert.Equal("rich", reasonCaps["unsupported_source_version"]);
+        Assert.Equal("partial", reasonCaps["schema_drift_detected"]);
+        Assert.NotEqual(reasonCaps["unsupported_source_version"], reasonCaps["schema_drift_detected"]);
+        Assert.Equal("rich", reasonCaps["ingest_gap"]);
+        Assert.Equal("partial", CalculateBaseStatus(hasNativeSessionId: true, hasRequiredLifecycleAndInput: false, hasRequiredContentAndTerminal: true));
+        Assert.NotEqual(reasonCaps["ingest_gap"], CalculateBaseStatus(hasNativeSessionId: true, hasRequiredLifecycleAndInput: false, hasRequiredContentAndTerminal: true));
+        AssertFutureOnlyReasonsAreExcludedFromRuntimeEquivalence(expectedReasons);
+        Assert.Equal(
+            ["missing_native_session_id", "content_capture_disabled", "hook_only"],
+            CalculateCompleteness("full", ["hook_only", "content_capture_disabled", "hook_only", "missing_native_session_id"], expectedReasons, reasonCaps).Reasons);
+        Assert.Throws<InvalidOperationException>(() => CalculateCompleteness("full", ["unknown_reason"], expectedReasons, reasonCaps));
+    }
+
+    private static void AssertFutureOnlyReasonsAreExcludedFromRuntimeEquivalence(IReadOnlyList<string> expectedReasons)
+    {
+        var futureOnlyReasons = new[]
+        {
+            "historical_summary_only",
+            "schema_drift_detected",
+            "planned_source_not_enabled"
+        };
+        var runtimeEquivalentReasons = RuntimeEquivalentReasons.Select(row => row[0]);
+
+        Assert.Equal(futureOnlyReasons, expectedReasons.Where(futureOnlyReasons.Contains));
+        Assert.DoesNotContain(runtimeEquivalentReasons, futureOnlyReasons.Contains);
+    }
+
+    private static string CalculateBaseStatus(
+        bool hasNativeSessionId,
+        bool hasRequiredLifecycleAndInput,
+        bool hasRequiredContentAndTerminal)
+    {
+        if (!hasNativeSessionId)
+        {
+            return "unbound";
+        }
+
+        if (!hasRequiredLifecycleAndInput)
+        {
+            return "partial";
+        }
+
+        return hasRequiredContentAndTerminal ? "full" : "rich";
+    }
+
+    private static (string Status, string[] Reasons) CalculateCompleteness(
+        string baseStatus,
+        IReadOnlyCollection<string> presentReasons,
+        IReadOnlyList<string> canonicalReasonOrder,
+        IReadOnlyDictionary<string, string> reasonCaps)
+    {
+        var unknownReason = presentReasons.FirstOrDefault(reason => !reasonCaps.ContainsKey(reason));
+        if (unknownReason is not null)
+        {
+            throw new InvalidOperationException($"Unknown completeness reason '{unknownReason}' is schema drift.");
+        }
+
+        var rank = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["unbound"] = 0,
+            ["partial"] = 1,
+            ["rich"] = 2,
+            ["full"] = 3
+        };
+        var status = presentReasons.Aggregate(baseStatus, (current, reason) =>
+            rank[reasonCaps[reason]] < rank[current] ? reasonCaps[reason] : current);
+        var reasons = canonicalReasonOrder.Where(presentReasons.Contains).ToArray();
+        return (status, reasons);
+    }
+
+    private static void AssertAuthorityAllowlist(string section)
+    {
+        Assert.Contains("| model/token, retry, error summary |", section, StringComparison.Ordinal);
+        Assert.Contains("historical summary allowlist-only: `model_tokens.*`, `retry_attempt.*`, and `errors`", section, StringComparison.Ordinal);
+        Assert.Contains("never identity, hierarchy, timing, lifecycle, or explicit event identity", section, StringComparison.Ordinal);
+    }
+
+    private static void AssertNoHeuristicMergeOrSyntheticSpan(params string[] sections)
+    {
+        Assert.Contains(sections, section => section.Contains("no heuristic merge", StringComparison.OrdinalIgnoreCase)
+            && section.Contains("synthetic span", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(sections, section => section.Contains("exact identity", StringComparison.OrdinalIgnoreCase)
+            && section.Contains("Issue #49", StringComparison.Ordinal));
+    }
+
+    private static void AssertNoContentAuthority(string section)
+    {
+        Assert.Contains("manifest grants no content authority", section, StringComparison.Ordinal);
+        Assert.Contains("does not grant any caller read, transport, storage, or display authority", section, StringComparison.Ordinal);
+        Assert.Contains("must not contain raw prompt/response, tool input/output, file or diff content, paths, credentials, tokens, PII", section, StringComparison.Ordinal);
+    }
+
+    private static void AssertAdapterHandoffChecklist(string telemetryContract, string decision)
+    {
+        Assert.Contains("matching manifest version", telemetryContract, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("declare only observed capabilities", telemetryContract, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("per-field actual-adapter provenance", telemetryContract, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("authority table without overwrite/inference", telemetryContract, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("fixed completeness statuses/reasons in the canonical order", telemetryContract, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("raw/sanitized boundaries", telemetryContract, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("new contract major", telemetryContract, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Contains("matching schema/manifest version", decision, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("observed rather than invented capability", decision, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("actual-adapter field provenance", decision, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("authority/absence precedence", decision, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("fixed status/reason output deterministically", decision, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("raw/sanitized boundaries", decision, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("new major", decision, StringComparison.OrdinalIgnoreCase);
     }
 
     private static void AssertActualAdapterProvenance(string section)
