@@ -43,13 +43,17 @@ public sealed class SetupContractShapeTests
         Assert.False(root.GetProperty("truncated").GetBoolean());
 
         AssertTargetShape(writable);
+        Assert.Equal("00000000-0000-7000-8000-000000000001", writable.GetProperty("record_id").GetString());
         Assert.Equal("json", writable.GetProperty("target_kind").GetString());
+        Assert.Equal("vscode-user-settings", writable.GetProperty("target_label").GetString());
+        Assert.True(writable.GetProperty("detected").GetBoolean());
         Assert.Equal("1.128.0", writable.GetProperty("detected_version").GetString());
         Assert.Equal("replace", writable.GetProperty("operation").GetString());
         Assert.Equal("user_setting", writable.GetProperty("effective_source").GetString());
         Assert.Equal(JsonValueKind.Null, writable.GetProperty("reference_state").ValueKind);
         Assert.Equal(JsonValueKind.Null, writable.GetProperty("current_state").ValueKind);
         Assert.Equal("restart_vscode", writable.GetProperty("restart_requirement").GetString());
+        Assert.True(writable.GetProperty("rollback_available").GetBoolean());
         Assert.Equal("http://127.0.0.1:4320", writable.GetProperty("endpoint").GetString());
         Assert.Equal("github-copilot-vscode", writable.GetProperty("expected_result").GetProperty("source_surface").GetString());
         Assert.Equal(JsonValueKind.Null, writable.GetProperty("guidance").ValueKind);
@@ -62,12 +66,17 @@ public sealed class SetupContractShapeTests
         Assert.False(change.GetProperty("managed").GetBoolean());
 
         AssertTargetShape(guidance);
+        Assert.Equal("00000000-0000-7000-8000-000000000002", guidance.GetProperty("record_id").GetString());
         Assert.Equal("guidance", guidance.GetProperty("target_kind").GetString());
+        Assert.Equal("app-sdk-guidance", guidance.GetProperty("target_label").GetString());
+        Assert.False(guidance.GetProperty("detected").GetBoolean());
         Assert.Equal(JsonValueKind.Null, guidance.GetProperty("detected_version").ValueKind);
         Assert.Equal("no-op", guidance.GetProperty("operation").GetString());
         Assert.Equal(JsonValueKind.Null, guidance.GetProperty("effective_source").ValueKind);
         Assert.Equal(JsonValueKind.Null, guidance.GetProperty("reference_state").ValueKind);
         Assert.Equal(JsonValueKind.Null, guidance.GetProperty("current_state").ValueKind);
+        Assert.Equal("none", guidance.GetProperty("restart_requirement").GetString());
+        Assert.False(guidance.GetProperty("rollback_available").GetBoolean());
         Assert.Equal(JsonValueKind.Null, guidance.GetProperty("endpoint").ValueKind);
         Assert.Equal(JsonValueKind.Null, guidance.GetProperty("expected_result").ValueKind);
         Assert.Empty(guidance.GetProperty("changes").EnumerateArray());
@@ -90,7 +99,7 @@ public sealed class SetupContractShapeTests
                 new SetupChangeSetStatusResult("00000000-0000-7000-8000-000000000011", "github-copilot", "all", "2026-07-12T00:00:00Z", "2026-07-12T01:00:00Z", SetupChangeSetState.Applied, "apply_succeeded", SetupCurrentState.Current, true, [writable]),
                 new SetupChangeSetStatusResult("00000000-0000-7000-8000-000000000012", "github-copilot", "app-sdk", "2026-07-12T02:00:00Z", "2026-07-12T03:00:00Z", SetupChangeSetState.Partial, null, SetupCurrentState.NotApplicable, false, [guidance]),
             ],
-            [], ["rerun_requested_setup_command"], true);
+            [], ["rerun_requested_setup_command"], false);
 
         using var document = JsonDocument.Parse(SetupJson.Serialize(result));
         var root = document.RootElement;
@@ -103,17 +112,74 @@ public sealed class SetupContractShapeTests
         Assert.Equal("00000000-0000-7000-8000-000000000010", root.GetProperty("recovered_change_set_id").GetString());
         Assert.Equal("apply", root.GetProperty("recovery_operation").GetString());
         Assert.Empty(root.GetProperty("targets").EnumerateArray());
-        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.False(root.GetProperty("truncated").GetBoolean());
         Assert.Equal("rerun_requested_setup_command", root.GetProperty("next_actions")[0].GetString());
         AssertChangeSetShape(applied);
+        Assert.Equal("00000000-0000-7000-8000-000000000011", applied.GetProperty("change_set_id").GetString());
+        Assert.Equal("github-copilot", applied.GetProperty("adapter").GetString());
+        Assert.Equal("all", applied.GetProperty("selected_target").GetString());
+        Assert.Equal("2026-07-12T00:00:00Z", applied.GetProperty("created_at").GetString());
+        Assert.Equal("2026-07-12T01:00:00Z", applied.GetProperty("updated_at").GetString());
+        Assert.Equal("applied", applied.GetProperty("state").GetString());
         Assert.Equal("apply_succeeded", applied.GetProperty("outcome_code").GetString());
         Assert.Equal("current", applied.GetProperty("current_state").GetString());
+        Assert.True(applied.GetProperty("rollback_available").GetBoolean());
         AssertChangeSetShape(partial);
+        Assert.Equal("00000000-0000-7000-8000-000000000012", partial.GetProperty("change_set_id").GetString());
+        Assert.Equal("github-copilot", partial.GetProperty("adapter").GetString());
+        Assert.Equal("app-sdk", partial.GetProperty("selected_target").GetString());
+        Assert.Equal("2026-07-12T02:00:00Z", partial.GetProperty("created_at").GetString());
+        Assert.Equal("2026-07-12T03:00:00Z", partial.GetProperty("updated_at").GetString());
         Assert.Equal(JsonValueKind.Null, partial.GetProperty("outcome_code").ValueKind);
         Assert.Equal("partial", partial.GetProperty("state").GetString());
         Assert.Equal("not_applicable", partial.GetProperty("current_state").GetString());
+        Assert.False(partial.GetProperty("rollback_available").GetBoolean());
+
+        var nestedWritable = applied.GetProperty("targets")[0];
+        AssertTargetShape(nestedWritable);
+        Assert.Equal("00000000-0000-7000-8000-000000000020", nestedWritable.GetProperty("record_id").GetString());
+        Assert.Equal("json", nestedWritable.GetProperty("target_kind").GetString());
+        Assert.Equal("vscode-user-settings", nestedWritable.GetProperty("target_label").GetString());
+        Assert.True(nestedWritable.GetProperty("detected").GetBoolean());
+        Assert.Equal("1.128.0", nestedWritable.GetProperty("detected_version").GetString());
+        Assert.Equal("replace", nestedWritable.GetProperty("operation").GetString());
+        Assert.Equal("user_setting", nestedWritable.GetProperty("effective_source").GetString());
+        Assert.Equal("desired", nestedWritable.GetProperty("reference_state").GetString());
+        Assert.Equal("current", nestedWritable.GetProperty("current_state").GetString());
+        Assert.Equal("restart_vscode", nestedWritable.GetProperty("restart_requirement").GetString());
+        Assert.True(nestedWritable.GetProperty("rollback_available").GetBoolean());
+        Assert.Equal("http://127.0.0.1:4320", nestedWritable.GetProperty("endpoint").GetString());
+        Assert.Equal(JsonValueKind.Null, nestedWritable.GetProperty("expected_result").ValueKind);
+        Assert.Equal(JsonValueKind.Null, nestedWritable.GetProperty("guidance").ValueKind);
+        var nestedMember = nestedWritable.GetProperty("changes")[0];
+        AssertMemberShape(nestedMember);
+        Assert.Equal("setting", nestedMember.GetProperty("setting_key").GetString());
+        Assert.Equal("replace", nestedMember.GetProperty("operation").GetString());
+        Assert.Equal("present_different", nestedMember.GetProperty("previous_state").GetString());
+        Assert.Equal("configured_loopback", nestedMember.GetProperty("new_state").GetString());
+        Assert.Equal("none", nestedMember.GetProperty("conflict").GetString());
+        Assert.False(nestedMember.GetProperty("managed").GetBoolean());
+
+        var nestedGuidanceTarget = partial.GetProperty("targets")[0];
+        AssertTargetShape(nestedGuidanceTarget);
+        Assert.Equal("00000000-0000-7000-8000-000000000021", nestedGuidanceTarget.GetProperty("record_id").GetString());
+        Assert.Equal("guidance", nestedGuidanceTarget.GetProperty("target_kind").GetString());
+        Assert.Equal("app-sdk-guidance", nestedGuidanceTarget.GetProperty("target_label").GetString());
+        Assert.False(nestedGuidanceTarget.GetProperty("detected").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, nestedGuidanceTarget.GetProperty("detected_version").ValueKind);
+        Assert.Equal("no-op", nestedGuidanceTarget.GetProperty("operation").GetString());
+        Assert.Equal(JsonValueKind.Null, nestedGuidanceTarget.GetProperty("effective_source").ValueKind);
+        Assert.Equal("none", nestedGuidanceTarget.GetProperty("reference_state").GetString());
+        Assert.Equal("not_applicable", nestedGuidanceTarget.GetProperty("current_state").GetString());
+        Assert.Equal("none", nestedGuidanceTarget.GetProperty("restart_requirement").GetString());
+        Assert.False(nestedGuidanceTarget.GetProperty("rollback_available").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, nestedGuidanceTarget.GetProperty("endpoint").ValueKind);
+        Assert.Equal(JsonValueKind.Null, nestedGuidanceTarget.GetProperty("expected_result").ValueKind);
+        Assert.Empty(nestedGuidanceTarget.GetProperty("changes").EnumerateArray());
         var nestedGuidance = partial.GetProperty("targets")[0].GetProperty("guidance");
         AssertPropertyOrder(nestedGuidance, "kind", "language");
+        Assert.Equal("caller_managed_sample", nestedGuidance.GetProperty("kind").GetString());
+        Assert.Equal("dotnet", nestedGuidance.GetProperty("language").GetString());
         Assert.False(nestedGuidance.TryGetProperty("sample", out _));
     }
 
