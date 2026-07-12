@@ -36,6 +36,9 @@ internal sealed class ProposalApplyService
         ArgumentNullException.ThrowIfNull(request);
         lock (sync)
         {
+            var proposal = store?.GetImprovementProposal(request.ProposalId);
+            if (proposal is null || proposal.Revision != request.ProposalRevision || proposal.Status != ImprovementProposalStatus.Recommended)
+                throw new InvalidOperationException("Proposal revision is stale.");
             if (store is null || !TryGetCurrentApplicationUnsafe(request.ProposalId, request.ApplyId, out _)) throw new CurrentApplicationException();
             // This lock covers both post-hash validation and the SQLite effect receipt transaction.
             return store.RecordEffectComparison(request, recordedAt);

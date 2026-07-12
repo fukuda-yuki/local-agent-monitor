@@ -196,6 +196,91 @@ public sealed class SessionEffectComparisonRouteTests
         Assert.DoesNotContain("candidate.txt", body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Post_exact_three_by_three_efficiency_improvement_verifies_and_get_preserves_stored_evidence_after_restart()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var fixture = await CreateComparisonFixtureAsync(temp);
+        var pre = Enumerable.Range(0, 3).Select(index => InsertComparableSession(temp.DatabasePath, "pre", index, "expected", 1000)).ToArray();
+        var post = Enumerable.Range(0, 3).Select(index => InsertComparableSession(temp.DatabasePath, "post", index, "expected", 900)).ToArray();
+
+        using var created = await fixture.Host.Client.SendAsync(Request(ComparisonBody(fixture, pre, post), null, true, true));
+        var createdBody = await created.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        using var receipt = JsonDocument.Parse(createdBody);
+        Assert.Equal("improved", receipt.RootElement.GetProperty("verdict").GetString());
+        Assert.Equal("active", receipt.RootElement.GetProperty("verification_state").GetString());
+        var comparisonId = receipt.RootElement.GetProperty("comparison_id").GetGuid();
+        Assert.Equal("verified", Text(temp.DatabasePath, "SELECT status FROM improvement_proposals WHERE proposal_id=$id", fixture.ProposalId));
+
+        using var beforeRestart = await fixture.Host.Client.GetAsync($"/api/session-workspace/effect-comparisons/{comparisonId:D}");
+        var detail = await beforeRestart.Content.ReadAsStringAsync();
+        Assert.Equal("no-store", beforeRestart.Headers.CacheControl?.ToString());
+        Assert.Equal(6, JsonDocument.Parse(detail).RootElement.GetProperty("sessions").GetArrayLength());
+        Assert.Equal(6, JsonDocument.Parse(detail).RootElement.GetProperty("evidence").GetArrayLength());
+        await fixture.RestartAsync();
+        using var afterRestart = await fixture.Host.Client.GetAsync($"/api/session-workspace/effect-comparisons/{comparisonId:D}");
+        Assert.Equal(detail, await afterRestart.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Post_maps_stale_proposal_revision_to_the_canonical_fixed_error_without_a_receipt()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var fixture = await CreateComparisonFixtureAsync(temp);
+        var pre = Enumerable.Range(0, 3).Select(index => InsertComparableSession(temp.DatabasePath, "pre", index, "expected", 1000)).ToArray();
+        var post = Enumerable.Range(0, 3).Select(index => InsertComparableSession(temp.DatabasePath, "post", index, "expected", 1000)).ToArray();
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open(); using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE improvement_proposals SET revision=2 WHERE proposal_id=$id;";
+            command.Parameters.AddWithValue("$id", fixture.ProposalId.ToString("D")); command.ExecuteNonQuery();
+        }
+
+        using var response = await fixture.Host.Client.SendAsync(Request(ComparisonBody(fixture, pre, post), null, true, true));
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Equal("{\"error\":\"proposal_revision_stale\"}", await response.Content.ReadAsStringAsync());
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM effect_comparisons;"));
+    }
+
+    [Fact]
+    public async Task Post_real_sqlite_verdict_matrix_returns_fixed_verdicts_and_preserves_non_improved_maturity()
+    {
+        using var noChangeTemp = new MonitorTempDirectory();
+        await using (var noChange = await CreateComparisonFixtureAsync(noChangeTemp))
+        {
+            var pre = Enumerable.Range(0, 3).Select(i => InsertComparableSession(noChangeTemp.DatabasePath, "pre", i, "expected", 1000)).ToArray();
+            var post = Enumerable.Range(0, 3).Select(i => InsertComparableSession(noChangeTemp.DatabasePath, "post", i, "expected", 1000)).ToArray();
+            await AssertVerdictAsync(noChange, pre, post, "no_change", "recommended");
+        }
+
+        using var regressedTemp = new MonitorTempDirectory();
+        await using (var regressed = await CreateComparisonFixtureAsync(regressedTemp))
+        {
+            var pre = Enumerable.Range(0, 3).Select(i => InsertComparableSession(regressedTemp.DatabasePath, "pre", i, "expected", 1000)).ToArray();
+            var post = Enumerable.Range(0, 3).Select(i => InsertComparableSession(regressedTemp.DatabasePath, "post", i, "problem", 900)).ToArray();
+            await AssertVerdictAsync(regressed, pre, post, "regressed", "recommended");
+        }
+
+        using var severeTemp = new MonitorTempDirectory();
+        await using (var severe = await CreateComparisonFixtureAsync(severeTemp))
+        {
+            var pre = Enumerable.Range(0, 3).Select(i => InsertComparableSession(severeTemp.DatabasePath, "pre", i, "expected", 1000)).ToArray();
+            var post = Enumerable.Range(0, 3).Select(i => InsertComparableSession(severeTemp.DatabasePath, "post", i, "expected", 900)).ToArray();
+            InsertSevereObjective(severeTemp.DatabasePath, post[0]);
+            await AssertVerdictAsync(severe, pre, post, "regressed", "recommended");
+        }
+
+        using var insufficientTemp = new MonitorTempDirectory();
+        await using (var insufficient = await CreateComparisonFixtureAsync(insufficientTemp))
+        {
+            var pre = Enumerable.Range(0, 2).Select(i => InsertComparableSession(insufficientTemp.DatabasePath, "pre", i, "expected", 1000)).ToArray();
+            var post = Enumerable.Range(0, 3).Select(i => InsertComparableSession(insufficientTemp.DatabasePath, "post", i, "expected", 900)).ToArray();
+            await AssertVerdictAsync(insufficient, pre, post, "insufficient_evidence", "recommended");
+        }
+    }
+
     private static HttpRequestMessage Request(string body, string? origin, bool csrf, bool media, string path = "/api/session-workspace/effect-comparisons")
     {
         var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(body, Encoding.UTF8, media ? "application/json" : "text/plain") };
@@ -209,6 +294,104 @@ public sealed class SessionEffectComparisonRouteTests
         using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
         connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
         return (long)command.ExecuteScalar()!;
+    }
+
+    private static string? Text(string databasePath, string sql, Guid id)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
+        connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
+        command.Parameters.AddWithValue("$id", id.ToString("D"));
+        return command.ExecuteScalar() as string;
+    }
+
+    private static async Task<ComparisonFixture> CreateComparisonFixtureAsync(MonitorTempDirectory temp)
+    {
+        var rootPath = Path.Combine(temp.Path, "comparison-root");
+        Directory.CreateDirectory(rootPath);
+        File.WriteAllText(Path.Combine(rootPath, "comparison.txt"), "before\n");
+        var root = ConfiguredApplyRoot.Create(ApplyRootKind.Repository, rootPath);
+        var host = await StartAsync(temp, root);
+        var proposalId = Guid.CreateVersion7();
+        InsertRecommendedProposal(temp.DatabasePath, proposalId);
+        var rootId = await GetRootIdAsync(host.Client);
+        using var create = Request($$"""{"proposal_id":"{{proposalId:D}}","root_id":"{{rootId:D}}","files":[{"relative_path":"comparison.txt","replacement_text":"after\n"}]}""", null, true, true, "/api/session-workspace/proposal-applies/drafts");
+        using var created = await host.Client.SendAsync(create);
+        created.EnsureSuccessStatusCode();
+        using var draft = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+        var draftId = draft.RootElement.GetProperty("draft_id").GetGuid();
+        var revision = draft.RootElement.GetProperty("selection_revision").GetInt32();
+        var digest = draft.RootElement.GetProperty("approval_digest").GetString();
+        using var approve = Request($$"""{"selection_revision":{{revision}},"approval_digest":"{{digest}}"}""", null, true, true, $"/api/session-workspace/proposal-applies/drafts/{draftId:D}/approve");
+        (await host.Client.SendAsync(approve)).EnsureSuccessStatusCode();
+        using var apply = new HttpRequestMessage(HttpMethod.Post, $"/api/session-workspace/proposal-applies/drafts/{draftId:D}/apply");
+        apply.Headers.TryAddWithoutValidation("x-monitor-csrf", "local-monitor");
+        using var applied = await host.Client.SendAsync(apply);
+        applied.EnsureSuccessStatusCode();
+        using var applyJson = JsonDocument.Parse(await applied.Content.ReadAsStringAsync());
+        var applyId = applyJson.RootElement.GetProperty("apply_id").GetGuid();
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open(); using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE proposal_applies SET created_at='2026-01-02T00:00:00+00:00' WHERE apply_id=$id;";
+            command.Parameters.AddWithValue("$id", applyId.ToString("D")); command.ExecuteNonQuery();
+        }
+        return new(temp, root, host, proposalId, applyId);
+    }
+
+    private static Guid InsertComparableSession(string databasePath, string side, int index, string quality, long durationMilliseconds)
+    {
+        var id = Guid.CreateVersion7();
+        var started = side == "pre" ? DateTimeOffset.Parse("2026-01-01T00:00:00Z").AddMinutes(index) : DateTimeOffset.Parse("2026-01-03T00:00:00Z").AddMinutes(index);
+        var ended = started.AddMilliseconds(durationMilliseconds);
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
+        connection.Open(); using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO sessions(session_id,status,completeness,repository,workspace,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at)
+            VALUES($id,'completed','full',NULL,NULL,$started,$ended,$ended,'not_captured',$started,$ended);
+            INSERT INTO session_native_ids(session_id,source_surface,native_session_id,binding_kind,observed_at)
+            VALUES($id,'copilot-sdk',$native,'native',$started);
+            INSERT INTO session_human_evaluation(session_id,verdict,recorded_at) VALUES($id,$quality,$ended);
+            """;
+        command.Parameters.AddWithValue("$id", id.ToString("D"));
+        command.Parameters.AddWithValue("$native", "comparison-" + id.ToString("N"));
+        command.Parameters.AddWithValue("$started", started.ToString("O")); command.Parameters.AddWithValue("$ended", ended.ToString("O"));
+        command.Parameters.AddWithValue("$quality", quality); command.ExecuteNonQuery();
+        return id;
+    }
+
+    private static void InsertSevereObjective(string databasePath, Guid sessionId)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
+        connection.Open(); using var command = connection.CreateCommand();
+        var runId = Guid.CreateVersion7();
+        command.CommandText = "INSERT INTO session_runs(run_id,session_id,source_surface,native_run_id,trace_id,parent_run_id,model,started_at,ended_at,input_tokens,output_tokens,total_tokens,status) VALUES($run,$session,NULL,NULL,'trace',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'completed'); INSERT INTO objective_evaluations(objective_evaluation_id,session_id,run_id,trace_id,result,severity,evaluator_id,evaluator_version,criterion_id,case_key,recorded_at) VALUES($id,$session,$run,'trace','fail','severe','eval','v1','quality','case','2026-01-03T00:00:00+00:00');";
+        command.Parameters.AddWithValue("$id", Guid.CreateVersion7().ToString("D")); command.Parameters.AddWithValue("$session", sessionId.ToString("D")); command.Parameters.AddWithValue("$run", runId.ToString("D")); command.ExecuteNonQuery();
+    }
+
+    private static async Task AssertVerdictAsync(ComparisonFixture fixture, IReadOnlyList<Guid> pre, IReadOnlyList<Guid> post, string verdict, string status)
+    {
+        using var response = await fixture.Host.Client.SendAsync(Request(ComparisonBody(fixture, pre, post), null, true, true));
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(verdict, body.RootElement.GetProperty("verdict").GetString());
+        Assert.Equal(status, Text(fixture.DatabasePath, "SELECT status FROM improvement_proposals WHERE proposal_id=$id", fixture.ProposalId));
+    }
+
+    private static string ComparisonBody(ComparisonFixture fixture, IReadOnlyList<Guid> pre, IReadOnlyList<Guid> post) =>
+        $$"""{"proposal_id":"{{fixture.ProposalId:D}}","proposal_revision":1,"apply_id":"{{fixture.ApplyId:D}}","sessions":[{{string.Join(',', pre.Select((id, index) => $$"""{"session_id":"{{id:D}}","classification":"pre","case_key":"case-{{index}}","exclusion_reason":null}"""))}},{{string.Join(',', post.Select((id, index) => $$"""{"session_id":"{{id:D}}","classification":"post","case_key":"case-{{index}}","exclusion_reason":null}"""))}}]}""";
+
+    private sealed class ComparisonFixture(MonitorTempDirectory temp, ConfiguredApplyRoot root, RunningMonitorHost host, Guid proposalId, Guid applyId) : IAsyncDisposable
+    {
+        public RunningMonitorHost Host { get; private set; } = host;
+        public Guid ProposalId { get; } = proposalId;
+        public Guid ApplyId { get; } = applyId;
+        public string DatabasePath => temp.DatabasePath;
+        public async Task RestartAsync()
+        {
+            await Host.DisposeAsync();
+            Host = await StartAsync(temp, root);
+        }
+        public ValueTask DisposeAsync() => Host.DisposeAsync();
     }
 
     private static async Task<RunningMonitorHost> StartAsync(MonitorTempDirectory temp, ConfiguredApplyRoot root)
