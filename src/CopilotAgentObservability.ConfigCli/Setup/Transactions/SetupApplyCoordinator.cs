@@ -50,6 +50,7 @@ internal sealed class SetupApplyCoordinator
     public SetupLedgerChangeSet Apply(SetupLock setupLock, Guid changeSetId)
     {
         setupLock.AssertHeld(platform, paths);
+        var compensationEligible = false;
         try
         {
             var plan = planStore.Load(changeSetId) ?? throw new SetupApplyException(SetupCodes.RecoveryRequired);
@@ -75,6 +76,7 @@ internal sealed class SetupApplyCoordinator
             CreateBackups(plan, changedCaptures);
 
             var journalTargets = CreateJournalTargets(changedCaptures);
+            compensationEligible = true;
             journalStore.CreatePrepared(setupLock, changeSetId, SetupJournalOperation.Apply, journalTargets);
             platform.Execution.Checkpoint(SetupFaultPoint.AfterJournalPreparedBeforeLedger);
 
@@ -100,32 +102,492 @@ internal sealed class SetupApplyCoordinator
 
             return applied;
         }
-        catch (SetupApplyException exception)
+        catch (Exception exception)
         {
-            if (SetupCodes.ResultCodes.Contains(exception.Code, StringComparer.Ordinal))
+            var outcomeCode = MapApplyFailure(exception);
+            if (compensationEligible && HasCompensatableJournal(changeSetId) &&
+                !Compensate(setupLock, changeSetId, outcomeCode))
             {
-                throw;
+                throw new SetupApplyException(SetupCodes.PartialApply);
             }
 
-            throw new SetupApplyException(SetupCodes.InternalError);
+            throw new SetupApplyException(outcomeCode);
         }
-        catch (SetupStorageException exception)
+    }
+
+    private bool HasCompensatableJournal(Guid changeSetId)
+    {
+        try
         {
-            throw new SetupApplyException(MapStorageCode(exception.Code));
-        }
-        catch (SetupFileStepException exception)
-        {
-            throw new SetupApplyException(MapMutationCode(exception.Code));
-        }
-        catch (SetupEnvironmentStepException exception)
-        {
-            throw new SetupApplyException(MapMutationCode(exception.Code));
+            var journal = journalStore.Load(changeSetId);
+            return journal is
+            {
+                Operation: SetupJournalOperation.Apply,
+                Phase: SetupJournalPhase.Prepared or SetupJournalPhase.Applying or SetupJournalPhase.Compensating,
+            };
         }
         catch (Exception)
         {
-            throw new SetupApplyException(SetupCodes.InternalError);
+            return false;
         }
     }
+
+    private bool Compensate(SetupLock setupLock, Guid changeSetId, string forwardOutcome)
+    {
+        try
+        {
+            var plan = planStore.Load(changeSetId);
+            if (plan is null || !EnsureJournalCompensating(setupLock, changeSetId) ||
+                !EnsureLedgerCompensating(setupLock, changeSetId))
+            {
+                PersistPartialLedger(setupLock, changeSetId, null, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+                return false;
+            }
+
+            var journal = journalStore.Load(changeSetId)!;
+            for (var targetIndex = journal.Targets.Count - 1; targetIndex >= 0; targetIndex--)
+            {
+                var target = journal.Targets[targetIndex];
+                var planTarget = plan.Targets.Single(candidate => candidate.RecordId == target.RecordId);
+                for (var stepIndex = target.Steps.Count - 1; stepIndex >= 0; stepIndex--)
+                {
+                    var step = ReloadStep(changeSetId, target.RecordId, target.Steps[stepIndex].MemberKey);
+                    if (step.Phase == SetupJournalStepPhase.Pending)
+                    {
+                        continue;
+                    }
+
+                    if (step.Phase == SetupJournalStepPhase.RestoreCompleted)
+                    {
+                        continue;
+                    }
+
+                    var failure = CompensateStep(setupLock, changeSetId, planTarget, step);
+                    if (failure is not null)
+                    {
+                        PersistPartial(setupLock, changeSetId, failure);
+                        return false;
+                    }
+                }
+            }
+
+            var verificationFailure = VerifyAllPrevious(plan, journal);
+            if (verificationFailure is not null)
+            {
+                PersistPartial(setupLock, changeSetId, verificationFailure);
+                return false;
+            }
+
+            try
+            {
+                journalStore.MarkTransactionPhase(setupLock, changeSetId, SetupJournalPhase.Restored);
+            }
+            catch (Exception)
+            {
+                if (journalStore.Load(changeSetId)?.Phase != SetupJournalPhase.Restored)
+                {
+                    PersistPartial(setupLock, changeSetId,
+                        new CompensationFailure(null, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed));
+                    return false;
+                }
+            }
+
+            if (!PersistRestoredLedger(setupLock, changeSetId, forwardOutcome))
+            {
+                PersistPartialLedger(
+                    setupLock,
+                    changeSetId,
+                    null,
+                    SetupCodes.InternalError,
+                    SetupLedgerRollbackStatus.Failed);
+                return false;
+            }
+
+            var terminal = journalStore.Load(changeSetId)!;
+            if (terminal.EnvironmentNotification == SetupEnvironmentNotification.Pending)
+            {
+                try
+                {
+                    environmentStep.NotifyFinalState();
+                    journalStore.MarkEnvironmentNotificationCompleted(setupLock, changeSetId);
+                }
+                catch (Exception)
+                {
+                    // The restored ledger and pending notification are recovery evidence.
+                }
+            }
+
+            return true;
+        }
+        catch (Exception)
+        {
+            PersistPartialLedger(setupLock, changeSetId, null, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+            return false;
+        }
+    }
+
+    private bool EnsureJournalCompensating(SetupLock setupLock, Guid changeSetId)
+    {
+        var current = journalStore.Load(changeSetId);
+        if (current is null || current.Operation != SetupJournalOperation.Apply)
+        {
+            return false;
+        }
+
+        if (current.Phase == SetupJournalPhase.Prepared &&
+            !TryMarkJournalPhase(setupLock, changeSetId, SetupJournalPhase.Applying))
+        {
+            return false;
+        }
+
+        current = journalStore.Load(changeSetId);
+        return current?.Phase == SetupJournalPhase.Compensating ||
+            current?.Phase == SetupJournalPhase.Applying &&
+            TryMarkJournalPhase(setupLock, changeSetId, SetupJournalPhase.Compensating);
+    }
+
+    private bool TryMarkJournalPhase(SetupLock setupLock, Guid changeSetId, SetupJournalPhase phase)
+    {
+        try
+        {
+            journalStore.MarkTransactionPhase(setupLock, changeSetId, phase);
+        }
+        catch (Exception)
+        {
+        }
+
+        return journalStore.Load(changeSetId)?.Phase == phase;
+    }
+
+    private bool EnsureLedgerCompensating(SetupLock setupLock, Guid changeSetId)
+    {
+        var ledger = ledgerStore.Load();
+        var index = FindChangeSet(ledger, changeSetId);
+        var current = ledger.ChangeSets[index];
+        if (current.State == SetupChangeSetState.Compensating)
+        {
+            return true;
+        }
+
+        if (current.State is not (SetupChangeSetState.Planned or SetupChangeSetState.Applying))
+        {
+            return false;
+        }
+
+        var journalRecordIds = journalStore.Load(changeSetId)!.Targets.Select(target => target.RecordId).ToHashSet();
+        var compensating = current with
+        {
+            UpdatedAt = platform.Clock.UtcNow,
+            State = SetupChangeSetState.Compensating,
+            Targets = current.Targets.Select(target => journalRecordIds.Contains(target.RecordId)
+                ? target with
+                {
+                    BackupReference = target.RecordId.ToString("D"),
+                    RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                }
+                : target).ToArray(),
+        };
+        try
+        {
+            SaveChangedSet(setupLock, ledger, index, compensating);
+        }
+        catch (Exception)
+        {
+        }
+
+        return ledgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == changeSetId).State ==
+            SetupChangeSetState.Compensating;
+    }
+
+    private CompensationFailure? CompensateStep(
+        SetupLock setupLock,
+        Guid changeSetId,
+        SetupPrivatePlanTarget target,
+        SetupJournalStep step)
+    {
+        var classification = Classify(target, step);
+        if (classification == CompensationClassification.ThirdParty)
+        {
+            return new CompensationFailure(target.RecordId, SetupCodes.RollbackStale, SetupLedgerRollbackStatus.Stale);
+        }
+
+        if (classification == CompensationClassification.Error)
+        {
+            return new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+        }
+
+        if (step.Phase is SetupJournalStepPhase.MutationStarted or SetupJournalStepPhase.MutationCompleted)
+        {
+            if (!TryMarkStepPhase(
+                    setupLock,
+                    changeSetId,
+                    target.RecordId,
+                    step.MemberKey,
+                    step.Phase,
+                    SetupJournalStepPhase.RestoreStarted))
+            {
+                return new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+            }
+        }
+
+        if (classification == CompensationClassification.Desired)
+        {
+            try
+            {
+                platform.Execution.Checkpoint(SetupFaultPoint.AfterRestoreIntentBeforeRestore);
+                RestoreStep(changeSetId, target, step);
+                platform.Execution.Checkpoint(SetupFaultPoint.AfterRestoreBeforeCompletion);
+            }
+            catch (Exception)
+            {
+                var afterFailure = Classify(target, step);
+                if (afterFailure == CompensationClassification.Prior)
+                {
+                    return TryCompleteRestore(setupLock, changeSetId, target.RecordId, step.MemberKey)
+                        ? null
+                        : new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+                }
+
+                return afterFailure == CompensationClassification.ThirdParty
+                    ? new CompensationFailure(target.RecordId, SetupCodes.RollbackStale, SetupLedgerRollbackStatus.Stale)
+                    : new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+            }
+        }
+
+        return TryCompleteRestore(setupLock, changeSetId, target.RecordId, step.MemberKey)
+            ? null
+            : new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+    }
+
+    private bool TryMarkStepPhase(
+        SetupLock setupLock,
+        Guid changeSetId,
+        Guid recordId,
+        string? memberKey,
+        SetupJournalStepPhase expected,
+        SetupJournalStepPhase next)
+    {
+        try
+        {
+            journalStore.MarkStepPhase(setupLock, changeSetId, recordId, memberKey, expected, next);
+        }
+        catch (Exception)
+        {
+        }
+
+        return ReloadStep(changeSetId, recordId, memberKey).Phase == next;
+    }
+
+    private bool TryCompleteRestore(SetupLock setupLock, Guid changeSetId, Guid recordId, string? memberKey)
+    {
+        try
+        {
+            journalStore.MarkStepPhase(
+                setupLock,
+                changeSetId,
+                recordId,
+                memberKey,
+                SetupJournalStepPhase.RestoreStarted,
+                SetupJournalStepPhase.RestoreCompleted);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private void RestoreStep(Guid changeSetId, SetupPrivatePlanTarget target, SetupJournalStep step)
+    {
+        var backupPath = paths.GetBackup(changeSetId, target.RecordId);
+        if (target.TargetKind == SetupTargetKind.Env)
+        {
+            environmentStep.RestoreMember(
+                step.MemberKey!, backupPath, step.DesiredStateHash, step.PriorStateHash);
+        }
+        else
+        {
+            fileStep.Restore(
+                GetAllowedRoot(target.TargetLocation),
+                target.TargetLocation,
+                backupPath,
+                step.DesiredStateHash,
+                step.PriorStateHash);
+        }
+    }
+
+    private CompensationClassification Classify(SetupPrivatePlanTarget target, SetupJournalStep step)
+    {
+        try
+        {
+            string currentHash;
+            if (target.TargetKind == SetupTargetKind.Env)
+            {
+                currentHash = environmentStep.Capture([step.MemberKey!]).Members[0].Hash;
+            }
+            else
+            {
+                currentHash = fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation).Hash;
+            }
+
+            if (string.Equals(currentHash, step.PriorStateHash, StringComparison.Ordinal))
+            {
+                return CompensationClassification.Prior;
+            }
+
+            return string.Equals(currentHash, step.DesiredStateHash, StringComparison.Ordinal)
+                ? CompensationClassification.Desired
+                : CompensationClassification.ThirdParty;
+        }
+        catch (Exception)
+        {
+            return CompensationClassification.Error;
+        }
+    }
+
+    private CompensationFailure? VerifyAllPrevious(
+        SetupPrivatePlan plan,
+        SetupTransactionJournal journal)
+    {
+        foreach (var journalTarget in journal.Targets)
+        {
+            var target = plan.Targets.Single(candidate => candidate.RecordId == journalTarget.RecordId);
+            try
+            {
+                var matches = target.TargetKind == SetupTargetKind.Env
+                    ? string.Equals(
+                        environmentStep.Capture(target.Members.Select(member => member.SettingKey).ToArray()).AggregateHash,
+                        target.BaseStateHash,
+                        StringComparison.Ordinal)
+                    : string.Equals(
+                        fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation).Hash,
+                        target.BaseStateHash,
+                        StringComparison.Ordinal);
+                if (!matches)
+                {
+                    return new CompensationFailure(target.RecordId, SetupCodes.RollbackStale, SetupLedgerRollbackStatus.Stale);
+                }
+            }
+            catch (Exception)
+            {
+                return new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+            }
+        }
+
+        return null;
+    }
+
+    private void PersistPartial(SetupLock setupLock, Guid changeSetId, CompensationFailure failure)
+    {
+        try
+        {
+            if (journalStore.Load(changeSetId)?.Phase == SetupJournalPhase.Compensating)
+            {
+                journalStore.MarkTransactionPhase(setupLock, changeSetId, SetupJournalPhase.Partial);
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        PersistPartialLedger(setupLock, changeSetId, failure.RecordId, failure.Code, failure.RollbackStatus);
+    }
+
+    private void PersistPartialLedger(
+        SetupLock setupLock,
+        Guid changeSetId,
+        Guid? failedRecordId,
+        string failureCode,
+        SetupLedgerRollbackStatus rollbackStatus)
+    {
+        try
+        {
+            var ledger = ledgerStore.Load();
+            var index = FindChangeSet(ledger, changeSetId);
+            var current = ledger.ChangeSets[index];
+            if (current.State is SetupChangeSetState.Applied or SetupChangeSetState.Restored or
+                SetupChangeSetState.NoChanges or SetupChangeSetState.RolledBack)
+            {
+                return;
+            }
+
+            var partial = current with
+            {
+                UpdatedAt = platform.Clock.UtcNow,
+                OutcomeCode = SetupCodes.PartialApply,
+                State = SetupChangeSetState.Partial,
+                Targets = current.Targets.Select(target => target.RecordId == failedRecordId || failedRecordId is null
+                    ? target with { OutcomeCode = failureCode, RollbackStatus = rollbackStatus }
+                    : target).ToArray(),
+            };
+            SaveChangedSet(setupLock, ledger, index, partial);
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private bool PersistRestoredLedger(SetupLock setupLock, Guid changeSetId, string forwardOutcome)
+    {
+        var ledger = ledgerStore.Load();
+        var index = FindChangeSet(ledger, changeSetId);
+        var current = ledger.ChangeSets[index];
+        var changedRecordIds = journalStore.Load(changeSetId)!.Targets
+            .Select(target => target.RecordId)
+            .ToHashSet();
+        var restored = current with
+        {
+            UpdatedAt = platform.Clock.UtcNow,
+            OutcomeCode = forwardOutcome,
+            State = SetupChangeSetState.Restored,
+            Targets = current.Targets.Select(target => changedRecordIds.Contains(target.RecordId)
+                ? target with
+                {
+                    AppliedStateHash = null,
+                    BackupReference = null,
+                    OutcomeCode = forwardOutcome,
+                    RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
+                }
+                : target).ToArray(),
+        };
+        try
+        {
+            SaveChangedSet(setupLock, ledger, index, restored);
+        }
+        catch (Exception)
+        {
+        }
+
+        return ledgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == changeSetId).State ==
+            SetupChangeSetState.Restored;
+    }
+
+    private SetupJournalStep ReloadStep(Guid changeSetId, Guid recordId, string? memberKey) =>
+        journalStore.Load(changeSetId)!.Targets.Single(target => target.RecordId == recordId).Steps
+            .Single(step => string.Equals(step.MemberKey, memberKey, StringComparison.Ordinal));
+
+    private static int FindChangeSet(SetupOwnershipLedger ledger, Guid changeSetId)
+    {
+        for (var index = 0; index < ledger.ChangeSets.Count; index++)
+        {
+            if (ledger.ChangeSets[index].ChangeSetId == changeSetId)
+            {
+                return index;
+            }
+        }
+
+        throw new SetupApplyException(SetupCodes.InvalidArguments);
+    }
+
+    private static string MapApplyFailure(Exception exception) => exception switch
+    {
+        SetupApplyException applyException when SetupCodes.ResultCodes.Contains(applyException.Code, StringComparer.Ordinal) =>
+            applyException.Code,
+        SetupStorageException storageException => MapStorageCode(storageException.Code),
+        SetupFileStepException fileException => MapMutationCode(fileException.Code),
+        SetupEnvironmentStepException environmentException => MapMutationCode(environmentException.Code),
+        _ => SetupCodes.InternalError,
+    };
 
     private void RunRevalidation(SetupPrivatePlan plan, SetupLedgerChangeSet planned)
     {
@@ -498,4 +960,17 @@ internal sealed class SetupApplyCoordinator
     {
         public bool HasChanges => File is not null ? FileChanged : ChangedMemberIndices.Count > 0;
     }
+
+    private enum CompensationClassification
+    {
+        Prior,
+        Desired,
+        ThirdParty,
+        Error,
+    }
+
+    private sealed record CompensationFailure(
+        Guid? RecordId,
+        string Code,
+        SetupLedgerRollbackStatus RollbackStatus);
 }

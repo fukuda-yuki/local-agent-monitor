@@ -73,13 +73,13 @@ public sealed class SetupApplyTests
     }
 
     [Theory]
-    [InlineData(SetupFaultPoint.AfterJournalPreparedBeforeLedger, SetupChangeSetState.Planned, "Prepared", "Pending")]
-    [InlineData(SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent, SetupChangeSetState.Applying, "Applying", "Pending")]
-    [InlineData(SetupFaultPoint.AfterMutationIntentBeforeMutation, SetupChangeSetState.Applying, "Applying", "MutationStarted")]
-    [InlineData(SetupFaultPoint.AfterMutationBeforeCompletion, SetupChangeSetState.Applying, "Applying", "MutationStarted")]
-    [InlineData(SetupFaultPoint.AfterCompletionBeforeCommit, SetupChangeSetState.Applying, "Applying", "MutationCompleted")]
+    [InlineData(SetupFaultPoint.AfterJournalPreparedBeforeLedger, SetupChangeSetState.Restored, "Restored", "Pending")]
+    [InlineData(SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent, SetupChangeSetState.Restored, "Restored", "Pending")]
+    [InlineData(SetupFaultPoint.AfterMutationIntentBeforeMutation, SetupChangeSetState.Restored, "Restored", "RestoreCompleted")]
+    [InlineData(SetupFaultPoint.AfterMutationBeforeCompletion, SetupChangeSetState.Restored, "Restored", "RestoreCompleted")]
+    [InlineData(SetupFaultPoint.AfterCompletionBeforeCommit, SetupChangeSetState.Restored, "Restored", "RestoreCompleted")]
     [InlineData(SetupFaultPoint.AfterCommitBeforeLedger, SetupChangeSetState.Applying, "Committed", "MutationCompleted")]
-    public void Apply_FaultsLeaveCloseReopenEvidenceAtEachForwardBoundary(
+    public void Apply_FaultsCompensateBeforeCommitAndLeaveCommittedRecoveryEvidenceAfterCommit(
         string faultPoint,
         SetupChangeSetState expectedLedgerState,
         string expectedJournalPhase,
@@ -180,7 +180,7 @@ public sealed class SetupApplyTests
     }
 
     [Fact]
-    public async Task Apply_FinalDesiredRacePreventsCommitAndLeavesDurableForwardEvidence()
+    public async Task Apply_FinalDesiredRacePreservesThirdPartyStateAndRecordsPartialCompensation()
     {
         var fixture = ApplyFixture.Create();
         using var barrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterMutationBeforeCompletion}");
@@ -193,18 +193,18 @@ public sealed class SetupApplyTests
         barrier.Release();
 
         var exception = await applying;
-        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(SetupCodes.PartialApply, exception.Code);
         var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
-        Assert.Equal(SetupJournalPhase.Applying, journal.Phase);
-        Assert.All(journal.Targets.SelectMany(target => target.Steps),
-            step => Assert.Equal(SetupJournalStepPhase.MutationCompleted, step.Phase));
-        Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet().State);
+        Assert.Equal(SetupJournalPhase.Partial, journal.Phase);
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
         Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
         Assert.Equal("third-party", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
     }
 
     [Fact]
-    public async Task Apply_ImmediatePreWriteRaceIsPreservedWithStartedEvidenceAndFixedFailure()
+    public async Task Apply_ImmediatePreWriteRaceIsPreservedAsPartialWithoutLaterWrites()
     {
         var fixture = ApplyFixture.Create();
         using var barrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}");
@@ -217,11 +217,12 @@ public sealed class SetupApplyTests
         barrier.Release();
 
         var exception = await applying;
-        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(SetupCodes.PartialApply, exception.Code);
         Assert.Equal("third-party", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
         var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
-        Assert.Equal(SetupJournalPhase.Applying, journal.Phase);
+        Assert.Equal(SetupJournalPhase.Partial, journal.Phase);
         Assert.Equal(SetupJournalStepPhase.MutationStarted, journal.Targets[0].Steps[0].Phase);
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
         Assert.DoesNotContain(fixture.Platform.Operations, operation => operation.StartsWith("environment.set:", StringComparison.Ordinal));
         Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
     }
@@ -412,12 +413,12 @@ public sealed class SetupApplyTests
         barrier.Release();
 
         var exception = await applying;
-        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(SetupCodes.PartialApply, exception.Code);
         Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_A"));
-        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_B"));
-        Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet().State);
+        Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
         var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
-        Assert.Equal(SetupJournalPhase.Applying, journal.Phase);
+        Assert.Equal(SetupJournalPhase.Partial, journal.Phase);
         Assert.Equal(["ENV_B"], journal.Targets.Single().Steps.Select(step => step.MemberKey));
         Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
     }
