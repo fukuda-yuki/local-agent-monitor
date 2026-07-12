@@ -103,7 +103,10 @@ Own `Setup/Transactions/SetupPathPolicy.cs`, `SetupHash.cs`,
 `AtomicFileSetupStep.cs`, and `tests/.../SetupFileStepTests.cs`. RED/GREEN filter
 `SetupFileStepTests`. Cover missing versus empty hashes, traversal/UNC/device/
 reparse rejection, same-directory temp+flush+replace, backup restore, and faults
-before/after each boundary. Commit:
+before/after each boundary. Failure paths never delete a temp pathname; a
+rebinding callback proves foreign replacement bytes survive. Native metadata
+tests cover read-only regular files, links, FIFO, socket, and character devices
+on Windows/Linux/macOS; another OS fails closed. Commit:
 `Issue #66: feat: add atomic setup file step`.
 
 ### Task 4 — Current-user environment member step

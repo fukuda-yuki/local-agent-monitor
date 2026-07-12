@@ -469,6 +469,15 @@ New files use an atomic same-directory move. Root, ancestor, and target symlink,
 junction, or reparse-point paths are rejected before plan, apply, compensation,
 and rollback. Absolute paths remain private and are never returned.
 
+Path metadata classification is no-follow and permission-independent. Only an
+actual regular file is a file target; FIFO, socket, character/block device, and
+symlink are rejected without opening their content. Windows, Linux, and macOS
+use native metadata-only classification; another OS fails closed. A failed
+create/flush/revalidation/replace/move never deletes a temporary pathname: its
+identity may have been rebound by another actor. Successful replace/move
+consumes the temp; interrupted-transaction recovery relies on journaled target
+state and never on pathname cleanup of a temp orphan.
+
 User environment mutation uses the current-user API only
 (`EnvironmentVariableTarget.User` / HKCU user environment), broadcasts one
 environment-change notification attempt on an uninterrupted path only after the
@@ -669,6 +678,11 @@ Focused validation covers:
 - deterministic stale apply/rollback and lock contention;
 - file faults before intent, after intent, after replace, and after completion,
   followed by close/reopen recovery;
+- temp-path rebinding after create/flush preserves foreign bytes and performs no
+  failure-path pathname deletion;
+- native no-follow metadata classifies read-only regular files, symlinks,
+  dangling links, FIFO, Unix sockets, and character devices on each supported
+  OS family;
 - per-environment-member faults before/after intent, write, and completion,
   including missing/present-empty state and unrelated-key preservation;
 - third-party file/member state during recovery is preserved and yields partial;

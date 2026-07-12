@@ -15,6 +15,7 @@ Updated: 2026-07-12
 | Runtime paths and exclusive lock (Task 2b) | #66 | Complete | `9d962ff..ed820bb` | SetupRuntimeTests 8/8; SetupPlatformTests 20/20; ConfigCli 477/477 | Spec PASS; Quality/Security APPROVED after cross-process test re-audit | Linux/macOS runtime not executed on Windows host; mandatory cross-platform test no longer skips |
 | Private plan and ledger v1 stores (Task 2c) | #66 | Complete | `0daee69..dcb7191` | SetupStorageTests 44/44; all Setup 193/193; ConfigCli 521/521; build 0/0 | Spec PASS; Quality/Security APPROVED | private desired-state schema is text JSON/env focused; binary expansion requires future schema |
 | JSONC and bounded TOML codecs (Task 3a) | #66 | Complete | `93398bb..97f757f` | SetupDocumentTests 51/51; ConfigSamplesTests 49/49; all Setup 244/244; ConfigCli 572/572 | Spec PASS; Quality/Security APPROVED | JSONC BOM handling deferred to file layer; bounded TOML non-goals explicit |
+| Path/hash/atomic file step (Task 3b) | #66 | Re-audit fix in progress | `291b3bf..32e8e4a` | SetupFileStepTests 61/61; SetupPlatformTests 25/25; ConfigCli 638/638 before re-audit fix | second review CHANGES_REQUIRED; architecture/security re-audit complete | native Linux/macOS special-file execution not available on Windows host |
 | Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
 | Atomic file mutation | #66 | Pending | - | - | - | - |
 | User environment mutation | #66 | Pending | - | - | - | - |

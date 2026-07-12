@@ -759,11 +759,16 @@ static artifacts, docs, Issues/PRs, or committed files.
 Automatic cleanup is outside Issues #66/#67; DB/log/telemetry runtime data is
 never removed by configuration rollback.
 
-File targets require a regular non-reparse target and non-reparse ancestry.
+File targets require no-follow metadata proving a regular non-reparse target
+and non-reparse ancestry from the filesystem root. Classification never opens
+FIFO/socket/device content or requires write permission. Unsupported operating
+systems fail closed.
 Path traversal, UNC/device/URI targets, symlink/junction/reparse points, and
 malformed structured configuration fail closed. Apply creates and flushes a
 backup and same-directory temporary file before atomic replacement. Every plan
 base hash is revalidated before the first write and again at each mutation.
+After a temp-path failure, setup never unlinks that pathname because another
+actor may have rebound it. Recovery uses journaled target state, not temp cleanup.
 Rollback requires the current post-apply hash; force rollback does not exist.
 
 Current-user environment writes use the user environment API only, never
