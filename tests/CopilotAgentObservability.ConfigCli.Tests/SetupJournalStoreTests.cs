@@ -30,12 +30,201 @@ public sealed class SetupJournalStoreTests
         Assert.Equal(1, created.SchemaVersion);
         Assert.Equal(CreatedAt, created.CreatedAt);
         Assert.Equal(SetupJournalPhase.Prepared, created.Phase);
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, created.EnvironmentNotification);
         Assert.Equal(operation, reopened!.Operation);
         Assert.Equal(2, reopened.Targets.Count);
         Assert.Single(reopened.Targets[0].Steps);
         Assert.Equal(new[] { "COPILOT_A", "COPILOT_B" }, reopened.Targets[1].Steps.Select(step => step.MemberKey));
         Assert.All(reopened.Targets.SelectMany(target => target.Steps), step => Assert.Equal(SetupJournalStepPhase.Pending, step.Phase));
         Assert.DoesNotContain("previous-value", Encoding.UTF8.GetString(context.Platform.ReadSeededFile(context.Paths.GetTransactionJournal(ChangeSetId))), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MarkStepPhase_FirstEnvironmentWriteAtomicallyRecordsPendingNotificationButFileWriteDoesNot()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, context.Store.Load(ChangeSetId)!.EnvironmentNotification);
+
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, EnvironmentRecordId, "COPILOT_A",
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
+
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!;
+        Assert.Equal(SetupEnvironmentNotification.Pending, reopened.EnvironmentNotification);
+        Assert.Equal(SetupJournalStepPhase.MutationStarted, reopened.Targets[1].Steps[0].Phase);
+    }
+
+    [Fact]
+    public void MarkStepPhase_FirstRollbackEnvironmentRestoreAtomicallyRecordsPendingNotification()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Rollback, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.RollingBack);
+
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, EnvironmentRecordId, "COPILOT_A",
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted);
+
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!;
+        Assert.Equal(SetupEnvironmentNotification.Pending, reopened.EnvironmentNotification);
+        Assert.Equal(SetupJournalStepPhase.RestoreStarted, reopened.Targets[1].Steps[0].Phase);
+    }
+
+    [Fact]
+    public void MarkEnvironmentNotificationCompleted_RequiresLiveLockPendingNotificationAndTerminalPhase()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        CompleteAllSteps(context, mutation: true);
+
+        Assert.Equal(SetupJournalStorageCodes.TransitionInvalid, Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId)).Code);
+
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Committed);
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+
+        Assert.Equal(
+            SetupEnvironmentNotification.Completed,
+            new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!.EnvironmentNotification);
+        Assert.Equal(SetupJournalStorageCodes.StaleUpdate, Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId)).Code);
+    }
+
+    [Fact]
+    public void MarkEnvironmentNotificationCompleted_RequiresLiveSameRuntimeLock()
+    {
+        var context = CreateCommittedApplyContext();
+        var foreignPlatform = new SetupTestPlatform(CreatedAt, "D:\\foreign");
+        var foreignPaths = new SetupRuntimePaths(foreignPlatform);
+        using var foreignAcquire = SetupLock.TryAcquire(foreignPlatform, foreignPaths);
+
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkEnvironmentNotificationCompleted(foreignAcquire.Lock!, ChangeSetId)).Code);
+
+        context.Lock.Dispose();
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId)).Code);
+    }
+
+    [Fact]
+    public void ApplyRestored_AllowsPendingAndRestoreCompletedStepsIncludingAllPending()
+    {
+        var allPending = CreateContext();
+        allPending.Store.CreatePrepared(allPending.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        allPending.Store.MarkTransactionPhase(allPending.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        allPending.Store.MarkTransactionPhase(allPending.Lock, ChangeSetId, SetupJournalPhase.Compensating);
+        allPending.Store.MarkTransactionPhase(allPending.Lock, ChangeSetId, SetupJournalPhase.Restored);
+        Assert.Equal(SetupJournalPhase.Restored, new SetupTransactionJournalStore(allPending.Platform, allPending.Paths).Load(ChangeSetId)!.Phase);
+
+        var mixed = CreateContext();
+        mixed.Store.CreatePrepared(mixed.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        mixed.Store.MarkTransactionPhase(mixed.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        mixed.Store.MarkStepPhase(mixed.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
+        mixed.Store.MarkTransactionPhase(mixed.Lock, ChangeSetId, SetupJournalPhase.Compensating);
+        mixed.Store.MarkStepPhase(mixed.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.MutationStarted, SetupJournalStepPhase.RestoreStarted);
+        mixed.Store.MarkStepPhase(mixed.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+        mixed.Store.MarkTransactionPhase(mixed.Lock, ChangeSetId, SetupJournalPhase.Restored);
+
+        Assert.Equal(
+            new[] { SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.Pending, SetupJournalStepPhase.Pending },
+            new SetupTransactionJournalStore(mixed.Platform, mixed.Paths).Load(ChangeSetId)!.Targets.SelectMany(target => target.Steps).Select(step => step.Phase));
+    }
+
+    [Theory]
+    [InlineData(SetupJournalStepPhase.MutationStarted)]
+    [InlineData(SetupJournalStepPhase.MutationCompleted)]
+    [InlineData(SetupJournalStepPhase.RestoreStarted)]
+    public void ApplyRestored_RejectsInFlightStepPhasesWithoutWrite(object stepPhaseValue)
+    {
+        var stepPhase = (SetupJournalStepPhase)stepPhaseValue;
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
+        if (stepPhase == SetupJournalStepPhase.MutationCompleted)
+        {
+            context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null,
+                SetupJournalStepPhase.MutationStarted, SetupJournalStepPhase.MutationCompleted);
+        }
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Compensating);
+        if (stepPhase == SetupJournalStepPhase.RestoreStarted)
+        {
+            context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null,
+                SetupJournalStepPhase.MutationStarted, SetupJournalStepPhase.RestoreStarted);
+        }
+        var before = context.Platform.ReadSeededFile(context.Paths.GetTransactionJournal(ChangeSetId));
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Restored));
+
+        Assert.Equal(SetupJournalStorageCodes.TransitionInvalid, exception.Code);
+        Assert.Equal(before, context.Platform.ReadSeededFile(context.Paths.GetTransactionJournal(ChangeSetId)));
+    }
+
+    [Fact]
+    public void CompensatingApply_RejectsPendingToRestoreStartedWithoutWrite()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Compensating);
+        var before = context.Platform.ReadSeededFile(context.Paths.GetTransactionJournal(ChangeSetId));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.MarkStepPhase(
+            context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted));
+
+        Assert.Equal(SetupJournalStorageCodes.TransitionInvalid, exception.Code);
+        Assert.Equal(before, context.Platform.ReadSeededFile(context.Paths.GetTransactionJournal(ChangeSetId)));
+    }
+
+    [Fact]
+    public void RestoredApply_CanDurablyCompletePendingEnvironmentNotification()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, EnvironmentRecordId, "COPILOT_A",
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Compensating);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, EnvironmentRecordId, "COPILOT_A",
+            SetupJournalStepPhase.MutationStarted, SetupJournalStepPhase.RestoreStarted);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, EnvironmentRecordId, "COPILOT_A",
+            SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Restored);
+
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Restored, reopened.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Completed, reopened.EnvironmentNotification);
+    }
+
+    [Fact]
+    public void PartialTransaction_NeverCompletesPendingEnvironmentNotification()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, EnvironmentRecordId, "COPILOT_A",
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Compensating);
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Partial);
+        var before = context.Platform.ReadSeededFile(context.Paths.GetTransactionJournal(ChangeSetId));
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId));
+
+        Assert.Equal(SetupJournalStorageCodes.TransitionInvalid, exception.Code);
+        Assert.Equal(before, context.Platform.ReadSeededFile(context.Paths.GetTransactionJournal(ChangeSetId)));
     }
 
     [Fact]
@@ -272,10 +461,40 @@ public sealed class SetupJournalStoreTests
             { valid.Replace("\"schema_version\": 1", "\"schema_version\": 2", StringComparison.Ordinal), SetupJournalStorageCodes.VersionUnsupported },
             { valid.Replace("\"schema_version\": 1", "\"schema_version\": null", StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
             { valid.Replace("\"operation\": \"apply\"", "\"operation\": 1", StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
+            { valid.Replace("\"environment_notification\": \"not_required\",", string.Empty, StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
+            { valid.Replace("\"environment_notification\": \"not_required\"", "\"environment_notification\": null", StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
+            { valid.Replace("\"environment_notification\": \"not_required\"", "\"environment_notification\": \"unknown\"", StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
+            { valid.Replace("\"environment_notification\": \"not_required\"", "\"environment_notification\": \"not_required\", \"environment_notification\": \"pending\"", StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
             { valid.Replace("\"phase\": \"prepared\"", "\"phase\": \"prepared\", \"PRIVATE_PATH_MARKER\": true", StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
             { valid.Replace("\"phase\": \"prepared\"", "\"phase\": \"prepared\", \"phase\": \"prepared\"", StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
             { valid.Replace("\"schema_version\": 1", "\"schema_version\": 1, \"schema_version\": 2", StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
         };
+    }
+
+    [Theory]
+    [InlineData("pending", "pending")]
+    [InlineData("completed", "pending")]
+    [InlineData("not_required", "mutation_started")]
+    public void Load_RejectsImpossibleNotificationStateWithFixedNonEchoError(string notification, string environmentStepPhase)
+    {
+        var json = ValidJson()
+            .Replace("\"environment_notification\": \"not_required\"", $"\"environment_notification\": \"{notification}\"", StringComparison.Ordinal);
+        if (environmentStepPhase != "pending")
+        {
+            var marker = "\"member_key\": \"COPILOT_A\"";
+            var member = json.IndexOf(marker, StringComparison.Ordinal);
+            var phase = json.IndexOf("\"phase\": \"pending\"", member, StringComparison.Ordinal);
+            json = json.Remove(phase, "\"phase\": \"pending\"".Length).Insert(phase, $"\"phase\": \"{environmentStepPhase}\"");
+        }
+        var transactionPhase = json.IndexOf("\"phase\": \"prepared\"", StringComparison.Ordinal);
+        json = json.Remove(transactionPhase, "\"phase\": \"prepared\"".Length).Insert(transactionPhase, "\"phase\": \"applying\"");
+
+        var context = CreateContext();
+        context.Platform.SeedFile(context.Paths.GetTransactionJournal(ChangeSetId), Encoding.UTF8.GetBytes(json));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.Load(ChangeSetId));
+        Assert.Equal(SetupJournalStorageCodes.Corrupt, exception.Code);
+        Assert.DoesNotContain("PRIVATE_PATH_MARKER", exception.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -285,7 +504,7 @@ public sealed class SetupJournalStoreTests
         using var document = JsonDocument.Parse(ValidJson());
         var root = document.RootElement;
         var reordered = $$"""
-            {"targets":{{root.GetProperty("targets").GetRawText()}},"phase":"prepared","created_at":"2026-07-12T01:02:03.0000000Z","operation":"apply","change_set_id":"{{ChangeSetId:D}}","schema_version":1}
+            {"targets":{{root.GetProperty("targets").GetRawText()}},"environment_notification":"not_required","phase":"prepared","created_at":"2026-07-12T01:02:03.0000000Z","operation":"apply","change_set_id":"{{ChangeSetId:D}}","schema_version":1}
             """;
         context.Platform.SeedFile(context.Paths.GetTransactionJournal(ChangeSetId), Encoding.UTF8.GetBytes(reordered));
 
@@ -420,6 +639,97 @@ public sealed class SetupJournalStoreTests
         {
             Assert.True(context.Platform.FileSystem.FileExists(temporary));
         }
+    }
+
+    [Theory]
+    [InlineData("write", false)]
+    [InlineData("write", true)]
+    [InlineData("flush", false)]
+    [InlineData("flush", true)]
+    [InlineData("replace", false)]
+    [InlineData("replace", true)]
+    public void EnvironmentPromotion_FaultBoundaryReopensAsCompleteOldOrNewPair(string boundary, bool afterEffect)
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var temporary = Temporary(destination, 3);
+        var operation = boundary switch
+        {
+            "write" => $"file.write-new:{temporary}",
+            "flush" => $"file.flush:{temporary}",
+            _ => $"file.replace:{temporary}->{destination}",
+        };
+        InjectFault(context.Platform, operation, afterEffect);
+
+        Assert.Throws<SetupStorageException>(() => context.Store.MarkStepPhase(
+            context.Lock, ChangeSetId, EnvironmentRecordId, "COPILOT_A",
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted));
+
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!;
+        var newPair = boundary == "replace" && afterEffect;
+        Assert.Equal(newPair ? SetupJournalStepPhase.MutationStarted : SetupJournalStepPhase.Pending, reopened.Targets[1].Steps[0].Phase);
+        Assert.Equal(newPair ? SetupEnvironmentNotification.Pending : SetupEnvironmentNotification.NotRequired, reopened.EnvironmentNotification);
+        if (afterEffect && boundary != "replace")
+        {
+            Assert.True(context.Platform.FileSystem.FileExists(temporary));
+        }
+    }
+
+    [Theory]
+    [InlineData("write", false)]
+    [InlineData("write", true)]
+    [InlineData("flush", false)]
+    [InlineData("flush", true)]
+    [InlineData("replace", false)]
+    [InlineData("replace", true)]
+    public void NotificationCompletion_FaultBoundaryReopensAsPendingOrCompleted(string boundary, bool afterEffect)
+    {
+        var context = CreateCommittedApplyContext();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var temporary = Temporary(destination, 10);
+        var operation = boundary switch
+        {
+            "write" => $"file.write-new:{temporary}",
+            "flush" => $"file.flush:{temporary}",
+            _ => $"file.replace:{temporary}->{destination}",
+        };
+        InjectFault(context.Platform, operation, afterEffect);
+
+        Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId));
+
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!;
+        Assert.Equal(
+            boundary == "replace" && afterEffect ? SetupEnvironmentNotification.Completed : SetupEnvironmentNotification.Pending,
+            reopened.EnvironmentNotification);
+        if (afterEffect && boundary != "replace")
+        {
+            Assert.True(context.Platform.FileSystem.FileExists(temporary));
+        }
+    }
+
+    [Fact]
+    public void NotificationCompletion_PreReplaceFaultCanRetryWithoutReusingOrDeletingReboundOrphan()
+    {
+        var context = CreateCommittedApplyContext();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var orphan = Temporary(destination, 10);
+        context.Platform.InjectFault($"file.replace:{orphan}->{destination}", new IOException("PRIVATE_PATH_MARKER"));
+
+        Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId));
+        var reboundBytes = Encoding.UTF8.GetBytes("rebound-orphan");
+        context.Platform.SeedFile(orphan, reboundBytes);
+
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths);
+        reopened.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+
+        Assert.Equal(reboundBytes, context.Platform.ReadSeededFile(orphan));
+        Assert.Equal(SetupEnvironmentNotification.Completed, reopened.Load(ChangeSetId)!.EnvironmentNotification);
+        Assert.Contains($"file.replace:{Temporary(destination, 11)}->{destination}", context.Platform.Operations);
+        Assert.DoesNotContain($"file.delete:{orphan}", context.Platform.Operations);
     }
 
     [Fact]
@@ -604,6 +914,16 @@ public sealed class SetupJournalStoreTests
         var paths = new SetupRuntimePaths(platform);
         var acquired = SetupLock.TryAcquire(platform, paths);
         return new TestContext(platform, paths, acquired.Lock!, new SetupTransactionJournalStore(platform, paths));
+    }
+
+    private static TestContext CreateCommittedApplyContext()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        CompleteAllSteps(context, mutation: true);
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Committed);
+        return context;
     }
 
     private static void InjectFault(SetupTestPlatform platform, string operation, bool afterEffect)

@@ -40,13 +40,21 @@ internal enum SetupJournalStepPhase
     RestoreCompleted,
 }
 
+internal enum SetupEnvironmentNotification
+{
+    NotRequired,
+    Pending,
+    Completed,
+}
+
 internal sealed record SetupTransactionJournal(
     int SchemaVersion,
     Guid ChangeSetId,
     SetupJournalOperation Operation,
     DateTimeOffset CreatedAt,
     SetupJournalPhase Phase,
-    IReadOnlyList<SetupJournalTarget> Targets);
+    IReadOnlyList<SetupJournalTarget> Targets,
+    SetupEnvironmentNotification EnvironmentNotification = SetupEnvironmentNotification.NotRequired);
 
 internal sealed record SetupJournalTarget(
     Guid RecordId,
@@ -188,7 +196,29 @@ internal sealed partial class SetupTransactionJournalStore
         steps[stepIndex] = step with { Phase = nextPhase };
         var targets = journal.Targets.ToArray();
         targets[targetIndex] = target with { Steps = steps };
-        Save(journal with { Targets = targets });
+        var notification = target.TargetKind == SetupTargetKind.Env &&
+            nextPhase is SetupJournalStepPhase.MutationStarted or SetupJournalStepPhase.RestoreStarted &&
+            journal.EnvironmentNotification == SetupEnvironmentNotification.NotRequired
+                ? SetupEnvironmentNotification.Pending
+                : journal.EnvironmentNotification;
+        Save(journal with { Targets = targets, EnvironmentNotification = notification });
+    }
+
+    public void MarkEnvironmentNotificationCompleted(SetupLock setupLock, Guid changeSetId)
+    {
+        setupLock.AssertHeld(platform, paths);
+        var journal = LoadRequired(changeSetId);
+        if (journal.EnvironmentNotification != SetupEnvironmentNotification.Pending)
+        {
+            throw new SetupStorageException(SetupJournalStorageCodes.StaleUpdate);
+        }
+
+        if (journal.Phase is not (SetupJournalPhase.Committed or SetupJournalPhase.Restored))
+        {
+            throw new SetupStorageException(SetupJournalStorageCodes.TransitionInvalid);
+        }
+
+        Save(journal with { EnvironmentNotification = SetupEnvironmentNotification.Completed });
     }
 
     private void Save(SetupTransactionJournal journal)
@@ -298,12 +328,12 @@ internal sealed partial class SetupTransactionJournalStore
             return true;
         }
 
-        var phases = journal.Targets.SelectMany(target => target.Steps).Select(step => step.Phase).Distinct().ToArray();
-        return phases.Length == 1 && (journal.Phase == SetupJournalPhase.Restored
-            ? journal.Operation == SetupJournalOperation.Apply && phases[0] == SetupJournalStepPhase.RestoreCompleted
+        var phases = journal.Targets.SelectMany(target => target.Steps).Select(step => step.Phase).ToArray();
+        return journal.Phase == SetupJournalPhase.Restored
+            ? journal.Operation == SetupJournalOperation.Apply && phases.All(phase => phase is SetupJournalStepPhase.Pending or SetupJournalStepPhase.RestoreCompleted)
             : journal.Operation == SetupJournalOperation.Rollback
-                ? phases[0] == SetupJournalStepPhase.RestoreCompleted
-                : phases[0] == SetupJournalStepPhase.MutationCompleted);
+                ? phases.All(phase => phase == SetupJournalStepPhase.RestoreCompleted)
+                : phases.All(phase => phase == SetupJournalStepPhase.MutationCompleted);
     }
 
     private static byte[] Serialize(SetupTransactionJournal journal)
@@ -317,6 +347,7 @@ internal sealed partial class SetupTransactionJournalStore
             writer.WriteString("operation", Operation(journal.Operation));
             writer.WriteString("created_at", SetupStorageJson.FormatTimestamp(journal.CreatedAt));
             writer.WriteString("phase", Phase(journal.Phase));
+            writer.WriteString("environment_notification", EnvironmentNotification(journal.EnvironmentNotification));
             writer.WritePropertyName("targets");
             writer.WriteStartArray();
             foreach (var target in journal.Targets)
@@ -357,7 +388,7 @@ internal sealed partial class SetupTransactionJournalStore
             throw new FormatException();
         }
 
-        SetupStorageJson.RequireProperties(root, "schema_version", "change_set_id", "operation", "created_at", "phase", "targets");
+        SetupStorageJson.RequireProperties(root, "schema_version", "change_set_id", "operation", "created_at", "phase", "environment_notification", "targets");
         var versionElement = root.GetProperty("schema_version");
         if (versionElement.ValueKind != JsonValueKind.Number)
         {
@@ -398,7 +429,8 @@ internal sealed partial class SetupTransactionJournalStore
             ParseOperation(SetupStorageJson.GetString(root, "operation")),
             SetupStorageJson.ParseTimestamp(SetupStorageJson.GetString(root, "created_at")),
             ParsePhase(SetupStorageJson.GetString(root, "phase")),
-            targets);
+            targets,
+            ParseEnvironmentNotification(SetupStorageJson.GetString(root, "environment_notification")));
         Validate(journal);
         return journal;
     }
@@ -422,6 +454,7 @@ internal sealed partial class SetupTransactionJournalStore
         Require(Enum.IsDefined(journal.Operation));
         Require(journal.CreatedAt.Offset == TimeSpan.Zero);
         Require(Enum.IsDefined(journal.Phase));
+        Require(Enum.IsDefined(journal.EnvironmentNotification));
         var targets = journal.Targets ?? throw new FormatException();
         Require(targets.Count is >= 1 and <= 16);
         Require(targets.Select(target => target?.RecordId).Distinct().Count() == targets.Count);
@@ -455,6 +488,23 @@ internal sealed partial class SetupTransactionJournalStore
             }
         }
 
+        var environmentSteps = targets
+            .Where(target => target.TargetKind == SetupTargetKind.Env)
+            .SelectMany(target => target.Steps)
+            .ToArray();
+        if (journal.EnvironmentNotification == SetupEnvironmentNotification.NotRequired)
+        {
+            Require(environmentSteps.All(step => step.Phase == SetupJournalStepPhase.Pending));
+        }
+        else
+        {
+            Require(environmentSteps.Any(step => step.Phase != SetupJournalStepPhase.Pending));
+        }
+        if (journal.EnvironmentNotification == SetupEnvironmentNotification.Completed)
+        {
+            Require(journal.Phase is SetupJournalPhase.Committed or SetupJournalPhase.Restored);
+        }
+
         if (journal.Phase is SetupJournalPhase.Committed or SetupJournalPhase.Restored)
         {
             Require(IsTerminalCoherent(journal));
@@ -473,7 +523,7 @@ internal sealed partial class SetupTransactionJournalStore
         SetupJournalPhase.RollingBack => operation == SetupJournalOperation.Rollback && stepPhase is
             SetupJournalStepPhase.Pending or SetupJournalStepPhase.RestoreStarted or SetupJournalStepPhase.RestoreCompleted,
         SetupJournalPhase.Committed => true,
-        SetupJournalPhase.Restored => operation == SetupJournalOperation.Apply && stepPhase == SetupJournalStepPhase.RestoreCompleted,
+        SetupJournalPhase.Restored => operation == SetupJournalOperation.Apply && stepPhase is SetupJournalStepPhase.Pending or SetupJournalStepPhase.RestoreCompleted,
         SetupJournalPhase.Partial => operation == SetupJournalOperation.Apply
             ? stepPhase is SetupJournalStepPhase.Pending or SetupJournalStepPhase.MutationStarted or SetupJournalStepPhase.MutationCompleted or SetupJournalStepPhase.RestoreStarted or SetupJournalStepPhase.RestoreCompleted
             : stepPhase is SetupJournalStepPhase.Pending or SetupJournalStepPhase.RestoreStarted or SetupJournalStepPhase.RestoreCompleted,
@@ -529,6 +579,22 @@ internal sealed partial class SetupTransactionJournalStore
         "committed" => SetupJournalPhase.Committed,
         "restored" => SetupJournalPhase.Restored,
         "partial" => SetupJournalPhase.Partial,
+        _ => throw new FormatException(),
+    };
+
+    private static string EnvironmentNotification(SetupEnvironmentNotification notification) => notification switch
+    {
+        SetupEnvironmentNotification.NotRequired => "not_required",
+        SetupEnvironmentNotification.Pending => "pending",
+        SetupEnvironmentNotification.Completed => "completed",
+        _ => throw new FormatException(),
+    };
+
+    private static SetupEnvironmentNotification ParseEnvironmentNotification(string notification) => notification switch
+    {
+        "not_required" => SetupEnvironmentNotification.NotRequired,
+        "pending" => SetupEnvironmentNotification.Pending,
+        "completed" => SetupEnvironmentNotification.Completed,
         _ => throw new FormatException(),
     };
 
