@@ -1,5 +1,7 @@
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
@@ -26,7 +28,42 @@ public sealed class SetupContractValidationTests
 
         var json = SetupJson.Serialize(CreatePlanResult([target]));
 
-        Assert.Contains(manifest.RootElement.GetProperty("source_surface").GetString()!, json, StringComparison.Ordinal);
+        using var serialized = JsonDocument.Parse(json);
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(serialized.RootElement.GetProperty("targets")[0].GetProperty("expected_result")));
+    }
+
+    [Theory]
+    [InlineData("signal")]
+    [InlineData("source_adapter")]
+    [InlineData("array_order")]
+    public void Serialize_WhenExpectedResultDiffersFromCanonicalManifest_RejectsWithoutEchoingIt(string mutation)
+    {
+        using var manifest = JsonDocument.Parse(File.ReadAllText(GetManifestPath("github-copilot-vscode.json")));
+        var node = JsonNode.Parse(manifest.RootElement.GetRawText())!.AsObject();
+        switch (mutation)
+        {
+            case "signal":
+                node["signals"]!["trace"]!["availability"] = "unknown";
+                break;
+            case "source_adapter":
+                node["source_adapter"] = "otel-http";
+                break;
+            case "array_order":
+                var statuses = node["completeness"]!["statuses"]!.AsArray();
+                var first = statuses[0]!.DeepClone();
+                statuses[0] = statuses[1]!.DeepClone();
+                statuses[1] = first;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mutation));
+        }
+
+        using var candidate = JsonDocument.Parse(node.ToJsonString());
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { ExpectedResult = candidate.RootElement.Clone() };
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(CreatePlanResult([target])));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
     }
 
     [Theory]
@@ -117,6 +154,23 @@ public sealed class SetupContractValidationTests
         var json = SetupJson.Serialize(result);
 
         Assert.Contains(endpoint, json, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("http://127.0.0.1")]
+    [InlineData("http://localhost/")]
+    [InlineData("http://[::1]:4320/")]
+    [InlineData("http://127.0.0.1:4320/v1/traces")]
+    [InlineData("http://127.0.0.1:4320/%2e")]
+    [InlineData("http://127.0.0.1.:4320")]
+    [InlineData("http://127.0.0.2:4320")]
+    public void Serialize_WhenEndpointIsNotCanonicalExplicitLoopbackOrigin_Rejects(string endpoint)
+    {
+        var result = CreatePlanResult([CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { Endpoint = endpoint }]);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
     }
 
     [Theory]
@@ -440,6 +494,28 @@ public sealed class SetupContractValidationTests
     }
 
     [Fact]
+    public void Serialize_WhenStatusCreatedAtIsAfterUpdatedAt_Rejects()
+    {
+        var status = CreateAppliedStatus("2026-07-12T00:01:00Z", "2026-07-12T00:00:00Z");
+        var result = new SetupCommandResult(SetupCommand.Status, true, SetupCodes.StatusReady, null, null, null, "github-copilot", [], [status], [], [], false);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
+    }
+
+    [Fact]
+    public void Serialize_WhenStatusCreatedAtEqualsUpdatedAt_PreservesSerialization()
+    {
+        var status = CreateAppliedStatus("2026-07-12T00:00:00Z", "2026-07-12T00:00:00Z");
+        var result = new SetupCommandResult(SetupCommand.Status, true, SetupCodes.StatusReady, null, null, null, "github-copilot", [], [status], [], [], false);
+
+        var json = SetupJson.Serialize(result);
+
+        Assert.Contains("\"updated_at\":\"2026-07-12T00:00:00Z\"", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Serialize_ValidStatusFixture_PreservesSerialization()
     {
         var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
@@ -471,6 +547,11 @@ public sealed class SetupContractValidationTests
         "00000000-0000-7000-8000-000000000001", SetupTargetKind.Guidance, "app-sdk-guidance", false, null,
         SetupOperation.NoOp, null, null, null, SetupRestartRequirement.None, false, null, null,
         new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), []);
+
+    private static SetupChangeSetStatusResult CreateAppliedStatus(string createdAt, string updatedAt) => new(
+        "00000000-0000-7000-8000-000000000003", "github-copilot", "all", createdAt, updatedAt,
+        SetupChangeSetState.Applied, null, SetupCurrentState.Current, true,
+        [CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { ReferenceState = SetupReferenceState.Desired, CurrentState = SetupCurrentState.Current }]);
 
     private static string GetManifestPath(string manifestFileName) => Path.Combine(
         AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "specifications", "contracts", "source-capabilities", "v1", "manifests", manifestFileName);

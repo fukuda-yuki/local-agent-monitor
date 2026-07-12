@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Contracts;
 
@@ -38,6 +39,9 @@ public static class SetupContractValidator
     private static readonly Regex Timestamp = new(
         "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,7})?Z$",
         RegexOptions.CultureInvariant);
+    private static readonly Regex CanonicalLoopbackEndpoint = new(
+        "^http://(?:127\\.0\\.0\\.1|localhost|\\[::1\\]):([1-9][0-9]{0,4})$",
+        RegexOptions.CultureInvariant);
 
     private static readonly HashSet<string> SuccessCodes = new(StringComparer.Ordinal)
     {
@@ -72,16 +76,6 @@ public static class SetupContractValidator
         SetupCodes.ReviewContentCaptureWarning,
         SetupCodes.RunFirstTraceDoctor,
         SetupCodes.RerunRequestedSetupCommand,
-    };
-
-    private static readonly HashSet<string> AvailabilityValues = new(StringComparer.Ordinal)
-    {
-        "available", "unavailable", "unknown",
-    };
-
-    private static readonly HashSet<string> GitHubCopilotSourceSurfaces = new(StringComparer.Ordinal)
-    {
-        "github-copilot-vscode", "github-copilot-cli",
     };
 
     public static void Validate(SetupCommandResult result)
@@ -518,113 +512,32 @@ public static class SetupContractValidator
             return;
         }
 
-        ValidateSourceCapabilityManifest(value);
-    }
-
-    private static void ValidateSourceCapabilityManifest(JsonElement manifest)
-    {
-        RequireObjectProperties(manifest,
-            "contract_version", "source_surface", "source_adapter", "support_status", "stability", "source_version_detector",
-            "signals", "native_session_identity", "trace_span_identity", "timing_ttft", "model_tokens", "retry_attempt",
-            "tool_calls", "permission", "errors", "agent_ownership", "prompt_response", "file_diff", "content_capture_gate",
-            "provenance", "completeness");
-        RequireString(manifest, "contract_version", "v1");
-        RequireOneOf(manifest, "source_surface", GitHubCopilotSourceSurfaces);
-        RequireString(manifest, "source_adapter", "otel-http+copilot-compatible-hook");
-        RequireString(manifest, "support_status", "active");
-        RequireString(manifest, "stability", "stable");
-        ValidateCapability(manifest.GetProperty("source_version_detector"));
-        ValidateCapability(manifest.GetProperty("native_session_identity"));
-        ValidateCapability(manifest.GetProperty("errors"));
-        ValidateCapability(manifest.GetProperty("content_capture_gate"));
-        ValidateCapabilityGroup(manifest.GetProperty("signals"), "trace", "log", "metric", "hook", "sdk_event", "saved_raw");
-        ValidateCapabilityGroup(manifest.GetProperty("trace_span_identity"), "trace_id", "span_id", "parentage");
-        ValidateCapabilityGroup(manifest.GetProperty("timing_ttft"), "timing", "ttft");
-        ValidateCapabilityGroup(manifest.GetProperty("model_tokens"), "model", "input_tokens", "output_tokens", "total_tokens", "cache_tokens", "reasoning_tokens");
-        ValidateCapabilityGroup(manifest.GetProperty("retry_attempt"), "retry", "attempt");
-        ValidateCapabilityGroup(manifest.GetProperty("tool_calls"), "identity", "input", "output");
-        ValidateCapabilityGroup(manifest.GetProperty("permission"), "wait", "decision");
-        ValidateCapabilityGroup(manifest.GetProperty("agent_ownership"), "main_agent", "sub_agent");
-        ValidateCapabilityGroup(manifest.GetProperty("prompt_response"), "prompt", "response");
-        ValidateCapabilityGroup(manifest.GetProperty("file_diff"), "file", "diff");
-
-        var provenance = manifest.GetProperty("provenance");
-        RequireObjectProperties(provenance, "required_keys");
-        RequireStringArray(provenance.GetProperty("required_keys"), "source_adapter", "source_version_or_schema_fingerprint", "source_event_or_trace_span_id", "capture_content_state", "normalization_version");
-
-        var completeness = manifest.GetProperty("completeness");
-        RequireObjectProperties(completeness, "statuses", "reason_codes");
-        RequireStringArray(completeness.GetProperty("statuses"), "unbound", "partial", "rich", "full");
-        RequireStringArray(completeness.GetProperty("reason_codes"), "missing_native_session_id", "missing_trace_context", "trace_signal_disabled", "content_capture_disabled", "unsupported_source_version", "ingest_gap", "hook_only", "historical_summary_only", "unknown_span_kind", "schema_drift_detected", "planned_source_not_enabled");
-    }
-
-    private static void ValidateCapabilityGroup(JsonElement group, params string[] propertyNames)
-    {
-        RequireObjectProperties(group, propertyNames);
-        foreach (var propertyName in propertyNames)
-        {
-            ValidateCapability(group.GetProperty(propertyName));
-        }
-    }
-
-    private static void ValidateCapability(JsonElement capability)
-    {
-        RequireObjectProperties(capability, "availability");
-        RequireOneOf(capability, "availability", AvailabilityValues);
-    }
-
-    private static void RequireObjectProperties(JsonElement value, params string[] propertyNames)
-    {
-        if (value.ValueKind != JsonValueKind.Object || value.EnumerateObject().Count() != propertyNames.Length)
+        if (value.ValueKind != JsonValueKind.Object)
         {
             Reject();
         }
 
-        foreach (var propertyName in propertyNames)
+        if (!value.TryGetProperty("source_surface", out var sourceSurfaceElement) || sourceSurfaceElement.ValueKind != JsonValueKind.String)
         {
-            if (!value.TryGetProperty(propertyName, out _))
+            Reject();
+        }
+
+        var sourceSurface = sourceSurfaceElement.GetString();
+        if (sourceSurface is null)
+        {
+            Reject();
+        }
+
+        try
+        {
+            if (!SourceCapabilityManifestLoader.MatchesCanonical(SourceCapabilityManifestLoader.LoadForSurface(sourceSurface), value))
             {
                 Reject();
             }
         }
-    }
-
-    private static void RequireString(JsonElement objectValue, string propertyName, string expected)
-    {
-        if (!objectValue.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.String || value.GetString() != expected)
+        catch (InvalidDataException)
         {
             Reject();
-        }
-    }
-
-    private static void RequireOneOf(JsonElement objectValue, string propertyName, ISet<string> allowedValues)
-    {
-        if (!objectValue.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.String ||
-            value.GetString() is not { } stringValue || !allowedValues.Contains(stringValue))
-        {
-            Reject();
-        }
-    }
-
-    private static void RequireStringArray(JsonElement value, params string[] expectedValues)
-    {
-        if (value.ValueKind != JsonValueKind.Array)
-        {
-            Reject();
-        }
-
-        var values = value.EnumerateArray().ToArray();
-        if (values.Length != expectedValues.Length)
-        {
-            Reject();
-        }
-
-        for (var index = 0; index < expectedValues.Length; index++)
-        {
-            if (values[index].ValueKind != JsonValueKind.String || values[index].GetString() != expectedValues[index])
-            {
-                Reject();
-            }
         }
     }
 
@@ -684,19 +597,13 @@ public static class SetupContractValidator
 
     private static bool IsCredentialFreeLoopbackHttpEndpoint(string value)
     {
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var endpoint) ||
-            endpoint.Scheme != Uri.UriSchemeHttp ||
-            endpoint.UserInfo.Length != 0 ||
-            endpoint.Query.Length != 0 ||
-            endpoint.Fragment.Length != 0 ||
-            endpoint.Port is < 1 or > 65535)
+        var match = CanonicalLoopbackEndpoint.Match(value);
+        if (!match.Success || !int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var port) || port is < 1 or > 65535)
         {
             return false;
         }
 
-        return endpoint.DnsSafeHost.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
-            endpoint.DnsSafeHost.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
-            endpoint.DnsSafeHost.Equals("::1", StringComparison.OrdinalIgnoreCase);
+        return true;
     }
 
     private static void RequireReferenceState(SetupTargetResult target, SetupReferenceState expected)
