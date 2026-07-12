@@ -121,6 +121,51 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    public void SystemPlatform_AtomicCreateFlushesOnlyTheFileItCreatedAndReportsCollision()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-platform-create-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var path = Path.Combine(directory, "backup");
+            var platform = new SystemSetupPlatform();
+
+            Assert.True(platform.FileSystem.TryWriteNewAllBytesAndFlush(path, [1, 2, 3]));
+            Assert.False(platform.FileSystem.TryWriteNewAllBytesAndFlush(path, [4, 5, 6]));
+
+            Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(path));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TestPlatform_AtomicCreateModelsDurableSuccessCollisionAndFaultBoundaries()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        const string created = "created.backup";
+        const string collision = "collision.backup";
+        const string beforeFault = "before.backup";
+        const string afterFault = "after.backup";
+        platform.SeedFile(collision, [9]);
+        platform.InjectFault($"file.try-write-new-flushed:{beforeFault}", new IOException("before"));
+        platform.InjectAfterEffectFault($"file.try-write-new-flushed:{afterFault}", new IOException("after"));
+
+        Assert.True(platform.FileSystem.TryWriteNewAllBytesAndFlush(created, [1]));
+        Assert.False(platform.FileSystem.TryWriteNewAllBytesAndFlush(collision, [2]));
+        Assert.Throws<IOException>(() => platform.FileSystem.TryWriteNewAllBytesAndFlush(beforeFault, [3]));
+        Assert.Throws<IOException>(() => platform.FileSystem.TryWriteNewAllBytesAndFlush(afterFault, [4]));
+
+        Assert.Equal(new byte[] { 1 }, platform.ReadSeededFile(created));
+        Assert.Equal(new byte[] { 9 }, platform.ReadSeededFile(collision));
+        Assert.False(platform.FileSystem.FileExists(beforeFault));
+        Assert.Equal(new byte[] { 4 }, platform.ReadSeededFile(afterFault));
+        Assert.DoesNotContain(platform.Operations, item => item.StartsWith("file.flush:", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void SystemPlatform_UnixClassifiesFifoAndSocketAsNonRegularWithoutBlocking()
     {
         if (OperatingSystem.IsWindows())

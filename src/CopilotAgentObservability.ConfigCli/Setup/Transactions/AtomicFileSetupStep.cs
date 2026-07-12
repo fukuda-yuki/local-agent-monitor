@@ -46,9 +46,10 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
 
     public void CreateOrValidateBackup(string backupPath, AtomicFileCapture expected)
     {
-        var expectedBytes = SerializeBackup(expected.Exists, expected.CopyBytes());
         try
         {
+            ArgumentNullException.ThrowIfNull(expected);
+            var expectedBytes = SerializeBackup(expected.Exists, expected.CopyBytes());
             var metadata = platform.FileSystem.GetPathMetadata(backupPath);
             if (metadata.Exists)
             {
@@ -56,23 +57,10 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
                 return;
             }
 
-            try
-            {
-                platform.FileSystem.WriteNewAllBytes(backupPath, expectedBytes);
-            }
-            catch (Exception)
+            if (!platform.FileSystem.TryWriteNewAllBytesAndFlush(backupPath, expectedBytes))
             {
                 ValidateExistingBackup(backupPath, expectedBytes);
-            }
-
-            try
-            {
-                platform.FileSystem.FlushFile(backupPath);
-            }
-            catch (Exception)
-            {
-                ValidateExistingBackup(backupPath, expectedBytes);
-                throw;
+                return;
             }
 
             ValidateExistingBackup(backupPath, expectedBytes);

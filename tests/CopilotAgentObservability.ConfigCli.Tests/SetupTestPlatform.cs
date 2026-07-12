@@ -332,6 +332,26 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             platform.RecordAfterEffect(operation);
         }
 
+        public bool TryWriteNewAllBytesAndFlush(string path, ReadOnlySpan<byte> bytes)
+        {
+            var operation = $"file.try-write-new-flushed:{path}";
+            platform.Record(operation);
+            lock (platform.gate)
+            {
+                if (platform.files.ContainsKey(path) ||
+                    platform.pathMetadata.TryGetValue(path, out var metadata) && metadata.Exists)
+                {
+                    return false;
+                }
+
+                platform.files[path] = bytes.ToArray();
+                platform.pathMetadata[path] = new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal);
+            }
+
+            platform.RecordAfterEffect(operation);
+            return true;
+        }
+
         public void FlushFile(string path)
         {
             var operation = $"file.flush:{path}";

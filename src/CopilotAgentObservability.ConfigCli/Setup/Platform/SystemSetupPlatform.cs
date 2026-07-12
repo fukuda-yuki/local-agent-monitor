@@ -103,6 +103,27 @@ public sealed class SystemSetupPlatform : ISetupPlatform
             stream.Write(bytes);
         }
 
+        public bool TryWriteNewAllBytesAndFlush(string path, ReadOnlySpan<byte> bytes)
+        {
+            FileStream stream;
+            try
+            {
+                stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            }
+            catch (IOException) when (PathEntryExists(path))
+            {
+                return false;
+            }
+
+            using (stream)
+            {
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+
+            return true;
+        }
+
         public void FlushFile(string path)
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
@@ -143,6 +164,23 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
         private static SetupPathMetadata ExistingOther(FileAttributes attributes = 0) =>
             new(true, SetupPathKind.Other, attributes);
+
+        private static bool PathEntryExists(string path)
+        {
+            try
+            {
+                _ = File.GetAttributes(path);
+                return true;
+            }
+            catch (FileNotFoundException)
+            {
+                return false;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return false;
+            }
+        }
 
         private static class WindowsPathMetadata
         {

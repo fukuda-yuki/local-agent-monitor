@@ -31,6 +31,8 @@ public interface ISetupFileSystem
 
     void WriteNewAllBytes(string path, ReadOnlySpan<byte> bytes);
 
+    bool TryWriteNewAllBytesAndFlush(string path, ReadOnlySpan<byte> bytes);
+
     void FlushFile(string path);
 
     void ReplaceFile(string sourcePath, string destinationPath);

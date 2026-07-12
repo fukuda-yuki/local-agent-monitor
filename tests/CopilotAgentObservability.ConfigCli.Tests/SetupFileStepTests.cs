@@ -137,9 +137,9 @@ public sealed class SetupFileStepTests
         new AtomicFileSetupStep(platform).CreateOrValidateBackup(backup, capture);
 
         Assert.Equal(exact, platform.ReadSeededFile(backup));
-        Assert.Contains($"file.write-new:{backup}", platform.Operations.Take(operationCount));
-        Assert.Contains($"file.flush:{backup}", platform.Operations.Take(operationCount));
+        Assert.Contains($"file.try-write-new-flushed:{backup}", platform.Operations.Take(operationCount));
         Assert.Contains($"file.read-bounded:{backup}:{exact.Length}", platform.Operations.Skip(operationCount));
+        Assert.DoesNotContain($"file.try-write-new-flushed:{backup}", platform.Operations.Skip(operationCount));
         Assert.DoesNotContain(platform.Operations.Skip(operationCount), operation =>
             operation.StartsWith("file.write", StringComparison.Ordinal) ||
             operation.StartsWith("file.flush", StringComparison.Ordinal) ||
@@ -210,34 +210,103 @@ public sealed class SetupFileStepTests
     }
 
     [Theory]
-    [InlineData("write-before", false)]
-    [InlineData("write-after", true)]
-    [InlineData("write-after-rebind", false)]
-    [InlineData("flush-before", false)]
-    [InlineData("flush-after", false)]
-    [InlineData("flush-after-rebind", false)]
-    public void CreateOrValidateBackup_ClassifiesCreateFaultWithoutRetryOrDeletion(string boundary, bool succeeds)
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CreateOrValidateBackup_AtomicCreateFaultNeverReopensOrFlushesThePath(bool afterEffect)
     {
         var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
         var target = "C:\\allowed\\settings.json";
         var backup = "C:\\private\\record.backup";
-        var foreign = Encoding.UTF8.GetBytes("foreign private value");
         platform.SeedFile(target, Encoding.UTF8.GetBytes("previous"));
         var step = new AtomicFileSetupStep(platform);
         var capture = step.Capture("C:\\allowed", target);
-        var operation = boundary.StartsWith("write", StringComparison.Ordinal) ? $"file.write-new:{backup}" : $"file.flush:{backup}";
-        var rebind = boundary.EndsWith("rebind", StringComparison.Ordinal) ? () => platform.SeedFile(backup, foreign) : (Action?)null;
-        if (boundary.EndsWith("before", StringComparison.Ordinal)) platform.InjectFault(operation, new IOException("raw"));
-        else platform.InjectAfterEffectFault(operation, new IOException("raw"), rebind);
+        var operation = $"file.try-write-new-flushed:{backup}";
+        if (afterEffect)
+        {
+            platform.InjectAfterEffectFault(operation, new IOException("raw secret"));
+        }
+        else
+        {
+            platform.InjectFault(operation, new IOException("raw secret"));
+        }
 
-        var exception = Record.Exception(() => step.CreateOrValidateBackup(backup, capture));
+        var exception = Assert.Throws<SetupFileStepException>(() => step.CreateOrValidateBackup(backup, capture));
+        var operationIndex = platform.Operations.ToList().LastIndexOf(operation);
 
-        if (succeeds) Assert.Null(exception);
-        else Assert.Equal(SetupCodes.InternalError, Assert.IsType<SetupFileStepException>(exception).Code);
-        Assert.Equal(1, platform.Operations.Count(item => item == $"file.write-new:{backup}"));
-        Assert.True(boundary == "write-before" || platform.FileSystem.FileExists(backup));
-        if (boundary.EndsWith("rebind", StringComparison.Ordinal)) Assert.Equal(foreign, platform.ReadSeededFile(backup));
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.DoesNotContain("secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(afterEffect, platform.FileSystem.FileExists(backup));
+        Assert.Equal(1, platform.Operations.Count(item => item == operation));
+        Assert.DoesNotContain(platform.Operations.Skip(operationIndex + 1), item =>
+            item == $"file.metadata:{backup}" || item.StartsWith($"file.read-bounded:{backup}:", StringComparison.Ordinal));
+        Assert.DoesNotContain(platform.Operations, item => item == $"file.flush:{backup}" || item == $"file.write-new:{backup}");
         Assert.DoesNotContain($"file.delete:{backup}", platform.Operations);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CreateOrValidateBackup_CollisionAfterMissingProbeNeverWritesOrFlushesUnownedPath(bool exactCollision)
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var envelopeFixture = "C:\\private\\fixture.backup";
+        platform.SeedFile(target, Encoding.UTF8.GetBytes("previous"));
+        var step = new AtomicFileSetupStep(platform);
+        var capture = step.Capture("C:\\allowed", target);
+        step.CreateBackup(envelopeFixture, capture);
+        var candidate = exactCollision
+            ? platform.ReadSeededFile(envelopeFixture)
+            : Encoding.UTF8.GetBytes("foreign private value");
+        var operation = $"file.try-write-new-flushed:{backup}";
+        using var barrier = platform.AddBarrier(operation);
+        var task = Task.Run(() => step.CreateOrValidateBackup(backup, capture));
+        try
+        {
+            await Task.Run(() => barrier.WaitUntilReached(CancellationToken.None));
+            platform.SeedFile(backup, candidate);
+            barrier.Release();
+            if (exactCollision)
+            {
+                await task;
+            }
+            else
+            {
+                Assert.Equal(
+                    SetupCodes.InternalError,
+                    (await Assert.ThrowsAsync<SetupFileStepException>(() => task)).Code);
+            }
+        }
+        finally
+        {
+            barrier.Release();
+            try
+            {
+                await task;
+            }
+            catch (SetupFileStepException)
+            {
+            }
+        }
+
+        Assert.Equal(candidate, platform.ReadSeededFile(backup));
+        Assert.Equal(1, platform.Operations.Count(item => item == operation));
+        Assert.DoesNotContain(platform.Operations, item => item == $"file.flush:{backup}" || item == $"file.write-new:{backup}");
+        Assert.DoesNotContain($"file.delete:{backup}", platform.Operations);
+    }
+
+    [Fact]
+    public void CreateOrValidateBackup_MapsNullExpectedToFixedRedactedError()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+
+        var exception = Assert.Throws<SetupFileStepException>(() =>
+            new AtomicFileSetupStep(platform).CreateOrValidateBackup("C:\\private\\secret.backup", null!));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(SetupCodes.InternalError, exception.Message);
+        Assert.DoesNotContain("secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
