@@ -12,6 +12,7 @@ Updated: 2026-07-12
 | Setup result validation (Task 1b) | #66 | Complete | `e62330b..92ced23` | SetupContractValidationTests 74/74; SetupContractShapeTests 47/47; ConfigCli 449/449 | Spec PASS; Security/Quality APPROVED after dependency re-audit | target pairing and CLI input normalization remain for Tasks 8b/7a |
 | Runtime #61 manifest loader (Task 8a, pulled forward) | #67 dependency | Complete | `cce9a72..e7d44e2` | SourceCapabilityRuntimeTests 14/14; SourceCapabilityContractTests 13/13; ConfigCli 432/432 at task review | Spec PASS; Quality/Security APPROVED | target pairing remains for Task 8b real-producer gate |
 | Platform contracts and deterministic fake (Task 2a) | #66 | Complete | `2755269..fd36d38` | SetupPlatformTests 15/15; ConfigCli 464/464 | Spec PASS; Quality/Security APPROVED after concurrency re-audit | actual Windows notification delivery not integration-tested; injected classification verified |
+| Runtime paths and exclusive lock (Task 2b) | #66 | Complete | `9d962ff..ed820bb` | SetupRuntimeTests 8/8; SetupPlatformTests 20/20; ConfigCli 477/477 | Spec PASS; Quality/Security APPROVED after cross-process test re-audit | Linux/macOS runtime not executed on Windows host; mandatory cross-platform test no longer skips |
 | Ledger schema and redaction | #66 | Pending | - | - | - | - |
 | Atomic file mutation | #66 | Pending | - | - | - | - |
 | User environment mutation | #66 | Pending | - | - | - | - |
