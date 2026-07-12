@@ -380,6 +380,36 @@ public sealed class SessionWorkspaceRouteTests
         Assert.Equal("""{"error":"raw_content_expired","content_state":"expired_pending_deletion"}""", await response.Content.ReadAsStringAsync());
     }
 
+    [Theory]
+    [InlineData("permission-request.json", "PermissionRequest")]
+    [InlineData("post-tool-use-failure.json", "PostToolUseFailure")]
+    [InlineData("stop-failure.json", "StopFailure")]
+    [InlineData("session-end.json", "SessionEnd")]
+    public void ClaudeHookMappedEvent_NormalizerPersistsRecognizedRawOnlyEvidenceAsSupported(
+        string fixtureName,
+        string eventType)
+    {
+        var capturedAt = DateTimeOffset.Parse("2026-07-13T12:34:56Z");
+        using var fixture = JsonDocument.Parse(File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "TestData", "Claude", "hooks", fixtureName)));
+        var metadata = new ClaudeHookSourceMetadata(
+            "claude-hook-v1", "session-normalization-v1", "3.4.5-synthetic", null);
+        Assert.True(ClaudeHookEventMapper.TryMap(fixture.RootElement, capturedAt, metadata, true, out var envelope));
+        var store = DispatchProxy.Create<ISessionStore, RecordingSessionStoreProxy>();
+        var recorder = (RecordingSessionStoreProxy)(object)store;
+
+        new SessionEventNormalizer(store, new FixedTimeProvider(capturedAt.AddMinutes(1))).NormalizeAndWrite(envelope!);
+
+        var batch = Assert.IsType<SessionWriteBatch>(recorder.WrittenBatch);
+        var mappedEvent = Assert.Single(batch.Detail.Events);
+        Assert.Equal(eventType, mappedEvent.Type);
+        Assert.Equal(SessionContentState.Available, mappedEvent.ContentState);
+        Assert.Null(mappedEvent.ParentEventId);
+        Assert.Null(mappedEvent.TraceId);
+        Assert.Null(mappedEvent.Status);
+        Assert.Single(batch.Content);
+    }
+
     private static HttpRequestMessage IngestRequest(string json, string? version = "1", string contentType = "application/json")
     {
         var request = new HttpRequestMessage(HttpMethod.Post, "/api/session-ingest/v1/events")

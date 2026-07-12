@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.LocalMonitor.Sessions;
 
 namespace CopilotAgentObservability.LocalMonitor.HookForwarding;
 
@@ -13,6 +14,8 @@ internal static class HookForwardCommand
     internal const string VersionHeader = "X-CAO-Session-Event-Version";
     internal const string IngestPath = "/api/session-ingest/v1/events";
     internal const int DefaultTimeoutMilliseconds = 250;
+    internal const string ClaudeAdapterVersion = "claude-hook-v1";
+    internal const string ClaudeNormalizationVersion = "session-normalization-v1";
 
     private static readonly IReadOnlyDictionary<string, string> EventTypes =
         new Dictionary<string, string>(StringComparer.Ordinal)
@@ -32,20 +35,24 @@ internal static class HookForwardCommand
         TextWriter output,
         TextWriter error,
         HttpMessageHandler? handler,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeProvider? timeProvider = null)
     {
         _ = output;
         _ = error;
 
         try
         {
-            if (!TryParseOptions(args, out var endpoint, out var timeoutMilliseconds))
+            if (!TryParseOptions(args, out var options))
             {
                 return 0;
             }
 
             var inputJson = await input.ReadToEndAsync(cancellationToken);
-            if (!TryCreateEnvelope(inputJson, out var envelope))
+            var created = options.Source == "claude-code"
+                ? TryCreateClaudeEnvelope(inputJson, options, timeProvider ?? TimeProvider.System, out var envelope)
+                : TryCreateEnvelope(inputJson, out envelope);
+            if (!created)
             {
                 return 0;
             }
@@ -54,8 +61,8 @@ internal static class HookForwardCommand
                 ? new HttpClient()
                 : new HttpClient(handler, disposeHandler: false);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromMilliseconds(timeoutMilliseconds));
-            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+            timeout.CancelAfter(TimeSpan.FromMilliseconds(options.TimeoutMilliseconds));
+            using var request = new HttpRequestMessage(HttpMethod.Post, options.Endpoint)
             {
                 Content = new StringContent(envelope, Encoding.UTF8, "application/json"),
             };
@@ -70,11 +77,14 @@ internal static class HookForwardCommand
         return 0;
     }
 
-    private static bool TryParseOptions(string[] args, out Uri endpoint, out int timeoutMilliseconds)
+    private static bool TryParseOptions(string[] args, out HookForwardOptions options)
     {
-        endpoint = null!;
-        timeoutMilliseconds = DefaultTimeoutMilliseconds;
+        options = null!;
+        var timeoutMilliseconds = DefaultTimeoutMilliseconds;
         string? endpointValue = null;
+        string? source = null;
+        string? sourceVersion = null;
+        string? schemaFingerprint = null;
         var timeoutSpecified = false;
 
         for (var index = 0; index < args.Length; index += 2)
@@ -94,6 +104,15 @@ internal static class HookForwardCommand
                     && parsed > 0:
                     timeoutMilliseconds = parsed;
                     timeoutSpecified = true;
+                    break;
+                case "--source" when source is null:
+                    source = args[index + 1];
+                    break;
+                case "--source-version" when sourceVersion is null:
+                    sourceVersion = args[index + 1];
+                    break;
+                case "--schema-fingerprint" when schemaFingerprint is null:
+                    schemaFingerprint = args[index + 1];
                     break;
                 default:
                     return false;
@@ -120,7 +139,24 @@ internal static class HookForwardCommand
             return false;
         }
 
-        endpoint = path.Length == 0 ? new Uri(baseUri, IngestPath) : baseUri;
+        if (source is null)
+        {
+            if (sourceVersion is not null || schemaFingerprint is not null)
+            {
+                return false;
+            }
+        }
+        else if (source != "claude-code" || sourceVersion is null && schemaFingerprint is null)
+        {
+            return false;
+        }
+
+        options = new HookForwardOptions(
+            path.Length == 0 ? new Uri(baseUri, IngestPath) : baseUri,
+            timeoutMilliseconds,
+            source,
+            sourceVersion,
+            schemaFingerprint);
         return true;
     }
 
@@ -132,6 +168,50 @@ internal static class HookForwardCommand
         }
 
         return IPAddress.TryParse(uri.Host, out var address) && IPAddress.IsLoopback(address);
+    }
+
+    private static bool TryCreateClaudeEnvelope(
+        string inputJson,
+        HookForwardOptions options,
+        TimeProvider timeProvider,
+        out string envelope)
+    {
+        envelope = string.Empty;
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(inputJson, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 64,
+            });
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        using (document)
+        {
+            var metadata = new ClaudeHookSourceMetadata(
+                ClaudeAdapterVersion,
+                ClaudeNormalizationVersion,
+                options.SourceVersion,
+                options.SchemaFingerprint);
+            if (!ClaudeHookEventMapper.TryMap(
+                document.RootElement,
+                timeProvider.GetUtcNow(),
+                metadata,
+                contentCaptureEnabled: true,
+                out var mapped))
+            {
+                return false;
+            }
+
+            envelope = JsonSerializer.Serialize(mapped);
+            return true;
+        }
     }
 
     private static bool TryCreateEnvelope(string inputJson, out string envelope)
@@ -370,4 +450,11 @@ internal static class HookForwardCommand
             "$1=[REDACTED]",
             RegexOptions.CultureInvariant);
     }
+
+    private sealed record HookForwardOptions(
+        Uri Endpoint,
+        int TimeoutMilliseconds,
+        string? Source,
+        string? SourceVersion,
+        string? SchemaFingerprint);
 }

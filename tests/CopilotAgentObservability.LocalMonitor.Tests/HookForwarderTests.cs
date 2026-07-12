@@ -7,6 +7,8 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class HookForwarderTests
 {
+    private static readonly DateTimeOffset ClaudeCaptureTime = DateTimeOffset.Parse("2026-07-13T12:34:56Z");
+
     [Theory]
     [InlineData("SessionStart", "SessionStart")]
     [InlineData("UserPromptSubmit", "UserPromptSubmit")]
@@ -184,6 +186,8 @@ public sealed class HookForwarderTests
     [Theory]
     [InlineData("--endpoint", "http://127.0.0.1:4320", "--endpoint", "http://localhost:4320")]
     [InlineData("--endpoint", "http://127.0.0.1:4320", "--timeout-ms", "250", "--timeout-ms", "300")]
+    [InlineData("--endpoint", "http://127.0.0.1:4320", "--timeout-ms", "0")]
+    [InlineData("--endpoint", "http://127.0.0.1:4320", "--timeout-ms", "invalid")]
     [InlineData("--endpoint")]
     public async Task MalformedOrDuplicateOptionsFailOpenWithoutRequest(params string[] args)
     {
@@ -208,13 +212,15 @@ public sealed class HookForwarderTests
     [Fact]
     public async Task NetworkFailureAlwaysSucceedsSilently()
     {
+        var handler = new ThrowingHandler();
         var result = await RunAsync(
             "{\"session_id\":\"s\",\"hook_event_name\":\"Stop\"}",
-            handler: new ThrowingHandler());
+            handler: handler);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Empty(result.StdOut);
         Assert.Empty(result.StdErr);
+        Assert.Equal(1, handler.Attempts);
     }
 
     [Fact]
@@ -230,6 +236,183 @@ public sealed class HookForwarderTests
         Assert.Empty(result.StdOut);
         Assert.Empty(result.StdErr);
         Assert.True(handler.WasCancelled);
+        Assert.Equal(1, handler.Attempts);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task ClaudeSelector_ForwardsOfficialFixtureWithCallerProvenance(bool sourceVersion, bool schemaFingerprint)
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        var args = new List<string>
+        {
+            "--endpoint", "http://127.0.0.1:4320",
+            "--timeout-ms", "250",
+            "--source", "claude-code",
+        };
+        if (sourceVersion) args.AddRange(["--source-version", "3.4.5-caller"]);
+        if (schemaFingerprint) args.AddRange(["--schema-fingerprint", new string('a', 64)]);
+
+        var result = await RunWithArgsAsync(ReadClaudeFixture("session-end.json"), args.ToArray(), handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Equal(1, handler.Attempts);
+        Assert.NotNull(handler.Request);
+        using var document = JsonDocument.Parse(handler.Body!);
+        var root = document.RootElement;
+        Assert.Equal("claude-code-hook", root.GetProperty("source_adapter").GetString());
+        Assert.Equal("claude-code", root.GetProperty("source_surface").GetString());
+        Assert.Equal(sourceVersion ? "3.4.5-caller" : null, root.GetProperty("source_application_version").GetString());
+        Assert.Equal("claude-hook-v1", root.GetProperty("adapter_version").GetString());
+        Assert.Equal(schemaFingerprint ? new string('a', 64) : null, root.GetProperty("schema_fingerprint").GetString());
+        Assert.Equal("session-normalization-v1", root.GetProperty("normalization_version").GetString());
+        var mappedEvent = root.GetProperty("events")[0];
+        Assert.Equal("SessionEnd", mappedEvent.GetProperty("type").GetString());
+        Assert.Equal(ClaudeCaptureTime, mappedEvent.GetProperty("occurred_at").GetDateTimeOffset());
+        Assert.Equal("SYNTHETIC_TRANSCRIPT_PATH", mappedEvent.GetProperty("payload").GetProperty("transcript_path").GetString());
+        Assert.Equal(64, mappedEvent.GetProperty("source_event_id").GetString()!.Length);
+        Assert.Equal(1, handler.Attempts);
+    }
+
+    [Fact]
+    public async Task ClaudeSelector_AcceptsOptionsInAnyOrder()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        var fingerprint = new string('b', 64);
+
+        var result = await RunWithArgsAsync(
+            ReadClaudeFixture("session-end.json"),
+            [
+                "--schema-fingerprint", fingerprint,
+                "--timeout-ms", "250",
+                "--source", "claude-code",
+                "--endpoint", "http://127.0.0.1:4320",
+                "--source-version", "3.4.5-reordered",
+            ],
+            handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Equal(1, handler.Attempts);
+        using var document = JsonDocument.Parse(handler.Body!);
+        Assert.Equal("3.4.5-reordered", document.RootElement.GetProperty("source_application_version").GetString());
+        Assert.Equal(fingerprint, document.RootElement.GetProperty("schema_fingerprint").GetString());
+    }
+
+    [Theory]
+    [InlineData("bad version", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    [InlineData("3.4.5-valid", "ABCDEF")]
+    public async Task ClaudeSelector_BothProvenanceValuesWithEitherInvalid_RejectsWithoutHttpAttempt(
+        string sourceVersion,
+        string schemaFingerprint)
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+
+        var result = await RunWithArgsAsync(
+            ReadClaudeFixture("session-end.json"),
+            [
+                "--endpoint", "http://127.0.0.1:4320",
+                "--source", "claude-code",
+                "--source-version", sourceVersion,
+                "--schema-fingerprint", schemaFingerprint,
+            ],
+            handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Equal(0, handler.Attempts);
+        Assert.Null(handler.Request);
+    }
+
+    [Theory]
+    [InlineData("--source", "claude-code")]
+    [InlineData("--source", "Claude-Code", "--source-version", "3.4.5")]
+    [InlineData("--source", "copilot", "--source-version", "3.4.5")]
+    [InlineData("--source-version", "3.4.5")]
+    [InlineData("--schema-fingerprint", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    [InlineData("--source", "claude-code", "--source-version", "bad version")]
+    [InlineData("--source", "claude-code", "--schema-fingerprint", "ABCDEF")]
+    [InlineData("--source", "claude-code", "--unknown", "value")]
+    [InlineData("--source", "claude-code", "--source", "claude-code", "--source-version", "3.4.5")]
+    [InlineData("--source", "claude-code", "--source-version", "3.4.5", "--source-version", "3.4.6")]
+    [InlineData("--source", "claude-code", "--schema-fingerprint", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--schema-fingerprint", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]
+    public async Task InvalidSelectorOrProvenance_FailsOpenSilentlyWithoutHttpAttempt(params string[] extraArgs)
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        var args = new[] { "--endpoint", "http://127.0.0.1:4320", "--timeout-ms", "250" }.Concat(extraArgs).ToArray();
+
+        var result = await RunWithArgsAsync(ReadClaudeFixture("session-end.json"), args, handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Null(handler.Request);
+        Assert.Equal(0, handler.Attempts);
+    }
+
+    [Theory]
+    [InlineData("unsupported-event.json")]
+    public async Task ClaudeInvalidProducerPayload_FailsOpenSilentlyWithoutHttpAttempt(string fixtureName)
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+
+        var result = await RunWithArgsAsync(
+            ReadClaudeFixture(fixtureName),
+            ["--endpoint", "http://127.0.0.1:4320", "--source", "claude-code", "--source-version", "3.4.5-caller"],
+            handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Equal(0, handler.Attempts);
+    }
+
+    [Fact]
+    public async Task ClaudePayloadProvenanceCannotReplaceMissingOutOfBandProvenance()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        var payload = ReadClaudeFixture("session-end.json").Replace(
+            "\"reason\": \"other\"",
+            "\"reason\": \"other\", \"source_application_version\": \"payload-must-not-win\"",
+            StringComparison.Ordinal);
+
+        var result = await RunWithArgsAsync(
+            payload,
+            ["--endpoint", "http://127.0.0.1:4320", "--source", "claude-code"],
+            handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Equal(0, handler.Attempts);
+    }
+
+    [Fact]
+    public async Task LegacyCopilotWithoutSelectorPreservesExistingEnvelopeAndSanitization()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        const string payload = """
+            {"session_id":"legacy","hook_event_name":"Stop","source_surface":"vscode","payload":{"token":"must-not-leak","safe":"kept"}}
+            """;
+
+        var result = await RunAsync(payload, handler: handler);
+
+        Assert.Equal(0, result.ExitCode);
+        using var document = JsonDocument.Parse(handler.Body!);
+        var root = document.RootElement;
+        Assert.Equal("copilot-compatible-hook", root.GetProperty("source_adapter").GetString());
+        Assert.Equal("vscode", root.GetProperty("source_surface").GetString());
+        Assert.False(root.TryGetProperty("adapter_version", out _));
+        var forwarded = root.GetProperty("events")[0].GetProperty("payload").GetRawText();
+        Assert.DoesNotContain("must-not-leak", forwarded, StringComparison.Ordinal);
+        Assert.Contains("kept", forwarded, StringComparison.Ordinal);
+        Assert.Equal(1, handler.Attempts);
     }
 
     private static async Task<(int ExitCode, string StdOut, string StdErr)> RunAsync(
@@ -250,6 +433,27 @@ public sealed class HookForwarderTests
         return (exitCode, output.ToString(), error.ToString());
     }
 
+    private static async Task<(int ExitCode, string StdOut, string StdErr)> RunWithArgsAsync(
+        string input,
+        string[] args,
+        HttpMessageHandler handler)
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = await HookForwardCommand.RunAsync(
+            args,
+            new StringReader(input),
+            output,
+            error,
+            handler,
+            CancellationToken.None,
+            new FixedTimeProvider(ClaudeCaptureTime));
+        return (exitCode, output.ToString(), error.ToString());
+    }
+
+    private static string ReadClaudeFixture(string name) => File.ReadAllText(Path.Combine(
+        AppContext.BaseDirectory, "TestData", "Claude", "hooks", name));
+
     private static string ReadEventId(string body)
     {
         using var document = JsonDocument.Parse(body);
@@ -261,27 +465,41 @@ public sealed class HookForwarderTests
         public HttpRequestMessage? Request { get; private set; }
 
         public string? Body { get; private set; }
+        public int Attempts { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            Attempts++;
             Request = request;
             Body = await request.Content!.ReadAsStringAsync(cancellationToken);
             return new HttpResponseMessage(statusCode);
         }
     }
 
+    private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => value;
+    }
+
     private sealed class ThrowingHandler : HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        public int Attempts { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Attempts++;
             throw new HttpRequestException("collector unavailable");
+        }
     }
 
     private sealed class BlockingHandler : HttpMessageHandler
     {
         public bool WasCancelled { get; private set; }
+        public int Attempts { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            Attempts++;
             try
             {
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
