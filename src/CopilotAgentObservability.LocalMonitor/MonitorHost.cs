@@ -793,11 +793,11 @@ internal static class MonitorHost
                 return;
             }
 
-            string payloadJson;
+            DecodedOtlpTracePayload decodedPayload;
             try
             {
-                payloadJson = OtlpTracePayloadDecoder.DecodeTracePayload(context.Request.ContentType, body);
-                OtlpTracePayloadDecoder.EnsurePayloadContainsSpan(payloadJson);
+                decodedPayload = OtlpTracePayloadDecoder.DecodeTracePayload(context.Request.ContentType, body);
+                OtlpTracePayloadDecoder.EnsurePayloadContainsSpan(decodedPayload.PayloadJson);
             }
             catch (UnsupportedOtlpContentTypeException)
             {
@@ -818,7 +818,7 @@ internal static class MonitorHost
             RawTelemetryRecord record;
             try
             {
-                record = RawOtlpIngestor.CreateRecordFromPayloadJson(payloadJson, DateTimeOffset.UtcNow);
+                record = RawOtlpIngestor.CreateRecordFromPayloadJson(decodedPayload.PayloadJson, DateTimeOffset.UtcNow);
             }
             catch (JsonException)
             {

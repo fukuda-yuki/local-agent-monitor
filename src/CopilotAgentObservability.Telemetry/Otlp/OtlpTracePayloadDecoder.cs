@@ -5,14 +5,20 @@ internal static class OtlpTracePayloadDecoder
     private const string JsonContentType = "application/json";
     private const string ProtobufContentType = "application/x-protobuf";
 
-    public static string DecodeTracePayload(string? contentType, byte[] body)
+    public static DecodedOtlpTracePayload DecodeTracePayload(string? contentType, byte[] body)
     {
         return NormalizeContentType(contentType) switch
         {
-            JsonContentType => Encoding.UTF8.GetString(body),
-            ProtobufContentType => OtlpProtobufTraceConverter.ConvertTraceRequestToRawOtlpJson(body),
+            JsonContentType => DecodeJson(body),
+            ProtobufContentType => OtlpProtobufTraceConverter.ConvertTraceRequest(body),
             _ => throw new UnsupportedOtlpContentTypeException(),
         };
+    }
+
+    private static DecodedOtlpTracePayload DecodeJson(byte[] body)
+    {
+        var payloadJson = Encoding.UTF8.GetString(body);
+        return new DecodedOtlpTracePayload(payloadJson, OtlpJsonStructuralWalker.Build(payloadJson));
     }
 
     public static void EnsurePayloadContainsSpan(string payloadJson)

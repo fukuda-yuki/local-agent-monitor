@@ -131,7 +131,7 @@ public class MonitorHostTests
     }
 
     [Fact]
-    public async Task PostTraces_ValidJsonPersistsRawRecord()
+    public async Task PostTraces_ValidJsonPersistsCanonicalPayloadWithoutStructuralInventory()
     {
         using var tempDirectory = new MonitorTempDirectory();
         await using var host = await StartHostAsync(tempDirectory);
@@ -142,7 +142,8 @@ public class MonitorHostTests
         Assert.Contains("\"accepted\":true", await response.Content.ReadAsStringAsync());
         var record = Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath).ListRecords());
         Assert.Equal("11111111111111111111111111111111", record.TraceId);
-        Assert.Contains("\"client.kind\"", record.PayloadJson);
+        Assert.Equal(ValidTraceJson(), record.PayloadJson);
+        Assert.DoesNotContain("StructuralInventory", record.PayloadJson, StringComparison.Ordinal);
     }
 
     [Fact]
