@@ -215,6 +215,45 @@ internal static class MonitorHost
                 await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
             }
         });
+        app.MapGet("/api/monitor/source-diagnostics", async context =>
+        {
+            if (!TryParseCursorQuery(context, out var after, out var limit))
+            {
+                await WriteInvalidCursorQueryAsync(context);
+                return;
+            }
+
+            try
+            {
+                var rows = compatibilityStore.List(after, limit);
+                var items = rows.Select(row => new
+                {
+                    observation_id = row.ObservationId,
+                    ingest_batch_id = row.IngestBatchId,
+                    source_surface = row.SourceSurface,
+                    source_application_version = row.SourceApplicationVersion,
+                    source_adapter = row.SourceAdapter,
+                    adapter_version = row.AdapterVersion,
+                    schema_fingerprint = row.SchemaFingerprint,
+                    inventory_hash = row.InventoryHash,
+                    compatibility_state = row.CompatibilityState,
+                    reason_codes = row.ReasonCodes,
+                    unknown_span_count = row.UnknownSpanCount,
+                    unknown_event_count = row.UnknownEventCount,
+                    unknown_attribute_count = row.UnknownAttributeCount,
+                    observed_at = row.ObservedAt,
+                    next_action = row.NextAction,
+                });
+                long? nextCursor = rows.Count == limit && compatibilityStore.List(rows[^1].Id, 1).Count > 0
+                    ? rows[^1].Id
+                    : null;
+                await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
+            }
+            catch (PersistenceBusyException)
+            {
+                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+            }
+        });
         app.MapGet("/api/monitor/traces", async context =>
         {
             if (!TryParseCursorQuery(context, out var after, out var limit))

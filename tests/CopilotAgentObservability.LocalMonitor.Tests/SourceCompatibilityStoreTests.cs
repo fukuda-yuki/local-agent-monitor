@@ -142,6 +142,51 @@ public sealed class SourceCompatibilityStoreTests
     }
 
     [Fact]
+    public void List_UsesStableAscendingCursorsForLessThanExactAndMultiplePages()
+    {
+        using var database = new TestDatabase();
+        var store = new SqliteSourceCompatibilityStore(database.Path);
+        store.CreateSchema();
+        var observedAt = DateTimeOffset.UnixEpoch;
+        for (var index = 1; index <= 51; index++)
+        {
+            store.RecordAdapterFailure(SourceAdapterFailureDraft.CreateParseFailure(
+                $"cursor-{index}", null, null, null, null, null, null, observedAt.AddMinutes(index)));
+        }
+
+        var firstPage = store.List(after: null, limit: 50);
+        var secondPage = store.List(after: firstPage[^1].Id, limit: 50);
+        var finalPage = store.List(after: secondPage[^1].Id, limit: 50);
+        var underLimitPage = store.List(after: null, limit: 200);
+
+        Assert.Equal(Enumerable.Range(1, 50).Select(value => (long)value), firstPage.Select(row => row.Id));
+        Assert.Equal([51L], secondPage.Select(row => row.Id));
+        Assert.Empty(finalPage);
+        Assert.Equal(51, underLimitPage.Count);
+        Assert.Equal(Enumerable.Range(1, 51).Select(value => (long)value), underLimitPage.Select(row => row.Id));
+    }
+
+    [Fact]
+    public void List_MapsConcreteSqliteReadLockToPersistenceBusyException()
+    {
+        using var database = new TestDatabase();
+        var connectionOptions = new RawTelemetryStoreConnectionOptions(EnableWriteAheadLog: false, BusyTimeoutMilliseconds: 0);
+        var store = new SqliteSourceCompatibilityStore(database.Path, connectionOptions);
+        store.CreateSchema();
+        using var lockConnection = Open(database.Path);
+        Execute(lockConnection, "PRAGMA locking_mode = EXCLUSIVE;");
+        Execute(lockConnection, "BEGIN EXCLUSIVE;");
+        try
+        {
+            Assert.Throws<PersistenceBusyException>(() => store.List(after: null, limit: 1));
+        }
+        finally
+        {
+            Execute(lockConnection, "ROLLBACK;");
+        }
+    }
+
+    [Fact]
     public void CreateSchema_RejectsNewerVersionWithoutRewritingStamp()
     {
         using var database = new TestDatabase();

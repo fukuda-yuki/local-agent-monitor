@@ -4,10 +4,6 @@ using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.Ingestion;
 
-internal sealed class PersistenceBusyException : Exception
-{
-}
-
 /// <summary>
 /// The single SQLite writer. Owns all monitor writes: runs the additive
 /// migration at startup, drains the ingestion queue sequentially, persists each

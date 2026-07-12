@@ -45,7 +45,7 @@ public class MonitorSecurityBoundaryTests
         foreach (var path in new[]
                  {
                      "/diagnostics",
-                     "/api/monitor/ingestions", "/api/monitor/traces",
+                     "/api/monitor/ingestions", "/api/monitor/source-diagnostics", "/api/monitor/traces",
                  })
         {
             var body = await host.Client.GetStringAsync(path);
@@ -341,6 +341,7 @@ public class MonitorSecurityBoundaryTests
         foreach (var path in new[]
                  {
                      "/api/monitor/ingestions",
+                     "/api/monitor/source-diagnostics",
                      "/api/monitor/traces",
                      $"/api/monitor/traces/{SanitizationProbeTraceId}/spans",
                  })
@@ -422,11 +423,14 @@ public class MonitorSecurityBoundaryTests
         return -1;
     }
 
-    private static Task<RunningMonitorHost> StartReadOnlyHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false) =>
-        MonitorTestHost.StartAsync(
+    private static Task<RunningMonitorHost> StartReadOnlyHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false)
+    {
+        new SqliteSourceCompatibilityStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
+        return MonitorTestHost.StartAsync(
             temp,
             sanitizedOnly: sanitizedOnly,
             testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
+    }
 
     private static Task<RunningMonitorHost> StartLiveHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false) =>
         MonitorTestHost.StartAsync(

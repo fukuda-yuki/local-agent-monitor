@@ -156,6 +156,18 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
 
     public IReadOnlyList<SourceCompatibilityRow> List(long? after, int limit)
     {
+        try
+        {
+            return ListCore(after, limit);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            throw new PersistenceBusyException();
+        }
+    }
+
+    private IReadOnlyList<SourceCompatibilityRow> ListCore(long? after, int limit)
+    {
         if (after < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(after));
