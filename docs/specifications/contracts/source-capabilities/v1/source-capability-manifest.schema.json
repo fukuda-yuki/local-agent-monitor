@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://copilot-agent-observability.dev/contracts/source-capabilities/v1",
+  "title": "Source capability manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "source_surface",
+    "source_adapter",
+    "support_status",
+    "stability",
+    "source_version_detector",
+    "signals",
+    "native_session_identity",
+    "trace_span_identity",
+    "timing_ttft",
+    "model_tokens",
+    "retry_attempt",
+    "tool_calls",
+    "permission",
+    "errors",
+    "agent_ownership",
+    "prompt_response",
+    "file_diff",
+    "content_capture_gate",
+    "provenance",
+    "completeness"
+  ],
+  "properties": {
+    "contract_version": { "const": "v1" },
+    "source_surface": { "$ref": "#/$defs/sourceSurface" },
+    "source_adapter": { "type": "string", "minLength": 1 },
+    "support_status": { "$ref": "#/$defs/supportStatus" },
+    "stability": { "$ref": "#/$defs/stability" },
+    "source_version_detector": { "$ref": "#/$defs/capability" },
+    "signals": { "$ref": "#/$defs/signals" },
+    "native_session_identity": { "$ref": "#/$defs/capability" },
+    "trace_span_identity": { "$ref": "#/$defs/traceSpanIdentity" },
+    "timing_ttft": { "$ref": "#/$defs/timingTtft" },
+    "model_tokens": { "$ref": "#/$defs/modelTokens" },
+    "retry_attempt": { "$ref": "#/$defs/retryAttempt" },
+    "tool_calls": { "$ref": "#/$defs/toolCalls" },
+    "permission": { "$ref": "#/$defs/permission" },
+    "errors": { "$ref": "#/$defs/capability" },
+    "agent_ownership": { "$ref": "#/$defs/agentOwnership" },
+    "prompt_response": { "$ref": "#/$defs/promptResponse" },
+    "file_diff": { "$ref": "#/$defs/fileDiff" },
+    "content_capture_gate": { "$ref": "#/$defs/capability" },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "completeness": { "$ref": "#/$defs/completeness" }
+  },
+  "$defs": {
+    "sourceSurface": {
+      "type": "string",
+      "enum": [
+        "github-copilot-vscode",
+        "github-copilot-cli",
+        "claude-code",
+        "codex-app",
+        "codex-cli"
+      ]
+    },
+    "supportStatus": {
+      "type": "string",
+      "enum": ["active", "planned", "unsupported"]
+    },
+    "stability": {
+      "type": "string",
+      "enum": ["stable", "preview", "beta", "internal-unstable"]
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability"],
+      "properties": {
+        "availability": {
+          "type": "string",
+          "enum": ["available", "unavailable", "unknown"]
+        }
+      }
+    },
+    "signals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trace", "log", "metric", "hook", "sdk_event", "saved_raw"],
+      "properties": {
+        "trace": { "$ref": "#/$defs/capability" },
+        "log": { "$ref": "#/$defs/capability" },
+        "metric": { "$ref": "#/$defs/capability" },
+        "hook": { "$ref": "#/$defs/capability" },
+        "sdk_event": { "$ref": "#/$defs/capability" },
+        "saved_raw": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "traceSpanIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trace_id", "span_id", "parentage"],
+      "properties": {
+        "trace_id": { "$ref": "#/$defs/capability" },
+        "span_id": { "$ref": "#/$defs/capability" },
+        "parentage": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "timingTtft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timing", "ttft"],
+      "properties": {
+        "timing": { "$ref": "#/$defs/capability" },
+        "ttft": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "modelTokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "input_tokens", "output_tokens", "total_tokens", "cache_tokens", "reasoning_tokens"],
+      "properties": {
+        "model": { "$ref": "#/$defs/capability" },
+        "input_tokens": { "$ref": "#/$defs/capability" },
+        "output_tokens": { "$ref": "#/$defs/capability" },
+        "total_tokens": { "$ref": "#/$defs/capability" },
+        "cache_tokens": { "$ref": "#/$defs/capability" },
+        "reasoning_tokens": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "retryAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retry", "attempt"],
+      "properties": {
+        "retry": { "$ref": "#/$defs/capability" },
+        "attempt": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "toolCalls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "input", "output"],
+      "properties": {
+        "identity": { "$ref": "#/$defs/capability" },
+        "input": { "$ref": "#/$defs/capability" },
+        "output": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "permission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wait", "decision"],
+      "properties": {
+        "wait": { "$ref": "#/$defs/capability" },
+        "decision": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "agentOwnership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["main_agent", "sub_agent"],
+      "properties": {
+        "main_agent": { "$ref": "#/$defs/capability" },
+        "sub_agent": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "promptResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt", "response"],
+      "properties": {
+        "prompt": { "$ref": "#/$defs/capability" },
+        "response": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "fileDiff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "diff"],
+      "properties": {
+        "file": { "$ref": "#/$defs/capability" },
+        "diff": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required_keys"],
+      "properties": {
+        "required_keys": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "prefixItems": [
+            { "const": "source_adapter" },
+            { "const": "source_version_or_schema_fingerprint" },
+            { "const": "source_event_or_trace_span_id" },
+            { "const": "capture_content_state" },
+            { "const": "normalization_version" }
+          ],
+          "items": false
+        }
+      }
+    },
+    "completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statuses", "reason_codes"],
+      "properties": {
+        "statuses": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            { "const": "unbound" },
+            { "const": "partial" },
+            { "const": "rich" },
+            { "const": "full" }
+          ],
+          "items": false
+        },
+        "reason_codes": {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 11,
+          "prefixItems": [
+            { "const": "missing_native_session_id" },
+            { "const": "missing_trace_context" },
+            { "const": "trace_signal_disabled" },
+            { "const": "content_capture_disabled" },
+            { "const": "unsupported_source_version" },
+            { "const": "ingest_gap" },
+            { "const": "hook_only" },
+            { "const": "historical_summary_only" },
+            { "const": "unknown_span_kind" },
+            { "const": "schema_drift_detected" },
+            { "const": "planned_source_not_enabled" }
+          ],
+          "items": false
+        }
+      }
+    }
+  }
+}
