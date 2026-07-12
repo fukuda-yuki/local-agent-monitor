@@ -481,6 +481,64 @@ public sealed class ProposalApplyServiceTests
         Assert.Equal(ImprovementProposalStatus.Candidate, store.GetImprovementProposal(proposalId)!.Status);
     }
 
+    [Fact]
+    public async Task Comparison_holds_the_apply_rollback_boundary_until_the_receipt_commits_then_rollback_invalidates_it()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "comparison-race.txt"), "before\n");
+        using var comparisonRevalidated = new ManualResetEventSlim();
+        using var releaseComparison = new ManualResetEventSlim();
+        using var rollbackAttempted = new ManualResetEventSlim();
+        var (service, store, proposalId, applyId, request) = PrepareComparison(directory, null, point =>
+        {
+            if (point == "after_current_application_revalidated") { comparisonRevalidated.Set(); releaseComparison.Wait(TimeSpan.FromSeconds(10)); }
+        });
+
+        var comparing = Task.Run(() => service.RecordCurrentEffectComparison(request, DateTimeOffset.UtcNow));
+        Assert.True(comparisonRevalidated.Wait(TimeSpan.FromSeconds(10)), "Comparison did not revalidate the current application.");
+        var rollingBack = Task.Run(() => { rollbackAttempted.Set(); return service.Rollback(applyId); });
+        Assert.True(rollbackAttempted.Wait(TimeSpan.FromSeconds(10)), "Rollback did not attempt the shared mutation boundary.");
+        Assert.False(rollingBack.IsCompleted, "Rollback passed the shared mutation boundary before comparison released it.");
+        Assert.Equal(0L, Scalar(directory.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_pending;"));
+
+        releaseComparison.Set();
+        var receipt = await comparing;
+        Assert.Equal(EffectVerdict.Improved, receipt.Result.Verdict);
+        Assert.Equal(ApplyTransactionResult.RolledBack, await rollingBack);
+
+        var detail = store.GetEffectComparison(receipt.ComparisonId)!;
+        Assert.Equal("invalidated", detail.Receipt.VerificationState);
+        Assert.Equal(ImprovementProposalStatus.Verified, store.GetImprovementProposal(proposalId)!.Status);
+        Assert.Equal(1L, Scalar(directory.DatabasePath, "SELECT COUNT(*) FROM effect_receipts;"));
+    }
+
+    [Fact]
+    public async Task Rollback_holding_the_apply_rollback_boundary_makes_comparison_fail_closed_without_a_receipt()
+    {
+        using var directory = new ApplyTestDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "comparison-race.txt"), "before\n");
+        using var rollbackPrepared = new ManualResetEventSlim();
+        using var releaseRollback = new ManualResetEventSlim();
+        using var comparisonAttempted = new ManualResetEventSlim();
+        var (service, store, proposalId, applyId, request) = PrepareComparison(directory, point =>
+        {
+            if (point == "after_rollback_prepared") { rollbackPrepared.Set(); releaseRollback.Wait(TimeSpan.FromSeconds(10)); }
+        }, null);
+
+        var rollingBack = Task.Run(() => service.Rollback(applyId));
+        Assert.True(rollbackPrepared.Wait(TimeSpan.FromSeconds(10)), "Rollback did not reach the shared mutation boundary.");
+        var comparing = Task.Run(() => { comparisonAttempted.Set(); return RecordComparisonResult(service, request); });
+        Assert.True(comparisonAttempted.Wait(TimeSpan.FromSeconds(10)), "Comparison did not attempt the shared mutation boundary.");
+        Assert.False(comparing.IsCompleted, "Comparison passed the shared mutation boundary while rollback held it.");
+        Assert.Equal(0L, Scalar(directory.DatabasePath, "SELECT COUNT(*) FROM effect_receipts;"));
+
+        releaseRollback.Set();
+        Assert.Equal(ApplyTransactionResult.RolledBack, await rollingBack);
+        Assert.Equal("application_not_active", await comparing);
+        Assert.Equal(0L, Scalar(directory.DatabasePath, "SELECT COUNT(*) FROM effect_receipts;"));
+        Assert.Equal(ImprovementProposalStatus.Recommended, store.GetImprovementProposal(proposalId)!.Status);
+    }
+
     private sealed class ApplyTestDirectory : IDisposable
     {
         public ApplyTestDirectory()
@@ -512,6 +570,55 @@ public sealed class ProposalApplyServiceTests
         command.Parameters.AddWithValue("$id", proposalId.ToString("D"));
         command.ExecuteNonQuery();
         return store;
+    }
+
+    private static (ProposalApplyService Service, SqliteSessionStore Store, Guid ProposalId, Guid ApplyId, EffectComparisonRequest Request) PrepareComparison(ApplyTestDirectory directory, Action<string>? fault, Action<string>? comparisonCheckpoint)
+    {
+        var store = CreateStore(directory, out _);
+        var proposalId = Guid.CreateVersion7();
+        InsertProposal(directory.DatabasePath, proposalId, ImprovementProposalStatus.Recommended);
+        var service = new ProposalApplyService([ConfiguredApplyRoot.Create(ApplyRootKind.Repository, directory.Path)], directory.RuntimePath, store, fault, comparisonCheckpoint);
+        var draft = ApproveSingleFile(service, proposalId, "comparison-race.txt", "after\n");
+        var (applyId, result, _) = service.ApplyWithId(draft.DraftId);
+        Assert.Equal(ApplyTransactionResult.Applied, result);
+        var appliedAt = store.ListApplicationReceipts(proposalId).Single().AppliedAt;
+        var sessions = Enumerable.Range(0, 6).Select(index => InsertComparisonSession(directory.DatabasePath, appliedAt, index, index < 3 ? 1000 : 900)).ToArray();
+        var request = new EffectComparisonRequest(proposalId, 1, applyId, sessions.Select((id, index) => new EffectCohortSession(id, index < 3 ? "pre" : "post", "case-" + (index % 3), null)).ToArray());
+        return (service, store, proposalId, applyId, request);
+    }
+
+    private static string RecordComparisonResult(ProposalApplyService service, EffectComparisonRequest request)
+    {
+        try { service.RecordCurrentEffectComparison(request, DateTimeOffset.UtcNow); return "unexpected_success"; }
+        catch (CurrentApplicationException) { return "application_not_active"; }
+    }
+
+    private static Guid InsertComparisonSession(string databasePath, DateTimeOffset appliedAt, int index, long durationMilliseconds)
+    {
+        var id = Guid.CreateVersion7();
+        var started = index < 3 ? appliedAt.AddHours(-2).AddMinutes(index) : appliedAt.AddHours(2).AddMinutes(index);
+        var ended = started.AddMilliseconds(durationMilliseconds);
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open(); using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO sessions(session_id,status,completeness,repository,workspace,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at)
+            VALUES($id,'completed','full',NULL,NULL,$started,$ended,$ended,'not_captured',$started,$ended);
+            INSERT INTO session_native_ids(session_id,source_surface,native_session_id,binding_kind,observed_at)
+            VALUES($id,'copilot-sdk',$native,'native',$started);
+            INSERT INTO session_human_evaluation(session_id,verdict,recorded_at) VALUES($id,'expected',$ended);
+            """;
+        command.Parameters.AddWithValue("$id", id.ToString("D"));
+        command.Parameters.AddWithValue("$native", "race-" + id.ToString("N"));
+        command.Parameters.AddWithValue("$started", started.ToString("O")); command.Parameters.AddWithValue("$ended", ended.ToString("O"));
+        command.ExecuteNonQuery();
+        return id;
+    }
+
+    private static long Scalar(string databasePath, string sql)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
+        return (long)command.ExecuteScalar()!;
     }
 
     private static void InsertProposal(string databasePath, Guid proposalId, ImprovementProposalStatus status)

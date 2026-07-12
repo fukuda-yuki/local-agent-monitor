@@ -372,6 +372,7 @@ public sealed class SessionEffectComparisonRouteTests
     [InlineData("apply")]
     [InlineData("rollback")]
     [InlineData("rolled_back")]
+    [InlineData("failed")]
     public async Task Post_maps_inactive_application_linkage_without_receipt_or_maturity_change(string state)
     {
         using var temp = new MonitorTempDirectory();
@@ -380,14 +381,58 @@ public sealed class SessionEffectComparisonRouteTests
         var post = Enumerable.Range(0, 3).Select(i => InsertComparableSession(temp.DatabasePath, "post", i, "expected", 900)).ToArray();
         if (state is "apply" or "rollback")
             InsertPendingApplication(temp.DatabasePath, fixture.ApplyId, state);
-        else
+        else if (state == "rolled_back")
             ExecuteSql(temp.DatabasePath, "UPDATE proposal_applies SET state='rolled_back' WHERE apply_id=$id;", fixture.ApplyId);
+        else
+            ExecuteSql(temp.DatabasePath, "UPDATE proposal_applies SET state='failed' WHERE apply_id=$id;", fixture.ApplyId);
 
         using var response = await fixture.Host.Client.SendAsync(Request(ComparisonBody(fixture, pre, post), null, true, true));
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var responseBody = await response.Content.ReadAsStringAsync();
         Assert.Equal("{\"error\":\"application_not_active\"}", responseBody);
         AssertRejectedWithoutReceiptOrMaturityChange(temp.DatabasePath, fixture.ProposalId, responseBody, "comparison.txt");
+    }
+
+    [Fact]
+    public async Task Post_requires_the_exact_applied_proposal_and_apply_binding_without_a_receipt()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var fixture = await CreateComparisonFixtureAsync(temp);
+        var pre = Enumerable.Range(0, 3).Select(i => InsertComparableSession(temp.DatabasePath, "pre", i, "expected", 1000)).ToArray();
+        var post = Enumerable.Range(0, 3).Select(i => InsertComparableSession(temp.DatabasePath, "post", i, "expected", 900)).ToArray();
+        var unboundApply = ComparisonBody(fixture, pre, post).Replace(fixture.ApplyId.ToString("D"), Guid.CreateVersion7().ToString("D"), StringComparison.Ordinal);
+        var unboundProposal = ComparisonBody(fixture, pre, post).Replace(fixture.ProposalId.ToString("D"), Guid.CreateVersion7().ToString("D"), StringComparison.Ordinal);
+
+        foreach (var (request, error) in new[] { (unboundApply, "application_not_active"), (unboundProposal, "proposal_revision_stale") })
+        {
+            using var response = await fixture.Host.Client.SendAsync(Request(request, null, true, true));
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal($"{{\"error\":\"{error}\"}}", body);
+            AssertRejectedWithoutReceiptOrMaturityChange(temp.DatabasePath, fixture.ProposalId, body, "comparison.txt");
+        }
+    }
+
+    [Fact]
+    public async Task Post_with_a_post_apply_hash_stale_target_fails_closed_without_a_receipt_or_sensitive_echo()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var fixture = await CreateComparisonFixtureAsync(temp);
+        var pre = Enumerable.Range(0, 3).Select(i => InsertComparableSession(temp.DatabasePath, "pre", i, "expected", 1000)).ToArray();
+        var post = Enumerable.Range(0, 3).Select(i => InsertComparableSession(temp.DatabasePath, "post", i, "expected", 900)).ToArray();
+        const string marker = "post-hash-stale-private-marker";
+        File.WriteAllText(Path.Combine(temp.Path, "comparison-root", "comparison.txt"), marker);
+
+        using var response = await fixture.Host.Client.SendAsync(Request(ComparisonBody(fixture, pre, post), null, true, true));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Equal("{\"error\":\"application_not_active\"}", body);
+        AssertRejectedWithoutReceiptOrMaturityChange(temp.DatabasePath, fixture.ProposalId, body, marker);
+        Assert.DoesNotContain("comparison.txt", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sha", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("diff", body, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

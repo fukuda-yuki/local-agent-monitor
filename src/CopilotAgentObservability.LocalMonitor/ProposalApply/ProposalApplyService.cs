@@ -15,13 +15,14 @@ internal sealed class ProposalApplyService
     private readonly object sync = new();
     private readonly ProposalApplyTransaction transaction;
     private readonly ISessionStore? store;
+    private readonly Action<string>? comparisonCheckpoint;
     private readonly string draftPath;
     private readonly Dictionary<Guid, ProposalApplyLinkage> applies = [];
 
     public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, Action<string>? fault = null) : this(roots, runtimePath, null, fault) { }
-    public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, ISessionStore? store, Action<string>? fault = null)
+    public ProposalApplyService(IReadOnlyList<ConfiguredApplyRoot> roots, string runtimePath, ISessionStore? store, Action<string>? fault = null, Action<string>? comparisonCheckpoint = null)
     {
-        transaction = new ProposalApplyTransaction(runtimePath, roots, fault); Roots = transaction.ConfiguredRoots; this.store = store;
+        transaction = new ProposalApplyTransaction(runtimePath, roots, fault); Roots = transaction.ConfiguredRoots; this.store = store; this.comparisonCheckpoint = comparisonCheckpoint;
         draftPath = Path.Combine(runtimePath, "drafts"); Directory.CreateDirectory(draftPath); transaction.RecoverUncommitted(); ReconcilePending(); MigrateLegacyDraftRevisions(); LoadDrafts(); LoadAppliedLinkages();
     }
     public IReadOnlyList<ConfiguredApplyRoot> Roots { get; }
@@ -40,6 +41,7 @@ internal sealed class ProposalApplyService
             if (proposal is null || proposal.Revision != request.ProposalRevision || proposal.Status != ImprovementProposalStatus.Recommended)
                 throw new InvalidOperationException("Proposal revision is stale.");
             if (store is null || !TryGetCurrentApplicationUnsafe(request.ProposalId, request.ApplyId, out _)) throw new CurrentApplicationException();
+            comparisonCheckpoint?.Invoke("after_current_application_revalidated");
             // This lock covers both post-hash validation and the SQLite effect receipt transaction.
             return store.RecordEffectComparison(request, recordedAt);
         }
