@@ -49,7 +49,12 @@ internal sealed class SetupApplyCoordinator
 
     public SetupLedgerChangeSet Apply(SetupLock setupLock, Guid changeSetId)
     {
-        setupLock.AssertHeld(platform, paths);
+        ArgumentNullException.ThrowIfNull(setupLock);
+        return setupLock.ExecuteWhileHeld(platform, paths, () => ApplyCore(setupLock, changeSetId));
+    }
+
+    private SetupLedgerChangeSet ApplyCore(SetupLock setupLock, Guid changeSetId)
+    {
         var compensationEligible = false;
         try
         {

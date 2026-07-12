@@ -1,5 +1,6 @@
 using System.Text;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
 using CopilotAgentObservability.ConfigCli.Setup.Transactions;
 
@@ -7,6 +8,44 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SetupCompensationTests
 {
+    [Fact]
+    public async Task Apply_DisposeRequestedAtEnvironmentRestoreKeepsExclusiveLockUntilRecoveryEvidenceIsReturned()
+    {
+        var fixture = CompensationFixture.Create();
+        var restoreBarrierReady = new TaskCompletionSource<SetupTestBarrier>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Platform.InjectAfterEffectFault(
+            "environment.set:ENV_B",
+            new IOException("FORWARD_PRIVATE"),
+            () => restoreBarrierReady.SetResult(fixture.Platform.AddBarrier("environment.set:ENV_B")));
+        using var disposeRequested = new ManualResetEventSlim();
+        var exclusive = new TrackingExclusiveLock();
+        var setupLock = SetupLock.CreateForTesting(exclusive, fixture.Platform, fixture.Paths, disposeRequested.Set);
+
+        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+            () => fixture.Coordinator.Apply(setupLock, fixture.ChangeSetId)));
+        using var restore = await restoreBarrierReady.Task;
+        restore.WaitUntilReached(CancellationToken.None);
+
+        var disposing = Task.Run(setupLock.Dispose);
+        Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+        Assert.False(exclusive.IsDisposed);
+        restore.Release();
+
+        var exception = await applying;
+        await disposing;
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.True(exclusive.IsDisposed);
+        Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal(SetupChangeSetState.Compensating, fixture.LoadChangeSet().State);
+        var journal = fixture.JournalStore.Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Compensating, journal.Phase);
+        Assert.Equal(
+            SetupJournalStepPhase.RestoreStarted,
+            journal.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId).Steps
+                .Single(step => step.MemberKey == "ENV_B").Phase);
+    }
+
     [Theory]
     [InlineData("ENV_A", false)]
     [InlineData("ENV_A", true)]
@@ -654,5 +693,14 @@ public sealed class SetupCompensationTests
         public void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
         {
         }
+    }
+
+    private sealed class TrackingExclusiveLock : ISetupExclusiveFileLock
+    {
+        private int disposed;
+
+        public bool IsDisposed => Volatile.Read(ref disposed) != 0;
+
+        public void Dispose() => Interlocked.Exchange(ref disposed, 1);
     }
 }

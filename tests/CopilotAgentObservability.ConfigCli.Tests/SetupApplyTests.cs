@@ -9,6 +9,151 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public sealed class SetupApplyTests
 {
     [Fact]
+    public async Task Apply_SameTokenConcurrentCommandWaitsForTheActiveCommandToExit()
+    {
+        var fixture = ApplyFixture.Create();
+        using var mutation = fixture.Platform.AddBarrier("environment.set:ENV_A");
+        using var secondStarted = new ManualResetEventSlim();
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var first = Task.Run(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+        mutation.WaitUntilReached(CancellationToken.None);
+        var second = Task.Run(() =>
+        {
+            secondStarted.Set();
+            return Assert.Throws<SetupApplyException>(
+                () => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+        });
+        Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(10)));
+        Assert.False(second.IsCompleted);
+
+        mutation.Release();
+        var applied = await first;
+        var rejected = await second;
+
+        Assert.Equal(SetupCodes.ApplySucceeded, applied.OutcomeCode);
+        Assert.Equal(SetupCodes.InvalidArguments, rejected.Code);
+        Assert.Equal(1, fixture.Revalidator.Calls);
+    }
+
+    [Fact]
+    public void Apply_ForeignPlatformLockRejectsBeforeRevalidationOrArtifacts()
+    {
+        var fixture = ApplyFixture.Create();
+        var foreignPlatform = new SetupTestPlatform(
+            fixture.Platform.Clock.UtcNow,
+            fixture.Platform.LocalApplicationData,
+            fixture.Platform.PathStyle);
+        using var foreignLock = SetupLock.CreateForTesting(
+            new TrackingExclusiveLock(),
+            foreignPlatform,
+            new SetupRuntimePaths(foreignPlatform));
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            fixture.Coordinator.Apply(foreignLock, fixture.ChangeSetId));
+
+        Assert.Equal(SetupStorageCodes.LockRequired, exception.Code);
+        Assert.Equal(0, fixture.Revalidator.Calls);
+        AssertNoTransactionArtifacts(fixture);
+    }
+
+    [Fact]
+    public async Task Apply_DisposeRequestedAtEnvironmentWriteKeepsExclusiveLockUntilRecoveryEvidenceIsReturned()
+    {
+        var fixture = ApplyFixture.Create();
+        using var mutation = fixture.Platform.AddBarrier("environment.set:ENV_A");
+        using var disposeRequested = new ManualResetEventSlim();
+        var exclusive = new TrackingExclusiveLock();
+        var setupLock = SetupLock.CreateForTesting(exclusive, fixture.Platform, fixture.Paths, disposeRequested.Set);
+
+        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+            () => fixture.Coordinator.Apply(setupLock, fixture.ChangeSetId)));
+        mutation.WaitUntilReached(CancellationToken.None);
+
+        var disposing = Task.Run(setupLock.Dispose);
+        Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+        Assert.False(exclusive.IsDisposed);
+        Assert.Null(exclusive.TryAcquire());
+        mutation.Release();
+
+        var exception = await applying;
+        await disposing;
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.True(exclusive.IsDisposed);
+        Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet().State);
+        var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Applying, journal.Phase);
+        Assert.Equal(SetupJournalStepPhase.MutationStarted, journal.Targets[1].Steps[0].Phase);
+        using var reacquired = exclusive.TryAcquire();
+        Assert.NotNull(reacquired);
+    }
+
+    [Fact]
+    public async Task Apply_DisposeRequestedAtFileReplaceKeepsExclusiveLockUntilRecoveryEvidenceIsReturned()
+    {
+        var fixture = ApplyFixture.Create(includeEnvironment: false);
+        using var beforeMutation = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterMutationIntentBeforeMutation}");
+        using var disposeRequested = new ManualResetEventSlim();
+        var exclusive = new TrackingExclusiveLock();
+        var setupLock = SetupLock.CreateForTesting(exclusive, fixture.Platform, fixture.Paths, disposeRequested.Set);
+
+        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+            () => fixture.Coordinator.Apply(setupLock, fixture.ChangeSetId)));
+        beforeMutation.WaitUntilReached(CancellationToken.None);
+        var temporary = NextTemporaryPath(fixture.Platform.Operations, fixture.TargetPath);
+        using var replace = fixture.Platform.AddBarrier($"file.replace:{temporary}->{fixture.TargetPath}");
+        beforeMutation.Release();
+        replace.WaitUntilReached(CancellationToken.None);
+
+        var disposing = Task.Run(setupLock.Dispose);
+        Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+        Assert.False(exclusive.IsDisposed);
+        replace.Release();
+
+        var exception = await applying;
+        await disposing;
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.True(exclusive.IsDisposed);
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet().State);
+        var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Applying, journal.Phase);
+        Assert.Equal(SetupJournalStepPhase.MutationStarted, journal.Targets[0].Steps[0].Phase);
+    }
+
+    [Fact]
+    public async Task Apply_DisposeRequestedAtNotificationKeepsCommittedPendingRecoveryEvidence()
+    {
+        var fixture = ApplyFixture.Create();
+        using var notification = fixture.Platform.AddBarrier("environment.notify");
+        using var disposeRequested = new ManualResetEventSlim();
+        var exclusive = new TrackingExclusiveLock();
+        var setupLock = SetupLock.CreateForTesting(exclusive, fixture.Platform, fixture.Paths, disposeRequested.Set);
+
+        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+            () => fixture.Coordinator.Apply(setupLock, fixture.ChangeSetId)));
+        notification.WaitUntilReached(CancellationToken.None);
+
+        var disposing = Task.Run(setupLock.Dispose);
+        Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+        Assert.False(exclusive.IsDisposed);
+        notification.Release();
+
+        var exception = await applying;
+        await disposing;
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.True(exclusive.IsDisposed);
+        Assert.Equal(SetupChangeSetState.Applied, fixture.LoadChangeSet().State);
+        var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Committed, journal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Pending, journal.EnvironmentNotification);
+    }
+
+    [Fact]
     public void Apply_RequiresLiveLockBeforeRevalidationOrArtifacts()
     {
         var fixture = ApplyFixture.Create();
@@ -639,5 +784,30 @@ public sealed class SetupApplyTests
             Calls++;
             OnRevalidate?.Invoke(plan, plannedChangeSet);
         }
+    }
+
+    private sealed class TrackingExclusiveLock : ISetupExclusiveFileLock
+    {
+        private int held = 1;
+
+        public bool IsDisposed => Volatile.Read(ref held) == 0;
+
+        public ISetupExclusiveFileLock? TryAcquire() =>
+            Interlocked.CompareExchange(ref held, 1, 0) == 0 ? this : null;
+
+        public void Dispose() => Interlocked.Exchange(ref held, 0);
+    }
+
+    private static string NextTemporaryPath(IReadOnlyList<string> operations, string destination)
+    {
+        const string marker = ".cao-00000000-0000-7000-8000-";
+        var maximum = operations
+            .Where(operation => operation.Contains(marker, StringComparison.Ordinal))
+            .Select(operation => operation[(operation.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..])
+            .Select(suffix => suffix[..12])
+            .Select(long.Parse)
+            .DefaultIfEmpty()
+            .Max();
+        return destination + marker + (maximum + 1).ToString("D12") + ".tmp";
     }
 }

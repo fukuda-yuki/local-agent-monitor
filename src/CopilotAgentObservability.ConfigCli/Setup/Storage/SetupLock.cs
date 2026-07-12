@@ -46,12 +46,6 @@ public sealed class SetupLock : IDisposable
         Action? disposeRequestedObserver = null) =>
         new(fileLock, platform, paths.Root, disposeRequestedObserver);
 
-    internal void AssertHeld(ISetupPlatform expectedPlatform, SetupRuntimePaths expectedPaths)
-    {
-        // Transitional only: Lock-B replaces caller-side checks with operation-scoped execution.
-        ExecuteWhileHeld(expectedPlatform, expectedPaths, static () => { });
-    }
-
     internal void ExecuteWhileHeld(
         ISetupPlatform expectedPlatform,
         SetupRuntimePaths expectedPaths,
