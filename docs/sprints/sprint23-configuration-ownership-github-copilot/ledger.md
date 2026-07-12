@@ -6,8 +6,9 @@ Updated: 2026-07-12
 
 | Task | Issue | State | Commit range | Focused/full tests | Review | Unresolved minor |
 | --- | --- | --- | --- | --- | --- | --- |
-| Contract and plan | #66-#67 | Complete; Task 1a ready | pending contract commit | SourceCapabilityContractTests 13/13; `git diff --check` exit 0 | Spec PASS; architecture/security APPROVED; Plan PASS; no findings | repository dispatch skill path is absent, using Superpowers SDD |
+| Contract and plan | #66-#67 | Complete | `3505565..63deb36` | SourceCapabilityContractTests 13/13; `git diff --check` exit 0 | Spec PASS; architecture/security APPROVED; Plan PASS; no findings | repository dispatch skill path is absent, using Superpowers SDD |
 | CRLF contract-test baseline fix | prerequisite | Complete | `3fa8340..3505565` | SourceCapabilityContractTests 13/13 / full 1,250/1,250 | Spec PASS, Quality APPROVED | none |
+| Setup result DTO and serializer (Task 1a) | #66 | Complete | `63deb36..98af0cc` | SetupContractShapeTests 47/47; `git diff --check` exit 0 | Spec PASS, Quality APPROVED; no findings after two required test-design re-audits | none |
 | Ledger schema and redaction | #66 | Pending | - | - | - | - |
 | Atomic file mutation | #66 | Pending | - | - | - | - |
 | User environment mutation | #66 | Pending | - | - | - | - |
@@ -26,6 +27,7 @@ Updated: 2026-07-12
 | Requirement | Planned executable evidence | Result |
 | --- | --- | --- |
 | Versioned ownership ledger | Schema fixtures, unknown-version rejection, close/reopen persistence | Pending |
+| Public setup wire contract | Canonical literal plan/status/error fixtures, every enum mapping, fixed-code catalog, sole serializer | SetupContractShapeTests 47/47; independent review PASS/APPROVED |
 | Stale plan/apply and rollback | Barrier-controlled hash changes without sleeps | Pending |
 | Atomic file update | Backup/temp/replace fault injection and restart-visible state | Pending |
 | Partial compensation | Deterministic multi-target failure at each boundary | Pending |
