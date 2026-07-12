@@ -133,17 +133,18 @@ The request requirements are:
 - request body at most **1 MiB (1048576 bytes)**;
 - `events` batch length from **1 through 100**, inclusive;
 - schema version `1` only;
-- `source_adapter` is `copilot-sdk-stream` or `copilot-compatible-hook`;
-- `source_surface` is `copilot-sdk`, `copilot-cli`, `vscode`, or
-  `hook-unknown`.
+- `source_adapter` is `copilot-sdk-stream`, `copilot-compatible-hook`, or
+  `claude-code-hook`;
+- `source_surface` is `copilot-sdk`, `copilot-cli`, `vscode`,
+  `hook-unknown`, or `claude-code`.
 
 The v1 envelope has these fields:
 
 | Field | Required | Contract |
 | --- | --- | --- |
 | `schema_version` | yes | Integer exactly `1`. |
-| `source_adapter` | yes | `copilot-sdk-stream` or `copilot-compatible-hook`. |
-| `source_surface` | yes | `copilot-sdk`, `copilot-cli`, `vscode`, or `hook-unknown`. |
+| `source_adapter` | yes | `copilot-sdk-stream`, `copilot-compatible-hook`, or `claude-code-hook`. |
+| `source_surface` | yes | `copilot-sdk`, `copilot-cli`, `vscode`, `hook-unknown`, or `claude-code`. |
 | `native_session_id` | yes | Nonblank string, 1..256 characters. |
 | `events` | yes | JSON array with 1..100 entries. |
 | `explicit_link` | no | The sole v1 wire representation of explicit resume/handoff linkage; shape below. |
@@ -152,7 +153,7 @@ The v1 envelope has these fields:
 
 ```json
 {
-  "source_surface": "copilot-sdk|copilot-cli|vscode|hook-unknown",
+  "source_surface": "copilot-sdk|copilot-cli|vscode|hook-unknown|claude-code",
   "native_session_id": "nonblank 1..256 characters",
   "kind": "resume|handoff"
 }
@@ -165,8 +166,8 @@ The v1 envelope example is:
 ```json
 {
   "schema_version": 1,
-  "source_adapter": "copilot-sdk-stream|copilot-compatible-hook",
-  "source_surface": "copilot-sdk|copilot-cli|vscode|hook-unknown",
+  "source_adapter": "copilot-sdk-stream|copilot-compatible-hook|claude-code-hook",
+  "source_surface": "copilot-sdk|copilot-cli|vscode|hook-unknown|claude-code",
   "native_session_id": "nonblank 1..256 characters",
   "explicit_link": {
     "source_surface": "copilot-cli",
@@ -285,7 +286,11 @@ pagination and no additional filters. Each list item has exactly these fields:
 | `session_id` | Local UUIDv7 string. |
 | `status` | `active`, `completed`, `failed`, or `unknown`. |
 | `completeness` | `unbound`, `partial`, `rich`, or `full`. |
+| `completeness_reason_codes` | Canonically ordered Issue #61 reason-code array. |
 | `source_surfaces` | Array of source-surface enum values. |
+| `source_diagnostic` | Additive sanitized object defined by `source-schema-drift-claude-code.md`, or `null` when no observation is linked. |
+| `binding_state` | `hook_only`, `otel_only`, or `exact_linked`. |
+| `content_state` | Nullable aggregate capture state defined by `source-schema-drift-claude-code.md`; never a UI-derived fallback. |
 | `repository` | Nullable string. |
 | `workspace` | Nullable string. |
 | `started_at` | Nullable ISO-8601 timestamp. |
@@ -300,7 +305,7 @@ An invalid or out-of-range `limit` returns `400` with
 top-level fields (`human_evaluation` is the Issue #52 additive amendment; see
 `canvas-session-workspace-ui.md`):
 
-- `session`: the exact list-item shape above;
+- `session`: the exact additive list-item shape above;
 - `human_evaluation`: JSON `null`, or `{ "verdict": "expected"|"problem",
   "recorded_at": "<ISO-8601>" }` recorded through the Issue #52
   human-evaluation endpoint;

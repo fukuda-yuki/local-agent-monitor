@@ -18,12 +18,55 @@ observation containing:
 - `inventory_hash`
 - `compatibility_state`
 - ordered `reason_codes`
+- `capture_content_state`
 - `observed_at`
+
+Adapter/parse failure before raw persistence produces an immutable diagnostic
+observation with a new `observation_id`, nullable `ingest_batch_id`, nullable
+fingerprint/hash fields, `compatibility_state = adapter_failure`, a fixed
+sanitized reason code, and no payload fragment or exception text. Unsupported
+media type, oversize, queue-full, and commit-timeout keep their existing HTTP
+error contracts and are not misreported as schema drift.
 
 `compatibility_state` is one of `supported`,
 `supported_with_unknown_fields`, `schema_drift_detected`,
 `unsupported_source_version`, `recognized_record_drop_detected`, or
 `adapter_failure`.
+
+Compatibility reason codes have this exact canonical order:
+
+1. `unknown_fields_observed`
+2. `unsupported_source_version`
+3. `schema_drift_detected`
+4. `recognized_record_drop_detected`
+5. `adapter_parse_failure`
+6. `adapter_exception`
+
+Reasons are de-duplicated and emitted in that order. `supported` has no reason.
+`supported_with_unknown_fields` has `unknown_fields_observed`.
+`unsupported_source_version`, `schema_drift_detected`, and
+`recognized_record_drop_detected` each carry the same-named reason.
+`adapter_failure` carries exactly one of `adapter_parse_failure` or
+`adapter_exception`.
+
+`next_action` has these exact wire values:
+
+| State/reason | `next_action` |
+| --- | --- |
+| `supported` | `none` |
+| `supported_with_unknown_fields` | `review_unknown_fields` |
+| `unsupported_source_version` | `use_compatible_source_or_update_adapter` |
+| `schema_drift_detected` | `capture_fixture_and_review_mapping` |
+| `recognized_record_drop_detected` | `restore_mapping_or_update_versioned_golden` |
+| `adapter_parse_failure` | `validate_payload_and_protocol` |
+| `adapter_exception` | `inspect_sanitized_adapter_failure` |
+
+For pre-persistence adapter failure, `source_surface`,
+`source_application_version`, `source_adapter`, `adapter_version`,
+`schema_fingerprint`, `inventory_hash`, and `capture_content_state` are
+nullable. A value is populated only when known before parsing failed; no value
+is inferred from payload text. `observed_at`, state, reason, and next action are
+always present.
 
 Verified versions are recorded as evidence. They are not a receive allowlist.
 An unverified version with a known fingerprint is supported. A new fingerprint
@@ -63,6 +106,14 @@ tables behind a focused store. They do not add source-specific responsibility
 to `RawTelemetryStore.cs` or make Session storage authoritative for batch
 compatibility.
 
+`IIngestionCommitStore.Commit(ValidatedIngestionBatch)` is the transaction
+coordinator: it inserts the raw record and batch observation in one SQLite
+transaction by calling shared raw-record SQL and the focused compatibility
+store. `ISourceCompatibilityStore.RecordAdapterFailure(...)` persists a
+diagnostic with no raw record through the same single-writer queue.
+`ISourceCompatibilityStore.List(after, limit)` owns diagnostic reads. Neither
+compatibility writes nor queries are added to `IMonitorProjectionStore`.
+
 Migration must be transactional, restart-safe, preserve every existing row,
 and reject a database schema newer than the implementation. Tests use fixtures
 created by each actual shipped schema implementation or preserved database
@@ -84,7 +135,9 @@ resume/handoff links. Hook input cannot create or overwrite spans, hierarchy,
 duration, token counts, TTFT, or OTel status.
 
 Binding is allowed only by identical native session ID, explicit
-resume/handoff, or byte-equivalent trace context. Repository, cwd, transcript
+resume/handoff, or byte-equivalent trace context. A matching trace ID without
+byte-equivalent trace context is insufficient. A generic link whose kind is
+not `resume` or `handoff` is insufficient. Repository, cwd, transcript
 path, process identity, and timestamp proximity are not binding evidence.
 Duplicate OTel and Hook inputs are idempotent by source identity and canonical
 Hook hash.
@@ -109,6 +162,13 @@ input is converted by the installed `hook-forward` path into the existing
 strict `POST /api/session-ingest/v1/events` envelope with distinct
 `source_adapter = claude-code-hook` and `source_surface = claude-code`.
 
+The Claude manifest registry label is
+`claude-code-otel+claude-code-hook`. It describes registered input paths only.
+Per-field and per-observation actual-adapter provenance is exactly
+`claude-code-otel` or `claude-code-hook`; the composite label is never stored as
+actual provenance. This uses the existing v1 string field and does not extend
+the v1 manifest schema.
+
 Source diagnostics use the additive sanitized endpoint
 `GET /api/monitor/source-diagnostics?after&limit`. `limit` defaults to 50 and
 is bounded to 1..200; malformed cursors or limits return the existing sanitized
@@ -117,9 +177,9 @@ is bounded to 1..200; malformed cursors or limits return the existing sanitized
 ```text
 {
   items: [{
-    observation_id, ingest_batch_id, source_surface,
+    observation_id, ingest_batch_id?, source_surface,
     source_application_version, source_adapter, adapter_version,
-    schema_fingerprint, inventory_hash, compatibility_state,
+    schema_fingerprint?, inventory_hash?, compatibility_state,
     reason_codes, unknown_span_count, unknown_event_count,
     unknown_attribute_count, observed_at, next_action
   }],
@@ -132,6 +192,54 @@ All identifiers are opaque and all fields are sanitized metadata. Existing
 unchanged as required by D051. Source compatibility does not make process
 readiness fail. Existing monitor/session DTOs may gain the same additive
 source diagnostic field names; no sanitized route may return raw content.
+
+The trace DTOs returned by `GET /api/monitor/traces` and
+`GET /api/monitor/trace-list`, and the Session DTO returned in
+`/api/session-workspace/sessions` list/detail responses, gain the same additive
+fields:
+
+```text
+source_diagnostic: {
+  source_surface,
+  source_application_version,
+  source_adapter,
+  adapter_version,
+  schema_fingerprint,
+  compatibility_state,
+  reason_codes,
+  next_action
+},
+binding_state,
+completeness,
+completeness_reason_codes,
+content_state
+```
+
+`binding_state` is `hook_only`, `otel_only`, or `exact_linked`.
+`completeness` keeps the Issue #51 four-value enum and reason codes keep Issue
+#61 canonical ordering. `content_state` uses the existing Session content-state
+wire values. If a trace has no exact Session link it is `otel_only` and
+`unbound`; the API does not invent Session evidence. Nullable source fields
+remain null rather than receiving display defaults. The Agent graph response
+shape does not change.
+
+For a trace or Session linked to multiple observations, select the display
+observation by compatibility severity, then newest `observation_id`:
+`recognized_record_drop_detected` > `adapter_failure` >
+`unsupported_source_version` > `schema_drift_detected` >
+`supported_with_unknown_fields` > `supported`. Emit the ordered distinct union
+of reason codes from every linked observation. A pre-persistence
+`adapter_failure` without a trace/session reference is diagnostics-only and is
+not joined by time or repository context.
+
+`capture_content_state` is `available` only when capture was explicitly enabled
+and an allowed content-bearing field was emitted, `not_captured` when disabled
+or absent, `redacted` when the source explicitly reports redaction, and
+`unsupported` when the surface cannot expose the gate. Trace/Session
+`content_state` is that value only when all linked observations agree;
+otherwise it is null and completeness reasons describe the missing content.
+`expired_pending_deletion` remains an event-content retention state and is not
+fabricated as a source capture state.
 
 ## Diagnostics and UI
 
