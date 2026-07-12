@@ -31,6 +31,7 @@ Updated: 2026-07-13
 | Early #62/#64 integration review | #62/#64 | Complete with explicit follow-ups (Task 19) | `67af37d..97bdd36` | ConfigCli 909/909; LocalMonitor 395/395; build 0 | Important findings resolved in canonical binding spec; Task20 gate reviewed | complete trace-context DTO remains deferred; Task20 must never exact-link trace-id-only |
 | Projection and HTTP DTO | #65 | Pending | - | - | - | - |
 | UI and Playwright | #65 | Pending | - | - | - | - |
+| User documentation and live-validation closeout | #65 | Complete with explicit live blockers (Task 23) | this docs closeout | `git diff --check` PASS; repository-safe docs review | Exact blockers and named follow-ups recorded for all three Claude surfaces | interactive TTY unavailable; print emitted no structural telemetry; Agent SDK package/runtime/credential unavailable |
 | Final integration | #62-#65 | Pending | - | - | - | - |
 
 ## Requirement-to-test evidence
@@ -53,9 +54,11 @@ Updated: 2026-07-13
 - Complete byte-equivalent trace-context binding awaits an additive Session DTO contract carrying complete context; trace_id-only remains explicitly insufficient.
 - Canonical exact-binding contract now reflects shipped Claude source values and explicitly defers the complete trace-context row.
 - Task18 cross-writer cursor/aggregate atomicity remains unverified until barrier tests complete.
-- Interactive CLI, `claude -p`, and Agent SDK live availability is unverified;
-  unavailable cases will receive a separate follow-up task with an exact
-  blocker.
+- Interactive CLI, `claude -p`, and Agent SDK live availability remains
+  unverified. Task 23 records the exact blockers and named follow-ups in
+  [M5 live-validation](milestones/M5-integration/live-validation.md): no
+  interactive TTY, no structural telemetry from the bounded print run, and
+  no available Agent SDK package/runtime/credential.
 - Source observation DTO has not yet been exercised through storage, HTTP, and
   UI in one executable test.
 

@@ -10,6 +10,6 @@ behavior remains canonical in requirements, spec, and interface documents.
 | M2 Claude inventory contract | Pending | Issue #63 |
 | M3 Claude ingestion and binding | Pending | Issue #64 |
 | M4 projection and UI | Pending | Issue #65 |
-| M5 integration closeout | Pending | Independent reviews and full validation |
+| M5 integration closeout | Complete with explicit live blockers | [Task 23 live-validation record](milestones/M5-integration/live-validation.md); independent live producer follow-ups remain named |
 
 See [ledger.md](ledger.md) for current execution evidence.
