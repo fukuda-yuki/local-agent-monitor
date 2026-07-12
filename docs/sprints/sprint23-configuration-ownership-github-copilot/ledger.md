@@ -9,8 +9,8 @@ Updated: 2026-07-12
 | Contract and plan | #66-#67 | Complete | `3505565..63deb36` | SourceCapabilityContractTests 13/13; `git diff --check` exit 0 | Spec PASS; architecture/security APPROVED; Plan PASS; no findings | repository dispatch skill path is absent, using Superpowers SDD |
 | CRLF contract-test baseline fix | prerequisite | Complete | `3fa8340..3505565` | SourceCapabilityContractTests 13/13 / full 1,250/1,250 | Spec PASS, Quality APPROVED | none |
 | Setup result DTO and serializer (Task 1a) | #66 | Complete | `63deb36..98af0cc` | SetupContractShapeTests 47/47; `git diff --check` exit 0 | Spec PASS, Quality APPROVED; no findings after two required test-design re-audits | none |
-| Setup result validation (Task 1b) | #66 | Blocked on pulled-forward Task 8a after dependency re-audit | `e62330b..fc6389a` | SetupContractValidationTests 57/57; SetupContractShapeTests 47/47 | second review CHANGES_REQUIRED; generic validator cannot own canonical resources | exact canonical membership and origin-only endpoint integration remain |
-| Runtime #61 manifest loader (Task 8a, pulled forward) | #67 dependency | In progress | - | - | dependency re-audit PASS for reordered work | target pairing remains for Task 8b real-producer gate |
+| Setup result validation (Task 1b) | #66 | Complete | `e62330b..92ced23` | SetupContractValidationTests 74/74; SetupContractShapeTests 47/47; ConfigCli 449/449 | Spec PASS; Security/Quality APPROVED after dependency re-audit | target pairing and CLI input normalization remain for Tasks 8b/7a |
+| Runtime #61 manifest loader (Task 8a, pulled forward) | #67 dependency | Complete | `cce9a72..e7d44e2` | SourceCapabilityRuntimeTests 14/14; SourceCapabilityContractTests 13/13; ConfigCli 432/432 at task review | Spec PASS; Quality/Security APPROVED | target pairing remains for Task 8b real-producer gate |
 | Ledger schema and redaction | #66 | Pending | - | - | - | - |
 | Atomic file mutation | #66 | Pending | - | - | - | - |
 | User environment mutation | #66 | Pending | - | - | - | - |
@@ -30,6 +30,7 @@ Updated: 2026-07-12
 | --- | --- | --- |
 | Versioned ownership ledger | Schema fixtures, unknown-version rejection, close/reopen persistence | Pending |
 | Public setup wire contract | Canonical literal plan/status/error fixtures, every enum mapping, fixed-code catalog, sole serializer | SetupContractShapeTests 47/47; independent review PASS/APPROVED |
+| Repository-safe DTO validation | Exact/over bounds, canonical manifest membership, origin-only endpoint, fixed non-echo failures, recovery/lifecycle matrix | SetupContractValidationTests 74/74; independent review PASS/APPROVED |
 | Stale plan/apply and rollback | Barrier-controlled hash changes without sleeps | Pending |
 | Atomic file update | Backup/temp/replace fault injection and restart-visible state | Pending |
 | Partial compensation | Deterministic multi-target failure at each boundary | Pending |
