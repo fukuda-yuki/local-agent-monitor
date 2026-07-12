@@ -1361,6 +1361,12 @@ public sealed class SqliteSessionStore : ISessionStore
             AddProposalRevisionColumns(connection, transaction);
             return;
         }
+        var v6Missing = new HashSet<(string Table, string Column)> { ("improvement_proposal_sessions", "proposal_revision") };
+        if (MatchesVersionTenShape(connection, transaction, v6Missing))
+        {
+            AddProposalRevisionColumns(connection, transaction);
+            return;
+        }
         if (!MatchesVersionTenShape(connection, transaction, new HashSet<(string Table, string Column)>()))
             throw new InvalidOperationException("Unsupported incomplete Session schema version 10.");
     }

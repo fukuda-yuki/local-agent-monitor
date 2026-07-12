@@ -162,7 +162,10 @@ public sealed class SqliteEffectComparisonStoreTests
         using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
         {
             connection.Open();
-            foreach (var (table, column) in new[] { ("improvement_proposals", "revision"), ("improvement_proposal_sessions", "proposal_revision"), ("proposal_apply_drafts", "proposal_revision"), ("proposal_applies", "proposal_revision") })
+            var missing = historicalVersion == 6
+                ? new[] { ("improvement_proposal_sessions", "proposal_revision") }
+                : new[] { ("improvement_proposals", "revision"), ("improvement_proposal_sessions", "proposal_revision"), ("proposal_apply_drafts", "proposal_revision"), ("proposal_applies", "proposal_revision") };
+            foreach (var (table, column) in missing)
                 if (ColumnExists(connection, table, column)) Execute(connection, $"ALTER TABLE {table} DROP COLUMN {column};");
             if (historicalVersion == 4) Execute(connection, "DROP TABLE proposal_apply_pending;");
         }
