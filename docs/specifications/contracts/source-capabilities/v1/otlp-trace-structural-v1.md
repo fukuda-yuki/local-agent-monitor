@@ -164,6 +164,45 @@ unknown but does not invalidate that containing Span envelope. A wrong-typed
 hierarchy field or non-object JSON span item does not create a valid Span.
 Malformed protobuf is an adapter parse failure, not a missing-signal result.
 
+## Recognized projection view
+
+The descriptor also defines an ephemeral recognized projection view for
+OTLP/JSON. The view is produced from the original accepted request with
+`JsonDocument` and `Utf8JsonWriter`; it is not produced with `JsonNode` and is
+never persisted, logged, fingerprinted, or used as raw evidence.
+
+The inventory walker and recognized-view builder consume the same descriptor
+representation predicates. A decimal-string field is accepted only when its
+entire value is ASCII decimal digits within `ulong` range, except
+`any_value.int`, which additionally accepts one leading `-` and must fit in
+`long`; `+`, whitespace, empty strings, embedded signs, decimals, exponents,
+and overflow are rejected. The builder recursively preserves only known fields
+with an accepted representation. It omits unknown properties, wrong-typed known
+fields, invalid repeated elements, and Trace-ignored fields. Valid siblings are
+preserved in original order. Repeated message fields contain only valid object
+elements; `EntityRef.idKeys` and `descriptionKeys` contain only valid string
+elements.
+
+The view always emits these protobuf-matching empty arrays when their containing
+envelope is emitted and the recognized field has no valid elements:
+`request.resourceSpans`, `resource_spans.scopeSpans`, `resource.attributes`,
+`scope_spans.spans`, `array_value.values`, and `key_value_list.values`. No other
+absent field is synthesized.
+
+Duplicate JSON properties remain independently visible to the original-input
+inventory. The recognized view filters each duplicate occurrence independently
+in source order. Valid occurrences remain duplicated in source order; invalid
+occurrences are omitted without overwriting or merging a valid occurrence. An
+invalid value is never serialized as sanitized text.
+
+A syntactically valid object request with a wrong hierarchy or field
+representation is not an adapter failure. Its original payload and immutable
+observation are committed atomically, and only its recognized view is offered
+to normalization and projection. If no structurally valid Span remains, the
+batch evaluates as `unsupported_source_version`. Malformed JSON/protobuf or a
+non-object request root remains a pre-persistence `adapter_parse_failure` with
+no raw record.
+
 ## Closed inventory domain
 
 `SourceStructuralNameToken`, `SourceOccurrenceCount`, `SourceUnknownIdentity`,

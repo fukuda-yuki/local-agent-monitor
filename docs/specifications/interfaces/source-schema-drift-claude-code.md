@@ -138,6 +138,32 @@ references use a monitor-generated opaque `sample:v1:<64 lowercase hex>` token.
 Unknown records are never classified as recognized operations or used to
 synthesize hierarchy.
 
+Local Monitor pre-persistence normalization and post-reload projection consume
+an ephemeral recognized projection view, not the original raw JSON directly.
+The versioned OTLP descriptor owns both
+inventory classification and view filtering. The view recursively excludes
+unknown properties, wrong representations, invalid repeated elements, and
+Trace-ignored fields while preserving valid siblings and descriptor-valid
+numeric enum/status values. It is built without `JsonNode`, is never stored or
+logged, and cannot change the original-input inventory or hashes.
+
+For monitor ingestion, a valid JSON object is inventoried before normalization.
+Wrong hierarchy or field representations therefore produce an atomically
+persisted raw record plus degraded or unsupported observation, not an adapter
+failure. The monitor raw ingestor receives the original payload and recognized
+view explicitly. The existing strict Config CLI raw-ingestion path does not
+change. Malformed transports, a non-object request root, and internal adapter
+failures unrelated to an accepted representation remain pre-persistence
+diagnostics with no raw record.
+
+After reload, every raw-backed compatibility state and legacy row rebuilds the
+same recognized view for trace and span projection. One successful scheduled
+pass completes both existing idempotent projection phases even when the view is
+partial or empty. The trace and span backlogs remain independent; no combined
+transaction, schema, retry loop, or sleep is added. Corrupt already-stored
+legacy raw remains a projection failure; no drift or adapter observation is
+fabricated. SQLite busy handling retains the existing scheduled replay.
+
 `capture_content_state` is a closed source-capture value: `available`,
 `not_captured`, `redacted`, or `unsupported`. Observation construction derives
 state, its zero-or-one scalar reason, and `next_action` together; callers cannot

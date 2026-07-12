@@ -142,29 +142,44 @@
 - [ ] Re-run focused tests and `git diff --check`.
 - [ ] Independent migration/concurrency reviewer checks transaction boundaries, restart, newer stamp, WAL behavior, and no raw/PII columns.
 
-### Task 4: Ingest Integration and Compatibility Projection Gate
+### Task 4B: Recognized View and Compatibility Projection Gate
 
 **Owner profile:** `gpt-5.6-sol`, high effort.
 
+Task 4A (atomic raw plus observation acknowledgement) is complete. Task 4B does
+not change its schema, commit store, or transaction.
+
 **Files:**
+- Modify: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/OtlpTraceSchema.cs`
+- Modify: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/OtlpJsonStructuralWalker.cs`
+- Create: `src/CopilotAgentObservability.Telemetry/SourceCompatibility/OtlpJsonRecognizedPayloadBuilder.cs`
+- Modify: `src/CopilotAgentObservability.Telemetry/RawTelemetry/RawOtlpIngestor.cs`
+- Modify: `src/CopilotAgentObservability.Telemetry/Normalization/OtlpSpanReader.cs`
+- Modify: `src/CopilotAgentObservability.Telemetry/Otlp/OtlpAttributeConverter.cs`
 - Modify: `src/CopilotAgentObservability.LocalMonitor/MonitorHost.cs`
-- Modify: `src/CopilotAgentObservability.LocalMonitor/Ingestion/IngestionWriteRequest.cs`
 - Modify: `src/CopilotAgentObservability.LocalMonitor/Projection/ProjectionWorker.cs`
-- Modify: `src/CopilotAgentObservability.Persistence.Sqlite/Ingestion/SqliteIngestionCommitStore.cs`
+- Modify: `src/CopilotAgentObservability.Persistence.Sqlite/SourceCompatibility/ISourceCompatibilityStore.cs`
 - Modify: `src/CopilotAgentObservability.Persistence.Sqlite/SourceCompatibility/SqliteSourceCompatibilityStore.cs`
-- Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/SourceCompatibilityIngestionTests.cs`
+- Create: `tests/CopilotAgentObservability.ConfigCli.Tests/OtlpJsonRecognizedPayloadBuilderTests.cs`
+- Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/RawOtlpIngestorTests.cs`
+- Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/RawNormalizationTests.cs`
+- Modify: `tests/CopilotAgentObservability.LocalMonitor.Tests/SourceCompatibilityIngestionTests.cs`
 - Modify: `tests/CopilotAgentObservability.LocalMonitor.Tests/ProjectionWorkerTests.cs`
+- Modify: `tests/CopilotAgentObservability.LocalMonitor.Tests/IngestionWriterWorkerTests.cs`
 
 **Interfaces:**
 - `/v1/traces` builds observation draft before enqueue and returns success only after atomic persistence.
-- Projection accepts recognized fields while excluding unknown values/records; degraded batches are processed, not stuck in backlog.
+- One descriptor-derived `JsonDocument`/`Utf8JsonWriter` recognized projection view is shared by monitor pre-persistence normalization and post-reload projection. It recursively excludes unknown properties, wrong representations, invalid repeated elements, and Trace-ignored fields without mutating raw or hashes.
+- Valid JSON objects with wrong field/hierarchy representations atomically persist original raw plus degraded/unsupported observation. Malformed transport/non-object root remains pre-persistence failure with no raw. The strict Config CLI path is unchanged.
+- Projection accepts the recognized partial/empty view for every raw-backed state and legacy row; one successful scheduled pass completes the existing independent idempotent trace and span phases. No combined transaction, schema, retry, or sleep is added.
 - Recognized-record drop and adapter/parse failure are distinct from drift.
 
-- [ ] Add RED end-to-end JSON/protobuf tests for commit acknowledgement, drift persistence, safe recognized projection, unknown exclusion, backlog completion, and pre-persistence parse failure with nullable batch/fingerprint fields and no payload/exception text.
+- [ ] Add a test-owned descriptor oracle with exactly 59 valid-representation cases, 295 wrong-kind cases, 28 malformed-decimal cases, 225 repeated-element first/middle/last cases, 84 unknown-property cases, 118 duplicate wrong-to-valid/valid-to-wrong cases, and 14 AnyValue consumer cases: 823 fast cases total. Tests must not derive expected rows from production descriptor helpers.
+- [ ] Add RED end-to-end JSON/protobuf tests for valid input; every recursive wrong type with valid siblings; every repeated array; duplicate properties; no-valid-span unsupported persistence; unknown JSON/protobuf; malformed transports; injected adapter exception; atomic commit rollback; raw-marker retention versus sanitized exclusion; descriptor-valid numeric `kind` and `status.code`; one-pass completion of both existing backlogs; and hard-coded valid Copilot projection bytes.
 - [ ] Run the focused ingestion/projection tests and confirm RED.
-- [ ] Wire decoder inventory through the queue/store and implement explicit projection disposition.
+- [ ] Implement the descriptor-derived recognized view, pass original payload plus view to monitor raw ingestion, rebuild the same view after reload, and implement explicit projection disposition. Keep local scalar readers strict by semantic type so IDs/names require strings while enum/status fields preserve descriptor-valid numbers.
 - [ ] Re-run focused tests plus existing `MonitorProjectionBuilderTests` and `MonitorSpanProjectionBuilderTests`.
-- [ ] Independent reviewer checks raw commit ordering, no silent drop, retry/backlog behavior, and Copilot projection non-regression.
+- [ ] Independent reviewer checks descriptor/view parity, raw commit ordering, no silent drop, retry/backlog behavior, valid numeric enum/status preservation, and Copilot projection non-regression.
 
 ### Task 5: Sanitized Source Diagnostics API and UI
 
