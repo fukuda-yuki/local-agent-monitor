@@ -19,10 +19,11 @@ Updated: 2026-07-12
 | Current-user environment member step (Task 4) | #66 | Complete | `f4f55ec..620448a` | SetupEnvironmentStepTests 69/69; SetupPlatformTests 36/36; all Setup 392/392; ConfigCli 720/720; build 0/0 | Spec PASS; Quality/Security APPROVED | actual Windows broadcast delivery not integration-tested; injected fixed failure/replay verified |
 | Transaction journal v1 store (Task 5a/5a1) | #66 | Complete | `2d88eff..c394b28` | SetupJournalStoreTests 99/99; storage+journal 143/143; all Setup 518/518; ConfigCli 846/846; build 0/0 on reviewed descendant | Spec PASS; Quality/Security APPROVED after persistence and cross-task notification/compensation re-audits | sudden OS power loss is represented by deterministic atomic fault seams, not directly induced |
 | File backup/apply split (Task 5b0 prerequisite) | #66 | Complete | `6df14ae..b763ded` | SetupFileStepTests 65/65; all Setup 462/462; ConfigCli 790/790; build 0/0 | Spec PASS; Quality/Security APPROVED | Linux/macOS native metadata branches unchanged and not executed on Windows host |
+| Apply preflight and forward intents (Task 5b) | #66 | Complete | `c394b28..34025d8` | SetupApplyTests 55/55; journal/file/environment/apply 288/288; all Setup 548/548; ConfigCli 876/876; build 0/0 | Spec PASS; Quality/Security/Concurrency APPROVED after ownership-boundary contract re-audit | forward failures deliberately retain durable evidence for Tasks 5c/5d |
 | Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
 | Atomic file mutation | #66 | Complete through Task 3b | `291b3bf..2ed9e8a` | typed hash, path/reparse, backup/temp/replace/restore fault matrix | PASS/APPROVED | three-OS runtime evidence gap noted above |
 | User environment mutation | #66 | Complete through Task 4 | `f4f55ec..620448a` | full 3x3 state, backup, member fault, notification boundary matrix | PASS/APPROVED | coordinator journaling/recovery remains Task 5 |
-| Transaction and rollback | #66 | In progress through Task 5a1/5b0 | `2d88eff..c394b28` | journal/store and file-backup prerequisite evidence above | Task 5a1/5b0 PASS/APPROVED | apply is under review; compensation, recovery, rollback remain |
+| Transaction and rollback | #66 | In progress through Task 5b | `2d88eff..34025d8` | journal/store, file-backup, and apply evidence above | Tasks 5a1/5b0/5b PASS/APPROVED | compensation, recovery, rollback remain |
 | Shared setup commands | #66 | Pending | - | - | - | - |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
@@ -39,13 +40,13 @@ Updated: 2026-07-12
 | Versioned ownership ledger | Schema fixtures, unknown-version rejection, close/reopen persistence | SetupStorageTests 44/44 and SetupJournalStoreTests 99/99; v1 only, bounded read, notification replay state, truthful compensation phases, atomic retry/reopen; independent review PASS/APPROVED |
 | Public setup wire contract | Canonical literal plan/status/error fixtures, every enum mapping, fixed-code catalog, sole serializer | SetupContractShapeTests 47/47; independent review PASS/APPROVED |
 | Repository-safe DTO validation | Exact/over bounds, canonical manifest membership, origin-only endpoint, fixed non-echo failures, recovery/lifecycle matrix | SetupContractValidationTests 74/74; independent review PASS/APPROVED |
-| Stale plan/apply and rollback | Barrier-controlled hash changes without sleeps | Pending |
+| Stale plan/apply and rollback | Barrier-controlled hash changes without sleeps | Apply preflight and post-mutation full-target verification covered by SetupApplyTests 55/55; rollback remains pending |
 | Atomic file update | Backup/temp/replace fault injection and restart-visible state | SetupFileStepTests 65/65; capture/durable-backup/write split plus fault/rebind matrix; independent review PASS/APPROVED |
 | Partial compensation | Deterministic multi-target failure at each boundary | Pending |
 | Crash recovery | Pre-file/per-env-member mutation and restore intents; deterministic faults before/during/after each step; close/reopen recovery classifies prior/desired/partial/foreign states | Pending |
 | Recovery result correlation | Producer DTO tests distinguish requested/created and recovered change-set IDs for plan/apply/rollback/status, including failed-recovery status projection | Pending |
 | Status hard cap | 99/100/101 fixtures, recovery-blocking/planned/terminal priority, UUID tie-break, and filter-before-cap | Pending |
-| Apply-time revalidation | Endpoint ownership, supported version, and managed state changed after plan produce no backup/journal/ledger transition/write | Pending |
+| Apply-time revalidation | Endpoint ownership, supported version, and managed state changed after plan produce no backup/journal/ledger transition/write | Generic required revalidator boundary and fixed no-artifact matrix pass in SetupApplyTests; real GitHub Copilot implementation remains Task 8b |
 | Final-state race | Barrier edits after mutation completion and after rollback preflight are preserved; apply does not commit and restore does not overwrite | Pending |
 | Status aggregation | Lifecycle reference matrix plus all-desired/all-previous/desired+previous/third-party/unavailable aggregate target cases prove change-set state and partial rollback unavailable | Pending |
 | Environment notification | Deterministic faults before/after delivery prove no early delivery and permit replay after recovery | Pending |
