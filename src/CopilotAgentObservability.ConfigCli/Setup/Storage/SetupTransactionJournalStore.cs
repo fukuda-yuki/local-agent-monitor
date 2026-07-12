@@ -128,43 +128,47 @@ internal sealed partial class SetupTransactionJournalStore
         SetupJournalOperation operation,
         IReadOnlyList<SetupJournalTarget> targets)
     {
-        setupLock.AssertHeld(platform, paths);
-        var expected = new SetupTransactionJournal(
-            1,
-            changeSetId,
-            operation,
-            platform.Clock.UtcNow,
-            SetupJournalPhase.Prepared,
-            targets);
-        ValidateForWrite(expected);
-
-        var destination = paths.GetTransactionJournal(changeSetId);
-        var metadata = platform.FileSystem.GetPathMetadata(destination);
-        if (metadata.Exists)
+        lock (setupLock)
         {
-            ValidateReusablePrepared(destination, changeSetId, operation, targets, metadata);
-            return SetupPreparedJournalOpenResult.Reused;
-        }
+            setupLock.AssertHeld(platform, paths);
+            try
+            {
+                var expected = new SetupTransactionJournal(
+                    1,
+                    changeSetId,
+                    operation,
+                    platform.Clock.UtcNow,
+                    SetupJournalPhase.Prepared,
+                    targets);
+                ValidateForWrite(expected);
 
-        platform.FileSystem.CreateDirectory(paths.Transactions);
-        bool created;
-        try
-        {
-            created = platform.FileSystem.TryWriteNewAllBytesAndFlush(destination, Serialize(expected));
-        }
-        catch (Exception)
-        {
-            throw new SetupStorageException(SetupStorageCodes.WriteFailed);
-        }
+                var destination = paths.GetTransactionJournal(changeSetId);
+                var metadata = platform.FileSystem.GetPathMetadata(destination);
+                if (metadata.Exists)
+                {
+                    ValidateReusablePrepared(destination, changeSetId, operation, targets, metadata);
+                    return SetupPreparedJournalOpenResult.Reused;
+                }
 
-        if (created)
-        {
-            ValidateReusablePrepared(destination, changeSetId, operation, targets);
-            return SetupPreparedJournalOpenResult.Created;
-        }
+                platform.FileSystem.CreateDirectory(paths.Transactions);
+                if (platform.FileSystem.TryWriteNewAllBytesAndFlush(destination, Serialize(expected)))
+                {
+                    ValidateReusablePrepared(destination, changeSetId, operation, targets);
+                    return SetupPreparedJournalOpenResult.Created;
+                }
 
-        ValidateReusablePrepared(destination, changeSetId, operation, targets);
-        return SetupPreparedJournalOpenResult.Reused;
+                ValidateReusablePrepared(destination, changeSetId, operation, targets);
+                return SetupPreparedJournalOpenResult.Reused;
+            }
+            catch (SetupStorageException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (SetupStorageException.ShouldMap(exception))
+            {
+                throw new SetupStorageException(SetupStorageCodes.WriteFailed);
+            }
+        }
     }
 
     public SetupTransactionJournal? Load(Guid changeSetId)

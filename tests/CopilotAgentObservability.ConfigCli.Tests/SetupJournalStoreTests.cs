@@ -96,7 +96,7 @@ public sealed class SetupJournalStoreTests
     }
 
     [Fact]
-    public async Task OpenOrCreatePrepared_CreateCollisionReopensAndValidatesExactJournal()
+    public async Task OpenOrCreatePrepared_SameLockCallersSerializeBeforeAtomicCreate()
     {
         var context = CreateContext();
         var destination = context.Paths.GetTransactionJournal(ChangeSetId);
@@ -104,16 +104,45 @@ public sealed class SetupJournalStoreTests
 
         var first = Task.Run(() => context.Store.OpenOrCreatePrepared(
             context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+        barrier.WaitUntilReached(CancellationToken.None);
+        var monitorWasAvailable = Monitor.TryEnter(context.Lock);
+        if (monitorWasAvailable)
+        {
+            Monitor.Exit(context.Lock);
+        }
+
+        using var secondStarted = new ManualResetEventSlim();
         var second = Task.Run(() => new SetupTransactionJournalStore(context.Platform, context.Paths).OpenOrCreatePrepared(
-            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
-        barrier.WaitUntilArrivals(2, CancellationToken.None);
+            StartedLock(secondStarted, context.Lock), ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+        Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(10)));
         barrier.Release();
         var results = await Task.WhenAll(first, second);
 
+        Assert.False(monitorWasAvailable);
         Assert.Equal(1, results.Count(result => result == SetupPreparedJournalOpenResult.Created));
         Assert.Equal(1, results.Count(result => result == SetupPreparedJournalOpenResult.Reused));
-        Assert.Equal(2, context.Platform.Operations.Count(operation => operation == $"file.try-write-new-flushed:{destination}"));
+        Assert.Equal(1, context.Platform.Operations.Count(operation => operation == $"file.try-write-new-flushed:{destination}"));
         Assert.NotNull(context.Store.Load(ChangeSetId));
+    }
+
+    [Theory]
+    [InlineData("metadata")]
+    [InlineData("directory")]
+    public void OpenOrCreatePrepared_MissingPathEvaluationFailureReturnsFixedNonEchoError(string boundary)
+    {
+        var context = CreateContext();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var operation = boundary == "metadata"
+            ? $"file.metadata:{destination}"
+            : $"directory.create:{context.Paths.Transactions}";
+        context.Platform.InjectFault(operation, new IOException($"PRIVATE_PATH_MARKER:{destination}"));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+        Assert.DoesNotContain("PRIVATE_PATH_MARKER", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(destination, exception.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1206,6 +1235,12 @@ public sealed class SetupJournalStoreTests
         var steps = target.Steps.ToArray();
         steps[index] = replace(steps[index]);
         return steps;
+    }
+
+    private static SetupLock StartedLock(ManualResetEventSlim started, SetupLock setupLock)
+    {
+        started.Set();
+        return setupLock;
     }
 
     private static string ReplaceFirst(string value, string oldValue, string newValue, int startIndex)
