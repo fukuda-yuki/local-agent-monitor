@@ -17,10 +17,12 @@ Updated: 2026-07-12
 | JSONC and bounded TOML codecs (Task 3a) | #66 | Complete | `93398bb..97f757f` | SetupDocumentTests 51/51; ConfigSamplesTests 49/49; all Setup 244/244; ConfigCli 572/572 | Spec PASS; Quality/Security APPROVED | JSONC BOM handling deferred to file layer; bounded TOML non-goals explicit |
 | Path/hash/atomic file step (Task 3b) | #66 | Complete | `291b3bf..2ed9e8a` | SetupFileStepTests 63/63; SetupPlatformTests 26/26; all Setup 313/313; ConfigCli 641/641; build 0/0 | Implementation Spec PASS; Quality/Security APPROVED after re-audit | Windows native executed; Linux statx ABI probed/static reviewed and macOS attrlist static reviewed, but Linux/macOS .NET branches not executed |
 | Current-user environment member step (Task 4) | #66 | Complete | `f4f55ec..620448a` | SetupEnvironmentStepTests 69/69; SetupPlatformTests 36/36; all Setup 392/392; ConfigCli 720/720; build 0/0 | Spec PASS; Quality/Security APPROVED | actual Windows broadcast delivery not integration-tested; injected fixed failure/replay verified |
+| Transaction journal v1 store (Task 5a) | #66 | Complete | `2d88eff..cee8079` | SetupJournalStoreTests 68/68; storage+journal 112/112; all Setup 462/462; ConfigCli 790/790; build 0/0 | Spec PASS; Quality/Security APPROVED after persistence review | no dedicated exact-128-character round trip; common create/load validator enforces the boundary |
+| File backup/apply split (Task 5b0 prerequisite) | #66 | Complete | `6df14ae..b763ded` | SetupFileStepTests 65/65; all Setup 462/462; ConfigCli 790/790; build 0/0 | Spec PASS; Quality/Security APPROVED | Linux/macOS native metadata branches unchanged and not executed on Windows host |
 | Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
 | Atomic file mutation | #66 | Complete through Task 3b | `291b3bf..2ed9e8a` | typed hash, path/reparse, backup/temp/replace/restore fault matrix | PASS/APPROVED | three-OS runtime evidence gap noted above |
 | User environment mutation | #66 | Complete through Task 4 | `f4f55ec..620448a` | full 3x3 state, backup, member fault, notification boundary matrix | PASS/APPROVED | coordinator journaling/recovery remains Task 5 |
-| Transaction and rollback | #66 | Pending | - | - | - | - |
+| Transaction and rollback | #66 | In progress through Task 5a/5b0 | `2d88eff..cee8079` | journal/store and file-backup prerequisite evidence above | Task 5a/5b0 PASS/APPROVED | apply, compensation, recovery, rollback remain |
 | Shared setup commands | #66 | Pending | - | - | - | - |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
@@ -34,11 +36,11 @@ Updated: 2026-07-12
 
 | Requirement | Planned executable evidence | Result |
 | --- | --- | --- |
-| Versioned ownership ledger | Schema fixtures, unknown-version rejection, close/reopen persistence | Pending |
+| Versioned ownership ledger | Schema fixtures, unknown-version rejection, close/reopen persistence | SetupStorageTests 44/44 and SetupJournalStoreTests 68/68; v1 only, bounded read, atomic retry/reopen; independent review PASS/APPROVED |
 | Public setup wire contract | Canonical literal plan/status/error fixtures, every enum mapping, fixed-code catalog, sole serializer | SetupContractShapeTests 47/47; independent review PASS/APPROVED |
 | Repository-safe DTO validation | Exact/over bounds, canonical manifest membership, origin-only endpoint, fixed non-echo failures, recovery/lifecycle matrix | SetupContractValidationTests 74/74; independent review PASS/APPROVED |
 | Stale plan/apply and rollback | Barrier-controlled hash changes without sleeps | Pending |
-| Atomic file update | Backup/temp/replace fault injection and restart-visible state | Pending |
+| Atomic file update | Backup/temp/replace fault injection and restart-visible state | SetupFileStepTests 65/65; capture/durable-backup/write split plus fault/rebind matrix; independent review PASS/APPROVED |
 | Partial compensation | Deterministic multi-target failure at each boundary | Pending |
 | Crash recovery | Pre-file/per-env-member mutation and restore intents; deterministic faults before/during/after each step; close/reopen recovery classifies prior/desired/partial/foreign states | Pending |
 | Recovery result correlation | Producer DTO tests distinguish requested/created and recovered change-set IDs for plan/apply/rollback/status, including failed-recovery status projection | Pending |
