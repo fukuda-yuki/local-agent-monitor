@@ -367,6 +367,47 @@ test("Compare workspace is explicit, inert, and never confirms a candidate autom
     assert.doesNotMatch(html, /session\.send/);
 });
 
+test("emitted Compare IIFE waits for manual cohort confirmation and renders the reloaded historical detail inertly", async () => {
+    const calls = [], proposalId = "0197d7c0-0000-7000-8000-000000000001", applyId = "0197d7c0-0000-7000-8000-000000000002", comparisonId = "0197d7c0-0000-7000-8000-000000000003";
+    const candidates = [{ session_id: "11111111-1111-7111-8111-111111111111", suggestion_reasons: [] }, { session_id: "22222222-2222-7222-8222-222222222222", suggestion_reasons: ["missing_evidence"] }, { session_id: "33333333-3333-7333-8333-333333333333", suggestion_reasons: ["not_comparable"] }];
+    const detail = { receipt: { comparison_id: comparisonId, verdict: "improved", verification_state: "invalidated" }, summary: { verdict: "improved", reasons: ["missing_evidence"], duration_delta: -0.2, token_delta: -0.1 }, evidence: [{ kind: "event", reference_id: "same-ref" }], case_key_groups: [{ case_key: "case-a", evidence: [{ kind: "event", reference_id: "same-ref" }] }] };
+    const fetch = async (path, init = {}) => {
+        calls.push({ path: String(path), init });
+        const url = String(path);
+        if (url.includes("/sessions?")) return response({ items: [bound] });
+        if (url.includes("/resolve?")) return response({ binding_status: "bound", session_id: bound.session_id });
+        if (url.includes("/sessions/")) return response({ session: bound, native_ids: [{ binding_kind: "native" }], events: [], runs: [] });
+        if (url.includes("/session-instruction/")) return response({ state: "no_instruction" });
+        if (url.includes("improvement-proposals?")) return response({ items: [{ proposal_id: proposalId, status: "recommended" }] });
+        if (url.includes("proposal-applies/receipts")) return response({ items: [{ apply_id: applyId, state: "applied" }] });
+        if (url.includes("effect-comparisons/candidates")) return response({ proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, items: candidates });
+        if (url.includes(`effect-comparisons/${comparisonId}`)) return response(detail);
+        if (url.includes("effect-comparisons")) return response({ comparison_id: comparisonId }, 201);
+        return response({});
+    };
+    const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve)); };
+    const { document } = await runWorkspaceIife(fetch); await settle();
+    const tab = document.querySelectorAll("button").find(item => item.dataset.tab === "improve"); await tab.click(); await settle();
+    const compare = document.querySelectorAll("button").find(item => item.dataset.tab === "compare"); await compare.click(); await settle();
+    assert.match(textIn(document.body), /適用記録を読み込む/);
+    assert.equal(calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons")).length, 0);
+    await document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await settle();
+    await document.querySelectorAll("button").find(item => item.textContent.startsWith("適用記録 ·")).click(); await settle();
+    assert.match(textIn(document.body), /証拠不足/);
+    assert.equal(calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons")).length, 0);
+    const selects = document.querySelectorAll("select"), inputs = document.querySelectorAll("input");
+    selects[0].value = "pre"; inputs[0].value = "case-a";
+    selects[2].value = "post"; inputs[1].value = "case-a";
+    selects[4].value = "excluded"; selects[5].value = "user_excluded";
+    await document.querySelectorAll("button").find(item => item.textContent === "比較を確定").click(); await settle();
+    const post = calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons"));
+    assert.equal(post.length, 1);
+    assert.deepEqual(JSON.parse(post[0].init.body), { proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, sessions: [{ session_id: candidates[0].session_id, classification: "pre", case_key: "case-a" }, { session_id: candidates[1].session_id, classification: "post", case_key: "case-a" }, { session_id: candidates[2].session_id, classification: "excluded", case_key: "excluded", exclusion_reason: "user_excluded" }] });
+    assert.equal(calls.filter(call => call.path.includes(`effect-comparisons/${comparisonId}`)).length, 1);
+    assert.match(textIn(document.body), /改善/); assert.match(textIn(document.body), /無効化済み/);
+    assert.equal((textIn(document.body).match(/same-ref/g) || []).length, 2);
+});
+
 test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, and gives rollback failures terminal precedence", async () => {
     const calls = [];
     const id = "0197d7c0-0000-7000-8000-000000000001";
