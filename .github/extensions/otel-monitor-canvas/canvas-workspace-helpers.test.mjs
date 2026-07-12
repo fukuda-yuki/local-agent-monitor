@@ -400,7 +400,7 @@ test("Compare workspace is explicit, inert, and never confirms a candidate autom
 
 test("emitted Compare IIFE waits for manual cohort confirmation and renders the reloaded historical detail inertly", async () => {
     const calls = [], proposalId = "0197d7c0-0000-7000-8000-000000000001", applyId = "0197d7c0-0000-7000-8000-000000000002", comparisonId = "0197d7c0-0000-7000-8000-000000000003";
-    const candidates = [{ session_id: "11111111-1111-7111-8111-111111111111", suggestion_reasons: [] }, { session_id: "22222222-2222-7222-8222-222222222222", suggestion_reasons: ["missing_evidence"] }, { session_id: "33333333-3333-7333-8333-333333333333", suggestion_reasons: ["not_comparable"] }];
+    const candidates = [{ session_id: "11111111-1111-7111-8111-111111111111", suggestion_reasons: [] }, { session_id: "22222222-2222-7222-8222-222222222222", suggestion_reasons: ["not_exact_bound", "unapproved_reason"] }, { session_id: "33333333-3333-7333-8333-333333333333", suggestion_reasons: ["not_comparable"] }];
     const detail = { receipt: { comparison_id: comparisonId, verdict: "improved", verification_state: "invalidated" }, summary: { verdict: "improved", reasons: ["missing_evidence"], duration_delta: -0.2, token_delta: -0.1 }, evidence: [{ kind: "event", reference_id: "same-ref" }], case_key_groups: [{ case_key: "case-a", evidence: [{ kind: "event", reference_id: "same-ref" }] }] };
     const fetch = async (path, init = {}) => {
         calls.push({ path: String(path), init });
@@ -442,7 +442,7 @@ test("emitted Compare IIFE waits for manual cohort confirmation and renders the 
 
 test("emitted Compare IIFE crosses the real helper with an exact upstream contract and strips nested extras", async () => {
     const proposalId = "0197d7c0-0000-7000-8000-000000000001", applyId = "0197d7c0-0000-7000-8000-000000000002", comparisonId = "0197d7c0-0000-7000-8000-000000000003";
-    const candidates = [{ session_id: "11111111-1111-7111-8111-111111111111", suggestion_reasons: [] }, { session_id: "22222222-2222-7222-8222-222222222222", suggestion_reasons: ["missing_evidence"] }, { session_id: "33333333-3333-7333-8333-333333333333", suggestion_reasons: ["not_comparable"] }];
+    const candidates = [{ session_id: "11111111-1111-7111-8111-111111111111", suggestion_reasons: [] }, { session_id: "22222222-2222-7222-8222-222222222222", suggestion_reasons: ["not_exact_bound", "unapproved_reason"] }, { session_id: "33333333-3333-7333-8333-333333333333", suggestion_reasons: ["not_comparable"] }];
     const upstream = [], helper = await proposalApplyHelperServer(upstream, { fetchResponse: (target, init = {}) => {
         const path = new URL(target).pathname;
         if (path.endsWith("/sessions")) return new Response(JSON.stringify({ items: [bound] }));
@@ -478,7 +478,7 @@ test("emitted Compare IIFE crosses the real helper with an exact upstream contra
         await document.querySelectorAll("button").find(item => item.dataset.tab === "compare").click(); await settle();
         await document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await settle();
         await document.querySelectorAll("button").find(item => item.textContent.startsWith("適用記録 ·")).click(); await settle();
-        assert.match(textIn(document.body), /証拠不足/); assert.match(textIn(document.body), /比較不可/);
+        assert.match(textIn(document.body), /正確な紐付けなし/); assert.match(textIn(document.body), /比較不可/); assert.doesNotMatch(textIn(document.body), /unapproved_reason/);
         const selects = document.querySelectorAll("select"), inputs = document.querySelectorAll("input"); selects[0].value = "pre"; inputs[0].value = "case-a"; selects[2].value = "post"; inputs[1].value = "case-a"; selects[4].value = "excluded"; selects[5].value = "user_excluded";
         await document.querySelectorAll("button").find(item => item.textContent === "比較を確定").click(); await settle();
         assert.equal(upstream.filter(call => new URL(call.target).pathname.endsWith("/effect-comparisons") && call.init.method === "POST").length, 1);
