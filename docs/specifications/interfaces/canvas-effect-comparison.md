@@ -161,9 +161,15 @@ the verdict is `improved`. Other verdicts never change proposal maturity.
 Races return a fixed stale/insufficient result and never partially verify.
 
 A later successful rollback leaves the effect receipt as historical evidence
-but makes its derived `verification_state` equal `invalidated`. The proposal's
-historical `verified` status remains; UI and APIs must not present the receipt
-as an active improvement. No rolled-back receipt can verify another cohort.
+but makes its derived `verification_state` equal `invalidated`. A persisted
+receipt is likewise `invalidated` whenever its exact application is no longer
+current: post-apply hashes are stale, the application is unavailable, or an
+apply/rollback operation is pending. This derived projection is recomputed at
+the Local Monitor service/route boundary from the authoritative Issue #55
+application currentness check; it is not persisted and does not disclose paths
+or hashes. The proposal's historical `verified` status and the immutable
+receipt/result remain unchanged; UI and APIs must not present the receipt as
+an active improvement. No non-current receipt can verify another cohort.
 
 ## Local Monitor Interface
 

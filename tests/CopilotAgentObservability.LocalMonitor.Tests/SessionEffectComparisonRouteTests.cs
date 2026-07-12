@@ -471,6 +471,33 @@ public sealed class SessionEffectComparisonRouteTests
         Assert.Equal(before, await afterRestart.Content.ReadAsStringAsync());
     }
 
+    [Fact]
+    public async Task Get_after_external_post_hash_edit_invalidates_effect_receipt_after_restart_and_keeps_history()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var fixture = await CreateComparisonFixtureAsync(temp);
+        var pre = Enumerable.Range(0, 3).Select(i => InsertComparableSession(temp.DatabasePath, "pre", i, "expected", 1000)).ToArray();
+        var post = Enumerable.Range(0, 3).Select(i => InsertComparableSession(temp.DatabasePath, "post", i, "expected", 900)).ToArray();
+        using var created = await fixture.Host.Client.SendAsync(Request(ComparisonBody(fixture, pre, post), null, true, true));
+        using var createdReceipt = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+        var comparisonId = createdReceipt.RootElement.GetProperty("comparison_id").GetGuid();
+        File.WriteAllText(Path.Combine(temp.Path, "comparison-root", "comparison.txt"), "externally edited");
+
+        await fixture.RestartAsync();
+        using var detail = await fixture.Host.Client.GetAsync($"/api/session-workspace/effect-comparisons/{comparisonId:D}");
+        var body = await detail.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+        Assert.Equal("invalidated", json.RootElement.GetProperty("receipt").GetProperty("verification_state").GetString());
+        Assert.Equal("improved", json.RootElement.GetProperty("receipt").GetProperty("verdict").GetString());
+        Assert.Equal("verified", Text(temp.DatabasePath, "SELECT status FROM improvement_proposals WHERE proposal_id=$id", fixture.ProposalId));
+        Assert.DoesNotContain("comparison.txt", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sha", body, StringComparison.OrdinalIgnoreCase);
+
+        using var candidate = await fixture.Host.Client.GetAsync($"/api/session-workspace/effect-comparisons/candidates?proposal_id={fixture.ProposalId:D}&apply_id={fixture.ApplyId:D}");
+        Assert.Equal(HttpStatusCode.BadRequest, candidate.StatusCode);
+        Assert.Equal("{\"error\":\"application_not_active\"}", await candidate.Content.ReadAsStringAsync());
+    }
+
     private static HttpRequestMessage Request(string body, string? origin, bool csrf, bool media, string path = "/api/session-workspace/effect-comparisons")
     {
         var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(body, Encoding.UTF8, media ? "application/json" : "text/plain") };

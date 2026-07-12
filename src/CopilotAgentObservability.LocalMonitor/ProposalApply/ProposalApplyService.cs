@@ -32,6 +32,17 @@ internal sealed class ProposalApplyService
         lock (sync) return TryGetCurrentApplicationUnsafe(proposalId, applyId, out receipt);
     }
 
+    public EffectReceipt ProjectEffectReceipt(EffectReceipt receipt)
+    {
+        lock (sync)
+        {
+            return TryGetCurrentApplicationUnsafe(receipt.ProposalId, receipt.ApplyId, out var application)
+                && application.ProposalRevision == receipt.ProposalRevision
+                ? receipt
+                : receipt with { VerificationState = "invalidated" };
+        }
+    }
+
     public EffectReceipt RecordCurrentEffectComparison(EffectComparisonRequest request, DateTimeOffset recordedAt)
     {
         ArgumentNullException.ThrowIfNull(request);

@@ -40,6 +40,14 @@ public sealed class SqliteEffectComparisonStoreTests
         if (previousVersion >= 2) Assert.Equal("expected", Text(verify, "SELECT verdict FROM session_human_evaluation WHERE session_id=$session;", ("$session", legacy.SessionId.ToString("D"))));
         if (previousVersion >= 3) Assert.Equal("legacy", Text(verify, "SELECT title FROM improvement_proposals LIMIT 1;"));
         if (previousVersion >= 4) Assert.Equal("applied", Text(verify, "SELECT state FROM proposal_applies LIMIT 1;"));
+        if (previousVersion is 4 or 5)
+        {
+            Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='proposal_apply_pending';"));
+            Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM pragma_table_info('improvement_proposals') WHERE name='revision';"));
+            Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM pragma_table_info('proposal_apply_drafts') WHERE name='proposal_revision';"));
+            Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM pragma_table_info('proposal_applies') WHERE name='proposal_revision';"));
+            Assert.Single(store.ListApplicationReceipts(legacy.ProposalId));
+        }
         foreach (var table in new[] { "effect_comparisons", "effect_comparison_sessions", "effect_comparison_evidence", "effect_receipts" })
             Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=$name;", ("$name", table)));
         foreach (var forbidden in new[] { "raw", "prompt", "response", "path", "source", "diff", "replacement", "snapshot", "credential", "token", "note" })
@@ -59,6 +67,32 @@ public sealed class SqliteEffectComparisonStoreTests
         Assert.Null(detail.Sessions.Single().EffectiveQuality);
         Assert.False(detail.Sessions.Single().SevereFailure);
         Assert.Null(detail.Evidence.Single().HumanVerdict);
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void CreateSchema_repairs_known_v10_stamped_issue55_gaps_without_losing_apply_data(int historicalVersion)
+    {
+        using var temp = new MonitorTempDirectory();
+        var legacy = CreateGenuineLegacySchema(temp.DatabasePath, historicalVersion);
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            Execute(connection, "UPDATE schema_version SET version=10 WHERE component='session';");
+        }
+
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+
+        using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
+        verify.Open();
+        Assert.Equal("legacy", Text(verify, "SELECT title FROM improvement_proposals WHERE proposal_id=$id;", ("$id", legacy.ProposalId.ToString("D"))));
+        Assert.Equal("applied", Text(verify, "SELECT state FROM proposal_applies WHERE apply_id=$id;", ("$id", legacy.ApplyId.ToString("D"))));
+        Assert.Single(store.ListApplicationReceipts(legacy.ProposalId));
+        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='proposal_apply_pending';"));
+        foreach (var (table, column) in new[] { ("improvement_proposals", "revision"), ("proposal_apply_drafts", "proposal_revision"), ("proposal_applies", "proposal_revision") })
+            Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM pragma_table_info($table) WHERE name=$column;", ("$table", table), ("$column", column)));
     }
 
     [Fact]
@@ -544,7 +578,7 @@ public sealed class SqliteEffectComparisonStoreTests
         if (version >= 6) Execute(connection, "CREATE TABLE proposal_apply_pending(apply_id TEXT PRIMARY KEY,draft_id TEXT NOT NULL,proposal_id TEXT NOT NULL,root_id TEXT NOT NULL,actor_kind TEXT NOT NULL,file_count INTEGER NOT NULL,operation_kind TEXT NOT NULL,recorded_at TEXT NOT NULL);");
         if (version >= 8) CreateLegacyObjectiveSchema(connection, session, at);
         if (version == 9) CreateLegacyEffectSchema(connection, session, proposal, apply, comparison, at);
-        return new(session, version == 9 ? comparison : null);
+        return new(session, proposal, apply, version == 9 ? comparison : null);
     }
 
     private static void CreateLegacyHumanSchema(SqliteConnection connection, Guid session, DateTimeOffset at) =>
@@ -571,7 +605,7 @@ public sealed class SqliteEffectComparisonStoreTests
         Execute(connection, "CREATE TABLE effect_comparisons(comparison_id TEXT PRIMARY KEY,cohort_revision INTEGER NOT NULL,proposal_id TEXT NOT NULL,proposal_revision INTEGER NOT NULL,apply_id TEXT NOT NULL,recorded_at TEXT NOT NULL); CREATE TABLE effect_comparison_sessions(comparison_id TEXT NOT NULL,session_id TEXT NOT NULL,classification TEXT NOT NULL,case_key TEXT NOT NULL,exclusion_reason TEXT NULL,session_order INTEGER NOT NULL,PRIMARY KEY(comparison_id,session_id)); CREATE TABLE effect_comparison_evidence(comparison_id TEXT NOT NULL,evidence_order INTEGER NOT NULL,session_id TEXT NOT NULL,kind TEXT NOT NULL,reference_id TEXT NOT NULL,recorded_at TEXT NULL,PRIMARY KEY(comparison_id,evidence_order)); CREATE TABLE effect_receipts(comparison_id TEXT PRIMARY KEY,verdict TEXT NOT NULL,result_json TEXT NOT NULL,recorded_at TEXT NOT NULL); INSERT INTO effect_comparisons(comparison_id,cohort_revision,proposal_id,proposal_revision,apply_id,recorded_at) VALUES($comparison,1,$proposal,1,$apply,$at); INSERT INTO effect_comparison_sessions(comparison_id,session_id,classification,case_key,exclusion_reason,session_order) VALUES($comparison,$session,'pre','case',NULL,0); INSERT INTO effect_comparison_evidence(comparison_id,evidence_order,session_id,kind,reference_id,recorded_at) VALUES($comparison,0,$session,'human',$session,$at); INSERT INTO effect_receipts(comparison_id,verdict,result_json,recorded_at) VALUES($comparison,'no_change',$result,$at);", ("$comparison", comparison.ToString("D")), ("$proposal", proposal.ToString("D")), ("$apply", apply.ToString("D")), ("$session", session.ToString("D")), ("$result", result), ("$at", at.ToString("O")));
     }
 
-    private sealed record LegacyFixture(Guid SessionId, Guid? ComparisonId);
+    private sealed record LegacyFixture(Guid SessionId, Guid ProposalId, Guid ApplyId, Guid? ComparisonId);
 
     private static Guid SeedComparableSession(string databasePath, DateTimeOffset boundary, long? totalTokens = 10)
     {

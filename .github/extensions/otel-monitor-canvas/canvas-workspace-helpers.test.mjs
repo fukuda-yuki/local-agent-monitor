@@ -436,7 +436,7 @@ test("emitted Compare IIFE waits for manual cohort confirmation and renders the 
     assert.equal(post.length, 1);
     assert.deepEqual(JSON.parse(post[0].init.body), { proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, sessions: [{ session_id: candidates[0].session_id, classification: "pre", case_key: "case-a", exclusion_reason: null }, { session_id: candidates[1].session_id, classification: "post", case_key: "case-a", exclusion_reason: null }, { session_id: candidates[2].session_id, classification: "excluded", case_key: "", exclusion_reason: "user_excluded" }] });
     assert.equal(calls.filter(call => call.path.includes(`effect-comparisons/${comparisonId}`)).length, 1);
-    assert.match(textIn(document.body), /改善/); assert.match(textIn(document.body), /無効化済み/);
+    assert.match(textIn(document.body), /改善/); assert.match(textIn(document.body), /無効化済み/); assert.doesNotMatch(textIn(document.body), /有効な改善/);
     assert.equal((textIn(document.body).match(/same-ref/g) || []).length, 2);
 });
 

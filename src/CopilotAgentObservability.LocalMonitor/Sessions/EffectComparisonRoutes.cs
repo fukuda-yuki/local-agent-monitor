@@ -45,7 +45,7 @@ internal static class EffectComparisonRoutes
             if (!SessionRoutes.TryUuidV7(comparisonId, out var id)) { await SessionRoutes.Failure(context, 400, "invalid_comparison_request"); return; }
             var detail = store.GetEffectComparison(id);
             if (detail is null) { await SessionRoutes.Failure(context, 404, "comparison_not_found"); return; }
-            await SessionRoutes.Json(context, Detail(detail));
+            await SessionRoutes.Json(context, Detail(detail with { Receipt = applies.ProjectEffectReceipt(detail.Receipt) }));
         });
     }
 

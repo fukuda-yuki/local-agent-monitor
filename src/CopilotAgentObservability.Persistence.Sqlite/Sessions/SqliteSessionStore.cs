@@ -107,6 +107,9 @@ public sealed class SqliteSessionStore : ISessionStore
         else if (Convert.ToInt32(existingVersion) == 4)
         {
             AddColumnIfMissing(connection, transaction, "proposal_apply_drafts", "updated_at", "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.0000000+00:00'");
+            command.CommandText = ProposalApplyPendingSchemaSql;
+            command.ExecuteNonQuery();
+            AddProposalRevisionColumns(connection, transaction);
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
@@ -117,6 +120,7 @@ public sealed class SqliteSessionStore : ISessionStore
         {
             command.CommandText = ProposalApplyPendingSchemaSql;
             command.ExecuteNonQuery();
+            AddProposalRevisionColumns(connection, transaction);
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
@@ -125,9 +129,7 @@ public sealed class SqliteSessionStore : ISessionStore
         }
         else if (Convert.ToInt32(existingVersion) == 6)
         {
-            AddColumnIfMissing(connection, transaction, "improvement_proposals", "revision", "INTEGER NOT NULL DEFAULT 1");
-            AddColumnIfMissing(connection, transaction, "proposal_apply_drafts", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
-            AddColumnIfMissing(connection, transaction, "proposal_applies", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
+            AddProposalRevisionColumns(connection, transaction);
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
@@ -153,6 +155,16 @@ public sealed class SqliteSessionStore : ISessionStore
             command.CommandText = "ALTER TABLE effect_comparison_sessions ADD COLUMN effective_quality TEXT NULL CHECK (effective_quality IS NULL OR effective_quality IN ('pass','fail','missing')); ALTER TABLE effect_comparison_sessions ADD COLUMN severe_failure INTEGER NOT NULL DEFAULT 0 CHECK (severe_failure IN (0,1)); ALTER TABLE effect_comparison_evidence ADD COLUMN human_verdict TEXT NULL CHECK (human_verdict IS NULL OR human_verdict IN ('expected','problem'));";
             command.ExecuteNonQuery();
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
+        else
+        {
+            // A released v4/v5 upgrader could stamp v10 before it had added these
+            // additive Issue #55 objects. Repair only that known incomplete shape;
+            // missing prerequisites still fail the migration transaction.
+            AddColumnIfMissing(connection, transaction, "proposal_apply_drafts", "updated_at", "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.0000000+00:00'");
+            command.CommandText = ProposalApplyPendingSchemaSql;
+            command.ExecuteNonQuery();
+            AddProposalRevisionColumns(connection, transaction);
         }
         transaction.Commit();
     }
@@ -1323,6 +1335,13 @@ public sealed class SqliteSessionStore : ISessionStore
         Add(columns, "$column", column);
         if (columns.ExecuteScalar() is not null) return;
         Execute(connection, transaction, $"ALTER TABLE {table} ADD COLUMN {column} {definition};");
+    }
+
+    private static void AddProposalRevisionColumns(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        AddColumnIfMissing(connection, transaction, "improvement_proposals", "revision", "INTEGER NOT NULL DEFAULT 1");
+        AddColumnIfMissing(connection, transaction, "proposal_apply_drafts", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
+        AddColumnIfMissing(connection, transaction, "proposal_applies", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
     }
 
     private static void ValidateComparisonRequest(EffectComparisonRequest request)
