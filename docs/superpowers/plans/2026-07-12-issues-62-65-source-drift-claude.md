@@ -119,8 +119,9 @@
 - Create: `src/CopilotAgentObservability.Persistence.Sqlite/SourceCompatibility/ISourceCompatibilityStore.cs`
 - Create: `src/CopilotAgentObservability.Persistence.Sqlite/SourceCompatibility/SqliteSourceCompatibilityStore.cs`
 - Create: `src/CopilotAgentObservability.Persistence.Sqlite/RawTelemetryRecordSql.cs`
+- Create: `src/CopilotAgentObservability.Persistence.Sqlite/MonitorSchemaMigrator.cs`
 - Create: `src/CopilotAgentObservability.Persistence.Sqlite/Ingestion/SqliteIngestionCommitStore.cs`
-- Modify: `src/CopilotAgentObservability.Persistence.Sqlite/RawTelemetryStore.cs` only to delegate existing raw insert SQL to `RawTelemetryRecordSql`
+- Modify: `src/CopilotAgentObservability.Persistence.Sqlite/RawTelemetryStore.cs` only to delegate existing raw insert SQL to `RawTelemetryRecordSql` and existing v1-v4 base DDL to source-neutral `MonitorSchemaMigrator`; it must preserve higher stamps and gain no compatibility query/write methods.
 - Modify: `src/CopilotAgentObservability.LocalMonitor/Ingestion/IngestionWriteRequest.cs`
 - Modify: `src/CopilotAgentObservability.LocalMonitor/Ingestion/IngestionWriterWorker.cs`
 - Modify: `tests/CopilotAgentObservability.LocalMonitor.Tests/MonitorSchemaMigrationFixtureTests.cs`
@@ -129,11 +130,13 @@
 
 **Interfaces:**
 - Monitor schema v5 adds dedicated `source_schema_observations` and `source_unknown_observations` tables plus cursor indexes.
+- v5 DDL and the static ExpectedV5 semantic oracle pin the exact state/scalar-reason/seven-value `next_action`/capture vocabulary and valid combinations; a direct invalid action insert is rejected.
 - `IIngestionCommitStore.Commit(ValidatedIngestionBatch)` returns raw/observation IDs after one SQLite transaction.
 - `ISourceCompatibilityStore.RecordAdapterFailure(SourceAdapterFailureDraft)` persists a nullable-batch diagnostic through the same single writer; `List(after, limit)` owns reads.
 - A failed observation insert rolls back the raw row; duplicate batch persistence is idempotent.
+- The focused initializer applies real v1-v4 base migration and v5 in one transaction; injected failure restores the exact original version/schema. Later raw initialization cannot downgrade v5 or a future stamp.
 
-- [ ] Add RED tests for newer-version rejection, transactional rollback, atomic raw+observation commit, unknown overflow counts, idempotency, and v1-v4 migrate-close-reopen.
+- [ ] Add RED tests for newer-version rejection/no downgrade, transactional rollback from every real v1-v4 fixture, atomic raw+observation commit, failure after partial unknown children, unknown overflow counts, idempotency, controlled write-lock busy/no-hidden-retry/explicit replay, duplicate delivery at deterministic barriers, ExpectedV5 exact `next_action` CHECK signature, and direct invalid-action rejection.
 - [ ] Run focused migration/store/writer tests and confirm RED.
 - [ ] Implement v5 migration inside a transaction and the focused store; do not add source-specific methods to unrelated raw CRUD.
 - [ ] Re-run focused tests and `git diff --check`.

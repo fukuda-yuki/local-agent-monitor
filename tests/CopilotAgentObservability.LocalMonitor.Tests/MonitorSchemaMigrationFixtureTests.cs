@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class MonitorSchemaMigrationFixtureTests
 {
-    private const int CurrentMonitorSchemaVersion = 4;
+    private const int CurrentMonitorSchemaVersion = 5;
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateMonitorSchemaFixtures/GenerateMonitorSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/monitor";
 
     public static TheoryData<int, string> HistoricalSchemas => new()
@@ -63,9 +63,9 @@ public sealed class MonitorSchemaMigrationFixtureTests
 
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
-    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v4_state_after_restart(int version, string sourceCommit)
+    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v5_state_after_restart(int version, string sourceCommit)
     {
-        Assert.Equal(CurrentMonitorSchemaVersion, RawTelemetryStore.MonitorSchemaVersion);
+        Assert.Equal(CurrentMonitorSchemaVersion, SqliteSourceCompatibilityStore.MonitorSchemaVersion);
 
         var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "monitor");
         var manifestPath = Path.Combine(fixtureDirectory, "manifest.json");
@@ -87,7 +87,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
         Assert.True(File.Exists(fixturePath), $"Missing migration fixture: {fixturePath}");
         Assert.Equal(fixture.Sha256, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(fixturePath))).ToLowerInvariant());
 
-        if (version == CurrentMonitorSchemaVersion)
+        if (version == 4)
         {
             using var readOnlyFixture = OpenReadOnly(fixturePath);
             AssertSchemaContract(ExpectedV4SchemaContract, ReadSchemaContract(readOnlyFixture));
@@ -99,11 +99,54 @@ public sealed class MonitorSchemaMigrationFixtureTests
         {
             AssertHistoricalState(migratedPath, version, fixture.Sentinels);
 
-            new RawTelemetryStore(migratedPath).CreateMonitorSchema();
+            new SqliteSourceCompatibilityStore(migratedPath).CreateSchema();
             AssertCompleteMigratedState(migratedPath, fixture.Sentinels);
 
-            new RawTelemetryStore(migratedPath).CreateMonitorSchema();
+            new SqliteSourceCompatibilityStore(migratedPath).CreateSchema();
             AssertCompleteMigratedState(migratedPath, fixture.Sentinels);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            File.Delete(migratedPath);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(HistoricalSchemas))]
+    public void InjectedV5Failure_RestoresExactOriginalHistoricalSchemaVersionAndRows(int version, string sourceCommit)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(sourceCommit));
+        var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "monitor");
+        var fixturePath = Path.Combine(fixtureDirectory, $"monitor-v{version}.sqlite");
+        var migratedPath = Path.Combine(Path.GetTempPath(), $"monitor-migration-rollback-{Guid.NewGuid():N}.sqlite");
+        File.Copy(fixturePath, migratedPath);
+        try
+        {
+            SchemaContract originalSchema;
+            IReadOnlyDictionary<string, string[]> originalRows;
+            using (var original = Open(migratedPath))
+            {
+                originalSchema = ReadSchemaContract(original);
+                originalRows = SnapshotRows(original, originalSchema);
+                Assert.Equal(version, Scalar<long>(original, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+            }
+
+            var store = new SqliteSourceCompatibilityStore(
+                migratedPath,
+                connectionOptions: null,
+                migrationCheckpoint: (_, _) => throw new InvalidOperationException("injected v5 migration failure"));
+
+            var exception = Assert.Throws<InvalidOperationException>(store.CreateSchema);
+
+            Assert.Equal("injected v5 migration failure", exception.Message);
+            using var restored = Open(migratedPath);
+            AssertSchemaContract(originalSchema, ReadSchemaContract(restored));
+            Assert.Equal(version, Scalar<long>(restored, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+            foreach (var table in originalRows)
+            {
+                Assert.Equal(table.Value, ReadRows(restored, table.Key));
+            }
         }
         finally
         {
@@ -129,7 +172,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
     {
         using var connection = Open(databasePath);
 
-        AssertSchemaContract(ExpectedV4SchemaContract, ReadSchemaContract(connection));
+        AssertSchemaContract(ExpectedV5SchemaContract, ReadSchemaContract(connection));
 
         Assert.Equal(new[] { $"s:monitor|i:{CurrentMonitorSchemaVersion}" }, ReadRows(connection, "schema_version"));
         Assert.Equal(new[] { $"i:{sentinels.RawRecordId}|s:raw-otlp|s:{sentinels.TraceId}|s:2026-07-12T00:00:00.0000000+00:00|<null>|s:{{\"fixture\":true}}|i:1" }, ReadRows(connection, "raw_records"));
@@ -143,6 +186,8 @@ public sealed class MonitorSchemaMigrationFixtureTests
             ? Array.Empty<string>()
             : new[] { $"i:{sentinels.SpanRowId}|i:{sentinels.RawRecordId}|s:{sentinels.TraceId}|s:{sentinels.SpanId}|<null>|i:0|{string.Join('|', Enumerable.Repeat("<null>", 22))}|s:2026-07-12T00:00:01.0000000+00:00" };
         Assert.Equal(expectedSpanRows, ReadRows(connection, "monitor_spans"));
+        Assert.Empty(ReadRows(connection, "source_schema_observations"));
+        Assert.Empty(ReadRows(connection, "source_unknown_observations"));
     }
 
     private static void AssertSchemaContract(SchemaContract expected, SchemaContract actual)
@@ -538,6 +583,11 @@ public sealed class MonitorSchemaMigrationFixtureTests
         return rows.ToArray();
     }
 
+    private static IReadOnlyDictionary<string, string[]> SnapshotRows(SqliteConnection connection, SchemaContract schema) =>
+        schema.Tables
+            .Where(table => table.Schema == "main" && table.Type == "table")
+            .ToDictionary(table => table.Name, table => ReadRows(connection, table.Name), StringComparer.Ordinal);
+
     private static string[] ReadStrings(SqliteConnection connection, string sql)
     {
         using var command = connection.CreateCommand();
@@ -571,6 +621,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
     }
 
     private static readonly SchemaContract ExpectedV4SchemaContract = CreateExpectedV4SchemaContract();
+    private static readonly SchemaContract ExpectedV5SchemaContract = CreateExpectedV5SchemaContract();
 
     private static SchemaContract CreateExpectedV4SchemaContract()
     {
@@ -641,6 +692,65 @@ public sealed class MonitorSchemaMigrationFixtureTests
             indexes.OrderBy(index => index.Table, StringComparer.Ordinal).ThenBy(index => index.SemanticSortKey, StringComparer.Ordinal).ToArray(),
             Array.Empty<ForeignKeyDefinition>(),
             Array.Empty<string>());
+    }
+
+    private static SchemaContract CreateExpectedV5SchemaContract()
+    {
+        var tables = ExpectedV4SchemaContract.Tables.Concat(new[]
+        {
+            new TableListDefinition("main", "source_schema_observations", "table", 20, 0, 0),
+            new TableListDefinition("main", "source_unknown_observations", "table", 9, 0, 0),
+        }).ToArray();
+        var columns = ExpectedV4SchemaContract.Columns.Concat(new[]
+        {
+            C("source_schema_observations",0,"id","INTEGER",pk:1), C("source_schema_observations",1,"observation_id","TEXT",notNull:1),
+            C("source_schema_observations",2,"raw_record_id","INTEGER"), C("source_schema_observations",3,"ingest_batch_id","TEXT"),
+            C("source_schema_observations",4,"source_surface","TEXT"), C("source_schema_observations",5,"source_application_version","TEXT"),
+            C("source_schema_observations",6,"source_adapter","TEXT"), C("source_schema_observations",7,"adapter_version","TEXT"),
+            C("source_schema_observations",8,"schema_fingerprint","TEXT"), C("source_schema_observations",9,"inventory_hash","TEXT"),
+            C("source_schema_observations",10,"compatibility_state","TEXT",notNull:1), C("source_schema_observations",11,"reason_code","TEXT"),
+            C("source_schema_observations",12,"next_action","TEXT",notNull:1), C("source_schema_observations",13,"capture_content_state","TEXT"),
+            C("source_schema_observations",14,"unknown_span_count","INTEGER",notNull:1), C("source_schema_observations",15,"unknown_event_count","INTEGER",notNull:1),
+            C("source_schema_observations",16,"unknown_attribute_count","INTEGER",notNull:1), C("source_schema_observations",17,"overflow_distinct_count","INTEGER",notNull:1),
+            C("source_schema_observations",18,"overflow_occurrence_count","INTEGER",notNull:1), C("source_schema_observations",19,"observed_at","TEXT",notNull:1),
+
+            C("source_unknown_observations",0,"id","INTEGER",pk:1), C("source_unknown_observations",1,"source_observation_id","INTEGER",notNull:1),
+            C("source_unknown_observations",2,"kind","TEXT",notNull:1), C("source_unknown_observations",3,"name","TEXT",notNull:1),
+            C("source_unknown_observations",4,"occurrence_count","INTEGER",notNull:1), C("source_unknown_observations",5,"source_version_label","TEXT"),
+            C("source_unknown_observations",6,"first_observed_at","TEXT",notNull:1), C("source_unknown_observations",7,"last_observed_at","TEXT",notNull:1),
+            C("source_unknown_observations",8,"opaque_sample_reference","TEXT",notNull:1),
+        }).ToArray();
+        var tableSql = ExpectedV4SchemaContract.TableSql.Concat(new[]
+        {
+            new TableSqlDefinition("source_schema_observations", true, CheckSignature(new[]
+            {
+                CanonicalExpression("compatibility_state IN ('supported','supported_with_unknown_fields','schema_drift_detected','unsupported_source_version','recognized_record_drop_detected','adapter_failure')"),
+                CanonicalExpression("reason_code IS NULL OR reason_code IN ('unknown_fields_observed','unsupported_source_version','schema_drift_detected','recognized_record_drop_detected','adapter_parse_failure','adapter_exception')"),
+                CanonicalExpression("next_action IN ('none','review_unknown_fields','use_compatible_source_or_update_adapter','capture_fixture_and_review_mapping','restore_mapping_or_update_versioned_golden','validate_payload_and_protocol','inspect_sanitized_adapter_failure')"),
+                CanonicalExpression("capture_content_state IS NULL OR capture_content_state IN ('available','not_captured','redacted','unsupported')"),
+                CanonicalExpression("compatibility_state = 'adapter_failure' OR capture_content_state IS NOT NULL"),
+                CanonicalExpression("compatibility_state = 'supported' OR reason_code IS NOT NULL"),
+                CanonicalExpression("(compatibility_state = 'supported' AND reason_code IS NULL AND next_action = 'none') OR (compatibility_state = 'supported_with_unknown_fields' AND reason_code = 'unknown_fields_observed' AND next_action = 'review_unknown_fields') OR (compatibility_state = 'unsupported_source_version' AND reason_code = 'unsupported_source_version' AND next_action = 'use_compatible_source_or_update_adapter') OR (compatibility_state = 'schema_drift_detected' AND reason_code = 'schema_drift_detected' AND next_action = 'capture_fixture_and_review_mapping') OR (compatibility_state = 'recognized_record_drop_detected' AND reason_code = 'recognized_record_drop_detected' AND next_action = 'restore_mapping_or_update_versioned_golden') OR (compatibility_state = 'adapter_failure' AND reason_code = 'adapter_parse_failure' AND next_action = 'validate_payload_and_protocol') OR (compatibility_state = 'adapter_failure' AND reason_code = 'adapter_exception' AND next_action = 'inspect_sanitized_adapter_failure')"),
+                CanonicalExpression("unknown_span_count >= 0"), CanonicalExpression("unknown_event_count >= 0"), CanonicalExpression("unknown_attribute_count >= 0"),
+                CanonicalExpression("overflow_distinct_count >= 0"), CanonicalExpression("overflow_occurrence_count >= 0"),
+            })),
+            new TableSqlDefinition("source_unknown_observations", true, CheckSignature(new[]
+            {
+                CanonicalExpression("kind IN ('span','event','attribute')"),
+                CanonicalExpression("occurrence_count BETWEEN 1 AND 1000000"),
+                CanonicalExpression("first_observed_at <= last_observed_at"),
+            })),
+        }).ToArray();
+        var indexes = ExpectedV4SchemaContract.Indexes.Concat(new[]
+        {
+            I("source_schema_observations",null,1,"u", X(0,1,"observation_id"), X(1,-1,"<rowid>",key:0)),
+            I("source_schema_observations",null,1,"u", X(0,2,"raw_record_id"), X(1,-1,"<rowid>",key:0)),
+            I("source_schema_observations",null,1,"u", X(0,3,"ingest_batch_id"), X(1,-1,"<rowid>",key:0)),
+            I("source_schema_observations","IX_source_schema_observations_cursor",0,"c", X(0,0,"id"), X(1,-1,"<rowid>",key:0)),
+            I("source_unknown_observations",null,1,"u", X(0,1,"source_observation_id"), X(1,2,"kind"), X(2,3,"name"), X(3,-1,"<rowid>",key:0)),
+            I("source_unknown_observations","IX_source_unknown_observations_cursor",0,"c", X(0,1,"source_observation_id"), X(1,0,"id"), X(2,-1,"<rowid>",key:0)),
+        }).OrderBy(index => index.Table, StringComparer.Ordinal).ThenBy(index => index.SemanticSortKey, StringComparer.Ordinal).ToArray();
+        return new SchemaContract(tables, columns, tableSql, indexes, Array.Empty<ForeignKeyDefinition>(), Array.Empty<string>());
     }
 
     private static ColumnDefinition C(string table, int cid, string name, string type, int notNull = 0, string? defaultValue = null, int pk = 0, int hidden = 0) => new(table, cid, name, type, notNull, defaultValue, pk, hidden);

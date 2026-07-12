@@ -174,6 +174,18 @@ diagnostic with no raw record through the same single-writer queue.
 `ISourceCompatibilityStore.List(after, limit)` owns diagnostic reads. Neither
 compatibility writes nor queries are added to `IMonitorProjectionStore`.
 
+One source-neutral `MonitorSchemaMigrator` owns the existing monitor v1-v4 base
+DDL and accepts an existing connection/transaction. `RawTelemetryStore` delegates
+base-schema initialization to it and never rewrites a higher monitor stamp back
+to v4. The focused compatibility initializer runs the same base migration plus
+v5 DDL and stamp in one transaction, so failure from any real v1-v4 input rolls
+the whole attempt back to its original version. A stamp newer than v5 is never
+downgraded and is rejected by the focused current-version initializer.
+The v5 observation table uses defensive CHECK constraints for the exact state,
+scalar reason, seven-value `next_action`, and capture-state vocabulary and their
+valid state/reason/action combinations. Direct SQL cannot persist arbitrary
+action text even when it bypasses the closed in-memory factories.
+
 Migration must be transactional, restart-safe, preserve every existing row,
 and reject a database schema newer than the implementation. Tests use fixtures
 created by each actual shipped schema implementation or preserved database
