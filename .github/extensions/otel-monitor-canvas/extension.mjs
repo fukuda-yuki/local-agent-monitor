@@ -312,6 +312,51 @@ async function handleProposalApplyProxy(req, res, { monitorUrl, path }) {
     } catch { sendJson(res, 502, { error: "monitor_unavailable" }); }
 }
 
+const comparisonReasons = new Set(["not_comparable", "wrong_case", "missing_evidence", "overlaps_application", "user_excluded"]);
+const comparisonVerdicts = new Set(["improved", "no_change", "regressed", "insufficient_evidence"]);
+const comparisonEvidenceKinds = new Set(["run", "event", "trace", "gate"]);
+const comparisonIdentifier = value => typeof value === "string" && value.length >= 1 && value.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value);
+const comparisonUuid = value => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+
+function comparisonWriteBody(path, input) {
+    if (path.endsWith("/objective-evaluations")) {
+        const keys = ["session_id", "run_id", "trace_id", "result", "severity", "evaluator_id", "evaluator_version", "criterion_id", "case_key", "evidence_refs"];
+        if (!exactKeys(input, keys) || !comparisonUuid(input.session_id) || !comparisonUuid(input.run_id) || typeof input.trace_id !== "string" || !input.trace_id.trim() || !["pass", "fail"].includes(input.result) || !["normal", "severe"].includes(input.severity) || (input.result === "pass" && input.severity !== "normal") || ![input.evaluator_id, input.evaluator_version, input.criterion_id].every(value => comparisonIdentifier(value) && value.length <= 100) || !comparisonIdentifier(input.case_key) || !Array.isArray(input.evidence_refs) || input.evidence_refs.length < 1 || input.evidence_refs.length > 10) return null;
+        const evidence_refs = [];
+        for (const item of input.evidence_refs) {
+            if (!exactKeys(item, ["kind", "reference_id"]) || !comparisonEvidenceKinds.has(item.kind) || typeof item.reference_id !== "string" || !item.reference_id.trim()) return null;
+            if (evidence_refs.some(value => value.kind === item.kind && value.reference_id === item.reference_id)) return null;
+            evidence_refs.push({ kind: item.kind, reference_id: item.reference_id });
+        }
+        return { session_id: input.session_id, run_id: input.run_id, trace_id: input.trace_id, result: input.result, severity: input.severity, evaluator_id: input.evaluator_id, evaluator_version: input.evaluator_version, criterion_id: input.criterion_id, case_key: input.case_key, evidence_refs };
+    }
+    const keys = ["proposal_id", "proposal_revision", "apply_id", "sessions"];
+    if (!exactKeys(input, keys) || !comparisonUuid(input.proposal_id) || !Number.isSafeInteger(input.proposal_revision) || input.proposal_revision < 1 || !comparisonUuid(input.apply_id) || !Array.isArray(input.sessions) || input.sessions.length < 1) return null;
+    const sessions = [];
+    for (const item of input.sessions) {
+        if (!exactKeys(item, ["session_id", "classification", "case_key", "exclusion_reason"]) || !comparisonUuid(item.session_id) || sessions.some(value => value.session_id === item.session_id)) return null;
+        if (["pre", "post"].includes(item.classification) && comparisonIdentifier(item.case_key) && item.exclusion_reason === null) sessions.push({ session_id: item.session_id, classification: item.classification, case_key: item.case_key, exclusion_reason: null });
+        else if (item.classification === "excluded" && item.case_key === "" && comparisonReasons.has(item.exclusion_reason)) sessions.push({ session_id: item.session_id, classification: "excluded", case_key: "", exclusion_reason: item.exclusion_reason });
+        else return null;
+    }
+    return { proposal_id: input.proposal_id, proposal_revision: input.proposal_revision, apply_id: input.apply_id, sessions };
+}
+
+function comparisonResponse(value) {
+    const pick = (source, keys) => Object.fromEntries(keys.filter(key => Object.hasOwn(source ?? {}, key) && ["string", "number", "boolean"].includes(typeof source[key]) || Object.hasOwn(source ?? {}, key) && source[key] === null).map(key => [key, source[key]]));
+    const evidence = item => pick(item, ["session_id", "kind", "reference_id", "recorded_at", "human_verdict"]);
+    const safe = pick(value, ["objective_evaluation_id", "comparison_id", "cohort_revision", "proposal_id", "proposal_revision", "apply_id", "state", "application_state", "verification_state", "verdict", "recorded_at", "applied_at", "file_count"]);
+    if (value.receipt && typeof value.receipt === "object") safe.receipt = pick(value.receipt, ["comparison_id", "cohort_revision", "proposal_id", "proposal_revision", "apply_id", "verdict", "verification_state", "recorded_at"]);
+    if (value.summary && typeof value.summary === "object") { const summary = pick(value.summary, ["verdict", "pre_pass", "pre_count", "post_pass", "post_count", "pre_duration_median", "post_duration_median", "duration_delta", "pre_token_median", "post_token_median", "token_delta"]); if (Array.isArray(value.summary.reasons)) summary.reasons = value.summary.reasons.filter(reason => typeof reason === "string" && (comparisonReasons.has(reason) || comparisonVerdicts.has(reason) || ["sub_threshold", "severe_failure", "comparison_evidence_stale"].includes(reason))); safe.summary = summary; }
+    if (Array.isArray(value.items)) safe.items = value.items.map(item => { const result = pick(item, ["objective_evaluation_id", "session_id", "run_id", "trace_id", "result", "severity", "evaluator_id", "evaluator_version", "criterion_id", "case_key", "recorded_at", "apply_id", "draft_id", "proposal_id", "proposal_revision", "selection_revision", "applied_at", "file_count", "state", "current_state", "status", "completeness", "started_at", "ended_at", "exact_bound", "evidence_available", "boundary_eligibility"]); if (Array.isArray(item.evidence_refs)) result.evidence_refs = item.evidence_refs.map(ref => pick(ref, ["kind", "reference_id"])); if (Array.isArray(item.suggestion_reasons)) result.suggestion_reasons = item.suggestion_reasons.filter(reason => typeof reason === "string" && comparisonReasons.has(reason)); return result; });
+    if (Array.isArray(value.sessions)) safe.sessions = value.sessions.map(item => pick(item, ["session_id", "classification", "case_key", "exclusion_reason", "effective_quality", "severe_failure"]));
+    if (Array.isArray(value.evidence)) safe.evidence = value.evidence.map(evidence);
+    if (Array.isArray(value.case_key_groups)) safe.case_key_groups = value.case_key_groups.map(group => ({ ...pick(group, ["case_key"]), sessions: Array.isArray(group.sessions) ? group.sessions.filter(item => typeof item === "string") : [], evidence: Array.isArray(group.evidence) ? group.evidence.map(evidence) : [] }));
+    if (Array.isArray(value.evidence_refs)) safe.evidence_refs = value.evidence_refs.map(item => pick(item, ["kind", "reference_id"]));
+    return safe;
+}
+
 async function handleEffectComparisonProxy(req, res, { monitorUrl, path }) {
     res.setHeader("Cache-Control", "no-store");
     if (!isLoopbackUrl(monitorUrl)) { sendJson(res, 400, { error: "invalid_monitor_url" }); return; }
@@ -323,24 +368,16 @@ async function handleEffectComparisonProxy(req, res, { monitorUrl, path }) {
         if (Number.isFinite(length) && length > 1048576) { sendJson(res, 413, { error: "request_too_large" }); return; }
         const input = await readRequestBodyAtMost(req, 1048576);
         if (input.exceeded) { sendJson(res, 413, { error: "request_too_large" }); return; }
-        try { JSON.parse(input.body); } catch { sendJson(res, 400, { error: "invalid_comparison_request" }); return; }
-        body = input.body;
+        let parsed; try { parsed = JSON.parse(input.body); } catch { sendJson(res, 400, { error: "invalid_comparison_request" }); return; }
+        const shaped = comparisonWriteBody(path, parsed);
+        if (!shaped) { sendJson(res, 400, { error: path.endsWith("/objective-evaluations") ? "invalid_objective_evaluation" : "invalid_comparison_request" }); return; }
+        body = JSON.stringify(shaped);
     }
     try {
         const result = await fetchHelperWorkspaceJson(monitorUrl, path, write ? { method: "POST", headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body } : undefined);
         const errors = new Set(["invalid_objective_evaluation", "objective_evidence_not_exact", "objective_store_unavailable", "invalid_comparison_request", "proposal_revision_stale", "application_not_active", "cohort_not_confirmed", "comparison_evidence_stale", "comparison_not_found", "cross_origin_forbidden", "csrf_required", "unsupported_media_type", "request_too_large"]);
         if (!result.response.ok) { sendJson(res, result.response.status, errors.has(result.parsed?.error) ? { error: result.parsed.error } : { error: "monitor_unavailable" }); return; }
-        const value = result.parsed ?? {}, pick = (source, keys) => Object.fromEntries(keys.filter(key => Object.hasOwn(source ?? {}, key)).map(key => [key, source[key]]));
-        const evidence = item => pick(item, ["session_id", "kind", "reference_id", "recorded_at", "human_verdict"]);
-        const safe = pick(value, ["objective_evaluation_id", "comparison_id", "cohort_revision", "proposal_id", "proposal_revision", "apply_id", "state", "application_state", "verification_state", "verdict", "recorded_at", "applied_at", "file_count"]);
-        if (value.receipt) safe.receipt = pick(value.receipt, ["comparison_id", "cohort_revision", "proposal_id", "proposal_revision", "apply_id", "verdict", "verification_state", "recorded_at"]);
-        if (value.summary) safe.summary = pick(value.summary, ["verdict", "pre_pass", "pre_count", "post_pass", "post_count", "pre_duration_median", "post_duration_median", "duration_delta", "pre_token_median", "post_token_median", "token_delta", "reasons"]);
-        if (Array.isArray(value.items)) safe.items = value.items.map(item => pick(item, ["objective_evaluation_id", "session_id", "run_id", "trace_id", "result", "severity", "evaluator_id", "evaluator_version", "criterion_id", "case_key", "evidence_refs", "recorded_at", "apply_id", "draft_id", "proposal_id", "proposal_revision", "selection_revision", "applied_at", "file_count", "state", "current_state", "status", "completeness", "started_at", "ended_at", "exact_bound", "evidence_available", "boundary_eligibility", "suggestion_reasons"]));
-        if (Array.isArray(value.sessions)) safe.sessions = value.sessions.map(item => pick(item, ["session_id", "classification", "case_key", "exclusion_reason", "effective_quality", "severe_failure"]));
-        if (Array.isArray(value.evidence)) safe.evidence = value.evidence.map(evidence);
-        if (Array.isArray(value.case_key_groups)) safe.case_key_groups = value.case_key_groups.map(group => ({ ...pick(group, ["case_key", "sessions"]), evidence: Array.isArray(group.evidence) ? group.evidence.map(evidence) : [] }));
-        if (Array.isArray(value.evidence_refs)) safe.evidence_refs = value.evidence_refs.map(item => pick(item, ["kind", "reference_id"]));
-        sendJson(res, result.response.status, safe);
+        sendJson(res, result.response.status, comparisonResponse(result.parsed ?? {}));
     } catch { sendJson(res, 502, { error: "monitor_unavailable" }); }
 }
 

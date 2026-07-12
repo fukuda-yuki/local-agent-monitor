@@ -328,14 +328,17 @@ test("proposal apply helper server streams size limits and returns every canonic
 
 test("effect comparison helper proxy accepts only the six token-gated canonical routes", async () => {
     const calls = [], proposalId = "0197d7c0-0000-7000-8000-000000000001", applyId = "0197d7c0-0000-7000-8000-000000000002", comparisonId = "0197d7c0-0000-7000-8000-000000000003";
+    const sessionId = "11111111-1111-7111-8111-111111111111", runId = "22222222-2222-7222-8222-222222222222";
+    const objective = JSON.stringify({ session_id: sessionId, run_id: runId, trace_id: "trace-1", result: "pass", severity: "normal", evaluator_id: "eval", evaluator_version: "v1", criterion_id: "quality", case_key: "case-a", evidence_refs: [{ kind: "run", reference_id: runId }] });
+    const comparison = JSON.stringify({ proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, sessions: [{ session_id: sessionId, classification: "pre", case_key: "case-a", exclusion_reason: null }] });
     const helper = await proposalApplyHelperServer(calls, { fetchResponse: () => new Response(JSON.stringify({ comparison_id: comparisonId, path: "secret-path", source: "secret-source", diff: "secret-diff", hash: "secret-hash", log: "secret-log" }), { status: 200 }) });
     try {
         const routes = [
-            ["POST", "/api/session-workspace/objective-evaluations", "{}"],
+            ["POST", "/api/session-workspace/objective-evaluations", objective],
             ["GET", `/api/session-workspace/objective-evaluations?session_id=${proposalId}`],
             ["GET", `/api/session-workspace/proposal-applies/receipts?proposal_id=${proposalId}`],
             ["GET", `/api/session-workspace/effect-comparisons/candidates?proposal_id=${proposalId}&apply_id=${applyId}`],
-            ["POST", "/api/session-workspace/effect-comparisons", "{}"],
+            ["POST", "/api/session-workspace/effect-comparisons", comparison],
             ["GET", `/api/session-workspace/effect-comparisons/${comparisonId}`],
         ];
         for (const [method, path, body] of routes) {
@@ -363,14 +366,27 @@ test("effect comparison helper projects stale and unavailable backend errors wit
     const errors = ["application_not_active", "proposal_revision_stale", "cohort_not_confirmed", "comparison_evidence_stale", "objective_store_unavailable"];
     let index = 0;
     const helper = await proposalApplyHelperServer([], { fetchResponse: async () => new Response(JSON.stringify({ error: errors[index++], path: "C:\\secret\\source.diff", raw: "do-not-echo" }), { status: index === errors.length ? 503 : 400, headers: { "content-type": "application/json" } }) });
+    const body = JSON.stringify({ proposal_id: "0197d7c0-0000-7000-8000-000000000001", proposal_revision: 2, apply_id: "0197d7c0-0000-7000-8000-000000000002", sessions: [{ session_id: "11111111-1111-7111-8111-111111111111", classification: "pre", case_key: "case-a", exclusion_reason: null }] });
     try {
         for (const error of errors) {
-            const result = await helper.call("POST", "/api/session-workspace/effect-comparisons?t=token", { "content-type": "application/json", "x-canvas-token": "token" }, "{}");
+            const result = await helper.call("POST", "/api/session-workspace/effect-comparisons?t=token", { "content-type": "application/json", "x-canvas-token": "token" }, body);
             assert.equal(result.status, error === "objective_store_unavailable" ? 503 : 400);
             assert.equal(result.headers["cache-control"], "no-store");
             assert.equal(result.text, JSON.stringify({ error }));
             assert.doesNotMatch(result.text, /secret|source|raw/i);
         }
+    } finally { await new Promise(resolve => helper.server.close(resolve)); }
+});
+
+test("effect comparison helper rejects unknown nested write fields before upstream dispatch", async () => {
+    const calls = [], proposalId = "0197d7c0-0000-7000-8000-000000000001", applyId = "0197d7c0-0000-7000-8000-000000000002", sessionId = "11111111-1111-7111-8111-111111111111";
+    const helper = await proposalApplyHelperServer(calls);
+    const payload = { proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, sessions: [{ session_id: sessionId, classification: "pre", case_key: "case-a", exclusion_reason: null, unapproved_field: "must-not-forward" }] };
+    try {
+        const result = await helper.call("POST", "/api/session-workspace/effect-comparisons?t=token", { "content-type": "application/json", "x-canvas-token": "token" }, JSON.stringify(payload));
+        assert.equal(result.status, 400);
+        assert.equal(result.text, '{"error":"invalid_comparison_request"}');
+        assert.equal(calls.length, 0);
     } finally { await new Promise(resolve => helper.server.close(resolve)); }
 });
 
@@ -409,6 +425,7 @@ test("emitted Compare IIFE waits for manual cohort confirmation and renders the 
     await document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await settle();
     await document.querySelectorAll("button").find(item => item.textContent.startsWith("適用記録 ·")).click(); await settle();
     assert.match(textIn(document.body), /証拠不足/);
+    assert.match(textIn(document.body), /比較不可/);
     assert.equal(calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons")).length, 0);
     const selects = document.querySelectorAll("select"), inputs = document.querySelectorAll("input");
     selects[0].value = "pre"; inputs[0].value = "case-a";
@@ -417,10 +434,56 @@ test("emitted Compare IIFE waits for manual cohort confirmation and renders the 
     await document.querySelectorAll("button").find(item => item.textContent === "比較を確定").click(); await settle();
     const post = calls.filter(call => call.init.method === "POST" && call.path.includes("effect-comparisons"));
     assert.equal(post.length, 1);
-    assert.deepEqual(JSON.parse(post[0].init.body), { proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, sessions: [{ session_id: candidates[0].session_id, classification: "pre", case_key: "case-a" }, { session_id: candidates[1].session_id, classification: "post", case_key: "case-a" }, { session_id: candidates[2].session_id, classification: "excluded", case_key: "excluded", exclusion_reason: "user_excluded" }] });
+    assert.deepEqual(JSON.parse(post[0].init.body), { proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, sessions: [{ session_id: candidates[0].session_id, classification: "pre", case_key: "case-a", exclusion_reason: null }, { session_id: candidates[1].session_id, classification: "post", case_key: "case-a", exclusion_reason: null }, { session_id: candidates[2].session_id, classification: "excluded", case_key: "", exclusion_reason: "user_excluded" }] });
     assert.equal(calls.filter(call => call.path.includes(`effect-comparisons/${comparisonId}`)).length, 1);
     assert.match(textIn(document.body), /改善/); assert.match(textIn(document.body), /無効化済み/);
     assert.equal((textIn(document.body).match(/same-ref/g) || []).length, 2);
+});
+
+test("emitted Compare IIFE crosses the real helper with an exact upstream contract and strips nested extras", async () => {
+    const proposalId = "0197d7c0-0000-7000-8000-000000000001", applyId = "0197d7c0-0000-7000-8000-000000000002", comparisonId = "0197d7c0-0000-7000-8000-000000000003";
+    const candidates = [{ session_id: "11111111-1111-7111-8111-111111111111", suggestion_reasons: [] }, { session_id: "22222222-2222-7222-8222-222222222222", suggestion_reasons: ["missing_evidence"] }, { session_id: "33333333-3333-7333-8333-333333333333", suggestion_reasons: ["not_comparable"] }];
+    const upstream = [], helper = await proposalApplyHelperServer(upstream, { fetchResponse: (target, init = {}) => {
+        const path = new URL(target).pathname;
+        if (path.endsWith("/sessions")) return new Response(JSON.stringify({ items: [bound] }));
+        if (path.endsWith("/resolve")) return new Response(JSON.stringify({ binding_status: "bound", session_id: bound.session_id }));
+        if (path.endsWith(`/sessions/${bound.session_id}`)) return new Response(JSON.stringify({ session: bound, native_ids: [{ binding_kind: "native" }], events: [], runs: [] }));
+        if (path.includes("session-instruction")) return new Response(JSON.stringify({ state: "no_instruction" }));
+        if (path.includes("improvement-proposals")) return new Response(JSON.stringify({ items: [{ proposal_id: proposalId, status: "recommended" }] }));
+        if (path.endsWith("/receipts")) return new Response(JSON.stringify({ items: [{ apply_id: applyId, state: "applied" }] }));
+        if (path.endsWith("/candidates")) return new Response(JSON.stringify({ proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, items: candidates }));
+        if (path.endsWith(`/effect-comparisons/${comparisonId}`)) return new Response(JSON.stringify({ receipt: { comparison_id: comparisonId, verdict: "improved", verification_state: "invalidated", extra: "hidden" }, summary: { verdict: "improved", reasons: ["missing_evidence", "hidden"], nested: { unapproved: "hidden" } }, evidence: [{ kind: "event", reference_id: "same-ref", unapproved: "hidden" }], case_key_groups: [{ case_key: "case-a", sessions: [candidates[0].session_id], evidence: [{ kind: "event", reference_id: "same-ref", unapproved: "hidden" }], unapproved: "hidden" }] }));
+        if (path.endsWith("/effect-comparisons")) {
+            const value = JSON.parse(init.body);
+            assert.deepEqual(value, { proposal_id: proposalId, proposal_revision: 2, apply_id: applyId, sessions: [{ session_id: candidates[0].session_id, classification: "pre", case_key: "case-a", exclusion_reason: null }, { session_id: candidates[1].session_id, classification: "post", case_key: "case-a", exclusion_reason: null }, { session_id: candidates[2].session_id, classification: "excluded", case_key: "", exclusion_reason: "user_excluded" }] });
+            return new Response(JSON.stringify({ comparison_id: comparisonId }), { status: 201 });
+        }
+        return new Response(JSON.stringify({ error: "unexpected" }), { status: 404 });
+    } });
+    try {
+        const fetch = async (path, init = {}) => {
+            const route = String(path);
+            if (route.includes("effect-comparisons")) { const clean = route.replace(/([?&])t=[^&]*/, "$1").replace(/[?&]$/, ""); const value = await helper.call(init.method ?? "GET", `${clean}${clean.includes("?") ? "&" : "?"}t=token`, { ...(init.headers ?? {}), "x-canvas-token": "token" }, init.body); return { status: value.status, json: async () => JSON.parse(value.text) }; }
+            if (route.includes("/sessions?")) return response({ items: [bound] });
+            if (route.includes("/resolve?")) return response({ binding_status: "bound", session_id: bound.session_id });
+            if (route.includes("/sessions/")) return response({ session: bound, native_ids: [{ binding_kind: "native" }], events: [], runs: [] });
+            if (route.includes("session-instruction")) return response({ state: "no_instruction" });
+            if (route.includes("improvement-proposals")) return response({ items: [{ proposal_id: proposalId, status: "recommended" }] });
+            if (route.includes("proposal-applies/receipts")) return response({ items: [{ apply_id: applyId, state: "applied" }] });
+            return response({ error: "unexpected" }, 404);
+        };
+        const settle = async () => { for (let index = 0; index < 20; index++) await new Promise(resolve => setImmediate(resolve)); };
+        const { document } = await runWorkspaceIife(fetch); await settle();
+        await document.querySelectorAll("button").find(item => item.dataset.tab === "improve").click(); await settle();
+        await document.querySelectorAll("button").find(item => item.dataset.tab === "compare").click(); await settle();
+        await document.querySelectorAll("button").find(item => item.textContent === "適用記録を読み込む").click(); await settle();
+        await document.querySelectorAll("button").find(item => item.textContent.startsWith("適用記録 ·")).click(); await settle();
+        assert.match(textIn(document.body), /証拠不足/); assert.match(textIn(document.body), /比較不可/);
+        const selects = document.querySelectorAll("select"), inputs = document.querySelectorAll("input"); selects[0].value = "pre"; inputs[0].value = "case-a"; selects[2].value = "post"; inputs[1].value = "case-a"; selects[4].value = "excluded"; selects[5].value = "user_excluded";
+        await document.querySelectorAll("button").find(item => item.textContent === "比較を確定").click(); await settle();
+        assert.equal(upstream.filter(call => new URL(call.target).pathname.endsWith("/effect-comparisons") && call.init.method === "POST").length, 1);
+        const text = textIn(document.body); assert.match(text, /改善/); assert.equal((text.match(/same-ref/g) || []).length, 2); assert.doesNotMatch(text, /hidden|unapproved/i);
+    } finally { await new Promise(resolve => helper.server.close(resolve)); }
 });
 
 test("emitted Compare IIFE renders every remaining verdict, available metrics, and safe terminal errors without authority", async () => {
