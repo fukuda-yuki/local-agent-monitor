@@ -14,6 +14,7 @@ public sealed class SetupJournalStoreTests
     private static readonly Guid EnvironmentRecordId = Guid.Parse("00000000-0000-7000-8000-000000000103");
     private const string PriorHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string DesiredHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    private const int MaximumJournalBytes = 1024 * 1024;
 
     [Theory]
     [InlineData("apply")]
@@ -229,7 +230,24 @@ public sealed class SetupJournalStoreTests
             new[] { valid[0], valid[1] with { Steps = new[] { valid[1].Steps[0] with { MemberKey = null } } } },
             new[] { valid[0] with { Steps = new[] { valid[0].Steps[0] with { PriorStateHash = "previous-value" } } }, valid[1] },
             new[] { valid[0] with { Steps = new[] { valid[0].Steps[0] with { BackupReference = "C:\\private\\backup" } } }, valid[1] },
+            new[] { valid[0] with { Steps = new[] { valid[0].Steps[0] with { BackupReference = "b" + new string('a', 128) } } }, valid[1] },
+            new[] { valid[0], valid[1] with { Steps = new[] { valid[1].Steps[0], valid[1].Steps[1] with { BackupReference = "backup-env-other" } } } },
         };
+    }
+
+    [Fact]
+    public void Load_OversizeJournalUsesBoundedReadAndReturnsFixedNonEchoError()
+    {
+        var context = CreateContext();
+        var source = context.Paths.GetTransactionJournal(ChangeSetId);
+        context.Platform.SeedFile(source, Enumerable.Repeat((byte)'P', MaximumJournalBytes + 1).ToArray());
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.Load(ChangeSetId));
+
+        Assert.Equal(SetupJournalStorageCodes.Corrupt, exception.Code);
+        Assert.DoesNotContain("PRIVATE_PATH_MARKER", exception.ToString(), StringComparison.Ordinal);
+        Assert.Contains($"file.read-bounded:{source}:{MaximumJournalBytes}", context.Platform.Operations);
+        Assert.DoesNotContain($"file.read:{source}", context.Platform.Operations);
     }
 
     [Theory]
@@ -352,7 +370,7 @@ public sealed class SetupJournalStoreTests
     {
         var context = CreateContext();
         var destination = context.Paths.GetTransactionJournal(ChangeSetId);
-        var temporary = destination + ".tmp";
+        var temporary = Temporary(destination, 1);
         var operation = boundary switch
         {
             "write" => $"file.write-new:{temporary}",
@@ -384,7 +402,7 @@ public sealed class SetupJournalStoreTests
         var context = CreateContext();
         context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
         var destination = context.Paths.GetTransactionJournal(ChangeSetId);
-        var temporary = destination + ".tmp";
+        var temporary = Temporary(destination, 2);
         var operation = boundary switch
         {
             "write" => $"file.write-new:{temporary}",
@@ -402,6 +420,51 @@ public sealed class SetupJournalStoreTests
         {
             Assert.True(context.Platform.FileSystem.FileExists(temporary));
         }
+    }
+
+    [Fact]
+    public void CreatePrepared_PreMoveFaultCanReopenAndRetryWithoutReusingOrDeletingReboundOrphan()
+    {
+        var context = CreateContext();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var orphan = Temporary(destination, 1);
+        context.Platform.InjectFault($"file.move:{orphan}->{destination}", new IOException("PRIVATE_PATH_MARKER"));
+
+        Assert.Throws<SetupStorageException>(() => context.Store.CreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+        var reboundBytes = Encoding.UTF8.GetBytes("rebound-orphan");
+        context.Platform.SeedFile(orphan, reboundBytes);
+
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths);
+        reopened.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+
+        Assert.Equal(reboundBytes, context.Platform.ReadSeededFile(orphan));
+        Assert.NotNull(new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId));
+        Assert.Contains($"file.move:{Temporary(destination, 2)}->{destination}", context.Platform.Operations);
+        Assert.DoesNotContain($"file.delete:{orphan}", context.Platform.Operations);
+    }
+
+    [Fact]
+    public void Update_PreReplaceFaultCanReopenAndRetryWithoutReusingOrDeletingReboundOrphan()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var orphan = Temporary(destination, 2);
+        context.Platform.InjectFault($"file.replace:{orphan}->{destination}", new IOException("PRIVATE_PATH_MARKER"));
+
+        Assert.Throws<SetupStorageException>(() => context.Store.MarkTransactionPhase(
+            context.Lock, ChangeSetId, SetupJournalPhase.Applying));
+        var reboundBytes = Encoding.UTF8.GetBytes("rebound-orphan");
+        context.Platform.SeedFile(orphan, reboundBytes);
+
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths);
+        reopened.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+
+        Assert.Equal(reboundBytes, context.Platform.ReadSeededFile(orphan));
+        Assert.Equal(SetupJournalPhase.Applying, new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!.Phase);
+        Assert.Contains($"file.replace:{Temporary(destination, 3)}->{destination}", context.Platform.Operations);
+        Assert.DoesNotContain($"file.delete:{orphan}", context.Platform.Operations);
     }
 
     private static void AdvanceTransaction(TestContext context, SetupJournalPhase phase, SetupJournalStepPhase completedPhase)
@@ -554,6 +617,9 @@ public sealed class SetupJournalStoreTests
             platform.InjectFault(operation, new IOException("PRIVATE_PATH_MARKER"));
         }
     }
+
+    private static string Temporary(string destination, int sequence) =>
+        destination + $".cao-00000000-0000-7000-8000-{sequence:D12}.tmp";
 
     private sealed record TestContext(
         SetupTestPlatform Platform,

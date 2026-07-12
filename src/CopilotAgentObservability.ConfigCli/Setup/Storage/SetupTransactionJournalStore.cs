@@ -62,6 +62,7 @@ internal sealed record SetupJournalStep(
 
 internal sealed partial class SetupTransactionJournalStore
 {
+    internal const int MaximumJournalBytes = 1024 * 1024;
     private readonly ISetupPlatform platform;
     private readonly SetupRuntimePaths paths;
 
@@ -117,7 +118,13 @@ internal sealed partial class SetupTransactionJournalStore
 
         try
         {
-            var journal = Deserialize(platform.FileSystem.ReadAllBytes(source));
+            var read = platform.FileSystem.ReadAtMostBytes(source, MaximumJournalBytes);
+            if (!read.IsComplete)
+            {
+                throw new FormatException();
+            }
+
+            var journal = Deserialize(read.Bytes);
             if (journal.ChangeSetId != changeSetId)
             {
                 throw new FormatException();
@@ -221,7 +228,7 @@ internal sealed partial class SetupTransactionJournalStore
 
     private void WriteCreateNew(string destination, byte[] bytes)
     {
-        var temporary = destination + ".tmp";
+        var temporary = CreateTemporaryPath(destination);
         try
         {
             platform.FileSystem.WriteNewAllBytes(temporary, bytes);
@@ -236,7 +243,7 @@ internal sealed partial class SetupTransactionJournalStore
 
     private void WriteReplace(string destination, byte[] bytes)
     {
-        var temporary = destination + ".tmp";
+        var temporary = CreateTemporaryPath(destination);
         try
         {
             platform.FileSystem.WriteNewAllBytes(temporary, bytes);
@@ -248,6 +255,9 @@ internal sealed partial class SetupTransactionJournalStore
             throw new SetupStorageException(SetupStorageCodes.WriteFailed);
         }
     }
+
+    private string CreateTemporaryPath(string destination) =>
+        destination + ".cao-" + platform.Identifiers.CreateUuidV7().ToString("D") + ".tmp";
 
     private static bool IsTransactionTransition(
         SetupJournalOperation operation,
@@ -426,6 +436,7 @@ internal sealed partial class SetupTransactionJournalStore
             {
                 Require(steps.All(step => step?.MemberKey is not null));
                 Require(steps.Select(step => step?.MemberKey).Distinct(StringComparer.Ordinal).Count() == steps.Count);
+                Require(steps.Select(step => step?.BackupReference).Distinct(StringComparer.Ordinal).Count() == 1);
             }
             else
             {
@@ -438,7 +449,7 @@ internal sealed partial class SetupTransactionJournalStore
                 Require(step.MemberKey is null || MemberKeyPattern().IsMatch(step.MemberKey));
                 Require(HashPattern().IsMatch(step.PriorStateHash ?? string.Empty));
                 Require(HashPattern().IsMatch(step.DesiredStateHash ?? string.Empty));
-                Require(BackupReferencePattern().IsMatch(step.BackupReference ?? string.Empty));
+                Require(step.BackupReference is { Length: <= 128 } && BackupReferencePattern().IsMatch(step.BackupReference));
                 Require(Enum.IsDefined(step.Phase));
                 Require(IsStepCoherent(journal.Operation, journal.Phase, step.Phase));
             }
