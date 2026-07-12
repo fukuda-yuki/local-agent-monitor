@@ -92,7 +92,11 @@ internal sealed class SessionEventNormalizer
             item.OccurredAt,
             !IsSupported(item.Type!) ? SessionContentState.Unsupported
                 : IsUsage(item.Type!) ? SessionContentState.NotCaptured
-                : SessionContentState.Available)).ToArray();
+                : SessionContentState.Available,
+            envelope.SourceApplicationVersion,
+            envelope.AdapterVersion,
+            envelope.SchemaFingerprint,
+            envelope.NormalizationVersion)).ToArray();
         var contents = persistedInputEvents.Where(item => !IsUsage(item.Type!) && IsSupported(item.Type!)).Select(item => new SessionEventContent(
             knownEventIds[item.SourceEventId!],
             "application/json",

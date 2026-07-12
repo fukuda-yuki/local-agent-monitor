@@ -1,8 +1,10 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Sessions;
+using CopilotAgentObservability.Telemetry.Sessions;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -90,6 +92,87 @@ public sealed class SessionWorkspaceRouteTests
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal("""{"error":"invalid_session_event_request"}""", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("""{"schema_version":1,"source_adapter":"copilot-compatible-hook","source_surface":"hook-unknown","native_session_id":"native-1","unknown_envelope_field":true,"events":[{"source_event_id":"event-1","type":"SessionStart","occurred_at":"2026-07-11T00:00:00Z","payload":{}}]}""")]
+    [InlineData("""{"schema_version":1,"source_adapter":"copilot-compatible-hook","source_surface":"hook-unknown","native_session_id":"native-1","events":[{"source_event_id":"event-1","type":"SessionStart","occurred_at":"2026-07-11T00:00:00Z","payload":{},"unknown_event_field":true}]}""")]
+    [InlineData("""{"schema_version":1,"source_adapter":"copilot-compatible-hook","source_surface":"copilot-cli","native_session_id":"native-2","explicit_link":{"source_surface":"hook-unknown","native_session_id":"native-1","kind":"resume","unknown_link_field":true},"events":[{"source_event_id":"event-1","type":"SessionStart","occurred_at":"2026-07-11T00:00:00Z","payload":{}}]}""")]
+    public async Task Ingest_RejectsUnknownFieldsAtEveryEnvelopeLevel(string json)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp);
+
+        using var response = await host.Client.SendAsync(IngestRequest(json));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("""{"error":"invalid_session_event_request"}""", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task IngestToNormalizer_CopiesEnvelopeProvenanceAndPreservesExistingIdentity()
+    {
+        using var temp = new MonitorTempDirectory();
+        var queue = new SessionEventQueue();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            SessionEventQueue = queue,
+            StartSessionWriter = false,
+            SessionCommitTimeout = TimeSpan.FromSeconds(5),
+        });
+        var sessionId = Guid.CreateVersion7();
+        var eventId = Guid.CreateVersion7();
+        var observedAt = DateTimeOffset.Parse("2026-07-12T00:00:00Z");
+        var session = new ObservedSession(
+            sessionId, ObservedSessionStatus.Active, SessionCompleteness.Partial,
+            null, null, observedAt, null, observedAt, SessionRawRetentionState.Expiring, observedAt, observedAt);
+        var existingEvent = new ObservedSessionEvent(
+            eventId, sessionId, null, SessionSourceSurface.ClaudeCode, null, null, null,
+            "claude-code-hook", "event-1", "SessionStart", observedAt, SessionContentState.Available,
+            "old-source", "old-adapter", new string('b', 64), "old-normalization");
+        var store = DispatchProxy.Create<ISessionStore, RecordingSessionStoreProxy>();
+        var recorder = (RecordingSessionStoreProxy)(object)store;
+        recorder.ExistingSession = session;
+        recorder.ExistingDetail = new SessionDetail(
+            session,
+            [new SessionNativeId(sessionId, SessionSourceSurface.ClaudeCode, "native-1", SessionBindingKind.Native, observedAt)],
+            [],
+            [existingEvent]);
+        var json = """
+            {
+              "schema_version":1,
+              "source_adapter":"claude-code-hook",
+              "source_surface":"claude-code",
+              "native_session_id":"native-1",
+              "source_application_version":"2.1.207+exact",
+              "adapter_version":"claude-hook-v1",
+              "schema_fingerprint":"__FINGERPRINT__",
+              "normalization_version":"session-normalization-v1",
+              "events":[
+                {"source_event_id":"event-1","type":"UserPromptSubmit","occurred_at":"2026-07-12T00:01:00Z","payload":{"source_application_version":"payload-must-not-win","adapter_version":"payload-must-not-win"}},
+                {"source_event_id":"event-2","type":"Stop","occurred_at":"2026-07-12T00:02:00Z","payload":{"normalization_version":"payload-must-not-win"}}
+              ]
+            }
+            """.Replace("__FINGERPRINT__", new string('a', 64), StringComparison.Ordinal);
+
+        var responseTask = host.Client.SendAsync(IngestRequest(json));
+        var queued = await queue.Reader.ReadAsync();
+        queue.MarkDequeued();
+        new SessionEventNormalizer(store, new FixedTimeProvider(observedAt.AddMinutes(3))).NormalizeAndWrite(queued.Envelope);
+        queued.Complete(SessionEventCommitStatus.Committed);
+        using var response = await responseTask;
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var batch = Assert.IsType<SessionWriteBatch>(recorder.WrittenBatch);
+        Assert.Equal(sessionId, batch.Detail.Session.SessionId);
+        Assert.Equal(eventId, Assert.Single(batch.Detail.Events, item => item.SourceEventId == "event-1").EventId);
+        Assert.All(batch.Detail.Events, item =>
+        {
+            Assert.Equal("2.1.207+exact", item.SourceApplicationVersion);
+            Assert.Equal("claude-hook-v1", item.AdapterVersion);
+            Assert.Equal(new string('a', 64), item.SchemaFingerprint);
+            Assert.Equal("session-normalization-v1", item.NormalizationVersion);
+        });
     }
 
     [Theory]
@@ -326,4 +409,30 @@ public sealed class SessionWorkspaceRouteTests
           ]
         }
         """;
+
+    private class RecordingSessionStoreProxy : DispatchProxy
+    {
+        public ObservedSession? ExistingSession { get; set; }
+        public SessionDetail? ExistingDetail { get; set; }
+        public SessionWriteBatch? WrittenBatch { get; private set; }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) => targetMethod?.Name switch
+        {
+            nameof(ISessionStore.Resolve) => ExistingSession,
+            nameof(ISessionStore.GetDetail) => ExistingDetail,
+            nameof(ISessionStore.Write) => Capture(args),
+            _ => throw new NotSupportedException(targetMethod?.Name),
+        };
+
+        private object? Capture(object?[]? args)
+        {
+            WrittenBatch = Assert.IsType<SessionWriteBatch>(Assert.Single(args!));
+            return null;
+        }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => value;
+    }
 }
