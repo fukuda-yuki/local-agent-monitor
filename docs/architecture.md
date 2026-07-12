@@ -92,6 +92,16 @@ Config CLI は repository-local な中核ツールである。
 - auto-decision generation。
 - dashboard dataset generation。
 - static HTML dashboard generation。
+- versioned user-scoped configuration ownership ledger and immutable setup
+  plan/apply/rollback/status coordination.
+- GitHub Copilot VS Code/CLI detection and bounded setup adapters; App/SDK
+  remains caller-managed guidance.
+
+The setup framework lives in the Config CLI rather than Local Monitor HTTP/UI.
+The Windows Release ZIP publishes the Config CLI beside the Local Monitor app
+and the setup PowerShell wrapper invokes the same command/result contract used
+in repository mode. This introduces no reverse reference from lower libraries
+to Config CLI and no new Local Monitor route.
 
 ### SQLite Raw Store
 
@@ -252,6 +262,26 @@ measurements
 - content-aware evidence extraction。
 - 改善候補と自動採用判断 record の生成。
 - human review pipeline との互換維持。
+
+### Reversible Configuration Setup Loop
+
+```text
+GitHub Copilot target detection
+  -> redacted immutable setup plan + base hashes
+  -> explicit change-set apply
+  -> flushed backup + per-file/per-env-member write-ahead intents
+  -> atomic physical-file / recoverable current-user env mutation
+  -> ownership ledger + static verification
+  -> hash-guarded change-set rollback
+```
+
+VS Code policy/environment/user-setting precedence and Copilot CLI user
+environment are observed through injected platform boundaries. Filesystem and
+environment writes are serialized by a non-waiting exclusive setup lock.
+Compensation runs in reverse journal-step order. `status` requests no new setup
+mutation, but it can restore an interrupted transaction before projecting the
+ledger. No setup result is evidence of a first
+trace; Issue #69 owns live receipt verification.
 
 ### Dashboard Artifact Generation
 

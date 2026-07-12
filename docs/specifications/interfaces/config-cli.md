@@ -22,6 +22,10 @@ config-cli collector-copilot-cli-env
 config-cli langfuse-codex-app-config
 config-cli collector-codex-app-config
 config-cli validate-resource-attributes <OTEL_RESOURCE_ATTRIBUTES>
+config-cli setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture]
+config-cli setup apply --change-set <uuid-v7>
+config-cli setup rollback --change-set <uuid-v7>
+config-cli setup status [--adapter github-copilot]
 ```
 
 Configuration commands must emit placeholders instead of real credentials.
@@ -35,6 +39,15 @@ instead of silently choosing a profile.
 
 Existing explicit commands such as `langfuse-vscode-env` and
 `collector-vscode-env` remain supported compatibility entry points.
+
+The `setup` command family is the reversible configuration surface introduced
+by Issues #66/#67. It does not replace or change the output of existing manual
+profile generators. `setup plan` creates an immutable private plan;
+`setup apply` and `setup rollback` require its UUIDv7 change-set ID. Every setup
+command emits exactly one `setup.v1` JSON result, and stderr contains only a
+fixed result code. The canonical ledger, DTO, error, transaction, policy, and
+GitHub Copilot target rules are defined in
+[configuration-setup.md](configuration-setup.md).
 
 For the `raw-local-receiver` profile, `profile-vscode-env` selects which local
 raw target the generated VS Code environment points at:

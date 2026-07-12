@@ -735,6 +735,65 @@ files, CI artifacts, static artifacts, Issue/PR text, or docs. Direct apply,
 snapshots, and rollback require the Issue #55 boundary and are not authorized
 by this proposal interface.
 
+## Configuration Setup Boundary
+
+Issues #66/#67 create a separate user-invoked configuration setup boundary.
+It does not reuse Canvas actions, `session.send()`, proposal apply roots, Local
+Monitor HTTP routes, or the monitor database. The trusted actor is the current
+local user explicitly invoking the Config CLI or packaged PowerShell wrapper.
+
+Repository-safe command output and the ownership ledger may contain fixed
+adapter/target/setting identifiers, timestamps, UUIDv7 IDs, SHA-256 hashes,
+state/error codes, restart requirements, and a validated non-credential-bearing
+loopback endpoint. They never contain raw setting values, absolute paths,
+credentials, tokens, authorization headers, raw exception text, raw telemetry,
+prompts/responses, tool input/output, source fragments, or PII.
+
+Immutable apply plans, backups, and transaction journals are private local
+runtime data under
+`%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\setup\`. Plans retain
+only target locations and validated desired values; they do not retain previous
+values read during preview. Flushed apply-time backups retain the exact previous
+local state needed for rollback. None is emitted to stdout/stderr, logs, CI,
+static artifacts, docs, Issues/PRs, or committed files.
+Automatic cleanup is outside Issues #66/#67; DB/log/telemetry runtime data is
+never removed by configuration rollback.
+
+File targets require a regular non-reparse target and non-reparse ancestry.
+Path traversal, UNC/device/URI targets, symlink/junction/reparse points, and
+malformed structured configuration fail closed. Apply creates and flushes a
+backup and same-directory temporary file before atomic replacement. Every plan
+base hash is revalidated before the first write and again at each mutation.
+Rollback requires the current post-apply hash; force rollback does not exist.
+
+Current-user environment writes use the user environment API only, never
+machine scope or `setx`. The adapter does not add global `client.kind`, alter
+headers/credentials, or implicitly enable content capture. Managed policy
+sources are read-only. A locally observed conflict blocks the relevant write;
+an unobservable server-managed policy is reported as unverified rather than
+treated as absent.
+
+Transaction concurrency uses a non-waiting exclusive lock and deterministic
+stale checks. There is no retry loop or timing-based conflict recovery. The
+journal flushes intent before every file mutation, environment member mutation,
+and restore. Apply performs a final all-step desired-state verification before
+commit. Normal compensation, rollback, and recovery classify
+prior/desired/current state immediately before each restore and never overwrite
+a third-party value. Partial failure triggers reverse compensation
+and records each outcome without raw exception content. Every command recovers
+or reconciles an interrupted journal before normal work. Failed recovery leaves
+setup fail-closed: status returns the readable bounded ledger projection and
+recovery correlation, while further mutation is blocked until the private local
+state is resolved. Status requests no new setup mutation, but recovery may
+restore targets before projection.
+
+Apply revalidates every distinct loopback endpoint before creating backups or
+mutation artifacts. The probe prevents writing a plan whose endpoint is already
+owned by an observed foreign listener; it is not a lease and does not claim the
+listener cannot change afterward. Environment notification happens only after a
+final state. Recovery may replay the notification when prior delivery cannot be
+proven; exactly-once external broadcast is not claimed.
+
 ## Proposal Apply Boundary
 
 Issue #55 is the only privileged local file-mutation surface. A Canvas action,

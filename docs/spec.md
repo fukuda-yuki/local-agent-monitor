@@ -57,6 +57,35 @@ Issue #56 は `canvas-effect-comparison.md` の exact-linked comparison boundary
 
 GitHub Pages publish workflow は現行スコープから削除した（D049）。Static dashboard は `generate-static-dashboard` で local artifact として生成する。
 
+Issue #66/#67 adds a user-scoped configuration setup path beside the existing
+manual profile generators and startup scripts. The Config CLI owns a versioned
+configuration ownership ledger and immutable private plans under
+`%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\setup\`. Public commands
+are `setup plan`, `setup apply`, `setup rollback`, and `setup status`; the
+Release ZIP carries a self-contained Config CLI plus a PowerShell wrapper that
+forwards the same `setup.v1` JSON result. Apply is explicit and change-set based,
+validates every base hash before writing, uses backup + same-directory atomic
+replace for files and current-user environment APIs for environment values, and
+flushes a write-ahead intent before each file/environment-member mutation or
+restore. Recovery classifies prior/desired/third-party state per step,
+compensates in reverse step order, and persists partial outcomes without
+overwriting third-party state. Rollback is hash-guarded and has no force mode.
+Results distinguish requested/created and recovered change-set IDs. No HTTP,
+proxy, Canvas, or Local Monitor UI DTO is added.
+
+The initial `github-copilot` adapter supports stable VS Code 1.128+ and terminal
+Copilot CLI 1.0.4+, and returns caller-managed .NET App/SDK telemetry guidance.
+VS Code effective precedence is managed policy, environment, user setting,
+then default. The adapter reads locally observable managed policy sources but
+does not edit them; a server-managed signed-in-account policy that an external
+CLI cannot prove is reported as unverified. VS Code writes only the documented
+Copilot OTel user settings. Terminal CLI writes only a bounded current-user OTel
+environment allowlist. Content capture remains unchanged unless the user selects
+the explicit sensitive option. App/SDK is no-write. Setup success means static
+configuration verification, never first-trace receipt. The complete contract is
+[configuration setup](specifications/interfaces/configuration-setup.md) and the
+security decision is D057.
+
 ## Source capability semantic contract v1
 
 `docs/specifications/contracts/source-capabilities/v1/source-capability-manifest.schema.json`
@@ -97,6 +126,7 @@ and [security data boundaries](specifications/security-data-boundaries.md).
 | Security and data boundaries | [specifications/security-data-boundaries.md](specifications/security-data-boundaries.md) |
 | Collection profile interface | [specifications/interfaces/collection-profiles.md](specifications/interfaces/collection-profiles.md) |
 | Config CLI interface | [specifications/interfaces/config-cli.md](specifications/interfaces/config-cli.md) |
+| Configuration setup interface | [specifications/interfaces/configuration-setup.md](specifications/interfaces/configuration-setup.md) |
 | Normalized measurement dataset interface | [specifications/interfaces/measurement-dataset.md](specifications/interfaces/measurement-dataset.md) |
 | Candidate record interfaces | [specifications/interfaces/candidate-records.md](specifications/interfaces/candidate-records.md) |
 | Human-review record interfaces | [specifications/interfaces/human-review-records.md](specifications/interfaces/human-review-records.md) |
@@ -114,6 +144,12 @@ and [security data boundaries](specifications/security-data-boundaries.md).
 Publicly documented interfaces are:
 
 - Config CLI command names, arguments, CSV / JSON output shape。
+- Config CLI configuration setup commands and `setup.v1` JSON result:
+  `setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all>`,
+  `setup apply --change-set <uuid-v7>`, `setup rollback --change-set <uuid-v7>`,
+  and `setup status [--adapter github-copilot]`. The configuration ownership
+  ledger is user-scoped runtime data; command output is repository-safe and
+  redacted. No setup HTTP/proxy/UI surface exists.
 - Collection profile names and `CAO_COLLECTION_PROFILE` values。
 - `OTEL_RESOURCE_ATTRIBUTES` keys and recommended values。
 - Dashboard dataset JSON and CSV logical tables。

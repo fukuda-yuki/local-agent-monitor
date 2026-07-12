@@ -1824,3 +1824,77 @@ not an implementation authorization and does not change Issue #51 or #49.
 [Canvas Session workspace](specifications/interfaces/canvas-session-workspace.md)、
 および [security data boundaries](specifications/security-data-boundaries.md)
 とする。
+
+## D057: Guided setup は user-scoped ownership ledger と hash-guarded transaction に閉じる
+
+Status: Accepted
+
+Issues #66/#67 add reversible configuration setup without turning Local Monitor
+into a general machine-management service. The same Config CLI implementation
+serves repository mode and the self-contained Windows Release ZIP; PowerShell is
+a thin argument/result wrapper.
+
+決定事項:
+
+- Public commands are `setup plan`, `setup apply`, `setup rollback`, and
+  `setup status`. Plan persists a private immutable change set; apply and
+  rollback require its UUIDv7 ID. Public output is the fixed repository-safe
+  `setup.v1` JSON contract.
+- The version-1 ownership ledger lives under the current user's Local Monitor
+  runtime root and stores only fixed labels, timestamps, state/error codes,
+  hashes, and opaque backup references. Exact values and paths are confined to
+  private plans/backups/journals. Plans retain desired state but not previous
+  values; exact previous state is captured only in apply-time backups. Version 1 is the first shipped schema; unknown versions
+  fail closed and no synthetic v0 migration is invented.
+- One physical file or current-user environment allowlist is one ledger target
+  with one base/applied hash and backup; setting changes are bounded members.
+  Apply preflights every base hash and path before writing, flushes backups and
+  a write-ahead journal, persists a flushed intent before each atomic file
+  replacement or current-user environment member write, and compensates in
+  reverse step order. Rollback uses the same pre-restore intent protocol. Every command recovers interrupted
+  apply/rollback journals before normal work; unresolved recovery permits status
+  only. Rollback is all-target hash guarded,
+  one change set at a time, and has no force mode. Concurrency uses an exclusive
+  non-waiting lock; tests use barriers/fault points rather than sleeps.
+- Apply verifies all desired file/member states again before commit. Every
+  compensation or rollback restore reclassifies current state immediately
+  before writing; a third-party state is preserved and makes the change set
+  partial. Status reports target state and derives change-set state and rollback
+  availability from all writable targets; guidance targets are not writable.
+  Target status is lifecycle-relative through an explicit base/desired/previous/
+  none reference. A third-party value preserved during a transaction is
+  `diverged`, as is a safely classified aggregate target whose members mix
+  desired and previous state. Classification failure is `unavailable` instead.
+- Symlink/junction/reparse/path traversal, malformed structured configuration,
+  machine-wide environment, `setx`, implicit administrator elevation, raw
+  exception output, and DB/log/runtime-data deletion are excluded.
+- The initial adapter ID is `github-copilot`. Stable VS Code 1.128+ writes only
+  documented Copilot OTel user settings; terminal Copilot CLI 1.0.4+ writes a
+  bounded current-user OTel environment allowlist; GitHub Copilot App/SDK is
+  caller-managed guidance and performs no write.
+- Effective precedence is managed policy, environment, user setting, default.
+  Locally observable managed sources are read-only and conflicts block apply.
+  Signed-in-account server policy that an external CLI cannot prove is surfaced
+  as unverified; setup does not claim an effective value until the user checks
+  VS Code policy diagnostics.
+- Content capture is preserved by default. Enabling it requires the independent
+  `--include-content-capture` option, a separate member plan change, and a sensitive
+  warning. Global `client.kind`, headers/credentials, and unrelated resource
+  attributes are not changed.
+- Setup static verification does not prove telemetry receipt. First-trace
+  diagnosis remains Issue #69. No HTTP, proxy, Canvas action, Razor UI, database,
+  or AppHost resource is added.
+- Public results separate the requested/created `change_set_id` from
+  `recovered_change_set_id` and `recovery_operation`. Apply revalidates target
+  support, managed state, and loopback endpoint ownership immediately before
+  creating mutation artifacts. Status is bounded to 100 entries with
+  recovery-blocking states prioritized, and may perform mandatory recovery
+  before projection.
+- Environment notification is attempted after an uninterrupted final state.
+  Recovery may replay it because exactly-once delivery cannot be proven across
+  a process crash without an acknowledgement protocol.
+
+The canonical interface is
+[configuration setup](specifications/interfaces/configuration-setup.md), and
+its repository-safe/private-data split is fixed in
+[security data boundaries](specifications/security-data-boundaries.md).
