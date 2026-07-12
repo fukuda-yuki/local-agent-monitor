@@ -1,0 +1,155 @@
+{
+  "inventory_version": "v1",
+  "source_surface": "claude-code",
+  "surface_mode": "print",
+  "execution": {
+    "status": "completed",
+    "observed_date": "2026-07-12",
+    "operating_system": "Windows",
+    "executable": "claude",
+    "version": "2.1.207",
+    "interactive_terminal": "not_required",
+    "authentication": "authenticated_status_exit_0",
+    "bounded_timeout_seconds": 75,
+    "terminal_evidence": {
+      "command": "claude -p --max-turns 1 --permission-mode plan --strict-mcp-config --mcp-config <ephemeral> --settings <ephemeral> --output-format json <synthetic-marker-input>",
+      "stdin_redirected": true,
+      "stdout_redirected": true,
+      "stderr_redirected": true
+    },
+    "execution_evidence": {
+      "exit_code": 0,
+      "timed_out": false,
+      "stdout_byte_count": 1236,
+      "stderr_byte_count": 0,
+      "raw_output_retained": false
+    }
+  },
+  "settings_labels": {
+    "telemetry_enable": "CLAUDE_CODE_ENABLE_TELEMETRY",
+    "enhanced_trace_enable": "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
+    "traces_exporter": "OTEL_TRACES_EXPORTER",
+    "logs_exporter": "OTEL_LOGS_EXPORTER",
+    "metrics_exporter": "OTEL_METRICS_EXPORTER",
+    "otlp_protocol": "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "otlp_endpoint": "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "traces_protocol": "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+    "traces_endpoint": "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "trace_content": "OTEL_LOG_TOOL_CONTENT",
+    "prompt_content": "OTEL_LOG_USER_PROMPTS",
+    "assistant_response_content": "OTEL_LOG_ASSISTANT_RESPONSES",
+    "tool_detail": "OTEL_LOG_TOOL_DETAILS",
+    "raw_api_bodies": "OTEL_LOG_RAW_API_BODIES",
+    "beta_tracing_detailed": "ENABLE_BETA_TRACING_DETAILED",
+    "beta_tracing_endpoint": "BETA_TRACING_ENDPOINT"
+  },
+  "settings_evidence_status": "effective_for_completed_content_disabled_run",
+  "hook_configuration_evidence_status": "not_configured_not_executed",
+  "capture_safety_constraints": {
+    "raw_api_bodies_required_state": "disabled",
+    "override_condition": "Enable OTEL_LOG_RAW_API_BODIES only with separate explicit authorization and a safely bounded capture procedure."
+  },
+  "content_capture_modes": {
+    "content_disabled": {
+      "execution_status": "executed_no_structural_telemetry_observed",
+      "otel_structure_fixture": null,
+      "hook_structure_fixture": null,
+      "verified_fingerprints": []
+    },
+    "content_enabled_with_synthetic_markers_only": {
+      "execution_status": "not_executed",
+      "otel_structure_fixture": null,
+      "hook_structure_fixture": null,
+      "verified_fingerprints": []
+    }
+  },
+  "tool_error_path": {
+    "status": "not_executed",
+    "evidence": "Authorization for a tool or error-path stimulus was outside the approved bounded run; the completed run requested no tool use."
+  },
+  "opaque_trace_reference": {
+    "status": "not_observed",
+    "reference": null,
+    "evidence": "No structural trace telemetry was emitted by the completed print-mode run."
+  },
+  "opaque_session_reference": {
+    "status": "not_observed",
+    "reference": null,
+    "evidence": "No structural telemetry containing an opaque native session reference was emitted by the completed print-mode run."
+  },
+  "observed_capabilities": {
+    "otel_traces": "not_observed",
+    "otel_logs": "not_observed",
+    "otel_metrics": "not_observed",
+    "hook_events": "not_observed",
+    "native_session_identity": "not_observed",
+    "trace_span_identity": "not_observed",
+    "content_capture_gate": "not_observed"
+  },
+  "missing_structural_evidence": [
+    "content-disabled OTel structure",
+    "content-enabled OTel structure",
+    "Hook event structure",
+    "OTel schema fingerprints",
+    "Hook schema fingerprints",
+    "tool or error-path structure",
+    "opaque trace reference",
+    "opaque session reference"
+  ],
+  "documentation_provenance": [
+    {
+      "source": "Claude Code CLI reference",
+      "url": "https://code.claude.com/docs/en/cli-usage",
+      "supports": [
+        "claude -p is a distinct non-interactive mode",
+        "print-mode bounds and settings flags",
+        "claude auth status exit semantics"
+      ]
+    },
+    {
+      "source": "Claude Code monitoring documentation",
+      "url": "https://code.claude.com/docs/en/monitoring-usage",
+      "supports": [
+        "telemetry and trace configuration labels",
+        "content-capture configuration labels",
+        "documented print-mode trace context and span hierarchy"
+      ]
+    },
+    {
+      "source": "Claude Code hooks reference",
+      "url": "https://code.claude.com/docs/en/hooks",
+      "supports": [
+        "Hook lifecycle and input are producer-defined",
+        "Hook configuration is settings-based"
+      ]
+    }
+  ],
+  "blocker": {
+    "code": "no_emitted_structural_telemetry",
+    "evidence": "The 75-second content-disabled print run exited 0, but its captured output contained no structural marker for Claude Code interaction, request, tool, Hook, or trace-response telemetry.",
+    "not_substituted": "interactive mode, Agent SDK, documentation-only structure, or invented fixture evidence"
+  },
+  "named_follow_up": {
+    "name": "claude-code-print-otel-hook-structure-capture",
+    "required_preconditions": [
+      "Claude Code remains installed and authenticated",
+      "a disposable local OTLP receiver can capture and reduce producer output to repository-safe structure only",
+      "explicit authorization exists for one safe print-mode tool or error-path stimulus",
+      "explicit authorization exists for a separate content-enabled synthetic-marker run"
+    ],
+    "required_execution": [
+      "run bounded claude -p content-disabled and content-enabled synthetic-marker sessions with the receiver configured before process start",
+      "execute one authorized safe tool or error-path stimulus",
+      "record only emitted names, structural types, occurrence counts, settings labels, opaque references, and deterministic fingerprints",
+      "create print otel.structure.json and hooks.structure.json only if their corresponding real producer records are captured",
+      "remove only artifacts created by the follow-up"
+    ]
+  },
+  "repository_safety": {
+    "contains_raw_content": false,
+    "contains_attribute_values": false,
+    "contains_credentials_or_tokens": false,
+    "contains_pii": false,
+    "contains_local_paths": false
+  }
+}
