@@ -5,7 +5,7 @@ behavior remains canonical in requirements, spec, and interface documents.
 
 | Milestone | State | Scope |
 | --- | --- | --- |
-| M0 contract and orchestration | In progress | Canonical contract, plan, durable ledger |
+| M0 contract and orchestration | Awaiting user spec review | Canonical contract, plan, durable ledger |
 | M1 schema drift foundation | Pending | Issue #62 |
 | M2 Claude inventory contract | Pending | Issue #63 |
 | M3 Claude ingestion and binding | Pending | Issue #64 |

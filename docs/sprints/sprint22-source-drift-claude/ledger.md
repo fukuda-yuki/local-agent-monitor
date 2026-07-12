@@ -6,7 +6,7 @@ Updated: 2026-07-12
 
 | Task | Issue | State | Commit range | Focused/full tests | Review | Unresolved minor |
 | --- | --- | --- | --- | --- | --- | --- |
-| Contract and plan | #62-#65 | In progress | uncommitted | SourceCapabilityContractTests 13/13 / not run | self-review complete | none |
+| Contract and plan | #62-#65 | Awaiting user spec review | `2105d46..2a37fc8` | SourceCapabilityContractTests 13/13 / not run | self-review complete | none |
 | CRLF contract-test baseline fix | #62 prerequisite | Complete | `3fa8340..2105d46` | SourceCapabilityContractTests 13/13 / not run | Spec PASS, Quality APPROVED | none |
 | Schema observation migration | #62 | Pending | - | - | - | - |
 | Unknown representation | #62 | Pending | - | - | - | - |
