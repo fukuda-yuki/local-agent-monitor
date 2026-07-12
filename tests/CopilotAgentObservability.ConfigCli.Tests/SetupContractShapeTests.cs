@@ -96,15 +96,15 @@ public sealed class SetupContractShapeTests
             SetupCommand.Status, true, "interrupted_apply_recovered", null, "00000000-0000-7000-8000-000000000010",
             SetupRecoveryOperation.Apply, "github-copilot", [],
             [
-                new SetupChangeSetStatusResult("00000000-0000-7000-8000-000000000011", "github-copilot", "all", "2026-07-12T00:00:00Z", "2026-07-12T01:00:00Z", SetupChangeSetState.Applied, "apply_succeeded", SetupCurrentState.Current, true, [writable]),
-                new SetupChangeSetStatusResult("00000000-0000-7000-8000-000000000012", "github-copilot", "app-sdk", "2026-07-12T02:00:00Z", "2026-07-12T03:00:00Z", SetupChangeSetState.Partial, null, SetupCurrentState.NotApplicable, false, [guidance]),
+                new SetupChangeSetStatusResult("00000000-0000-7000-8000-000000000012", "github-copilot", "app-sdk", "2026-07-12T02:00:00Z", "2026-07-12T03:00:00Z", SetupChangeSetState.Planned, null, SetupCurrentState.NotApplicable, false, [guidance]),
+                new SetupChangeSetStatusResult("00000000-0000-7000-8000-000000000010", "github-copilot", "all", "2026-07-12T00:00:00Z", "2026-07-12T01:00:00Z", SetupChangeSetState.Applied, "interrupted_apply_recovered", SetupCurrentState.Current, true, [writable]),
             ],
             [], ["rerun_requested_setup_command"], false);
 
         using var document = JsonDocument.Parse(SetupJson.Serialize(result));
         var root = document.RootElement;
-        var applied = root.GetProperty("change_sets")[0];
-        var partial = root.GetProperty("change_sets")[1];
+        var planned = root.GetProperty("change_sets")[0];
+        var applied = root.GetProperty("change_sets")[1];
 
         Assert.Equal("status", root.GetProperty("command").GetString());
         Assert.Equal("interrupted_apply_recovered", root.GetProperty("code").GetString());
@@ -114,26 +114,27 @@ public sealed class SetupContractShapeTests
         Assert.Empty(root.GetProperty("targets").EnumerateArray());
         Assert.False(root.GetProperty("truncated").GetBoolean());
         Assert.Equal("rerun_requested_setup_command", root.GetProperty("next_actions")[0].GetString());
+        AssertChangeSetShape(planned);
+        Assert.Equal("00000000-0000-7000-8000-000000000012", planned.GetProperty("change_set_id").GetString());
+        Assert.Equal("github-copilot", planned.GetProperty("adapter").GetString());
+        Assert.Equal("app-sdk", planned.GetProperty("selected_target").GetString());
+        Assert.Equal("2026-07-12T02:00:00Z", planned.GetProperty("created_at").GetString());
+        Assert.Equal("2026-07-12T03:00:00Z", planned.GetProperty("updated_at").GetString());
+        Assert.Equal("planned", planned.GetProperty("state").GetString());
+        Assert.Equal(JsonValueKind.Null, planned.GetProperty("outcome_code").ValueKind);
+        Assert.Equal("not_applicable", planned.GetProperty("current_state").GetString());
+        Assert.False(planned.GetProperty("rollback_available").GetBoolean());
         AssertChangeSetShape(applied);
-        Assert.Equal("00000000-0000-7000-8000-000000000011", applied.GetProperty("change_set_id").GetString());
+        Assert.Equal("00000000-0000-7000-8000-000000000010", applied.GetProperty("change_set_id").GetString());
+        Assert.Equal(root.GetProperty("recovered_change_set_id").GetString(), applied.GetProperty("change_set_id").GetString());
         Assert.Equal("github-copilot", applied.GetProperty("adapter").GetString());
         Assert.Equal("all", applied.GetProperty("selected_target").GetString());
         Assert.Equal("2026-07-12T00:00:00Z", applied.GetProperty("created_at").GetString());
         Assert.Equal("2026-07-12T01:00:00Z", applied.GetProperty("updated_at").GetString());
         Assert.Equal("applied", applied.GetProperty("state").GetString());
-        Assert.Equal("apply_succeeded", applied.GetProperty("outcome_code").GetString());
+        Assert.Equal("interrupted_apply_recovered", applied.GetProperty("outcome_code").GetString());
         Assert.Equal("current", applied.GetProperty("current_state").GetString());
         Assert.True(applied.GetProperty("rollback_available").GetBoolean());
-        AssertChangeSetShape(partial);
-        Assert.Equal("00000000-0000-7000-8000-000000000012", partial.GetProperty("change_set_id").GetString());
-        Assert.Equal("github-copilot", partial.GetProperty("adapter").GetString());
-        Assert.Equal("app-sdk", partial.GetProperty("selected_target").GetString());
-        Assert.Equal("2026-07-12T02:00:00Z", partial.GetProperty("created_at").GetString());
-        Assert.Equal("2026-07-12T03:00:00Z", partial.GetProperty("updated_at").GetString());
-        Assert.Equal(JsonValueKind.Null, partial.GetProperty("outcome_code").ValueKind);
-        Assert.Equal("partial", partial.GetProperty("state").GetString());
-        Assert.Equal("not_applicable", partial.GetProperty("current_state").GetString());
-        Assert.False(partial.GetProperty("rollback_available").GetBoolean());
 
         var nestedWritable = applied.GetProperty("targets")[0];
         AssertTargetShape(nestedWritable);
@@ -160,7 +161,7 @@ public sealed class SetupContractShapeTests
         Assert.Equal("none", nestedMember.GetProperty("conflict").GetString());
         Assert.False(nestedMember.GetProperty("managed").GetBoolean());
 
-        var nestedGuidanceTarget = partial.GetProperty("targets")[0];
+        var nestedGuidanceTarget = planned.GetProperty("targets")[0];
         AssertTargetShape(nestedGuidanceTarget);
         Assert.Equal("00000000-0000-7000-8000-000000000021", nestedGuidanceTarget.GetProperty("record_id").GetString());
         Assert.Equal("guidance", nestedGuidanceTarget.GetProperty("target_kind").GetString());
@@ -176,7 +177,7 @@ public sealed class SetupContractShapeTests
         Assert.Equal(JsonValueKind.Null, nestedGuidanceTarget.GetProperty("endpoint").ValueKind);
         Assert.Equal(JsonValueKind.Null, nestedGuidanceTarget.GetProperty("expected_result").ValueKind);
         Assert.Empty(nestedGuidanceTarget.GetProperty("changes").EnumerateArray());
-        var nestedGuidance = partial.GetProperty("targets")[0].GetProperty("guidance");
+        var nestedGuidance = planned.GetProperty("targets")[0].GetProperty("guidance");
         AssertPropertyOrder(nestedGuidance, "kind", "language");
         Assert.Equal("caller_managed_sample", nestedGuidance.GetProperty("kind").GetString());
         Assert.Equal("dotnet", nestedGuidance.GetProperty("language").GetString());
