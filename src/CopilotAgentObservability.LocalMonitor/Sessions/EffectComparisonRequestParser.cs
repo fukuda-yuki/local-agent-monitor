@@ -30,9 +30,10 @@ internal static class EffectComparisonRequestParser
                     || !item.TryGetProperty("case_key", out var caseElement) || !item.TryGetProperty("exclusion_reason", out var reasonElement)) return false;
                 var caseKey = caseElement.ValueKind == JsonValueKind.String ? caseElement.GetString() : null;
                 var exclusion = reasonElement.ValueKind == JsonValueKind.String ? reasonElement.GetString() : reasonElement.ValueKind == JsonValueKind.Null ? null : "\0";
-                if (caseKey is null || exclusion == "\0") return false;
-                sessions.Add(new(sessionId, classification!, caseKey, exclusion));
+                if (!ValidCohortSession(classification!, caseKey, exclusion)) return false;
+                sessions.Add(new(sessionId, classification!, caseKey ?? string.Empty, exclusion));
             }
+            if (sessions.Count == 0 || sessions.Select(item => item.SessionId).Distinct().Count() != sessions.Count) return false;
             request = new(proposalId, proposalRevision, applyId, sessions);
             return true;
         }
@@ -50,4 +51,11 @@ internal static class EffectComparisonRequestParser
     }
 
     private static bool UuidV7(string value, out Guid id) => Guid.TryParseExact(value, "D", out id) && id.ToString("D")[14] == '7';
+
+    private static bool ValidCohortSession(string classification, string? caseKey, string? exclusion) => classification switch
+    {
+        "pre" or "post" => ObjectiveEvaluationValidation.IdentifierValue(caseKey, 200) && exclusion is null,
+        "excluded" => string.IsNullOrEmpty(caseKey) && exclusion is "not_comparable" or "wrong_case" or "missing_evidence" or "overlaps_application" or "user_excluded",
+        _ => false,
+    };
 }
