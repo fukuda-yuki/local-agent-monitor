@@ -55,6 +55,13 @@ bounds, sanitized versions/labels, forbidden path/value/secret markers,
 mixed-operation derivation, and requested/recovered IDs. Commit:
 `Issue #66: feat: validate setup result safety`.
 
+**Review-discovered dependency gate:** execute Task 8a immediately after the
+structural Task 1b work and before Task 1b can receive final approval. Then
+resume Task 1b with a narrow integration that calls the runtime canonical
+matcher for every non-null `expected_result`. The generic serializer validates
+canonical membership only; Task 8b owns target-to-surface pairing. Do not copy
+manifest JSON or hard-code fingerprints in the validator.
+
 ### Task 2a — Platform contracts and deterministic fake
 
 Own `Setup/Platform/ISetupPlatform.cs`, `SystemSetupPlatform.cs`, and
@@ -208,6 +215,11 @@ depend on `docs/`. RED/GREEN filter `SourceCapabilityRuntimeTests`; compare the
 runtime typed loader against canonical JSON and reject unknown/malformed data.
 Do not copy a test fixture. Commit:
 `Issue #67: feat: load Copilot capability manifests`.
+
+This task is pulled forward to the Task 1b dependency gate. Its loader provides
+semantic canonical matching that ignores JSON whitespace/object-property order
+but preserves property names, values, value kinds, and array order. Task 1b
+consumes that matcher; Task 8b later consumes target selection.
 
 ### Task 8b — Real GitHub Copilot plan producer
 

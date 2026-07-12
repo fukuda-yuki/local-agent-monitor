@@ -73,6 +73,12 @@ overwriting third-party state. Rollback is hash-guarded and has no force mode.
 Results distinguish requested/created and recovered change-set IDs. No HTTP,
 proxy, Canvas, or Local Monitor UI DTO is added.
 
+Setup endpoint input is an explicit-port loopback HTTP origin only. Input may
+normalize a case-equivalent host/scheme and one root slash; plans, ledger-safe
+DTOs, and configured values use the canonical no-trailing-slash origin. Userinfo,
+non-root paths, query, fragment, HTTPS, remote hosts, and implicit ports fail
+closed.
+
 The initial `github-copilot` adapter supports stable VS Code 1.128+ and terminal
 Copilot CLI 1.0.4+, and returns caller-managed .NET App/SDK telemetry guidance.
 VS Code effective precedence is managed policy, environment, user setting,

@@ -9,6 +9,8 @@ Updated: 2026-07-12
 | Contract and plan | #66-#67 | Complete | `3505565..63deb36` | SourceCapabilityContractTests 13/13; `git diff --check` exit 0 | Spec PASS; architecture/security APPROVED; Plan PASS; no findings | repository dispatch skill path is absent, using Superpowers SDD |
 | CRLF contract-test baseline fix | prerequisite | Complete | `3fa8340..3505565` | SourceCapabilityContractTests 13/13 / full 1,250/1,250 | Spec PASS, Quality APPROVED | none |
 | Setup result DTO and serializer (Task 1a) | #66 | Complete | `63deb36..98af0cc` | SetupContractShapeTests 47/47; `git diff --check` exit 0 | Spec PASS, Quality APPROVED; no findings after two required test-design re-audits | none |
+| Setup result validation (Task 1b) | #66 | Blocked on pulled-forward Task 8a after dependency re-audit | `e62330b..fc6389a` | SetupContractValidationTests 57/57; SetupContractShapeTests 47/47 | second review CHANGES_REQUIRED; generic validator cannot own canonical resources | exact canonical membership and origin-only endpoint integration remain |
+| Runtime #61 manifest loader (Task 8a, pulled forward) | #67 dependency | In progress | - | - | dependency re-audit PASS for reordered work | target pairing remains for Task 8b real-producer gate |
 | Ledger schema and redaction | #66 | Pending | - | - | - | - |
 | Atomic file mutation | #66 | Pending | - | - | - | - |
 | User environment mutation | #66 | Pending | - | - | - | - |

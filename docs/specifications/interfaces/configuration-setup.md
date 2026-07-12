@@ -42,10 +42,15 @@ config-cli setup rollback --change-set <uuid-v7>
 config-cli setup status [--adapter github-copilot]
 ```
 
-`--endpoint` defaults to `http://127.0.0.1:4320` and accepts only loopback HTTP
-hosts (`127.0.0.1`, `localhost`, or `::1`). `all` means the three Issue #67
-targets at plan time; apply still requires the returned change-set ID. App/SDK
-remains a no-write target.
+`--endpoint` defaults to `http://127.0.0.1:4320` and accepts only a loopback HTTP
+origin with an explicit port. Hosts are exactly `127.0.0.1`, `localhost`, or
+`::1`; userinfo, a non-root path, query, and fragment are forbidden. CLI input
+may use case-equivalent scheme/host spelling and one root slash, but normalizes
+before plan creation to lowercase `http`, lowercase host, bracketed IPv6, and no
+trailing slash. Public DTOs and persisted plans accept only the canonical
+`http://<loopback-host>:<port>` form. `all` means the three Issue #67 targets at
+plan time; apply still requires the returned change-set ID. App/SDK remains a
+no-write target.
 
 `setup plan` persists an immutable private plan under the user runtime root and
 returns its change-set ID. `setup apply` accepts only that ID; it never rebuilds
@@ -141,7 +146,8 @@ single non-no-op operation when all changed members agree, and `mixed` when two
 or more non-no-op member operations differ. Each physical
 target contains at most 32 member `changes`; member `previous_state` and
 `new_state` are redacted state names, never raw setting values. The `endpoint`
-field is allowed only for a validated non-credential-bearing loopback HTTP URL;
+field is allowed only for the canonical explicit-port loopback HTTP origin
+defined above;
 foreign endpoints are reported only as `loopback`, `remote`,
 `credential_bearing`, or `invalid` state.
 
