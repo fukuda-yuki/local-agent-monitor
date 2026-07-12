@@ -38,7 +38,8 @@ internal sealed record OtlpTraceField(
     SourceStructuralEnvelope? ChildEnvelope,
     SourceStructuralRole? ProducerRole,
     OtlpJsonRepresentation JsonRepresentation,
-    OtlpTraceFieldDisposition Disposition);
+    OtlpTraceFieldDisposition Disposition,
+    bool EmitEmptyArrayWhenAbsent);
 
 internal static class OtlpTraceSchema
 {
@@ -47,15 +48,15 @@ internal static class OtlpTraceSchema
 
     private static readonly OtlpTraceField[] Descriptor =
     [
-        Child(SourceStructuralEnvelope.Request, "resourceSpans", SourceStructuralType.Array, 1, OtlpProtobufWireType.LengthDelimited, "request.resource_spans", SourceStructuralEnvelope.ResourceSpans, OtlpJsonRepresentation.Array),
+        Child(SourceStructuralEnvelope.Request, "resourceSpans", SourceStructuralType.Array, 1, OtlpProtobufWireType.LengthDelimited, "request.resource_spans", SourceStructuralEnvelope.ResourceSpans, OtlpJsonRepresentation.Array, emitEmptyArrayWhenAbsent: true),
         Child(SourceStructuralEnvelope.ResourceSpans, "resource", SourceStructuralType.Object, 1, OtlpProtobufWireType.LengthDelimited, "resource_spans.resource", SourceStructuralEnvelope.Resource, OtlpJsonRepresentation.Object),
-        Child(SourceStructuralEnvelope.ResourceSpans, "scopeSpans", SourceStructuralType.Array, 2, OtlpProtobufWireType.LengthDelimited, "resource_spans.scope_spans", SourceStructuralEnvelope.ScopeSpans, OtlpJsonRepresentation.Array),
+        Child(SourceStructuralEnvelope.ResourceSpans, "scopeSpans", SourceStructuralType.Array, 2, OtlpProtobufWireType.LengthDelimited, "resource_spans.scope_spans", SourceStructuralEnvelope.ScopeSpans, OtlpJsonRepresentation.Array, emitEmptyArrayWhenAbsent: true),
         Producer(SourceStructuralEnvelope.ResourceSpans, "schemaUrl", SourceStructuralType.String, 3, OtlpProtobufWireType.LengthDelimited, "resource_spans.schema_url", SourceStructuralRole.SchemaUrl, OtlpJsonRepresentation.String),
-        Child(SourceStructuralEnvelope.Resource, "attributes", SourceStructuralType.Array, 1, OtlpProtobufWireType.LengthDelimited, "resource.attributes", SourceStructuralEnvelope.KeyValue, OtlpJsonRepresentation.Array),
+        Child(SourceStructuralEnvelope.Resource, "attributes", SourceStructuralType.Array, 1, OtlpProtobufWireType.LengthDelimited, "resource.attributes", SourceStructuralEnvelope.KeyValue, OtlpJsonRepresentation.Array, emitEmptyArrayWhenAbsent: true),
         Value(SourceStructuralEnvelope.Resource, "droppedAttributesCount", SourceStructuralType.Int, 2, OtlpProtobufWireType.Varint, "resource.dropped_attributes_count", OtlpJsonRepresentation.Number),
         Child(SourceStructuralEnvelope.Resource, "entityRefs", SourceStructuralType.Array, 3, OtlpProtobufWireType.LengthDelimited, "resource.entity_refs", SourceStructuralEnvelope.EntityRef, OtlpJsonRepresentation.Array),
         Child(SourceStructuralEnvelope.ScopeSpans, "scope", SourceStructuralType.Object, 1, OtlpProtobufWireType.LengthDelimited, "scope_spans.scope", SourceStructuralEnvelope.Scope, OtlpJsonRepresentation.Object),
-        Child(SourceStructuralEnvelope.ScopeSpans, "spans", SourceStructuralType.Array, 2, OtlpProtobufWireType.LengthDelimited, "scope_spans.spans", SourceStructuralEnvelope.Span, OtlpJsonRepresentation.Array),
+        Child(SourceStructuralEnvelope.ScopeSpans, "spans", SourceStructuralType.Array, 2, OtlpProtobufWireType.LengthDelimited, "scope_spans.spans", SourceStructuralEnvelope.Span, OtlpJsonRepresentation.Array, emitEmptyArrayWhenAbsent: true),
         Producer(SourceStructuralEnvelope.ScopeSpans, "schemaUrl", SourceStructuralType.String, 3, OtlpProtobufWireType.LengthDelimited, "scope_spans.schema_url", SourceStructuralRole.SchemaUrl, OtlpJsonRepresentation.String),
         Value(SourceStructuralEnvelope.Scope, "name", SourceStructuralType.String, 1, OtlpProtobufWireType.LengthDelimited, "scope.name", OtlpJsonRepresentation.String),
         Value(SourceStructuralEnvelope.Scope, "version", SourceStructuralType.String, 2, OtlpProtobufWireType.LengthDelimited, "scope.version", OtlpJsonRepresentation.String),
@@ -99,8 +100,8 @@ internal static class OtlpTraceSchema
         Child(SourceStructuralEnvelope.AnyValue, "kvlistValue", SourceStructuralType.Object, 6, OtlpProtobufWireType.LengthDelimited, "any_value.kvlist", SourceStructuralEnvelope.KeyValueList, OtlpJsonRepresentation.Object),
         Value(SourceStructuralEnvelope.AnyValue, "bytesValue", SourceStructuralType.Bytes, 7, OtlpProtobufWireType.LengthDelimited, "any_value.bytes", OtlpJsonRepresentation.String),
         Ignored(SourceStructuralEnvelope.AnyValue, "stringValueStrindex", SourceStructuralType.Int, 8, OtlpProtobufWireType.Varint, "any_value.string_strindex", OtlpJsonRepresentation.Number),
-        Child(SourceStructuralEnvelope.ArrayValue, "values", SourceStructuralType.Array, 1, OtlpProtobufWireType.LengthDelimited, "array_value.values", SourceStructuralEnvelope.AnyValue, OtlpJsonRepresentation.Array),
-        Child(SourceStructuralEnvelope.KeyValueList, "values", SourceStructuralType.Array, 1, OtlpProtobufWireType.LengthDelimited, "key_value_list.values", SourceStructuralEnvelope.KeyValue, OtlpJsonRepresentation.Array),
+        Child(SourceStructuralEnvelope.ArrayValue, "values", SourceStructuralType.Array, 1, OtlpProtobufWireType.LengthDelimited, "array_value.values", SourceStructuralEnvelope.AnyValue, OtlpJsonRepresentation.Array, emitEmptyArrayWhenAbsent: true),
+        Child(SourceStructuralEnvelope.KeyValueList, "values", SourceStructuralType.Array, 1, OtlpProtobufWireType.LengthDelimited, "key_value_list.values", SourceStructuralEnvelope.KeyValue, OtlpJsonRepresentation.Array, emitEmptyArrayWhenAbsent: true),
         Ignored(SourceStructuralEnvelope.KeyValue, "keyStrindex", SourceStructuralType.Int, 3, OtlpProtobufWireType.Varint, "key_value.key_strindex", OtlpJsonRepresentation.Number),
         Producer(SourceStructuralEnvelope.EntityRef, "schemaUrl", SourceStructuralType.String, 1, OtlpProtobufWireType.LengthDelimited, "entity_ref.schema_url", SourceStructuralRole.SchemaUrl, OtlpJsonRepresentation.String),
         Value(SourceStructuralEnvelope.EntityRef, "type", SourceStructuralType.String, 2, OtlpProtobufWireType.LengthDelimited, "entity_ref.type", OtlpJsonRepresentation.String),
@@ -129,6 +130,54 @@ internal static class OtlpTraceSchema
         return false;
     }
 
+    public static bool HasAcceptedJsonRepresentation(OtlpTraceField field, JsonElement value) =>
+        field.JsonRepresentation switch
+        {
+            OtlpJsonRepresentation.Object => value.ValueKind == JsonValueKind.Object,
+            OtlpJsonRepresentation.Array => value.ValueKind == JsonValueKind.Array,
+            OtlpJsonRepresentation.String => value.ValueKind == JsonValueKind.String,
+            OtlpJsonRepresentation.DecimalString => IsCanonicalDecimalString(field, value),
+            OtlpJsonRepresentation.Boolean => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
+            OtlpJsonRepresentation.Number => value.ValueKind == JsonValueKind.Number,
+            _ => throw new ArgumentOutOfRangeException(nameof(field.JsonRepresentation)),
+        };
+
+    public static bool HasAcceptedJsonRepeatedElement(OtlpTraceField field, JsonElement value) =>
+        field.Disposition switch
+        {
+            OtlpTraceFieldDisposition.ChildEnvelope => value.ValueKind == JsonValueKind.Object,
+            OtlpTraceFieldDisposition.ProducerName => value.ValueKind == JsonValueKind.String,
+            _ => true,
+        };
+
+    private static bool IsCanonicalDecimalString(OtlpTraceField field, JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var text = value.GetString() ?? string.Empty;
+        var signed = field.FieldCode == "any_value.int";
+        var digitStart = 0;
+        if (text.Length != 0 && text[0] == '-')
+        {
+            if (!signed)
+            {
+                return false;
+            }
+            digitStart = 1;
+        }
+        if (digitStart == text.Length || text.AsSpan(digitStart).IndexOfAnyExceptInRange('0', '9') >= 0)
+        {
+            return false;
+        }
+
+        return signed
+            ? long.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _)
+            : ulong.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out _);
+    }
+
     private static OtlpTraceField Value(
         SourceStructuralEnvelope envelope,
         string jsonName,
@@ -137,7 +186,7 @@ internal static class OtlpTraceSchema
         OtlpProtobufWireType wireType,
         string fieldCode,
         OtlpJsonRepresentation representation) =>
-        new(envelope, jsonName, type, tag, wireType, fieldCode, null, null, representation, OtlpTraceFieldDisposition.Value);
+        new(envelope, jsonName, type, tag, wireType, fieldCode, null, null, representation, OtlpTraceFieldDisposition.Value, false);
 
     private static OtlpTraceField Child(
         SourceStructuralEnvelope envelope,
@@ -147,8 +196,9 @@ internal static class OtlpTraceSchema
         OtlpProtobufWireType wireType,
         string fieldCode,
         SourceStructuralEnvelope child,
-        OtlpJsonRepresentation representation) =>
-        new(envelope, jsonName, type, tag, wireType, fieldCode, child, null, representation, OtlpTraceFieldDisposition.ChildEnvelope);
+        OtlpJsonRepresentation representation,
+        bool emitEmptyArrayWhenAbsent = false) =>
+        new(envelope, jsonName, type, tag, wireType, fieldCode, child, null, representation, OtlpTraceFieldDisposition.ChildEnvelope, emitEmptyArrayWhenAbsent);
 
     private static OtlpTraceField Producer(
         SourceStructuralEnvelope envelope,
@@ -159,7 +209,7 @@ internal static class OtlpTraceSchema
         string fieldCode,
         SourceStructuralRole role,
         OtlpJsonRepresentation representation) =>
-        new(envelope, jsonName, type, tag, wireType, fieldCode, null, role, representation, OtlpTraceFieldDisposition.ProducerName);
+        new(envelope, jsonName, type, tag, wireType, fieldCode, null, role, representation, OtlpTraceFieldDisposition.ProducerName, false);
 
     private static OtlpTraceField Ignored(
         SourceStructuralEnvelope envelope,
@@ -169,5 +219,5 @@ internal static class OtlpTraceSchema
         OtlpProtobufWireType wireType,
         string fieldCode,
         OtlpJsonRepresentation representation) =>
-        new(envelope, jsonName, type, tag, wireType, fieldCode, null, null, representation, OtlpTraceFieldDisposition.TraceIgnored);
+        new(envelope, jsonName, type, tag, wireType, fieldCode, null, null, representation, OtlpTraceFieldDisposition.TraceIgnored, false);
 }

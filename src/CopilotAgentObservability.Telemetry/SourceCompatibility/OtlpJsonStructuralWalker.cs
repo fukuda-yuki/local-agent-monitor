@@ -44,7 +44,7 @@ internal static class OtlpJsonStructuralWalker
                     continue;
                 }
 
-                if (!HasAcceptedRepresentation(field, property.Value))
+                if (!OtlpTraceSchema.HasAcceptedJsonRepresentation(field, property.Value))
                 {
                     AddKnownWrongType(field, property.Value.ValueKind);
                     continue;
@@ -54,7 +54,7 @@ internal static class OtlpJsonStructuralWalker
                 {
                     foreach (var item in property.Value.EnumerateArray())
                     {
-                        if (HasAcceptedArrayElement(field, item.ValueKind))
+                        if (OtlpTraceSchema.HasAcceptedJsonRepeatedElement(field, item))
                         {
                             EmitAcceptedField(field, item);
                         }
@@ -154,52 +154,6 @@ internal static class OtlpJsonStructuralWalker
                 SourceOccurrenceCount.Create(1)));
         }
 
-    }
-
-    private static bool HasAcceptedRepresentation(OtlpTraceField field, JsonElement value) => field.JsonRepresentation switch
-    {
-        OtlpJsonRepresentation.Object => value.ValueKind == JsonValueKind.Object,
-        OtlpJsonRepresentation.Array => value.ValueKind == JsonValueKind.Array,
-        OtlpJsonRepresentation.String => value.ValueKind == JsonValueKind.String,
-        OtlpJsonRepresentation.DecimalString => IsCanonicalDecimalString(field, value),
-        OtlpJsonRepresentation.Boolean => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
-        OtlpJsonRepresentation.Number => value.ValueKind == JsonValueKind.Number,
-        _ => throw new ArgumentOutOfRangeException(nameof(field.JsonRepresentation)),
-    };
-
-    private static bool HasAcceptedArrayElement(OtlpTraceField field, JsonValueKind kind) => field.Disposition switch
-    {
-        OtlpTraceFieldDisposition.ChildEnvelope => kind == JsonValueKind.Object,
-        OtlpTraceFieldDisposition.ProducerName => kind == JsonValueKind.String,
-        _ => true,
-    };
-
-    private static bool IsCanonicalDecimalString(OtlpTraceField field, JsonElement value)
-    {
-        if (value.ValueKind != JsonValueKind.String)
-        {
-            return false;
-        }
-
-        var text = value.GetString() ?? string.Empty;
-        var signed = field.FieldCode == "any_value.int";
-        var digitStart = 0;
-        if (text.Length != 0 && text[0] == '-')
-        {
-            if (!signed)
-            {
-                return false;
-            }
-            digitStart = 1;
-        }
-        if (digitStart == text.Length || text.AsSpan(digitStart).IndexOfAnyExceptInRange('0', '9') >= 0)
-        {
-            return false;
-        }
-
-        return signed
-            ? long.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _)
-            : ulong.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out _);
     }
 
     private static SourceStructuralType ActualType(JsonValueKind kind) => kind switch
