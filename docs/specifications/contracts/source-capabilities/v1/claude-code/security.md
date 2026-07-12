@@ -47,6 +47,8 @@ describes documentation-only gates and does not claim availability.
 | Raw API request/response bodies | `OTEL_LOG_RAW_API_BODIES` | prohibited for repository capture; remains disabled without separate authorization |
 | Detailed beta trace content | detailed beta tracing settings | documented unstable raw content; no observed mapping to sanitized targets |
 | Hook prompt, tool input/output, assistant message, error detail, paths | the corresponding Hook event is configured and fires | raw-bearing local event payload only |
+| Hook session title | `current session title is already set (for example via --name or /rename)` | optional raw-bearing local event payload only; absence remains absent |
+| Hook background-task registry and session cron registry | `Claude Code v2.1.145 or later AND task registry is reachable` | optional raw-bearing local event payload only; absence remains absent |
 
 `capture_content_state = available` requires both an enabled source gate and an
 actually emitted allowed content-bearing field. Disabled or absent content is
@@ -126,6 +128,11 @@ binding evidence.
 Hook `duration_ms`, error/status labels, stop fields, and SessionEnd reason stay
 within the Hook lifecycle/raw boundary. They never overwrite OTel
 `MonitorSpanProjection.DurationMs`, `Status`, or `ErrorType`.
+
+Hook `session_title`, `background_tasks`, and `session_crons` also remain raw
+only. They pass through `SessionIngestEvent.Payload`, are secret-filtered before
+`SessionEventContent.ContentJson`, and never become sanitized labels, task
+state, identity, binding, or authority evidence.
 
 ## Repository-safe evidence
 
