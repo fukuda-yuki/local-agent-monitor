@@ -96,7 +96,9 @@ internal static class MonitorSpanProjectionBuilder
                 foreach (var spanElement in OtlpSpanReader.EnumerateArrayProperty(scopeSpan, "spans"))
                 {
                     var span = OtlpSpanReader.CreateSpan(spanElement);
-                    projections.Add(ProjectSpan(span, ordinal));
+                    projections.Add(ClaudeCodeSpanAdapter.TryProject(span, ordinal, out var claudeProjection)
+                        ? claudeProjection
+                        : ProjectSpan(span, ordinal));
                     ordinal++;
                 }
             }
