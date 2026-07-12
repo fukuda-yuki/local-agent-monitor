@@ -30,6 +30,12 @@ Sessions may merge only when at least one exact condition holds:
 3. an ingested event and OTel evidence carry the byte-for-byte identical trace
    context.
 
+For Claude v1, condition 3 is reserved but unavailable: the event envelope
+contains only optional `trace_id`, not a provenance-bearing complete trace
+context. Trace-ID-only evidence never merges Sessions and never becomes
+`trace_context` or `exact_linked`. Claude v1 exact linking is limited to
+conditions 1 and 2 until a later spec-first DTO adds the complete context.
+
 Repository and timestamp proximity must never merge sessions.
 `client_kind` never participates in Session binding or merge. An exact
 `gen_ai.conversation.id` may bind/enrich only when it is byte-for-byte equal to

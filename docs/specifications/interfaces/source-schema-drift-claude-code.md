@@ -253,6 +253,13 @@ path, process identity, and timestamp proximity are not binding evidence.
 Duplicate OTel and Hook inputs are idempotent by source identity and canonical
 Hook hash.
 
+For Claude v1, positive `trace_context` binding is deferred because the Session
+event envelope exposes only `trace_id` and no provenance-bearing complete
+trace-context DTO. The canonical condition remains reserved for a later
+spec-first interface. Until that DTO exists, a shared trace ID is insufficient
+and must remain unbound; only identical native session ID or an explicit
+resume/handoff may produce an exact Claude link.
+
 ## Cross-surface DTO contract
 
 | Boundary | Required data | Rule |
@@ -341,6 +348,12 @@ wire values. If a trace has no exact Session link it is `otel_only` and
 `unbound`; the API does not invent Session evidence. Nullable source fields
 remain null rather than receiving display defaults. The Agent graph response
 shape does not change.
+
+For Task20 projection, `exact_linked` requires the shipped identical-native-ID
+or explicit resume/handoff resolver. Trace-ID-only evidence never produces
+`exact_linked`; the separate Hook and OTel evidence remain `hook_only` and
+`otel_only` until a complete provenance-bearing trace-context DTO is specified
+and implemented.
 
 For a trace or Session linked to multiple observations, select the display
 observation by compatibility severity, then newest `observation_id`:

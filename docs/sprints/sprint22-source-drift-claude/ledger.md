@@ -28,6 +28,7 @@ Updated: 2026-07-13
 | Claude Hook adapter | #64 | Complete (Task 16A/16B) | `0b6c453..67f1527` | mapper 296/296; forwarder 79/79; build 0 | Spec/Code/Security/Tests APPROVED | none |
 | Claude OTLP adapter | #64 | Complete (Task 17A/17B) | `c02be2b..cbb2128` | adapter 15/15; enrichment 10/10; related 311/311; build 0 | Spec/Code/Security/Tests APPROVED | complete trace-context positive blocked by DTO lacking traceparent/tracestate |
 | Exact binding and dedupe | #64 | In progress (Task 18) | - | deterministic concurrency matrix pending | pending independent concurrency/security review | cursor/aggregate crash boundary remains |
+| Early #62/#64 integration review | #62/#64 | Complete with explicit follow-ups (Task 19) | `67af37d..97bdd36` | ConfigCli 909/909; LocalMonitor 395/395; build 0 | Important findings resolved in canonical binding spec; Task20 gate reviewed | complete trace-context DTO remains deferred; Task20 must never exact-link trace-id-only |
 | Projection and HTTP DTO | #65 | Pending | - | - | - | - |
 | UI and Playwright | #65 | Pending | - | - | - | - |
 | Final integration | #62-#65 | Pending | - | - | - | - |
@@ -50,6 +51,7 @@ Updated: 2026-07-13
 ## Unverified Issue interfaces
 
 - Complete byte-equivalent trace-context binding awaits an additive Session DTO contract carrying complete context; trace_id-only remains explicitly insufficient.
+- Canonical exact-binding contract now reflects shipped Claude source values and explicitly defers the complete trace-context row.
 - Task18 cross-writer cursor/aggregate atomicity remains unverified until barrier tests complete.
 - Interactive CLI, `claude -p`, and Agent SDK live availability is unverified;
   unavailable cases will receive a separate follow-up task with an exact

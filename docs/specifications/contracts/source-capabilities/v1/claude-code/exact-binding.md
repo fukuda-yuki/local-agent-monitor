@@ -16,40 +16,41 @@ otherwise it remains unbound.
 | --- | --- | --- |
 | Identical native session ID | Mapping fields `hook.session_id` and `otel.session_id` are both present and their UTF-8 bytes are identical. The Hook value resolves to exactly one Session. | Bind the OTel trace evidence to that Session with `CopilotAgentObservability.Telemetry.Sessions.SessionBindingKind.Native`; lower-authority context cannot participate. |
 | Explicit resume/handoff | `CopilotAgentObservability.LocalMonitor.Sessions.SessionIngestEnvelope.ExplicitLink` contains an exact target `CopilotAgentObservability.LocalMonitor.Sessions.SessionExplicitLink.NativeSessionId`, and `CopilotAgentObservability.LocalMonitor.Sessions.SessionExplicitLink.Kind` is `resume` or `handoff`. | Merge only the explicitly named Sessions with `CopilotAgentObservability.Telemetry.Sessions.SessionBindingKind.ExplicitResume` or `CopilotAgentObservability.Telemetry.Sessions.SessionBindingKind.ExplicitHandoff`. |
-| Byte-equivalent trace context | A producer event and an OTel record carry the complete same trace context byte-for-byte, with provenance for both values. | Bind only the records carrying that exact context with `CopilotAgentObservability.Telemetry.Sessions.SessionBindingKind.TraceContext`. `CopilotAgentObservability.LocalMonitor.Sessions.SessionIngestEvent.TraceId` by itself is insufficient. |
+| Byte-equivalent trace context | A producer event and an OTel record carry the complete same trace context byte-for-byte, with provenance for both values. | **Deferred in Session v1:** the current envelope carries only `trace_id`, which is insufficient. No `TraceContext` binding is emitted until a provenance-bearing complete trace-context DTO is added and separately reviewed. |
 
 There is no normalization before comparison: no trimming, case folding,
 Unicode normalization, decoding/re-encoding, prefix removal, or numeric
 conversion. Missing or ambiguous evidence cannot bind.
 
-Claude Code has one documentation-only candidate for this table: mapping field
-`hook.session_id` compared byte-for-byte with `otel.session_id`. The resolver is
-fully specified, but no approved inventory observed the OTel producer field and
-the current
-`CopilotAgentObservability.Telemetry.Sessions.SessionSourceSurface` enum has no
-Claude Code member, and `SessionIngestValidation` does not accept
-`source_surface = claude-code`; Task10B owns that registry/adapter seam. The
-official Hook reference and approved Task 7-9 inventories also do not establish
-a Hook trace-context field or a target native session ID for
-`SessionStart.source = resume`. Agent SDK `TRACEPARENT`/`TRACESTATE`
-propagation establishes OTel parentage only; it does not add trace context to a
-Hook event and does not bind a Session.
+Claude Code's shipped v1 resolver uses the exact native-session-ID and explicit
+resume/handoff rows above. `SessionSourceSurface.ClaudeCode`, the
+`source_surface = claude-code` envelope validation, and the
+`claude-code-otel`/`claude-code-hook` adapters are current shipped contracts.
+The complete trace-context row remains a named future interface because the
+Session envelope still exposes only `trace_id`; trace-id-only evidence remains
+`otel_only`/`hook_only` and can never become `exact_linked`. The official Hook
+reference and approved Task 7-9 inventories do not establish a complete Hook
+trace-context field or a target native session ID for `SessionStart.source =
+resume`. Agent SDK `TRACEPARENT`/`TRACESTATE` propagation establishes OTel
+parentage only; it does not add trace context to a Hook event or bind a
+Session.
 
 ## Existing-target audit
 
 | Evidence or result | Exact existing target | Current state |
 | --- | --- | --- |
-| Hook native session ID | `CopilotAgentObservability.LocalMonitor.Sessions.SessionIngestEnvelope.NativeSessionId` | Field exists; Claude source acceptance is the Task10B seam. |
-| Persisted native ID and binding kind | `CopilotAgentObservability.Telemetry.Sessions.SessionNativeId.NativeSessionId` and `CopilotAgentObservability.Telemetry.Sessions.SessionNativeId.BindingKind` | Fields exist; `CopilotAgentObservability.Telemetry.Sessions.SessionSourceSurface` lacks Claude Code. |
+| Hook native session ID | `CopilotAgentObservability.LocalMonitor.Sessions.SessionIngestEnvelope.NativeSessionId` | Field exists and accepts the shipped Claude Hook source contract. |
+| Persisted native ID and binding kind | `CopilotAgentObservability.Telemetry.Sessions.SessionNativeId.NativeSessionId` and `CopilotAgentObservability.Telemetry.Sessions.SessionNativeId.BindingKind` | Fields exist; `SessionSourceSurface.ClaudeCode` and native/explicit kinds are shipped. |
 | Explicit link | `CopilotAgentObservability.LocalMonitor.Sessions.SessionIngestEnvelope.ExplicitLink`, `CopilotAgentObservability.LocalMonitor.Sessions.SessionExplicitLink.NativeSessionId`, and `CopilotAgentObservability.LocalMonitor.Sessions.SessionExplicitLink.Kind` | Fields exist; no documented or observed Claude target native ID is available. |
 | Hook trace ID | `CopilotAgentObservability.LocalMonitor.Sessions.SessionIngestEvent.TraceId` | Field exists, but no Hook trace field was observed and a trace ID is not complete trace context. |
 | OTel trace/span/parent IDs | `CopilotAgentObservability.Telemetry.MonitorSpanProjection.TraceId`, `CopilotAgentObservability.Telemetry.MonitorSpanProjection.SpanId`, and `CopilotAgentObservability.Telemetry.MonitorSpanProjection.ParentSpanId` | Exact OTel targets exist; they do not by themselves create a Session binding. |
 
-There is no existing normalized OTel native-session-candidate field or complete
-Hook trace-context DTO. `otel.session_id` is therefore
-`corroboration_only`, and the absent Hook trace-context/explicit-link producer
-fields remain documented-unmapped. This contract does not invent either
-target.
+There is no existing normalized complete Hook trace-context DTO. The raw OTel
+`session.id` is compared byte-for-byte to the persisted Claude native ID only
+inside the exact native resolver; it is not persisted as a new native ID. A
+trace ID alone remains insufficient binding evidence, and the absent Hook
+trace-context/explicit-link producer fields remain documented-unmapped. This
+contract does not invent either target.
 
 The OTel `agent_id` row is `otel.agent_id` with disposition
 `documented_unmapped`. It never targets
@@ -143,6 +144,13 @@ identity, trace context, content state, provenance, or source structure maps
 only to the canonical completeness reasons; it is never zero-filled or
 guessed. The fixed wire status and reason vocabulary remains the one defined by
 the Canvas Session workspace specification.
+
+Task20 projection emits `binding_state = exact_linked` only after the shipped
+identical-native-ID or explicit resume/handoff resolver has produced an exact
+link. A shared `trace_id`, including an identical trace ID on Hook and OTel
+records, remains `hook_only` / `otel_only` under v1 and never projects as
+`exact_linked`. This remains true until a later spec-first change defines and
+implements the complete provenance-bearing trace-context DTO.
 
 ## Evidence status
 
