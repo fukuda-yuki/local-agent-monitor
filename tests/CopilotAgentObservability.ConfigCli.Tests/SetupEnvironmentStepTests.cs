@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Transactions;
 using Xunit.Sdk;
 
@@ -344,6 +345,235 @@ public sealed class SetupEnvironmentStepTests
 
         Assert.Equal(expectedHash, SHA256.HashData(platform.ReadSeededFile("private.backup")));
         Assert.DoesNotContain("file.delete:private.backup", platform.Operations);
+    }
+
+    [Fact]
+    public void CreateOrValidateBackup_CreatesThenReusesExactModelAArtifactWithoutWriting()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedUserEnvironment("EMPTY", string.Empty);
+        platform.SeedUserEnvironment("VALUE", "private-value");
+        platform.SeedUserEnvironment("UNRELATED", "outside-model-a");
+        var step = new UserEnvironmentSetupStep(platform);
+        var capture = step.Capture(["MISSING", "EMPTY", "VALUE"]);
+
+        step.CreateOrValidateBackup("private.backup", capture);
+        var exact = platform.ReadSeededFile("private.backup");
+        var operationCount = platform.Operations.Count;
+        new UserEnvironmentSetupStep(platform).CreateOrValidateBackup("private.backup", capture);
+
+        Assert.Equal(exact, platform.ReadSeededFile("private.backup"));
+        Assert.Contains("file.try-write-new-flushed:private.backup", platform.Operations.Take(operationCount));
+        Assert.Equal(
+        [
+            "file.metadata:private.backup",
+            "file.read-bounded:private.backup:2097152",
+            "file.metadata:private.backup",
+        ],
+        platform.Operations.Skip(operationCount));
+        Assert.DoesNotContain("environment.get:UNRELATED", platform.Operations);
+        Assert.DoesNotContain(platform.Operations.Skip(operationCount), operation =>
+            operation.StartsWith("file.write", StringComparison.Ordinal) ||
+            operation.StartsWith("file.flush", StringComparison.Ordinal) ||
+            operation.StartsWith("file.delete", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("reordered")]
+    [InlineData("subset")]
+    [InlineData("state")]
+    [InlineData("member-hash")]
+    [InlineData("aggregate-hash")]
+    [InlineData("malformed")]
+    [InlineData("oversize")]
+    [InlineData("reparse")]
+    [InlineData("directory")]
+    [InlineData("device")]
+    [InlineData("unreadable")]
+    public void CreateOrValidateBackup_RejectsInexactOrUnsafeArtifactWithoutMutation(string fixture)
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedUserEnvironment("A", "first");
+        platform.SeedUserEnvironment("B", "second");
+        var step = new UserEnvironmentSetupStep(platform);
+        var originalCapture = step.Capture(["A", "B"]);
+        step.CreateBackup("private.backup", originalCapture);
+        var exact = platform.ReadSeededFile("private.backup");
+        var expectedPlatform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        expectedPlatform.SeedUserEnvironment("A", fixture == "state" ? "changed" : "first");
+        expectedPlatform.SeedUserEnvironment("B", "second");
+        var expectedStep = new UserEnvironmentSetupStep(expectedPlatform);
+        var expected = fixture switch
+        {
+            "reordered" => expectedStep.Capture(["B", "A"]),
+            "subset" => expectedStep.Capture(["A"]),
+            "member-hash" => originalCapture with
+            {
+                Members = originalCapture.Members.Select((member, index) =>
+                    index == 0 ? member with { Hash = new string('0', 64) } : member).ToArray(),
+            },
+            "aggregate-hash" => originalCapture with { AggregateHash = new string('0', 64) },
+            _ => expectedStep.Capture(["A", "B"]),
+        };
+        var candidate = fixture switch
+        {
+            "malformed" => Encoding.UTF8.GetBytes("malformed private backup"),
+            "oversize" => new byte[2 * 1024 * 1024 + 1],
+            _ => exact,
+        };
+        platform.SeedFile("private.backup", candidate);
+        if (fixture == "reparse") platform.SeedPathMetadata("private.backup", new(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        if (fixture == "directory") platform.SeedPathMetadata("private.backup", new(true, SetupPathKind.Directory, FileAttributes.Directory));
+        if (fixture == "device") platform.SeedPathMetadata("private.backup", new(true, SetupPathKind.Other, FileAttributes.Normal));
+        if (fixture == "unreadable") platform.InjectFault("file.read-bounded:private.backup:2097152", new IOException("raw secret"));
+        var operationCount = platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupEnvironmentStepException>(() =>
+            step.CreateOrValidateBackup("private.backup", expected));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(SetupCodes.InternalError, exception.Message);
+        Assert.DoesNotContain("secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(candidate, platform.ReadSeededFile("private.backup"));
+        Assert.DoesNotContain(platform.Operations.Skip(operationCount), operation =>
+            operation.StartsWith("file.write", StringComparison.Ordinal) ||
+            operation.StartsWith("file.flush", StringComparison.Ordinal) ||
+            operation.StartsWith("file.delete", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CreateOrValidateBackup_AtomicCreateFaultNeverReopensOrFlushesPath(bool afterEffect)
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedUserEnvironment("VALUE", "private-value");
+        var step = new UserEnvironmentSetupStep(platform);
+        var capture = step.Capture(["VALUE"]);
+        const string operation = "file.try-write-new-flushed:private.backup";
+        if (afterEffect)
+        {
+            platform.InjectAfterEffectFault(operation, new IOException("raw secret"));
+        }
+        else
+        {
+            platform.InjectFault(operation, new IOException("raw secret"));
+        }
+
+        var exception = Assert.Throws<SetupEnvironmentStepException>(() =>
+            step.CreateOrValidateBackup("private.backup", capture));
+        var operationIndex = platform.Operations.ToList().LastIndexOf(operation);
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.DoesNotContain("secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(afterEffect, platform.FileSystem.FileExists("private.backup"));
+        Assert.Equal(1, platform.Operations.Count(item => item == operation));
+        Assert.DoesNotContain(platform.Operations.Skip(operationIndex + 1), item =>
+            item == "file.metadata:private.backup" || item.StartsWith("file.read-bounded:private.backup:", StringComparison.Ordinal));
+        Assert.DoesNotContain(platform.Operations, item => item is "file.flush:private.backup" or "file.write-new:private.backup");
+        Assert.DoesNotContain("file.delete:private.backup", platform.Operations);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CreateOrValidateBackup_CollisionAfterMissingProbeNeverWritesOrFlushesUnownedPath(bool exactCollision)
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedUserEnvironment("VALUE", "private-value");
+        var step = new UserEnvironmentSetupStep(platform);
+        var capture = step.Capture(["VALUE"]);
+        step.CreateBackup("fixture.backup", capture);
+        var candidate = exactCollision
+            ? platform.ReadSeededFile("fixture.backup")
+            : Encoding.UTF8.GetBytes("foreign private value");
+        const string operation = "file.try-write-new-flushed:private.backup";
+        using var barrier = platform.AddBarrier(operation);
+        var task = Task.Run(() => step.CreateOrValidateBackup("private.backup", capture));
+        try
+        {
+            await Task.Run(() => barrier.WaitUntilReached(CancellationToken.None));
+            platform.SeedFile("private.backup", candidate);
+            barrier.Release();
+            if (exactCollision)
+            {
+                await task;
+            }
+            else
+            {
+                Assert.Equal(
+                    SetupCodes.InternalError,
+                    (await Assert.ThrowsAsync<SetupEnvironmentStepException>(() => task)).Code);
+            }
+        }
+        finally
+        {
+            barrier.Release();
+            try
+            {
+                await task;
+            }
+            catch (SetupEnvironmentStepException)
+            {
+            }
+        }
+
+        Assert.Equal(candidate, platform.ReadSeededFile("private.backup"));
+        Assert.Equal(1, platform.Operations.Count(item => item == operation));
+        Assert.DoesNotContain(platform.Operations, item => item is "file.flush:private.backup" or "file.write-new:private.backup");
+        Assert.DoesNotContain("file.delete:private.backup", platform.Operations);
+    }
+
+    [Fact]
+    public void CreateOrValidateBackup_MapsNullExpectedToFixedRedactedError()
+    {
+        var exception = Assert.Throws<SetupEnvironmentStepException>(() =>
+            new UserEnvironmentSetupStep(new SetupTestPlatform(DateTimeOffset.UnixEpoch))
+                .CreateOrValidateBackup("private-secret.backup", null!));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(SetupCodes.InternalError, exception.Message);
+        Assert.DoesNotContain("secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CreateOrValidateBackup_RejectsMetadataRebindDuringBoundedRead()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedUserEnvironment("VALUE", "private-value");
+        var step = new UserEnvironmentSetupStep(platform);
+        var capture = step.Capture(["VALUE"]);
+        step.CreateBackup("private.backup", capture);
+        var original = platform.ReadSeededFile("private.backup");
+        using var barrier = platform.AddBarrier("file.read-bounded:private.backup:2097152");
+        var task = Task.Run(() => step.CreateOrValidateBackup("private.backup", capture));
+        try
+        {
+            await Task.Run(() => barrier.WaitUntilReached(CancellationToken.None));
+            platform.SeedPathMetadata(
+                "private.backup",
+                new(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+            barrier.Release();
+
+            Assert.Equal(
+                SetupCodes.InternalError,
+                (await Assert.ThrowsAsync<SetupEnvironmentStepException>(() => task)).Code);
+        }
+        finally
+        {
+            barrier.Release();
+            try
+            {
+                await task;
+            }
+            catch (SetupEnvironmentStepException)
+            {
+            }
+        }
+
+        Assert.Equal(original, platform.ReadSeededFile("private.backup"));
+        Assert.DoesNotContain("file.delete:private.backup", platform.Operations);
+        Assert.DoesNotContain(platform.Operations, operation => operation.StartsWith("file.write:private.backup", StringComparison.Ordinal));
     }
 
     [Theory]

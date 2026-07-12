@@ -99,6 +99,33 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
         }
     }
 
+    public void CreateOrValidateBackup(string backupPath, UserEnvironmentCapture expected)
+    {
+        try
+        {
+            ValidateCapture(expected);
+            var expectedBytes = SerializeBackup(expected);
+            var metadata = platform.FileSystem.GetPathMetadata(backupPath);
+            if (metadata.Exists)
+            {
+                ValidateExistingBackup(backupPath, expectedBytes, metadata);
+                return;
+            }
+
+            if (!platform.FileSystem.TryWriteNewAllBytesAndFlush(backupPath, expectedBytes))
+            {
+                ValidateExistingBackup(backupPath, expectedBytes);
+                return;
+            }
+
+            ValidateExistingBackup(backupPath, expectedBytes);
+        }
+        catch (Exception)
+        {
+            throw new SetupEnvironmentStepException(SetupCodes.InternalError);
+        }
+    }
+
     public UserEnvironmentCapture ReadBackup(string backupPath, IReadOnlyList<string> orderedNames)
     {
         ValidateNames(orderedNames);
@@ -324,6 +351,33 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
         payload.CopyTo(envelope, 0);
         checksum.CopyTo(envelope, payload.Length);
         return envelope;
+    }
+
+    private void ValidateExistingBackup(
+        string backupPath,
+        byte[] expectedBytes,
+        SetupPathMetadata? initialMetadata = null)
+    {
+        var before = initialMetadata ?? platform.FileSystem.GetPathMetadata(backupPath);
+        ValidateBackupMetadata(before);
+        var read = platform.FileSystem.ReadAtMostBytes(backupPath, MaximumBackupBytes);
+        if (!read.IsComplete || !read.Bytes.AsSpan().SequenceEqual(expectedBytes))
+        {
+            throw new FormatException();
+        }
+
+        _ = DeserializeBackup(read.Bytes);
+        ValidateBackupMetadata(platform.FileSystem.GetPathMetadata(backupPath));
+    }
+
+    private static void ValidateBackupMetadata(SetupPathMetadata metadata)
+    {
+        if (!metadata.Exists ||
+            metadata.Kind != SetupPathKind.File ||
+            (metadata.Attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new FormatException();
+        }
     }
 
     private static UserEnvironmentCapture DeserializeBackup(byte[] bytes)
