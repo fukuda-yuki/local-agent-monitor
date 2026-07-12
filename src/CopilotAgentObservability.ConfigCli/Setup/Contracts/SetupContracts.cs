@@ -56,7 +56,7 @@ public sealed record SetupChangeSetStatusResult(
 public sealed record SetupGuidance(
     string Kind,
     string Language,
-    string? Sample);
+    string Sample);
 
 public enum SetupCommand
 {

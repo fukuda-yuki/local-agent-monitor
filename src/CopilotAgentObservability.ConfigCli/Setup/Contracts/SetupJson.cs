@@ -100,7 +100,7 @@ public static class SetupJson
         writer.WriteStartObject();
         writer.WriteString("kind", guidance.Kind);
         writer.WriteString("language", guidance.Language);
-        if (includeSample && guidance.Sample is not null)
+        if (includeSample)
         {
             writer.WriteString("sample", guidance.Sample);
         }
