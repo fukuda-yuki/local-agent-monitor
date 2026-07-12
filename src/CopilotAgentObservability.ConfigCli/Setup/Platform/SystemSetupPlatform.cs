@@ -7,10 +7,11 @@ public sealed class SystemSetupPlatform : ISetupPlatform
     public SystemSetupPlatform(
         ISetupExecution? execution = null,
         Func<bool>? notificationAttempt = null,
-        string? localApplicationData = null)
+        string? localApplicationData = null,
+        Func<string, FileStream>? exclusiveFileLockAttempt = null)
     {
         LocalApplicationData = localApplicationData ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        FileSystem = new SystemSetupFileSystem();
+        FileSystem = new SystemSetupFileSystem(exclusiveFileLockAttempt);
         UserEnvironment = new SystemSetupUserEnvironment(notificationAttempt);
         Clock = new SystemSetupClock();
         Identifiers = new SystemSetupIdentifierGenerator();
@@ -29,8 +30,35 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
     public ISetupExecution Execution { get; }
 
+    internal static bool IsExclusiveFileLockContention(IOException exception)
+    {
+        const int WindowsSharingViolation = unchecked((int)0x80070020);
+        const int WindowsLockViolation = unchecked((int)0x80070021);
+        const int LinuxEagain = 11;
+        const int MacOsEagain = 35;
+
+        if (OperatingSystem.IsWindows())
+        {
+            return exception.HResult is WindowsSharingViolation or WindowsLockViolation;
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            return exception.HResult == LinuxEagain;
+        }
+
+        return OperatingSystem.IsMacOS() && exception.HResult == MacOsEagain;
+    }
+
     private sealed class SystemSetupFileSystem : ISetupFileSystem
     {
+        private readonly Func<string, FileStream> exclusiveFileLockAttempt;
+
+        public SystemSetupFileSystem(Func<string, FileStream>? exclusiveFileLockAttempt)
+        {
+            this.exclusiveFileLockAttempt = exclusiveFileLockAttempt ?? OpenExclusiveFileLock;
+        }
+
         public void CreateDirectory(string path) => Directory.CreateDirectory(path);
 
         public bool FileExists(string path) => File.Exists(path);
@@ -70,13 +98,15 @@ public sealed class SystemSetupPlatform : ISetupPlatform
         {
             try
             {
-                return new SystemSetupExclusiveFileLock(new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None));
+                return new SystemSetupExclusiveFileLock(exclusiveFileLockAttempt(path));
             }
-            catch (IOException)
+            catch (IOException exception) when (IsExclusiveFileLockContention(exception))
             {
                 return null;
             }
         }
+
+        private static FileStream OpenExclusiveFileLock(string path) => new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
 
         private sealed class SystemSetupExclusiveFileLock(FileStream stream) : ISetupExclusiveFileLock
         {

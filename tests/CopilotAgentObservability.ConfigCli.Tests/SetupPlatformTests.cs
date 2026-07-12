@@ -13,6 +13,33 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    public void SystemPlatform_RecognizesOnlyNativeExclusiveFileLockContention()
+    {
+        var contentionCodes = OperatingSystem.IsWindows()
+            ? new[] { unchecked((int)0x80070020), unchecked((int)0x80070021) }
+            : OperatingSystem.IsMacOS()
+                ? new[] { 35 }
+                : new[] { 11 };
+        var nonContentionCodes = OperatingSystem.IsWindows()
+            ? new[] { unchecked((int)0x80070005), unchecked((int)0x80070008), unchecked((int)0x80070070) }
+            : new[] { 13, 24, 28 };
+
+        Assert.All(contentionCodes, code => Assert.True(SystemSetupPlatform.IsExclusiveFileLockContention(new IOException("synthetic", code))));
+        Assert.All(nonContentionCodes, code => Assert.False(SystemSetupPlatform.IsExclusiveFileLockContention(new IOException("synthetic", code))));
+    }
+
+    [Fact]
+    public void SystemPlatform_PropagatesNonContentionExclusiveLockErrors()
+    {
+        var exception = new IOException("synthetic disk failure", unchecked((int)0x80070070));
+        var platform = new SystemSetupPlatform(exclusiveFileLockAttempt: _ => throw exception);
+
+        var actual = Assert.Throws<IOException>(() => platform.FileSystem.TryAcquireExclusiveFileLock("setup.lock"));
+
+        Assert.Same(exception, actual);
+    }
+
+    [Fact]
     public void SystemPlatform_ProvidesUtcClockAndUuidV7Identifiers()
     {
         var platform = new SystemSetupPlatform();
@@ -325,6 +352,25 @@ public sealed class SetupPlatformTests
             "file.lock:runtime\\setup.lock",
         ],
         platform.Operations);
+    }
+
+    [Fact]
+    public void TestPlatform_DoubleDisposingAStaleLockDoesNotReleaseTheNewOwner()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        var first = platform.FileSystem.TryAcquireExclusiveFileLock("setup.lock");
+        first!.Dispose();
+        var second = platform.FileSystem.TryAcquireExclusiveFileLock("setup.lock");
+        first.Dispose();
+
+        var contended = platform.FileSystem.TryAcquireExclusiveFileLock("setup.lock");
+        second!.Dispose();
+        var reacquired = platform.FileSystem.TryAcquireExclusiveFileLock("setup.lock");
+
+        Assert.NotNull(second);
+        Assert.Null(contended);
+        Assert.NotNull(reacquired);
+        reacquired!.Dispose();
     }
 
     private static async Task ObserveWorkersAsync(params Task?[] tasks)

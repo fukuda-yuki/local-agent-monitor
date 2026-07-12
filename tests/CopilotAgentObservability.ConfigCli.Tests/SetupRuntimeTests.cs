@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -85,6 +87,19 @@ public sealed class SetupRuntimeTests
     }
 
     [Fact]
+    public void SetupLock_PropagatesFakeNonContentionLockFailures()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        var exception = new IOException("synthetic disk failure", unchecked((int)0x80070070));
+        platform.InjectFault($"file.lock:{paths.Lock}", exception);
+
+        var actual = Assert.Throws<IOException>(() => SetupLock.TryAcquire(platform, paths));
+
+        Assert.Same(exception, actual);
+    }
+
+    [Fact]
     public void SetupLock_SystemPlatformReturnsBusyWhileHandleIsHeldAndReacquiresAfterDispose()
     {
         var temporaryRoot = Path.Combine(Path.GetTempPath(), $"cao-setup-runtime-{Guid.NewGuid():N}");
@@ -109,6 +124,79 @@ public sealed class SetupRuntimeTests
             {
                 Directory.Delete(temporaryRoot, recursive: true);
             }
+        }
+    }
+
+    [Fact]
+    public async Task SetupLock_SystemPlatformCoordinatesExclusiveFileShareAcrossProcesses()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw Xunit.Sdk.SkipException.ForSkip("FileShare.None cross-process semantics are verified on Windows.");
+        }
+
+        var temporaryRoot = Path.Combine(Path.GetTempPath(), $"cao-setup-runtime-{Guid.NewGuid():N}");
+        var platform = new SystemSetupPlatform(localApplicationData: temporaryRoot);
+        var paths = new SetupRuntimePaths(platform);
+        Process? child = null;
+        try
+        {
+            paths.EnsureRoot();
+            child = StartLockHoldingPowerShell(paths.Lock);
+            var ready = await child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal("READY", ready);
+
+            using var contended = SetupLock.TryAcquire(platform, paths);
+            Assert.False(contended.Acquired);
+            Assert.Equal(SetupCodes.SetupBusy, contended.Code);
+
+            await child.StandardInput.WriteLineAsync();
+            child.StandardInput.Close();
+            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(0, child.ExitCode);
+
+            using var reacquired = SetupLock.TryAcquire(platform, paths);
+            Assert.True(reacquired.Acquired);
+        }
+        finally
+        {
+            if (child is not null && !child.HasExited)
+            {
+                child.Kill(entireProcessTree: true);
+                await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            }
+
+            child?.Dispose();
+            if (Directory.Exists(temporaryRoot))
+            {
+                Directory.Delete(temporaryRoot, recursive: true);
+            }
+        }
+    }
+
+    private static Process StartLockHoldingPowerShell(string lockPath)
+    {
+        const string command = "${stream} = [System.IO.File]::Open($env:CAO_SETUP_LOCK_TEST_PATH, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); try { [Console]::Out.WriteLine('READY'); [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null } finally { ${stream}.Dispose() }";
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "pwsh",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.Environment["CAO_SETUP_LOCK_TEST_PATH"] = lockPath;
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-Command");
+        startInfo.ArgumentList.Add(command);
+
+        try
+        {
+            return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start pwsh.");
+        }
+        catch (Win32Exception exception) when (exception.NativeErrorCode == 2)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip("pwsh is unavailable for the required cross-process lock test.");
         }
     }
 }
