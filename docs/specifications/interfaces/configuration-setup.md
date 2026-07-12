@@ -353,6 +353,17 @@ target. All changes for one file share one base hash, applied hash, backup, and
 ledger record. All current-user environment member changes share one canonical
 allowlist hash and one environment backup. Plan construction:
 
+An environment physical target's ordered member list remains immutable across
+plan, applying, applied, recovery, and status. Its base and applied aggregate
+hashes and its backup cover every listed member, including members whose
+operation is `no-op`. Journal steps, forward writes, compensation, and rollback
+restore only members whose observed base differs from the desired state. A
+listed no-op member is never written or restored, but it remains part of the
+aggregate commit and rollback stale-state guard. A physical target with no
+changed members creates no backup, journal target, notification requirement,
+applied hash, or rollback ownership. Environment values outside the ordered
+member list remain outside capture, hashing, backup, status, and mutation.
+
 1. detects the target and supported version;
 2. validates path ancestry and structured configuration before proposing a
    replacement;
