@@ -158,13 +158,7 @@ public sealed class SqliteSessionStore : ISessionStore
         }
         else
         {
-            // A released v4/v5 upgrader could stamp v10 before it had added these
-            // additive Issue #55 objects. Repair only that known incomplete shape;
-            // missing prerequisites still fail the migration transaction.
-            AddColumnIfMissing(connection, transaction, "proposal_apply_drafts", "updated_at", "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.0000000+00:00'");
-            command.CommandText = ProposalApplyPendingSchemaSql;
-            command.ExecuteNonQuery();
-            AddProposalRevisionColumns(connection, transaction);
+            RepairKnownStampedVersionTenShape(connection, transaction, command);
         }
         transaction.Commit();
     }
@@ -1343,6 +1337,91 @@ public sealed class SqliteSessionStore : ISessionStore
         AddColumnIfMissing(connection, transaction, "proposal_apply_drafts", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
         AddColumnIfMissing(connection, transaction, "proposal_applies", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
     }
+
+    private static void RepairKnownStampedVersionTenShape(SqliteConnection connection, SqliteTransaction transaction, SqliteCommand command)
+    {
+        var revisionColumns = new HashSet<(string Table, string Column)>
+        {
+            ("improvement_proposals", "revision"),
+            ("proposal_apply_drafts", "proposal_revision"),
+            ("proposal_applies", "proposal_revision"),
+        };
+        var v4Missing = revisionColumns.Append(("proposal_apply_pending", "__table__")).ToHashSet();
+        if (MatchesVersionTenShape(connection, transaction, v4Missing))
+        {
+            command.CommandText = ProposalApplyPendingSchemaSql;
+            command.ExecuteNonQuery();
+            AddProposalRevisionColumns(connection, transaction);
+            return;
+        }
+        if (MatchesVersionTenShape(connection, transaction, revisionColumns))
+        {
+            AddProposalRevisionColumns(connection, transaction);
+            return;
+        }
+        if (!MatchesVersionTenShape(connection, transaction, new HashSet<(string Table, string Column)>()))
+            throw new InvalidOperationException("Unsupported incomplete Session schema version 10.");
+    }
+
+    private static bool MatchesVersionTenShape(SqliteConnection connection, SqliteTransaction transaction, IReadOnlySet<(string Table, string Column)> missing)
+    {
+        foreach (var (table, columns) in VersionTenRequiredColumns)
+        {
+            if (missing.Contains((table, "__table__")))
+            {
+                if (TableExists(connection, transaction, table)) return false;
+                continue;
+            }
+            if (!TableExists(connection, transaction, table)) return false;
+            var actual = Columns(connection, transaction, table);
+            foreach (var column in columns)
+                if (actual.Contains(column) == missing.Contains((table, column))) return false;
+        }
+        return true;
+    }
+
+    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string table)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction;
+        command.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=$table;";
+        Add(command, "$table", table); return command.ExecuteScalar() is not null;
+    }
+
+    private static HashSet<string> Columns(SqliteConnection connection, SqliteTransaction transaction, string table)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction;
+        command.CommandText = $"SELECT name FROM pragma_table_info('{table}');";
+        using var reader = command.ExecuteReader(); var columns = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read()) columns.Add(reader.GetString(0)); return columns;
+    }
+
+    private static readonly IReadOnlyDictionary<string, string[]> VersionTenRequiredColumns = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        ["schema_version"] = ["component", "version"],
+        ["sessions"] = ["session_id", "status", "completeness", "repository", "workspace", "started_at", "ended_at", "last_seen_at", "raw_retention_state", "created_at", "updated_at"],
+        ["session_native_ids"] = ["session_id", "source_surface", "native_session_id", "binding_kind", "observed_at"],
+        ["session_runs"] = ["run_id", "session_id", "source_surface", "native_run_id", "trace_id", "parent_run_id", "model", "started_at", "ended_at", "input_tokens", "output_tokens", "total_tokens", "status"],
+        ["session_events"] = ["event_id", "session_id", "run_id", "source_surface", "parent_event_id", "trace_id", "status", "source_adapter", "source_event_id", "type", "occurred_at", "content_state"],
+        ["session_event_content"] = ["event_id", "content_kind", "content_json", "captured_at", "expires_at"],
+        ["session_projection_state"] = ["projector_key", "projection_cursor", "unsupported_event_version_count", "updated_at"],
+        ["session_human_evaluation"] = ["session_id", "verdict", "recorded_at"],
+        ["improvement_proposals"] = ["proposal_id", "revision", "status", "target_kind", "target_label", "title", "summary", "expected_effect", "risk_note", "created_at", "updated_at", "recommended_at", "verified_at"],
+        ["improvement_proposal_sessions"] = ["proposal_id", "proposal_revision", "session_id", "source_order"],
+        ["improvement_proposal_evidence"] = ["proposal_id", "evidence_order", "kind", "reference_id"],
+        ["proposal_apply_drafts"] = ["draft_id", "proposal_id", "proposal_revision", "root_id", "selection_revision", "approval_digest", "state", "created_at", "updated_at"],
+        ["proposal_apply_files"] = ["draft_id", "file_order", "base_sha256", "replacement_sha256"],
+        ["proposal_apply_hunks"] = ["draft_id", "hunk_id", "selected", "replacement_sha256"],
+        ["proposal_apply_revisions"] = ["draft_id", "selection_revision", "approval_digest", "approved_at"],
+        ["proposal_applies"] = ["apply_id", "draft_id", "proposal_revision", "state", "created_at"],
+        ["proposal_apply_audit"] = ["audit_id", "apply_id", "draft_id", "proposal_id", "root_id", "actor_kind", "state", "error_code", "file_count", "recorded_at"],
+        ["proposal_apply_pending"] = ["apply_id", "draft_id", "proposal_id", "root_id", "actor_kind", "file_count", "operation_kind", "recorded_at"],
+        ["objective_evaluations"] = ["objective_evaluation_id", "session_id", "run_id", "trace_id", "result", "severity", "evaluator_id", "evaluator_version", "criterion_id", "case_key", "recorded_at"],
+        ["objective_evaluation_evidence"] = ["objective_evaluation_id", "evidence_order", "kind", "reference_id"],
+        ["effect_comparisons"] = ["comparison_id", "cohort_revision", "proposal_id", "proposal_revision", "apply_id", "recorded_at"],
+        ["effect_comparison_sessions"] = ["comparison_id", "session_id", "classification", "case_key", "exclusion_reason", "session_order", "effective_quality", "severe_failure"],
+        ["effect_comparison_evidence"] = ["comparison_id", "evidence_order", "session_id", "kind", "reference_id", "recorded_at", "human_verdict"],
+        ["effect_receipts"] = ["comparison_id", "verdict", "result_json", "recorded_at"],
+    };
 
     private static void ValidateComparisonRequest(EffectComparisonRequest request)
     {

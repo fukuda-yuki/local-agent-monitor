@@ -1,6 +1,8 @@
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.LocalMonitor;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -75,11 +77,15 @@ public sealed class SqliteEffectComparisonStoreTests
     public void CreateSchema_repairs_known_v10_stamped_issue55_gaps_without_losing_apply_data(int historicalVersion)
     {
         using var temp = new MonitorTempDirectory();
-        var legacy = CreateGenuineLegacySchema(temp.DatabasePath, historicalVersion);
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7();
+        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, DateTimeOffset.Parse("2026-07-12T12:00:00+00:00"));
         using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
         {
             connection.Open();
             Execute(connection, "UPDATE schema_version SET version=10 WHERE component='session';");
+            Execute(connection, "ALTER TABLE improvement_proposals DROP COLUMN revision; ALTER TABLE proposal_apply_drafts DROP COLUMN proposal_revision; ALTER TABLE proposal_applies DROP COLUMN proposal_revision;");
+            if (historicalVersion == 4) Execute(connection, "DROP TABLE proposal_apply_pending;");
         }
 
         var store = new SqliteSessionStore(temp.DatabasePath);
@@ -87,12 +93,77 @@ public sealed class SqliteEffectComparisonStoreTests
 
         using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
         verify.Open();
-        Assert.Equal("legacy", Text(verify, "SELECT title FROM improvement_proposals WHERE proposal_id=$id;", ("$id", legacy.ProposalId.ToString("D"))));
-        Assert.Equal("applied", Text(verify, "SELECT state FROM proposal_applies WHERE apply_id=$id;", ("$id", legacy.ApplyId.ToString("D"))));
-        Assert.Single(store.ListApplicationReceipts(legacy.ProposalId));
+        Assert.Equal("fixture", Text(verify, "SELECT title FROM improvement_proposals WHERE proposal_id=$id;", ("$id", proposal.ToString("D"))));
+        Assert.Equal("applied", Text(verify, "SELECT state FROM proposal_applies WHERE apply_id=$id;", ("$id", apply.ToString("D"))));
+        Assert.Single(store.ListApplicationReceipts(proposal));
         Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='proposal_apply_pending';"));
         foreach (var (table, column) in new[] { ("improvement_proposals", "revision"), ("proposal_apply_drafts", "proposal_revision"), ("proposal_applies", "proposal_revision") })
             Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM pragma_table_info($table) WHERE name=$column;", ("$table", table), ("$column", column)));
+    }
+
+    [Theory]
+    [InlineData("revision")]
+    [InlineData("pending")]
+    public void CreateSchema_rejects_unknown_stamped_v10_gaps_without_schema_or_data_mutation(string missingObject)
+    {
+        using var temp = new MonitorTempDirectory();
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7();
+        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, DateTimeOffset.Parse("2026-07-12T12:00:00+00:00"));
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            Execute(connection, "UPDATE schema_version SET version=10 WHERE component='session';");
+            Execute(connection, missingObject == "revision"
+                ? "ALTER TABLE proposal_applies DROP COLUMN proposal_revision;"
+                : "DROP TABLE proposal_apply_pending;");
+        }
+
+        Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(temp.DatabasePath).CreateSchema());
+
+        using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
+        verify.Open();
+        Assert.Equal("fixture", Text(verify, "SELECT title FROM improvement_proposals WHERE proposal_id=$id;", ("$id", proposal.ToString("D"))));
+        Assert.Equal("applied", Text(verify, "SELECT state FROM proposal_applies WHERE apply_id=$id;", ("$id", apply.ToString("D"))));
+        Assert.Equal(10L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(missingObject == "pending" ? 0L : 1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='proposal_apply_pending';"));
+        Assert.Equal(missingObject == "revision" ? 0L : 1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM pragma_table_info('proposal_applies') WHERE name='proposal_revision';"));
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void MonitorHost_starts_and_reads_current_application_after_genuine_legacy_migration(int historicalVersion)
+    {
+        using var temp = new MonitorTempDirectory();
+        var legacy = CreateGenuineLegacySchema(temp.DatabasePath, historicalVersion);
+
+        using var app = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
+
+        var store = app.Services.GetRequiredService<ISessionStore>();
+        Assert.Single(store.ListApplicationReceipts(legacy.ProposalId));
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void MonitorHost_starts_and_reads_current_application_after_known_stamped_v10_repair(int historicalVersion)
+    {
+        using var temp = new MonitorTempDirectory();
+        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7();
+        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, DateTimeOffset.Parse("2026-07-12T12:00:00+00:00"));
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            Execute(connection, "ALTER TABLE improvement_proposals DROP COLUMN revision; ALTER TABLE proposal_apply_drafts DROP COLUMN proposal_revision; ALTER TABLE proposal_applies DROP COLUMN proposal_revision;");
+            if (historicalVersion == 4) Execute(connection, "DROP TABLE proposal_apply_pending;");
+        }
+
+        using var app = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
+
+        var store = app.Services.GetRequiredService<ISessionStore>();
+        Assert.Single(store.ListApplicationReceipts(proposal));
     }
 
     [Fact]
@@ -586,14 +657,14 @@ public sealed class SqliteEffectComparisonStoreTests
 
     private static void CreateLegacyProposalSchema(SqliteConnection connection, Guid proposal, bool withRevision, DateTimeOffset at)
     {
-        Execute(connection, $"CREATE TABLE improvement_proposals(proposal_id TEXT PRIMARY KEY,{(withRevision ? "revision INTEGER NOT NULL DEFAULT 1," : string.Empty)}status TEXT NOT NULL,target_kind TEXT NOT NULL,target_label TEXT NOT NULL,title TEXT NOT NULL,summary TEXT NOT NULL,expected_effect TEXT NOT NULL,risk_note TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,recommended_at TEXT NULL,verified_at TEXT NULL); CREATE TABLE improvement_proposal_sessions(proposal_id TEXT NOT NULL,{(withRevision ? "proposal_revision INTEGER NOT NULL DEFAULT 1," : string.Empty)}session_id TEXT NOT NULL,source_order INTEGER NOT NULL,PRIMARY KEY(proposal_id,session_id)); CREATE TABLE improvement_proposal_evidence(proposal_id TEXT NOT NULL,evidence_order INTEGER NOT NULL,kind TEXT NOT NULL,reference_id TEXT NOT NULL,PRIMARY KEY(proposal_id,evidence_order)); INSERT INTO improvement_proposals(proposal_id,{(withRevision ? "revision," : string.Empty)}status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at) VALUES($proposal,{(withRevision ? "1," : string.Empty)}'recommended','skill','legacy','legacy','legacy','legacy','legacy',$at,$at,$at);", ("$proposal", proposal.ToString("D")), ("$at", at.ToString("O")));
+        Execute(connection, $"CREATE TABLE improvement_proposals(proposal_id TEXT PRIMARY KEY,{(withRevision ? "revision INTEGER NOT NULL DEFAULT 1," : string.Empty)}status TEXT NOT NULL,target_kind TEXT NOT NULL,target_label TEXT NOT NULL,title TEXT NOT NULL,summary TEXT NOT NULL,expected_effect TEXT NOT NULL,risk_note TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,recommended_at TEXT NULL,verified_at TEXT NULL); CREATE TABLE improvement_proposal_sessions(proposal_id TEXT NOT NULL,proposal_revision INTEGER NOT NULL DEFAULT 1,session_id TEXT NOT NULL,source_order INTEGER NOT NULL,PRIMARY KEY(proposal_id,session_id)); CREATE TABLE improvement_proposal_evidence(proposal_id TEXT NOT NULL,evidence_order INTEGER NOT NULL,kind TEXT NOT NULL,reference_id TEXT NOT NULL,PRIMARY KEY(proposal_id,evidence_order)); INSERT INTO improvement_proposals(proposal_id,{(withRevision ? "revision," : string.Empty)}status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at) VALUES($proposal,{(withRevision ? "1," : string.Empty)}'recommended','skill','legacy','legacy','legacy','legacy','legacy',$at,$at,$at);", ("$proposal", proposal.ToString("D")), ("$at", at.ToString("O")));
     }
 
     private static void CreateLegacyApplySchema(SqliteConnection connection, Guid proposal, Guid draft, Guid apply, bool withUpdatedAt, bool withRevision, DateTimeOffset at)
     {
         var updated = withUpdatedAt ? ",updated_at TEXT NOT NULL" : string.Empty;
         var revisions = withRevision ? ",proposal_revision INTEGER NOT NULL DEFAULT 1" : string.Empty;
-        Execute(connection, $"CREATE TABLE proposal_apply_drafts(draft_id TEXT PRIMARY KEY,proposal_id TEXT NOT NULL{revisions},root_id TEXT NOT NULL,selection_revision INTEGER NOT NULL,approval_digest TEXT NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL{updated}); CREATE TABLE proposal_apply_files(draft_id TEXT NOT NULL,file_order INTEGER NOT NULL,base_sha256 TEXT NOT NULL,replacement_sha256 TEXT NOT NULL,PRIMARY KEY(draft_id,file_order)); CREATE TABLE proposal_apply_hunks(draft_id TEXT NOT NULL,hunk_id TEXT NOT NULL,selected INTEGER NOT NULL,replacement_sha256 TEXT NOT NULL,PRIMARY KEY(draft_id,hunk_id)); CREATE TABLE proposal_apply_revisions(draft_id TEXT NOT NULL,selection_revision INTEGER NOT NULL,approval_digest TEXT NOT NULL,approved_at TEXT NULL,PRIMARY KEY(draft_id,selection_revision)); CREATE TABLE proposal_applies(apply_id TEXT PRIMARY KEY,draft_id TEXT NOT NULL{revisions},state TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE proposal_apply_audit(audit_id INTEGER PRIMARY KEY,apply_id TEXT NULL,draft_id TEXT NULL,proposal_id TEXT NOT NULL,root_id TEXT NOT NULL,actor_kind TEXT NOT NULL,state TEXT NOT NULL,error_code TEXT NULL,file_count INTEGER NOT NULL,recorded_at TEXT NOT NULL); INSERT INTO proposal_apply_drafts(draft_id,proposal_id{(withRevision ? ",proposal_revision" : string.Empty)},root_id,selection_revision,approval_digest,state,created_at{(withUpdatedAt ? ",updated_at" : string.Empty)}) VALUES($draft,$proposal{(withRevision ? ",1" : string.Empty)},'root',1,'legacy','applied',$at{(withUpdatedAt ? ",$at" : string.Empty)}); INSERT INTO proposal_applies(apply_id,draft_id{(withRevision ? ",proposal_revision" : string.Empty)},state,created_at) VALUES($apply,$draft{(withRevision ? ",1" : string.Empty)},'applied',$at);", ("$proposal", proposal.ToString("D")), ("$draft", draft.ToString("D")), ("$apply", apply.ToString("D")), ("$at", at.ToString("O")));
+        Execute(connection, $"CREATE TABLE proposal_apply_drafts(draft_id TEXT PRIMARY KEY,proposal_id TEXT NOT NULL{revisions},root_id TEXT NOT NULL,selection_revision INTEGER NOT NULL,approval_digest TEXT NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL{updated}); CREATE TABLE proposal_apply_files(draft_id TEXT NOT NULL,file_order INTEGER NOT NULL,base_sha256 TEXT NOT NULL,replacement_sha256 TEXT NOT NULL,PRIMARY KEY(draft_id,file_order)); CREATE TABLE proposal_apply_hunks(draft_id TEXT NOT NULL,hunk_id TEXT NOT NULL,selected INTEGER NOT NULL,replacement_sha256 TEXT NOT NULL,PRIMARY KEY(draft_id,hunk_id)); CREATE TABLE proposal_apply_revisions(draft_id TEXT NOT NULL,selection_revision INTEGER NOT NULL,approval_digest TEXT NOT NULL,approved_at TEXT NULL,PRIMARY KEY(draft_id,selection_revision)); CREATE TABLE proposal_applies(apply_id TEXT PRIMARY KEY,draft_id TEXT NOT NULL{revisions},state TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE proposal_apply_audit(audit_id INTEGER PRIMARY KEY,apply_id TEXT NULL,draft_id TEXT NULL,proposal_id TEXT NOT NULL,root_id TEXT NOT NULL,actor_kind TEXT NOT NULL,state TEXT NOT NULL,error_code TEXT NULL,file_count INTEGER NOT NULL,recorded_at TEXT NOT NULL); INSERT INTO proposal_apply_drafts(draft_id,proposal_id{(withRevision ? ",proposal_revision" : string.Empty)},root_id,selection_revision,approval_digest,state,created_at{(withUpdatedAt ? ",updated_at" : string.Empty)}) VALUES($draft,$proposal{(withRevision ? ",1" : string.Empty)},$root,1,'legacy','applied',$at{(withUpdatedAt ? ",$at" : string.Empty)}); INSERT INTO proposal_applies(apply_id,draft_id{(withRevision ? ",proposal_revision" : string.Empty)},state,created_at) VALUES($apply,$draft{(withRevision ? ",1" : string.Empty)},'applied',$at);", ("$proposal", proposal.ToString("D")), ("$draft", draft.ToString("D")), ("$apply", apply.ToString("D")), ("$root", Guid.CreateVersion7().ToString("D")), ("$at", at.ToString("O")));
     }
 
     private static void CreateLegacyObjectiveSchema(SqliteConnection connection, Guid session, DateTimeOffset at) =>
