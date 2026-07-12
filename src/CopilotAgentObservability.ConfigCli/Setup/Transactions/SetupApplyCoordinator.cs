@@ -105,46 +105,77 @@ internal sealed class SetupApplyCoordinator
         catch (Exception exception)
         {
             var outcomeCode = MapApplyFailure(exception);
-            if (compensationEligible && HasCompensatableJournal(changeSetId) &&
-                !Compensate(setupLock, changeSetId, outcomeCode))
+            if (compensationEligible)
             {
-                throw new SetupApplyException(SetupCodes.PartialApply);
+                var compensation = Compensate(setupLock, changeSetId, outcomeCode);
+                if (compensation == CompensationOutcome.Partial)
+                {
+                    throw new SetupApplyException(SetupCodes.PartialApply);
+                }
+
+                if (compensation == CompensationOutcome.RecoveryRequired)
+                {
+                    throw new SetupApplyException(SetupCodes.RecoveryRequired);
+                }
             }
 
             throw new SetupApplyException(outcomeCode);
         }
     }
 
-    private bool HasCompensatableJournal(Guid changeSetId)
+    private CompensationOutcome Compensate(SetupLock setupLock, Guid changeSetId, string forwardOutcome)
     {
-        try
+        if (!TryLoadJournalAfterFailure(changeSetId, out var initialJournal))
         {
-            var journal = journalStore.Load(changeSetId);
-            return journal is
-            {
-                Operation: SetupJournalOperation.Apply,
-                Phase: SetupJournalPhase.Prepared or SetupJournalPhase.Applying or SetupJournalPhase.Compensating,
-            };
+            return CompensationOutcome.RecoveryRequired;
         }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
 
-    private bool Compensate(SetupLock setupLock, Guid changeSetId, string forwardOutcome)
-    {
+        if (initialJournal is null)
+        {
+            return IsLedgerStillPlanned(changeSetId)
+                ? CompensationOutcome.OriginalFailure
+                : CompensationOutcome.RecoveryRequired;
+        }
+
+        if (initialJournal.Operation != SetupJournalOperation.Apply)
+        {
+            return CompensationOutcome.RecoveryRequired;
+        }
+
+        if (initialJournal.Phase is SetupJournalPhase.Committed or SetupJournalPhase.Restored)
+        {
+            return CompensationOutcome.OriginalFailure;
+        }
+
+        if (initialJournal.Phase == SetupJournalPhase.Partial)
+        {
+            return CompensationOutcome.Partial;
+        }
+
         try
         {
             var plan = planStore.Load(changeSetId);
-            if (plan is null || !EnsureJournalCompensating(setupLock, changeSetId) ||
-                !EnsureLedgerCompensating(setupLock, changeSetId))
+            if (plan is null || !EnsureJournalCompensating(setupLock, changeSetId, initialJournal))
             {
-                PersistPartialLedger(setupLock, changeSetId, null, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
-                return false;
+                return CompensationOutcome.RecoveryRequired;
             }
 
-            var journal = journalStore.Load(changeSetId)!;
+            if (!EnsureLedgerCompensating(setupLock, changeSetId))
+            {
+                return PersistPartial(
+                    setupLock,
+                    changeSetId,
+                    new CompensationFailure(null, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed))
+                    ? CompensationOutcome.Partial
+                    : CompensationOutcome.RecoveryRequired;
+            }
+
+            if (!TryLoadJournalOnce(changeSetId, out var journal) || journal is null ||
+                journal.Phase != SetupJournalPhase.Compensating)
+            {
+                return CompensationOutcome.RecoveryRequired;
+            }
+
             for (var targetIndex = journal.Targets.Count - 1; targetIndex >= 0; targetIndex--)
             {
                 var target = journal.Targets[targetIndex];
@@ -165,8 +196,9 @@ internal sealed class SetupApplyCoordinator
                     var failure = CompensateStep(setupLock, changeSetId, planTarget, step);
                     if (failure is not null)
                     {
-                        PersistPartial(setupLock, changeSetId, failure);
-                        return false;
+                        return PersistPartial(setupLock, changeSetId, failure)
+                            ? CompensationOutcome.Partial
+                            : CompensationOutcome.RecoveryRequired;
                     }
                 }
             }
@@ -174,36 +206,32 @@ internal sealed class SetupApplyCoordinator
             var verificationFailure = VerifyAllPrevious(plan, journal);
             if (verificationFailure is not null)
             {
-                PersistPartial(setupLock, changeSetId, verificationFailure);
-                return false;
+                return PersistPartial(setupLock, changeSetId, verificationFailure)
+                    ? CompensationOutcome.Partial
+                    : CompensationOutcome.RecoveryRequired;
             }
 
-            try
+            if (!TryMarkJournalPhase(setupLock, changeSetId, SetupJournalPhase.Restored))
             {
-                journalStore.MarkTransactionPhase(setupLock, changeSetId, SetupJournalPhase.Restored);
-            }
-            catch (Exception)
-            {
-                if (journalStore.Load(changeSetId)?.Phase != SetupJournalPhase.Restored)
-                {
-                    PersistPartial(setupLock, changeSetId,
-                        new CompensationFailure(null, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed));
-                    return false;
-                }
+                return PersistPartial(
+                    setupLock,
+                    changeSetId,
+                    new CompensationFailure(null, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed))
+                    ? CompensationOutcome.Partial
+                    : CompensationOutcome.RecoveryRequired;
             }
 
             if (!PersistRestoredLedger(setupLock, changeSetId, forwardOutcome))
             {
-                PersistPartialLedger(
-                    setupLock,
-                    changeSetId,
-                    null,
-                    SetupCodes.InternalError,
-                    SetupLedgerRollbackStatus.Failed);
-                return false;
+                return CompensationOutcome.RecoveryRequired;
             }
 
-            var terminal = journalStore.Load(changeSetId)!;
+            if (!TryLoadJournalOnce(changeSetId, out var terminal) || terminal is null ||
+                terminal.Phase != SetupJournalPhase.Restored)
+            {
+                return CompensationOutcome.RecoveryRequired;
+            }
+
             if (terminal.EnvironmentNotification == SetupEnvironmentNotification.Pending)
             {
                 try
@@ -217,22 +245,25 @@ internal sealed class SetupApplyCoordinator
                 }
             }
 
-            return true;
+            return CompensationOutcome.Restored;
         }
         catch (Exception)
         {
-            PersistPartialLedger(setupLock, changeSetId, null, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
-            return false;
+            return PersistPartial(
+                setupLock,
+                changeSetId,
+                new CompensationFailure(null, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed))
+                ? CompensationOutcome.Partial
+                : CompensationOutcome.RecoveryRequired;
         }
     }
 
-    private bool EnsureJournalCompensating(SetupLock setupLock, Guid changeSetId)
+    private bool EnsureJournalCompensating(
+        SetupLock setupLock,
+        Guid changeSetId,
+        SetupTransactionJournal initial)
     {
-        var current = journalStore.Load(changeSetId);
-        if (current is null || current.Operation != SetupJournalOperation.Apply)
-        {
-            return false;
-        }
+        var current = initial;
 
         if (current.Phase == SetupJournalPhase.Prepared &&
             !TryMarkJournalPhase(setupLock, changeSetId, SetupJournalPhase.Applying))
@@ -240,9 +271,13 @@ internal sealed class SetupApplyCoordinator
             return false;
         }
 
-        current = journalStore.Load(changeSetId);
-        return current?.Phase == SetupJournalPhase.Compensating ||
-            current?.Phase == SetupJournalPhase.Applying &&
+        if (!TryLoadJournalOnce(changeSetId, out current) || current is null)
+        {
+            return false;
+        }
+
+        return current.Phase == SetupJournalPhase.Compensating ||
+            current.Phase == SetupJournalPhase.Applying &&
             TryMarkJournalPhase(setupLock, changeSetId, SetupJournalPhase.Compensating);
     }
 
@@ -251,12 +286,12 @@ internal sealed class SetupApplyCoordinator
         try
         {
             journalStore.MarkTransactionPhase(setupLock, changeSetId, phase);
+            return true;
         }
         catch (Exception)
         {
+            return TryLoadJournalOnce(changeSetId, out var current) && current?.Phase == phase;
         }
-
-        return journalStore.Load(changeSetId)?.Phase == phase;
     }
 
     private bool EnsureLedgerCompensating(SetupLock setupLock, Guid changeSetId)
@@ -290,13 +325,20 @@ internal sealed class SetupApplyCoordinator
         try
         {
             SaveChangedSet(setupLock, ledger, index, compensating);
+            return true;
         }
         catch (Exception)
         {
+            try
+            {
+                return ledgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == changeSetId).State ==
+                    SetupChangeSetState.Compensating;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
-
-        return ledgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == changeSetId).State ==
-            SetupChangeSetState.Compensating;
     }
 
     private CompensationFailure? CompensateStep(
@@ -370,12 +412,19 @@ internal sealed class SetupApplyCoordinator
         try
         {
             journalStore.MarkStepPhase(setupLock, changeSetId, recordId, memberKey, expected, next);
+            return true;
         }
         catch (Exception)
         {
+            try
+            {
+                return ReloadStep(changeSetId, recordId, memberKey).Phase == next;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
-
-        return ReloadStep(changeSetId, recordId, memberKey).Phase == next;
     }
 
     private bool TryCompleteRestore(SetupLock setupLock, Guid changeSetId, Guid recordId, string? memberKey)
@@ -477,53 +526,84 @@ internal sealed class SetupApplyCoordinator
         return null;
     }
 
-    private void PersistPartial(SetupLock setupLock, Guid changeSetId, CompensationFailure failure)
+    private bool PersistPartial(SetupLock setupLock, Guid changeSetId, CompensationFailure failure)
     {
-        try
+        SetupTransactionJournal? journal;
+        if (!TryLoadJournalOnce(changeSetId, out journal) || journal is null)
         {
-            if (journalStore.Load(changeSetId)?.Phase == SetupJournalPhase.Compensating)
+            return false;
+        }
+
+        if (journal.Phase == SetupJournalPhase.Compensating)
+        {
+            if (!TryMarkJournalPhase(setupLock, changeSetId, SetupJournalPhase.Partial))
             {
-                journalStore.MarkTransactionPhase(setupLock, changeSetId, SetupJournalPhase.Partial);
+                return false;
             }
         }
-        catch (Exception)
+        else if (journal.Phase != SetupJournalPhase.Partial)
         {
+            return false;
         }
 
-        PersistPartialLedger(setupLock, changeSetId, failure.RecordId, failure.Code, failure.RollbackStatus);
+        return PersistPartialLedger(
+            setupLock,
+            changeSetId,
+            failure.RecordId,
+            failure.Code,
+            failure.RollbackStatus);
     }
 
-    private void PersistPartialLedger(
+    private bool PersistPartialLedger(
         SetupLock setupLock,
         Guid changeSetId,
         Guid? failedRecordId,
         string failureCode,
         SetupLedgerRollbackStatus rollbackStatus)
     {
+        SetupOwnershipLedger ledger;
         try
         {
-            var ledger = ledgerStore.Load();
-            var index = FindChangeSet(ledger, changeSetId);
-            var current = ledger.ChangeSets[index];
-            if (current.State is SetupChangeSetState.Applied or SetupChangeSetState.Restored or
-                SetupChangeSetState.NoChanges or SetupChangeSetState.RolledBack)
-            {
-                return;
-            }
-
-            var partial = current with
-            {
-                UpdatedAt = platform.Clock.UtcNow,
-                OutcomeCode = SetupCodes.PartialApply,
-                State = SetupChangeSetState.Partial,
-                Targets = current.Targets.Select(target => target.RecordId == failedRecordId || failedRecordId is null
-                    ? target with { OutcomeCode = failureCode, RollbackStatus = rollbackStatus }
-                    : target).ToArray(),
-            };
-            SaveChangedSet(setupLock, ledger, index, partial);
+            ledger = ledgerStore.Load();
         }
         catch (Exception)
         {
+            return false;
+        }
+
+        var index = FindChangeSet(ledger, changeSetId);
+        var current = ledger.ChangeSets[index];
+        if (current.State is SetupChangeSetState.Applied or SetupChangeSetState.Restored or
+            SetupChangeSetState.NoChanges or SetupChangeSetState.RolledBack)
+        {
+            return false;
+        }
+
+        var partial = current with
+        {
+            UpdatedAt = platform.Clock.UtcNow,
+            OutcomeCode = SetupCodes.PartialApply,
+            State = SetupChangeSetState.Partial,
+            Targets = current.Targets.Select(target => target.RecordId == failedRecordId || failedRecordId is null
+                ? target with { OutcomeCode = failureCode, RollbackStatus = rollbackStatus }
+                : target).ToArray(),
+        };
+        try
+        {
+            SaveChangedSet(setupLock, ledger, index, partial);
+            return true;
+        }
+        catch (Exception)
+        {
+            try
+            {
+                return ledgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == changeSetId).State ==
+                    SetupChangeSetState.Partial;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
     }
 
@@ -553,18 +633,62 @@ internal sealed class SetupApplyCoordinator
         try
         {
             SaveChangedSet(setupLock, ledger, index, restored);
+            return true;
         }
         catch (Exception)
         {
+            try
+            {
+                return ledgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == changeSetId).State ==
+                    SetupChangeSetState.Restored;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
-
-        return ledgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == changeSetId).State ==
-            SetupChangeSetState.Restored;
     }
 
     private SetupJournalStep ReloadStep(Guid changeSetId, Guid recordId, string? memberKey) =>
         journalStore.Load(changeSetId)!.Targets.Single(target => target.RecordId == recordId).Steps
             .Single(step => string.Equals(step.MemberKey, memberKey, StringComparison.Ordinal));
+
+    private bool TryLoadJournalAfterFailure(Guid changeSetId, out SetupTransactionJournal? journal)
+    {
+        if (TryLoadJournalOnce(changeSetId, out journal))
+        {
+            return true;
+        }
+
+        return TryLoadJournalOnce(changeSetId, out journal);
+    }
+
+    private bool TryLoadJournalOnce(Guid changeSetId, out SetupTransactionJournal? journal)
+    {
+        try
+        {
+            journal = journalStore.Load(changeSetId);
+            return true;
+        }
+        catch (Exception)
+        {
+            journal = null;
+            return false;
+        }
+    }
+
+    private bool IsLedgerStillPlanned(Guid changeSetId)
+    {
+        try
+        {
+            return ledgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == changeSetId).State ==
+                SetupChangeSetState.Planned;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
 
     private static int FindChangeSet(SetupOwnershipLedger ledger, Guid changeSetId)
     {
@@ -967,6 +1091,14 @@ internal sealed class SetupApplyCoordinator
         Desired,
         ThirdParty,
         Error,
+    }
+
+    private enum CompensationOutcome
+    {
+        OriginalFailure,
+        Restored,
+        Partial,
+        RecoveryRequired,
     }
 
     private sealed record CompensationFailure(

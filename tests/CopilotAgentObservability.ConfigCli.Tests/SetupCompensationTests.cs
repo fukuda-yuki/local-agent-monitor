@@ -12,6 +12,8 @@ public sealed class SetupCompensationTests
     [InlineData("ENV_A", true)]
     [InlineData("ENV_B", false)]
     [InlineData("ENV_B", true)]
+    [InlineData("ENV_C", false)]
+    [InlineData("ENV_C", true)]
     public void Apply_EnvironmentForwardFaultBeforeOrAfterEffectRestoresThePriorAggregate(
         string member,
         bool afterEffect)
@@ -33,6 +35,85 @@ public sealed class SetupCompensationTests
         Assert.Equal(SetupCodes.InternalError, exception.Code);
         Assert.DoesNotContain("PRIVATE_VALUE", exception.Message, StringComparison.Ordinal);
         AssertFullyRestored(fixture);
+    }
+
+    [Fact]
+    public void Apply_OneShotJournalReadFailureAfterForwardPrimitiveFailureStillCompensates()
+    {
+        var fixture = CompensationFixture.Create();
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        fixture.Platform.InjectAfterEffectFault(
+            "environment.set:ENV_B",
+            new IOException("FORWARD_PRIVATE"),
+            () => fixture.Platform.InjectFault(
+                $"file.read-bounded:{journalPath}:{SetupTransactionJournalStore.MaximumJournalBytes}",
+                new IOException("JOURNAL_PRIVATE")));
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        AssertFullyRestored(fixture);
+        Assert.DoesNotContain("JOURNAL_PRIVATE", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Apply_UnprovenJournalReadAfterForwardPrimitiveFailureRequiresRecovery()
+    {
+        var fixture = CompensationFixture.Create();
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        var readOperation = $"file.read-bounded:{journalPath}:{SetupTransactionJournalStore.MaximumJournalBytes}";
+        fixture.Platform.InjectAfterEffectFault(
+            "environment.set:ENV_B",
+            new IOException("FORWARD_PRIVATE"),
+            () =>
+            {
+                fixture.Platform.InjectFault(readOperation, new IOException("JOURNAL_PRIVATE_ONE"));
+                fixture.Platform.InjectFault(readOperation, new IOException("JOURNAL_PRIVATE_TWO"));
+            });
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(SetupJournalPhase.Applying, fixture.JournalStore.Load(fixture.ChangeSetId)!.Phase);
+        Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet().State);
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.DoesNotContain("JOURNAL_PRIVATE", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(SetupFaultPoint.AfterRestoreIntentBeforeRestore, false)]
+    [InlineData(SetupFaultPoint.AfterRestoreBeforeCompletion, true)]
+    public void Apply_RestoreCheckpointFaultClassifiesPhysicalEffectBeforeContinuing(
+        string faultPoint,
+        bool effectOccurred)
+    {
+        var fixture = CompensationFixture.Create();
+        fixture.Platform.InjectAfterEffectFault("environment.set:ENV_B", new IOException("FORWARD_PRIVATE"));
+        fixture.Platform.InjectFault($"checkpoint:{faultPoint}", new IOException("RESTORE_PRIVATE"));
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        if (effectOccurred)
+        {
+            Assert.Equal(SetupCodes.InternalError, exception.Code);
+            AssertFullyRestored(fixture);
+        }
+        else
+        {
+            Assert.Equal(SetupCodes.PartialApply, exception.Code);
+            Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+            Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+            Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_B"));
+            Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        }
     }
 
     [Fact]
@@ -197,6 +278,57 @@ public sealed class SetupCompensationTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task Apply_FileRestorePrimitiveFaultClassifiesBeforeOrAfterEffect(bool afterEffect)
+    {
+        var fixture = CompensationFixture.Create(includeEnvironment: false);
+        using var forwardBarrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterMutationBeforeCompletion}");
+        using var restoreBarrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterRestoreIntentBeforeRestore}");
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        forwardBarrier.WaitUntilReached(CancellationToken.None);
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        fixture.Platform.InjectFault(
+            $"file.write-new:{NextTemporaryPath(fixture.Platform.Operations, journalPath)}",
+            new IOException("FORWARD_PRIVATE"));
+        forwardBarrier.Release();
+
+        restoreBarrier.WaitUntilReached(CancellationToken.None);
+        var restoreTemporary = NextTemporaryPath(fixture.Platform.Operations, fixture.TargetPath);
+        var restoreOperation = $"file.replace:{restoreTemporary}->{fixture.TargetPath}";
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(restoreOperation, new IOException("RESTORE_PRIVATE"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault(restoreOperation, new IOException("RESTORE_PRIVATE"));
+        }
+        restoreBarrier.Release();
+
+        var exception = await applying;
+        if (afterEffect)
+        {
+            Assert.Equal(SetupCodes.InternalError, exception.Code);
+            Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+            Assert.Equal(SetupJournalPhase.Restored, fixture.JournalStore.Load(fixture.ChangeSetId)!.Phase);
+            Assert.Equal(SetupChangeSetState.Restored, fixture.LoadChangeSet().State);
+        }
+        else
+        {
+            Assert.Equal(SetupCodes.PartialApply, exception.Code);
+            Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+            Assert.Equal(SetupJournalPhase.Partial, fixture.JournalStore.Load(fixture.ChangeSetId)!.Phase);
+            Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+        }
+
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Apply_RestoreCompletionWriteFaultStopsWithoutRestoringEarlierSteps(bool afterEffect)
     {
         var fixture = CompensationFixture.Create();
@@ -231,7 +363,7 @@ public sealed class SetupCompensationTests
     }
 
     [Fact]
-    public async Task Apply_RestoredLedgerPreReplaceFaultRecordsPartialLedgerWithoutRepeatingRestores()
+    public async Task Apply_RestoredLedgerPreReplaceFaultLeavesJournalAheadForRecoveryWithoutRepeatingRestores()
     {
         var fixture = CompensationFixture.Create();
         fixture.Platform.InjectAfterEffectFault("environment.set:ENV_B", new IOException("FORWARD_PRIVATE"));
@@ -247,10 +379,45 @@ public sealed class SetupCompensationTests
         barrier.Release();
 
         var exception = await applying;
-        Assert.Equal(SetupCodes.PartialApply, exception.Code);
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
         AssertFullyPriorValues(fixture);
         Assert.Equal(SetupJournalPhase.Restored, fixture.JournalStore.Load(fixture.ChangeSetId)!.Phase);
-        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+        Assert.Equal(SetupChangeSetState.Compensating, fixture.LoadChangeSet().State);
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public async Task Apply_UnprovenJournalPartialNeverAdvancesLedgerToPartial()
+    {
+        var fixture = CompensationFixture.Create();
+        var barrierReady = new TaskCompletionSource<SetupTestBarrier>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Platform.InjectAfterEffectFault(
+            "environment.set:ENV_B",
+            new IOException("FORWARD_PRIVATE"),
+            () =>
+            {
+                fixture.Platform.SeedUserEnvironment("ENV_A", "third-party");
+                barrierReady.SetResult(fixture.Platform.AddBarrier("environment.get:ENV_A"));
+            });
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        using var barrier = await barrierReady.Task;
+        barrier.WaitUntilReached(CancellationToken.None);
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        fixture.Platform.InjectFault(
+            $"file.write-new:{NextTemporaryPath(fixture.Platform.Operations, journalPath)}",
+            new IOException("PRIVATE_JOURNAL"));
+        barrier.Release();
+
+        var exception = await applying;
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(SetupJournalPhase.Compensating, fixture.JournalStore.Load(fixture.ChangeSetId)!.Phase);
+        Assert.Equal(SetupChangeSetState.Compensating, fixture.LoadChangeSet().State);
+        Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
         Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
     }
 
@@ -313,7 +480,7 @@ public sealed class SetupCompensationTests
 
     private static string NextTemporaryPath(IReadOnlyList<string> operations, string destination)
     {
-        var marker = destination + ".cao-00000000-0000-7000-8000-";
+        const string marker = ".cao-00000000-0000-7000-8000-";
         var maximum = operations
             .Where(operation => operation.Contains(marker, StringComparison.Ordinal))
             .Select(operation => operation[(operation.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..])
@@ -321,7 +488,7 @@ public sealed class SetupCompensationTests
             .Select(long.Parse)
             .DefaultIfEmpty()
             .Max();
-        return marker + (maximum + 1).ToString("D12") + ".tmp";
+        return destination + marker + (maximum + 1).ToString("D12") + ".tmp";
     }
 
     private static int LastIndexOf(IReadOnlyList<string> values, string value)
@@ -352,7 +519,7 @@ public sealed class SetupCompensationTests
 
     private sealed class CompensationFixture
     {
-        private CompensationFixture(bool fileNoChange)
+        private CompensationFixture(bool fileNoChange, bool includeEnvironment)
         {
             Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 12, 1, 2, 3, TimeSpan.Zero));
             Paths = new SetupRuntimePaths(Platform);
@@ -370,6 +537,31 @@ public sealed class SetupCompensationTests
             var environmentCapture = environmentStep.Capture(["ENV_A", "ENV_B", "ENV_C"]);
             var fileDesired = fileNoChange ? "old" : "new";
             var fileOperation = fileNoChange ? SetupOperation.NoOp : SetupOperation.Replace;
+            var planTargets = new List<SetupPrivatePlanTarget>
+            {
+                new(
+                    FileRecordId,
+                    SetupTargetKind.Json,
+                    TargetPath,
+                    SetupHash.File(true, Encoding.UTF8.GetBytes("old")),
+                    fileDesired,
+                    [new SetupPrivatePlanMember("setting", fileOperation, fileDesired)]),
+            };
+            if (includeEnvironment)
+            {
+                planTargets.Add(new SetupPrivatePlanTarget(
+                    EnvironmentRecordId,
+                    SetupTargetKind.Env,
+                    "current-user",
+                    environmentCapture.AggregateHash,
+                    "environment-allowlist",
+                    [
+                        new SetupPrivatePlanMember("ENV_A", SetupOperation.Replace, "desired-a"),
+                        new SetupPrivatePlanMember("ENV_B", SetupOperation.Remove, null),
+                        new SetupPrivatePlanMember("ENV_C", SetupOperation.Replace, "desired-c"),
+                    ]));
+            }
+
             var plan = new SetupPrivatePlan(
                 1,
                 ChangeSetId,
@@ -377,26 +569,44 @@ public sealed class SetupCompensationTests
                 "vscode",
                 Platform.Clock.UtcNow,
                 "1.0.0",
-                [
-                    new SetupPrivatePlanTarget(
-                        FileRecordId,
-                        SetupTargetKind.Json,
-                        TargetPath,
-                        SetupHash.File(true, Encoding.UTF8.GetBytes("old")),
-                        fileDesired,
-                        [new SetupPrivatePlanMember("setting", fileOperation, fileDesired)]),
-                    new SetupPrivatePlanTarget(
-                        EnvironmentRecordId,
-                        SetupTargetKind.Env,
-                        "current-user",
-                        environmentCapture.AggregateHash,
-                        "environment-allowlist",
-                        [
-                            new SetupPrivatePlanMember("ENV_A", SetupOperation.Replace, "desired-a"),
-                            new SetupPrivatePlanMember("ENV_B", SetupOperation.Remove, null),
-                            new SetupPrivatePlanMember("ENV_C", SetupOperation.Replace, "desired-c"),
-                        ]),
-                ]);
+                planTargets);
+            var ledgerTargets = new List<SetupLedgerTarget>
+            {
+                new(
+                    FileRecordId,
+                    SetupTargetKind.Json,
+                    "settings",
+                    "github-copilot",
+                    [new SetupLedgerMember("setting", fileOperation)],
+                    plan.Targets[0].BaseStateHash,
+                    null,
+                    null,
+                    null,
+                    SetupLedgerRollbackStatus.NotAvailable,
+                    SetupRestartRequirement.RestartVsCode,
+                    "1.0.0"),
+            };
+            if (includeEnvironment)
+            {
+                ledgerTargets.Add(new SetupLedgerTarget(
+                    EnvironmentRecordId,
+                    SetupTargetKind.Env,
+                    "user-environment",
+                    "github-copilot",
+                    [
+                        new SetupLedgerMember("ENV_A", SetupOperation.Replace),
+                        new SetupLedgerMember("ENV_B", SetupOperation.Remove),
+                        new SetupLedgerMember("ENV_C", SetupOperation.Replace),
+                    ],
+                    plan.Targets[1].BaseStateHash,
+                    null,
+                    null,
+                    null,
+                    SetupLedgerRollbackStatus.NotAvailable,
+                    SetupRestartRequirement.RestartTerminalSession,
+                    "1.0.0"));
+            }
+
             var ledgerChangeSet = new SetupLedgerChangeSet(
                 ChangeSetId,
                 "github-copilot",
@@ -406,38 +616,7 @@ public sealed class SetupCompensationTests
                 "1.0.0",
                 null,
                 SetupChangeSetState.Planned,
-                [
-                    new SetupLedgerTarget(
-                        FileRecordId,
-                        SetupTargetKind.Json,
-                        "settings",
-                        "github-copilot",
-                        [new SetupLedgerMember("setting", fileOperation)],
-                        plan.Targets[0].BaseStateHash,
-                        null,
-                        null,
-                        null,
-                        SetupLedgerRollbackStatus.NotAvailable,
-                        SetupRestartRequirement.RestartVsCode,
-                        "1.0.0"),
-                    new SetupLedgerTarget(
-                        EnvironmentRecordId,
-                        SetupTargetKind.Env,
-                        "user-environment",
-                        "github-copilot",
-                        [
-                            new SetupLedgerMember("ENV_A", SetupOperation.Replace),
-                            new SetupLedgerMember("ENV_B", SetupOperation.Remove),
-                            new SetupLedgerMember("ENV_C", SetupOperation.Replace),
-                        ],
-                        plan.Targets[1].BaseStateHash,
-                        null,
-                        null,
-                        null,
-                        SetupLedgerRollbackStatus.NotAvailable,
-                        SetupRestartRequirement.RestartTerminalSession,
-                        "1.0.0"),
-                ]);
+                ledgerTargets);
             PlanStore = new SetupPlanStore(Platform, Paths);
             LedgerStore = new SetupLedgerStore(Platform, Paths, PlanStore);
             JournalStore = new SetupTransactionJournalStore(Platform, Paths);
@@ -463,7 +642,8 @@ public sealed class SetupCompensationTests
         public SetupTransactionJournalStore JournalStore { get; }
         public SetupApplyCoordinator Coordinator { get; }
 
-        public static CompensationFixture Create(bool fileNoChange = false) => new(fileNoChange);
+        public static CompensationFixture Create(bool fileNoChange = false, bool includeEnvironment = true) =>
+            new(fileNoChange, includeEnvironment);
 
         public SetupLedgerChangeSet LoadChangeSet() =>
             LedgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
