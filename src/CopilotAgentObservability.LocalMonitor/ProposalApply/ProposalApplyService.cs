@@ -200,6 +200,7 @@ internal sealed class ProposalApplyService
     }
     private string CurrentReceiptState(ProposalApplicationReceipt receipt)
     {
+        if (store!.ListProposalApplyPending().Any(item => item.ApplyId == receipt.ApplyId)) return "pending";
         if (receipt.State == "rolled_back") return "rolled_back";
         if (receipt.State != "applied") return "pending";
         if (store!.GetImprovementProposal(receipt.ProposalId)?.Revision != receipt.ProposalRevision) return "stale";
