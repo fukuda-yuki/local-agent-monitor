@@ -10,6 +10,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SessionSchemaMigrationFixtureTests
 {
     private const int CurrentSessionSchemaVersion = 10;
+    private const string VersionTenUpgraderCommit = "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346";
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateSessionSchemaFixtures/GenerateSessionSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/session";
     private const string VersionFourLimitation = "Commit 601c2beb5cb528d1e87aba0fef150b65e1dbccc0 exposes no public proposal-apply persistence API; parameterized INSERTs populate proposal-apply rows only after its public CreateSchema, Write, and CreateImprovementProposal APIs create the schema and parent sentinels.";
 
@@ -37,23 +38,30 @@ public sealed class SessionSchemaMigrationFixtureTests
         "session_native_ids", "session_projection_state", "session_runs", "sessions",
     ];
 
-    public static TheoryData<int, string> HistoricalSchemas => new()
+    public static TheoryData<string, int, string, int?> HistoricalSchemas => new()
     {
-        { 1, "ab02e362f05798537e56c50a3048e0fbe3b9bf5a" },
-        { 2, "b5e02e0f36705eb54881c288b83f875753e11de1" },
-        { 3, "8d765ad07a46556b84ca32213e86fae28d5998b1" },
-        { 4, "601c2beb5cb528d1e87aba0fef150b65e1dbccc0" },
-        { 5, "30d5c8600d0d2abedecdb81944797d7213ef14c9" },
-        { 6, "6048da1a50473fdf8701fdb2b787b5e565fec82a" },
-        { 7, "5a28b87c05c81acecd9121ecf68f5afa2e82deae" },
-        { 8, "87f4a000932481ac6240b5ec1240318c319efdb5" },
-        { 9, "e55e2dfb0e306963065759716474385d337b17f6" },
-        { 10, "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346" },
+        { "session-v1.sqlite", 1, "ab02e362f05798537e56c50a3048e0fbe3b9bf5a", null },
+        { "session-v2.sqlite", 2, "b5e02e0f36705eb54881c288b83f875753e11de1", null },
+        { "session-v3.sqlite", 3, "8d765ad07a46556b84ca32213e86fae28d5998b1", null },
+        { "session-v4.sqlite", 4, "601c2beb5cb528d1e87aba0fef150b65e1dbccc0", null },
+        { "session-v5.sqlite", 5, "30d5c8600d0d2abedecdb81944797d7213ef14c9", null },
+        { "session-v6.sqlite", 6, "6048da1a50473fdf8701fdb2b787b5e565fec82a", null },
+        { "session-v7.sqlite", 7, "5a28b87c05c81acecd9121ecf68f5afa2e82deae", null },
+        { "session-v8.sqlite", 8, "87f4a000932481ac6240b5ec1240318c319efdb5", null },
+        { "session-v9.sqlite", 9, "e55e2dfb0e306963065759716474385d337b17f6", null },
+        { "session-v10.sqlite", 10, VersionTenUpgraderCommit, null },
+        { "session-v10-from-v4.sqlite", 10, "601c2beb5cb528d1e87aba0fef150b65e1dbccc0", 4 },
+        { "session-v10-from-v5.sqlite", 10, "30d5c8600d0d2abedecdb81944797d7213ef14c9", 5 },
+        { "session-v10-from-v6.sqlite", 10, "6048da1a50473fdf8701fdb2b787b5e565fec82a", 6 },
     };
 
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
-    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v10_state_after_restart(int version, string sourceCommit)
+    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v10_state_after_restart(
+        string fixtureFile,
+        int version,
+        string sourceCommit,
+        int? sourceVersion)
     {
         var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "session");
         var manifestPath = Path.Combine(fixtureDirectory, "manifest.json");
@@ -64,20 +72,46 @@ public sealed class SessionSchemaMigrationFixtureTests
         Assert.Equal("session", manifest.Component);
         Assert.Equal(GenerationCommand, manifest.GenerationCommand);
         Assert.Equal("git status --porcelain", manifest.GitStatusCommand);
-        Assert.Equal(10, manifest.Fixtures.Count);
-
-        var fixture = Assert.Single(manifest.Fixtures, candidate => candidate.Version == version);
+        Assert.Equal(13, manifest.Fixtures.Count);
+        var manifestIdentities = manifest.Fixtures.Select(fixture => (fixture.Version, fixture.File)).ToArray();
+        AssertReviewedManifestIdentities(manifestIdentities);
+        Assert.Throws<Xunit.Sdk.EqualException>(() => AssertReviewedManifestIdentities(
+            manifestIdentities.Append((10, "session-v10-pseudo.sqlite")).ToArray()));
+        var fixture = Assert.Single(manifest.Fixtures, candidate => candidate.File == fixtureFile);
+        Assert.Equal(version, fixture.Version);
         Assert.Equal(sourceCommit, fixture.SourceCommit);
-        Assert.Equal($"session-v{version}.sqlite", fixture.File);
+        Assert.Equal(fixtureFile, fixture.File);
         Assert.Equal(string.Empty, fixture.GitStatusBefore);
         Assert.Equal(string.Empty, fixture.GitStatusAfter);
-        var expectedLimitations = version switch
+        var contentVersion = sourceVersion ?? version;
+        var expectedLimitations = sourceVersion is not null
+            ? Array.Empty<string>()
+            : version switch
         {
             4 => [VersionFourLimitation],
             >= 9 => [$"Commit {sourceCommit} exposes RecordEffectComparison but no public comparison-ID input; after that public API persists the complete comparison graph, parameterized UPDATEs replace only its generated opaque comparison ID with the deterministic fixture sentinel so SHA-256 reproduction remains exact."],
             _ => Array.Empty<string>(),
         };
         Assert.Equal(expectedLimitations, fixture.Limitations);
+        if (sourceVersion is null)
+        {
+            Assert.Null(fixture.Lineage);
+        }
+        else
+        {
+            var sourceFixture = Assert.Single(manifest.Fixtures, candidate => candidate.File == $"session-v{sourceVersion}.sqlite");
+            var lineage = Assert.IsType<LineageProvenance>(fixture.Lineage);
+            Assert.Equal(sourceVersion, lineage.SourceVersion);
+            Assert.Equal(sourceFixture.File, lineage.SourceFixture);
+            Assert.Equal(sourceFixture.Sha256, lineage.SourceFixtureSha256);
+            Assert.Equal(VersionTenUpgraderCommit, lineage.UpgraderCommit);
+            Assert.Equal(new[]
+            {
+                $"git worktree add --detach {{upgraderWorktree}} {VersionTenUpgraderCommit}",
+                "dotnet build {upgraderWorktree}/src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj --configuration Release --artifacts-path {upgraderArtifacts} --nologo",
+                $"dotnet {{generatorAssembly}} --upgrade-one {{upgraderAssembly}} {sourceFixture.File} {fixture.File}",
+            }, lineage.Commands);
+        }
 
         var fixturePath = Path.Combine(fixtureDirectory, fixture.File);
         Assert.True(File.Exists(fixturePath), $"Missing migration fixture: {fixturePath}");
@@ -86,7 +120,8 @@ public sealed class SessionSchemaMigrationFixtureTests
         using (var historical = OpenReadOnly(fixturePath))
         {
             Assert.Equal(version, Scalar<long>(historical, "SELECT version FROM schema_version WHERE component='session';"));
-            AssertHistoricalSentinels(historical, version, fixture.Sentinels);
+            AssertHistoricalSentinels(historical, contentVersion, fixture.Sentinels);
+            if (sourceVersion is not null) AssertStampedVersionTenLineage(historical, sourceVersion.Value);
         }
 
         var migratedPath = Path.Combine(Path.GetTempPath(), $"session-migration-{Guid.NewGuid():N}.sqlite");
@@ -97,14 +132,14 @@ public sealed class SessionSchemaMigrationFixtureTests
             MigratedSnapshot firstPass;
             using (var reopened = Open(migratedPath))
             {
-                firstPass = AssertCompleteMigratedState(reopened, version, fixture.Sentinels);
+                firstPass = AssertCompleteMigratedState(reopened, contentVersion, fixture.Sentinels);
             }
 
             new SqliteSessionStore(migratedPath).CreateSchema();
             MigratedSnapshot restartPass;
             using (var reopenedAgain = Open(migratedPath))
             {
-                restartPass = AssertCompleteMigratedState(reopenedAgain, version, fixture.Sentinels);
+                restartPass = AssertCompleteMigratedState(reopenedAgain, contentVersion, fixture.Sentinels);
             }
             Assert.Equal(firstPass.SemanticSchema, restartPass.SemanticSchema);
             Assert.Equal(firstPass.Rows, restartPass.Rows);
@@ -114,6 +149,52 @@ public sealed class SessionSchemaMigrationFixtureTests
             SqliteConnection.ClearAllPools();
             File.Delete(migratedPath);
         }
+    }
+
+    private static void AssertStampedVersionTenLineage(SqliteConnection connection, int sourceVersion)
+    {
+        var tables = ReadTableNames(connection);
+        Assert.Equal(sourceVersion == 4 ? ExpectedV10Tables.Where(table => table != "proposal_apply_pending") : ExpectedV10Tables, tables);
+        Assert.Equal(sourceVersion >= 5, TableExists(connection, "proposal_apply_pending"));
+        if (sourceVersion >= 5) AssertEmpty(connection, "proposal_apply_pending");
+
+        var missingRevisionColumns = sourceVersion switch
+        {
+            4 or 5 => new[]
+            {
+                ("improvement_proposals", "revision"),
+                ("improvement_proposal_sessions", "proposal_revision"),
+                ("proposal_apply_drafts", "proposal_revision"),
+                ("proposal_applies", "proposal_revision"),
+            },
+            6 => [("improvement_proposal_sessions", "proposal_revision")],
+            _ => throw new ArgumentOutOfRangeException(nameof(sourceVersion)),
+        };
+        foreach (var (table, column) in new[]
+        {
+            ("improvement_proposals", "revision"),
+            ("improvement_proposal_sessions", "proposal_revision"),
+            ("proposal_apply_drafts", "proposal_revision"),
+            ("proposal_applies", "proposal_revision"),
+        })
+        {
+            Assert.Equal(!missingRevisionColumns.Contains((table, column)), ColumnExists(connection, table, column));
+        }
+
+        foreach (var table in new[]
+        {
+            "objective_evaluations", "objective_evaluation_evidence", "effect_comparisons",
+            "effect_comparison_sessions", "effect_comparison_evidence", "effect_receipts",
+        })
+        {
+            Assert.True(TableExists(connection, table), $"Stamped-v10 lineage from v{sourceVersion} is missing {table}.");
+            AssertEmpty(connection, table);
+        }
+    }
+
+    private static void AssertReviewedManifestIdentities(IReadOnlyList<(int Version, string File)> actual)
+    {
+        Assert.Equal(ReviewedFixtureIdentities, actual);
     }
 
     private static void AssertHistoricalSentinels(SqliteConnection connection, int version, FixtureSentinels sentinels)
@@ -512,6 +593,22 @@ public sealed class SessionSchemaMigrationFixtureTests
         return connection;
     }
 
+    private static bool TableExists(SqliteConnection connection, string table)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$table;";
+        command.Parameters.AddWithValue("$table", table);
+        return command.ExecuteScalar() is not null;
+    }
+
+    private static bool ColumnExists(SqliteConnection connection, string table, string column)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT 1 FROM pragma_table_info('{table}') WHERE name=$column;";
+        command.Parameters.AddWithValue("$column", column);
+        return command.ExecuteScalar() is not null;
+    }
+
     private static T Scalar<T>(SqliteConnection connection, string sql, object? parameter = null)
     {
         using var command = connection.CreateCommand();
@@ -546,9 +643,40 @@ public sealed class SessionSchemaMigrationFixtureTests
     private const string N = "<null>";
 
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private static readonly (int Version, string File)[] ReviewedFixtureIdentities =
+    [
+        (1, "session-v1.sqlite"),
+        (2, "session-v2.sqlite"),
+        (3, "session-v3.sqlite"),
+        (4, "session-v4.sqlite"),
+        (5, "session-v5.sqlite"),
+        (6, "session-v6.sqlite"),
+        (7, "session-v7.sqlite"),
+        (8, "session-v8.sqlite"),
+        (9, "session-v9.sqlite"),
+        (10, "session-v10.sqlite"),
+        (10, "session-v10-from-v4.sqlite"),
+        (10, "session-v10-from-v5.sqlite"),
+        (10, "session-v10-from-v6.sqlite"),
+    ];
 
     private sealed record FixtureManifest(string Component, string GenerationCommand, string GitStatusCommand, IReadOnlyList<FixtureEntry> Fixtures);
-    private sealed record FixtureEntry(int Version, string File, string SourceCommit, string Sha256, string GitStatusBefore, string GitStatusAfter, IReadOnlyList<string> Limitations, FixtureSentinels Sentinels);
+    private sealed record FixtureEntry(
+        int Version,
+        string File,
+        string SourceCommit,
+        string Sha256,
+        string GitStatusBefore,
+        string GitStatusAfter,
+        IReadOnlyList<string> Limitations,
+        FixtureSentinels Sentinels,
+        LineageProvenance? Lineage = null);
+    private sealed record LineageProvenance(
+        int SourceVersion,
+        string SourceFixture,
+        string SourceFixtureSha256,
+        string UpgraderCommit,
+        IReadOnlyList<string> Commands);
     private sealed record FixtureSentinels(Guid SessionId, string NativeSessionId, Guid RunId, Guid EventId, string SourceEventId, string ProjectorKey, Guid? ProposalId, Guid? DraftId, Guid? ApplyId, Guid? RootId, Guid? ObjectiveEvaluationId = null, Guid? SecondarySessionId = null, string? SecondaryNativeSessionId = null, Guid? SecondaryRunId = null, Guid? SecondaryEventId = null, string? SecondarySourceEventId = null, Guid? ComparisonId = null);
     private sealed record MigratedSnapshot(string SemanticSchema, string Rows);
 }

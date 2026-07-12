@@ -14,6 +14,12 @@ if (args.Length == 4 && args[0] == "--generate-one")
     return;
 }
 
+if (args.Length == 4 && args[0] == "--upgrade-one")
+{
+    UpgradeHistoricalFixture(args[1], args[2], args[3]);
+    return;
+}
+
 var outputArgument = ParseOutputArgument(args);
 if (Path.IsPathRooted(outputArgument))
 {
@@ -31,26 +37,59 @@ if (!outputDirectory.StartsWith(repositoryPrefix, StringComparison.OrdinalIgnore
 var normalizedOutput = outputArgument.Replace('\\', '/').TrimEnd('/');
 var generationCommand = $"dotnet run --project scripts/test/GenerateSessionSchemaFixtures/GenerateSessionSchemaFixtures.csproj -- --output {normalizedOutput}";
 var temporaryRoot = Path.Combine(Path.GetTempPath(), $"session-schema-fixtures-{Guid.NewGuid():N}");
-var stagedOutput = Path.Combine(temporaryRoot, "output");
-Directory.CreateDirectory(stagedOutput);
-
-var specifications = new[]
-{
-    new FixtureSpecification(1, "ab02e362f05798537e56c50a3048e0fbe3b9bf5a"),
-    new FixtureSpecification(2, "b5e02e0f36705eb54881c288b83f875753e11de1"),
-    new FixtureSpecification(3, "8d765ad07a46556b84ca32213e86fae28d5998b1"),
-    new FixtureSpecification(4, "601c2beb5cb528d1e87aba0fef150b65e1dbccc0"),
-    new FixtureSpecification(5, "30d5c8600d0d2abedecdb81944797d7213ef14c9"),
-    new FixtureSpecification(6, "6048da1a50473fdf8701fdb2b787b5e565fec82a"),
-    new FixtureSpecification(7, "5a28b87c05c81acecd9121ecf68f5afa2e82deae"),
-    new FixtureSpecification(8, "87f4a000932481ac6240b5ec1240318c319efdb5"),
-    new FixtureSpecification(9, "e55e2dfb0e306963065759716474385d337b17f6"),
-    new FixtureSpecification(10, "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346"),
-};
-
-var entries = new List<FixtureEntry>();
 try
 {
+    var stagedOutput = Path.Combine(temporaryRoot, "output");
+    Directory.CreateDirectory(stagedOutput);
+    var approvedSourceDirectory = Path.Combine(temporaryRoot, "approved-sources");
+    Directory.CreateDirectory(approvedSourceDirectory);
+
+    const string versionTenUpgraderCommit = "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346";
+    var approvedManifestPath = Path.Combine(outputDirectory, "manifest.json");
+    if (!File.Exists(approvedManifestPath))
+    {
+        throw new InvalidOperationException("The committed Session fixture manifest is required to preserve approved lineage inputs.");
+    }
+    var approvedManifest = JsonSerializer.Deserialize<FixtureManifest>(File.ReadAllText(approvedManifestPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+        ?? throw new InvalidOperationException("The committed Session fixture manifest could not be read.");
+    var lineageSources = new List<ApprovedLineageSource>();
+    foreach (var sourceVersion in new[] { 4, 5, 6 })
+    {
+        var sourceFile = $"session-v{sourceVersion}.sqlite";
+        var sourceEntry = approvedManifest.Fixtures.Single(candidate => candidate.Version == sourceVersion && candidate.File == sourceFile);
+        var sourcePath = Path.Combine(outputDirectory, sourceFile);
+        if (!File.Exists(sourcePath)) throw new InvalidOperationException($"Approved lineage source is missing: {sourceFile}.");
+        var sourceSha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(sourcePath))).ToLowerInvariant();
+        if (!string.Equals(sourceEntry.Sha256, sourceSha256, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Approved lineage source hash changed for {sourceFile}.");
+        using (var sourceConnection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = sourcePath, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
+        {
+            sourceConnection.Open();
+            using var command = sourceConnection.CreateCommand();
+            command.CommandText = "SELECT version FROM schema_version WHERE component='session';";
+            if (Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != sourceVersion)
+                throw new InvalidOperationException($"Approved lineage source {sourceFile} is not schema v{sourceVersion}.");
+        }
+        var approvedCopyPath = Path.Combine(approvedSourceDirectory, sourceFile);
+        File.Copy(sourcePath, approvedCopyPath);
+        lineageSources.Add(new ApprovedLineageSource(sourceVersion, sourceFile, sourceEntry.SourceCommit, sourceSha256, approvedCopyPath, sourceEntry.Sentinels));
+    }
+
+    var specifications = new[]
+    {
+        new FixtureSpecification(1, "ab02e362f05798537e56c50a3048e0fbe3b9bf5a"),
+        new FixtureSpecification(2, "b5e02e0f36705eb54881c288b83f875753e11de1"),
+        new FixtureSpecification(3, "8d765ad07a46556b84ca32213e86fae28d5998b1"),
+        new FixtureSpecification(4, "601c2beb5cb528d1e87aba0fef150b65e1dbccc0"),
+        new FixtureSpecification(5, "30d5c8600d0d2abedecdb81944797d7213ef14c9"),
+        new FixtureSpecification(6, "6048da1a50473fdf8701fdb2b787b5e565fec82a"),
+        new FixtureSpecification(7, "5a28b87c05c81acecd9121ecf68f5afa2e82deae"),
+        new FixtureSpecification(8, "87f4a000932481ac6240b5ec1240318c319efdb5"),
+        new FixtureSpecification(9, "e55e2dfb0e306963065759716474385d337b17f6"),
+        new FixtureSpecification(10, "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346"),
+    };
+
+    var entries = new List<FixtureEntry>();
     foreach (var specification in specifications)
     {
         var historicalWorktree = Path.Combine(temporaryRoot, $"session-v{specification.Version}");
@@ -114,6 +153,59 @@ try
         }
     }
 
+    var upgraderWorktree = Path.Combine(temporaryRoot, "session-v10-upgrader");
+    var upgraderArtifacts = Path.Combine(temporaryRoot, "artifacts-v10-upgrader");
+    Run("git", repositoryRoot, "worktree", "add", "--detach", upgraderWorktree, versionTenUpgraderCommit);
+    try
+    {
+        var actualCommit = Run("git", repositoryRoot, "-C", upgraderWorktree, "rev-parse", "HEAD").Trim();
+        if (!string.Equals(versionTenUpgraderCommit, actualCommit, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Historical upgrader worktree resolved to {actualCommit}, expected {versionTenUpgraderCommit}.");
+
+        var statusBefore = Run("git", repositoryRoot, "-C", upgraderWorktree, "status", "--porcelain").Trim();
+        EnsureClean(10, "before lineage upgrade", statusBefore);
+        var upgraderProject = Path.Combine(upgraderWorktree, "src", "CopilotAgentObservability.Persistence.Sqlite", "CopilotAgentObservability.Persistence.Sqlite.csproj");
+        Run("dotnet", repositoryRoot, "build", upgraderProject, "--configuration", "Release", "--artifacts-path", upgraderArtifacts, "--nologo");
+        var upgraderAssembly = FindHistoricalAssembly(upgraderArtifacts);
+        var generatorAssembly = Assembly.GetExecutingAssembly().Location;
+
+        foreach (var source in lineageSources)
+        {
+            var fixtureFile = $"session-v10-from-v{source.Version}.sqlite";
+            var fixturePath = Path.Combine(stagedOutput, fixtureFile);
+            Run("dotnet", repositoryRoot, generatorAssembly, "--upgrade-one", upgraderAssembly, source.ApprovedCopyPath, fixturePath);
+            CloseAndVacuum(fixturePath);
+            EnsureNoSqliteSidecars(fixturePath);
+
+            var statusAfter = Run("git", repositoryRoot, "-C", upgraderWorktree, "status", "--porcelain").Trim();
+            EnsureClean(10, $"after v{source.Version} lineage upgrade", statusAfter);
+            entries.Add(new FixtureEntry(
+                10,
+                fixtureFile,
+                source.SourceCommit,
+                Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(fixturePath))).ToLowerInvariant(),
+                statusBefore,
+                statusAfter,
+                Array.Empty<string>(),
+                source.Sentinels,
+                new LineageProvenance(
+                    source.Version,
+                    source.File,
+                    source.Sha256,
+                    versionTenUpgraderCommit,
+                    new[]
+                    {
+                        $"git worktree add --detach {{upgraderWorktree}} {versionTenUpgraderCommit}",
+                        "dotnet build {upgraderWorktree}/src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj --configuration Release --artifacts-path {upgraderArtifacts} --nologo",
+                        $"dotnet {{generatorAssembly}} --upgrade-one {{upgraderAssembly}} {source.File} {fixtureFile}",
+                    })));
+        }
+    }
+    finally
+    {
+        Run("git", repositoryRoot, "worktree", "remove", "--force", upgraderWorktree);
+    }
+
     Directory.CreateDirectory(outputDirectory);
     foreach (var entry in entries)
     {
@@ -154,6 +246,24 @@ static string FindHistoricalAssembly(string artifactsPath)
     return candidates.Length == 1
         ? Path.GetFullPath(candidates[0])
         : throw new InvalidOperationException($"Expected one loadable historical persistence assembly, found {candidates.Length}.");
+}
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static void UpgradeHistoricalFixture(string assemblyPath, string sourceFixturePath, string fixturePath)
+{
+    File.Copy(sourceFixturePath, fixturePath, overwrite: true);
+    var loadContext = new HistoricalLoadContext(assemblyPath);
+    try
+    {
+        var persistenceAssembly = loadContext.LoadFromAssemblyPath(assemblyPath);
+        var storeType = persistenceAssembly.GetType("CopilotAgentObservability.Persistence.Sqlite.Sessions.SqliteSessionStore", throwOnError: true)!;
+        var store = Activator.CreateInstance(storeType, fixturePath, null)!;
+        Invoke(store, "CreateSchema");
+    }
+    finally
+    {
+        loadContext.Unload();
+    }
 }
 
 [MethodImpl(MethodImplOptions.NoInlining)]
@@ -352,6 +462,12 @@ static void CloseAndVacuum(string fixturePath)
     }
 }
 
+static void EnsureNoSqliteSidecars(string fixturePath)
+{
+    foreach (var suffix in new[] { "-wal", "-shm", "-journal" })
+        if (File.Exists(fixturePath + suffix)) throw new InvalidOperationException($"Unexpected SQLite sidecar: {Path.GetFileName(fixturePath)}{suffix}.");
+}
+
 static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql, params (string Name, object Value)[] parameters)
 {
     using var command = connection.CreateCommand();
@@ -407,7 +523,18 @@ sealed class HistoricalLoadContext(string assemblyPath) : AssemblyLoadContext(is
 
 sealed record FixtureSpecification(int Version, string SourceCommit);
 sealed record FixtureManifest(string Component, string GenerationCommand, string GitStatusCommand, IReadOnlyList<FixtureEntry> Fixtures);
-sealed record FixtureEntry(int Version, string File, string SourceCommit, string Sha256, string GitStatusBefore, string GitStatusAfter, IReadOnlyList<string> Limitations, FixtureSentinels Sentinels);
+sealed record FixtureEntry(
+    int Version,
+    string File,
+    string SourceCommit,
+    string Sha256,
+    string GitStatusBefore,
+    string GitStatusAfter,
+    IReadOnlyList<string> Limitations,
+    FixtureSentinels Sentinels,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] LineageProvenance? Lineage = null);
+sealed record LineageProvenance(int SourceVersion, string SourceFixture, string SourceFixtureSha256, string UpgraderCommit, IReadOnlyList<string> Commands);
+sealed record ApprovedLineageSource(int Version, string File, string SourceCommit, string Sha256, string ApprovedCopyPath, FixtureSentinels Sentinels);
 sealed record FixtureSentinels(
     Guid SessionId, string NativeSessionId, Guid RunId, Guid EventId, string SourceEventId, string ProjectorKey,
     Guid? ProposalId, Guid? DraftId, Guid? ApplyId, Guid? RootId,

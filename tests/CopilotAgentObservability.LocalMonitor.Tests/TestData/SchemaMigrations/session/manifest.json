@@ -233,6 +233,102 @@
         "secondarySourceEventId": "fixture-session-v10-secondary-event",
         "comparisonId": "00000012-0000-7000-8000-000000000010"
       }
+    },
+    {
+      "version": 10,
+      "file": "session-v10-from-v4.sqlite",
+      "sourceCommit": "601c2beb5cb528d1e87aba0fef150b65e1dbccc0",
+      "sha256": "21dfe6bceb1b950fb463178b604aefffa4a0b75a10f19dfd226e7c764a33c3a2",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000004",
+        "nativeSessionId": "fixture-session-v4-native",
+        "runId": "00000002-0000-7000-8000-000000000004",
+        "eventId": "00000003-0000-7000-8000-000000000004",
+        "sourceEventId": "fixture-session-v4-event",
+        "projectorKey": "fixture-session-v4-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000004",
+        "draftId": "00000005-0000-7000-8000-000000000004",
+        "applyId": "00000006-0000-7000-8000-000000000004",
+        "rootId": "00000007-0000-7000-8000-000000000004"
+      },
+      "lineage": {
+        "sourceVersion": 4,
+        "sourceFixture": "session-v4.sqlite",
+        "sourceFixtureSha256": "a2013cd3ed61788ebc859dc78afcfdb66e0156d8576c257b38cf73f750fd948b",
+        "upgraderCommit": "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+        "commands": [
+          "git worktree add --detach {upgraderWorktree} cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+          "dotnet build {upgraderWorktree}/src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj --configuration Release --artifacts-path {upgraderArtifacts} --nologo",
+          "dotnet {generatorAssembly} --upgrade-one {upgraderAssembly} session-v4.sqlite session-v10-from-v4.sqlite"
+        ]
+      }
+    },
+    {
+      "version": 10,
+      "file": "session-v10-from-v5.sqlite",
+      "sourceCommit": "30d5c8600d0d2abedecdb81944797d7213ef14c9",
+      "sha256": "74775c914827d116eaf0721a53c44cefd27ad4b2da15f7fa2833099f1d653605",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000005",
+        "nativeSessionId": "fixture-session-v5-native",
+        "runId": "00000002-0000-7000-8000-000000000005",
+        "eventId": "00000003-0000-7000-8000-000000000005",
+        "sourceEventId": "fixture-session-v5-event",
+        "projectorKey": "fixture-session-v5-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000005",
+        "draftId": "00000005-0000-7000-8000-000000000005",
+        "applyId": "00000006-0000-7000-8000-000000000005",
+        "rootId": "00000007-0000-7000-8000-000000000005"
+      },
+      "lineage": {
+        "sourceVersion": 5,
+        "sourceFixture": "session-v5.sqlite",
+        "sourceFixtureSha256": "9d4fb5df4f0c8c2eaeedb291fdb919c07ee29643c0f217932a66911014ae6ff2",
+        "upgraderCommit": "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+        "commands": [
+          "git worktree add --detach {upgraderWorktree} cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+          "dotnet build {upgraderWorktree}/src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj --configuration Release --artifacts-path {upgraderArtifacts} --nologo",
+          "dotnet {generatorAssembly} --upgrade-one {upgraderAssembly} session-v5.sqlite session-v10-from-v5.sqlite"
+        ]
+      }
+    },
+    {
+      "version": 10,
+      "file": "session-v10-from-v6.sqlite",
+      "sourceCommit": "6048da1a50473fdf8701fdb2b787b5e565fec82a",
+      "sha256": "26c1ddd755dd61e4b4dbcb97c6d10ac4ebdb70b1ab8c5bcc541e1f0181f4e798",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000006",
+        "nativeSessionId": "fixture-session-v6-native",
+        "runId": "00000002-0000-7000-8000-000000000006",
+        "eventId": "00000003-0000-7000-8000-000000000006",
+        "sourceEventId": "fixture-session-v6-event",
+        "projectorKey": "fixture-session-v6-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000006",
+        "draftId": "00000005-0000-7000-8000-000000000006",
+        "applyId": "00000006-0000-7000-8000-000000000006",
+        "rootId": "00000007-0000-7000-8000-000000000006"
+      },
+      "lineage": {
+        "sourceVersion": 6,
+        "sourceFixture": "session-v6.sqlite",
+        "sourceFixtureSha256": "ad0ff7a49b5eec5873719ab561f00207693efaed681397707a18dd1c330270b1",
+        "upgraderCommit": "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+        "commands": [
+          "git worktree add --detach {upgraderWorktree} cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+          "dotnet build {upgraderWorktree}/src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj --configuration Release --artifacts-path {upgraderArtifacts} --nologo",
+          "dotnet {generatorAssembly} --upgrade-one {upgraderAssembly} session-v6.sqlite session-v10-from-v6.sqlite"
+        ]
+      }
     }
   ]
 }
