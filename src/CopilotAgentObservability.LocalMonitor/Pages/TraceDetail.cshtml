@@ -61,6 +61,7 @@
                 <strong id="agent-summary-state">Sub-agent利用を確認中…</strong>
                 <span id="agent-summary-meta">Agent実行グラフを読み込み中…</span>
             </div>
+            <div class="agent-summary" id="trace-source-evidence" aria-live="polite" hidden></div>
             <p class="detail-meta">
                 <span class="monitor-mono">@MonitorViewFormat.ShortTraceId(Model.TraceId)</span>
                 <span>@(Model.Trace.PrimaryModel ?? "モデル不明")</span>
@@ -72,7 +73,7 @@
                 <span>@MonitorViewFormat.RelativeTime(Model.Trace.FirstSeenAt) 開始 · @MonitorViewFormat.Duration(Model.Trace.DurationMs)</span>
             </p>
         </div>
-        <div class="token-total-card">
+        <div class="token-total-card" id="token-total-card">
             <span class="token-total-label">トークン合計</span>
             <span class="token-total-value monitor-mono">@MonitorViewFormat.Tokens(Model.Trace.TotalTokens)</span>
             <div class="preview-token-bar token-total-bar">
@@ -176,7 +177,7 @@
             </div>
         </div>
 
-        <details class="raw-section">
+        <details class="raw-section" id="raw-section">
             <summary><h3 class="raw-section-title">Raw OTLP ペイロード</h3></summary>
             @if (Model.RawRecords.Count == 0)
             {

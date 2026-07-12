@@ -1,4 +1,5 @@
 using Microsoft.Playwright;
+using System.Text.Json;
 using static Microsoft.Playwright.Assertions;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -6,6 +7,124 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorAgentExecutionPlaywrightTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TraceDetail_ClaudeContentDisabledHidesRawControlsAndNullTokenCard(bool sanitizedOnly)
+    {
+        using var temp = new MonitorTempDirectory();
+        Seed(temp, ExactGraphPayload);
+        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: DisabledWorkers);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/monitor/trace-list?*", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = ClaudeTraceListBody(contentState: "not_captured"),
+        }));
+
+        await page.GotoAsync($"{host.Url}/traces/{TraceId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#trace-source-evidence")).ToContainTextAsync("内容は取得されていません");
+        await Expect(page.Locator("#token-total-card")).ToBeHiddenAsync();
+        await Expect(page.Locator("#copilot-open")).ToBeHiddenAsync();
+        await Expect(page.Locator("#raw-section")).ToBeHiddenAsync();
+    }
+
+    [Fact]
+    public async Task TraceDetail_ClaudeSchemaDriftShowsReasonAndJapaneseNextAction()
+    {
+        using var temp = new MonitorTempDirectory();
+        Seed(temp, ExactGraphPayload);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: DisabledWorkers);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/monitor/trace-list?*", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = ClaudeTraceListBody(
+                contentState: "available",
+                compatibilityState: "schema_drift_detected",
+                reasonCodes: ["schema_drift_detected"],
+                nextAction: "capture_fixture_and_review_mapping"),
+        }));
+
+        await page.GotoAsync($"{host.Url}/traces/{TraceId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        var source = page.Locator("#trace-source-evidence");
+        await Expect(source).ToContainTextAsync("スキーマ変更を検出");
+        await Expect(source).ToContainTextAsync("スキーマ変更のため完全性を確認できません");
+        await Expect(source).ToContainTextAsync("fixture を取得してマッピングを確認してください");
+    }
+
+    [Fact]
+    public async Task TraceDetail_SourceFactsFailureIsShownWithoutBreakingFlow()
+    {
+        using var temp = new MonitorTempDirectory();
+        Seed(temp, ExactGraphPayload);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: DisabledWorkers);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/monitor/trace-list?*", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            Status = 503,
+            ContentType = "application/json",
+            Body = "{\"accepted\":false,\"error\":\"persistence_busy\"}",
+        }));
+
+        await page.GotoAsync($"{host.Url}/traces/{TraceId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#trace-source-evidence")).ToContainTextAsync("ソース情報を読み込めませんでした");
+        await Expect(page.Locator("#flow-view .agent-container")).ToHaveCountAsync(4);
+    }
+
+    [Theory]
+    [InlineData("unknown_parent", "親スパンが見つかりません")]
+    [InlineData("ambiguous", "親子関係を一意に決められません")]
+    [InlineData("duplicate_span_id", "親子関係を一意に決められません")]
+    [InlineData("cycle_detected", "親子関係に循環があります")]
+    public async Task TraceDetail_ClaudeExactOnlyUnresolvedStatesNeverShowInference(string graphState, string expectedLabel)
+    {
+        using var temp = new MonitorTempDirectory();
+        Seed(temp, ExactGraphPayload);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: DisabledWorkers);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/monitor/trace-list?*", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = ClaudeTraceListBody(contentState: "not_captured"),
+        }));
+        await page.RouteAsync("**/agent-graph", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = ClaudeUnresolvedGraphBody(graphState),
+        }));
+
+        await page.GotoAsync($"{host.Url}/traces/{TraceId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        var source = page.Locator("#trace-source-evidence");
+        await Expect(source).ToBeVisibleAsync();
+        await Expect(source).ToContainTextAsync("Claude Code");
+        await Expect(source).ToContainTextAsync("親子関係は送信元の親スパンだけで判定します");
+        await Expect(source).ToContainTextAsync(expectedLabel);
+        await Expect(page.Locator("#agent-summary")).ToContainTextAsync("関係 判定不能");
+        await Expect(page.Locator("#flow-view .relationship-badge")).ToContainTextAsync("判定不能");
+        await Expect(page.Locator("#trace-detail-root")).Not.ToContainTextAsync("推定");
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -223,6 +342,89 @@ public class MonitorAgentExecutionPlaywrightTests
         store.ApplyProjection(id, record.Source, record.ReceivedAt, MonitorProjectionBuilder.Build(record), DateTimeOffset.UnixEpoch.AddMinutes(2));
         store.ApplySpanProjection(id, MonitorSpanProjectionBuilder.Build(record), DateTimeOffset.UnixEpoch.AddMinutes(3));
     }
+
+    private static string ClaudeTraceListBody(
+        string contentState,
+        string compatibilityState = "supported",
+        string[]? reasonCodes = null,
+        string nextAction = "none") => JsonSerializer.Serialize(new
+    {
+        items = new[]
+        {
+            new
+            {
+                trace_id = TraceId,
+                source_diagnostic = new
+                {
+                    source_surface = "claude-code",
+                    source_application_version = (string?)null,
+                    source_adapter = "claude-code-otel",
+                    adapter_version = "1",
+                    schema_fingerprint = (string?)null,
+                    compatibility_state = compatibilityState,
+                    reason_codes = reasonCodes ?? Array.Empty<string>(),
+                    next_action = nextAction,
+                },
+                binding_state = "otel_only",
+                completeness = "unbound",
+                completeness_reason_codes = new[] { "missing_native_session_id" },
+                content_state = contentState,
+            },
+        },
+        total_matched = 1,
+        total_matched_tokens = 0,
+        offset = 0,
+        limit = 50,
+    });
+
+    private static string ClaudeUnresolvedGraphBody(string graphState) => JsonSerializer.Serialize(new
+    {
+        summary = new
+        {
+            main_agent_name = "main-agent",
+            root_agent_count = 1,
+            subagent_invocation_count = 0,
+            unique_subagent_count = 0,
+            max_agent_depth = 0,
+            parallel_agent_group_count = 0,
+            relationship_quality = "undeterminable",
+            agent_presence = "detected",
+        },
+        agents = new[]
+        {
+            new
+            {
+                span_id = "a000",
+                agent_name = "main-agent",
+                agent_role = "main",
+                caller_agent_span_id = (string?)null,
+                model = (string?)null,
+                started_at = (string?)null,
+                ended_at = (string?)null,
+                duration_ms = (double?)null,
+                input_tokens = (int?)null,
+                output_tokens = (int?)null,
+                total_tokens = (int?)null,
+                status = "ok",
+                child_agent_count = 0,
+                agent_depth = 0,
+                relationship_source = "parent_span",
+                relationship_confidence = "exact",
+            },
+        },
+        span_ownership = new[]
+        {
+            new
+            {
+                span_id = "l001",
+                owning_agent_span_id = (string?)null,
+                relationship_source = "unresolved",
+                relationship_confidence = "unknown",
+            },
+        },
+        parallel_groups = Array.Empty<string[]>(),
+        graph_warnings = graphState == "ambiguous" ? Array.Empty<string>() : new[] { graphState },
+    });
 
     private const string TraceId = "agent-ui";
 
