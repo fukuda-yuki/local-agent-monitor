@@ -13,7 +13,8 @@ Updated: 2026-07-12
 | Runtime #61 manifest loader (Task 8a, pulled forward) | #67 dependency | Complete | `cce9a72..e7d44e2` | SourceCapabilityRuntimeTests 14/14; SourceCapabilityContractTests 13/13; ConfigCli 432/432 at task review | Spec PASS; Quality/Security APPROVED | target pairing remains for Task 8b real-producer gate |
 | Platform contracts and deterministic fake (Task 2a) | #66 | Complete | `2755269..fd36d38` | SetupPlatformTests 15/15; ConfigCli 464/464 | Spec PASS; Quality/Security APPROVED after concurrency re-audit | actual Windows notification delivery not integration-tested; injected classification verified |
 | Runtime paths and exclusive lock (Task 2b) | #66 | Complete | `9d962ff..ed820bb` | SetupRuntimeTests 8/8; SetupPlatformTests 20/20; ConfigCli 477/477 | Spec PASS; Quality/Security APPROVED after cross-process test re-audit | Linux/macOS runtime not executed on Windows host; mandatory cross-platform test no longer skips |
-| Ledger schema and redaction | #66 | Pending | - | - | - | - |
+| Private plan and ledger v1 stores (Task 2c) | #66 | Complete | `0daee69..dcb7191` | SetupStorageTests 44/44; all Setup 193/193; ConfigCli 521/521; build 0/0 | Spec PASS; Quality/Security APPROVED | private desired-state schema is text JSON/env focused; binary expansion requires future schema |
+| Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
 | Atomic file mutation | #66 | Pending | - | - | - | - |
 | User environment mutation | #66 | Pending | - | - | - | - |
 | Transaction and rollback | #66 | Pending | - | - | - | - |
