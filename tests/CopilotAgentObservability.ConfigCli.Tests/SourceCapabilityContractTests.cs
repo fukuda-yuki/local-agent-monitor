@@ -365,7 +365,7 @@ public sealed class SourceCapabilityContractTests
         var caps = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (Match match in Regex.Matches(
                      section[tableStart..],
-                     "(?m)^\\| `([^`]+)` \\| `(unbound|partial|rich|full)` \\|[^\\r\\n]*\\|$"))
+                     "(?m)^\\| `([^`]+)` \\| `(unbound|partial|rich|full)` \\|[^\\r\\n]*\\|\\r?$"))
         {
             Assert.True(caps.TryAdd(match.Groups[1].Value, match.Groups[2].Value),
                 $"Completeness reason '{match.Groups[1].Value}' has more than one maximum status.");
