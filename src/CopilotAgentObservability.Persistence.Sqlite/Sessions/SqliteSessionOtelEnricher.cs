@@ -10,12 +10,23 @@ public sealed class SqliteSessionOtelEnricher
     private readonly string databasePath;
     private readonly ISessionStore store;
     private readonly TimeProvider timeProvider;
+    private readonly Action<string>? checkpoint;
 
     public SqliteSessionOtelEnricher(string databasePath, ISessionStore store, TimeProvider? timeProvider = null)
     {
         this.databasePath = databasePath;
         this.store = store;
         this.timeProvider = timeProvider ?? TimeProvider.System;
+    }
+
+    internal SqliteSessionOtelEnricher(
+        string databasePath,
+        ISessionStore store,
+        TimeProvider timeProvider,
+        Action<string> checkpoint)
+        : this(databasePath, store, timeProvider)
+    {
+        this.checkpoint = checkpoint ?? throw new ArgumentNullException(nameof(checkpoint));
     }
 
     public int ProcessNextBatch(int limit = 100)
@@ -170,6 +181,7 @@ public sealed class SqliteSessionOtelEnricher
             row.AdapterVersion,
             row.SchemaFingerprint,
             NormalizationVersion: null);
+        checkpoint?.Invoke("before-claude-write");
         store.Write(new(new(session, [], [run], [@event]), []));
     }
 

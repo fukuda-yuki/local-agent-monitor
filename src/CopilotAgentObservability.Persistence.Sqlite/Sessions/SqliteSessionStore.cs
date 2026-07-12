@@ -3,6 +3,14 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
+public sealed class SessionIdentityConflictException : InvalidOperationException
+{
+    internal SessionIdentityConflictException()
+        : base("Session source identity is already owned by another session.")
+    {
+    }
+}
+
 public sealed class SqliteSessionStore : ISessionStore
 {
     private const int VersionTenSchemaVersion = 10;
@@ -17,6 +25,8 @@ public sealed class SqliteSessionStore : ISessionStore
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
     private readonly Action<string>? comparisonCheckpoint;
+    private readonly Action<string>? writeCheckpoint;
+    private readonly int busyTimeoutMilliseconds = 5000;
 
     public SqliteSessionStore(string databasePath, TimeProvider? timeProvider = null)
     {
@@ -29,6 +39,25 @@ public sealed class SqliteSessionStore : ISessionStore
         : this(databasePath)
     {
         this.comparisonCheckpoint = comparisonCheckpoint ?? throw new ArgumentNullException(nameof(comparisonCheckpoint));
+    }
+
+    internal SqliteSessionStore(string databasePath, int busyTimeoutMilliseconds)
+        : this(databasePath)
+    {
+        if (busyTimeoutMilliseconds < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(busyTimeoutMilliseconds));
+        }
+        this.busyTimeoutMilliseconds = busyTimeoutMilliseconds;
+    }
+
+    internal SqliteSessionStore(
+        string databasePath,
+        TimeProvider timeProvider,
+        Action<string> writeCheckpoint)
+        : this(databasePath, timeProvider)
+    {
+        this.writeCheckpoint = writeCheckpoint ?? throw new ArgumentNullException(nameof(writeCheckpoint));
     }
 
     public void CreateSchema()
@@ -327,8 +356,14 @@ public sealed class SqliteSessionStore : ISessionStore
     public void Write(SessionWriteBatch batch)
     {
         ArgumentNullException.ThrowIfNull(batch);
+        writeCheckpoint?.Invoke("before-session-write");
         using var connection = Open();
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        if (IsClaudeOtelReplay(connection, transaction, batch))
+        {
+            transaction.Commit();
+            return;
+        }
         ValidateBatch(connection, transaction, batch);
         var orderedRuns = OrderRuns(batch.Detail.Runs);
         var orderedEvents = OrderEvents(batch.Detail.Events);
@@ -395,6 +430,40 @@ public sealed class SqliteSessionStore : ISessionStore
         }
 
         transaction.Commit();
+    }
+
+    private static bool IsClaudeOtelReplay(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        SessionWriteBatch batch)
+    {
+        var events = batch.Detail.Events;
+        if (events.Count == 0 || events.Any(item => item.SourceAdapter != "claude-code-otel"))
+        {
+            return false;
+        }
+
+        var expectedOwner = Id(batch.Detail.Session.SessionId);
+        var replayableUnboundCandidate = batch.Detail.Session.Completeness == SessionCompleteness.Unbound
+            && batch.Detail.NativeIds.Count == 0;
+        foreach (var item in events)
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                "SELECT session_id FROM session_events WHERE source_adapter=$adapter AND source_event_id=$source_event_id COLLATE BINARY;";
+            Add(command, "$adapter", item.SourceAdapter);
+            Add(command, "$source_event_id", item.SourceEventId);
+            if (command.ExecuteScalar() is not string owner)
+            {
+                return false;
+            }
+            if (!string.Equals(owner, expectedOwner, StringComparison.Ordinal) && !replayableUnboundCandidate)
+            {
+                throw new SessionIdentityConflictException();
+            }
+        }
+        return true;
     }
 
     private static IReadOnlyList<ObservedSessionRun> OrderRuns(IReadOnlyList<ObservedSessionRun> runs) =>
@@ -478,7 +547,8 @@ public sealed class SqliteSessionStore : ISessionStore
                 "SELECT session_id FROM session_native_ids WHERE source_surface=$first AND native_session_id=$second COLLATE BINARY;",
                 sessionIdText,
                 ("$first", SessionWire.ToWire(nativeId.SourceSurface)),
-                ("$second", nativeId.NativeSessionId));
+                ("$second", nativeId.NativeSessionId),
+                identityConflict: nativeId.SourceSurface == SessionSourceSurface.ClaudeCode);
         }
 
         foreach (var run in batch.Detail.Runs)
@@ -488,7 +558,8 @@ public sealed class SqliteSessionStore : ISessionStore
                 transaction,
                 "SELECT session_id FROM session_runs WHERE run_id=$first;",
                 sessionIdText,
-                ("$first", Id(run.RunId)));
+                ("$first", Id(run.RunId)),
+                identityConflict: run.SourceSurface == SessionSourceSurface.ClaudeCode);
             if (run.ParentRunId is not null && !runIds.Contains(run.ParentRunId.Value))
             {
                 EnsureReferenceOwnedBySession(connection, transaction, "session_runs", "run_id", run.ParentRunId.Value, sessionIdText);
@@ -502,14 +573,16 @@ public sealed class SqliteSessionStore : ISessionStore
                 transaction,
                 "SELECT session_id FROM session_events WHERE event_id=$first;",
                 sessionIdText,
-                ("$first", Id(item.EventId)));
+                ("$first", Id(item.EventId)),
+                identityConflict: item.SourceSurface == SessionSourceSurface.ClaudeCode);
             EnsureExistingOwnerMatches(
                 connection,
                 transaction,
                 "SELECT session_id FROM session_events WHERE source_adapter=$first AND source_event_id=$second;",
                 sessionIdText,
                 ("$first", item.SourceAdapter),
-                ("$second", item.SourceEventId));
+                ("$second", item.SourceEventId),
+                identityConflict: item.SourceSurface == SessionSourceSurface.ClaudeCode);
 
             if (item.RunId is not null && !runIds.Contains(item.RunId.Value))
             {
@@ -547,7 +620,8 @@ public sealed class SqliteSessionStore : ISessionStore
         string expectedSessionId,
         (string Name, object? Value) first,
         (string Name, object? Value)? second = null,
-        bool requireExisting = false)
+        bool requireExisting = false,
+        bool identityConflict = false)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -558,7 +632,7 @@ public sealed class SqliteSessionStore : ISessionStore
         if ((requireExisting && owner is null)
             || (owner is not null && !string.Equals(owner, expectedSessionId, StringComparison.Ordinal)))
         {
-            throw OwnershipViolation();
+            throw identityConflict ? new SessionIdentityConflictException() : OwnershipViolation();
         }
     }
 
@@ -1182,8 +1256,16 @@ public sealed class SqliteSessionStore : ISessionStore
         Execute(connection, transaction, """
             INSERT INTO sessions(session_id,status,completeness,repository,workspace,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at)
             VALUES($session_id,$status,$completeness,$repository,$workspace,$started_at,$ended_at,$last_seen_at,$raw_retention_state,$created_at,$updated_at)
-            ON CONFLICT(session_id) DO UPDATE SET status=excluded.status,completeness=excluded.completeness,repository=excluded.repository,workspace=excluded.workspace,
-            started_at=excluded.started_at,ended_at=excluded.ended_at,last_seen_at=excluded.last_seen_at,raw_retention_state=excluded.raw_retention_state,updated_at=excluded.updated_at;
+            ON CONFLICT(session_id) DO UPDATE SET
+            status=CASE WHEN sessions.status IN ('completed','failed') THEN sessions.status ELSE excluded.status END,
+            completeness=CASE
+                WHEN CASE sessions.completeness WHEN 'full' THEN 4 WHEN 'rich' THEN 3 WHEN 'partial' THEN 2 ELSE 1 END
+                   >= CASE excluded.completeness WHEN 'full' THEN 4 WHEN 'rich' THEN 3 WHEN 'partial' THEN 2 ELSE 1 END
+                THEN sessions.completeness ELSE excluded.completeness END,
+            repository=COALESCE(sessions.repository,excluded.repository),workspace=COALESCE(sessions.workspace,excluded.workspace),
+            started_at=COALESCE(sessions.started_at,excluded.started_at),ended_at=COALESCE(sessions.ended_at,excluded.ended_at),
+            last_seen_at=MAX(sessions.last_seen_at,excluded.last_seen_at),raw_retention_state=excluded.raw_retention_state,
+            updated_at=MAX(sessions.updated_at,excluded.updated_at);
             """,
             ("$session_id", Id(value.SessionId)), ("$status", SessionWire.ToWire(value.Status)), ("$completeness", SessionWire.ToWire(value.Completeness)),
             ("$repository", value.Repository), ("$workspace", value.Workspace), ("$started_at", Timestamp(value.StartedAt)), ("$ended_at", Timestamp(value.EndedAt)),
@@ -1322,11 +1404,11 @@ public sealed class SqliteSessionStore : ISessionStore
         {
             DataSource = databasePath,
             Pooling = false,
-            DefaultTimeout = 5,
+            DefaultTimeout = Math.Max(1, checked((busyTimeoutMilliseconds + 999) / 1000)),
         }.ToString());
         connection.Open();
         Execute(connection, enforceForeignKeys ? "PRAGMA foreign_keys=ON;" : "PRAGMA foreign_keys=OFF;");
-        Execute(connection, "PRAGMA busy_timeout=5000;");
+        Execute(connection, $"PRAGMA busy_timeout={busyTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)};");
         return connection;
     }
 

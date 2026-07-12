@@ -13,6 +13,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// </summary>
 public class MonitorSecurityBoundaryTests
 {
+    private const string ClaudeSecretMarker = "sk-task18-claude-secret-marker";
     private static readonly string[] Markers =
     {
         "SECRET_PROMPT_TEXT_MARKER",
@@ -31,6 +32,59 @@ public class MonitorSecurityBoundaryTests
     };
 
     private const string SanitizationProbeTraceId = "trace-probe";
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ClaudeHookSecretMarkerStaysOutOfSanitizedSurfacesAndRawStorage(bool sanitizedOnly)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartLiveHostAsync(temp, sanitizedOnly);
+        using var ingest = ClaudeIngestRequest("UserPromptSubmit", $$"""{"api_key":"{{ClaudeSecretMarker}}","message":"synthetic"}""");
+
+        Assert.Equal(HttpStatusCode.NoContent, (await host.Client.SendAsync(ingest)).StatusCode);
+        using var sessions = JsonDocument.Parse(await host.Client.GetStringAsync("/api/session-workspace/sessions"));
+        var sessionId = sessions.RootElement.GetProperty("items")[0].GetProperty("session_id").GetString();
+        var detailBody = await host.Client.GetStringAsync($"/api/session-workspace/sessions/{sessionId}");
+        Assert.DoesNotContain(ClaudeSecretMarker, detailBody, StringComparison.Ordinal);
+        using var detail = JsonDocument.Parse(detailBody);
+        var @event = detail.RootElement.GetProperty("events")[0];
+        Assert.Equal("available", @event.GetProperty("content_state").GetString());
+        var eventId = @event.GetProperty("event_id").GetString();
+        var content = await host.Client.GetAsync($"/sessions/{sessionId}/events/{eventId}/content");
+        Assert.Equal(sanitizedOnly ? HttpStatusCode.NotFound : HttpStatusCode.OK, content.StatusCode);
+        Assert.DoesNotContain(ClaudeSecretMarker, await content.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await host.DisposeAsync();
+        Assert.All(Directory.GetFiles(temp.Path), path =>
+            Assert.DoesNotContain(ClaudeSecretMarker, Encoding.UTF8.GetString(File.ReadAllBytes(path)), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ClaudeContentDisabledAndErrorSurfacesDoNotExposeSecretMarker()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartLiveHostAsync(temp);
+        using var usage = ClaudeIngestRequest("assistant.usage", $$"""{"api_key":"{{ClaudeSecretMarker}}"}""");
+        Assert.Equal(HttpStatusCode.NoContent, (await host.Client.SendAsync(usage)).StatusCode);
+        using var sessions = JsonDocument.Parse(await host.Client.GetStringAsync("/api/session-workspace/sessions"));
+        var sessionId = sessions.RootElement.GetProperty("items")[0].GetProperty("session_id").GetString();
+        var detailBody = await host.Client.GetStringAsync($"/api/session-workspace/sessions/{sessionId}");
+        Assert.DoesNotContain(ClaudeSecretMarker, detailBody, StringComparison.Ordinal);
+        using var detail = JsonDocument.Parse(detailBody);
+        Assert.Equal("not_captured", detail.RootElement.GetProperty("events")[0].GetProperty("content_state").GetString());
+
+        using var invalid = ClaudeIngestRequest("UserPromptSubmit", $$"""{"api_key":"{{ClaudeSecretMarker}}"}""");
+        invalid.Content = new StringContent(
+            (await invalid.Content!.ReadAsStringAsync()).Replace("\"schema_version\":1", "\"schema_version\":2", StringComparison.Ordinal),
+            Encoding.UTF8,
+            "application/json");
+        var error = await host.Client.SendAsync(invalid);
+        Assert.Equal(HttpStatusCode.BadRequest, error.StatusCode);
+        Assert.DoesNotContain(ClaudeSecretMarker, await error.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await host.DisposeAsync();
+        Assert.All(Directory.GetFiles(temp.Path), path =>
+            Assert.DoesNotContain(ClaudeSecretMarker, Encoding.UTF8.GetString(File.ReadAllBytes(path)), StringComparison.Ordinal));
+    }
 
     [Fact]
     public async Task SanitizedSurfaces_NeverReturnRawOrPii_EvenWithRawShownByDefault()
@@ -439,6 +493,23 @@ public class MonitorSecurityBoundaryTests
             testOptions: new MonitorHostTestOptions { ProjectionPollInterval = TimeSpan.FromMilliseconds(50) });
 
     private static StringContent JsonContent(string json) => new(json, Encoding.UTF8, "application/json");
+
+    private static HttpRequestMessage ClaudeIngestRequest(string eventType, string payload)
+    {
+        var json = $$"""
+            {"schema_version":1,"source_adapter":"claude-code-hook","source_surface":"claude-code",
+             "native_session_id":"task18-security-native","source_application_version":"fixture-v1",
+             "adapter_version":"claude-hook-v1","normalization_version":"session-normalization-v1",
+             "events":[{"source_event_id":"task18-{{eventType}}","type":"{{eventType}}",
+             "occurred_at":"2026-07-13T00:00:00Z","payload":{{payload}}}]}
+            """;
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/session-ingest/v1/events")
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Add("X-CAO-Session-Event-Version", "1");
+        return request;
+    }
 
     private static string ValidTraceJson() =>
         """
