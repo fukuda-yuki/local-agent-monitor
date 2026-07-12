@@ -25,6 +25,8 @@ public interface ISetupFileSystem
 
     byte[] ReadAllBytes(string path);
 
+    SetupBoundedFileRead ReadAtMostBytes(string path, int maximumBytes);
+
     void WriteAllBytes(string path, ReadOnlySpan<byte> bytes);
 
     void WriteNewAllBytes(string path, ReadOnlySpan<byte> bytes);
@@ -88,3 +90,5 @@ public sealed record SetupPathMetadata(bool Exists, SetupPathKind Kind, FileAttr
 {
     public static SetupPathMetadata Missing { get; } = new(false, SetupPathKind.Missing, 0);
 }
+
+public sealed record SetupBoundedFileRead(byte[] Bytes, bool IsComplete);

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Buffers;
 using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
@@ -110,13 +111,13 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
                 throw new FormatException();
             }
 
-            var bytes = platform.FileSystem.ReadAllBytes(backupPath);
-            if (bytes.Length > MaximumBackupBytes)
+            var read = platform.FileSystem.ReadAtMostBytes(backupPath, MaximumBackupBytes);
+            if (!read.IsComplete)
             {
                 throw new FormatException();
             }
 
-            var capture = DeserializeBackup(bytes);
+            var capture = DeserializeBackup(read.Bytes);
             if (capture.Members.Count != orderedNames.Count ||
                 capture.Members.Where((member, index) =>
                     !string.Equals(member.Name, orderedNames[index], StringComparison.Ordinal)).Any())
@@ -209,13 +210,13 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
                 throw new FormatException();
             }
 
-            var bytes = platform.FileSystem.ReadAllBytes(backupPath);
-            if (bytes.Length > MaximumBackupBytes)
+            var read = platform.FileSystem.ReadAtMostBytes(backupPath, MaximumBackupBytes);
+            if (!read.IsComplete)
             {
                 throw new FormatException();
             }
 
-            return DeserializeBackup(bytes).Members.Single(member =>
+            return DeserializeBackup(read.Bytes).Members.Single(member =>
                 string.Equals(member.Name, name, StringComparison.Ordinal));
         }
         catch (Exception)
@@ -376,8 +377,13 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
         return CreateCapture(members);
     }
 
-    private static void ValidateCapture(UserEnvironmentCapture capture)
+    private static void ValidateCapture(UserEnvironmentCapture? capture)
     {
+        if (capture is null)
+        {
+            throw new SetupEnvironmentStepException(SetupCodes.InvalidArguments);
+        }
+
         ValidateNames(capture.Members.Select(member => member.Name).ToArray());
         foreach (var member in capture.Members)
         {
@@ -395,9 +401,9 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
         }
     }
 
-    private static void ValidateNames(IReadOnlyList<string> names)
+    private static void ValidateNames(IReadOnlyList<string>? names)
     {
-        if (names.Count is 0 or > MaximumMembers)
+        if (names is null || names.Count is 0 or > MaximumMembers)
         {
             throw new SetupEnvironmentStepException(SetupCodes.InvalidArguments);
         }
@@ -406,6 +412,7 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
         foreach (var name in names)
         {
             if (string.IsNullOrEmpty(name) || name.Length > MaximumNameCharacters ||
+                !IsWellFormedUtf16(name) ||
                 name.Contains('=') || name.Any(character => char.IsControl(character)) ||
                 !unique.Add(name))
             {
@@ -417,10 +424,27 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
     private static void ValidateValue(UserEnvironmentValue value)
     {
         if (value is null || value.Exists && (value.Value is null || value.Value.Length > MaximumValueCharacters) ||
-            !value.Exists && value.Value is not null)
+            !value.Exists && value.Value is not null ||
+            value.Value is not null && !IsWellFormedUtf16(value.Value))
         {
             throw new SetupEnvironmentStepException(SetupCodes.InvalidArguments);
         }
+    }
+
+    private static bool IsWellFormedUtf16(string value)
+    {
+        var remaining = value.AsSpan();
+        while (!remaining.IsEmpty)
+        {
+            if (Rune.DecodeFromUtf16(remaining, out _, out var consumed) != OperationStatus.Done)
+            {
+                return false;
+            }
+
+            remaining = remaining[consumed..];
+        }
+
+        return true;
     }
 
     private static void ValidateHash(string value)

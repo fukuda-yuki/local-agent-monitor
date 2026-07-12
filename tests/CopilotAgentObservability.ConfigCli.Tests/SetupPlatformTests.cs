@@ -6,6 +6,45 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SetupPlatformTests
 {
+    [Theory]
+    [InlineData(16, true, 16)]
+    [InlineData(17, false, 17)]
+    [InlineData(4096, false, 17)]
+    public void TestPlatform_BoundedReadAllocatesAtMostMaximumPlusOne(int sourceLength, bool complete, int returnedLength)
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedFile("backup", Enumerable.Repeat((byte)1, sourceLength).ToArray());
+
+        var read = platform.FileSystem.ReadAtMostBytes("backup", 16);
+
+        Assert.Equal(complete, read.IsComplete);
+        Assert.Equal(returnedLength, read.Bytes.Length);
+    }
+
+    [Theory]
+    [InlineData(16, true, 16)]
+    [InlineData(17, false, 17)]
+    [InlineData(4096, false, 17)]
+    public void SystemPlatform_BoundedReadAllocatesAtMostMaximumPlusOne(int sourceLength, bool complete, int returnedLength)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-bounded-read-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var path = Path.Combine(directory, "backup");
+            File.WriteAllBytes(path, Enumerable.Repeat((byte)1, sourceLength).ToArray());
+
+            var read = new SystemSetupPlatform().FileSystem.ReadAtMostBytes(path, 16);
+
+            Assert.Equal(complete, read.IsComplete);
+            Assert.Equal(returnedLength, read.Bytes.Length);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public void SystemPlatform_UsesTheConfiguredLocalApplicationDataRoot()
     {
@@ -319,6 +358,57 @@ public sealed class SetupPlatformTests
             "environment.get:COPILOT_OTEL_ENABLED",
         ],
         platform.Operations);
+    }
+
+    [Fact]
+    public void TestPlatform_WindowsUserEnvironmentUsesCaseInsensitiveGetSetAndRemove()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, pathStyle: SetupPathStyle.Windows);
+        platform.SeedUserEnvironment("Value", "before");
+
+        Assert.Equal("before", platform.UserEnvironment.Get("VALUE"));
+        platform.UserEnvironment.Set("vAlUe", "after");
+        Assert.Equal("after", platform.UserEnvironment.Get("value"));
+        platform.UserEnvironment.Set("VALUE", null);
+        Assert.Null(platform.UserEnvironment.Get("Value"));
+    }
+
+    [Fact]
+    public void TestPlatform_UnixUserEnvironmentUsesCaseSensitiveGetSetAndRemove()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, pathStyle: SetupPathStyle.Unix);
+        platform.SeedUserEnvironment("Value", "before");
+
+        platform.UserEnvironment.Set("VALUE", "after");
+        platform.UserEnvironment.Set("Value", null);
+
+        Assert.Null(platform.UserEnvironment.Get("Value"));
+        Assert.Equal("after", platform.UserEnvironment.Get("VALUE"));
+    }
+
+    [Fact]
+    public async Task TestPlatform_ConcurrentUserEnvironmentWritesAreSynchronizedAfterBarrierRelease()
+    {
+        const int workerCount = 4;
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        using var barrier = platform.AddBarrier("environment.set:VALUE");
+        var tasks = Enumerable.Range(0, workerCount)
+            .Select(index => Task.Run(() => platform.UserEnvironment.Set("VALUE", index.ToString())))
+            .ToArray();
+        try
+        {
+            await Task.Run(() => barrier.WaitUntilArrivals(workerCount, CancellationToken.None));
+            barrier.Release();
+            await Task.WhenAll(tasks);
+        }
+        finally
+        {
+            barrier.Release();
+            await ObserveWorkersAsync(tasks);
+        }
+
+        Assert.Contains(platform.ReadUserEnvironment("VALUE"), Enumerable.Range(0, workerCount).Select(index => index.ToString()));
+        Assert.Equal(workerCount, platform.Operations.Count(operation => operation == "environment.set:VALUE"));
     }
 
     [Fact]

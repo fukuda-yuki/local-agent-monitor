@@ -6,7 +6,7 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 {
     private readonly object gate = new();
     private readonly Dictionary<string, byte[]> files;
-    private readonly Dictionary<string, string?> environment = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string?> environment;
     private readonly Dictionary<string, Queue<Exception>> faults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<(Exception Exception, Action? Callback)>> afterEffectFaults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SetupTestBarrierState> barriers = new(StringComparer.Ordinal);
@@ -23,6 +23,7 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         PathStyle = pathStyle;
         var pathComparer = pathStyle == SetupPathStyle.Windows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         files = new Dictionary<string, byte[]>(pathComparer);
+        environment = new Dictionary<string, string?>(pathComparer);
         pathMetadata = new Dictionary<string, SetupPathMetadata>(pathComparer);
         exclusiveLocks = new HashSet<string>(pathComparer);
         Clock = new SetupTestClock(utcNow);
@@ -112,9 +113,21 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 
     public byte[] ReadSeededFile(string path) => files[path].ToArray();
 
-    public void SeedUserEnvironment(string name, string? value) => environment[name] = value;
+    public void SeedUserEnvironment(string name, string? value)
+    {
+        lock (gate)
+        {
+            environment[name] = value;
+        }
+    }
 
-    public string? ReadUserEnvironment(string name) => environment.TryGetValue(name, out var value) ? value : null;
+    public string? ReadUserEnvironment(string name)
+    {
+        lock (gate)
+        {
+            return environment.TryGetValue(name, out var value) ? value : null;
+        }
+    }
 
     private void Record(string operation)
     {
@@ -274,6 +287,23 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             return platform.files[path].ToArray();
         }
 
+        public SetupBoundedFileRead ReadAtMostBytes(string path, int maximumBytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(maximumBytes);
+            if (maximumBytes == int.MaxValue)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+            }
+
+            platform.Record($"file.read-bounded:{path}:{maximumBytes}");
+            lock (platform.gate)
+            {
+                var bytes = platform.files[path];
+                var length = Math.Min(bytes.Length, maximumBytes + 1);
+                return new SetupBoundedFileRead(bytes.AsSpan(0, length).ToArray(), bytes.Length <= maximumBytes);
+            }
+        }
+
         public void WriteAllBytes(string path, ReadOnlySpan<byte> bytes)
         {
             var operation = $"file.write:{path}";
@@ -404,20 +434,26 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         public string? Get(string name)
         {
             platform.Record($"environment.get:{name}");
-            return platform.environment.TryGetValue(name, out var value) ? value : null;
+            lock (platform.gate)
+            {
+                return platform.environment.TryGetValue(name, out var value) ? value : null;
+            }
         }
 
         public void Set(string name, string? value)
         {
             var operation = $"environment.set:{name}";
             platform.Record(operation);
-            if (value is null)
+            lock (platform.gate)
             {
-                platform.environment.Remove(name);
-            }
-            else
-            {
-                platform.environment[name] = value;
+                if (value is null)
+                {
+                    platform.environment.Remove(name);
+                }
+                else
+                {
+                    platform.environment[name] = value;
+                }
             }
 
             platform.RecordAfterEffect(operation);

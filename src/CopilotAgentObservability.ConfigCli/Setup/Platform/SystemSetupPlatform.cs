@@ -70,6 +70,31 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
         public byte[] ReadAllBytes(string path) => File.ReadAllBytes(path);
 
+        public SetupBoundedFileRead ReadAtMostBytes(string path, int maximumBytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(maximumBytes);
+            if (maximumBytes == int.MaxValue)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+            }
+
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var buffer = new byte[maximumBytes + 1];
+            var length = 0;
+            while (length < buffer.Length)
+            {
+                var read = stream.Read(buffer, length, buffer.Length - length);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                length += read;
+            }
+
+            return new SetupBoundedFileRead(buffer.AsSpan(0, length).ToArray(), length <= maximumBytes);
+        }
+
         public void WriteAllBytes(string path, ReadOnlySpan<byte> bytes) => File.WriteAllBytes(path, bytes);
 
         public void WriteNewAllBytes(string path, ReadOnlySpan<byte> bytes)
