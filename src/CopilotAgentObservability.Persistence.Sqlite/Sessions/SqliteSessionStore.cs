@@ -98,6 +98,7 @@ public sealed class SqliteSessionStore : ISessionStore
         {
             command.CommandText = ProposalApplySchemaSql;
             command.ExecuteNonQuery();
+            AddProposalRevisionColumns(connection, transaction);
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;

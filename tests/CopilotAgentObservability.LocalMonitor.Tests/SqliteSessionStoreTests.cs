@@ -21,26 +21,33 @@ public sealed class SqliteSessionStoreTests
     }
 
     [Fact]
-    public void CreateSchema_upgrades_version_three_with_objective_tables_and_preserved_data()
+    public void CreateSchema_upgrades_real_version_three_database_with_revisions_and_survives_restart()
     {
         using var database = new SessionTestDatabase();
-        var original = new SqliteSessionStore(database.Path);
-        original.CreateSchema();
-        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "version-three-preserved");
-        original.Write(batch);
-        using (var connection = database.Open())
+        var fixturePath = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "session", "session-v3.sqlite");
+        File.Copy(fixturePath, database.Path);
+        var proposalId = Guid.Parse("00000004-0000-7000-8000-000000000003");
+        using (var historical = database.Open())
         {
-            Execute(connection, "DROP TABLE objective_evaluation_evidence; DROP TABLE objective_evaluations; UPDATE schema_version SET version=3 WHERE component='session';");
+            Assert.Equal(3L, Scalar<long>(historical, "SELECT version FROM schema_version WHERE component='session';"));
+            Assert.Equal(0L, Scalar<long>(historical, "SELECT COUNT(*) FROM pragma_table_info('improvement_proposals') WHERE name='revision';"));
+            Assert.Equal(0L, Scalar<long>(historical, "SELECT COUNT(*) FROM pragma_table_info('improvement_proposal_sessions') WHERE name='proposal_revision';"));
         }
 
-        var store = new SqliteSessionStore(database.Path);
-        store.CreateSchema();
+        new SqliteSessionStore(database.Path).CreateSchema();
+        using (var migrated = database.Open())
+        {
+            Assert.Equal(10L, Scalar<long>(migrated, "SELECT version FROM schema_version WHERE component='session';"));
+            Assert.Equal(proposalId.ToString("D"), Scalar<string>(migrated, "SELECT proposal_id FROM improvement_proposals;"));
+        }
 
-        using var verify = database.Open();
-        Assert.Equal(10L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
-        Assert.Equal(batch.Detail.Session.SessionId, store.GetDetail(batch.Detail.Session.SessionId)!.Session.SessionId);
-        Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='objective_evaluations';"));
-        Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='objective_evaluation_evidence';"));
+        new SqliteSessionStore(database.Path).CreateSchema();
+
+        using var restarted = database.Open();
+        Assert.Equal(1L, Scalar<long>(restarted, "SELECT revision FROM improvement_proposals WHERE proposal_id='00000004-0000-7000-8000-000000000003';"));
+        Assert.Equal(1L, Scalar<long>(restarted, "SELECT proposal_revision FROM improvement_proposal_sessions WHERE proposal_id='00000004-0000-7000-8000-000000000003';"));
+        Assert.Equal(1L, Scalar<long>(restarted, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='objective_evaluations';"));
+        Assert.Equal(1L, Scalar<long>(restarted, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='objective_evaluation_evidence';"));
     }
 
     [Fact]

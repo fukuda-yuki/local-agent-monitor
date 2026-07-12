@@ -32,6 +32,7 @@
 
   <ItemGroup>
     <None Include="TestData\SchemaMigrations\monitor\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\SchemaMigrations\session\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
