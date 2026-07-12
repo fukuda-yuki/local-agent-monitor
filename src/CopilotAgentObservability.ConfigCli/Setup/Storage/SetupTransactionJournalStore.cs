@@ -47,6 +47,12 @@ internal enum SetupEnvironmentNotification
     Completed,
 }
 
+internal enum SetupPreparedJournalOpenResult
+{
+    Created,
+    Reused,
+}
+
 internal sealed record SetupTransactionJournal(
     int SchemaVersion,
     Guid ChangeSetId,
@@ -114,6 +120,51 @@ internal sealed partial class SetupTransactionJournalStore
         platform.FileSystem.CreateDirectory(paths.Transactions);
         WriteCreateNew(destination, Serialize(journal));
         return journal;
+    }
+
+    public SetupPreparedJournalOpenResult OpenOrCreatePrepared(
+        SetupLock setupLock,
+        Guid changeSetId,
+        SetupJournalOperation operation,
+        IReadOnlyList<SetupJournalTarget> targets)
+    {
+        setupLock.AssertHeld(platform, paths);
+        var expected = new SetupTransactionJournal(
+            1,
+            changeSetId,
+            operation,
+            platform.Clock.UtcNow,
+            SetupJournalPhase.Prepared,
+            targets);
+        ValidateForWrite(expected);
+
+        var destination = paths.GetTransactionJournal(changeSetId);
+        var metadata = platform.FileSystem.GetPathMetadata(destination);
+        if (metadata.Exists)
+        {
+            ValidateReusablePrepared(destination, changeSetId, operation, targets, metadata);
+            return SetupPreparedJournalOpenResult.Reused;
+        }
+
+        platform.FileSystem.CreateDirectory(paths.Transactions);
+        bool created;
+        try
+        {
+            created = platform.FileSystem.TryWriteNewAllBytesAndFlush(destination, Serialize(expected));
+        }
+        catch (Exception)
+        {
+            throw new SetupStorageException(SetupStorageCodes.WriteFailed);
+        }
+
+        if (created)
+        {
+            ValidateReusablePrepared(destination, changeSetId, operation, targets);
+            return SetupPreparedJournalOpenResult.Created;
+        }
+
+        ValidateReusablePrepared(destination, changeSetId, operation, targets);
+        return SetupPreparedJournalOpenResult.Reused;
     }
 
     public SetupTransactionJournal? Load(Guid changeSetId)
@@ -230,6 +281,92 @@ internal sealed partial class SetupTransactionJournalStore
     private SetupTransactionJournal LoadRequired(Guid changeSetId) =>
         Load(changeSetId) ?? throw new SetupStorageException(SetupJournalStorageCodes.Corrupt);
 
+    private void ValidateReusablePrepared(
+        string source,
+        Guid changeSetId,
+        SetupJournalOperation operation,
+        IReadOnlyList<SetupJournalTarget> targets,
+        SetupPathMetadata? initialMetadata = null)
+    {
+        try
+        {
+            ValidateJournalMetadata(initialMetadata ?? platform.FileSystem.GetPathMetadata(source));
+            var read = platform.FileSystem.ReadAtMostBytes(source, MaximumJournalBytes);
+            if (!read.IsComplete)
+            {
+                throw new FormatException();
+            }
+
+            var existing = Deserialize(read.Bytes);
+            ValidateJournalMetadata(platform.FileSystem.GetPathMetadata(source));
+            if (existing.ChangeSetId != changeSetId ||
+                existing.Operation != operation ||
+                existing.Phase != SetupJournalPhase.Prepared ||
+                existing.EnvironmentNotification != SetupEnvironmentNotification.NotRequired ||
+                !TargetsExactlyEqual(existing.Targets, targets))
+            {
+                throw new SetupStorageException(SetupJournalStorageCodes.AlreadyExists);
+            }
+        }
+        catch (SetupStorageException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (SetupStorageException.ShouldMap(exception))
+        {
+            throw new SetupStorageException(SetupJournalStorageCodes.Corrupt);
+        }
+    }
+
+    private static bool TargetsExactlyEqual(
+        IReadOnlyList<SetupJournalTarget> existing,
+        IReadOnlyList<SetupJournalTarget> expected)
+    {
+        if (existing.Count != expected.Count)
+        {
+            return false;
+        }
+
+        for (var targetIndex = 0; targetIndex < existing.Count; targetIndex++)
+        {
+            var actualTarget = existing[targetIndex];
+            var expectedTarget = expected[targetIndex];
+            if (actualTarget.RecordId != expectedTarget.RecordId ||
+                actualTarget.TargetKind != expectedTarget.TargetKind ||
+                actualTarget.Steps.Count != expectedTarget.Steps.Count)
+            {
+                return false;
+            }
+
+            for (var stepIndex = 0; stepIndex < actualTarget.Steps.Count; stepIndex++)
+            {
+                var actualStep = actualTarget.Steps[stepIndex];
+                var expectedStep = expectedTarget.Steps[stepIndex];
+                if (actualStep.Phase != SetupJournalStepPhase.Pending ||
+                    expectedStep.Phase != SetupJournalStepPhase.Pending ||
+                    !string.Equals(actualStep.MemberKey, expectedStep.MemberKey, StringComparison.Ordinal) ||
+                    !string.Equals(actualStep.PriorStateHash, expectedStep.PriorStateHash, StringComparison.Ordinal) ||
+                    !string.Equals(actualStep.DesiredStateHash, expectedStep.DesiredStateHash, StringComparison.Ordinal) ||
+                    !string.Equals(actualStep.BackupReference, expectedStep.BackupReference, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private static void ValidateJournalMetadata(SetupPathMetadata metadata)
+    {
+        if (!metadata.Exists ||
+            metadata.Kind != SetupPathKind.File ||
+            (metadata.Attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new FormatException();
+        }
+    }
+
     private static int FindTarget(SetupTransactionJournal journal, Guid recordId)
     {
         for (var index = 0; index < journal.Targets.Count; index++)
@@ -299,9 +436,11 @@ internal sealed partial class SetupTransactionJournalStore
         (SetupJournalOperation.Apply, SetupJournalPhase.Applying, SetupJournalPhase.Committed) => true,
         (SetupJournalOperation.Apply, SetupJournalPhase.Compensating, SetupJournalPhase.Restored) => true,
         (SetupJournalOperation.Apply, SetupJournalPhase.Compensating, SetupJournalPhase.Partial) => true,
+        (SetupJournalOperation.Apply, SetupJournalPhase.Partial, SetupJournalPhase.Compensating) => true,
         (SetupJournalOperation.Rollback, SetupJournalPhase.Prepared, SetupJournalPhase.RollingBack) => true,
         (SetupJournalOperation.Rollback, SetupJournalPhase.RollingBack, SetupJournalPhase.Committed) => true,
         (SetupJournalOperation.Rollback, SetupJournalPhase.RollingBack, SetupJournalPhase.Partial) => true,
+        (SetupJournalOperation.Rollback, SetupJournalPhase.Partial, SetupJournalPhase.RollingBack) => true,
         _ => false,
     };
 

@@ -16,6 +16,263 @@ public sealed class SetupJournalStoreTests
     private const string DesiredHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private const int MaximumJournalBytes = 1024 * 1024;
 
+    [Fact]
+    public void OpenOrCreatePrepared_CloseAndReopenExactJournalReturnsReusedWithoutWriting()
+    {
+        var context = CreateContext();
+        Assert.Equal(
+            SetupPreparedJournalOpenResult.Created,
+            context.Store.OpenOrCreatePrepared(
+                context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var exact = context.Platform.ReadSeededFile(destination);
+        var operationCount = context.Platform.Operations.Count;
+
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths);
+        var result = reopened.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+
+        Assert.Equal(SetupPreparedJournalOpenResult.Reused, result);
+        Assert.Equal(exact, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData("operation")]
+    [InlineData("target-order")]
+    [InlineData("target-kind")]
+    [InlineData("record-id")]
+    [InlineData("step-order")]
+    [InlineData("member-key")]
+    [InlineData("prior-hash")]
+    [InlineData("desired-hash")]
+    [InlineData("backup-reference")]
+    public void OpenOrCreatePrepared_ExistingShapeMismatchFailsClosedWithoutWrite(string mismatch)
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var exact = context.Platform.ReadSeededFile(destination);
+        var expected = ValidTargets().ToArray();
+        var operation = SetupJournalOperation.Apply;
+        switch (mismatch)
+        {
+            case "operation": operation = SetupJournalOperation.Rollback; break;
+            case "target-order": expected = expected.Reverse().ToArray(); break;
+            case "target-kind": expected[0] = expected[0] with { TargetKind = SetupTargetKind.Toml }; break;
+            case "record-id": expected[0] = expected[0] with { RecordId = Guid.Parse("00000000-0000-7000-8000-000000000104") }; break;
+            case "step-order": expected[1] = expected[1] with { Steps = expected[1].Steps.Reverse().ToArray() }; break;
+            case "member-key": expected[1] = expected[1] with { Steps = ReplaceStep(expected[1], 0, step => step with { MemberKey = "COPILOT_C" }) }; break;
+            case "prior-hash": expected[0] = expected[0] with { Steps = ReplaceStep(expected[0], 0, step => step with { PriorStateHash = DesiredHash }) }; break;
+            case "desired-hash": expected[0] = expected[0] with { Steps = ReplaceStep(expected[0], 0, step => step with { DesiredStateHash = PriorHash }) }; break;
+            case "backup-reference": expected[0] = expected[0] with { Steps = ReplaceStep(expected[0], 0, step => step with { BackupReference = "backup-file-other" }) }; break;
+        }
+        var operationCount = context.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, operation, expected));
+
+        Assert.Equal(SetupJournalStorageCodes.AlreadyExists, exception.Code);
+        Assert.Equal(exact, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
+    public void OpenOrCreatePrepared_ExistingNonDormantJournalFailsClosedWithoutWrite()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var exact = context.Platform.ReadSeededFile(destination);
+        var operationCount = context.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+
+        Assert.Equal(SetupJournalStorageCodes.AlreadyExists, exception.Code);
+        Assert.Equal(exact, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
+    public async Task OpenOrCreatePrepared_CreateCollisionReopensAndValidatesExactJournal()
+    {
+        var context = CreateContext();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        using var barrier = context.Platform.AddBarrier($"file.try-write-new-flushed:{destination}");
+
+        var first = Task.Run(() => context.Store.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+        var second = Task.Run(() => new SetupTransactionJournalStore(context.Platform, context.Paths).OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+        barrier.WaitUntilArrivals(2, CancellationToken.None);
+        barrier.Release();
+        var results = await Task.WhenAll(first, second);
+
+        Assert.Equal(1, results.Count(result => result == SetupPreparedJournalOpenResult.Created));
+        Assert.Equal(1, results.Count(result => result == SetupPreparedJournalOpenResult.Reused));
+        Assert.Equal(2, context.Platform.Operations.Count(operation => operation == $"file.try-write-new-flushed:{destination}"));
+        Assert.NotNull(context.Store.Load(ChangeSetId));
+    }
+
+    [Fact]
+    public void OpenOrCreatePrepared_RequiresLiveSameRuntimeLock()
+    {
+        var context = CreateContext();
+        var foreignPlatform = new SetupTestPlatform(CreatedAt, "D:\\foreign");
+        var foreignPaths = new SetupRuntimePaths(foreignPlatform);
+        using var foreignAcquire = SetupLock.TryAcquire(foreignPlatform, foreignPaths);
+
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.Store.OpenOrCreatePrepared(
+                foreignAcquire.Lock!, ChangeSetId, SetupJournalOperation.Apply, ValidTargets())).Code);
+
+        context.Lock.Dispose();
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.Store.OpenOrCreatePrepared(
+                context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets())).Code);
+    }
+
+    [Theory]
+    [InlineData("notification")]
+    [InlineData("step")]
+    public void OpenOrCreatePrepared_ImpossibleDormantStateFailsFixedWithoutOverwrite(string mismatch)
+    {
+        var context = CreateContext();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var json = ValidJson();
+        json = mismatch == "notification"
+            ? json.Replace("\"environment_notification\": \"not_required\"", "\"environment_notification\": \"pending\"", StringComparison.Ordinal)
+            : ReplaceFirst(json, "\"phase\": \"pending\"", "\"phase\": \"mutation_started\"", json.IndexOf("\"member_key\": \"COPILOT_A\"", StringComparison.Ordinal));
+        var bytes = Encoding.UTF8.GetBytes(json);
+        context.Platform.SeedFile(destination, bytes);
+        var operationCount = context.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+
+        Assert.Equal(SetupJournalStorageCodes.Corrupt, exception.Code);
+        Assert.Equal(bytes, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
+    public void OpenOrCreatePrepared_EmbeddedChangeSetMismatchFailsClosedWithoutOverwrite()
+    {
+        var context = CreateContext();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var bytes = Encoding.UTF8.GetBytes(ValidJson().Replace(
+            ChangeSetId.ToString("D"),
+            "00000000-0000-7000-8000-000000000105",
+            StringComparison.Ordinal));
+        context.Platform.SeedFile(destination, bytes);
+        var operationCount = context.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+
+        Assert.Equal(SetupJournalStorageCodes.AlreadyExists, exception.Code);
+        Assert.Equal(bytes, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData(SetupPathKind.File, FileAttributes.ReparsePoint)]
+    [InlineData(SetupPathKind.Directory, FileAttributes.Directory)]
+    public void OpenOrCreatePrepared_ExistingNonRegularOrReparsePathFailsClosed(
+        SetupPathKind kind,
+        FileAttributes attributes)
+    {
+        var context = CreateContext();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        context.Platform.SeedFile(destination, Encoding.UTF8.GetBytes(ValidJson()));
+        context.Platform.SeedPathMetadata(destination, new SetupPathMetadata(true, kind, attributes));
+        var operationCount = context.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+
+        Assert.Equal(SetupJournalStorageCodes.Corrupt, exception.Code);
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
+    public async Task OpenOrCreatePrepared_ReboundExistingJournalFailsClosedWithoutWrite()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var operation = $"file.read-bounded:{destination}:{MaximumJournalBytes}";
+        using var barrier = context.Platform.AddBarrier(operation);
+        var operationCount = context.Platform.Operations.Count;
+
+        var open = Task.Run(() => Assert.Throws<SetupStorageException>(() => context.Store.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets())));
+        barrier.WaitUntilReached(CancellationToken.None);
+        context.Platform.SeedPathMetadata(destination, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        barrier.Release();
+        var exception = await open;
+
+        Assert.Equal(SetupJournalStorageCodes.Corrupt, exception.Code);
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
+    public void OpenOrCreatePrepared_OversizeExistingJournalFailsFixedAndDoesNotOverwrite()
+    {
+        var context = CreateContext();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var bytes = Enumerable.Repeat((byte)'X', MaximumJournalBytes + 1).ToArray();
+        context.Platform.SeedFile(destination, bytes);
+        var operationCount = context.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.OpenOrCreatePrepared(
+            context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+
+        Assert.Equal(SetupJournalStorageCodes.Corrupt, exception.Code);
+        Assert.Equal(bytes, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+        Assert.DoesNotContain(destination, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(SetupJournalOperation.Apply, SetupJournalPhase.Compensating)]
+    [InlineData(SetupJournalOperation.Rollback, SetupJournalPhase.RollingBack)]
+    public void MarkTransactionPhase_PartialRecoveryReopensOnlyItsOperationSpecificRecoveryPhase(
+        object operationValue,
+        object recoveryPhaseValue)
+    {
+        var operation = (SetupJournalOperation)operationValue;
+        var recoveryPhase = (SetupJournalPhase)recoveryPhaseValue;
+        var context = CreatePartialContext(operation);
+
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, recoveryPhase);
+
+        Assert.Equal(recoveryPhase, context.Store.Load(ChangeSetId)!.Phase);
+    }
+
+    [Theory]
+    [InlineData(SetupJournalOperation.Apply, SetupJournalPhase.RollingBack)]
+    [InlineData(SetupJournalOperation.Apply, SetupJournalPhase.Applying)]
+    [InlineData(SetupJournalOperation.Rollback, SetupJournalPhase.Compensating)]
+    [InlineData(SetupJournalOperation.Rollback, SetupJournalPhase.Applying)]
+    public void MarkTransactionPhase_PartialRejectsWrongOperationAndForwardResume(
+        object operationValue,
+        object nextPhaseValue)
+    {
+        var operation = (SetupJournalOperation)operationValue;
+        var nextPhase = (SetupJournalPhase)nextPhaseValue;
+        var context = CreatePartialContext(operation);
+        var before = context.Platform.ReadSeededFile(context.Paths.GetTransactionJournal(ChangeSetId));
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, nextPhase));
+
+        Assert.Equal(SetupJournalStorageCodes.TransitionInvalid, exception.Code);
+        Assert.Equal(before, context.Platform.ReadSeededFile(context.Paths.GetTransactionJournal(ChangeSetId)));
+    }
+
     [Theory]
     [InlineData("apply")]
     [InlineData("rollback")]
@@ -458,6 +715,7 @@ public sealed class SetupJournalStoreTests
         return new TheoryData<string, string>
         {
             { "{", SetupJournalStorageCodes.Corrupt },
+            { valid.Replace("\"schema_version\": 1", "\"schema_version\": 0", StringComparison.Ordinal), SetupJournalStorageCodes.VersionUnsupported },
             { valid.Replace("\"schema_version\": 1", "\"schema_version\": 2", StringComparison.Ordinal), SetupJournalStorageCodes.VersionUnsupported },
             { valid.Replace("\"schema_version\": 1", "\"schema_version\": null", StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
             { valid.Replace("\"operation\": \"apply\"", "\"operation\": 1", StringComparison.Ordinal), SetupJournalStorageCodes.Corrupt },
@@ -568,6 +826,45 @@ public sealed class SetupJournalStoreTests
             Assert.Equal(
                 SetupJournalPhase.Applying,
                 new SetupTransactionJournalStore(reopenedPlatform, reopenedPaths).Load(ChangeSetId)!.Phase);
+        }
+        finally
+        {
+            if (Directory.Exists(localApplicationData))
+            {
+                Directory.Delete(localApplicationData, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void SystemFileSystem_OpenOrCreatePreparedCloseAndReopenReturnsReusedWithoutChangingBytes()
+    {
+        var localApplicationData = Path.Combine(Path.GetTempPath(), $"setup-journal-reuse-{Guid.NewGuid():N}");
+        try
+        {
+            var firstPlatform = new SystemSetupPlatform(localApplicationData: localApplicationData);
+            var firstPaths = new SetupRuntimePaths(firstPlatform);
+            byte[] exact;
+            using (var acquired = SetupLock.TryAcquire(firstPlatform, firstPaths))
+            {
+                var store = new SetupTransactionJournalStore(firstPlatform, firstPaths);
+                Assert.Equal(
+                    SetupPreparedJournalOpenResult.Created,
+                    store.OpenOrCreatePrepared(
+                        acquired.Lock!, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+                exact = File.ReadAllBytes(firstPaths.GetTransactionJournal(ChangeSetId));
+            }
+
+            var reopenedPlatform = new SystemSetupPlatform(localApplicationData: localApplicationData);
+            var reopenedPaths = new SetupRuntimePaths(reopenedPlatform);
+            using var reopenedLock = SetupLock.TryAcquire(reopenedPlatform, reopenedPaths);
+            var reopened = new SetupTransactionJournalStore(reopenedPlatform, reopenedPaths);
+
+            Assert.Equal(
+                SetupPreparedJournalOpenResult.Reused,
+                reopened.OpenOrCreatePrepared(
+                    reopenedLock.Lock!, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+            Assert.Equal(exact, File.ReadAllBytes(reopenedPaths.GetTransactionJournal(ChangeSetId)));
         }
         finally
         {
@@ -900,6 +1197,49 @@ public sealed class SetupJournalStoreTests
             new("COPILOT_B", DesiredHash, PriorHash, "backup-env-103", SetupJournalStepPhase.Pending),
         ]),
     ];
+
+    private static IReadOnlyList<SetupJournalStep> ReplaceStep(
+        SetupJournalTarget target,
+        int index,
+        Func<SetupJournalStep, SetupJournalStep> replace)
+    {
+        var steps = target.Steps.ToArray();
+        steps[index] = replace(steps[index]);
+        return steps;
+    }
+
+    private static string ReplaceFirst(string value, string oldValue, string newValue, int startIndex)
+    {
+        var index = value.IndexOf(oldValue, startIndex, StringComparison.Ordinal);
+        return value.Remove(index, oldValue.Length).Insert(index, newValue);
+    }
+
+    private static bool IsWriteOperation(string operation) =>
+        operation.StartsWith("file.write", StringComparison.Ordinal) ||
+        operation.StartsWith("file.try-write", StringComparison.Ordinal) ||
+        operation.StartsWith("file.flush", StringComparison.Ordinal) ||
+        operation.StartsWith("file.move", StringComparison.Ordinal) ||
+        operation.StartsWith("file.replace", StringComparison.Ordinal) ||
+        operation.StartsWith("file.delete", StringComparison.Ordinal) ||
+        operation.StartsWith("directory.create", StringComparison.Ordinal);
+
+    private static TestContext CreatePartialContext(SetupJournalOperation operation)
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, operation, ValidTargets());
+        if (operation == SetupJournalOperation.Apply)
+        {
+            context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+            context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Compensating);
+        }
+        else
+        {
+            context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.RollingBack);
+        }
+
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Partial);
+        return context;
+    }
 
     private static string ValidJson()
     {
