@@ -1,0 +1,23 @@
+{
+  "contract_version": "v1",
+  "source_surface": "github-copilot-cli",
+  "source_adapter": "otel-http+copilot-compatible-hook",
+  "support_status": "active",
+  "stability": "stable",
+  "source_version_detector": { "availability": "unavailable" },
+  "signals": { "trace": { "availability": "available" }, "log": { "availability": "unknown" }, "metric": { "availability": "unknown" }, "hook": { "availability": "available" }, "sdk_event": { "availability": "unavailable" }, "saved_raw": { "availability": "unknown" } },
+  "native_session_identity": { "availability": "available" },
+  "trace_span_identity": { "trace_id": { "availability": "available" }, "span_id": { "availability": "available" }, "parentage": { "availability": "available" } },
+  "timing_ttft": { "timing": { "availability": "available" }, "ttft": { "availability": "unknown" } },
+  "model_tokens": { "model": { "availability": "unknown" }, "input_tokens": { "availability": "unknown" }, "output_tokens": { "availability": "unknown" }, "total_tokens": { "availability": "unknown" }, "cache_tokens": { "availability": "unknown" }, "reasoning_tokens": { "availability": "unknown" } },
+  "retry_attempt": { "retry": { "availability": "unknown" }, "attempt": { "availability": "unknown" } },
+  "tool_calls": { "identity": { "availability": "unknown" }, "input": { "availability": "unknown" }, "output": { "availability": "unknown" } },
+  "permission": { "wait": { "availability": "unknown" }, "decision": { "availability": "unknown" } },
+  "errors": { "availability": "unknown" },
+  "agent_ownership": { "main_agent": { "availability": "unknown" }, "sub_agent": { "availability": "unknown" } },
+  "prompt_response": { "prompt": { "availability": "unknown" }, "response": { "availability": "unknown" } },
+  "file_diff": { "file": { "availability": "unknown" }, "diff": { "availability": "unknown" } },
+  "content_capture_gate": { "availability": "available" },
+  "provenance": { "required_keys": ["source_adapter", "source_version_or_schema_fingerprint", "source_event_or_trace_span_id", "capture_content_state", "normalization_version"] },
+  "completeness": { "statuses": ["unbound", "partial", "rich", "full"], "reason_codes": ["missing_native_session_id", "missing_trace_context", "trace_signal_disabled", "content_capture_disabled", "unsupported_source_version", "ingest_gap", "hook_only", "historical_summary_only", "unknown_span_kind", "schema_drift_detected", "planned_source_not_enabled"] }
+}

@@ -10,6 +10,71 @@ public sealed class SourceCapabilityContractTests
         "docs", "specifications", "contracts", "source-capabilities", "v1",
         "source-capability-manifest.schema.json");
 
+    private static readonly string ManifestsDirectory = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "docs", "specifications", "contracts", "source-capabilities", "v1",
+        "manifests");
+
+    [Fact]
+    public void Repository_manifests_declare_the_initial_distinct_producer_surfaces()
+    {
+        Assert.True(Directory.Exists(ManifestsDirectory), $"Missing source capability manifests: {ManifestsDirectory}");
+
+        var manifestPaths = Directory.GetFiles(ManifestsDirectory, "*.json")
+            .OrderBy(Path.GetFileName)
+            .ToArray();
+
+        Assert.Equal(
+            [
+                "claude-code.json",
+                "codex-app.json",
+                "codex-cli.json",
+                "github-copilot-cli.json",
+                "github-copilot-vscode.json"
+            ],
+            manifestPaths.Select(path => Path.GetFileName(path)!).ToArray());
+
+        using var schema = JsonDocument.Parse(File.ReadAllText(SchemaPath));
+        var manifests = manifestPaths.ToDictionary(
+            path => Path.GetFileNameWithoutExtension(path)!,
+            path => JsonDocument.Parse(File.ReadAllText(path)),
+            StringComparer.Ordinal);
+
+        try
+        {
+            foreach (var manifest in manifests.Values)
+            {
+                Assert.Empty(SourceCapabilityManifestValidator.Validate(schema, manifest));
+            }
+
+            Assert.Equal(5, manifests.Values.Select(manifest => manifest.RootElement.GetProperty("source_surface").GetString()).Distinct().Count());
+
+            AssertManifestHeader(manifests["github-copilot-vscode"], "github-copilot-vscode", "otel-http+copilot-compatible-hook", "active", "stable");
+            AssertManifestHeader(manifests["github-copilot-cli"], "github-copilot-cli", "otel-http+copilot-compatible-hook", "active", "stable");
+            AssertManifestHeader(manifests["claude-code"], "claude-code", "not-implemented", "planned", "preview");
+            AssertManifestHeader(manifests["codex-app"], "codex-app", "not-implemented", "planned", "preview");
+            AssertManifestHeader(manifests["codex-cli"], "codex-cli", "not-implemented", "planned", "preview");
+
+            AssertAvailabilityMatrix(manifests["github-copilot-vscode"], CopilotAvailabilityMatrix());
+            AssertAvailabilityMatrix(manifests["github-copilot-cli"], CopilotAvailabilityMatrix());
+            AssertAvailabilityMatrix(manifests["claude-code"], UnknownAvailabilityMatrix());
+            AssertAvailabilityMatrix(manifests["codex-app"], UnknownAvailabilityMatrix());
+            AssertAvailabilityMatrix(manifests["codex-cli"], UnknownAvailabilityMatrix());
+
+            Assert.NotEqual(
+                manifests["codex-app"].RootElement.GetProperty("source_surface").GetString(),
+                manifests["codex-cli"].RootElement.GetProperty("source_surface").GetString());
+        }
+        finally
+        {
+            foreach (var manifest in manifests.Values)
+            {
+                manifest.Dispose();
+            }
+        }
+    }
+
     [Fact]
     public void Schema_defines_the_exact_versioned_source_capability_contract()
     {
@@ -129,6 +194,93 @@ public sealed class SourceCapabilityContractTests
         }
 
         return current;
+    }
+
+    private static void AssertManifestHeader(JsonDocument manifest, string surface, string adapter, string supportStatus, string stability)
+    {
+        var root = manifest.RootElement;
+        Assert.Equal("v1", root.GetProperty("contract_version").GetString());
+        Assert.Equal(surface, root.GetProperty("source_surface").GetString());
+        Assert.Equal(adapter, root.GetProperty("source_adapter").GetString());
+        Assert.Equal(supportStatus, root.GetProperty("support_status").GetString());
+        Assert.Equal(stability, root.GetProperty("stability").GetString());
+    }
+
+    private static void AssertCapability(JsonDocument manifest, string path, string expectedAvailability)
+    {
+        var value = manifest.RootElement;
+        foreach (var segment in path.Split('.'))
+        {
+            value = value.GetProperty(segment);
+        }
+
+        Assert.Equal(expectedAvailability, value.GetProperty("availability").GetString());
+    }
+
+    private static void AssertAvailabilityMatrix(JsonDocument manifest, IReadOnlyDictionary<string, string> expectedAvailability)
+    {
+        Assert.Equal(34, expectedAvailability.Count);
+        foreach (var (path, availability) in expectedAvailability)
+        {
+            AssertCapability(manifest, path, availability);
+        }
+    }
+
+    private static Dictionary<string, string> CopilotAvailabilityMatrix()
+    {
+        var availability = UnknownAvailabilityMatrix();
+        availability["source_version_detector"] = "unavailable";
+        availability["signals.trace"] = "available";
+        availability["signals.hook"] = "available";
+        availability["signals.sdk_event"] = "unavailable";
+        availability["native_session_identity"] = "available";
+        availability["trace_span_identity.trace_id"] = "available";
+        availability["trace_span_identity.span_id"] = "available";
+        availability["trace_span_identity.parentage"] = "available";
+        availability["timing_ttft.timing"] = "available";
+        availability["content_capture_gate"] = "available";
+        return availability;
+    }
+
+    private static Dictionary<string, string> UnknownAvailabilityMatrix()
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["source_version_detector"] = "unknown",
+            ["signals.trace"] = "unknown",
+            ["signals.log"] = "unknown",
+            ["signals.metric"] = "unknown",
+            ["signals.hook"] = "unknown",
+            ["signals.sdk_event"] = "unknown",
+            ["signals.saved_raw"] = "unknown",
+            ["native_session_identity"] = "unknown",
+            ["trace_span_identity.trace_id"] = "unknown",
+            ["trace_span_identity.span_id"] = "unknown",
+            ["trace_span_identity.parentage"] = "unknown",
+            ["timing_ttft.timing"] = "unknown",
+            ["timing_ttft.ttft"] = "unknown",
+            ["model_tokens.model"] = "unknown",
+            ["model_tokens.input_tokens"] = "unknown",
+            ["model_tokens.output_tokens"] = "unknown",
+            ["model_tokens.total_tokens"] = "unknown",
+            ["model_tokens.cache_tokens"] = "unknown",
+            ["model_tokens.reasoning_tokens"] = "unknown",
+            ["retry_attempt.retry"] = "unknown",
+            ["retry_attempt.attempt"] = "unknown",
+            ["tool_calls.identity"] = "unknown",
+            ["tool_calls.input"] = "unknown",
+            ["tool_calls.output"] = "unknown",
+            ["permission.wait"] = "unknown",
+            ["permission.decision"] = "unknown",
+            ["errors"] = "unknown",
+            ["agent_ownership.main_agent"] = "unknown",
+            ["agent_ownership.sub_agent"] = "unknown",
+            ["prompt_response.prompt"] = "unknown",
+            ["prompt_response.response"] = "unknown",
+            ["file_diff.file"] = "unknown",
+            ["file_diff.diff"] = "unknown",
+            ["content_capture_gate"] = "unknown"
+        };
     }
 
     private static string CreateFixture(string surface, string? unknownProperty = null)
