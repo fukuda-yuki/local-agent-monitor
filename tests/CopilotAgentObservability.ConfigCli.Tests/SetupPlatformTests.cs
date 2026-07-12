@@ -21,6 +21,27 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    public void SystemPlatform_MapsFailedEnvironmentNotificationToFixedSafeError()
+    {
+        var platform = new SystemSetupPlatform(notificationAttempt: () => false);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => platform.UserEnvironment.NotifyChange());
+
+        Assert.Equal("setup_environment_notification_failed", exception.Message);
+    }
+
+    [Fact]
+    public void SystemPlatform_MapsEnvironmentNotificationExceptionToFixedSafeError()
+    {
+        var platform = new SystemSetupPlatform(notificationAttempt: () => throw new InvalidOperationException("raw operating system message"));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => platform.UserEnvironment.NotifyChange());
+
+        Assert.Equal("setup_environment_notification_failed", exception.Message);
+        Assert.Null(exception.InnerException);
+    }
+
+    [Fact]
     public void TestPlatform_RecordsFilesystemEnvironmentAndCheckpointOperationsInOrder()
     {
         var platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero));
@@ -63,29 +84,98 @@ public sealed class SetupPlatformTests
     public async Task TestPlatform_BarrierBlocksUntilExplicitReleaseWithoutSleep()
     {
         var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
-        var barrier = platform.AddBarrier("checkpoint:before-final-verification");
+        using var barrier = platform.AddBarrier("checkpoint:before-final-verification");
 
         var task = Task.Run(() => platform.Execution.Checkpoint("before-final-verification"));
-        await Task.Run(barrier.WaitUntilReached);
-        Assert.False(task.IsCompleted);
+        try
+        {
+            await Task.Run(() => barrier.WaitUntilReached(CancellationToken.None));
+            Assert.False(task.IsCompleted);
+        }
+        finally
+        {
+            barrier.Release();
+        }
 
-        barrier.Release();
         await task;
 
         Assert.Equal(["checkpoint:before-final-verification"], platform.Operations);
     }
 
     [Fact]
-    public void TestPlatform_DoesNotTouchTheRealUserEnvironment()
+    public void TestPlatform_UserEnvironmentIsolatedInMemory()
     {
-        const string name = "COPILOT_AGENT_OBSERVABILITY_TEST_ISOLATED";
-        var original = Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.User);
         var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedUserEnvironment("COPILOT_OTEL_ENABLED", "false");
 
-        platform.UserEnvironment.Set(name, "test-only");
+        platform.UserEnvironment.Set("COPILOT_OTEL_ENABLED", "true");
 
-        Assert.Equal("test-only", platform.UserEnvironment.Get(name));
-        Assert.Equal(original, Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.User));
+        Assert.Equal("true", platform.UserEnvironment.Get("COPILOT_OTEL_ENABLED"));
+        Assert.Equal(
+        [
+            "environment.set:COPILOT_OTEL_ENABLED",
+            "environment.get:COPILOT_OTEL_ENABLED",
+        ],
+        platform.Operations);
+    }
+
+    [Fact]
+    public void TestPlatform_BarrierIgnoresWrongCheckpoint()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        using var barrier = platform.AddBarrier("checkpoint:expected");
+
+        try
+        {
+            platform.Execution.Checkpoint("other");
+
+            Assert.False(barrier.HasReached);
+        }
+        finally
+        {
+            barrier.Release();
+        }
+    }
+
+    [Fact]
+    public async Task TestPlatform_BarrierDoesNotBlockAWorkerFault()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        using var barrier = platform.AddBarrier("checkpoint:faulting");
+        platform.InjectFault("checkpoint:faulting", new IOException("synthetic"));
+
+        var task = Task.Run(() => platform.Execution.Checkpoint("faulting"));
+        try
+        {
+            await Assert.ThrowsAsync<IOException>(() => task);
+            Assert.False(barrier.HasReached);
+        }
+        finally
+        {
+            barrier.Release();
+        }
+    }
+
+    [Fact]
+    public async Task TestPlatform_BarrierCancellationReleasesWorker()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        using var cancellation = new CancellationTokenSource();
+        using var barrier = platform.AddBarrier("checkpoint:cancellable", cancellation.Token);
+        using var hostGuard = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var task = Task.Run(() => platform.Execution.Checkpoint("cancellable"));
+
+        try
+        {
+            await Task.Run(() => barrier.WaitUntilReached(hostGuard.Token));
+            cancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+        }
+        finally
+        {
+            barrier.Release();
+        }
     }
 
     [Fact]

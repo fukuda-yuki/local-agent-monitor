@@ -42,9 +42,12 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         queuedFaults.Enqueue(exception);
     }
 
-    public SetupTestBarrier AddBarrier(string operation)
+    public SetupTestBarrier AddBarrier(
+        string operation,
+        CancellationToken cancellationToken = default,
+        TimeSpan? maximumWait = null)
     {
-        var barrier = new SetupTestBarrier();
+        var barrier = new SetupTestBarrier(cancellationToken, maximumWait ?? TimeSpan.FromSeconds(10));
         barriers.Add(operation, barrier);
         return barrier;
     }
@@ -168,18 +171,44 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     }
 }
 
-internal sealed class SetupTestBarrier
+internal sealed class SetupTestBarrier : IDisposable
 {
     private readonly ManualResetEventSlim reached = new(false);
     private readonly ManualResetEventSlim release = new(false);
+    private readonly CancellationToken cancellationToken;
+    private readonly TimeSpan maximumWait;
 
-    public void WaitUntilReached() => reached.Wait();
+    public SetupTestBarrier(CancellationToken cancellationToken, TimeSpan maximumWait)
+    {
+        this.cancellationToken = cancellationToken;
+        this.maximumWait = maximumWait;
+    }
+
+    public bool HasReached => reached.IsSet;
+
+    public void WaitUntilReached(CancellationToken cancellationToken)
+    {
+        if (!reached.Wait(maximumWait, cancellationToken))
+        {
+            throw new TimeoutException("Setup test barrier did not receive the expected checkpoint.");
+        }
+    }
 
     public void Release() => release.Set();
 
     internal void ArriveAndWait()
     {
         reached.Set();
-        release.Wait();
+        if (!release.Wait(maximumWait, cancellationToken))
+        {
+            throw new TimeoutException("Setup test barrier was not released.");
+        }
+    }
+
+    public void Dispose()
+    {
+        Release();
+        reached.Dispose();
+        release.Dispose();
     }
 }

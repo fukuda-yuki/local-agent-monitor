@@ -4,10 +4,10 @@ namespace CopilotAgentObservability.ConfigCli.Setup.Platform;
 
 public sealed class SystemSetupPlatform : ISetupPlatform
 {
-    public SystemSetupPlatform(ISetupExecution? execution = null)
+    public SystemSetupPlatform(ISetupExecution? execution = null, Func<bool>? notificationAttempt = null)
     {
         FileSystem = new SystemSetupFileSystem();
-        UserEnvironment = new SystemSetupUserEnvironment();
+        UserEnvironment = new SystemSetupUserEnvironment(notificationAttempt);
         Clock = new SystemSetupClock();
         Identifiers = new SystemSetupIdentifierGenerator();
         Execution = execution ?? NoOpSetupExecution.Instance;
@@ -61,17 +61,38 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
     private sealed class SystemSetupUserEnvironment : ISetupUserEnvironment
     {
+        private const string NotificationFailureCode = "setup_environment_notification_failed";
+        private readonly Func<bool> notificationAttempt;
+
+        public SystemSetupUserEnvironment(Func<bool>? notificationAttempt)
+        {
+            this.notificationAttempt = notificationAttempt ?? TryNotifyChange;
+        }
+
         public string? Get(string name) => Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.User);
 
         public void Set(string name, string? value) => Environment.SetEnvironmentVariable(name, value, EnvironmentVariableTarget.User);
 
         public void NotifyChange()
         {
-            if (OperatingSystem.IsWindows())
+            bool notified;
+            try
             {
-                _ = SendMessageTimeout(new IntPtr(0xffff), 0x001a, IntPtr.Zero, "Environment", 0x0002, 5000, out _);
+                notified = notificationAttempt();
+            }
+            catch (Exception)
+            {
+                throw new InvalidOperationException(NotificationFailureCode);
+            }
+
+            if (!notified)
+            {
+                throw new InvalidOperationException(NotificationFailureCode);
             }
         }
+
+        private static bool TryNotifyChange() => !OperatingSystem.IsWindows() ||
+            SendMessageTimeout(new IntPtr(0xffff), 0x001a, IntPtr.Zero, "Environment", 0x0002, 5000, out _) != IntPtr.Zero;
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr SendMessageTimeout(
