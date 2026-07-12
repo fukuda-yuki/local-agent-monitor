@@ -5,13 +5,13 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 internal sealed class SetupTestPlatform : ISetupPlatform
 {
     private readonly object gate = new();
-    private readonly Dictionary<string, byte[]> files = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, byte[]> files;
     private readonly Dictionary<string, string?> environment = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<Exception>> faults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<(Exception Exception, Action? Callback)>> afterEffectFaults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SetupTestBarrierState> barriers = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SetupPathMetadata> pathMetadata;
-    private readonly HashSet<string> exclusiveLocks = new(StringComparer.Ordinal);
+    private readonly HashSet<string> exclusiveLocks;
     private readonly List<string> operations = [];
 
     public SetupTestPlatform(
@@ -21,8 +21,10 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     {
         LocalApplicationData = localApplicationData;
         PathStyle = pathStyle;
-        pathMetadata = new Dictionary<string, SetupPathMetadata>(
-            pathStyle == SetupPathStyle.Windows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var pathComparer = pathStyle == SetupPathStyle.Windows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        files = new Dictionary<string, byte[]>(pathComparer);
+        pathMetadata = new Dictionary<string, SetupPathMetadata>(pathComparer);
+        exclusiveLocks = new HashSet<string>(pathComparer);
         Clock = new SetupTestClock(utcNow);
         Identifiers = new SetupTestIdentifierGenerator();
         FileSystem = new SetupTestFileSystem(this);
@@ -251,6 +253,11 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             platform.Record($"directory.create:{path}");
             lock (platform.gate)
             {
+                if (platform.files.ContainsKey(path))
+                {
+                    throw new IOException("A file already exists at the directory path.");
+                }
+
                 platform.pathMetadata[path] = new SetupPathMetadata(true, SetupPathKind.Directory, FileAttributes.Directory);
             }
         }
@@ -271,6 +278,11 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         {
             var operation = $"file.write:{path}";
             platform.Record(operation);
+            if (platform.pathMetadata.TryGetValue(path, out var existing) && existing.Kind == SetupPathKind.Directory)
+            {
+                throw new UnauthorizedAccessException("Destination is a directory.");
+            }
+
             platform.files[path] = bytes.ToArray();
             platform.pathMetadata[path] = new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal);
             platform.RecordAfterEffect(operation);
@@ -294,6 +306,11 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         {
             var operation = $"file.flush:{path}";
             platform.Record(operation);
+            if (!platform.files.ContainsKey(path))
+            {
+                throw new FileNotFoundException("File does not exist.");
+            }
+
             platform.RecordAfterEffect(operation);
         }
 
@@ -301,6 +318,11 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         {
             var operation = $"file.replace:{sourcePath}->{destinationPath}";
             platform.Record(operation);
+            if (!platform.files.ContainsKey(sourcePath) || !platform.files.ContainsKey(destinationPath))
+            {
+                throw new IOException("Source and destination files must exist.");
+            }
+
             platform.files[destinationPath] = platform.files[sourcePath];
             platform.files.Remove(sourcePath);
             platform.pathMetadata[destinationPath] = new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal);
@@ -312,7 +334,13 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         {
             var operation = $"file.move:{sourcePath}->{destinationPath}";
             platform.Record(operation);
-            if (!overwrite && platform.files.ContainsKey(destinationPath))
+            if (!platform.files.ContainsKey(sourcePath))
+            {
+                throw new IOException("Source does not exist.");
+            }
+
+            if (platform.pathMetadata.TryGetValue(destinationPath, out var destinationMetadata) &&
+                (destinationMetadata.Kind != SetupPathKind.File || !overwrite))
             {
                 throw new IOException("Destination already exists.");
             }
@@ -327,6 +355,11 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         public void DeleteFile(string path)
         {
             platform.Record($"file.delete:{path}");
+            if (platform.pathMetadata.TryGetValue(path, out var metadata) && metadata.Kind == SetupPathKind.Directory)
+            {
+                throw new UnauthorizedAccessException("Path is a directory.");
+            }
+
             platform.files.Remove(path);
             platform.pathMetadata.Remove(path);
             platform.RecordAfterEffect($"file.delete:{path}");

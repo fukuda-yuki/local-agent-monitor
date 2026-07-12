@@ -1,4 +1,6 @@
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
+using System.Diagnostics;
+using System.Net.Sockets;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
@@ -80,6 +82,53 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    public void SystemPlatform_UnixClassifiesFifoAndSocketAsNonRegularWithoutBlocking()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal(SetupPathStyle.Windows, new SystemSetupPlatform().PathStyle);
+            return;
+        }
+
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-platform-special-{Guid.NewGuid():N}");
+        var fifo = Path.Combine(directory, "input.fifo");
+        var socketPath = Path.Combine(directory, "input.socket");
+        Directory.CreateDirectory(directory);
+        Socket? socket = null;
+        try
+        {
+            using (var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "mkfifo",
+                    UseShellExecute = false,
+                },
+            })
+            {
+                process.StartInfo.ArgumentList.Add(fifo);
+                Assert.True(process.Start());
+                Assert.True(process.WaitForExit(TimeSpan.FromSeconds(5)));
+                Assert.Equal(0, process.ExitCode);
+            }
+
+            socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            socket.Bind(new UnixDomainSocketEndPoint(socketPath));
+            var platform = new SystemSetupPlatform();
+
+            Assert.Equal(SetupPathKind.Other, platform.FileSystem.GetPathMetadata(fifo).Kind);
+            Assert.Equal(SetupPathKind.Other, platform.FileSystem.GetPathMetadata(socketPath).Kind);
+        }
+        finally
+        {
+            socket?.Dispose();
+            File.Delete(fifo);
+            File.Delete(socketPath);
+            Directory.Delete(directory);
+        }
+    }
+
+    [Fact]
     public void SystemPlatform_MapsFailedEnvironmentNotificationToFixedSafeError()
     {
         var platform = new SystemSetupPlatform(notificationAttempt: () => false);
@@ -104,6 +153,7 @@ public sealed class SetupPlatformTests
     public void TestPlatform_RecordsFilesystemEnvironmentAndCheckpointOperationsInOrder()
     {
         var platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero));
+        platform.SeedFile("plan.json", []);
 
         platform.FileSystem.WriteAllBytes("plan.tmp", [1, 2, 3]);
         platform.FileSystem.FlushFile("plan.tmp");
@@ -376,6 +426,67 @@ public sealed class SetupPlatformTests
             "file.lock:runtime\\setup.lock",
         ],
         platform.Operations);
+    }
+
+    [Fact]
+    public void TestPlatform_WindowsPathsAndLocksUseOneCaseInsensitiveComparer()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, pathStyle: SetupPathStyle.Windows);
+        platform.SeedDirectory("C:\\ROOT");
+        platform.SeedFile("C:\\ROOT\\File.bin", [1]);
+
+        Assert.Equal(new byte[] { 1 }, platform.FileSystem.ReadAllBytes("c:\\root\\file.BIN"));
+        Assert.Throws<IOException>(() => platform.FileSystem.WriteNewAllBytes("c:\\root\\FILE.bin", [2]));
+        var first = platform.FileSystem.TryAcquireExclusiveFileLock("C:\\ROOT\\Setup.lock");
+        var collision = platform.FileSystem.TryAcquireExclusiveFileLock("c:\\root\\setup.LOCK");
+
+        Assert.NotNull(first);
+        Assert.Null(collision);
+        first!.Dispose();
+    }
+
+    [Fact]
+    public void TestPlatform_UnixPathsAndLocksUseOneCaseSensitiveComparer()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, pathStyle: SetupPathStyle.Unix);
+        platform.SeedDirectory("/root");
+        platform.SeedFile("/root/File.bin", [1]);
+
+        platform.FileSystem.WriteNewAllBytes("/root/file.bin", [2]);
+        var first = platform.FileSystem.TryAcquireExclusiveFileLock("/root/Setup.lock");
+        var distinct = platform.FileSystem.TryAcquireExclusiveFileLock("/root/setup.lock");
+
+        Assert.Equal(new byte[] { 1 }, platform.FileSystem.ReadAllBytes("/root/File.bin"));
+        Assert.Equal(new byte[] { 2 }, platform.FileSystem.ReadAllBytes("/root/file.bin"));
+        Assert.NotNull(first);
+        Assert.NotNull(distinct);
+        first!.Dispose();
+        distinct!.Dispose();
+    }
+
+    [Fact]
+    public void TestPlatform_ReplaceAndMoveMatchSystemExistenceAndOverwriteSemantics()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedFile("source", [1]);
+
+        Assert.Throws<IOException>(() => platform.FileSystem.CreateDirectory("source"));
+        Assert.Throws<IOException>(() => platform.FileSystem.ReplaceFile("source", "missing-destination"));
+        Assert.Equal(new byte[] { 1 }, platform.ReadSeededFile("source"));
+        Assert.Throws<IOException>(() => platform.FileSystem.MoveFile("missing-source", "destination", overwrite: false));
+
+        platform.SeedFile("destination", [2]);
+        Assert.Throws<IOException>(() => platform.FileSystem.MoveFile("source", "destination", overwrite: false));
+        Assert.Equal(new byte[] { 1 }, platform.ReadSeededFile("source"));
+        Assert.Equal(new byte[] { 2 }, platform.ReadSeededFile("destination"));
+
+        platform.FileSystem.MoveFile("source", "destination", overwrite: true);
+        Assert.False(platform.FileSystem.FileExists("source"));
+        Assert.Equal(new byte[] { 1 }, platform.ReadSeededFile("destination"));
+
+        platform.SeedDirectory("directory");
+        Assert.Throws<UnauthorizedAccessException>(() => platform.FileSystem.DeleteFile("directory"));
+        platform.FileSystem.DeleteFile("missing");
     }
 
     [Fact]

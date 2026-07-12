@@ -105,8 +105,29 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
             var kind = (attributes & FileAttributes.Directory) != 0
                 ? SetupPathKind.Directory
-                : SetupPathKind.File;
+                : OperatingSystem.IsWindows()
+                    ? SetupPathKind.File
+                    : GetUnixPathKind(path);
             return new SetupPathMetadata(true, kind, attributes);
+        }
+
+        private static SetupPathKind GetUnixPathKind(string path)
+        {
+            try
+            {
+                using var stream = File.Open(path, new FileStreamOptions
+                {
+                    Mode = FileMode.Open,
+                    Access = FileAccess.ReadWrite,
+                    Share = FileShare.ReadWrite | FileShare.Delete,
+                    BufferSize = 1,
+                });
+                return stream.CanSeek ? SetupPathKind.File : SetupPathKind.Other;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                return SetupPathKind.Other;
+            }
         }
 
         public ISetupExclusiveFileLock? TryAcquireExclusiveFileLock(string path)

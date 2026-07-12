@@ -323,7 +323,7 @@ public sealed class SetupFileStepTests
         Assert.Equal(old, platform.ReadSeededFile(target));
         if (boundary.StartsWith("temp", StringComparison.Ordinal))
         {
-            Assert.False(platform.FileSystem.FileExists(temporary));
+            Assert.Equal(boundary == "temp-write", platform.FileSystem.FileExists(temporary));
         }
         else
         {
@@ -401,7 +401,7 @@ public sealed class SetupFileStepTests
     [Theory]
     [InlineData("temp-write")]
     [InlineData("temp-flush")]
-    public void Restore_AfterEffectPreReplaceFaultPreservesAppliedTargetAndCleansTemporaryFile(string boundary)
+    public void Restore_AfterEffectPreReplaceFaultPreservesAppliedTargetAndOnlyCleansOwnedTemporaryFile(string boundary)
     {
         var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
         var target = "C:\\allowed\\settings.json";
@@ -422,7 +422,7 @@ public sealed class SetupFileStepTests
             Assert.Throws<SetupFileStepException>(() => step.Restore(
                 "C:\\allowed", target, backup, applied.AppliedHash, applied.PreviousHash)).Code);
         Assert.Equal(desired, platform.ReadSeededFile(target));
-        Assert.False(platform.FileSystem.FileExists(restoreTemporary));
+        Assert.Equal(boundary == "temp-write", platform.FileSystem.FileExists(restoreTemporary));
     }
 
     [Fact]
@@ -486,6 +486,149 @@ public sealed class SetupFileStepTests
     }
 
     [Fact]
+    public void Apply_TemporaryCollisionPreservesUnrelatedCandidate()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var temporary = target + ".cao-00000000-0000-7000-8000-000000000001.tmp";
+        var previous = Encoding.UTF8.GetBytes("previous");
+        var unrelated = Encoding.UTF8.GetBytes("unrelated");
+        platform.SeedFile(target, previous);
+        platform.SeedFile(temporary, unrelated);
+
+        var exception = Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+            "C:\\allowed", target, backup, SetupHash.File(true, previous), Encoding.UTF8.GetBytes("desired")));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(previous, platform.ReadSeededFile(target));
+        Assert.Equal(unrelated, platform.ReadSeededFile(temporary));
+    }
+
+    [Fact]
+    public void Apply_AfterEffectTemporaryCreateFaultDoesNotClaimOrDeleteCandidate()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var temporary = target + ".cao-00000000-0000-7000-8000-000000000001.tmp";
+        var previous = Encoding.UTF8.GetBytes("previous");
+        var desired = Encoding.UTF8.GetBytes("desired");
+        platform.SeedFile(target, previous);
+        platform.InjectAfterEffectFault($"file.write-new:{temporary}", new IOException("ambiguous create"));
+
+        Assert.Equal(
+            SetupCodes.InternalError,
+            Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+                "C:\\allowed", target, backup, SetupHash.File(true, previous), desired)).Code);
+        Assert.Equal(previous, platform.ReadSeededFile(target));
+        Assert.Equal(desired, platform.ReadSeededFile(temporary));
+    }
+
+    [Fact]
+    public void Restore_TemporaryCollisionPreservesUnrelatedCandidate()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var restoreTemporary = target + ".cao-00000000-0000-7000-8000-000000000002.tmp";
+        var previous = Encoding.UTF8.GetBytes("previous");
+        var desired = Encoding.UTF8.GetBytes("desired");
+        var unrelated = Encoding.UTF8.GetBytes("unrelated");
+        platform.SeedFile(target, previous);
+        var step = new AtomicFileSetupStep(platform);
+        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, previous), desired);
+        platform.SeedFile(restoreTemporary, unrelated);
+
+        var exception = Assert.Throws<SetupFileStepException>(() => step.Restore(
+            "C:\\allowed", target, backup, applied.AppliedHash, applied.PreviousHash));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(desired, platform.ReadSeededFile(target));
+        Assert.Equal(unrelated, platform.ReadSeededFile(restoreTemporary));
+    }
+
+    [Fact]
+    public void Restore_AfterEffectTemporaryCreateFaultDoesNotClaimOrDeleteCandidate()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var restoreTemporary = target + ".cao-00000000-0000-7000-8000-000000000002.tmp";
+        var previous = Encoding.UTF8.GetBytes("previous");
+        var desired = Encoding.UTF8.GetBytes("desired");
+        platform.SeedFile(target, previous);
+        var step = new AtomicFileSetupStep(platform);
+        var applied = step.Apply("C:\\allowed", target, backup, SetupHash.File(true, previous), desired);
+        platform.InjectAfterEffectFault($"file.write-new:{restoreTemporary}", new IOException("ambiguous create"));
+
+        Assert.Equal(
+            SetupCodes.InternalError,
+            Assert.Throws<SetupFileStepException>(() => step.Restore(
+                "C:\\allowed", target, backup, applied.AppliedHash, applied.PreviousHash)).Code);
+        Assert.Equal(desired, platform.ReadSeededFile(target));
+        Assert.Equal(previous, platform.ReadSeededFile(restoreTemporary));
+    }
+
+    [Fact]
+    public void Apply_BackupCollisionPreservesUnrelatedCandidate()
+    {
+        var platform = CreatePlatform(SetupPathStyle.Windows, "C:\\allowed");
+        var target = "C:\\allowed\\settings.json";
+        var backup = "C:\\private\\record.backup";
+        var previous = Encoding.UTF8.GetBytes("previous");
+        var unrelated = Encoding.UTF8.GetBytes("unrelated");
+        platform.SeedFile(target, previous);
+        platform.SeedFile(backup, unrelated);
+
+        Assert.Equal(
+            SetupCodes.InternalError,
+            Assert.Throws<SetupFileStepException>(() => new AtomicFileSetupStep(platform).Apply(
+                "C:\\allowed", target, backup, SetupHash.File(true, previous), Encoding.UTF8.GetBytes("desired"))).Code);
+        Assert.Equal(previous, platform.ReadSeededFile(target));
+        Assert.Equal(unrelated, platform.ReadSeededFile(backup));
+    }
+
+    [Theory]
+    [InlineData(SetupPathStyle.Windows, "C:\\", "C:\\outer", "C:\\outer\\allowed", "C:\\outer\\allowed\\settings.json")]
+    [InlineData(SetupPathStyle.Unix, "/", "/outer", "/outer/allowed", "/outer/allowed/settings.json")]
+    public void PathPolicy_RejectsReparseAncestorAboveAllowedRoot(
+        SetupPathStyle style,
+        string filesystemRoot,
+        string enclosingAncestor,
+        string allowedRoot,
+        string target)
+    {
+        var platform = new SetupTestPlatform(Now, pathStyle: style);
+        platform.SeedDirectory(filesystemRoot);
+        platform.SeedPathMetadata(
+            enclosingAncestor,
+            new SetupPathMetadata(true, SetupPathKind.Directory, FileAttributes.Directory | FileAttributes.ReparsePoint));
+        platform.SeedDirectory(allowedRoot);
+        platform.SeedFile(target, [1]);
+
+        var exception = Assert.Throws<SetupFileStepException>(() =>
+            SetupPathPolicy.ValidateFileTarget(platform, allowedRoot, target));
+
+        Assert.Equal(SetupCodes.UnsafePath, exception.Code);
+        Assert.Contains($"file.metadata:{filesystemRoot}", platform.Operations);
+        Assert.Contains($"file.metadata:{enclosingAncestor}", platform.Operations);
+    }
+
+    [Fact]
+    public void PathPolicy_RejectsReparseFilesystemRoot()
+    {
+        var platform = new SetupTestPlatform(Now, pathStyle: SetupPathStyle.Windows);
+        platform.SeedPathMetadata("C:\\", new SetupPathMetadata(true, SetupPathKind.Directory, FileAttributes.Directory | FileAttributes.ReparsePoint));
+        platform.SeedDirectory("C:\\allowed");
+
+        Assert.Equal(
+            SetupCodes.UnsafePath,
+            Assert.Throws<SetupFileStepException>(() =>
+                SetupPathPolicy.ValidateFileTarget(platform, "C:\\allowed", "C:\\allowed\\settings.json")).Code);
+    }
+
+    [Fact]
     public void SystemPlatform_CloseReopenRestorePreservesExactBytes()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"cao-setup-file-{Guid.NewGuid():N}");
@@ -533,6 +676,43 @@ public sealed class SetupFileStepTests
             var target = Path.Combine(linked, "settings.json");
             var exception = Assert.Throws<SetupFileStepException>(() =>
                 SetupPathPolicy.ValidateFileTarget(new SystemSetupPlatform(), directory, target));
+
+            Assert.Equal(SetupCodes.UnsafePath, exception.Code);
+        }
+        finally
+        {
+            if (Directory.Exists(linked))
+            {
+                Directory.Delete(linked);
+            }
+
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SystemPlatform_RejectsRealReparseAncestorAboveAllowedRoot()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-setup-root-{Guid.NewGuid():N}");
+        var actual = Path.Combine(directory, "actual");
+        var actualAllowed = Path.Combine(actual, "allowed");
+        var linked = Path.Combine(directory, "linked");
+        Directory.CreateDirectory(actualAllowed);
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linked, actual);
+            }
+            catch (Exception creationException) when (creationException is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+            {
+                throw Xunit.Sdk.SkipException.ForSkip($"Cannot create enclosing reparse fixture: {creationException.GetType().Name}");
+            }
+
+            var allowedRoot = Path.Combine(linked, "allowed");
+            var target = Path.Combine(allowedRoot, "settings.json");
+            var exception = Assert.Throws<SetupFileStepException>(() =>
+                SetupPathPolicy.ValidateFileTarget(new SystemSetupPlatform(), allowedRoot, target));
 
             Assert.Equal(SetupCodes.UnsafePath, exception.Code);
         }

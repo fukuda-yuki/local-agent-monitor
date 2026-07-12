@@ -32,7 +32,7 @@ internal static class SetupPathPolicy
                 Reject();
             }
 
-            ValidateMetadata(platform, root, SetupPathKind.Directory);
+            ValidateDirectoryChain(platform, root);
             var relative = target[rootPrefix.Length..];
             var segments = relative.Split(separator, StringSplitOptions.RemoveEmptyEntries);
             var current = root;
@@ -150,6 +150,19 @@ internal static class SetupPathPolicy
         if (!metadata.Exists || metadata.Kind != expectedKind)
         {
             Reject();
+        }
+    }
+
+    private static void ValidateDirectoryChain(ISetupPlatform platform, string root)
+    {
+        var separator = platform.PathStyle == SetupPathStyle.Windows ? '\\' : '/';
+        var filesystemRootLength = platform.PathStyle == SetupPathStyle.Windows ? 3 : 1;
+        var current = root[..filesystemRootLength];
+        ValidateMetadata(platform, current, SetupPathKind.Directory);
+        foreach (var segment in root[filesystemRootLength..].Split(separator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = current.EndsWith(separator) ? current + segment : current + separator + segment;
+            ValidateMetadata(platform, current, SetupPathKind.Directory);
         }
     }
 
