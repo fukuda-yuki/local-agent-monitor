@@ -119,11 +119,15 @@ internal static class SourceProjectionStateBuilder
         SessionDetail? session)
     {
         var diagnostic = SourceDiagnosticDto.FromRows(observations);
-        var hasOtel = observations.Count != 0;
+        // An observation proves only that an OTLP record exists. It is not
+        // binding evidence: a Hook event and an unrelated OTLP record may
+        // share a trace id. Exact linkage requires the persisted Session
+        // enrichment event written by the OTel enricher for this Session.
+        var hasExactOtelEvent = session?.Events.Any(IsExactOtelEvent) == true;
         var hasHook = session?.Events.Any(eventItem => eventItem.SourceAdapter == "claude-code-hook") == true;
         var exact = session is not null
             && session.NativeIds.Any(native => native.BindingKind is SessionBindingKind.Native or SessionBindingKind.ExplicitResume or SessionBindingKind.ExplicitHandoff)
-            && hasOtel;
+            && hasExactOtelEvent;
         var binding = exact ? "exact_linked" : hasHook ? "hook_only" : "otel_only";
         var completeness = session is null
             ? "unbound"
@@ -131,6 +135,10 @@ internal static class SourceProjectionStateBuilder
         var reasons = CompletenessReasons(observations, session, binding);
         return new(diagnostic, binding, completeness, reasons, SourceDiagnosticDto.AgreedContentState(observations));
     }
+
+    private static bool IsExactOtelEvent(ObservedSessionEvent eventItem) =>
+        !string.IsNullOrWhiteSpace(eventItem.TraceId)
+        && eventItem.SourceAdapter is "claude-code-otel" or "otel-exact";
 
     private static IReadOnlyList<string> CompletenessReasons(
         IReadOnlyList<SourceCompatibilityRow> observations,
