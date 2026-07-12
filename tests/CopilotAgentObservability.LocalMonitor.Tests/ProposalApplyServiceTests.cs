@@ -340,7 +340,8 @@ public sealed class ProposalApplyServiceTests
         legacy.Remove("ProposalRevision");
         legacy["ApprovalDigest"] = legacyDigest;
         File.WriteAllText(privatePath, legacy.ToJsonString());
-        CreateVersionSixAppliedDraft(directory.DatabasePath, approved, legacyDigest);
+        CopySessionFixture("session-v6.sqlite", directory.DatabasePath);
+        AddVersionSixAppliedDraft(directory.DatabasePath, approved, legacyDigest);
 
         var store = new SqliteSessionStore(directory.DatabasePath);
         store.CreateSchema();
@@ -667,27 +668,16 @@ public sealed class ProposalApplyServiceTests
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", values)))).ToLowerInvariant();
     }
 
-    private static void CreateVersionSixAppliedDraft(string databasePath, ProposalApplyDraft draft, string digest)
+    private static void CopySessionFixture(string fixtureFile, string databasePath)
+    {
+        var fixturePath = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "session", fixtureFile);
+        File.Copy(fixturePath, databasePath);
+    }
+
+    private static void AddVersionSixAppliedDraft(string databasePath, ProposalApplyDraft draft, string digest)
     {
         using var connection = new SqliteConnection($"Data Source={databasePath}");
         connection.Open();
-        using (var schema = connection.CreateCommand())
-        {
-            schema.CommandText = """
-                CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL);
-                INSERT INTO schema_version VALUES('session', 6);
-                CREATE TABLE improvement_proposals (proposal_id TEXT PRIMARY KEY, status TEXT NOT NULL, target_kind TEXT NOT NULL, target_label TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL, expected_effect TEXT NOT NULL, risk_note TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, recommended_at TEXT NULL, verified_at TEXT NULL);
-                CREATE TABLE improvement_proposal_sessions (proposal_id TEXT NOT NULL, session_id TEXT NOT NULL, source_order INTEGER NOT NULL, PRIMARY KEY(proposal_id,session_id));
-                CREATE TABLE improvement_proposal_evidence (proposal_id TEXT NOT NULL, evidence_order INTEGER NOT NULL, kind TEXT NOT NULL, reference_id TEXT NOT NULL, PRIMARY KEY(proposal_id,evidence_order));
-                CREATE TABLE proposal_apply_drafts (draft_id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL, root_id TEXT NOT NULL, selection_revision INTEGER NOT NULL, approval_digest TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-                CREATE TABLE proposal_apply_files (draft_id TEXT NOT NULL, file_order INTEGER NOT NULL, base_sha256 TEXT NOT NULL, replacement_sha256 TEXT NOT NULL, PRIMARY KEY(draft_id,file_order));
-                CREATE TABLE proposal_apply_hunks (draft_id TEXT NOT NULL, hunk_id TEXT NOT NULL, selected INTEGER NOT NULL, replacement_sha256 TEXT NOT NULL, PRIMARY KEY(draft_id,hunk_id));
-                CREATE TABLE proposal_apply_revisions (draft_id TEXT NOT NULL, selection_revision INTEGER NOT NULL, approval_digest TEXT NOT NULL, approved_at TEXT NULL, PRIMARY KEY(draft_id,selection_revision));
-                CREATE TABLE proposal_applies (apply_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL);
-                CREATE TABLE proposal_apply_pending (apply_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, proposal_id TEXT NOT NULL, root_id TEXT NOT NULL, actor_kind TEXT NOT NULL, file_count INTEGER NOT NULL, operation_kind TEXT NOT NULL, recorded_at TEXT NOT NULL);
-                """;
-            schema.ExecuteNonQuery();
-        }
         var timestamp = DateTimeOffset.UnixEpoch.ToString("O");
         ExecuteVersionSix(connection, "INSERT INTO improvement_proposals VALUES($proposal,'candidate','skill','fixture','fixture','fixture','fixture','fixture',$time,$time,NULL,NULL);", ("$proposal", draft.ProposalId.ToString("D")), ("$time", timestamp));
         ExecuteVersionSix(connection, "INSERT INTO proposal_apply_drafts VALUES($draft,$proposal,$root,$selection,$digest,'applied',$time,$time);", ("$draft", draft.DraftId.ToString("D")), ("$proposal", draft.ProposalId.ToString("D")), ("$root", draft.RootId.ToString("D")), ("$selection", draft.SelectionRevision), ("$digest", digest), ("$time", timestamp));

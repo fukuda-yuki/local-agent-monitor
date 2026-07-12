@@ -37,7 +37,7 @@ public sealed class SqliteSessionStoreTests
         new SqliteSessionStore(database.Path).CreateSchema();
         using (var migrated = database.Open())
         {
-            Assert.Equal(10L, Scalar<long>(migrated, "SELECT version FROM schema_version WHERE component='session';"));
+            Assert.Equal(11L, Scalar<long>(migrated, "SELECT version FROM schema_version WHERE component='session';"));
             Assert.Equal(proposalId.ToString("D"), Scalar<string>(migrated, "SELECT proposal_id FROM improvement_proposals;"));
         }
 
@@ -357,7 +357,10 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var connection = database.Open();
-        Assert.Equal(10L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
+        Assert.Equal(11L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
+        Assert.Equal(
+            new[] { "source_application_version", "adapter_version", "schema_fingerprint", "normalization_version" },
+            ReadColumns(connection, "session_events").Where(column => column.EndsWith("version", StringComparison.Ordinal) || column == "schema_fingerprint"));
         foreach (var table in new[] { "sessions", "session_native_ids", "session_runs", "session_events", "session_event_content", "session_projection_state", "session_human_evaluation", "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence", "proposal_apply_drafts", "proposal_apply_files", "proposal_apply_hunks", "proposal_apply_revisions", "proposal_applies", "proposal_apply_audit", "proposal_apply_pending", "objective_evaluations", "objective_evaluation_evidence" })
         {
             Assert.Equal(1L, Scalar<long>(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
@@ -380,19 +383,21 @@ public sealed class SqliteSessionStoreTests
     }
 
     [Fact]
-    public void CreateSchema_IncompatibleSessionVersionRollsBackBeforeSessionTableDdl()
+    public void CreateSchema_NewerSessionVersionPreservesCurrentSchemaAndRows()
     {
         using var database = new SessionTestDatabase();
-        using (var connection = database.Open())
-        {
-            Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 11);");
-        }
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        store.Write(batch);
+        using (var connection = database.Open()) Execute(connection, "UPDATE schema_version SET version=12 WHERE component='session';");
 
-        Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(database.Path).CreateSchema());
+        Assert.Throws<InvalidOperationException>(store.CreateSchema);
 
         using var verify = database.Open();
-        Assert.Equal(11L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
-        Assert.Equal(0L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_native_ids','session_runs','session_events','session_event_content','session_projection_state','session_human_evaluation');"));
+        Assert.Equal(12L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(batch.Detail.Session.SessionId.ToString("D"), Scalar<string>(verify, "SELECT session_id FROM sessions;"));
+        Assert.Equal(batch.Detail.Events[0].EventId.ToString("D"), Scalar<string>(verify, "SELECT event_id FROM session_events;"));
     }
 
     [Fact]
@@ -411,7 +416,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(10L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(11L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_human_evaluation';"));
         Assert.NotNull(store.GetDetail(batch.Detail.Session.SessionId));
     }
@@ -465,7 +470,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(10L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(11L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         foreach (var table in new[] { "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence" })
         {
             Assert.Equal(1L, Scalar<long>(verify, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
@@ -503,6 +508,56 @@ public sealed class SqliteSessionStoreTests
         Assert.Equal(batch.Detail.NativeIds, detail.NativeIds);
         Assert.Equal(batch.Detail.Runs, detail.Runs);
         Assert.Equal(batch.Detail.Events, detail.Events);
+    }
+
+    [Fact]
+    public void Write_RoundTripsClaudeProvenanceAndKeepsLegacyEventProvenanceNullAfterRestart()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        var legacy = CreateBatch(DateTimeOffset.UnixEpoch, "legacy-native");
+        var claude = CreateBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "claude-native");
+        var fingerprint = new string('a', 64);
+        claude = claude with
+        {
+            Detail = claude.Detail with
+            {
+                NativeIds = [claude.Detail.NativeIds[0] with { SourceSurface = SessionSourceSurface.ClaudeCode }],
+                Runs = [claude.Detail.Runs[0] with { SourceSurface = SessionSourceSurface.ClaudeCode }],
+                Events =
+                [
+                    claude.Detail.Events[0] with
+                    {
+                        SourceSurface = SessionSourceSurface.ClaudeCode,
+                        SourceAdapter = "claude-code-hook",
+                        SourceApplicationVersion = "2.1.207",
+                        AdapterVersion = "claude-hook-v1",
+                        SchemaFingerprint = fingerprint,
+                        NormalizationVersion = "session-normalization-v1",
+                    },
+                ],
+            },
+        };
+
+        store.Write(legacy);
+        store.Write(claude);
+        store.CreateSchema();
+        var restarted = new SqliteSessionStore(database.Path);
+
+        var legacyEvent = Assert.Single(restarted.GetDetail(legacy.Detail.Session.SessionId)!.Events);
+        Assert.Null(legacyEvent.SourceApplicationVersion);
+        Assert.Null(legacyEvent.AdapterVersion);
+        Assert.Null(legacyEvent.SchemaFingerprint);
+        Assert.Null(legacyEvent.NormalizationVersion);
+
+        var claudeEvent = Assert.Single(restarted.GetDetail(claude.Detail.Session.SessionId)!.Events);
+        Assert.Equal(SessionSourceSurface.ClaudeCode, claudeEvent.SourceSurface);
+        Assert.Equal("claude-code-hook", claudeEvent.SourceAdapter);
+        Assert.Equal("2.1.207", claudeEvent.SourceApplicationVersion);
+        Assert.Equal("claude-hook-v1", claudeEvent.AdapterVersion);
+        Assert.Equal(fingerprint, claudeEvent.SchemaFingerprint);
+        Assert.Equal("session-normalization-v1", claudeEvent.NormalizationVersion);
     }
 
     [Fact]
@@ -941,17 +996,17 @@ public sealed class SqliteSessionStoreTests
     public void CreateSchema_upgrades_a_real_version_six_database_and_keeps_legacy_application_receipts_queryable()
     {
         using var database = new SessionTestDatabase();
-        var proposalId = Guid.CreateVersion7();
-        var draftId = Guid.CreateVersion7();
-        var applyId = Guid.CreateVersion7();
-        var rootId = Guid.CreateVersion7();
-        CreateVersionSixProposalApplyDatabase(database.Open, proposalId, draftId, applyId, rootId);
+        var proposalId = Guid.Parse("00000004-0000-7000-8000-000000000006");
+        var draftId = Guid.Parse("00000005-0000-7000-8000-000000000006");
+        var applyId = Guid.Parse("00000006-0000-7000-8000-000000000006");
+        var fixture = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "session", "session-v6.sqlite");
+        File.Copy(fixture, database.Path);
 
         var store = new SqliteSessionStore(database.Path);
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(10L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(11L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT revision FROM improvement_proposals;"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM pragma_table_info('improvement_proposal_sessions') WHERE name='proposal_revision';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT proposal_revision FROM proposal_apply_drafts;"));
@@ -996,52 +1051,6 @@ public sealed class SqliteSessionStoreTests
             null);
     }
 
-    private static void CreateVersionSixProposalApplyDatabase(Func<SqliteConnection> open, Guid proposalId, Guid draftId, Guid applyId, Guid rootId)
-    {
-        using var connection = open();
-        Execute(connection, """
-            CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL);
-            INSERT INTO schema_version VALUES('session', 6);
-            CREATE TABLE improvement_proposals (
-                proposal_id TEXT PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('candidate','recommended','verified')),
-                target_kind TEXT NOT NULL, target_label TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
-                expected_effect TEXT NOT NULL, risk_note TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                recommended_at TEXT NULL, verified_at TEXT NULL);
-            CREATE TABLE improvement_proposal_sessions (
-                proposal_id TEXT NOT NULL, session_id TEXT NOT NULL, source_order INTEGER NOT NULL,
-                PRIMARY KEY(proposal_id,session_id));
-            CREATE TABLE proposal_apply_drafts (
-                draft_id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL, root_id TEXT NOT NULL,
-                selection_revision INTEGER NOT NULL CHECK (selection_revision > 0), approval_digest TEXT NOT NULL,
-                state TEXT NOT NULL CHECK (state IN ('draft','approved','applied','rolled_back','failed')),
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-            CREATE TABLE proposal_apply_files (
-                draft_id TEXT NOT NULL, file_order INTEGER NOT NULL CHECK (file_order >= 0),
-                base_sha256 TEXT NOT NULL, replacement_sha256 TEXT NOT NULL, PRIMARY KEY (draft_id,file_order));
-            CREATE TABLE proposal_apply_hunks (
-                draft_id TEXT NOT NULL, hunk_id TEXT NOT NULL, selected INTEGER NOT NULL CHECK (selected IN (0,1)),
-                replacement_sha256 TEXT NOT NULL, PRIMARY KEY (draft_id,hunk_id));
-            CREATE TABLE proposal_apply_revisions (
-                draft_id TEXT NOT NULL, selection_revision INTEGER NOT NULL CHECK (selection_revision > 0),
-                approval_digest TEXT NOT NULL, approved_at TEXT NULL, PRIMARY KEY (draft_id,selection_revision));
-            CREATE TABLE proposal_applies (
-                apply_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL,
-                state TEXT NOT NULL CHECK (state IN ('applied','rolled_back','failed')), created_at TEXT NOT NULL);
-            CREATE TABLE proposal_apply_audit (
-                audit_id INTEGER PRIMARY KEY, apply_id TEXT NULL, draft_id TEXT NULL, proposal_id TEXT NOT NULL,
-                root_id TEXT NOT NULL, actor_kind TEXT NOT NULL CHECK (actor_kind='local_user'), state TEXT NOT NULL,
-                error_code TEXT NULL, file_count INTEGER NOT NULL CHECK (file_count >= 0), recorded_at TEXT NOT NULL);
-            CREATE TABLE proposal_apply_pending (
-                apply_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, proposal_id TEXT NOT NULL, root_id TEXT NOT NULL,
-                actor_kind TEXT NOT NULL CHECK (actor_kind='local_user'), file_count INTEGER NOT NULL CHECK (file_count >= 0),
-                operation_kind TEXT NOT NULL CHECK (operation_kind IN ('apply','rollback')), recorded_at TEXT NOT NULL);
-            """);
-        var timestamp = DateTimeOffset.UnixEpoch.ToString("O");
-        Execute(connection, $"INSERT INTO improvement_proposals VALUES('{proposalId:D}','candidate','skill','fixture','fixture','fixture','fixture','fixture','{timestamp}','{timestamp}',NULL,NULL);");
-        Execute(connection, $"INSERT INTO proposal_apply_drafts VALUES('{draftId:D}','{proposalId:D}','{rootId:D}',1,'digest','applied','{timestamp}','{timestamp}');");
-        Execute(connection, $"INSERT INTO proposal_applies VALUES('{applyId:D}','{draftId:D}','applied','{timestamp}');");
-    }
-
     private static void Execute(SqliteConnection connection, string sql)
     {
         using var command = connection.CreateCommand();
@@ -1054,6 +1063,16 @@ public sealed class SqliteSessionStoreTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return (T)Convert.ChangeType(command.ExecuteScalar()!, typeof(T));
+    }
+
+    private static IReadOnlyList<string> ReadColumns(SqliteConnection connection, string table)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT name FROM pragma_table_info('{table}') ORDER BY cid;";
+        using var reader = command.ExecuteReader();
+        var columns = new List<string>();
+        while (reader.Read()) columns.Add(reader.GetString(0));
+        return columns;
     }
 
     private sealed class SessionTestDatabase : IDisposable

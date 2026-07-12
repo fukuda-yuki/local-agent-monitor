@@ -37,7 +37,7 @@ public sealed class SqliteEffectComparisonStoreTests
 
         using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
         verify.Open();
-        Assert.Equal(10L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(11L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(legacy.SessionId.ToString("D"), Text(verify, "SELECT session_id FROM sessions LIMIT 1;"));
         if (previousVersion >= 2) Assert.Equal("expected", Text(verify, "SELECT verdict FROM session_human_evaluation WHERE session_id=$session;", ("$session", legacy.SessionId.ToString("D"))));
         if (previousVersion >= 3) Assert.Equal("legacy", Text(verify, "SELECT title FROM improvement_proposals LIMIT 1;"));
@@ -78,23 +78,16 @@ public sealed class SqliteEffectComparisonStoreTests
     public void CreateSchema_repairs_known_v10_stamped_issue55_gaps_without_losing_apply_data(int historicalVersion)
     {
         using var temp = new MonitorTempDirectory();
-        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7();
-        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
-        SeedProposalAndApply(temp.DatabasePath, proposal, apply, DateTimeOffset.Parse("2026-07-12T12:00:00+00:00"));
-        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
-        {
-            connection.Open();
-            Execute(connection, "UPDATE schema_version SET version=10 WHERE component='session';");
-            Execute(connection, "ALTER TABLE improvement_proposals DROP COLUMN revision; ALTER TABLE improvement_proposal_sessions DROP COLUMN proposal_revision; ALTER TABLE proposal_apply_drafts DROP COLUMN proposal_revision; ALTER TABLE proposal_applies DROP COLUMN proposal_revision;");
-            if (historicalVersion == 4) Execute(connection, "DROP TABLE proposal_apply_pending;");
-        }
+        CopySessionFixture($"session-v10-from-v{historicalVersion}.sqlite", temp.DatabasePath);
+        var proposal = FixtureId(4, historicalVersion);
+        var apply = FixtureId(6, historicalVersion);
 
         var store = new SqliteSessionStore(temp.DatabasePath);
         store.CreateSchema();
 
         using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
         verify.Open();
-        Assert.Equal("fixture", Text(verify, "SELECT title FROM improvement_proposals WHERE proposal_id=$id;", ("$id", proposal.ToString("D"))));
+        Assert.Equal($"Fixture proposal v{historicalVersion}", Text(verify, "SELECT title FROM improvement_proposals WHERE proposal_id=$id;", ("$id", proposal.ToString("D"))));
         Assert.Equal("applied", Text(verify, "SELECT state FROM proposal_applies WHERE apply_id=$id;", ("$id", apply.ToString("D"))));
         Assert.Single(store.ListApplicationReceipts(proposal));
         Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='proposal_apply_pending';"));
@@ -105,30 +98,35 @@ public sealed class SqliteEffectComparisonStoreTests
     [Theory]
     [InlineData("revision")]
     [InlineData("pending")]
-    public void CreateSchema_rejects_unknown_stamped_v10_gaps_without_schema_or_data_mutation(string missingObject)
+    public void CreateSchema_rejects_unapproved_stamped_v10_gap_without_schema_data_or_version_mutation(string missingObject)
     {
         using var temp = new MonitorTempDirectory();
-        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7();
-        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
-        SeedProposalAndApply(temp.DatabasePath, proposal, apply, DateTimeOffset.Parse("2026-07-12T12:00:00+00:00"));
+        CopySessionFixture("session-v10.sqlite", temp.DatabasePath);
+        string schemaBefore;
+        string dataBefore;
+        long versionBefore;
         using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
         {
             connection.Open();
-            Execute(connection, "UPDATE schema_version SET version=10 WHERE component='session';");
             Execute(connection, missingObject == "revision"
-                ? "ALTER TABLE proposal_applies DROP COLUMN proposal_revision;"
-                : "DROP TABLE proposal_apply_pending;");
+                ? "ALTER TABLE proposal_applies RENAME COLUMN proposal_revision TO unapproved_proposal_revision;"
+                : "ALTER TABLE proposal_apply_pending RENAME TO unapproved_proposal_apply_pending;");
+            Assert.Equal(missingObject == "revision" ? 0L : 1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM pragma_table_info('proposal_applies') WHERE name='proposal_revision';"));
+            Assert.Equal(missingObject == "pending" ? 0L : 1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='proposal_apply_pending';"));
+            versionBefore = Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';");
+            schemaBefore = ReadSchemaSnapshot(connection);
+            dataBefore = ReadDataSnapshot(connection);
         }
 
-        Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(temp.DatabasePath).CreateSchema());
+        var error = Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(temp.DatabasePath).CreateSchema());
+        Assert.Equal("Unsupported incomplete Session schema version 10.", error.Message);
 
         using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
         verify.Open();
-        Assert.Equal("fixture", Text(verify, "SELECT title FROM improvement_proposals WHERE proposal_id=$id;", ("$id", proposal.ToString("D"))));
-        Assert.Equal("applied", Text(verify, "SELECT state FROM proposal_applies WHERE apply_id=$id;", ("$id", apply.ToString("D"))));
-        Assert.Equal(10L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
-        Assert.Equal(missingObject == "pending" ? 0L : 1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='proposal_apply_pending';"));
-        Assert.Equal(missingObject == "revision" ? 0L : 1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM pragma_table_info('proposal_applies') WHERE name='proposal_revision';"));
+        Assert.Equal(10L, versionBefore);
+        Assert.Equal(versionBefore, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(schemaBefore, ReadSchemaSnapshot(verify));
+        Assert.Equal(dataBefore, ReadDataSnapshot(verify));
     }
 
     [Theory]
@@ -138,15 +136,16 @@ public sealed class SqliteEffectComparisonStoreTests
     public void MonitorHost_starts_and_reads_current_application_after_genuine_legacy_migration(int historicalVersion)
     {
         using var temp = new MonitorTempDirectory();
-        var legacy = CreateGenuineLegacySchema(temp.DatabasePath, historicalVersion);
+        CopySessionFixture($"session-v{historicalVersion}.sqlite", temp.DatabasePath);
+        var proposal = FixtureId(4, historicalVersion);
 
         using var app = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
 
         var store = app.Services.GetRequiredService<ISessionStore>();
-        Assert.Single(store.ListApplicationReceipts(legacy.ProposalId));
-        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT proposal_revision FROM improvement_proposal_sessions WHERE proposal_id=$proposal;", ("$proposal", legacy.ProposalId.ToString("D"))));
+        Assert.Single(store.ListApplicationReceipts(proposal));
+        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT proposal_revision FROM improvement_proposal_sessions WHERE proposal_id=$proposal;", ("$proposal", proposal.ToString("D"))));
         using var restarted = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
-        Assert.Single(restarted.Services.GetRequiredService<ISessionStore>().ListApplicationReceipts(legacy.ProposalId));
+        Assert.Single(restarted.Services.GetRequiredService<ISessionStore>().ListApplicationReceipts(proposal));
     }
 
     [Theory]
@@ -156,27 +155,16 @@ public sealed class SqliteEffectComparisonStoreTests
     public void MonitorHost_starts_and_reads_current_application_after_known_stamped_v10_repair(int historicalVersion)
     {
         using var temp = new MonitorTempDirectory();
-        var proposal = Guid.CreateVersion7(); var apply = Guid.CreateVersion7();
-        var legacy = CreateGenuineLegacySchema(temp.DatabasePath, historicalVersion);
-        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
-        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
-        {
-            connection.Open();
-            var missing = historicalVersion == 6
-                ? new[] { ("improvement_proposal_sessions", "proposal_revision") }
-                : new[] { ("improvement_proposals", "revision"), ("improvement_proposal_sessions", "proposal_revision"), ("proposal_apply_drafts", "proposal_revision"), ("proposal_applies", "proposal_revision") };
-            foreach (var (table, column) in missing)
-                if (ColumnExists(connection, table, column)) Execute(connection, $"ALTER TABLE {table} DROP COLUMN {column};");
-            if (historicalVersion == 4) Execute(connection, "DROP TABLE proposal_apply_pending;");
-        }
+        CopySessionFixture($"session-v10-from-v{historicalVersion}.sqlite", temp.DatabasePath);
+        var proposal = FixtureId(4, historicalVersion);
 
         using var app = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
 
         var store = app.Services.GetRequiredService<ISessionStore>();
-        Assert.Single(store.ListApplicationReceipts(legacy.ProposalId));
-        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT proposal_revision FROM improvement_proposal_sessions WHERE proposal_id=$proposal;", ("$proposal", legacy.ProposalId.ToString("D"))));
+        Assert.Single(store.ListApplicationReceipts(proposal));
+        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT proposal_revision FROM improvement_proposal_sessions WHERE proposal_id=$proposal;", ("$proposal", proposal.ToString("D"))));
         using var restarted = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
-        Assert.Single(restarted.Services.GetRequiredService<ISessionStore>().ListApplicationReceipts(legacy.ProposalId));
+        Assert.Single(restarted.Services.GetRequiredService<ISessionStore>().ListApplicationReceipts(proposal));
     }
 
     [Fact]
@@ -648,6 +636,15 @@ public sealed class SqliteEffectComparisonStoreTests
         store.CompleteProposalApplyPending(new(apply, draft, ProposalApplyState.RolledBack, at), proposal, root, 0, null);
     }
 
+    private static void CopySessionFixture(string fixtureFile, string databasePath)
+    {
+        var fixturePath = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "session", fixtureFile);
+        File.Copy(fixturePath, databasePath);
+    }
+
+    private static Guid FixtureId(int entity, int version) =>
+        Guid.Parse($"000000{entity:D2}-0000-7000-8000-{version:D12}");
+
     private static LegacyFixture CreateGenuineLegacySchema(string databasePath, int version)
     {
         var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
@@ -742,6 +739,58 @@ public sealed class SqliteEffectComparisonStoreTests
         using var command = connection.CreateCommand(); command.CommandText = sql; foreach (var (name, value) in values) command.Parameters.AddWithValue(name, value);
         return command.ExecuteScalar() as string;
     }
+
+    private static string ReadSchemaSnapshot(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name;";
+        using var reader = command.ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add(string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(index => EncodeSnapshotValue(reader.GetValue(index)))));
+        return string.Join('\n', rows);
+    }
+
+    private static string ReadDataSnapshot(SqliteConnection connection)
+    {
+        var tables = new List<string>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;";
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) tables.Add(reader.GetString(0));
+        }
+
+        var rows = new List<string>();
+        foreach (var table in tables)
+        {
+            rows.Add($"table:{table}");
+            var quotedTable = $"\"{table.Replace("\"", "\"\"")}\"";
+            var columns = new List<string>();
+            using (var columnCommand = connection.CreateCommand())
+            {
+                columnCommand.CommandText = "SELECT name FROM pragma_table_info($table) ORDER BY cid;";
+                columnCommand.Parameters.AddWithValue("$table", table);
+                using var reader = columnCommand.ExecuteReader();
+                while (reader.Read()) columns.Add(reader.GetString(0));
+            }
+            var ordering = string.Join(',', columns.Select(column => $"\"{column.Replace("\"", "\"\"")}\""));
+            using var dataCommand = connection.CreateCommand();
+            dataCommand.CommandText = $"SELECT * FROM {quotedTable} ORDER BY {ordering};";
+            using var dataReader = dataCommand.ExecuteReader();
+            while (dataReader.Read())
+                rows.Add($"{table}|{string.Join('|', Enumerable.Range(0, dataReader.FieldCount).Select(index => EncodeSnapshotValue(dataReader.GetValue(index))))}");
+        }
+        return string.Join('\n', rows);
+    }
+
+    private static string EncodeSnapshotValue(object value) => value switch
+    {
+        DBNull => "null",
+        byte[] bytes => $"blob:{Convert.ToBase64String(bytes)}",
+        double number => $"real:{number.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}",
+        _ => $"{value.GetType().Name}:{value}",
+    };
 
     private sealed class EffectVerdictResultComparer : IEqualityComparer<EffectVerdictResult>
     {

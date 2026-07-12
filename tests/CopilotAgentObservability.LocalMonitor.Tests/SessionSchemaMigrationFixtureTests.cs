@@ -9,26 +9,26 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SessionSchemaMigrationFixtureTests
 {
-    private const int CurrentSessionSchemaVersion = 10;
+    private const int CurrentSessionSchemaVersion = 11;
     private const string VersionTenUpgraderCommit = "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346";
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateSessionSchemaFixtures/GenerateSessionSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/session";
     private const string VersionFourLimitation = "Commit 601c2beb5cb528d1e87aba0fef150b65e1dbccc0 exposes no public proposal-apply persistence API; parameterized INSERTs populate proposal-apply rows only after its public CreateSchema, Write, and CreateImprovementProposal APIs create the schema and parent sentinels.";
 
-    private static readonly IReadOnlyDictionary<int, string> ExpectedV10SemanticSchemaHashes = new Dictionary<int, string>
+    private static readonly IReadOnlyDictionary<int, string> ExpectedV11SemanticSchemaHashes = new Dictionary<int, string>
     {
-        [1] = "bd67d58a17a5f891dad3eb08bba06e2d9f068b88bd2b5da241de4deb4ab221e9",
-        [2] = "bd67d58a17a5f891dad3eb08bba06e2d9f068b88bd2b5da241de4deb4ab221e9",
-        [3] = "ce9fe303992b9a665ee347d5625eca11d669dc0b2630e2df6e996de14942e53e",
-        [4] = "137553761c4ae4f410d337a8e102b110ac229c4b0c25cf6bd46b81c1d3020c9a",
-        [5] = "b7383a0f39442159a86fccd9e6b787c60a91b7aeb5d2853e0e69e636e250336c",
-        [6] = "b7383a0f39442159a86fccd9e6b787c60a91b7aeb5d2853e0e69e636e250336c",
-        [7] = "bd67d58a17a5f891dad3eb08bba06e2d9f068b88bd2b5da241de4deb4ab221e9",
-        [8] = "bd67d58a17a5f891dad3eb08bba06e2d9f068b88bd2b5da241de4deb4ab221e9",
-        [9] = "bd67d58a17a5f891dad3eb08bba06e2d9f068b88bd2b5da241de4deb4ab221e9",
-        [10] = "bd67d58a17a5f891dad3eb08bba06e2d9f068b88bd2b5da241de4deb4ab221e9",
+        [1] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
+        [2] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
+        [3] = "e43eec292118ef9ddd70a106454cb9c85b0a3bbbf39e81538658b759743cb8d2",
+        [4] = "228832a6446f170c03351d5cff281492a78fd4a351fde4767c7d84957388cb65",
+        [5] = "26ca7752f24b880b65449c169f748ac649e26af9d8e0ebb3da30fa03778fbe5f",
+        [6] = "26ca7752f24b880b65449c169f748ac649e26af9d8e0ebb3da30fa03778fbe5f",
+        [7] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
+        [8] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
+        [9] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
+        [10] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
     };
 
-    private static readonly string[] ExpectedV10Tables =
+    private static readonly string[] ExpectedV11Tables =
     [
         "effect_comparison_evidence", "effect_comparison_sessions", "effect_comparisons", "effect_receipts",
         "improvement_proposal_evidence", "improvement_proposal_sessions", "improvement_proposals",
@@ -57,7 +57,7 @@ public sealed class SessionSchemaMigrationFixtureTests
 
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
-    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v10_state_after_restart(
+    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v11_state_after_restart(
         string fixtureFile,
         int version,
         string sourceCommit,
@@ -133,6 +133,7 @@ public sealed class SessionSchemaMigrationFixtureTests
             using (var reopened = Open(migratedPath))
             {
                 firstPass = AssertCompleteMigratedState(reopened, contentVersion, fixture.Sentinels);
+                AssertDatabaseIntegrity(reopened);
             }
 
             new SqliteSessionStore(migratedPath).CreateSchema();
@@ -140,6 +141,7 @@ public sealed class SessionSchemaMigrationFixtureTests
             using (var reopenedAgain = Open(migratedPath))
             {
                 restartPass = AssertCompleteMigratedState(reopenedAgain, contentVersion, fixture.Sentinels);
+                AssertDatabaseIntegrity(reopenedAgain);
             }
             Assert.Equal(firstPass.SemanticSchema, restartPass.SemanticSchema);
             Assert.Equal(firstPass.Rows, restartPass.Rows);
@@ -151,10 +153,351 @@ public sealed class SessionSchemaMigrationFixtureTests
         }
     }
 
+    [Theory]
+    [InlineData(12)]
+    [InlineData(99)]
+    public void Newer_version_real_fixture_is_rejected_without_schema_or_data_mutation(int newerVersion)
+    {
+        var migratedPath = CopyFixture("session-v10.sqlite");
+        try
+        {
+            using (var injected = Open(migratedPath))
+                Execute(injected, $"UPDATE schema_version SET version={newerVersion} WHERE component='session';");
+            var before = CapturePreflightSnapshot(migratedPath);
+
+            Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(migratedPath).CreateSchema());
+
+            Assert.Equal(before, CapturePreflightSnapshot(migratedPath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            File.Delete(migratedPath);
+        }
+    }
+
+    [Theory]
+    [InlineData("source_application_version")]
+    [InlineData("adapter_version")]
+    [InlineData("schema_fingerprint")]
+    [InlineData("normalization_version")]
+    public void Invalid_partial_v11_column_on_real_v10_fixture_rolls_back_version_schema_data_and_journal(string column)
+    {
+        var migratedPath = CopyFixture("session-v10.sqlite");
+        try
+        {
+            using (var injected = Open(migratedPath))
+                Execute(injected, $"ALTER TABLE session_events ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;");
+            var before = CapturePreflightSnapshot(migratedPath);
+
+            Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(migratedPath).CreateSchema());
+
+            Assert.Equal(before, CapturePreflightSnapshot(migratedPath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            File.Delete(migratedPath);
+        }
+    }
+
+    [Fact]
+    public void Invalid_extra_legacy_column_on_real_v10_fixture_is_rejected_without_mutation()
+    {
+        var migratedPath = CopyFixture("session-v10.sqlite");
+        try
+        {
+            using (var injected = Open(migratedPath))
+                Execute(injected, "ALTER TABLE session_events ADD COLUMN unexpected_legacy_column TEXT NULL;");
+            var before = CapturePreflightSnapshot(migratedPath);
+
+            Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(migratedPath).CreateSchema());
+
+            Assert.Equal(before, CapturePreflightSnapshot(migratedPath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            File.Delete(migratedPath);
+        }
+    }
+
+    [Fact]
+    public void Invalid_stamped_v11_shape_on_real_v10_fixture_is_rejected_without_mutation()
+    {
+        var migratedPath = CopyFixture("session-v10.sqlite");
+        try
+        {
+            using (var injected = Open(migratedPath))
+            {
+                Execute(injected, """
+                    ALTER TABLE session_events ADD COLUMN source_application_version TEXT NULL;
+                    ALTER TABLE session_events ADD COLUMN adapter_version TEXT NULL;
+                    ALTER TABLE session_events ADD COLUMN schema_fingerprint TEXT NULL;
+                    ALTER TABLE session_events ADD COLUMN normalization_version TEXT NULL;
+                    ALTER TABLE session_events ADD COLUMN unrelated_marker TEXT NULL CHECK (unrelated_marker IS NULL OR unrelated_marker <> 'claude-code');
+                    ALTER TABLE session_runs ADD COLUMN unrelated_marker TEXT NULL CHECK (unrelated_marker IS NULL OR unrelated_marker <> 'claude-code');
+                    ALTER TABLE session_native_ids ADD COLUMN unrelated_marker TEXT NULL CHECK (unrelated_marker IS NULL OR unrelated_marker <> 'claude-code');
+                    UPDATE schema_version SET version=11 WHERE component='session';
+                    """);
+            }
+            var before = CapturePreflightSnapshot(migratedPath);
+
+            Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(migratedPath).CreateSchema());
+
+            Assert.Equal(before, CapturePreflightSnapshot(migratedPath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            File.Delete(migratedPath);
+        }
+    }
+
+    [Fact]
+    public void Foreign_key_invalid_stamped_v11_from_real_v10_fixture_is_rejected_without_mutation()
+    {
+        var migratedPath = CreateStampedVersionElevenFixture("session-v10.sqlite");
+        try
+        {
+            using (var injected = Open(migratedPath))
+            {
+                Execute(injected, "PRAGMA foreign_keys=OFF; UPDATE session_events SET run_id='00000000-0000-7000-8000-000000000000';");
+                AssertForeignKeyCheckHasRows(injected);
+            }
+            var before = CapturePreflightSnapshot(migratedPath);
+
+            Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(migratedPath).CreateSchema());
+
+            Assert.Equal(before, CapturePreflightSnapshot(migratedPath));
+            using var verify = Open(migratedPath);
+            AssertForeignKeyCheckHasRows(verify);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            File.Delete(migratedPath);
+        }
+    }
+
+    private const int StampedVersionElevenMutationCount = 37;
+    private const int SupportedWholeProfileFixtureCount = 5;
+    private const int WholeProfileHybridCount = 2;
+
+    public static TheoryData<string> StampedVersionElevenSemanticMutations => new()
+    {
+        "extra-regular-column",
+        "missing-regular-column",
+        "virtual-generated-column",
+        "stored-generated-column",
+        "declared-type-changed",
+        "nullability-changed",
+        "default-added",
+        "primary-key-changed-to-unique",
+        "column-order-changed",
+        "check-removed",
+        "check-broadened",
+        "check-added",
+        "check-removed-with-quoted-decoy",
+        "check-removed-with-comment-decoy",
+        "autoincrement-added",
+        "ordinary-index-added",
+        "unique-index-added",
+        "expression-index-added",
+        "autoindex-primary-key-order-changed",
+        "index-collation-changed",
+        "index-direction-changed",
+        "index-key-and-auxiliary-terms-changed",
+        "partial-index-added",
+        "foreign-key-removed",
+        "foreign-key-retargeted",
+        "foreign-key-added",
+        "foreign-key-action-changed",
+        "trigger-on-owned-table-added",
+        "owned-table-replaced-by-view",
+        "reserved-table-added",
+        "reserved-view-added",
+        "strict-table-added",
+        "without-rowid-added",
+        "reserved-virtual-table-added",
+        "schema-version-extra-column",
+        "schema-version-component-primary-key-removed",
+        "owned-table-removed",
+    };
+
+    public static TheoryData<string> SupportedWholeProfileFixtures => new()
+    {
+        "session-v10.sqlite",
+        "session-v3.sqlite",
+        "session-v4.sqlite",
+        "session-v5.sqlite",
+        "session-v6.sqlite",
+    };
+
+    public static TheoryData<string, string, string> WholeProfileHybrids => new()
+    {
+        { "session-v10.sqlite", "session-v3.sqlite", "improvement_proposals" },
+        { "session-v3.sqlite", "session-v10.sqlite", "improvement_proposals" },
+    };
+
+    [Theory]
+    [MemberData(nameof(StampedVersionElevenSemanticMutations))]
+    public void Stamped_v11_semantic_mutation_is_rejected_before_initialization_without_mutation(string mutationName)
+    {
+        Assert.Equal(StampedVersionElevenMutationCount, StampedVersionElevenSemanticMutations.Count);
+        var databasePath = CreateStampedVersionElevenFixture("session-v10.sqlite");
+        try
+        {
+            ApplyStampedVersionElevenMutation(databasePath, mutationName);
+            var before = CapturePreflightSnapshot(databasePath);
+
+            Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(databasePath).CreateSchema());
+
+            Assert.Equal(before, CapturePreflightSnapshot(databasePath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(SupportedWholeProfileFixtures))]
+    public void Exact_supported_whole_profile_from_real_fixture_is_accepted(string fixtureFile)
+    {
+        Assert.Equal(SupportedWholeProfileFixtureCount, SupportedWholeProfileFixtures.Count);
+        var databasePath = CreateStampedVersionElevenFixture(fixtureFile);
+        try
+        {
+            var before = CapturePreflightSnapshot(databasePath);
+
+            new SqliteSessionStore(databasePath).CreateSchema();
+
+            Assert.Equal(before, CapturePreflightSnapshot(databasePath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(WholeProfileHybrids))]
+    public void Per_table_hybrid_of_two_supported_whole_profiles_is_rejected(
+        string targetFixture,
+        string donorFixture,
+        string table)
+    {
+        Assert.Equal(WholeProfileHybridCount, WholeProfileHybrids.Count);
+        var databasePath = CreateStampedVersionElevenFixture(targetFixture);
+        var donorPath = CreateStampedVersionElevenFixture(donorFixture);
+        try
+        {
+            string donorSql;
+            using (var donor = OpenReadOnly(donorPath))
+                donorSql = Scalar<string>(donor, "SELECT sql FROM sqlite_schema WHERE type='table' AND name=$id;", table);
+            RewriteTableSql(databasePath, table, current =>
+            {
+                Assert.NotEqual(CanonicalSql(current), CanonicalSql(donorSql));
+                return donorSql;
+            });
+            var before = CapturePreflightSnapshot(databasePath);
+
+            Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(databasePath).CreateSchema());
+
+            Assert.Equal(before, CapturePreflightSnapshot(databasePath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+            DeleteDatabaseFiles(donorPath);
+        }
+    }
+
+    [Fact]
+    public void Exact_v5_profile_assembled_from_real_v4_lineage_is_accepted_by_schema_semantics()
+    {
+        var databasePath = CreateStampedVersionElevenFixture("session-v4.sqlite");
+        var versionFivePath = CreateStampedVersionElevenFixture("session-v5.sqlite");
+        try
+        {
+            string versionFiveDraftSql;
+            string versionFiveSchema;
+            using (var versionFive = OpenReadOnly(versionFivePath))
+            {
+                versionFiveDraftSql = Scalar<string>(versionFive, "SELECT sql FROM sqlite_schema WHERE type='table' AND name=$id;", "proposal_apply_drafts");
+                versionFiveSchema = ReadSemanticSchemaSnapshot(versionFive);
+            }
+            RewriteTableSql(databasePath, "proposal_apply_drafts", _ => versionFiveDraftSql);
+            var before = CapturePreflightSnapshot(databasePath);
+            Assert.Equal(versionFiveSchema, before.SemanticSchema);
+
+            new SqliteSessionStore(databasePath).CreateSchema();
+
+            Assert.Equal(before, CapturePreflightSnapshot(databasePath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+            DeleteDatabaseFiles(versionFivePath);
+        }
+    }
+
+    [Theory]
+    [InlineData("monitor_test_state")]
+    [InlineData("analysis_test_state")]
+    [InlineData("source_compat_test_state")]
+    public void Unrelated_monitor_analysis_and_source_compatibility_objects_are_accepted(string table)
+    {
+        var databasePath = CreateStampedVersionElevenFixture("session-v10.sqlite");
+        try
+        {
+            using (var connection = Open(databasePath))
+                Execute(connection, $"CREATE TABLE {table}(value TEXT PRIMARY KEY); INSERT INTO {table} VALUES('sentinel'); CREATE INDEX {table}_value_idx ON {table}(value DESC); CREATE TRIGGER {table}_trigger AFTER UPDATE ON {table} BEGIN SELECT 'AUTOINCREMENT CHECK (decoy)'; END;");
+            var before = CapturePreflightSnapshot(databasePath);
+
+            new SqliteSessionStore(databasePath).CreateSchema();
+
+            Assert.Equal(before, CapturePreflightSnapshot(databasePath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+        }
+    }
+
+    [Fact]
+    public void Commented_autoincrement_check_and_quoted_decoys_do_not_change_an_owned_table_profile()
+    {
+        var databasePath = CreateStampedVersionElevenFixture("session-v10.sqlite");
+        try
+        {
+            RewriteTableSql(databasePath, "sessions", sql => ReplaceRequired(
+                sql,
+                "status TEXT NOT NULL",
+                "/* AUTOINCREMENT CHECK (status='decoy') 'quoted CHECK' */ status TEXT NOT NULL"));
+            var before = CapturePreflightSnapshot(databasePath);
+
+            new SqliteSessionStore(databasePath).CreateSchema();
+
+            Assert.Equal(before, CapturePreflightSnapshot(databasePath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+        }
+    }
+
     private static void AssertStampedVersionTenLineage(SqliteConnection connection, int sourceVersion)
     {
         var tables = ReadTableNames(connection);
-        Assert.Equal(sourceVersion == 4 ? ExpectedV10Tables.Where(table => table != "proposal_apply_pending") : ExpectedV10Tables, tables);
+        Assert.Equal(sourceVersion == 4 ? ExpectedV11Tables.Where(table => table != "proposal_apply_pending") : ExpectedV11Tables, tables);
         Assert.Equal(sourceVersion >= 5, TableExists(connection, "proposal_apply_pending"));
         if (sourceVersion >= 5) AssertEmpty(connection, "proposal_apply_pending");
 
@@ -246,7 +589,8 @@ public sealed class SessionSchemaMigrationFixtureTests
         AssertExpectedRow(connection, "session_events", sessionRowCount, D(
             ("event_id", S(eventId)), ("session_id", S(sessionId)), ("run_id", S(runId)), ("source_surface", S("copilot-sdk")),
             ("parent_event_id", N), ("trace_id", S($"fixture-trace-v{version}")), ("status", S("ok")), ("source_adapter", S("fixture-adapter")),
-            ("source_event_id", S(sentinels.SourceEventId)), ("type", S("session.task_complete")), ("occurred_at", S(at.AddSeconds(30))), ("content_state", S("available"))));
+            ("source_event_id", S(sentinels.SourceEventId)), ("type", S("session.task_complete")), ("occurred_at", S(at.AddSeconds(30))), ("content_state", S("available")),
+            ("source_application_version", N), ("adapter_version", N), ("schema_fingerprint", N), ("normalization_version", N)));
         AssertExpectedRow(connection, "session_event_content", sessionRowCount, D(
             ("event_id", S(eventId)), ("content_kind", S("fixture")), ("content_json", S($"{{\"fixture\":\"session-v{version}\"}}")),
             ("captured_at", S(at.AddSeconds(30))), ("expires_at", S(at.AddDays(90)))));
@@ -295,11 +639,11 @@ public sealed class SessionSchemaMigrationFixtureTests
             AssertEmpty(connection, "effect_receipts");
         }
 
-        Assert.Equal(ExpectedV10Tables, ReadTableNames(connection));
+        Assert.Equal(ExpectedV11Tables, ReadTableNames(connection));
         var semanticSnapshot = ReadSemanticSchemaSnapshot(connection);
         var actualHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(semanticSnapshot))).ToLowerInvariant();
-        Assert.True(string.Equals(ExpectedV10SemanticSchemaHashes[version], actualHash, StringComparison.Ordinal),
-            $"Session v{version}->v10 semantic schema hash was {actualHash}.{Environment.NewLine}{semanticSnapshot}");
+        Assert.True(string.Equals(ExpectedV11SemanticSchemaHashes[version], actualHash, StringComparison.Ordinal),
+            $"Session v{version}->v11 semantic schema hash was {actualHash}.{Environment.NewLine}{semanticSnapshot}");
         return new MigratedSnapshot(semanticSnapshot, ReadDatabaseRowSnapshot(connection));
     }
 
@@ -325,7 +669,8 @@ public sealed class SessionSchemaMigrationFixtureTests
         AssertExpectedRow(connection, "session_events", 2, D(
             ("event_id", S(eventId)), ("session_id", S(sessionId)), ("run_id", S(runId)), ("source_surface", S("copilot-sdk")),
             ("parent_event_id", N), ("trace_id", S($"fixture-trace-v{version}-secondary")), ("status", S("ok")), ("source_adapter", S("fixture-adapter")),
-            ("source_event_id", S(sentinels.SecondarySourceEventId!)), ("type", S("session.task_complete")), ("occurred_at", S(secondaryAt.AddSeconds(30))), ("content_state", S("available"))));
+            ("source_event_id", S(sentinels.SecondarySourceEventId!)), ("type", S("session.task_complete")), ("occurred_at", S(secondaryAt.AddSeconds(30))), ("content_state", S("available")),
+            ("source_application_version", N), ("adapter_version", N), ("schema_fingerprint", N), ("normalization_version", N)));
         AssertExpectedRow(connection, "session_event_content", 2, D(
             ("event_id", S(eventId)), ("content_kind", S("fixture")), ("content_json", S($"{{\"fixture\":\"session-v{version}-secondary\"}}")),
             ("captured_at", S(secondaryAt.AddSeconds(30))), ("expires_at", S(secondaryAt.AddDays(90)))));
@@ -448,6 +793,23 @@ public sealed class SessionSchemaMigrationFixtureTests
     private static void AssertEmpty(SqliteConnection connection, string table) =>
         Assert.Equal(0L, Scalar<long>(connection, $"SELECT COUNT(*) FROM \"{table}\";"));
 
+    private static void AssertDatabaseIntegrity(SqliteConnection connection)
+    {
+        Assert.Equal("ok", Scalar<string>(connection, "PRAGMA integrity_check;"));
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA foreign_key_check;";
+        using var reader = command.ExecuteReader();
+        Assert.False(reader.Read());
+    }
+
+    private static void AssertForeignKeyCheckHasRows(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA foreign_key_check;";
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+    }
+
     private static string[] ReadTableNames(SqliteConnection connection)
     {
         using var command = connection.CreateCommand();
@@ -525,10 +887,18 @@ public sealed class SessionSchemaMigrationFixtureTests
         var lines = new List<string>();
         foreach (var table in ReadTableNames(connection))
         {
+            var columns = new List<string>();
+            using (var columnCommand = connection.CreateCommand())
+            {
+                columnCommand.CommandText = "SELECT name FROM pragma_table_xinfo($table) WHERE hidden=0 ORDER BY cid;";
+                columnCommand.Parameters.AddWithValue("$table", table);
+                using var columnReader = columnCommand.ExecuteReader();
+                while (columnReader.Read()) columns.Add(columnReader.GetString(0));
+            }
+            var projection = string.Join(',', columns.Select(QuoteIdentifier));
             using var command = connection.CreateCommand();
-            command.CommandText = $"SELECT * FROM \"{table}\";";
+            command.CommandText = $"SELECT {projection} FROM {QuoteIdentifier(table)} ORDER BY {projection};";
             using var reader = command.ExecuteReader();
-            var columns = Enumerable.Range(0, reader.FieldCount).Select(reader.GetName).ToArray();
             lines.Add($"table|{table}|{string.Join('|', columns)}");
             while (reader.Read())
             {
@@ -537,6 +907,8 @@ public sealed class SessionSchemaMigrationFixtureTests
         }
         return string.Join('\n', lines) + "\n";
     }
+
+    private static string QuoteIdentifier(string identifier) => $"\"{identifier.Replace("\"", "\"\"")}\"";
 
     private static string CanonicalSql(string sql)
     {
@@ -577,6 +949,319 @@ public sealed class SessionSchemaMigrationFixtureTests
             tokens.Add(sql[index++].ToString());
         }
         return string.Join('|', tokens);
+    }
+
+    private static void ApplyStampedVersionElevenMutation(string databasePath, string mutationName)
+    {
+        switch (mutationName)
+        {
+            case "extra-regular-column":
+                RewriteDefinitions(databasePath, "session_projection_state", definitions => definitions.Append("unexpected_column TEXT NULL"));
+                return;
+            case "missing-regular-column":
+                RewriteDefinitions(databasePath, "session_projection_state", definitions => definitions.Where(definition => !StartsWithIdentifier(definition, "updated_at")));
+                return;
+            case "virtual-generated-column":
+                RewriteDefinitions(databasePath, "session_projection_state", definitions => definitions.Append("synthetic_cursor INTEGER GENERATED ALWAYS AS (projection_cursor + 1) VIRTUAL"));
+                return;
+            case "stored-generated-column":
+                RewriteDefinitions(databasePath, "session_projection_state", definitions => definitions.Append("synthetic_cursor INTEGER GENERATED ALWAYS AS (projection_cursor + 1) STORED"));
+                return;
+            case "declared-type-changed":
+                RewriteDefinition(databasePath, "session_projection_state", "projection_cursor", definition => ReplaceRequired(definition, "INTEGER", "TEXT"));
+                return;
+            case "nullability-changed":
+                RewriteDefinition(databasePath, "session_projection_state", "updated_at", definition => ReplaceRequired(definition, "TEXT NOT NULL", "TEXT NULL"));
+                return;
+            case "default-added":
+                RewriteDefinition(databasePath, "session_projection_state", "updated_at", definition => ReplaceRequired(definition, "TEXT NOT NULL", "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"));
+                return;
+            case "primary-key-changed-to-unique":
+                RebuildTable(databasePath, "session_projection_state", sql => ReplaceRequired(sql, "projector_key TEXT PRIMARY KEY", "projector_key TEXT NOT NULL UNIQUE"));
+                return;
+            case "column-order-changed":
+                RewriteDefinitions(databasePath, "session_projection_state", definitions =>
+                {
+                    var changed = definitions.ToList();
+                    (changed[1], changed[2]) = (changed[2], changed[1]);
+                    return changed;
+                });
+                return;
+            case "check-removed":
+                RewriteDefinition(databasePath, "session_projection_state", "projection_cursor", definition => ReplaceRequired(definition, " CHECK (projection_cursor IS NULL OR projection_cursor >= 0)", string.Empty));
+                return;
+            case "check-broadened":
+                RewriteDefinition(databasePath, "session_projection_state", "projection_cursor", definition => ReplaceRequired(definition, "projection_cursor >= 0", "projection_cursor >= -1"));
+                return;
+            case "check-added":
+                RewriteDefinitions(databasePath, "session_projection_state", definitions => definitions.Append("CHECK (length(projector_key) > 0)"));
+                return;
+            case "check-removed-with-quoted-decoy":
+                RewriteDefinition(databasePath, "session_projection_state", "projection_cursor", definition => ReplaceRequired(definition, " CHECK (projection_cursor IS NULL OR projection_cursor >= 0)", " DEFAULT 'CHECK (projection_cursor IS NULL OR projection_cursor >= 0)'"));
+                return;
+            case "check-removed-with-comment-decoy":
+                RewriteDefinition(databasePath, "session_projection_state", "projection_cursor", definition => ReplaceRequired(definition, " CHECK (projection_cursor IS NULL OR projection_cursor >= 0)", " /* CHECK (projection_cursor IS NULL OR projection_cursor >= 0) */"));
+                return;
+            case "autoincrement-added":
+                RebuildTable(databasePath, "proposal_apply_audit", sql => ReplaceRequired(sql, "audit_id INTEGER PRIMARY KEY", "audit_id INTEGER PRIMARY KEY AUTOINCREMENT"));
+                return;
+            case "ordinary-index-added":
+                ExecuteMutation(databasePath, "CREATE INDEX sessions_status_idx ON sessions(status);");
+                return;
+            case "unique-index-added":
+                ExecuteMutation(databasePath, "CREATE UNIQUE INDEX sessions_session_id_unique_idx ON sessions(session_id);");
+                return;
+            case "expression-index-added":
+                ExecuteMutation(databasePath, "CREATE INDEX sessions_status_expression_idx ON sessions(lower(status));");
+                return;
+            case "autoindex-primary-key-order-changed":
+                RebuildTable(databasePath, "session_native_ids", sql => ReplaceRequired(sql, "PRIMARY KEY (source_surface, native_session_id)", "PRIMARY KEY (native_session_id, source_surface)"));
+                return;
+            case "index-collation-changed":
+                RebuildTable(databasePath, "session_native_ids", sql => ReplaceRequired(sql, "source_surface TEXT NOT NULL", "source_surface TEXT COLLATE NOCASE NOT NULL"));
+                return;
+            case "index-direction-changed":
+                RebuildTable(databasePath, "session_native_ids", sql => ReplaceRequired(sql, "PRIMARY KEY (source_surface, native_session_id)", "PRIMARY KEY (source_surface DESC, native_session_id)"));
+                return;
+            case "index-key-and-auxiliary-terms-changed":
+                ExecuteMutation(databasePath, "CREATE INDEX sessions_status_session_idx ON sessions(status,session_id);");
+                return;
+            case "partial-index-added":
+                ExecuteMutation(databasePath, "CREATE INDEX sessions_partial_idx ON sessions(status) WHERE ended_at IS NOT NULL;");
+                return;
+            case "foreign-key-removed":
+                RewriteDefinitions(databasePath, "session_event_content", definitions => definitions.Where(definition => !definition.TrimStart().StartsWith("FOREIGN KEY", StringComparison.OrdinalIgnoreCase)));
+                return;
+            case "foreign-key-retargeted":
+                RewriteDefinition(databasePath, "session_human_evaluation", "FOREIGN KEY", definition => ReplaceRequired(definition, "REFERENCES sessions(session_id)", "REFERENCES session_runs(run_id)"));
+                return;
+            case "foreign-key-added":
+                RewriteDefinitions(databasePath, "session_human_evaluation", definitions => definitions.Append("FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE"));
+                return;
+            case "foreign-key-action-changed":
+                RewriteDefinition(databasePath, "session_human_evaluation", "FOREIGN KEY", definition => ReplaceRequired(definition, "ON DELETE CASCADE", "ON DELETE RESTRICT"));
+                return;
+            case "trigger-on-owned-table-added":
+                ExecuteMutation(databasePath, "CREATE TRIGGER monitor_named_owned_trigger AFTER UPDATE ON sessions BEGIN SELECT 1; END;");
+                return;
+            case "owned-table-replaced-by-view":
+                ExecuteMutation(databasePath, "PRAGMA foreign_keys=OFF; DROP TABLE session_projection_state; CREATE VIEW session_projection_state AS SELECT 'fixture-projector-v10' AS projector_key,1010 AS projection_cursor,20 AS unsupported_event_version_count,'2026-07-12T00:11:00.0000000+00:00' AS updated_at;");
+                return;
+            case "reserved-table-added":
+                ExecuteMutation(databasePath, "CREATE TABLE session_reserved_extra(value TEXT);");
+                return;
+            case "reserved-view-added":
+                ExecuteMutation(databasePath, "CREATE VIEW improvement_proposal_reserved_view AS SELECT 1 AS value;");
+                return;
+            case "strict-table-added":
+                RewriteTableSql(databasePath, "session_projection_state", sql => sql + " STRICT");
+                return;
+            case "without-rowid-added":
+                RebuildTable(databasePath, "session_projection_state", sql => sql + " WITHOUT ROWID");
+                return;
+            case "reserved-virtual-table-added":
+                ExecuteMutation(databasePath, "CREATE VIRTUAL TABLE session_reserved_virtual USING fts5(value);");
+                return;
+            case "schema-version-extra-column":
+                RewriteDefinitions(databasePath, "schema_version", definitions => definitions.Append("unexpected_column TEXT NULL"));
+                return;
+            case "schema-version-component-primary-key-removed":
+                RebuildTable(databasePath, "schema_version", sql => ReplaceRequired(sql, "component TEXT PRIMARY KEY", "component TEXT NOT NULL UNIQUE"));
+                return;
+            case "owned-table-removed":
+                ExecuteMutation(databasePath, "DROP TABLE proposal_apply_pending;");
+                return;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mutationName), mutationName, "Unknown stamped-v11 mutation.");
+        }
+    }
+
+    private static string ReplaceRequired(string value, string oldValue, string newValue)
+    {
+        var replaced = value.Replace(oldValue, newValue, StringComparison.Ordinal);
+        Assert.NotEqual(value, replaced);
+        return replaced;
+    }
+
+    private static void RewriteDefinition(string databasePath, string table, string identifier, Func<string, string> rewrite) =>
+        RewriteDefinitions(databasePath, table, definitions => definitions.Select(definition =>
+            StartsWithIdentifier(definition, identifier) ? rewrite(definition) : definition));
+
+    private static void RewriteDefinitions(string databasePath, string table, Func<IReadOnlyList<string>, IEnumerable<string>> rewrite)
+    {
+        RewriteTableSql(databasePath, table, sql =>
+        {
+            var opening = sql.IndexOf('(', StringComparison.Ordinal);
+            var closing = FindMatchingParenthesis(sql, opening);
+            Assert.True(opening >= 0 && closing > opening, $"Unable to parse {table} CREATE TABLE SQL: {sql}");
+            var definitions = SplitTopLevel(sql[(opening + 1)..closing]);
+            var rewritten = rewrite(definitions).ToArray();
+            Assert.False(definitions.SequenceEqual(rewritten), $"Mutation did not change {table} CREATE TABLE semantics.");
+            return sql[..(opening + 1)] + string.Join(',', rewritten) + sql[closing..];
+        });
+    }
+
+    private static int FindMatchingParenthesis(string sql, int opening)
+    {
+        var depth = 0;
+        var quote = '\0';
+        for (var index = opening; index < sql.Length; index++)
+        {
+            var character = sql[index];
+            if (quote != '\0')
+            {
+                var closingQuote = quote == '[' ? ']' : quote;
+                if (character != closingQuote) continue;
+                if (quote != '[' && index + 1 < sql.Length && sql[index + 1] == closingQuote) { index++; continue; }
+                quote = '\0';
+                continue;
+            }
+            if (character is '\'' or '"' or '`' or '[') { quote = character; continue; }
+            if (character == '(') depth++;
+            else if (character == ')' && --depth == 0) return index;
+        }
+        return -1;
+    }
+
+    private static IReadOnlyList<string> SplitTopLevel(string definitions)
+    {
+        var result = new List<string>();
+        var depth = 0;
+        var start = 0;
+        var quote = '\0';
+        for (var index = 0; index < definitions.Length; index++)
+        {
+            var character = definitions[index];
+            if (quote != '\0')
+            {
+                var closingQuote = quote == '[' ? ']' : quote;
+                if (character != closingQuote) continue;
+                if (quote != '[' && index + 1 < definitions.Length && definitions[index + 1] == closingQuote) { index++; continue; }
+                quote = '\0';
+                continue;
+            }
+            if (character is '\'' or '"' or '`' or '[') { quote = character; continue; }
+            if (character == '(') depth++;
+            else if (character == ')') depth--;
+            else if (character == ',' && depth == 0)
+            {
+                result.Add(definitions[start..index].Trim());
+                start = index + 1;
+            }
+        }
+        result.Add(definitions[start..].Trim());
+        return result;
+    }
+
+    private static bool StartsWithIdentifier(string definition, string identifier)
+    {
+        var value = definition.TrimStart();
+        if (identifier == "FOREIGN KEY") return value.StartsWith(identifier, StringComparison.OrdinalIgnoreCase);
+        var length = 0;
+        while (length < value.Length && (char.IsLetterOrDigit(value[length]) || value[length] == '_')) length++;
+        return string.Equals(value[..length], identifier, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void RewriteTableSql(string databasePath, string table, Func<string, string> rewrite)
+    {
+        using var connection = Open(databasePath);
+        var currentSql = Scalar<string>(connection, "SELECT sql FROM sqlite_schema WHERE type='table' AND name=$id;", table);
+        var rewrittenSql = rewrite(currentSql);
+        Assert.NotEqual(currentSql, rewrittenSql);
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=$sql WHERE type='table' AND name=$table; PRAGMA writable_schema=OFF;";
+        command.Parameters.AddWithValue("$sql", rewrittenSql);
+        command.Parameters.AddWithValue("$table", table);
+        command.ExecuteNonQuery();
+        Execute(connection, $"PRAGMA schema_version={Scalar<long>(connection, "PRAGMA schema_version;") + 1};");
+    }
+
+    private static void RebuildTable(string databasePath, string table, Func<string, string> rewrite)
+    {
+        using var connection = Open(databasePath);
+        Execute(connection, "PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;");
+        var currentSql = Scalar<string>(connection, "SELECT sql FROM sqlite_schema WHERE type='table' AND name=$id;", table);
+        var rewrittenSql = rewrite(currentSql);
+        Assert.NotEqual(currentSql, rewrittenSql);
+        var columns = new List<string>();
+        using (var columnCommand = connection.CreateCommand())
+        {
+            columnCommand.CommandText = "SELECT name FROM pragma_table_xinfo($table) WHERE hidden=0 ORDER BY cid;";
+            columnCommand.Parameters.AddWithValue("$table", table);
+            using var reader = columnCommand.ExecuteReader();
+            while (reader.Read()) columns.Add(reader.GetString(0));
+        }
+        var oldTable = $"mutation_old_{table}";
+        var projection = string.Join(',', columns.Select(QuoteIdentifier));
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, $"ALTER TABLE {QuoteIdentifier(table)} RENAME TO {QuoteIdentifier(oldTable)};");
+        Execute(connection, transaction, rewrittenSql);
+        Execute(connection, transaction, $"INSERT INTO {QuoteIdentifier(table)}({projection}) SELECT {projection} FROM {QuoteIdentifier(oldTable)};");
+        Execute(connection, transaction, $"DROP TABLE {QuoteIdentifier(oldTable)};");
+        transaction.Commit();
+    }
+
+    private static void ExecuteMutation(string databasePath, string sql)
+    {
+        using var connection = Open(databasePath);
+        Execute(connection, sql);
+    }
+
+    private static string CreateStampedVersionElevenFixture(string fixtureFile)
+    {
+        var databasePath = CopyFixture(fixtureFile);
+        new SqliteSessionStore(databasePath).CreateSchema();
+        return databasePath;
+    }
+
+    private static PreflightSnapshot CapturePreflightSnapshot(string databasePath)
+    {
+        long version;
+        string schema;
+        string rows;
+        string journalMode;
+        using (var connection = Open(databasePath))
+        {
+            version = Scalar<long>(connection, "SELECT version FROM schema_version WHERE component='session';");
+            schema = ReadSemanticSchemaSnapshot(connection);
+            rows = ReadDatabaseRowSnapshot(connection);
+            journalMode = Scalar<string>(connection, "PRAGMA journal_mode;");
+        }
+        return new(version, schema, rows, journalMode, CaptureFile(databasePath + "-wal"), CaptureFile(databasePath + "-shm"));
+    }
+
+    private static FileSnapshot CaptureFile(string path) => File.Exists(path)
+        ? new(true, new FileInfo(path).Length, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant())
+        : new(false, 0, string.Empty);
+
+    private static void DeleteDatabaseFiles(string databasePath)
+    {
+        File.Delete(databasePath);
+        File.Delete(databasePath + "-wal");
+        File.Delete(databasePath + "-shm");
+    }
+
+    private static string CopyFixture(string fixtureFile)
+    {
+        var fixturePath = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "session", fixtureFile);
+        var migratedPath = Path.Combine(Path.GetTempPath(), $"session-migration-{Guid.NewGuid():N}.sqlite");
+        File.Copy(fixturePath, migratedPath);
+        return migratedPath;
+    }
+
+    private static void Execute(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
     }
 
     private static SqliteConnection Open(string databasePath)
@@ -679,4 +1364,6 @@ public sealed class SessionSchemaMigrationFixtureTests
         IReadOnlyList<string> Commands);
     private sealed record FixtureSentinels(Guid SessionId, string NativeSessionId, Guid RunId, Guid EventId, string SourceEventId, string ProjectorKey, Guid? ProposalId, Guid? DraftId, Guid? ApplyId, Guid? RootId, Guid? ObjectiveEvaluationId = null, Guid? SecondarySessionId = null, string? SecondaryNativeSessionId = null, Guid? SecondaryRunId = null, Guid? SecondaryEventId = null, string? SecondarySourceEventId = null, Guid? ComparisonId = null);
     private sealed record MigratedSnapshot(string SemanticSchema, string Rows);
+    private sealed record PreflightSnapshot(long Version, string SemanticSchema, string Rows, string JournalMode, FileSnapshot Wal, FileSnapshot Shm);
+    private sealed record FileSnapshot(bool Exists, long Length, string Sha256);
 }
