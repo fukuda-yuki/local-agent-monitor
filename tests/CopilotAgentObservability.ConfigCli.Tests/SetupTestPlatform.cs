@@ -8,6 +8,7 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     private readonly Dictionary<string, byte[]> files = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string?> environment = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<Exception>> faults = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Queue<(Exception Exception, Action? Callback)>> afterEffectFaults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SetupTestBarrierState> barriers = new(StringComparer.Ordinal);
     private readonly HashSet<string> directories = new(StringComparer.Ordinal);
     private readonly HashSet<string> exclusiveLocks = new(StringComparer.Ordinal);
@@ -57,6 +58,20 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             }
 
             queuedFaults.Enqueue(exception);
+        }
+    }
+
+    public void InjectAfterEffectFault(string operation, Exception exception, Action? callback = null)
+    {
+        lock (gate)
+        {
+            if (!afterEffectFaults.TryGetValue(operation, out var queuedFaults))
+            {
+                queuedFaults = new Queue<(Exception, Action?)>();
+                afterEffectFaults.Add(operation, queuedFaults);
+            }
+
+            queuedFaults.Enqueue((exception, callback));
         }
     }
 
@@ -117,6 +132,24 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             {
                 barrier.ReleaseLease();
             }
+        }
+    }
+
+    private void RecordAfterEffect(string operation)
+    {
+        (Exception Exception, Action? Callback)? fault = null;
+        lock (gate)
+        {
+            if (afterEffectFaults.TryGetValue(operation, out var queuedFaults) && queuedFaults.TryDequeue(out var queuedFault))
+            {
+                fault = queuedFault;
+            }
+        }
+
+        if (fault is { } afterEffectFault)
+        {
+            afterEffectFault.Callback?.Invoke();
+            throw afterEffectFault.Exception;
         }
     }
 
@@ -219,22 +252,32 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 
         public void WriteAllBytes(string path, ReadOnlySpan<byte> bytes)
         {
-            platform.Record($"file.write:{path}");
+            var operation = $"file.write:{path}";
+            platform.Record(operation);
             platform.files[path] = bytes.ToArray();
+            platform.RecordAfterEffect(operation);
         }
 
-        public void FlushFile(string path) => platform.Record($"file.flush:{path}");
+        public void FlushFile(string path)
+        {
+            var operation = $"file.flush:{path}";
+            platform.Record(operation);
+            platform.RecordAfterEffect(operation);
+        }
 
         public void ReplaceFile(string sourcePath, string destinationPath)
         {
-            platform.Record($"file.replace:{sourcePath}->{destinationPath}");
+            var operation = $"file.replace:{sourcePath}->{destinationPath}";
+            platform.Record(operation);
             platform.files[destinationPath] = platform.files[sourcePath];
             platform.files.Remove(sourcePath);
+            platform.RecordAfterEffect(operation);
         }
 
         public void MoveFile(string sourcePath, string destinationPath, bool overwrite)
         {
-            platform.Record($"file.move:{sourcePath}->{destinationPath}");
+            var operation = $"file.move:{sourcePath}->{destinationPath}";
+            platform.Record(operation);
             if (!overwrite && platform.files.ContainsKey(destinationPath))
             {
                 throw new IOException("Destination already exists.");
@@ -242,6 +285,7 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 
             platform.files[destinationPath] = platform.files[sourcePath];
             platform.files.Remove(sourcePath);
+            platform.RecordAfterEffect(operation);
         }
 
         public void DeleteFile(string path)

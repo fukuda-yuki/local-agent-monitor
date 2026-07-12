@@ -17,7 +17,7 @@ public sealed class SetupStorageTests
     public void PersistPlannedChangeSet_WritesAndFlushesImmutablePlanBeforeAtomicallyReplacingLedger()
     {
         var context = CreateContext();
-        context.Store.PersistPlannedChangeSet(CreatePlan(), CreatePlannedChangeSet());
+        context.Store.PersistPlannedChangeSet(context.Lock, CreatePlan(), CreatePlannedChangeSet());
 
         var operations = context.Platform.Operations;
         var planFlush = IndexOf(operations, $"file.flush:{context.Paths.GetPlan(ChangeSetId)}.tmp");
@@ -41,7 +41,7 @@ public sealed class SetupStorageTests
         context.Platform.InjectFault("checkpoint:after-plan-persisted-before-ledger", new IOException("PREVIOUS_SECRET_MARKER"));
 
         var exception = Assert.Throws<SetupStorageException>(() =>
-            context.Store.PersistPlannedChangeSet(CreatePlan(), CreatePlannedChangeSet()));
+            context.Store.PersistPlannedChangeSet(context.Lock, CreatePlan(), CreatePlannedChangeSet()));
 
         Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
         Assert.Equal(SetupStorageCodes.WriteFailed, exception.Message);
@@ -55,7 +55,7 @@ public sealed class SetupStorageTests
     public void Load_IgnoresOrphanPlanWithoutLedgerRow()
     {
         var context = CreateContext();
-        context.PlanStore.Create(CreatePlan());
+        context.PlanStore.Create(context.Lock, CreatePlan());
 
         var ledger = context.Store.Load();
 
@@ -67,7 +67,7 @@ public sealed class SetupStorageTests
     public void Load_NonTerminalLedgerRowWithoutPlanReportsFixedRecoveryRequired()
     {
         var context = CreateContext();
-        context.Store.Save(new SetupOwnershipLedger(1, [CreatePlannedChangeSet()]));
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, [CreatePlannedChangeSet()]));
         context.Platform.FileSystem.DeleteFile(context.Paths.GetPlan(ChangeSetId));
 
         var exception = Assert.Throws<SetupStorageException>(() => context.Store.Load());
@@ -81,11 +81,11 @@ public sealed class SetupStorageTests
     public void PlanCreate_IsImmutableAndRejectsOverwriteWithoutChangingBytes()
     {
         var context = CreateContext();
-        context.PlanStore.Create(CreatePlan());
+        context.PlanStore.Create(context.Lock, CreatePlan());
         var original = context.Platform.ReadSeededFile(context.Paths.GetPlan(ChangeSetId));
 
         var changed = CreatePlan() with { ToolVersion = "9.9.9" };
-        var exception = Assert.Throws<SetupStorageException>(() => context.PlanStore.Create(changed));
+        var exception = Assert.Throws<SetupStorageException>(() => context.PlanStore.Create(context.Lock, changed));
 
         Assert.Equal(SetupStorageCodes.PlanAlreadyExists, exception.Code);
         Assert.Equal(original, context.Platform.ReadSeededFile(context.Paths.GetPlan(ChangeSetId)));
@@ -97,7 +97,7 @@ public sealed class SetupStorageTests
         var context = CreateContext();
         var plan = CreatePlan();
 
-        context.PlanStore.Create(plan);
+        context.PlanStore.Create(context.Lock, plan);
         var reopened = new SetupPlanStore(context.Platform, context.Paths).Load(ChangeSetId);
         var json = Encoding.UTF8.GetString(context.Platform.ReadSeededFile(context.Paths.GetPlan(ChangeSetId)));
 
@@ -131,8 +131,8 @@ public sealed class SetupStorageTests
         };
         var ledger = new SetupOwnershipLedger(1, [CreatePlannedChangeSet(), second]);
 
-        context.PlanStore.Create(CreatePlan());
-        context.Store.Save(ledger);
+        context.PlanStore.Create(context.Lock, CreatePlan());
+        context.Store.Save(context.Lock, ledger);
         var reopened = new SetupLedgerStore(context.Platform, context.Paths, context.PlanStore).Load();
         var json = Encoding.UTF8.GetString(context.Platform.ReadSeededFile(context.Paths.OwnershipLedger));
 
@@ -150,12 +150,12 @@ public sealed class SetupStorageTests
     public void Save_ReplacesExistingLedgerAtomicallyAndCleansTemporaryFileAfterFault()
     {
         var context = CreateContext();
-        context.Store.Save(new SetupOwnershipLedger(1, []));
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, []));
         var original = context.Platform.ReadSeededFile(context.Paths.OwnershipLedger);
         context.Platform.InjectFault($"file.replace:{context.Paths.OwnershipLedger}.tmp->{context.Paths.OwnershipLedger}", new IOException("synthetic"));
 
         var exception = Assert.Throws<SetupStorageException>(() =>
-            context.Store.Save(new SetupOwnershipLedger(1, [CreateAppliedChangeSet()])));
+            context.Store.Save(context.Lock, new SetupOwnershipLedger(1, [CreateAppliedChangeSet()])));
 
         Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
         Assert.Equal(original, context.Platform.ReadSeededFile(context.Paths.OwnershipLedger));
@@ -190,13 +190,17 @@ public sealed class SetupStorageTests
     public void PersistPlannedChangeSet_RejectsMismatchedPlanAndLedgerBeforeWriting()
     {
         var context = CreateContext();
-        var ledgerRow = CreatePlannedChangeSet() with { Adapter = "other-adapter" };
+        var ledgerRow = CreatePlannedChangeSet() with
+        {
+            Adapter = "other-adapter",
+            Targets = [CreateLedgerTarget() with { OwningAdapter = "other-adapter" }],
+        };
 
         var exception = Assert.Throws<SetupStorageException>(() =>
-            context.Store.PersistPlannedChangeSet(CreatePlan(), ledgerRow));
+            context.Store.PersistPlannedChangeSet(context.Lock, CreatePlan(), ledgerRow));
 
         Assert.Equal(SetupStorageCodes.PlanLedgerMismatch, exception.Code);
-        Assert.Empty(context.Platform.Operations);
+        Assert.DoesNotContain(context.Platform.Operations, operation => operation.StartsWith("file.write:", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -212,12 +216,287 @@ public sealed class SetupStorageTests
         Assert.Single(document.RootElement.GetProperty("change_sets").EnumerateArray());
     }
 
+    [Theory]
+    [InlineData("adapter", "null")]
+    [InlineData("adapter", "{\"marker\":\"PREVIOUS_SECRET_MARKER\"}")]
+    [InlineData("targets", "null")]
+    public void PlanLoad_NullOrWrongTypeMapsToFixedRecoveryRequiredWithoutEcho(string property, string replacement)
+    {
+        var context = CreateContext();
+        var json = Encoding.UTF8.GetString(SetupPlanStore.Serialize(CreatePlan()))
+            .Replace("DESIRED_VALUE_MARKER", "PREVIOUS_SECRET_MARKER", StringComparison.Ordinal);
+        json = ReplacePropertyValue(json, property, replacement);
+        context.Platform.SeedFile(context.Paths.GetPlan(ChangeSetId), Encoding.UTF8.GetBytes(json));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.PlanStore.Load(ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Message);
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("adapter", "null")]
+    [InlineData("adapter", "{\"marker\":\"PREVIOUS_SECRET_MARKER\"}")]
+    [InlineData("change_sets", "null")]
+    public void LedgerLoad_NullOrWrongTypeMapsToFixedCorruptWithoutEcho(string property, string replacement)
+    {
+        var context = CreateContext();
+        var json = Encoding.UTF8.GetString(SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [CreateAppliedChangeSet()])));
+        json = ReplacePropertyValue(json, property, replacement);
+        context.Platform.SeedFile(context.Paths.OwnershipLedger, Encoding.UTF8.GetBytes(json));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.Load());
+
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Code);
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Message);
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LedgerLoad_AcceptsReorderedExactPropertiesAndRejectsDuplicateOrUnknownProperties()
+    {
+        var reordered = CreateContext();
+        reordered.Platform.SeedFile(reordered.Paths.OwnershipLedger, Encoding.UTF8.GetBytes("{\"change_sets\":[],\"schema_version\":1}"));
+        Assert.Empty(reordered.Store.Load().ChangeSets);
+
+        foreach (var invalid in new[]
+        {
+            "{\"schema_version\":1,\"schema_version\":1,\"change_sets\":[]}",
+            "{\"schema_version\":1,\"change_sets\":[],\"marker\":\"PREVIOUS_SECRET_MARKER\"}",
+        })
+        {
+            var context = CreateContext();
+            context.Platform.SeedFile(context.Paths.OwnershipLedger, Encoding.UTF8.GetBytes(invalid));
+            var exception = Assert.Throws<SetupStorageException>(() => context.Store.Load());
+            Assert.Equal(SetupCodes.LedgerCorrupt, exception.Code);
+            Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", exception.ToString(), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void LedgerValidation_RejectsUnknownOutcomeAndInvalidPlannedOwnershipFieldsBeforeWriting()
+    {
+        var invalidRows = new[]
+        {
+            CreateAppliedChangeSet() with { OutcomeCode = "synthetic_unknown_code" },
+            CreatePlannedChangeSet() with { OutcomeCode = SetupCodes.PlanReady },
+            CreatePlannedChangeSet() with { Targets = [CreateLedgerTarget() with { AppliedStateHash = HashB }] },
+            CreatePlannedChangeSet() with { Targets = [CreateLedgerTarget() with { BackupReference = "backup-ref" }] },
+            CreatePlannedChangeSet() with { Targets = [CreateLedgerTarget() with { OutcomeCode = SetupCodes.PlanReady }] },
+            CreatePlannedChangeSet() with { Targets = [CreateLedgerTarget() with { RollbackStatus = SetupLedgerRollbackStatus.Pending }] },
+            CreatePlannedChangeSet() with { Targets = [CreateLedgerTarget() with { OwningAdapter = "other-adapter" }] },
+            CreatePlannedChangeSet() with { Targets = [CreateLedgerTarget() with { ToolVersion = "9.9.9" }] },
+            CreatePlannedChangeSet() with
+            {
+                Targets =
+                [
+                    CreateLedgerTarget() with
+                    {
+                        Members =
+                        [
+                            new SetupLedgerMember("duplicate.setting", SetupOperation.Add),
+                            new SetupLedgerMember("duplicate.setting", SetupOperation.Replace),
+                        ],
+                    },
+                ],
+            },
+        };
+
+        foreach (var row in invalidRows)
+        {
+            var context = CreateContext();
+            Assert.Throws<FormatException>(() => context.Store.Save(context.Lock, new SetupOwnershipLedger(1, [row])));
+            Assert.DoesNotContain(context.Platform.Operations, operation => operation.StartsWith("file.write:", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public void Mutations_RequireLiveLockForTheSamePlatformAndRuntime()
+    {
+        var context = CreateContext();
+        using var contended = SetupLock.TryAcquire(context.Platform, context.Paths);
+        Assert.False(contended.Acquired);
+        Assert.Equal(SetupCodes.SetupBusy, contended.Code);
+
+        var foreignPlatform = new SetupTestPlatform(CreatedAt, "C:\\foreign-runtime");
+        var foreignPaths = new SetupRuntimePaths(foreignPlatform);
+        using var foreignAcquire = SetupLock.TryAcquire(foreignPlatform, foreignPaths);
+
+        var foreign = Assert.Throws<SetupStorageException>(() =>
+            context.PlanStore.Create(foreignAcquire.Lock!, CreatePlan()));
+        Assert.Equal(SetupStorageCodes.LockRequired, foreign.Code);
+
+        context.Lock.Dispose();
+        var disposed = Assert.Throws<SetupStorageException>(() =>
+            context.Store.Save(context.Lock, new SetupOwnershipLedger(1, [])));
+        Assert.Equal(SetupStorageCodes.LockRequired, disposed.Code);
+        Assert.DoesNotContain(context.Platform.Operations, operation => operation.Contains(".tmp", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("write", false)]
+    [InlineData("write", true)]
+    [InlineData("flush", false)]
+    [InlineData("flush", true)]
+    [InlineData("move", false)]
+    [InlineData("move", true)]
+    public void PlanCreate_FaultMatrixLeavesExactDurableStateAndNoTemporaryFile(string boundary, bool afterEffect)
+    {
+        var context = CreateContext();
+        var destination = context.Paths.GetPlan(ChangeSetId);
+        var operation = FileOperation(boundary, destination, destination + ".tmp");
+        InjectFault(context.Platform, operation, afterEffect);
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.PlanStore.Create(context.Lock, CreatePlan()));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+        Assert.False(context.Platform.FileSystem.FileExists(destination + ".tmp"));
+        var reopened = new SetupPlanStore(context.Platform, context.Paths).Load(ChangeSetId);
+        if (boundary == "move" && afterEffect)
+        {
+            Assert.Equivalent(CreatePlan(), reopened, strict: true);
+        }
+        else
+        {
+            Assert.Null(reopened);
+        }
+    }
+
+    [Theory]
+    [InlineData("write", false)]
+    [InlineData("write", true)]
+    [InlineData("flush", false)]
+    [InlineData("flush", true)]
+    [InlineData("move", false)]
+    [InlineData("move", true)]
+    public void FirstLedgerSave_FaultMatrixLeavesExactDurableStateAndNoTemporaryFile(string boundary, bool afterEffect)
+    {
+        var context = CreateContext();
+        var destination = context.Paths.OwnershipLedger;
+        var operation = FileOperation(boundary, destination, destination + ".tmp");
+        InjectFault(context.Platform, operation, afterEffect);
+
+        Assert.Throws<SetupStorageException>(() =>
+            context.Store.Save(context.Lock, new SetupOwnershipLedger(1, [CreateAppliedChangeSet()])));
+
+        Assert.False(context.Platform.FileSystem.FileExists(destination + ".tmp"));
+        var reopened = new SetupLedgerStore(context.Platform, context.Paths, context.PlanStore).Load();
+        Assert.Equal(boundary == "move" && afterEffect ? 1 : 0, reopened.ChangeSets.Count);
+    }
+
+    [Theory]
+    [InlineData("write", false)]
+    [InlineData("write", true)]
+    [InlineData("flush", false)]
+    [InlineData("flush", true)]
+    [InlineData("replace", false)]
+    [InlineData("replace", true)]
+    public void LedgerReplace_FaultMatrixPreservesOldOrDurableNewStateAndCleansTemporaryFile(string boundary, bool afterEffect)
+    {
+        var context = CreateContext();
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, []));
+        var destination = context.Paths.OwnershipLedger;
+        var operation = FileOperation(boundary, destination, destination + ".tmp");
+        InjectFault(context.Platform, operation, afterEffect);
+
+        Assert.Throws<SetupStorageException>(() =>
+            context.Store.Save(context.Lock, new SetupOwnershipLedger(1, [CreateAppliedChangeSet()])));
+
+        Assert.False(context.Platform.FileSystem.FileExists(destination + ".tmp"));
+        var reopened = new SetupLedgerStore(context.Platform, context.Paths, context.PlanStore).Load();
+        Assert.Equal(boundary == "replace" && afterEffect ? 1 : 0, reopened.ChangeSets.Count);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PersistPlannedChangeSet_AfterLedgerCommitFaultPreservesReferencedPlan(bool replacingExistingLedger)
+    {
+        var context = CreateContext();
+        if (replacingExistingLedger)
+        {
+            context.Store.Save(context.Lock, new SetupOwnershipLedger(1, []));
+        }
+
+        var destination = context.Paths.OwnershipLedger;
+        var boundary = replacingExistingLedger ? "replace" : "move";
+        var operation = FileOperation(boundary, destination, destination + ".tmp");
+        context.Platform.InjectAfterEffectFault(operation, new IOException("PREVIOUS_SECRET_MARKER"));
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.PersistPlannedChangeSet(context.Lock, CreatePlan(), CreatePlannedChangeSet()));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+        Assert.NotNull(context.PlanStore.Load(ChangeSetId));
+        Assert.Single(new SetupLedgerStore(context.Platform, context.Paths, context.PlanStore).Load().ChangeSets);
+        Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PersistPlannedChangeSet_UnreadableLedgerAfterAmbiguousCommitPreservesPlanFailClosed()
+    {
+        var context = CreateContext();
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, []));
+        var destination = context.Paths.OwnershipLedger;
+        var operation = FileOperation("replace", destination, destination + ".tmp");
+        context.Platform.InjectAfterEffectFault(
+            operation,
+            new IOException("PREVIOUS_SECRET_MARKER"),
+            () => context.Platform.SeedFile(destination, Encoding.UTF8.GetBytes("corrupt-PREVIOUS_SECRET_MARKER")));
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.PersistPlannedChangeSet(context.Lock, CreatePlan(), CreatePlannedChangeSet()));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+        Assert.NotNull(context.PlanStore.Load(ChangeSetId));
+        var corrupt = Assert.Throws<SetupStorageException>(() => context.Store.Load());
+        Assert.Equal(SetupCodes.LedgerCorrupt, corrupt.Code);
+        Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", corrupt.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SystemFileSystem_AtomicReplacementSurvivesCloseAndReopen()
+    {
+        var temporaryRoot = Path.Combine(Path.GetTempPath(), $"cao-setup-storage-{Guid.NewGuid():N}");
+        try
+        {
+            var firstPlatform = new CopilotAgentObservability.ConfigCli.Setup.Platform.SystemSetupPlatform(localApplicationData: temporaryRoot);
+            var firstPaths = new SetupRuntimePaths(firstPlatform);
+            var firstPlans = new SetupPlanStore(firstPlatform, firstPaths);
+            var firstStore = new SetupLedgerStore(firstPlatform, firstPaths, firstPlans);
+            using (var acquired = SetupLock.TryAcquire(firstPlatform, firstPaths))
+            {
+                firstStore.Save(acquired.Lock!, new SetupOwnershipLedger(1, []));
+                firstStore.Save(acquired.Lock!, new SetupOwnershipLedger(1, [CreateAppliedChangeSet()]));
+            }
+
+            var reopenedPlatform = new CopilotAgentObservability.ConfigCli.Setup.Platform.SystemSetupPlatform(localApplicationData: temporaryRoot);
+            var reopenedPaths = new SetupRuntimePaths(reopenedPlatform);
+            var reopenedPlans = new SetupPlanStore(reopenedPlatform, reopenedPaths);
+            var reopened = new SetupLedgerStore(reopenedPlatform, reopenedPaths, reopenedPlans).Load();
+
+            Assert.Equivalent(new SetupOwnershipLedger(1, [CreateAppliedChangeSet()]), reopened, strict: true);
+            Assert.False(File.Exists(reopenedPaths.OwnershipLedger + ".tmp"));
+        }
+        finally
+        {
+            if (Directory.Exists(temporaryRoot))
+            {
+                Directory.Delete(temporaryRoot, recursive: true);
+            }
+        }
+    }
+
     private static StorageContext CreateContext()
     {
         var platform = new SetupTestPlatform(CreatedAt);
         var paths = new SetupRuntimePaths(platform);
         var planStore = new SetupPlanStore(platform, paths);
-        return new StorageContext(platform, paths, planStore, new SetupLedgerStore(platform, paths, planStore));
+        var acquired = SetupLock.TryAcquire(platform, paths);
+        return new StorageContext(platform, paths, acquired.Lock!, planStore, new SetupLedgerStore(platform, paths, planStore));
     }
 
     private static SetupPrivatePlan CreatePlan() => new(
@@ -281,9 +560,47 @@ public sealed class SetupStorageTests
     private static int IndexOf(IReadOnlyList<string> values, string expected) =>
         values.Select((value, index) => (value, index)).Single(pair => pair.value == expected).index;
 
+    private static string FileOperation(string boundary, string destination, string temporary) => boundary switch
+    {
+        "write" => $"file.write:{temporary}",
+        "flush" => $"file.flush:{temporary}",
+        "move" => $"file.move:{temporary}->{destination}",
+        "replace" => $"file.replace:{temporary}->{destination}",
+        _ => throw new ArgumentOutOfRangeException(nameof(boundary)),
+    };
+
+    private static void InjectFault(SetupTestPlatform platform, string operation, bool afterEffect)
+    {
+        if (afterEffect)
+        {
+            platform.InjectAfterEffectFault(operation, new IOException("PREVIOUS_SECRET_MARKER"));
+        }
+        else
+        {
+            platform.InjectFault(operation, new IOException("PREVIOUS_SECRET_MARKER"));
+        }
+    }
+
+    private static string ReplacePropertyValue(string json, string propertyName, string replacement)
+    {
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.TryGetProperty(propertyName, out var property))
+        {
+            return json.Replace($"\"{propertyName}\": {property.GetRawText()}", $"\"{propertyName}\": {replacement}", StringComparison.Ordinal);
+        }
+
+        if (propertyName == "adapter")
+        {
+            return json.Replace("\"adapter\": \"github-copilot\"", $"\"adapter\": {replacement}", StringComparison.Ordinal);
+        }
+
+        throw new ArgumentOutOfRangeException(nameof(propertyName));
+    }
+
     private sealed record StorageContext(
         SetupTestPlatform Platform,
         SetupRuntimePaths Paths,
+        SetupLock Lock,
         SetupPlanStore PlanStore,
         SetupLedgerStore Store);
 }

@@ -12,6 +12,7 @@ internal static class SetupStorageCodes
     public const string PlanLedgerMismatch = "setup_plan_ledger_mismatch";
     public const string ChangeSetAlreadyExists = "setup_change_set_already_exists";
     public const string WriteFailed = "setup_storage_write_failed";
+    public const string LockRequired = "setup_lock_required";
 }
 
 internal sealed class SetupStorageException : Exception
@@ -115,15 +116,17 @@ internal sealed class SetupLedgerStore
         return ledger;
     }
 
-    public void Save(SetupOwnershipLedger ledger)
+    public void Save(SetupLock setupLock, SetupOwnershipLedger ledger)
     {
+        setupLock.AssertHeld(platform, paths);
         var bytes = Serialize(ledger);
         paths.EnsureRoot();
         SetupStorageFile.WriteAtomic(platform, paths.OwnershipLedger, bytes);
     }
 
-    public void PersistPlannedChangeSet(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
+    public void PersistPlannedChangeSet(SetupLock setupLock, SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
     {
+        setupLock.AssertHeld(platform, paths);
         SetupStorageValidation.ValidatePlanAndLedger(plan, plannedChangeSet);
         var ledger = Load();
         if (ledger.ChangeSets.Any(changeSet => changeSet.ChangeSetId == plan.ChangeSetId))
@@ -134,16 +137,20 @@ internal sealed class SetupLedgerStore
         var planCreated = false;
         try
         {
-            planStore.Create(plan);
+            planStore.Create(setupLock, plan);
             planCreated = true;
             platform.Execution.Checkpoint("after-plan-persisted-before-ledger");
-            Save(ledger with { ChangeSets = [.. ledger.ChangeSets, plannedChangeSet] });
+            Save(setupLock, ledger with { ChangeSets = [.. ledger.ChangeSets, plannedChangeSet] });
         }
-        catch (SetupStorageException)
+        catch (SetupStorageException exception)
         {
-            if (planCreated)
+            if (!planCreated && exception.Code == SetupStorageCodes.WriteFailed)
             {
-                planStore.Delete(plan.ChangeSetId);
+                planStore.Delete(setupLock, plan.ChangeSetId);
+            }
+            else if (planCreated)
+            {
+                DeletePlanWhenLedgerDefinitelyDoesNotReference(setupLock, plan.ChangeSetId);
             }
 
             throw;
@@ -152,10 +159,25 @@ internal sealed class SetupLedgerStore
         {
             if (planCreated)
             {
-                planStore.Delete(plan.ChangeSetId);
+                DeletePlanWhenLedgerDefinitelyDoesNotReference(setupLock, plan.ChangeSetId);
             }
 
             throw new SetupStorageException(SetupStorageCodes.WriteFailed);
+        }
+    }
+
+    private void DeletePlanWhenLedgerDefinitelyDoesNotReference(SetupLock setupLock, Guid changeSetId)
+    {
+        try
+        {
+            var durableLedger = Load();
+            if (durableLedger.ChangeSets.All(changeSet => changeSet.ChangeSetId != changeSetId))
+            {
+                planStore.Delete(setupLock, changeSetId);
+            }
+        }
+        catch (Exception)
+        {
         }
     }
 
@@ -241,46 +263,46 @@ internal sealed class SetupLedgerStore
         SetupStorageJson.RequireProperties(root, "schema_version", "change_sets");
 
         var changeSets = new List<SetupLedgerChangeSet>();
-        foreach (var changeSetElement in root.GetProperty("change_sets").EnumerateArray())
+        foreach (var changeSetElement in SetupStorageJson.GetArray(root, "change_sets"))
         {
             SetupStorageJson.RequireProperties(changeSetElement, "change_set_id", "adapter", "selected_target", "created_at", "updated_at", "tool_version", "outcome_code", "state", "targets");
             var targets = new List<SetupLedgerTarget>();
-            foreach (var targetElement in changeSetElement.GetProperty("targets").EnumerateArray())
+            foreach (var targetElement in SetupStorageJson.GetArray(changeSetElement, "targets"))
             {
                 SetupStorageJson.RequireProperties(targetElement, "record_id", "target_kind", "target_label", "owning_adapter", "members", "previous_state_hash", "applied_state_hash", "backup_reference", "outcome_code", "rollback_status", "restart_requirement", "tool_version");
                 var members = new List<SetupLedgerMember>();
-                foreach (var memberElement in targetElement.GetProperty("members").EnumerateArray())
+                foreach (var memberElement in SetupStorageJson.GetArray(targetElement, "members"))
                 {
                     SetupStorageJson.RequireProperties(memberElement, "setting_key", "operation");
                     members.Add(new SetupLedgerMember(
-                        memberElement.GetProperty("setting_key").GetString()!,
-                        SetupStorageJson.ParseOperation(memberElement.GetProperty("operation").GetString()!)));
+                        SetupStorageJson.GetString(memberElement, "setting_key"),
+                        SetupStorageJson.ParseOperation(SetupStorageJson.GetString(memberElement, "operation"))));
                 }
 
                 targets.Add(new SetupLedgerTarget(
-                    Guid.Parse(targetElement.GetProperty("record_id").GetString()!),
-                    SetupStorageJson.ParseTargetKind(targetElement.GetProperty("target_kind").GetString()!),
-                    targetElement.GetProperty("target_label").GetString()!,
-                    targetElement.GetProperty("owning_adapter").GetString()!,
+                    SetupStorageJson.GetGuid(targetElement, "record_id"),
+                    SetupStorageJson.ParseTargetKind(SetupStorageJson.GetString(targetElement, "target_kind")),
+                    SetupStorageJson.GetString(targetElement, "target_label"),
+                    SetupStorageJson.GetString(targetElement, "owning_adapter"),
                     members,
-                    targetElement.GetProperty("previous_state_hash").GetString()!,
+                    SetupStorageJson.GetString(targetElement, "previous_state_hash"),
                     SetupStorageJson.GetNullableString(targetElement, "applied_state_hash"),
                     SetupStorageJson.GetNullableString(targetElement, "backup_reference"),
                     SetupStorageJson.GetNullableString(targetElement, "outcome_code"),
-                    SetupStorageJson.ParseRollbackStatus(targetElement.GetProperty("rollback_status").GetString()!),
-                    SetupStorageJson.ParseRestartRequirement(targetElement.GetProperty("restart_requirement").GetString()!),
-                    targetElement.GetProperty("tool_version").GetString()!));
+                    SetupStorageJson.ParseRollbackStatus(SetupStorageJson.GetString(targetElement, "rollback_status")),
+                    SetupStorageJson.ParseRestartRequirement(SetupStorageJson.GetString(targetElement, "restart_requirement")),
+                    SetupStorageJson.GetString(targetElement, "tool_version")));
             }
 
             changeSets.Add(new SetupLedgerChangeSet(
-                Guid.Parse(changeSetElement.GetProperty("change_set_id").GetString()!),
-                changeSetElement.GetProperty("adapter").GetString()!,
-                changeSetElement.GetProperty("selected_target").GetString()!,
-                SetupStorageJson.ParseTimestamp(changeSetElement.GetProperty("created_at").GetString()!),
-                SetupStorageJson.ParseTimestamp(changeSetElement.GetProperty("updated_at").GetString()!),
-                changeSetElement.GetProperty("tool_version").GetString()!,
+                SetupStorageJson.GetGuid(changeSetElement, "change_set_id"),
+                SetupStorageJson.GetString(changeSetElement, "adapter"),
+                SetupStorageJson.GetString(changeSetElement, "selected_target"),
+                SetupStorageJson.ParseTimestamp(SetupStorageJson.GetString(changeSetElement, "created_at")),
+                SetupStorageJson.ParseTimestamp(SetupStorageJson.GetString(changeSetElement, "updated_at")),
+                SetupStorageJson.GetString(changeSetElement, "tool_version"),
                 SetupStorageJson.GetNullableString(changeSetElement, "outcome_code"),
-                SetupStorageJson.ParseChangeSetState(changeSetElement.GetProperty("state").GetString()!),
+                SetupStorageJson.ParseChangeSetState(SetupStorageJson.GetString(changeSetElement, "state")),
                 targets));
         }
 
@@ -351,6 +373,8 @@ internal static class SetupStorageFile
 
 internal static partial class SetupStorageValidation
 {
+    private static readonly HashSet<string> OutcomeCodes = new(SetupCodes.ResultCodes, StringComparer.Ordinal);
+
     [GeneratedRegex("^[a-z0-9]+(?:-[a-z0-9]+)*$", RegexOptions.CultureInvariant)]
     private static partial Regex SlugPattern();
 
@@ -363,66 +387,96 @@ internal static partial class SetupStorageValidation
     [GeneratedRegex("^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$", RegexOptions.CultureInvariant)]
     private static partial Regex ToolVersionPattern();
 
-    [GeneratedRegex("^[a-z0-9]+(?:[_-][a-z0-9]+)*$", RegexOptions.CultureInvariant)]
-    private static partial Regex CodePattern();
-
     public static void ValidatePlan(SetupPrivatePlan plan)
     {
         Require(plan.SchemaVersion == 1 && IsUuidV7(plan.ChangeSetId));
         RequireSlug(plan.Adapter);
         RequireSlug(plan.SelectedTarget);
         RequireTimestamp(plan.CreatedAt);
-        Require(ToolVersionPattern().IsMatch(plan.ToolVersion));
-        Require(plan.Targets.Count <= 16);
-        foreach (var target in plan.Targets)
+        RequirePattern(plan.ToolVersion, ToolVersionPattern());
+        var targets = RequireNotNull(plan.Targets);
+        Require(targets.Count <= 16);
+        foreach (var targetValue in targets)
         {
+            var target = RequireNotNull(targetValue);
             Require(IsUuidV7(target.RecordId));
             Require(!string.IsNullOrWhiteSpace(target.TargetLocation));
-            Require(HashPattern().IsMatch(target.BaseStateHash));
+            Require(Enum.IsDefined(target.TargetKind));
+            RequirePattern(target.BaseStateHash, HashPattern());
             Require(target.DesiredState is not null);
-            Require(target.Members.Count <= 32);
-            foreach (var member in target.Members)
+            var members = RequireNotNull(target.Members);
+            Require(members.Count <= 32);
+            Require(members.Select(member => member?.SettingKey).Distinct(StringComparer.Ordinal).Count() == members.Count);
+            foreach (var memberValue in members)
             {
-                Require(SettingKeyPattern().IsMatch(member.SettingKey));
+                var member = RequireNotNull(memberValue);
+                RequirePattern(member.SettingKey, SettingKeyPattern());
+                Require(Enum.IsDefined(member.Operation));
                 Require(member.DesiredValue is not null || member.Operation == SetupOperation.Remove);
             }
         }
 
-        Require(plan.Targets.Select(target => target.RecordId).Distinct().Count() == plan.Targets.Count);
+        Require(targets.Select(target => target.RecordId).Distinct().Count() == targets.Count);
     }
 
     public static void ValidateLedger(SetupOwnershipLedger ledger)
     {
         Require(ledger.SchemaVersion == 1);
-        Require(ledger.ChangeSets.Select(changeSet => changeSet.ChangeSetId).Distinct().Count() == ledger.ChangeSets.Count);
-        foreach (var changeSet in ledger.ChangeSets)
+        var changeSets = RequireNotNull(ledger.ChangeSets);
+        Require(changeSets.Select(changeSet => changeSet?.ChangeSetId).Distinct().Count() == changeSets.Count);
+        foreach (var changeSetValue in changeSets)
         {
+            var changeSet = RequireNotNull(changeSetValue);
             Require(IsUuidV7(changeSet.ChangeSetId));
             RequireSlug(changeSet.Adapter);
             RequireSlug(changeSet.SelectedTarget);
             RequireTimestamp(changeSet.CreatedAt);
             RequireTimestamp(changeSet.UpdatedAt);
             Require(changeSet.UpdatedAt >= changeSet.CreatedAt);
-            Require(ToolVersionPattern().IsMatch(changeSet.ToolVersion));
+            Require(Enum.IsDefined(changeSet.State));
+            RequirePattern(changeSet.ToolVersion, ToolVersionPattern());
             RequireNullableCode(changeSet.OutcomeCode);
-            Require(changeSet.Targets.Count <= 16);
-            Require(changeSet.Targets.Select(target => target.RecordId).Distinct().Count() == changeSet.Targets.Count);
-            foreach (var target in changeSet.Targets)
+            var targets = RequireNotNull(changeSet.Targets);
+            if (changeSet.State == SetupChangeSetState.Planned)
             {
+                Require(changeSet.OutcomeCode is null);
+            }
+
+            Require(targets.Count <= 16);
+            Require(targets.Select(target => target?.RecordId).Distinct().Count() == targets.Count);
+            foreach (var targetValue in targets)
+            {
+                var target = RequireNotNull(targetValue);
                 Require(IsUuidV7(target.RecordId));
+                Require(Enum.IsDefined(target.TargetKind));
+                Require(Enum.IsDefined(target.RollbackStatus));
+                Require(Enum.IsDefined(target.RestartRequirement));
                 RequireSlug(target.TargetLabel);
                 RequireSlug(target.OwningAdapter);
-                Require(target.Members.Count <= 32);
-                foreach (var member in target.Members)
+                Require(target.OwningAdapter == changeSet.Adapter);
+                var members = RequireNotNull(target.Members);
+                Require(members.Count <= 32);
+                Require(members.Select(member => member?.SettingKey).Distinct(StringComparer.Ordinal).Count() == members.Count);
+                foreach (var memberValue in members)
                 {
-                    Require(SettingKeyPattern().IsMatch(member.SettingKey));
+                    var member = RequireNotNull(memberValue);
+                    RequirePattern(member.SettingKey, SettingKeyPattern());
+                    Require(Enum.IsDefined(member.Operation));
                 }
 
-                Require(HashPattern().IsMatch(target.PreviousStateHash));
-                Require(target.AppliedStateHash is null || HashPattern().IsMatch(target.AppliedStateHash));
+                RequirePattern(target.PreviousStateHash, HashPattern());
+                Require(target.AppliedStateHash is null || IsPattern(target.AppliedStateHash, HashPattern()));
                 RequireNullableSlug(target.BackupReference);
                 RequireNullableCode(target.OutcomeCode);
-                Require(ToolVersionPattern().IsMatch(target.ToolVersion));
+                RequirePattern(target.ToolVersion, ToolVersionPattern());
+                Require(target.ToolVersion == changeSet.ToolVersion);
+                if (changeSet.State == SetupChangeSetState.Planned)
+                {
+                    Require(target.AppliedStateHash is null);
+                    Require(target.BackupReference is null);
+                    Require(target.OutcomeCode is null);
+                    Require(target.RollbackStatus == SetupLedgerRollbackStatus.NotAvailable);
+                }
             }
         }
     }
@@ -478,7 +532,7 @@ internal static partial class SetupStorageValidation
         return text[14] == '7' && text[19] is '8' or '9' or 'a' or 'b';
     }
 
-    private static void RequireSlug(string value) => Require(value.Length <= 128 && SlugPattern().IsMatch(value));
+    private static void RequireSlug(string? value) => Require(value is { Length: <= 128 } && SlugPattern().IsMatch(value));
 
     private static void RequireNullableSlug(string? value)
     {
@@ -492,9 +546,20 @@ internal static partial class SetupStorageValidation
     {
         if (value is not null)
         {
-            Require(value.Length <= 128 && CodePattern().IsMatch(value));
+            Require(OutcomeCodes.Contains(value));
         }
     }
+
+    private static T RequireNotNull<T>(T? value)
+        where T : class
+    {
+        Require(value is not null);
+        return value!;
+    }
+
+    private static void RequirePattern(string? value, Regex pattern) => Require(IsPattern(value, pattern));
+
+    private static bool IsPattern(string? value, Regex pattern) => value is not null && pattern.IsMatch(value);
 
     private static void RequireTimestamp(DateTimeOffset value) => Require(value.Offset == TimeSpan.Zero);
 
@@ -530,17 +595,73 @@ internal static class SetupStorageJson
             throw new FormatException();
         }
 
-        var actual = element.EnumerateObject().Select(property => property.Name).ToArray();
-        if (actual.Length != names.Length || !actual.SequenceEqual(names, StringComparer.Ordinal))
+        var expected = new HashSet<string>(names, StringComparer.Ordinal);
+        var actual = new HashSet<string>(StringComparer.Ordinal);
+        if (expected.Count != names.Length)
+        {
+            throw new FormatException();
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!expected.Contains(property.Name) || !actual.Add(property.Name))
+            {
+                throw new FormatException();
+            }
+        }
+
+        if (actual.Count != expected.Count)
         {
             throw new FormatException();
         }
     }
 
+    public static JsonElement.ArrayEnumerator GetArray(JsonElement element, string propertyName)
+    {
+        var property = element.GetProperty(propertyName);
+        if (property.ValueKind != JsonValueKind.Array)
+        {
+            throw new FormatException();
+        }
+
+        return property.EnumerateArray();
+    }
+
+    public static string GetString(JsonElement element, string propertyName)
+    {
+        var property = element.GetProperty(propertyName);
+        if (property.ValueKind != JsonValueKind.String || property.GetString() is not { } value)
+        {
+            throw new FormatException();
+        }
+
+        return value;
+    }
+
+    public static Guid GetGuid(JsonElement element, string propertyName)
+    {
+        if (!Guid.TryParseExact(GetString(element, propertyName), "D", out var value))
+        {
+            throw new FormatException();
+        }
+
+        return value;
+    }
+
     public static string? GetNullableString(JsonElement element, string propertyName)
     {
         var property = element.GetProperty(propertyName);
-        return property.ValueKind == JsonValueKind.Null ? null : property.GetString();
+        if (property.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (property.ValueKind != JsonValueKind.String || property.GetString() is not { } value)
+        {
+            throw new FormatException();
+        }
+
+        return value;
     }
 
     public static void WriteNullableString(Utf8JsonWriter writer, string propertyName, string? value)

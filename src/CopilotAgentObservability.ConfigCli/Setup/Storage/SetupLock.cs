@@ -6,10 +6,15 @@ namespace CopilotAgentObservability.ConfigCli.Setup.Storage;
 public sealed class SetupLock : IDisposable
 {
     private readonly ISetupExclusiveFileLock fileLock;
+    private readonly ISetupPlatform platform;
+    private readonly string runtimeRoot;
+    private int disposed;
 
-    private SetupLock(ISetupExclusiveFileLock fileLock)
+    private SetupLock(ISetupExclusiveFileLock fileLock, ISetupPlatform platform, string runtimeRoot)
     {
         this.fileLock = fileLock;
+        this.platform = platform;
+        this.runtimeRoot = runtimeRoot;
     }
 
     public static SetupLockAcquireResult TryAcquire(ISetupPlatform platform, SetupRuntimePaths paths)
@@ -18,10 +23,26 @@ public sealed class SetupLock : IDisposable
         var fileLock = platform.FileSystem.TryAcquireExclusiveFileLock(paths.Lock);
         return fileLock is null
             ? SetupLockAcquireResult.Busy
-            : SetupLockAcquireResult.Success(new SetupLock(fileLock));
+            : SetupLockAcquireResult.Success(new SetupLock(fileLock, platform, paths.Root));
     }
 
-    public void Dispose() => fileLock.Dispose();
+    internal void AssertHeld(ISetupPlatform expectedPlatform, SetupRuntimePaths expectedPaths)
+    {
+        if (Volatile.Read(ref disposed) != 0 ||
+            !ReferenceEquals(platform, expectedPlatform) ||
+            !string.Equals(runtimeRoot, expectedPaths.Root, StringComparison.Ordinal))
+        {
+            throw new SetupStorageException(SetupStorageCodes.LockRequired);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) == 0)
+        {
+            fileLock.Dispose();
+        }
+    }
 }
 
 public sealed record SetupLockAcquireResult(SetupLock? Lock, string? Code) : IDisposable

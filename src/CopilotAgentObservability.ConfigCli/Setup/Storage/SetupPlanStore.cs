@@ -38,8 +38,9 @@ internal sealed class SetupPlanStore
         this.paths = paths;
     }
 
-    public void Create(SetupPrivatePlan plan)
+    public void Create(SetupLock setupLock, SetupPrivatePlan plan)
     {
+        setupLock.AssertHeld(platform, paths);
         SetupStorageValidation.ValidatePlan(plan);
         var destination = paths.GetPlan(plan.ChangeSetId);
         if (platform.FileSystem.FileExists(destination))
@@ -75,8 +76,9 @@ internal sealed class SetupPlanStore
         }
     }
 
-    public void Delete(Guid changeSetId)
+    public void Delete(SetupLock setupLock, Guid changeSetId)
     {
+        setupLock.AssertHeld(platform, paths);
         try
         {
             platform.FileSystem.DeleteFile(paths.GetPlan(changeSetId));
@@ -142,35 +144,35 @@ internal sealed class SetupPlanStore
         }
 
         var targets = new List<SetupPrivatePlanTarget>();
-        foreach (var targetElement in root.GetProperty("targets").EnumerateArray())
+        foreach (var targetElement in SetupStorageJson.GetArray(root, "targets"))
         {
             SetupStorageJson.RequireProperties(targetElement, "record_id", "target_kind", "target_location", "base_state_hash", "desired_state", "members");
             var members = new List<SetupPrivatePlanMember>();
-            foreach (var memberElement in targetElement.GetProperty("members").EnumerateArray())
+            foreach (var memberElement in SetupStorageJson.GetArray(targetElement, "members"))
             {
                 SetupStorageJson.RequireProperties(memberElement, "setting_key", "operation", "desired_value");
                 members.Add(new SetupPrivatePlanMember(
-                    memberElement.GetProperty("setting_key").GetString()!,
-                    SetupStorageJson.ParseOperation(memberElement.GetProperty("operation").GetString()!),
+                    SetupStorageJson.GetString(memberElement, "setting_key"),
+                    SetupStorageJson.ParseOperation(SetupStorageJson.GetString(memberElement, "operation")),
                     SetupStorageJson.GetNullableString(memberElement, "desired_value")));
             }
 
             targets.Add(new SetupPrivatePlanTarget(
-                Guid.Parse(targetElement.GetProperty("record_id").GetString()!),
-                SetupStorageJson.ParseTargetKind(targetElement.GetProperty("target_kind").GetString()!),
-                targetElement.GetProperty("target_location").GetString()!,
-                targetElement.GetProperty("base_state_hash").GetString()!,
-                targetElement.GetProperty("desired_state").GetString()!,
+                SetupStorageJson.GetGuid(targetElement, "record_id"),
+                SetupStorageJson.ParseTargetKind(SetupStorageJson.GetString(targetElement, "target_kind")),
+                SetupStorageJson.GetString(targetElement, "target_location"),
+                SetupStorageJson.GetString(targetElement, "base_state_hash"),
+                SetupStorageJson.GetString(targetElement, "desired_state"),
                 members));
         }
 
         var plan = new SetupPrivatePlan(
             1,
-            Guid.Parse(root.GetProperty("change_set_id").GetString()!),
-            root.GetProperty("adapter").GetString()!,
-            root.GetProperty("selected_target").GetString()!,
-            SetupStorageJson.ParseTimestamp(root.GetProperty("created_at").GetString()!),
-            root.GetProperty("tool_version").GetString()!,
+            SetupStorageJson.GetGuid(root, "change_set_id"),
+            SetupStorageJson.GetString(root, "adapter"),
+            SetupStorageJson.GetString(root, "selected_target"),
+            SetupStorageJson.ParseTimestamp(SetupStorageJson.GetString(root, "created_at")),
+            SetupStorageJson.GetString(root, "tool_version"),
             targets);
         SetupStorageValidation.ValidatePlan(plan);
         return plan;
