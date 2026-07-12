@@ -379,11 +379,47 @@ public sealed class SetupApplyTests
             .Load(fixture.ChangeSetId)!.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId);
         Assert.Equal(["ENV_B"], environmentJournal.Steps.Select(step => step.MemberKey));
         Assert.Equal(
-            ["ENV_B"],
+            ["ENV_A", "ENV_B"],
             result.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId).Members.Select(member => member.SettingKey));
+        var environmentStep = new UserEnvironmentSetupStep(fixture.Platform);
+        var backup = environmentStep.ReadBackup(
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.EnvironmentRecordId),
+            ["ENV_A", "ENV_B"]);
+        Assert.Equal(["ENV_A", "ENV_B"], backup.Members.Select(member => member.Name));
+        var environmentLedger = result.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId);
+        Assert.Equal(backup.AggregateHash, environmentLedger.PreviousStateHash);
+        var fullApplied = environmentStep.Capture(["ENV_A", "ENV_B"]);
+        var changedSubset = environmentStep.Capture(["ENV_B"]);
+        Assert.Equal(fullApplied.AggregateHash, environmentLedger.AppliedStateHash);
+        Assert.NotEqual(changedSubset.AggregateHash, environmentLedger.AppliedStateHash);
         Assert.DoesNotContain("environment.set:ENV_A", fixture.Platform.Operations);
         Assert.Contains("environment.set:ENV_B", fixture.Platform.Operations);
+        Assert.Equal("untouched", fixture.Platform.ReadUserEnvironment("UNRELATED"));
         Assert.Equal(1, fixture.Platform.Operations.Count(operation => operation == "environment.notify"));
+    }
+
+    [Fact]
+    public async Task Apply_NoOpEnvironmentMemberExternalEditFailsFullAllowlistCommitGuard()
+    {
+        var fixture = ApplyFixture.Create(fileNoChange: true, environmentANoChange: true);
+        using var barrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterMutationBeforeCompletion}");
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+            () => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        barrier.WaitUntilReached(CancellationToken.None);
+        fixture.Platform.SeedUserEnvironment("ENV_A", "third-party");
+        barrier.Release();
+
+        var exception = await applying;
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet().State);
+        var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Applying, journal.Phase);
+        Assert.Equal(["ENV_B"], journal.Targets.Single().Steps.Select(step => step.MemberKey));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
     }
 
     [Fact]
@@ -507,6 +543,7 @@ public sealed class SetupApplyTests
             Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old"));
             Platform.SeedUserEnvironment("ENV_A", "old-a");
             Platform.SeedUserEnvironment("ENV_B", "old-b");
+            Platform.SeedUserEnvironment("UNRELATED", "untouched");
             var environmentCapture = new UserEnvironmentSetupStep(Platform).Capture(["ENV_A", "ENV_B"]);
             var fileDesired = noChanges || fileNoChange ? "old" : "new";
             var fileOperation = noChanges || fileNoChange ? SetupOperation.NoOp : SetupOperation.Replace;

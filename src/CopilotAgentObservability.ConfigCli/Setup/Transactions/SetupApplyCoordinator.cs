@@ -262,17 +262,14 @@ internal sealed class SetupApplyCoordinator
         SetupLedgerChangeSet planned,
         IReadOnlyList<TargetCapture> changedCaptures)
     {
-        var capturesByRecordId = changedCaptures.ToDictionary(capture => capture.Target.RecordId);
+        var changedRecordIds = changedCaptures.Select(capture => capture.Target.RecordId).ToHashSet();
         return planned with
         {
             UpdatedAt = platform.Clock.UtcNow,
             State = SetupChangeSetState.Applying,
-            Targets = planned.Targets.Select(target => capturesByRecordId.TryGetValue(target.RecordId, out var capture)
+            Targets = planned.Targets.Select(target => changedRecordIds.Contains(target.RecordId)
                 ? target with
                 {
-                    Members = capture.Environment is null
-                        ? target.Members
-                        : capture.ChangedMemberIndices.Select(index => target.Members[index]).ToArray(),
                     BackupReference = target.RecordId.ToString("D"),
                     RollbackStatus = SetupLedgerRollbackStatus.Pending,
                 }
