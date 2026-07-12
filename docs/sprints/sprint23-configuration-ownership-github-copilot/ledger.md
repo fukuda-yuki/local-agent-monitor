@@ -20,10 +20,11 @@ Updated: 2026-07-12
 | Transaction journal v1 store (Task 5a/5a1) | #66 | Complete | `2d88eff..c394b28` | SetupJournalStoreTests 99/99; storage+journal 143/143; all Setup 518/518; ConfigCli 846/846; build 0/0 on reviewed descendant | Spec PASS; Quality/Security APPROVED after persistence and cross-task notification/compensation re-audits | sudden OS power loss is represented by deterministic atomic fault seams, not directly induced |
 | File backup/apply split (Task 5b0 prerequisite) | #66 | Complete | `6df14ae..b763ded` | SetupFileStepTests 65/65; all Setup 462/462; ConfigCli 790/790; build 0/0 | Spec PASS; Quality/Security APPROVED | Linux/macOS native metadata branches unchanged and not executed on Windows host |
 | Apply preflight and forward intents (Task 5b) | #66 | Complete | `c394b28..34025d8` | SetupApplyTests 55/55; journal/file/environment/apply 288/288; all Setup 548/548; ConfigCli 876/876; build 0/0 | Spec PASS; Quality/Security/Concurrency APPROVED after ownership-boundary contract re-audit | forward failures deliberately retain durable evidence for Tasks 5c/5d |
+| Reverse compensation (Task 5c) | #66 | Complete | `c3e0314..9c82edc` | SetupCompensationTests 24/24; apply/compensation/journal/file/environment 312/312; all Setup 572/572; ConfigCli 900/900; build 0/0 | Spec PASS; Quality/Security/Concurrency APPROVED after journal-ordering review | restart recovery of durable nonterminal/terminal-pending evidence remains Task 5d |
 | Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
 | Atomic file mutation | #66 | Complete through Task 3b | `291b3bf..2ed9e8a` | typed hash, path/reparse, backup/temp/replace/restore fault matrix | PASS/APPROVED | three-OS runtime evidence gap noted above |
 | User environment mutation | #66 | Complete through Task 4 | `f4f55ec..620448a` | full 3x3 state, backup, member fault, notification boundary matrix | PASS/APPROVED | coordinator journaling/recovery remains Task 5 |
-| Transaction and rollback | #66 | In progress through Task 5b | `2d88eff..34025d8` | journal/store, file-backup, and apply evidence above | Tasks 5a1/5b0/5b PASS/APPROVED | compensation, recovery, rollback remain |
+| Transaction and rollback | #66 | In progress through Task 5c | `2d88eff..9c82edc` | journal/store, file-backup, apply, and compensation evidence above | Tasks 5a1/5b0/5b/5c PASS/APPROVED | restart recovery and rollback remain |
 | Shared setup commands | #66 | Pending | - | - | - | - |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
@@ -42,7 +43,7 @@ Updated: 2026-07-12
 | Repository-safe DTO validation | Exact/over bounds, canonical manifest membership, origin-only endpoint, fixed non-echo failures, recovery/lifecycle matrix | SetupContractValidationTests 74/74; independent review PASS/APPROVED |
 | Stale plan/apply and rollback | Barrier-controlled hash changes without sleeps | Apply preflight and post-mutation full-target verification covered by SetupApplyTests 55/55; rollback remains pending |
 | Atomic file update | Backup/temp/replace fault injection and restart-visible state | SetupFileStepTests 65/65; capture/durable-backup/write split plus fault/rebind matrix; independent review PASS/APPROVED |
-| Partial compensation | Deterministic multi-target failure at each boundary | Pending |
+| Partial compensation | Deterministic multi-target failure at each boundary | SetupCompensationTests 24/24 cover file plus ENV_A/B/C forward/restore faults, reverse order, third-party preservation, restored/partial journal-before-ledger ordering; independent review PASS/APPROVED |
 | Crash recovery | Pre-file/per-env-member mutation and restore intents; deterministic faults before/during/after each step; close/reopen recovery classifies prior/desired/partial/foreign states | Pending |
 | Recovery result correlation | Producer DTO tests distinguish requested/created and recovered change-set IDs for plan/apply/rollback/status, including failed-recovery status projection | Pending |
 | Status hard cap | 99/100/101 fixtures, recovery-blocking/planned/terminal priority, UUID tie-break, and filter-before-cap | Pending |
