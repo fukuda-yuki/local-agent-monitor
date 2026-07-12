@@ -539,6 +539,30 @@ public class AgentExecutionGraphEndpointTests
     }
 
     [Fact]
+    public async Task AgentGraph_ClaudeObservationUsesExactParentagePolicy()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rawRecordId = Seed(temp, "claude-agent-graph", ClaudeInferencePayload("claude-agent-graph"));
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            SourceCompatibilityStore = new ClaudeCompatibilityStore(rawRecordId),
+            StartWriter = false,
+            StartProjectionWorker = false,
+        });
+
+        var response = await host.Client.GetAsync("/api/monitor/traces/claude-agent-graph/agent-graph");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var root = document.RootElement;
+        var ownership = Assert.Single(root.GetProperty("span_ownership").EnumerateArray());
+        Assert.Equal(JsonValueKind.Null, ownership.GetProperty("owning_agent_span_id").ValueKind);
+        Assert.Equal("unresolved", ownership.GetProperty("relationship_source").GetString());
+        Assert.Equal("unknown", ownership.GetProperty("relationship_confidence").GetString());
+        Assert.Equal("undeterminable", root.GetProperty("summary").GetProperty("relationship_quality").GetString());
+    }
+
+    [Fact]
     public async Task AgentGraph_UnknownTraceReturnsTraceNotFound()
     {
         using var temp = new MonitorTempDirectory();
@@ -577,7 +601,7 @@ public class AgentExecutionGraphEndpointTests
         Assert.Equal(3, root.EnumerateObject().Count());
     }
 
-    private static void Seed(MonitorTempDirectory temp, string traceId, string payload)
+    private static long Seed(MonitorTempDirectory temp, string traceId, string payload)
     {
         var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
@@ -585,6 +609,7 @@ public class AgentExecutionGraphEndpointTests
         var id = store.Insert(record);
         store.ApplyProjection(id, record.Source, record.ReceivedAt, MonitorProjectionBuilder.Build(record), DateTimeOffset.UnixEpoch);
         store.ApplySpanProjection(id, MonitorSpanProjectionBuilder.Build(record), DateTimeOffset.UnixEpoch);
+        return id;
     }
 
     private static void AssertExactFields(JsonElement element, params string[] fields)
@@ -634,6 +659,13 @@ public class AgentExecutionGraphEndpointTests
         ]}]}]}
         """.Replace("__TRACE__", traceId, StringComparison.Ordinal);
 
+    private static string ClaudeInferencePayload(string traceId) => """
+        {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[
+          {"traceId":"__TRACE__","spanId":"main","name":"invoke_agent","startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000100000000000","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},{"key":"gen_ai.agent.name","value":{"stringValue":"main"}}]},
+          {"traceId":"__TRACE__","spanId":"orphan","parentSpanId":"missing","name":"chat","startTimeUnixNano":"1710000010000000000","endTimeUnixNano":"1710000020000000000","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}}]}
+        ]}]}]}
+        """.Replace("__TRACE__", traceId, StringComparison.Ordinal);
+
     private sealed class BusyProjectionStore : IMonitorProjectionStore
     {
         public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit) => throw new NotSupportedException();
@@ -657,5 +689,41 @@ public class AgentExecutionGraphEndpointTests
         public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => throw new NotSupportedException();
         public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) => throw new NotSupportedException();
         public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) => throw new NotSupportedException();
+    }
+
+    private sealed class ClaudeCompatibilityStore(long rawRecordId) : ISourceCompatibilityStore
+    {
+        public void CreateSchema()
+        {
+        }
+
+        public long RecordAdapterFailure(SourceAdapterFailureDraft failure) => 1;
+
+        public SourceCompatibilityRow? GetByRawRecordId(long id) => id == rawRecordId
+            ? new SourceCompatibilityRow(
+                Id: 1,
+                ObservationId: "claude-observation",
+                RawRecordId: rawRecordId,
+                IngestBatchId: "claude-batch",
+                SourceSurface: "claude-code",
+                SourceApplicationVersion: null,
+                SourceAdapter: "claude-code-otel",
+                AdapterVersion: "1",
+                SchemaFingerprint: "fingerprint",
+                InventoryHash: "inventory",
+                CompatibilityState: SourceCompatibilityState.Supported,
+                ReasonCodes: [],
+                NextAction: "none",
+                CaptureContentState: SourceCaptureContentState.Available,
+                UnknownSpanCount: 0,
+                UnknownEventCount: 0,
+                UnknownAttributeCount: 0,
+                OverflowDistinctCount: 0,
+                OverflowOccurrenceCount: 0,
+                ObservedAt: DateTimeOffset.UnixEpoch,
+                UnknownObservations: [])
+            : null;
+
+        public IReadOnlyList<SourceCompatibilityRow> List(long? after, int limit) => [];
     }
 }

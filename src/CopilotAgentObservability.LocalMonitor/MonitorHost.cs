@@ -350,7 +350,18 @@ internal static class MonitorHost
                     return;
                 }
 
-                var graph = AgentExecutionGraphBuilder.Build(projectionStore.GetSpansForTrace(traceId));
+                var spans = projectionStore.GetSpansForTrace(traceId);
+                var exactClaudeRawRecordIds = projectionStore.ListRawRecordsByTraceId(traceId, 200)
+                    .Where(record => record.Id is not null)
+                    .Where(record => string.Equals(
+                        compatibilityStore.GetByRawRecordId(record.Id!.Value)?.SourceSurface,
+                        "claude-code",
+                        StringComparison.Ordinal))
+                    .Select(record => record.Id!.Value)
+                    .ToHashSet();
+                var graph = exactClaudeRawRecordIds.Count == 0
+                    ? AgentExecutionGraphBuilder.Build(spans)
+                    : AgentExecutionGraphBuilder.Build(spans, exactClaudeRawRecordIds);
                 await WriteJsonAsync(context, new
                 {
                     summary = new
