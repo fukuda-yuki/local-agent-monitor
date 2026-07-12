@@ -9,16 +9,21 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     private readonly Dictionary<string, string?> environment = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<Exception>> faults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SetupTestBarrierState> barriers = new(StringComparer.Ordinal);
+    private readonly HashSet<string> directories = new(StringComparer.Ordinal);
+    private readonly HashSet<string> exclusiveLocks = new(StringComparer.Ordinal);
     private readonly List<string> operations = [];
 
-    public SetupTestPlatform(DateTimeOffset utcNow)
+    public SetupTestPlatform(DateTimeOffset utcNow, string localApplicationData = "C:\\setup-test-local-app-data")
     {
+        LocalApplicationData = localApplicationData;
         Clock = new SetupTestClock(utcNow);
         Identifiers = new SetupTestIdentifierGenerator();
         FileSystem = new SetupTestFileSystem(this);
         UserEnvironment = new SetupTestUserEnvironment(this);
         Execution = new SetupTestExecution(this);
     }
+
+    public string LocalApplicationData { get; }
 
     public ISetupFileSystem FileSystem { get; }
 
@@ -115,6 +120,14 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         }
     }
 
+    private void ReleaseExclusiveFileLock(string path)
+    {
+        lock (gate)
+        {
+            exclusiveLocks.Remove(path);
+        }
+    }
+
     internal bool HasReached(SetupTestBarrierState state)
     {
         lock (gate)
@@ -183,6 +196,15 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 
     private sealed class SetupTestFileSystem(SetupTestPlatform platform) : ISetupFileSystem
     {
+        public void CreateDirectory(string path)
+        {
+            platform.Record($"directory.create:{path}");
+            lock (platform.gate)
+            {
+                platform.directories.Add(path);
+            }
+        }
+
         public bool FileExists(string path)
         {
             platform.Record($"file.exists:{path}");
@@ -234,6 +256,31 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             return platform.files.TryGetValue(path, out var bytes)
                 ? new SetupFileMetadata(true, bytes.Length, FileAttributes.Normal, platform.Clock.UtcNow)
                 : SetupFileMetadata.Missing;
+        }
+
+        public ISetupExclusiveFileLock? TryAcquireExclusiveFileLock(string path)
+        {
+            platform.Record($"file.lock:{path}");
+            lock (platform.gate)
+            {
+                platform.files.TryAdd(path, []);
+                return platform.exclusiveLocks.Add(path)
+                    ? new SetupTestExclusiveFileLock(platform, path)
+                    : null;
+            }
+        }
+    }
+
+    private sealed class SetupTestExclusiveFileLock(SetupTestPlatform platform, string path) : ISetupExclusiveFileLock
+    {
+        private int disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) == 0)
+            {
+                platform.ReleaseExclusiveFileLock(path);
+            }
         }
     }
 

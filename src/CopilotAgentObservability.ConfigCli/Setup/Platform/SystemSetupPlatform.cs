@@ -4,14 +4,20 @@ namespace CopilotAgentObservability.ConfigCli.Setup.Platform;
 
 public sealed class SystemSetupPlatform : ISetupPlatform
 {
-    public SystemSetupPlatform(ISetupExecution? execution = null, Func<bool>? notificationAttempt = null)
+    public SystemSetupPlatform(
+        ISetupExecution? execution = null,
+        Func<bool>? notificationAttempt = null,
+        string? localApplicationData = null)
     {
+        LocalApplicationData = localApplicationData ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         FileSystem = new SystemSetupFileSystem();
         UserEnvironment = new SystemSetupUserEnvironment(notificationAttempt);
         Clock = new SystemSetupClock();
         Identifiers = new SystemSetupIdentifierGenerator();
         Execution = execution ?? NoOpSetupExecution.Instance;
     }
+
+    public string LocalApplicationData { get; }
 
     public ISetupFileSystem FileSystem { get; }
 
@@ -25,6 +31,8 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
     private sealed class SystemSetupFileSystem : ISetupFileSystem
     {
+        public void CreateDirectory(string path) => Directory.CreateDirectory(path);
+
         public bool FileExists(string path) => File.Exists(path);
 
         public byte[] ReadAllBytes(string path) => File.ReadAllBytes(path);
@@ -56,6 +64,23 @@ public sealed class SystemSetupPlatform : ISetupPlatform
                 file.Length,
                 file.Attributes,
                 new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero));
+        }
+
+        public ISetupExclusiveFileLock? TryAcquireExclusiveFileLock(string path)
+        {
+            try
+            {
+                return new SystemSetupExclusiveFileLock(new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None));
+            }
+            catch (IOException)
+            {
+                return null;
+            }
+        }
+
+        private sealed class SystemSetupExclusiveFileLock(FileStream stream) : ISetupExclusiveFileLock
+        {
+            public void Dispose() => stream.Dispose();
         }
     }
 

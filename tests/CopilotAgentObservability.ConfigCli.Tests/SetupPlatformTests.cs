@@ -5,6 +5,14 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public sealed class SetupPlatformTests
 {
     [Fact]
+    public void SystemPlatform_UsesTheConfiguredLocalApplicationDataRoot()
+    {
+        var platform = new SystemSetupPlatform(localApplicationData: "C:\\runtime\\local-app-data");
+
+        Assert.Equal("C:\\runtime\\local-app-data", platform.LocalApplicationData);
+    }
+
+    [Fact]
     public void SystemPlatform_ProvidesUtcClockAndUuidV7Identifiers()
     {
         var platform = new SystemSetupPlatform();
@@ -292,6 +300,31 @@ public sealed class SetupPlatformTests
 
         Assert.Equal("00000000-0000-7000-8000-000000000001", first.ToString("D"));
         Assert.Equal("00000000-0000-7000-8000-000000000002", second.ToString("D"));
+    }
+
+    [Fact]
+    public void TestPlatform_CreatesDirectoriesAndCoordinatesExclusiveFileLocks()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+
+        platform.FileSystem.CreateDirectory("runtime");
+        var first = platform.FileSystem.TryAcquireExclusiveFileLock("runtime\\setup.lock");
+        var contended = platform.FileSystem.TryAcquireExclusiveFileLock("runtime\\setup.lock");
+        first!.Dispose();
+        var reacquired = platform.FileSystem.TryAcquireExclusiveFileLock("runtime\\setup.lock");
+        reacquired!.Dispose();
+
+        Assert.NotNull(first);
+        Assert.Null(contended);
+        Assert.NotNull(reacquired);
+        Assert.Equal(
+        [
+            "directory.create:runtime",
+            "file.lock:runtime\\setup.lock",
+            "file.lock:runtime\\setup.lock",
+            "file.lock:runtime\\setup.lock",
+        ],
+        platform.Operations);
     }
 
     private static async Task ObserveWorkersAsync(params Task?[] tasks)

@@ -2,6 +2,8 @@ namespace CopilotAgentObservability.ConfigCli.Setup.Platform;
 
 public interface ISetupPlatform
 {
+    string LocalApplicationData { get; }
+
     ISetupFileSystem FileSystem { get; }
 
     ISetupUserEnvironment UserEnvironment { get; }
@@ -15,6 +17,8 @@ public interface ISetupPlatform
 
 public interface ISetupFileSystem
 {
+    void CreateDirectory(string path);
+
     bool FileExists(string path);
 
     byte[] ReadAllBytes(string path);
@@ -30,6 +34,12 @@ public interface ISetupFileSystem
     void DeleteFile(string path);
 
     SetupFileMetadata GetFileMetadata(string path);
+
+    ISetupExclusiveFileLock? TryAcquireExclusiveFileLock(string path);
+}
+
+public interface ISetupExclusiveFileLock : IDisposable
+{
 }
 
 public interface ISetupUserEnvironment
