@@ -439,6 +439,50 @@ Live validation for the monitor records the same evidence as the
 `raw-local-receiver` profile, plus the monitor port, the VS Code / GitHub
 Copilot extension version, and optionally whether `--sanitized-only` was set.
 
+## Source capability semantic contract v1
+
+`contracts/source-capabilities/v1/source-capability-manifest.schema.json` is
+the JSON Schema 2020-12 structural contract. Each JSON file in its `manifests/`
+directory declares the capability of one source surface. A manifest's
+`contract_version` must match the schema major (`v1`); unknown properties are
+rejected. The composite `otel-http+copilot-compatible-hook` manifest label
+denotes registered paths only. It is not provenance for an observed field.
+
+For each normalized value, the producing adapter records the actual
+contributing adapter ID that supplied the field, such as `otel-http`,
+`copilot-compatible-hook`, or `copilot-sdk-stream`, rather than a registry
+classification; it must never record the composite
+`otel-http+copilot-compatible-hook` manifest label as per-field provenance.
+It also records a required source version or schema fingerprint, source event
+ID or trace/span identity, capture/content state, and normalization version. If
+any required provenance component is absent, the value is not promoted to
+authoritative evidence and does not trigger inference. The absence maps only to
+the fixed reasons: absent source event/trace-span identity is
+`missing_trace_context`; absent capture/content state is
+`content_capture_disabled`; and absent actual adapter, source version/schema
+fingerprint, or normalization version is `schema_drift_detected`.
+
+The field-family authority and precedence contract is:
+
+| Field family | Authoritative evidence | Limited fallback | Precedence rule |
+| --- | --- | --- | --- |
+| identity, hierarchy, timing | available OTel identity/hierarchy/timing, only when the existing exact-link rule is met | none for binding | weak never overwrites strong; missing values do not overwrite |
+| native lifecycle, explicit event identity | Hook/SDK native lifecycle/explicit event identity | none | weak never overwrites strong; missing values do not overwrite |
+| model/token, retry, error summary | declared primary source with complete provenance | historical summary allowlist-only: `model_tokens.*`, `retry_attempt.*`, and `errors` | historical data may fill an absent allowlisted field but never identity, hierarchy, timing, lifecycle, or explicit event identity |
+
+Repository, workspace, and timestamp are context only; they are never identity
+evidence. This contract neither permits a heuristic Session merge nor creates a
+synthetic span. It preserves Issue #51 exact identity and Issue #49 ownership.
+
+Later adapter work must use this handoff checklist: validate the exact v1
+schema and matching manifest version; declare only observed capabilities; emit
+per-field actual-adapter provenance; apply the authority table without
+overwrite/inference; calculate the fixed completeness statuses/reasons in the
+canonical order; keep raw/sanitized boundaries; and obtain a new contract major
+before a breaking vocabulary or semantic change. This checklist is not an
+authorization to change the existing receiver, adapter, persistence, migration,
+HTTP, proxy, or UI DTO in Issue #61.
+
 ## Session Event Ingestion And Enrichment
 
 Issue #51 adds a Session event input beside, not inside, the OTLP receiver:

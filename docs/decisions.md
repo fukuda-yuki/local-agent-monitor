@@ -1756,3 +1756,64 @@ application receipt に結合した operational verification とする。
 
 正本は [Canvas Effect Comparison interface](specifications/interfaces/canvas-effect-comparison.md)
 とする。
+
+## D056: Source capability semantic contract v1
+
+Status: Accepted
+
+Issue #61 publishes a versioned producer-facing capability contract without
+implementing a receiver, adapter, persistence, migration, HTTP, proxy, or UI
+change. JSON Schema 2020-12 and the per-surface manifests are the
+machine-readable structural/capability source of truth; canonical Markdown owns
+the semantic rules below.
+
+決定事項:
+
+- A manifest `contract_version` and its schema major must match (`v1`), and the
+  schema rejects unknown fields. A source capability observation may change
+  within the declared shape only when it does not alter semantics or safety.
+  Any added field (also optional), removed/renamed field, type/enum change,
+  changed authority or completeness meaning, or acceptance of an unknown field
+  is a breaking change and requires a new major schema plus matching manifests.
+- available OTel identity/hierarchy/timing is authoritative for its field
+  families when the existing exact-link rule applies. Hook/SDK native
+  lifecycle/explicit event identity is authoritative for its field families.
+  Historical summary allowlist-only fields are `model_tokens.*`,
+  `retry_attempt.*`, and `errors`; they cannot affect identity, hierarchy,
+  timing, lifecycle, or explicit event identity. Weak never overwrites strong,
+  and missing values do not overwrite.
+- Per-field provenance records the actual contributing adapter ID that supplied
+  the field, such as `otel-http`, `copilot-compatible-hook`, or
+  `copilot-sdk-stream`; source version or schema fingerprint; source event or
+  trace/span identity; capture/content state; and normalization version. The
+  composite `otel-http+copilot-compatible-hook` manifest label denotes
+  registered paths only and is never per-field provenance. Missing provenance
+  prevents authoritative promotion and does not authorize inference.
+- Repository, workspace, and timestamp are context only. They are never
+  identity evidence; no heuristic merge and no synthetic span are allowed. This
+  preserves Issue #51 exact identity and leaves Issue #49 Agent ownership
+  unchanged.
+- Completeness is a deterministic pure decision over declared requirements and
+  observed facts. It uses only `unbound`, `partial`, `rich`, and `full`, and the
+  eleven ordered, de-duplicated reasons in the Session workspace specification.
+  `missing_native_session_id` forces `unbound`; missing lifecycle/input or a
+  planned source caps `partial`; missing content/terminal caps `rich`; every
+  declared blocking condition prevents `full`; `historical_summary_only` never
+  reaches `full`.
+- The schema/manifests are repository-safe metadata. They contain no raw/PII
+  and manifest grants no content authority. Existing raw/sanitized, loopback,
+  same-origin, no-store, retention, and `--sanitized-only` policy remains the
+  only content boundary.
+
+The later adapter handoff checklist is: use a matching schema/manifest version;
+declare observed rather than invented capability; reject unknown fields; emit
+actual-adapter field provenance; apply authority/absence precedence; calculate
+the fixed status/reason output deterministically; preserve raw/sanitized
+boundaries; and propose a new major before a breaking change. This decision is
+not an implementation authorization and does not change Issue #51 or #49.
+
+正本は [telemetry ingestion](specifications/layers/telemetry-ingestion.md)、
+[raw-store normalization](specifications/layers/raw-store-normalization.md)、
+[Canvas Session workspace](specifications/interfaces/canvas-session-workspace.md)、
+および [security data boundaries](specifications/security-data-boundaries.md)
+とする。

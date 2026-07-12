@@ -51,6 +51,44 @@ Missed events are not reconstructed. In particular, opening Canvas after a
 session has already started lowers completeness when earlier evidence was not
 captured.
 
+### Completeness input facts and decision order
+
+The `v1` source-capability contract supplies declarations, not inferred Session
+facts. The normalizer evaluates native identity; exact trace context and trace
+signal; lifecycle/input, content, and terminal evidence; source-version,
+ingest, Hook-only, historical-summary, span-kind, schema-drift, and
+source-enabled facts. It returns only the four values above and the fixed
+reason-code set below. The reasons are de-duplicated and ordered exactly as
+listed, never by arrival order:
+
+1. `missing_native_session_id`
+2. `missing_trace_context`
+3. `trace_signal_disabled`
+4. `content_capture_disabled`
+5. `unsupported_source_version`
+6. `ingest_gap`
+7. `hook_only`
+8. `historical_summary_only`
+9. `unknown_span_kind`
+10. `schema_drift_detected`
+11. `planned_source_not_enabled`
+
+`missing_native_session_id` has first precedence and forces `unbound`. With a
+native ID, incomplete required lifecycle/input or planned/not-enabled evidence
+caps at `partial`; incomplete required content/terminal evidence caps at
+`rich`. Every listed reason except `missing_native_session_id` prevents `full`
+when its condition applies. In particular, `historical_summary_only` never
+reaches `full`. This calculation has no heuristic merge and creates no
+synthetic span. A missing lifecycle/input fact does not introduce a twelfth
+reason code. Missing required provenance maps only to fixed reasons: missing
+event/trace-span identity to `missing_trace_context`, missing capture/content
+state to `content_capture_disabled`, and missing adapter/version/fingerprint/
+normalization version to `schema_drift_detected`.
+
+The contract is an adapter handoff requirement, not an Issue #61 change to this
+ingest API, its sanitized read DTOs, raw-content route, Session/Run/Event
+identity, or Issue #49 Agent ownership.
+
 ## Session Event Ingest
 
 The installed Local Monitor exposes:

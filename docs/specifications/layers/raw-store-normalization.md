@@ -409,6 +409,74 @@ Automatic physical deletion, pin, and delete-now are Issue #57 scope. The full
 write/read shape is defined in
 [Canvas Session workspace](../interfaces/canvas-session-workspace.md).
 
+### Source capability semantic contract v1
+
+The source-capability JSON Schema and manifests declare structure and available
+capabilities; this section owns their normalization meaning. Field-family
+authority is applied before persistence: exact available OTel identity,
+hierarchy, and timing win for those families; Hook/SDK native lifecycle and
+explicit event identity win for those families. Historical summaries are
+allowlist-only (`model_tokens.*`, `retry_attempt.*`, `errors`) and cannot
+create, merge, or replace identity, hierarchy, timing, lifecycle, or explicit
+event identity. A weak value never overwrites a strong one, and a missing value
+never overwrites any value.
+
+Per-field provenance records the actual contributing adapter ID that supplied
+the field, such as `otel-http`, `copilot-compatible-hook`, or
+`copilot-sdk-stream`; the composite `otel-http+copilot-compatible-hook`
+manifest label must never be per-field provenance. It also records source
+version or schema fingerprint; source event or trace/span identity;
+capture/content state; and normalization version. A value lacking any required
+provenance is retained only as non-authoritative observed context where the
+existing storage boundary permits it; it is not used to upgrade completeness,
+bind identity, or infer a replacement. Repository/workspace/timestamp context
+never supplies provenance or identity. No heuristic merge and no synthetic span
+are permitted. Provenance absence uses the existing fixed reasons only: missing
+source event/trace-span identity is `missing_trace_context`; missing capture/
+content state is `content_capture_disabled`; missing actual adapter, source
+version/schema fingerprint, or normalization version is `schema_drift_detected`.
+
+### Deterministic completeness decision
+
+Completeness is a pure calculation from declared surface requirements and these
+observed facts: native session ID; exact trace context and enabled trace signal;
+required lifecycle and input families; content-capture state and required
+content; terminal evidence; supported source version; ingest continuity;
+whether evidence is Hook-only or historical-summary-only; recognized span kind;
+schema agreement; and whether the declared source is enabled. It neither
+reconstructs missed events nor guesses a span or source field.
+
+Apply caps in this order, choosing the lowest status: absent native session ID
+forces `unbound`; otherwise missing required lifecycle or input evidence, or a
+source that is planned/not enabled, caps at `partial`; otherwise missing
+required content or terminal evidence caps at `rich`; `full` requires all
+surface-required start-to-end facts, exact-linked OTel enrichment, and no
+blocking condition. `missing_trace_context`, `trace_signal_disabled`,
+`content_capture_disabled`, `unsupported_source_version`, `ingest_gap`,
+`hook_only`, `historical_summary_only`, `unknown_span_kind`, and
+`schema_drift_detected` each prevent `full`; `historical_summary_only` never
+reaches `full`. No twelfth reason code is invented when a lifecycle/input fact
+is absent; the result carries each applicable fixed condition below.
+
+The output reason list is de-duplicated and emitted in this stable canonical
+order, never observation order:
+
+1. `missing_native_session_id`
+2. `missing_trace_context`
+3. `trace_signal_disabled`
+4. `content_capture_disabled`
+5. `unsupported_source_version`
+6. `ingest_gap`
+7. `hook_only`
+8. `historical_summary_only`
+9. `unknown_span_kind`
+10. `schema_drift_detected`
+11. `planned_source_not_enabled`
+
+The fixed status vocabulary is exactly `unbound`, `partial`, `rich`, and
+`full`. Completeness does not alter Issue #51 exact identity or Issue #49 Agent
+ownership.
+
 ## Local Analysis Persistence
 
 The Local Monitor adds local-only analysis tables for Copilot SDK raw analysis.

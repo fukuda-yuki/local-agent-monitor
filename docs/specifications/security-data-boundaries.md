@@ -676,6 +676,24 @@ Issue #51 Session ingestion remains inside the installed Local Monitor's
 single-trusted-local-user, loopback, Host-header, no-CORS boundary. It does not
 authorize remote or non-loopback ingest.
 
+### Source capability semantic contract v1
+
+The v1 schema and its manifests are repository-safe metadata only: contract
+version, declared surface/adapters/capabilities, required provenance key names,
+and fixed completeness vocabulary. They must not contain raw prompt/response,
+tool input/output, file or diff content, paths, credentials, tokens, PII, or a
+captured event/trace value. `capture_content_state` reports an observed capture
+state; it does not grant any caller read, transport, storage, or display
+authority. In particular, manifest grants no content authority.
+
+Actual raw-bearing values remain governed by the Local Monitor's existing
+loopback, same-origin, no-store, retention, secret-filter, and
+`--sanitized-only` boundaries. Sanitized values remain metadata-only and must
+not be promoted to raw content because a manifest says a capability is
+available. Later adapters must preserve these boundaries while emitting the
+required provenance; the contract itself authorizes no new receiver, adapter,
+database, migration, HTTP, proxy, or UI DTO.
+
 `POST /api/session-ingest/v1/events` accepts raw-bearing SDK/Hook event payloads.
 Requests require JSON and `X-CAO-Session-Event-Version: 1`, are bounded to 1 MiB
 and 1..100 events, and return `204` only after commit. Fixed error responses use

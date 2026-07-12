@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
@@ -183,6 +184,129 @@ public sealed class SourceCapabilityContractTests
         Assert.Contains(
             SourceCapabilityManifestValidator.Validate(schema, unexpectedCapabilityProperty),
             error => error == "$.source_version_detector.unexpected is not allowed.");
+    }
+
+    [Fact]
+    public void Canonical_documents_define_the_v1_semantic_contract_and_adapter_handoff()
+    {
+        var canonicalDocuments = new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["docs/requirements.md"] = ["Source capability semantic contract v1", "repository / workspace / timestamp"],
+            ["docs/spec.md"] = ["Source capability semantic contract v1", "source-capability-manifest.schema.json"],
+            ["docs/specifications/layers/telemetry-ingestion.md"] = ["Source capability semantic contract v1"],
+            ["docs/specifications/layers/raw-store-normalization.md"] = ["Source capability semantic contract v1"],
+            ["docs/specifications/interfaces/canvas-session-workspace.md"] = ["Completeness input facts and decision order", "historical_summary_only"],
+            ["docs/specifications/security-data-boundaries.md"] = ["Source capability semantic contract v1", "manifest grants no content authority"],
+            ["docs/decisions.md"] = ["D056: Source capability semantic contract v1", "adapter handoff checklist"],
+            ["docs/task.md"] = ["Source capability contract (Issue #61)", "実装中"]
+        };
+
+        foreach (var (relativePath, requiredIdentifiers) in canonicalDocuments)
+        {
+            var document = ReadRepositoryDocument(relativePath);
+            foreach (var identifier in requiredIdentifiers)
+            {
+                Assert.Contains(identifier, document, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        using var schema = JsonDocument.Parse(File.ReadAllText(SchemaPath));
+        var completeness = Resolve(schema.RootElement, "#/$defs/completeness").GetProperty("properties");
+        var expectedStatuses = completeness.GetProperty("statuses").GetProperty("prefixItems")
+            .EnumerateArray().Select(item => item.GetProperty("const").GetString()!).ToArray();
+        var expectedReasons = completeness.GetProperty("reason_codes").GetProperty("prefixItems")
+            .EnumerateArray().Select(item => item.GetProperty("const").GetString()!).ToArray();
+
+        var workspaceCompleteness = GetMarkdownSection(
+            ReadRepositoryDocument("docs/specifications/interfaces/canvas-session-workspace.md"),
+            "### Completeness input facts and decision order",
+            "\n## ");
+        var normalizationCompleteness = GetMarkdownSection(
+            ReadRepositoryDocument("docs/specifications/layers/raw-store-normalization.md"),
+            "### Deterministic completeness decision",
+            "\n## ");
+
+        AssertMarkdownCompletenessMatchesSchema(workspaceCompleteness, expectedStatuses, expectedReasons);
+        AssertMarkdownCompletenessMatchesSchema(normalizationCompleteness, expectedStatuses, expectedReasons);
+        Assert.Contains("The reasons are de-duplicated and ordered exactly as listed, never by arrival order:", workspaceCompleteness, StringComparison.Ordinal);
+        Assert.Contains("`missing_native_session_id` has first precedence and forces `unbound`.", workspaceCompleteness, StringComparison.Ordinal);
+        Assert.Contains("caps at `partial`", workspaceCompleteness, StringComparison.Ordinal);
+        Assert.Contains("caps at `rich`", workspaceCompleteness, StringComparison.Ordinal);
+        Assert.Contains("`historical_summary_only` never reaches `full`.", workspaceCompleteness, StringComparison.Ordinal);
+        Assert.Contains("Apply caps in this order, choosing the lowest status:", normalizationCompleteness, StringComparison.Ordinal);
+        Assert.Contains("The output reason list is de-duplicated and emitted in this stable canonical order, never observation order:", normalizationCompleteness, StringComparison.Ordinal);
+        Assert.Contains("`historical_summary_only` never reaches `full`.", normalizationCompleteness, StringComparison.Ordinal);
+
+        var telemetryContract = GetMarkdownSection(
+            ReadRepositoryDocument("docs/specifications/layers/telemetry-ingestion.md"),
+            "## Source capability semantic contract v1",
+            "\n## Session Event Ingestion And Enrichment");
+        var normalizationContract = GetMarkdownSection(
+            ReadRepositoryDocument("docs/specifications/layers/raw-store-normalization.md"),
+            "### Source capability semantic contract v1",
+            "\n### Deterministic completeness decision");
+        var decision = GetMarkdownSection(
+            ReadRepositoryDocument("docs/decisions.md"),
+            "## D056: Source capability semantic contract v1",
+            null);
+
+        AssertActualAdapterProvenance(telemetryContract);
+        AssertActualAdapterProvenance(normalizationContract);
+        AssertActualAdapterProvenance(decision);
+
+        var issue61Row = Assert.Single(
+            ReadRepositoryDocument("docs/task.md").Split('\n'),
+            line => line.Contains("Source capability contract (Issue #61)", StringComparison.Ordinal));
+        Assert.Contains("**実装中**", issue61Row, StringComparison.Ordinal);
+        Assert.DoesNotContain("**完了", issue61Row, StringComparison.Ordinal);
+    }
+
+    private static string ReadRepositoryDocument(string relativePath)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", relativePath.Replace('/', Path.DirectorySeparatorChar));
+        Assert.True(File.Exists(path), $"Missing canonical Issue #61 document: {relativePath}");
+        return File.ReadAllText(path);
+    }
+
+    private static string GetMarkdownSection(string document, string heading, string? endHeading)
+    {
+        var start = document.IndexOf(heading, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"Missing Markdown section: {heading}");
+
+        var end = endHeading is null
+            ? document.Length
+            : document.IndexOf(endHeading, start + heading.Length, StringComparison.Ordinal);
+        Assert.True(endHeading is null || end >= 0, $"Missing section terminator after {heading}: {endHeading}");
+        return Regex.Replace(document[start..(endHeading is null ? document.Length : end)], "\\s+", " ");
+    }
+
+    private static void AssertMarkdownCompletenessMatchesSchema(string section, IReadOnlyList<string> expectedStatuses, IReadOnlyList<string> expectedReasons)
+    {
+        var listedReasons = Regex.Matches(section, "\\d+\\. `([^`]+)`")
+            .Select(match => match.Groups[1].Value)
+            .ToArray();
+        Assert.Equal(expectedReasons, listedReasons);
+
+        var position = 0;
+        foreach (var status in expectedStatuses)
+        {
+            position = section.IndexOf($"`{status}`", position, StringComparison.Ordinal);
+            Assert.True(position >= 0, $"Missing ordered completeness status: {status}");
+            position++;
+        }
+    }
+
+    private static void AssertActualAdapterProvenance(string section)
+    {
+        Assert.Contains("actual contributing adapter", section, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("such as", section, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("`otel-http`", section, StringComparison.Ordinal);
+        Assert.Contains("`copilot-compatible-hook`", section, StringComparison.Ordinal);
+        Assert.Contains("`copilot-sdk-stream`", section, StringComparison.Ordinal);
+        Assert.Contains("`otel-http+copilot-compatible-hook`", section, StringComparison.Ordinal);
+        Assert.Contains("per-field provenance", section, StringComparison.OrdinalIgnoreCase);
+        Assert.Matches("(?i)(?:must never record the composite |composite )`otel-http\\+copilot-compatible-hook` manifest label (?:as |must never be |denotes registered paths only and is never )per-field provenance", section);
+        Assert.DoesNotContain("actual contributing adapter (`otel-http` or `copilot-compatible-hook`)", section, StringComparison.Ordinal);
     }
 
     private static JsonElement Resolve(JsonElement root, string reference)

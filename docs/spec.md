@@ -57,6 +57,34 @@ Issue #56 は `canvas-effect-comparison.md` の exact-linked comparison boundary
 
 GitHub Pages publish workflow は現行スコープから削除した（D049）。Static dashboard は `generate-static-dashboard` で local artifact として生成する。
 
+## Source capability semantic contract v1
+
+`docs/specifications/contracts/source-capabilities/v1/source-capability-manifest.schema.json`
+is the JSON Schema 2020-12 structural source of truth. The sibling `manifests/`
+documents are the per-surface declared-capability source of truth; their
+`contract_version` must match the schema major version (`v1`). Canonical
+Markdown is the semantic source of truth for evidence authority, provenance,
+deterministic completeness, data safety, and the later adapter handoff.
+
+The v1 schema rejects unknown fields. Therefore a v1-compatible change may add
+only a newly observed manifest value within an already declared capability
+shape, without changing its meaning or lowering safety. Adding a manifest or
+schema field (including an optional one), removing or renaming a field,
+changing a type or enum, changing authority/precedence, or changing the
+meaning of a completeness status/reason is breaking and requires a new
+contract major with matching schema and manifests. A manifest/schema version
+match and unknown field rejection are mandatory; a consumer must not silently
+accept a mismatched or extended document.
+
+This is a documentation and committed-contract release only. It does not
+change the Issue #51 Session / Run / Event identity, the Issue #49 Agent
+ownership interpretation, or any receiver, adapter, database, migration, HTTP,
+proxy, or UI DTO. The semantic rules and canonical locations are defined by
+[telemetry ingestion](specifications/layers/telemetry-ingestion.md),
+[raw-store normalization](specifications/layers/raw-store-normalization.md),
+[Canvas Session workspace](specifications/interfaces/canvas-session-workspace.md),
+and [security data boundaries](specifications/security-data-boundaries.md).
+
 ## Specification Map
 
 | Area | Spec |
