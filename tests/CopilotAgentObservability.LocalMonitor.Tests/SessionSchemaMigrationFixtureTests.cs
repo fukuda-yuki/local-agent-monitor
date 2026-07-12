@@ -20,6 +20,11 @@ public sealed class SessionSchemaMigrationFixtureTests
         [3] = "ce9fe303992b9a665ee347d5625eca11d669dc0b2630e2df6e996de14942e53e",
         [4] = "137553761c4ae4f410d337a8e102b110ac229c4b0c25cf6bd46b81c1d3020c9a",
         [5] = "b7383a0f39442159a86fccd9e6b787c60a91b7aeb5d2853e0e69e636e250336c",
+        [6] = "b7383a0f39442159a86fccd9e6b787c60a91b7aeb5d2853e0e69e636e250336c",
+        [7] = "bd67d58a17a5f891dad3eb08bba06e2d9f068b88bd2b5da241de4deb4ab221e9",
+        [8] = "bd67d58a17a5f891dad3eb08bba06e2d9f068b88bd2b5da241de4deb4ab221e9",
+        [9] = "bd67d58a17a5f891dad3eb08bba06e2d9f068b88bd2b5da241de4deb4ab221e9",
+        [10] = "bd67d58a17a5f891dad3eb08bba06e2d9f068b88bd2b5da241de4deb4ab221e9",
     };
 
     private static readonly string[] ExpectedV10Tables =
@@ -39,6 +44,11 @@ public sealed class SessionSchemaMigrationFixtureTests
         { 3, "8d765ad07a46556b84ca32213e86fae28d5998b1" },
         { 4, "601c2beb5cb528d1e87aba0fef150b65e1dbccc0" },
         { 5, "30d5c8600d0d2abedecdb81944797d7213ef14c9" },
+        { 6, "6048da1a50473fdf8701fdb2b787b5e565fec82a" },
+        { 7, "5a28b87c05c81acecd9121ecf68f5afa2e82deae" },
+        { 8, "87f4a000932481ac6240b5ec1240318c319efdb5" },
+        { 9, "e55e2dfb0e306963065759716474385d337b17f6" },
+        { 10, "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346" },
     };
 
     [Theory]
@@ -54,14 +64,20 @@ public sealed class SessionSchemaMigrationFixtureTests
         Assert.Equal("session", manifest.Component);
         Assert.Equal(GenerationCommand, manifest.GenerationCommand);
         Assert.Equal("git status --porcelain", manifest.GitStatusCommand);
-        Assert.Equal(5, manifest.Fixtures.Count);
+        Assert.Equal(10, manifest.Fixtures.Count);
 
         var fixture = Assert.Single(manifest.Fixtures, candidate => candidate.Version == version);
         Assert.Equal(sourceCommit, fixture.SourceCommit);
         Assert.Equal($"session-v{version}.sqlite", fixture.File);
         Assert.Equal(string.Empty, fixture.GitStatusBefore);
         Assert.Equal(string.Empty, fixture.GitStatusAfter);
-        Assert.Equal(version == 4 ? [VersionFourLimitation] : Array.Empty<string>(), fixture.Limitations);
+        var expectedLimitations = version switch
+        {
+            4 => [VersionFourLimitation],
+            >= 9 => [$"Commit {sourceCommit} exposes RecordEffectComparison but no public comparison-ID input; after that public API persists the complete comparison graph, parameterized UPDATEs replace only its generated opaque comparison ID with the deterministic fixture sentinel so SHA-256 reproduction remains exact."],
+            _ => Array.Empty<string>(),
+        };
+        Assert.Equal(expectedLimitations, fixture.Limitations);
 
         var fixturePath = Path.Combine(fixtureDirectory, fixture.File);
         Assert.True(File.Exists(fixturePath), $"Missing migration fixture: {fixturePath}");
@@ -115,6 +131,13 @@ public sealed class SessionSchemaMigrationFixtureTests
             Assert.Equal(sentinels.DraftId!.Value.ToString("D"), Scalar<string>(connection, "SELECT draft_id FROM proposal_apply_drafts;"));
             Assert.Equal(sentinels.ApplyId!.Value.ToString("D"), Scalar<string>(connection, "SELECT apply_id FROM proposal_applies;"));
         }
+        if (version >= 8)
+            Assert.Equal(sentinels.ObjectiveEvaluationId!.Value.ToString("D"), Scalar<string>(connection, "SELECT objective_evaluation_id FROM objective_evaluations;"));
+        if (version >= 9)
+        {
+            Assert.Equal(sentinels.SecondarySessionId!.Value.ToString("D"), Scalar<string>(connection, "SELECT session_id FROM sessions WHERE session_id<>$id;", sentinels.SessionId.ToString("D")));
+            Assert.Equal(sentinels.ComparisonId!.Value.ToString("D"), Scalar<string>(connection, "SELECT comparison_id FROM effect_comparisons;"));
+        }
     }
 
     private static MigratedSnapshot AssertCompleteMigratedState(SqliteConnection connection, int version, FixtureSentinels sentinels)
@@ -125,24 +148,25 @@ public sealed class SessionSchemaMigrationFixtureTests
         var eventId = sentinels.EventId.ToString("D");
 
         AssertSingleRow(connection, "schema_version", D(("component", S("session")), ("version", I(CurrentSessionSchemaVersion))));
-        AssertSingleRow(connection, "sessions", D(
+        var sessionRowCount = version >= 9 ? 2 : 1;
+        AssertExpectedRow(connection, "sessions", sessionRowCount, D(
             ("session_id", S(sessionId)), ("status", S("completed")), ("completeness", S("full")),
             ("repository", S($"fixture/session-v{version}")), ("workspace", S($"workspace-v{version}")),
             ("started_at", S(at)), ("ended_at", S(at.AddMinutes(1))), ("last_seen_at", S(at.AddMinutes(1))),
             ("raw_retention_state", S("expiring")), ("created_at", S(at)), ("updated_at", S(at.AddMinutes(1)))));
-        AssertSingleRow(connection, "session_native_ids", D(
+        AssertExpectedRow(connection, "session_native_ids", sessionRowCount, D(
             ("session_id", S(sessionId)), ("source_surface", S("copilot-sdk")), ("native_session_id", S(sentinels.NativeSessionId)),
             ("binding_kind", S("native")), ("observed_at", S(at))));
-        AssertSingleRow(connection, "session_runs", D(
+        AssertExpectedRow(connection, "session_runs", sessionRowCount, D(
             ("run_id", S(runId)), ("session_id", S(sessionId)), ("source_surface", S("copilot-sdk")),
             ("native_run_id", S($"fixture-run-v{version}")), ("trace_id", S($"fixture-trace-v{version}")), ("parent_run_id", N),
             ("model", S("fixture-model")), ("started_at", S(at)), ("ended_at", S(at.AddMinutes(1))),
             ("input_tokens", I(11 + version)), ("output_tokens", I(21 + version)), ("total_tokens", I(32 + version * 2)), ("status", S("completed"))));
-        AssertSingleRow(connection, "session_events", D(
+        AssertExpectedRow(connection, "session_events", sessionRowCount, D(
             ("event_id", S(eventId)), ("session_id", S(sessionId)), ("run_id", S(runId)), ("source_surface", S("copilot-sdk")),
             ("parent_event_id", N), ("trace_id", S($"fixture-trace-v{version}")), ("status", S("ok")), ("source_adapter", S("fixture-adapter")),
             ("source_event_id", S(sentinels.SourceEventId)), ("type", S("session.task_complete")), ("occurred_at", S(at.AddSeconds(30))), ("content_state", S("available"))));
-        AssertSingleRow(connection, "session_event_content", D(
+        AssertExpectedRow(connection, "session_event_content", sessionRowCount, D(
             ("event_id", S(eventId)), ("content_kind", S("fixture")), ("content_json", S($"{{\"fixture\":\"session-v{version}\"}}")),
             ("captured_at", S(at.AddSeconds(30))), ("expires_at", S(at.AddDays(90)))));
         AssertSingleRow(connection, "session_projection_state", D(
@@ -150,8 +174,10 @@ public sealed class SessionSchemaMigrationFixtureTests
             ("unsupported_event_version_count", I(10 + version)), ("updated_at", S(at.AddMinutes(1)))));
 
         if (version >= 2)
-            AssertSingleRow(connection, "session_human_evaluation", D(("session_id", S(sessionId)), ("verdict", S("expected")), ("recorded_at", S(at.AddMinutes(2)))));
+            AssertExpectedRow(connection, "session_human_evaluation", version >= 9 ? 2 : 1, D(("session_id", S(sessionId)), ("verdict", S("expected")), ("recorded_at", S(at.AddMinutes(2)))));
         else AssertEmpty(connection, "session_human_evaluation");
+
+        if (version >= 9) AssertSecondarySessionRows(connection, version, at, sentinels);
 
         if (version >= 3) AssertProposalRows(connection, version, at, sentinels);
         else
@@ -173,12 +199,20 @@ public sealed class SessionSchemaMigrationFixtureTests
         }
 
         AssertEmpty(connection, "proposal_apply_pending");
-        AssertEmpty(connection, "objective_evaluations");
-        AssertEmpty(connection, "objective_evaluation_evidence");
-        AssertEmpty(connection, "effect_comparisons");
-        AssertEmpty(connection, "effect_comparison_sessions");
-        AssertEmpty(connection, "effect_comparison_evidence");
-        AssertEmpty(connection, "effect_receipts");
+        if (version >= 8) AssertObjectiveRows(connection, version, at, sentinels);
+        else
+        {
+            AssertEmpty(connection, "objective_evaluations");
+            AssertEmpty(connection, "objective_evaluation_evidence");
+        }
+        if (version >= 9) AssertEffectRows(connection, version, at, sentinels);
+        else
+        {
+            AssertEmpty(connection, "effect_comparisons");
+            AssertEmpty(connection, "effect_comparison_sessions");
+            AssertEmpty(connection, "effect_comparison_evidence");
+            AssertEmpty(connection, "effect_receipts");
+        }
 
         Assert.Equal(ExpectedV10Tables, ReadTableNames(connection));
         var semanticSnapshot = ReadSemanticSchemaSnapshot(connection);
@@ -188,18 +222,103 @@ public sealed class SessionSchemaMigrationFixtureTests
         return new MigratedSnapshot(semanticSnapshot, ReadDatabaseRowSnapshot(connection));
     }
 
+    private static void AssertSecondarySessionRows(SqliteConnection connection, int version, DateTimeOffset at, FixtureSentinels sentinels)
+    {
+        var secondaryAt = at.AddMinutes(10);
+        var sessionId = sentinels.SecondarySessionId!.Value.ToString("D");
+        var runId = sentinels.SecondaryRunId!.Value.ToString("D");
+        var eventId = sentinels.SecondaryEventId!.Value.ToString("D");
+        AssertExpectedRow(connection, "sessions", 2, D(
+            ("session_id", S(sessionId)), ("status", S("completed")), ("completeness", S("full")),
+            ("repository", S($"fixture/session-v{version}/secondary")), ("workspace", S($"workspace-v{version}-secondary")),
+            ("started_at", S(secondaryAt)), ("ended_at", S(secondaryAt.AddMinutes(1))), ("last_seen_at", S(secondaryAt.AddMinutes(1))),
+            ("raw_retention_state", S("expiring")), ("created_at", S(secondaryAt)), ("updated_at", S(secondaryAt.AddMinutes(1)))));
+        AssertExpectedRow(connection, "session_native_ids", 2, D(
+            ("session_id", S(sessionId)), ("source_surface", S("copilot-sdk")), ("native_session_id", S(sentinels.SecondaryNativeSessionId!)),
+            ("binding_kind", S("native")), ("observed_at", S(secondaryAt))));
+        AssertExpectedRow(connection, "session_runs", 2, D(
+            ("run_id", S(runId)), ("session_id", S(sessionId)), ("source_surface", S("copilot-sdk")),
+            ("native_run_id", S($"fixture-run-v{version}-secondary")), ("trace_id", S($"fixture-trace-v{version}-secondary")), ("parent_run_id", N),
+            ("model", S("fixture-model")), ("started_at", S(secondaryAt)), ("ended_at", S(secondaryAt.AddMinutes(1))),
+            ("input_tokens", I(101 + version)), ("output_tokens", I(201 + version)), ("total_tokens", I(302 + version * 2)), ("status", S("completed"))));
+        AssertExpectedRow(connection, "session_events", 2, D(
+            ("event_id", S(eventId)), ("session_id", S(sessionId)), ("run_id", S(runId)), ("source_surface", S("copilot-sdk")),
+            ("parent_event_id", N), ("trace_id", S($"fixture-trace-v{version}-secondary")), ("status", S("ok")), ("source_adapter", S("fixture-adapter")),
+            ("source_event_id", S(sentinels.SecondarySourceEventId!)), ("type", S("session.task_complete")), ("occurred_at", S(secondaryAt.AddSeconds(30))), ("content_state", S("available"))));
+        AssertExpectedRow(connection, "session_event_content", 2, D(
+            ("event_id", S(eventId)), ("content_kind", S("fixture")), ("content_json", S($"{{\"fixture\":\"session-v{version}-secondary\"}}")),
+            ("captured_at", S(secondaryAt.AddSeconds(30))), ("expires_at", S(secondaryAt.AddDays(90)))));
+        AssertExpectedRow(connection, "session_human_evaluation", 2, D(
+            ("session_id", S(sessionId)), ("verdict", S("expected")), ("recorded_at", S(at.AddMinutes(11)))));
+    }
+
+    private static void AssertObjectiveRows(SqliteConnection connection, int version, DateTimeOffset at, FixtureSentinels sentinels)
+    {
+        var objectiveId = sentinels.ObjectiveEvaluationId!.Value.ToString("D");
+        AssertSingleRow(connection, "objective_evaluations", D(
+            ("objective_evaluation_id", S(objectiveId)), ("session_id", S(sentinels.SessionId.ToString("D"))),
+            ("run_id", S(sentinels.RunId.ToString("D"))), ("trace_id", S($"fixture-trace-v{version}")), ("result", S("fail")),
+            ("severity", S("severe")), ("evaluator_id", S("fixture-evaluator")), ("evaluator_version", S("v1")),
+            ("criterion_id", S("fixture-criterion")), ("case_key", S("fixture-case")), ("recorded_at", S(at.AddMinutes(2)))));
+        AssertSingleRow(connection, "objective_evaluation_evidence", D(
+            ("objective_evaluation_id", S(objectiveId)), ("evidence_order", I(0)), ("kind", S("event")),
+            ("reference_id", S(sentinels.EventId.ToString("D")))));
+    }
+
+    private static void AssertEffectRows(SqliteConnection connection, int version, DateTimeOffset at, FixtureSentinels sentinels)
+    {
+        var comparisonId = sentinels.ComparisonId!.Value.ToString("D");
+        AssertSingleRow(connection, "effect_comparisons", D(
+            ("comparison_id", S(comparisonId)), ("cohort_revision", I(1)), ("proposal_id", S(sentinels.ProposalId!.Value.ToString("D"))),
+            ("proposal_revision", I(2)), ("apply_id", S(sentinels.ApplyId!.Value.ToString("D"))), ("recorded_at", S(at.AddMinutes(12)))));
+        AssertExpectedRow(connection, "effect_comparison_sessions", 2, D(
+            ("comparison_id", S(comparisonId)), ("session_id", S(sentinels.SessionId.ToString("D"))), ("classification", S("pre")),
+            ("case_key", S("fixture-case")), ("exclusion_reason", N), ("session_order", I(0)),
+            ("effective_quality", version == 9 ? N : S("fail")), ("severe_failure", I(version == 9 ? 0 : 1))));
+        AssertExpectedRow(connection, "effect_comparison_sessions", 2, D(
+            ("comparison_id", S(comparisonId)), ("session_id", S(sentinels.SecondarySessionId!.Value.ToString("D"))), ("classification", S("post")),
+            ("case_key", S("fixture-case")), ("exclusion_reason", N), ("session_order", I(1)),
+            ("effective_quality", version == 9 ? N : S("pass")), ("severe_failure", I(0))));
+        var primarySessionId = sentinels.SessionId.ToString("D");
+        var secondarySessionId = sentinels.SecondarySessionId!.Value.ToString("D");
+        AssertExpectedRow(connection, "effect_comparison_evidence", 4, D(
+            ("comparison_id", S(comparisonId)), ("evidence_order", I(0)), ("session_id", S(primarySessionId)),
+            ("kind", S("human")), ("reference_id", S(primarySessionId)), ("recorded_at", S(at.AddMinutes(2))),
+            ("human_verdict", version == 9 ? N : S("expected"))));
+        AssertExpectedRow(connection, "effect_comparison_evidence", 4, D(
+            ("comparison_id", S(comparisonId)), ("evidence_order", I(1)), ("session_id", S(primarySessionId)),
+            ("kind", S("objective")), ("reference_id", S(sentinels.ObjectiveEvaluationId!.Value.ToString("D"))), ("recorded_at", S(at.AddMinutes(2))), ("human_verdict", N)));
+        AssertExpectedRow(connection, "effect_comparison_evidence", 4, D(
+            ("comparison_id", S(comparisonId)), ("evidence_order", I(2)), ("session_id", S(primarySessionId)),
+            ("kind", S("objective_event")), ("reference_id", S(sentinels.EventId.ToString("D"))), ("recorded_at", N), ("human_verdict", N)));
+        AssertExpectedRow(connection, "effect_comparison_evidence", 4, D(
+            ("comparison_id", S(comparisonId)), ("evidence_order", I(3)), ("session_id", S(secondarySessionId)),
+            ("kind", S("human")), ("reference_id", S(secondarySessionId)), ("recorded_at", S(at.AddMinutes(11))),
+            ("human_verdict", version == 9 ? N : S("expected"))));
+        const string resultJson = "{\"Verdict\":3,\"PrePass\":0,\"PreCount\":1,\"PostPass\":1,\"PostCount\":1,\"PreDurationMedian\":null,\"PostDurationMedian\":null,\"DurationDelta\":null,\"PreTokenMedian\":null,\"PostTokenMedian\":null,\"TokenDelta\":null,\"Reasons\":[\"insufficient_cohort\"]}";
+        AssertSingleRow(connection, "effect_receipts", D(
+            ("comparison_id", S(comparisonId)), ("verdict", S("insufficient_evidence")), ("result_json", S(resultJson)), ("recorded_at", S(at.AddMinutes(12)))));
+    }
+
     private static void AssertProposalRows(SqliteConnection connection, int version, DateTimeOffset at, FixtureSentinels sentinels)
     {
         var proposalId = sentinels.ProposalId!.Value.ToString("D");
         AssertSingleRow(connection, "improvement_proposals", D(
-            ("proposal_id", S(proposalId)), ("revision", I(1)), ("status", S("candidate")), ("target_kind", S("skill")),
+            ("proposal_id", S(proposalId)), ("revision", I(version >= 9 ? 2 : 1)), ("status", S(version >= 9 ? "recommended" : "candidate")), ("target_kind", S("skill")),
             ("target_label", S($"fixture-target-v{version}")), ("title", S($"Fixture proposal v{version}")), ("summary", S("Synthetic migration sentinel")),
             ("expected_effect", S("Preserve fixture rows")), ("risk_note", S("none")), ("created_at", S(at.AddMinutes(3))),
-            ("updated_at", S(at.AddMinutes(3))), ("recommended_at", N), ("verified_at", N)));
-        AssertSingleRow(connection, "improvement_proposal_sessions", D(
+            ("updated_at", S(at.AddMinutes(version >= 9 ? 4 : 3))), ("recommended_at", version >= 9 ? S(at.AddMinutes(4)) : N), ("verified_at", N)));
+        AssertExpectedRow(connection, "improvement_proposal_sessions", version >= 9 ? 2 : 1, D(
             ("proposal_id", S(proposalId)), ("proposal_revision", I(1)), ("session_id", S(sentinels.SessionId.ToString("D"))), ("source_order", I(0))));
-        AssertSingleRow(connection, "improvement_proposal_evidence", D(
+        AssertExpectedRow(connection, "improvement_proposal_evidence", version >= 9 ? 2 : 1, D(
             ("proposal_id", S(proposalId)), ("evidence_order", I(0)), ("kind", S("event")), ("reference_id", S(sentinels.EventId.ToString("D")))));
+        if (version >= 9)
+        {
+            AssertExpectedRow(connection, "improvement_proposal_sessions", 2, D(
+                ("proposal_id", S(proposalId)), ("proposal_revision", I(1)), ("session_id", S(sentinels.SecondarySessionId!.Value.ToString("D"))), ("source_order", I(1))));
+            AssertExpectedRow(connection, "improvement_proposal_evidence", 2, D(
+                ("proposal_id", S(proposalId)), ("evidence_order", I(1)), ("kind", S("event")), ("reference_id", S(sentinels.SecondaryEventId!.Value.ToString("D")))));
+        }
     }
 
     private static void AssertProposalApplyRows(SqliteConnection connection, int version, DateTimeOffset at, FixtureSentinels sentinels)
@@ -210,7 +329,7 @@ public sealed class SessionSchemaMigrationFixtureTests
         var rootId = sentinels.RootId!.Value.ToString("D");
         var updatedAt = version == 4 ? "s:1970-01-01T00:00:00.0000000+00:00" : S(at.AddMinutes(5));
         AssertSingleRow(connection, "proposal_apply_drafts", D(
-            ("draft_id", S(draftId)), ("proposal_id", S(proposalId)), ("proposal_revision", I(1)), ("root_id", S(rootId)),
+            ("draft_id", S(draftId)), ("proposal_id", S(proposalId)), ("proposal_revision", I(version >= 9 ? 2 : 1)), ("root_id", S(rootId)),
             ("selection_revision", I(1)), ("approval_digest", S($"fixture-digest-v{version}")), ("state", S("applied")),
             ("created_at", S(at.AddMinutes(4))), ("updated_at", updatedAt)));
         AssertSingleRow(connection, "proposal_apply_files", D(
@@ -220,22 +339,29 @@ public sealed class SessionSchemaMigrationFixtureTests
         AssertSingleRow(connection, "proposal_apply_revisions", D(
             ("draft_id", S(draftId)), ("selection_revision", I(1)), ("approval_digest", S($"fixture-digest-v{version}")), ("approved_at", S(at.AddMinutes(4)))));
         AssertSingleRow(connection, "proposal_applies", D(
-            ("apply_id", S(applyId)), ("draft_id", S(draftId)), ("proposal_revision", I(1)), ("state", S("applied")), ("created_at", S(at.AddMinutes(5)))));
+            ("apply_id", S(applyId)), ("draft_id", S(draftId)), ("proposal_revision", I(version >= 9 ? 2 : 1)), ("state", S("applied")), ("created_at", S(at.AddMinutes(5)))));
         AssertSingleRow(connection, "proposal_apply_audit", D(
             ("audit_id", I(1)), ("apply_id", S(applyId)), ("draft_id", S(draftId)), ("proposal_id", S(proposalId)), ("root_id", S(rootId)),
             ("actor_kind", S("local_user")), ("state", S("applied")), ("error_code", N), ("file_count", I(1)), ("recorded_at", S(at.AddMinutes(5)))));
     }
 
     private static void AssertSingleRow(SqliteConnection connection, string table, IReadOnlyDictionary<string, string> expected)
+        => AssertExpectedRow(connection, table, 1, expected);
+
+    private static void AssertExpectedRow(SqliteConnection connection, string table, int expectedCount, IReadOnlyDictionary<string, string> expected)
     {
         using var command = connection.CreateCommand();
         command.CommandText = $"SELECT * FROM \"{table}\";";
         using var reader = command.ExecuteReader();
-        Assert.True(reader.Read(), $"Expected one row in {table}.");
-        var actual = new SortedDictionary<string, string>(StringComparer.Ordinal);
-        for (var index = 0; index < reader.FieldCount; index++) actual.Add(reader.GetName(index), Encode(reader, index));
-        Assert.False(reader.Read(), $"Expected exactly one row in {table}.");
-        Assert.Equal(expected, actual);
+        var rows = new List<SortedDictionary<string, string>>();
+        while (reader.Read())
+        {
+            var row = new SortedDictionary<string, string>(StringComparer.Ordinal);
+            for (var index = 0; index < reader.FieldCount; index++) row.Add(reader.GetName(index), Encode(reader, index));
+            rows.Add(row);
+        }
+        Assert.Equal(expectedCount, rows.Count);
+        Assert.Contains(rows, actual => expected.SequenceEqual(actual));
     }
 
     private static void AssertEmpty(SqliteConnection connection, string table) =>
@@ -423,6 +549,6 @@ public sealed class SessionSchemaMigrationFixtureTests
 
     private sealed record FixtureManifest(string Component, string GenerationCommand, string GitStatusCommand, IReadOnlyList<FixtureEntry> Fixtures);
     private sealed record FixtureEntry(int Version, string File, string SourceCommit, string Sha256, string GitStatusBefore, string GitStatusAfter, IReadOnlyList<string> Limitations, FixtureSentinels Sentinels);
-    private sealed record FixtureSentinels(Guid SessionId, string NativeSessionId, Guid RunId, Guid EventId, string SourceEventId, string ProjectorKey, Guid? ProposalId, Guid? DraftId, Guid? ApplyId, Guid? RootId);
+    private sealed record FixtureSentinels(Guid SessionId, string NativeSessionId, Guid RunId, Guid EventId, string SourceEventId, string ProjectorKey, Guid? ProposalId, Guid? DraftId, Guid? ApplyId, Guid? RootId, Guid? ObjectiveEvaluationId = null, Guid? SecondarySessionId = null, string? SecondaryNativeSessionId = null, Guid? SecondaryRunId = null, Guid? SecondaryEventId = null, string? SecondarySourceEventId = null, Guid? ComparisonId = null);
     private sealed record MigratedSnapshot(string SemanticSchema, string Rows);
 }

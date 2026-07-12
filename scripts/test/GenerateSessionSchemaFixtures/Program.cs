@@ -7,6 +7,13 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
+if (args.Length == 4 && args[0] == "--generate-one")
+{
+    var generated = CreateHistoricalFixture(args[1], args[2], int.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture));
+    Console.Write(JsonSerializer.Serialize(generated.Sentinels));
+    return;
+}
+
 var outputArgument = ParseOutputArgument(args);
 if (Path.IsPathRooted(outputArgument))
 {
@@ -34,6 +41,11 @@ var specifications = new[]
     new FixtureSpecification(3, "8d765ad07a46556b84ca32213e86fae28d5998b1"),
     new FixtureSpecification(4, "601c2beb5cb528d1e87aba0fef150b65e1dbccc0"),
     new FixtureSpecification(5, "30d5c8600d0d2abedecdb81944797d7213ef14c9"),
+    new FixtureSpecification(6, "6048da1a50473fdf8701fdb2b787b5e565fec82a"),
+    new FixtureSpecification(7, "5a28b87c05c81acecd9121ecf68f5afa2e82deae"),
+    new FixtureSpecification(8, "87f4a000932481ac6240b5ec1240318c319efdb5"),
+    new FixtureSpecification(9, "e55e2dfb0e306963065759716474385d337b17f6"),
+    new FixtureSpecification(10, "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346"),
 };
 
 var entries = new List<FixtureEntry>();
@@ -61,9 +73,16 @@ try
             var projectPath = Path.Combine(historicalWorktree, "src", "CopilotAgentObservability.Persistence.Sqlite", "CopilotAgentObservability.Persistence.Sqlite.csproj");
             Run("dotnet", repositoryRoot, "build", projectPath, "--configuration", "Release", "--artifacts-path", artifactsPath, "--nologo");
             var historicalAssembly = FindHistoricalAssembly(artifactsPath);
-            var generated = CreateHistoricalFixture(historicalAssembly, fixturePath, specification.Version);
-            var sentinels = generated.Sentinels;
-            WaitForUnload(generated.LoadContext);
+            var generatorAssembly = Assembly.GetExecutingAssembly().Location;
+            var generatedJson = Run("dotnet", repositoryRoot, generatorAssembly, "--generate-one", historicalAssembly, fixturePath, specification.Version.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            var sentinels = JsonSerializer.Deserialize<FixtureSentinels>(generatedJson)
+                ?? throw new InvalidOperationException($"Historical v{specification.Version} generator did not return sentinels.");
+            if (specification.Version >= 9)
+            {
+                var deterministicComparisonId = FixtureGuid(12, specification.Version);
+                NormalizeComparisonId(fixturePath, sentinels.ComparisonId!.Value, deterministicComparisonId);
+                sentinels = sentinels with { ComparisonId = deterministicComparisonId };
+            }
             if (specification.Version == 4)
             {
                 InsertVersionFourProposalApplySentinels(fixturePath, sentinels);
@@ -73,9 +92,12 @@ try
             var statusAfter = Run("git", repositoryRoot, "-C", historicalWorktree, "status", "--porcelain").Trim();
             EnsureClean(specification.Version, "after generation", statusAfter);
 
-            var limitations = specification.Version == 4
-                ? new[] { "Commit 601c2beb5cb528d1e87aba0fef150b65e1dbccc0 exposes no public proposal-apply persistence API; parameterized INSERTs populate proposal-apply rows only after its public CreateSchema, Write, and CreateImprovementProposal APIs create the schema and parent sentinels." }
-                : Array.Empty<string>();
+            var limitations = specification.Version switch
+            {
+                4 => new[] { "Commit 601c2beb5cb528d1e87aba0fef150b65e1dbccc0 exposes no public proposal-apply persistence API; parameterized INSERTs populate proposal-apply rows only after its public CreateSchema, Write, and CreateImprovementProposal APIs create the schema and parent sentinels." },
+                >= 9 => new[] { $"Commit {specification.SourceCommit} exposes RecordEffectComparison but no public comparison-ID input; after that public API persists the complete comparison graph, parameterized UPDATEs replace only its generated opaque comparison ID with the deterministic fixture sentinel so SHA-256 reproduction remains exact." },
+                _ => Array.Empty<string>(),
+            };
             entries.Add(new FixtureEntry(
                 specification.Version,
                 fixtureFile,
@@ -154,9 +176,16 @@ static (FixtureSentinels Sentinels, WeakReference LoadContext) CreateHistoricalF
         var draftId = version >= 4 ? FixtureGuid(5, version) : (Guid?)null;
         var applyId = version >= 4 ? FixtureGuid(6, version) : (Guid?)null;
         var rootId = version >= 4 ? FixtureGuid(7, version) : (Guid?)null;
+        var objectiveEvaluationId = version >= 8 ? FixtureGuid(8, version) : (Guid?)null;
+        var secondarySessionId = version >= 9 ? FixtureGuid(9, version) : (Guid?)null;
+        var secondaryRunId = version >= 9 ? FixtureGuid(10, version) : (Guid?)null;
+        var secondaryEventId = version >= 9 ? FixtureGuid(11, version) : (Guid?)null;
+        Guid? comparisonId = null;
         var nativeSessionId = $"fixture-session-v{version}-native";
+        var secondaryNativeSessionId = version >= 9 ? $"fixture-session-v{version}-secondary-native" : null;
         var projectorKey = $"fixture-session-v{version}-projector";
         var sourceEventId = $"fixture-session-v{version}-event";
+        var secondarySourceEventId = version >= 9 ? $"fixture-session-v{version}-secondary-event" : null;
 
         object EnumValue(string name, string value) => Enum.Parse(telemetryAssembly.GetType($"CopilotAgentObservability.Telemetry.Sessions.{name}", true)!, value);
         object Domain(string name, params object?[] values) => Create(telemetryAssembly.GetType($"CopilotAgentObservability.Telemetry.Sessions.{name}", true)!, values);
@@ -179,6 +208,18 @@ static (FixtureSentinels Sentinels, WeakReference LoadContext) CreateHistoricalF
         Invoke(store, "Write", batch);
         Invoke(store, "UpsertProjectionState", Domain("SessionProjectionState", projectorKey, 1000L + version, 10L + version, at.AddMinutes(1)));
 
+        if (version >= 9)
+        {
+            var secondaryAt = at.AddMinutes(10);
+            var secondarySession = Domain("ObservedSession", secondarySessionId!.Value, completed, EnumValue("SessionCompleteness", "Full"), $"fixture/session-v{version}/secondary", $"workspace-v{version}-secondary", secondaryAt, secondaryAt.AddMinutes(1), secondaryAt.AddMinutes(1), EnumValue("SessionRawRetentionState", "Expiring"), secondaryAt, secondaryAt.AddMinutes(1));
+            var secondaryNativeId = Domain("SessionNativeId", secondarySessionId.Value, sourceSurface, secondaryNativeSessionId!, EnumValue("SessionBindingKind", "Native"), secondaryAt);
+            var secondaryRun = Domain("ObservedSessionRun", secondaryRunId!.Value, secondarySessionId.Value, sourceSurface, $"fixture-run-v{version}-secondary", $"fixture-trace-v{version}-secondary", null, "fixture-model", completed, secondaryAt, secondaryAt.AddMinutes(1), 101L + version, 201L + version, 302L + version * 2L);
+            var secondaryEvent = Domain("ObservedSessionEvent", secondaryEventId!.Value, secondarySessionId.Value, secondaryRunId.Value, sourceSurface, null, $"fixture-trace-v{version}-secondary", "ok", "fixture-adapter", secondarySourceEventId!, "session.task_complete", secondaryAt.AddSeconds(30), EnumValue("SessionContentState", "Available"));
+            var secondaryContent = Domain("SessionEventContent", secondaryEventId.Value, "fixture", $"{{\"fixture\":\"session-v{version}-secondary\"}}", secondaryAt.AddSeconds(30), secondaryAt.AddDays(90));
+            var secondaryDetail = Domain("SessionDetail", secondarySession, DomainArray("SessionNativeId", secondaryNativeId), DomainArray("ObservedSessionRun", secondaryRun), DomainArray("ObservedSessionEvent", secondaryEvent));
+            Invoke(store, "Write", Domain("SessionWriteBatch", secondaryDetail, DomainArray("SessionEventContent", secondaryContent)));
+        }
+
         if (version >= 2)
         {
             Invoke(store, "UpsertHumanEvaluation", Domain("SessionHumanEvaluation", sessionId, "expected", at.AddMinutes(2)));
@@ -187,22 +228,60 @@ static (FixtureSentinels Sentinels, WeakReference LoadContext) CreateHistoricalF
         if (version >= 3)
         {
             var evidence = Domain("ImprovementProposalEvidenceReference", "event", eventId.ToString("D"));
-            var proposal = Domain("ImprovementProposal", proposalId!.Value, EnumValue("ImprovementProposalStatus", "Candidate"), "skill", $"fixture-target-v{version}", $"Fixture proposal v{version}", "Synthetic migration sentinel", "Preserve fixture rows", "none", new[] { sessionId }, DomainArray("ImprovementProposalEvidenceReference", evidence), at.AddMinutes(3), at.AddMinutes(3), null, null);
+            var sourceSessions = version >= 9 ? new[] { sessionId, secondarySessionId!.Value } : new[] { sessionId };
+            var evidenceReferences = version >= 9
+                ? DomainArray("ImprovementProposalEvidenceReference", evidence, Domain("ImprovementProposalEvidenceReference", "event", secondaryEventId!.Value.ToString("D")))
+                : DomainArray("ImprovementProposalEvidenceReference", evidence);
+            var proposal = version >= 7
+                ? Domain("ImprovementProposal", proposalId!.Value, 1, EnumValue("ImprovementProposalStatus", "Candidate"), "skill", $"fixture-target-v{version}", $"Fixture proposal v{version}", "Synthetic migration sentinel", "Preserve fixture rows", "none", sourceSessions, evidenceReferences, at.AddMinutes(3), at.AddMinutes(3), null, null)
+                : Domain("ImprovementProposal", proposalId!.Value, EnumValue("ImprovementProposalStatus", "Candidate"), "skill", $"fixture-target-v{version}", $"Fixture proposal v{version}", "Synthetic migration sentinel", "Preserve fixture rows", "none", sourceSessions, evidenceReferences, at.AddMinutes(3), at.AddMinutes(3), null, null);
             Invoke(store, "CreateImprovementProposal", proposal);
+            if (version >= 9)
+            {
+                Invoke(store, "UpdateImprovementProposalStatus", proposalId.Value, EnumValue("ImprovementProposalStatus", "Recommended"), at.AddMinutes(4));
+            }
         }
 
         if (version >= 5)
         {
-            var draft = Domain("ProposalApplyDraftMetadata", draftId!.Value, proposalId!.Value, rootId!.Value, 1, $"fixture-digest-v{version}", EnumValue("ProposalApplyState", "Draft"), 1, at.AddMinutes(4), at.AddMinutes(4));
+            var draft = version >= 7
+                ? Domain("ProposalApplyDraftMetadata", draftId!.Value, proposalId!.Value, version >= 9 ? 2 : 1, rootId!.Value, 1, $"fixture-digest-v{version}", EnumValue("ProposalApplyState", "Draft"), 1, at.AddMinutes(4), at.AddMinutes(4))
+                : Domain("ProposalApplyDraftMetadata", draftId!.Value, proposalId!.Value, rootId!.Value, 1, $"fixture-digest-v{version}", EnumValue("ProposalApplyState", "Draft"), 1, at.AddMinutes(4), at.AddMinutes(4));
             var revision = Domain("ProposalApplyRevisionMetadata", draftId.Value, 1, $"fixture-digest-v{version}", null);
             Invoke(store, "SaveProposalApplyDraft", draft, new[] { ($"fixture-base-v{version}", $"fixture-replacement-v{version}") }, new[] { ($"fixture-hunk-v{version}", true, $"fixture-replacement-v{version}") }, revision);
             var approvedRevision = Domain("ProposalApplyRevisionMetadata", draftId.Value, 1, $"fixture-digest-v{version}", at.AddMinutes(4));
             Invoke(store, "SaveProposalApplyApproval", draftId.Value, approvedRevision);
             var outcome = Domain("ProposalApplyOutcome", applyId!.Value, draftId.Value, EnumValue("ProposalApplyState", "Applied"), at.AddMinutes(5));
-            Invoke(store, "SaveProposalApplyOutcome", outcome, proposalId.Value, rootId.Value, 1, null);
+            if (version >= 6)
+            {
+                var pending = Domain("ProposalApplyPendingOperation", applyId.Value, draftId.Value, proposalId.Value, rootId.Value, 1, "apply", at.AddMinutes(5));
+                Invoke(store, "SaveProposalApplyPending", pending);
+                Invoke(store, "CompleteProposalApplyPending", outcome, proposalId.Value, rootId.Value, 1, null);
+            }
+            else
+            {
+                Invoke(store, "SaveProposalApplyOutcome", outcome, proposalId.Value, rootId.Value, 1, null);
+            }
         }
 
-        return (new FixtureSentinels(sessionId, nativeSessionId, runId, eventId, sourceEventId, projectorKey, proposalId, draftId, applyId, rootId), new WeakReference(loadContext));
+        if (version >= 8)
+        {
+            var objectiveEvidence = Domain("ObjectiveEvaluationEvidence", "event", eventId.ToString("D"));
+            var objective = Domain("ObjectiveEvaluationReceipt", objectiveEvaluationId!.Value, sessionId, runId, $"fixture-trace-v{version}", EnumValue("ObjectiveResult", "Fail"), EnumValue("ObjectiveSeverity", "Severe"), "fixture-evaluator", "v1", "fixture-criterion", "fixture-case", DomainArray("ObjectiveEvaluationEvidence", objectiveEvidence), at.AddMinutes(2));
+            Invoke(store, "CreateObjectiveEvaluation", objective);
+        }
+
+        if (version >= 9)
+        {
+            Invoke(store, "UpsertHumanEvaluation", Domain("SessionHumanEvaluation", secondarySessionId!.Value, "expected", at.AddMinutes(11)));
+            var pre = Domain("EffectCohortSession", sessionId, "pre", "fixture-case", null);
+            var post = Domain("EffectCohortSession", secondarySessionId.Value, "post", "fixture-case", null);
+            var request = Domain("EffectComparisonRequest", proposalId!.Value, 2, applyId!.Value, DomainArray("EffectCohortSession", pre, post));
+            var receipt = Invoke(store, "RecordEffectComparison", request, at.AddMinutes(12))!;
+            comparisonId = (Guid)receipt.GetType().GetProperty("ComparisonId")!.GetValue(receipt)!;
+        }
+
+        return (new FixtureSentinels(sessionId, nativeSessionId, runId, eventId, sourceEventId, projectorKey, proposalId, draftId, applyId, rootId, objectiveEvaluationId, secondarySessionId, secondaryNativeSessionId, secondaryRunId, secondaryEventId, secondarySourceEventId, comparisonId), new WeakReference(loadContext));
     }
     finally
     {
@@ -210,14 +289,19 @@ static (FixtureSentinels Sentinels, WeakReference LoadContext) CreateHistoricalF
     }
 }
 
-static void WaitForUnload(WeakReference loadContext)
+static void NormalizeComparisonId(string fixturePath, Guid generatedId, Guid deterministicId)
 {
-    for (var attempt = 0; loadContext.IsAlive && attempt < 10; attempt++)
+    using var connection = new SqliteConnection($"Data Source={fixturePath};Pooling=False");
+    connection.Open();
+    using (var deferForeignKeys = connection.CreateCommand())
     {
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
+        deferForeignKeys.CommandText = "PRAGMA defer_foreign_keys=ON;";
+        deferForeignKeys.ExecuteNonQuery();
     }
-    if (loadContext.IsAlive) throw new InvalidOperationException("Historical assembly load context did not unload.");
+    using var transaction = connection.BeginTransaction();
+    foreach (var table in new[] { "effect_comparison_sessions", "effect_comparison_evidence", "effect_receipts", "effect_comparisons" })
+        Execute(connection, transaction, $"UPDATE {table} SET comparison_id=$deterministic WHERE comparison_id=$generated;", ("$deterministic", deterministicId.ToString("D")), ("$generated", generatedId.ToString("D")));
+    transaction.Commit();
 }
 
 static object Create(Type type, object?[] values)
@@ -324,4 +408,13 @@ sealed class HistoricalLoadContext(string assemblyPath) : AssemblyLoadContext(is
 sealed record FixtureSpecification(int Version, string SourceCommit);
 sealed record FixtureManifest(string Component, string GenerationCommand, string GitStatusCommand, IReadOnlyList<FixtureEntry> Fixtures);
 sealed record FixtureEntry(int Version, string File, string SourceCommit, string Sha256, string GitStatusBefore, string GitStatusAfter, IReadOnlyList<string> Limitations, FixtureSentinels Sentinels);
-sealed record FixtureSentinels(Guid SessionId, string NativeSessionId, Guid RunId, Guid EventId, string SourceEventId, string ProjectorKey, Guid? ProposalId, Guid? DraftId, Guid? ApplyId, Guid? RootId);
+sealed record FixtureSentinels(
+    Guid SessionId, string NativeSessionId, Guid RunId, Guid EventId, string SourceEventId, string ProjectorKey,
+    Guid? ProposalId, Guid? DraftId, Guid? ApplyId, Guid? RootId,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] Guid? ObjectiveEvaluationId = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] Guid? SecondarySessionId = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? SecondaryNativeSessionId = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] Guid? SecondaryRunId = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] Guid? SecondaryEventId = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? SecondarySourceEventId = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] Guid? ComparisonId = null);

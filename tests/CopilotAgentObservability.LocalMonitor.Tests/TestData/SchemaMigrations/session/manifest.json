@@ -109,6 +109,130 @@
         "applyId": "00000006-0000-7000-8000-000000000005",
         "rootId": "00000007-0000-7000-8000-000000000005"
       }
+    },
+    {
+      "version": 6,
+      "file": "session-v6.sqlite",
+      "sourceCommit": "6048da1a50473fdf8701fdb2b787b5e565fec82a",
+      "sha256": "ad0ff7a49b5eec5873719ab561f00207693efaed681397707a18dd1c330270b1",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000006",
+        "nativeSessionId": "fixture-session-v6-native",
+        "runId": "00000002-0000-7000-8000-000000000006",
+        "eventId": "00000003-0000-7000-8000-000000000006",
+        "sourceEventId": "fixture-session-v6-event",
+        "projectorKey": "fixture-session-v6-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000006",
+        "draftId": "00000005-0000-7000-8000-000000000006",
+        "applyId": "00000006-0000-7000-8000-000000000006",
+        "rootId": "00000007-0000-7000-8000-000000000006"
+      }
+    },
+    {
+      "version": 7,
+      "file": "session-v7.sqlite",
+      "sourceCommit": "5a28b87c05c81acecd9121ecf68f5afa2e82deae",
+      "sha256": "1587a996030c8613b07936ae6281b1ada94231a6be032daa517e8eabdb569fd4",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000007",
+        "nativeSessionId": "fixture-session-v7-native",
+        "runId": "00000002-0000-7000-8000-000000000007",
+        "eventId": "00000003-0000-7000-8000-000000000007",
+        "sourceEventId": "fixture-session-v7-event",
+        "projectorKey": "fixture-session-v7-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000007",
+        "draftId": "00000005-0000-7000-8000-000000000007",
+        "applyId": "00000006-0000-7000-8000-000000000007",
+        "rootId": "00000007-0000-7000-8000-000000000007"
+      }
+    },
+    {
+      "version": 8,
+      "file": "session-v8.sqlite",
+      "sourceCommit": "87f4a000932481ac6240b5ec1240318c319efdb5",
+      "sha256": "424e74ebd9e91c511d01754d26b7002a38459712eb8c43d7956fce2cc92eef6f",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000008",
+        "nativeSessionId": "fixture-session-v8-native",
+        "runId": "00000002-0000-7000-8000-000000000008",
+        "eventId": "00000003-0000-7000-8000-000000000008",
+        "sourceEventId": "fixture-session-v8-event",
+        "projectorKey": "fixture-session-v8-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000008",
+        "draftId": "00000005-0000-7000-8000-000000000008",
+        "applyId": "00000006-0000-7000-8000-000000000008",
+        "rootId": "00000007-0000-7000-8000-000000000008",
+        "objectiveEvaluationId": "00000008-0000-7000-8000-000000000008"
+      }
+    },
+    {
+      "version": 9,
+      "file": "session-v9.sqlite",
+      "sourceCommit": "e55e2dfb0e306963065759716474385d337b17f6",
+      "sha256": "726fac6ca0662b0508be2801cf085cca70673d90d75d7175d2945440c76d7644",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [
+        "Commit e55e2dfb0e306963065759716474385d337b17f6 exposes RecordEffectComparison but no public comparison-ID input; after that public API persists the complete comparison graph, parameterized UPDATEs replace only its generated opaque comparison ID with the deterministic fixture sentinel so SHA-256 reproduction remains exact."
+      ],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000009",
+        "nativeSessionId": "fixture-session-v9-native",
+        "runId": "00000002-0000-7000-8000-000000000009",
+        "eventId": "00000003-0000-7000-8000-000000000009",
+        "sourceEventId": "fixture-session-v9-event",
+        "projectorKey": "fixture-session-v9-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000009",
+        "draftId": "00000005-0000-7000-8000-000000000009",
+        "applyId": "00000006-0000-7000-8000-000000000009",
+        "rootId": "00000007-0000-7000-8000-000000000009",
+        "objectiveEvaluationId": "00000008-0000-7000-8000-000000000009",
+        "secondarySessionId": "00000009-0000-7000-8000-000000000009",
+        "secondaryNativeSessionId": "fixture-session-v9-secondary-native",
+        "secondaryRunId": "00000010-0000-7000-8000-000000000009",
+        "secondaryEventId": "00000011-0000-7000-8000-000000000009",
+        "secondarySourceEventId": "fixture-session-v9-secondary-event",
+        "comparisonId": "00000012-0000-7000-8000-000000000009"
+      }
+    },
+    {
+      "version": 10,
+      "file": "session-v10.sqlite",
+      "sourceCommit": "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+      "sha256": "cdcb1a87eeac8550281ab12825c2a297941c74b5574f25ba99793004d838a60d",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [
+        "Commit cf2b15f6c9b18a68aea8dc22f48fcb3177a81346 exposes RecordEffectComparison but no public comparison-ID input; after that public API persists the complete comparison graph, parameterized UPDATEs replace only its generated opaque comparison ID with the deterministic fixture sentinel so SHA-256 reproduction remains exact."
+      ],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000010",
+        "nativeSessionId": "fixture-session-v10-native",
+        "runId": "00000002-0000-7000-8000-000000000010",
+        "eventId": "00000003-0000-7000-8000-000000000010",
+        "sourceEventId": "fixture-session-v10-event",
+        "projectorKey": "fixture-session-v10-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000010",
+        "draftId": "00000005-0000-7000-8000-000000000010",
+        "applyId": "00000006-0000-7000-8000-000000000010",
+        "rootId": "00000007-0000-7000-8000-000000000010",
+        "objectiveEvaluationId": "00000008-0000-7000-8000-000000000010",
+        "secondarySessionId": "00000009-0000-7000-8000-000000000010",
+        "secondaryNativeSessionId": "fixture-session-v10-secondary-native",
+        "secondaryRunId": "00000010-0000-7000-8000-000000000010",
+        "secondaryEventId": "00000011-0000-7000-8000-000000000010",
+        "secondarySourceEventId": "fixture-session-v10-secondary-event",
+        "comparisonId": "00000012-0000-7000-8000-000000000010"
+      }
     }
   ]
 }
