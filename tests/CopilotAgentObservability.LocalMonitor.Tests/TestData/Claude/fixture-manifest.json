@@ -70,7 +70,7 @@
       "expected_empty_registry_state": "schema_drift_detected",
       "expected_source_adapter": "claude-code-otel",
       "provenance": "documentation_derived_conformance_fixture",
-      "sha256": "53e33786c9723f662df492467fc3fb2b2ebd1f1cc27ab05983c70e329b44977b"
+      "sha256": "1606e394ee0213e2a62ab668a5253adfcaac1741f933171020101d64238ed5eb"
     },
     {
       "path": "otel/content-enabled.json",
@@ -80,7 +80,7 @@
       "expected_empty_registry_state": "schema_drift_detected",
       "expected_source_adapter": "claude-code-otel",
       "provenance": "documentation_derived_conformance_fixture",
-      "sha256": "5d910f943495a3eb98c7ec4ba3eca8d674bfbb1c72740b26bcc2049b61665d5c"
+      "sha256": "2895d004d8f989fc1bf6aec415f5a5307a251e8a583d8fe09feda07923f12cc0"
     },
     {
       "path": "otel/unsupported-version.json",
@@ -92,7 +92,7 @@
       "provenance": "documentation_derived_conformance_fixture",
       "evidence_label": "same_schema_unverified_evidence",
       "version_policy": "version_not_receive_allowlist",
-      "sha256": "7fb9af4d966dabac36e97dd2b98e2da391c2a7d6ac769576d2da4d09340425bc"
+      "sha256": "718b59075472bf2e8be8f6a3df421d928ddc5b46e9e81a851bdfad3d5b1e5e91"
     },
     {
       "path": "otel/schema-drift.json",
@@ -103,7 +103,7 @@
       "expected_source_adapter": "claude-code-otel",
       "provenance": "documentation_derived_conformance_fixture",
       "drift_marker": "one synthetic unknown span attribute; all documented structure is unchanged",
-      "sha256": "d0dfa8a43b848344af783771db9496c699fbe2200d90a983626c1bce68c52fd0"
+      "sha256": "9b08a0ce541bdab30d218ab0864dc21bef856f3e1e0530bb0b9f5ec8593f9d65"
     },
     {
       "path": "otel/content-disabled.bin",
