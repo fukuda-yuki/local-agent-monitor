@@ -5,10 +5,17 @@ namespace CopilotAgentObservability.ConfigCli.Setup.Storage;
 
 public sealed class SetupLock : IDisposable
 {
+    private const int Held = 0;
+    private const int DisposeRequested = 1;
+    private const int Disposed = 2;
+
     private readonly ISetupExclusiveFileLock fileLock;
     private readonly ISetupPlatform platform;
     private readonly string runtimeRoot;
-    private int disposed;
+    private readonly object operationGate = new();
+    private int lifecycle = Held;
+    private int operationDepth;
+    private bool releaseOnOperationExit;
 
     private SetupLock(ISetupExclusiveFileLock fileLock, ISetupPlatform platform, string runtimeRoot)
     {
@@ -28,20 +35,77 @@ public sealed class SetupLock : IDisposable
 
     internal void AssertHeld(ISetupPlatform expectedPlatform, SetupRuntimePaths expectedPaths)
     {
-        if (Volatile.Read(ref disposed) != 0 ||
-            !ReferenceEquals(platform, expectedPlatform) ||
-            !string.Equals(runtimeRoot, expectedPaths.Root, StringComparison.Ordinal))
+        // Transitional only: Lock-B replaces caller-side checks with operation-scoped execution.
+        ExecuteWhileHeld(expectedPlatform, expectedPaths, static () => { });
+    }
+
+    internal void ExecuteWhileHeld(
+        ISetupPlatform expectedPlatform,
+        SetupRuntimePaths expectedPaths,
+        Action action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        ExecuteWhileHeld<object?>(expectedPlatform, expectedPaths, () =>
         {
-            throw new SetupStorageException(SetupStorageCodes.LockRequired);
+            action();
+            return null;
+        });
+    }
+
+    internal T ExecuteWhileHeld<T>(
+        ISetupPlatform expectedPlatform,
+        SetupRuntimePaths expectedPaths,
+        Func<T> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        lock (operationGate)
+        {
+            if (Volatile.Read(ref lifecycle) != Held ||
+                !ReferenceEquals(platform, expectedPlatform) ||
+                !string.Equals(runtimeRoot, expectedPaths.Root, StringComparison.Ordinal))
+            {
+                throw new SetupStorageException(SetupStorageCodes.LockRequired);
+            }
+
+            operationDepth++;
+            try
+            {
+                return action();
+            }
+            finally
+            {
+                operationDepth--;
+                if (operationDepth == 0 && releaseOnOperationExit)
+                {
+                    ReleaseUnderGate();
+                }
+            }
         }
     }
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref disposed, 1) == 0)
+        if (Interlocked.CompareExchange(ref lifecycle, DisposeRequested, Held) != Held)
         {
-            fileLock.Dispose();
+            return;
         }
+
+        if (Monitor.IsEntered(operationGate))
+        {
+            releaseOnOperationExit = true;
+            return;
+        }
+
+        lock (operationGate)
+        {
+            ReleaseUnderGate();
+        }
+    }
+
+    private void ReleaseUnderGate()
+    {
+        Volatile.Write(ref lifecycle, Disposed);
+        fileLock.Dispose();
     }
 }
 

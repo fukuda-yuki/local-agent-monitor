@@ -86,6 +86,189 @@ public sealed class SetupRuntimeTests
     }
 
     [Fact]
+    public async Task SetupLock_ExecuteWhileHeldSerializesCallbacksAndDisposeWaitsForTheActiveCallback()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        var acquired = SetupLock.TryAcquire(platform, paths);
+        var setupLock = Assert.IsType<SetupLock>(acquired.Lock);
+        using var callbackEntered = new ManualResetEventSlim();
+        using var releaseCallback = new ManualResetEventSlim();
+        using var secondAttempted = new ManualResetEventSlim();
+        using var secondCallbackEntered = new ManualResetEventSlim();
+        using var disposeStarted = new ManualResetEventSlim();
+
+        var first = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
+        {
+            callbackEntered.Set();
+            releaseCallback.Wait();
+        }));
+        callbackEntered.Wait();
+
+        var second = Task.Run(() =>
+        {
+            secondAttempted.Set();
+            setupLock.ExecuteWhileHeld(platform, paths, secondCallbackEntered.Set);
+        });
+        secondAttempted.Wait();
+        Assert.False(secondCallbackEntered.IsSet);
+        using var contended = SetupLock.TryAcquire(platform, paths);
+        Assert.False(contended.Acquired);
+        Assert.Equal(SetupCodes.SetupBusy, contended.Code);
+
+        releaseCallback.Set();
+        await first;
+        await second;
+        Assert.True(secondCallbackEntered.IsSet);
+
+        callbackEntered.Reset();
+        releaseCallback.Reset();
+        var third = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
+        {
+            callbackEntered.Set();
+            releaseCallback.Wait();
+        }));
+        callbackEntered.Wait();
+        var dispose = Task.Factory.StartNew(
+            () =>
+            {
+                disposeStarted.Set();
+                setupLock.Dispose();
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        disposeStarted.Wait();
+        Assert.False(dispose.IsCompleted);
+
+        releaseCallback.Set();
+        await third;
+        await dispose;
+        AssertLockRequired(() => setupLock.ExecuteWhileHeld(platform, paths, () => { }));
+        using var reacquired = SetupLock.TryAcquire(platform, paths);
+        Assert.True(reacquired.Acquired);
+    }
+
+    [Fact]
+    public void SetupLock_ExecuteWhileHeldAllowsNestedCallbacksOnTheSameThread()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        using var acquired = SetupLock.TryAcquire(platform, paths);
+        var setupLock = Assert.IsType<SetupLock>(acquired.Lock);
+
+        var actual = setupLock.ExecuteWhileHeld(
+            platform,
+            paths,
+            () => setupLock.ExecuteWhileHeld(platform, paths, () => 42));
+
+        Assert.Equal(42, actual);
+    }
+
+    [Fact]
+    public void SetupLock_ReentrantDisposeDefersReleaseAndRejectsNestedExecute()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        var acquired = SetupLock.TryAcquire(platform, paths);
+        var setupLock = Assert.IsType<SetupLock>(acquired.Lock);
+
+        setupLock.ExecuteWhileHeld(platform, paths, () =>
+        {
+            setupLock.Dispose();
+            using var contended = SetupLock.TryAcquire(platform, paths);
+            Assert.False(contended.Acquired);
+            var rejected = Assert.Throws<SetupStorageException>(
+                () => setupLock.ExecuteWhileHeld(platform, paths, () => { }));
+            Assert.Equal(SetupStorageCodes.LockRequired, rejected.Code);
+        });
+
+        using var reacquired = SetupLock.TryAcquire(platform, paths);
+        Assert.True(reacquired.Acquired);
+    }
+
+    [Fact]
+    public void SetupLock_CallbackExceptionUnwindsWithoutReleasingAnOtherwiseHeldLock()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        using var acquired = SetupLock.TryAcquire(platform, paths);
+        var setupLock = Assert.IsType<SetupLock>(acquired.Lock);
+        var expected = new InvalidOperationException("synthetic callback failure");
+
+        var actual = Assert.Throws<InvalidOperationException>(
+            () => setupLock.ExecuteWhileHeld(platform, paths, () => throw expected));
+
+        Assert.Same(expected, actual);
+        Assert.Equal(7, setupLock.ExecuteWhileHeld(platform, paths, () => 7));
+        using var contended = SetupLock.TryAcquire(platform, paths);
+        Assert.False(contended.Acquired);
+    }
+
+    [Fact]
+    public void SetupLock_ReentrantDisposeWithCallbackExceptionStillReleasesAfterUnwind()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        var acquired = SetupLock.TryAcquire(platform, paths);
+        var setupLock = Assert.IsType<SetupLock>(acquired.Lock);
+        var expected = new InvalidOperationException("synthetic callback failure");
+
+        var actual = Assert.Throws<InvalidOperationException>(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
+        {
+            setupLock.Dispose();
+            throw expected;
+        }));
+
+        Assert.Same(expected, actual);
+        using var reacquired = SetupLock.TryAcquire(platform, paths);
+        Assert.True(reacquired.Acquired);
+    }
+
+    [Fact]
+    public void SetupLock_ExecuteWhileHeldRequiresTheAcquiringPlatformRootAndHeldLifecycle()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        var acquired = SetupLock.TryAcquire(platform, paths);
+        var setupLock = Assert.IsType<SetupLock>(acquired.Lock);
+        var otherPlatform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var otherRootPlatform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\other");
+
+        Assert.Equal(1, setupLock.ExecuteWhileHeld(platform, paths, () => 1));
+        AssertLockRequired(() => setupLock.ExecuteWhileHeld(otherPlatform, new SetupRuntimePaths(otherPlatform), () => { }));
+        AssertLockRequired(() => setupLock.ExecuteWhileHeld(platform, new SetupRuntimePaths(otherRootPlatform), () => { }));
+        setupLock.Dispose();
+        AssertLockRequired(() => setupLock.ExecuteWhileHeld(platform, paths, () => { }));
+    }
+
+    [Fact]
+    public async Task SetupLock_PublicObjectMonitorDoesNotGateThePrivateOperationLease()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        using var acquired = SetupLock.TryAcquire(platform, paths);
+        var setupLock = Assert.IsType<SetupLock>(acquired.Lock);
+        using var publicMonitorEntered = new ManualResetEventSlim();
+        using var releasePublicMonitor = new ManualResetEventSlim();
+        var monitorHolder = Task.Run(() =>
+        {
+            lock (setupLock)
+            {
+                publicMonitorEntered.Set();
+                releasePublicMonitor.Wait();
+            }
+        });
+        publicMonitorEntered.Wait();
+
+        var operation = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () => 11));
+        Assert.Equal(11, await operation);
+
+        releasePublicMonitor.Set();
+        await monitorHolder;
+    }
+
+    [Fact]
     public void SetupLock_PropagatesFakeNonContentionLockFailures()
     {
         var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
@@ -168,9 +351,78 @@ public sealed class SetupRuntimeTests
         }
     }
 
+    [Fact]
+    public async Task SetupLock_ReentrantDisposeKeepsTheSystemLockBusyUntilTheCallbackExits()
+    {
+        var temporaryRoot = Path.Combine(Path.GetTempPath(), $"cao-setup-runtime-{Guid.NewGuid():N}");
+        var platform = new SystemSetupPlatform(localApplicationData: temporaryRoot);
+        var paths = new SetupRuntimePaths(platform);
+        var acquired = SetupLock.TryAcquire(platform, paths);
+        var setupLock = Assert.IsType<SetupLock>(acquired.Lock);
+        Process? child = null;
+        try
+        {
+            setupLock.ExecuteWhileHeld(platform, paths, () =>
+            {
+                setupLock.Dispose();
+                child = StartTwoAttemptLockPowerShell(paths.Lock);
+                var first = child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+                Assert.Equal("BUSY", first);
+            });
+
+            Assert.NotNull(child);
+            await child.StandardInput.WriteLineAsync();
+            child.StandardInput.Close();
+            var second = await child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal("ACQUIRED", second);
+            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(0, child.ExitCode);
+        }
+        finally
+        {
+            if (child is not null && !child.HasExited)
+            {
+                child.Kill(entireProcessTree: true);
+                await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            }
+
+            child?.Dispose();
+            acquired.Dispose();
+            if (Directory.Exists(temporaryRoot))
+            {
+                Directory.Delete(temporaryRoot, recursive: true);
+            }
+        }
+    }
+
+    private static void AssertLockRequired(Action action)
+    {
+        var exception = Assert.Throws<SetupStorageException>(action);
+        Assert.Equal(SetupStorageCodes.LockRequired, exception.Code);
+    }
+
     private static Process StartLockHoldingPowerShell(string lockPath)
     {
         const string command = "${stream} = [System.IO.File]::Open($env:CAO_SETUP_LOCK_TEST_PATH, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); try { [Console]::Out.WriteLine('READY'); [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null } finally { ${stream}.Dispose() }";
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "pwsh",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.Environment["CAO_SETUP_LOCK_TEST_PATH"] = lockPath;
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-Command");
+        startInfo.ArgumentList.Add(command);
+
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start pwsh.");
+    }
+
+    private static Process StartTwoAttemptLockPowerShell(string lockPath)
+    {
+        const string command = "$p=$env:CAO_SETUP_LOCK_TEST_PATH; function Try-Lock { try { return [System.IO.File]::Open($p,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None) } catch [System.IO.IOException] { return $null } }; $first=Try-Lock; if ($null -eq $first) { [Console]::Out.WriteLine('BUSY') } else { $first.Dispose(); [Console]::Out.WriteLine('UNEXPECTED_ACQUIRED') }; [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null; $second=Try-Lock; if ($null -eq $second) { [Console]::Out.WriteLine('UNEXPECTED_BUSY'); exit 2 }; try { [Console]::Out.WriteLine('ACQUIRED'); [Console]::Out.Flush() } finally { $second.Dispose() }";
         var startInfo = new ProcessStartInfo
         {
             FileName = "pwsh",
