@@ -76,12 +76,12 @@ internal static class MonitorHost
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(health);
 
+        var compatibilityStore = testOptions?.SourceCompatibilityStore
+            ?? new SqliteSourceCompatibilityStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         if (testOptions?.StartWriter ?? true)
         {
             var commitStore = testOptions?.IngestionCommitStore
                 ?? new SqliteIngestionCommitStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
-            var compatibilityStore = testOptions?.SourceCompatibilityStore
-                ?? new SqliteSourceCompatibilityStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
             var worker = new IngestionWriterWorker(queue, commitStore, compatibilityStore, health);
             builder.Services.AddHostedService(_ => worker);
         }
@@ -121,7 +121,12 @@ internal static class MonitorHost
         {
             // Registered after the ingestion writer so its synchronous migration
             // runs first; the projection worker also guards on migration_complete.
-            var projectionWorker = new ProjectionWorker(projectionStore, health, eventBroker: eventBroker, pollInterval: testOptions?.ProjectionPollInterval);
+            var projectionWorker = new ProjectionWorker(
+                projectionStore,
+                health,
+                compatibilityStore,
+                eventBroker: eventBroker,
+                pollInterval: testOptions?.ProjectionPollInterval);
             builder.Services.AddHostedService(_ => projectionWorker);
         }
         if (testOptions?.StartSessionOtelEnrichment ?? true)
@@ -805,7 +810,11 @@ internal static class MonitorHost
             {
                 var observedAt = timeProvider.GetUtcNow();
                 var decodedPayload = OtlpTracePayloadDecoder.DecodeTracePayload(context.Request.ContentType, body);
-                var record = RawOtlpIngestor.CreateRecordFromPayloadJson(decodedPayload.PayloadJson, observedAt);
+                var recognizedPayloadJson = OtlpJsonRecognizedPayloadBuilder.Build(decodedPayload.PayloadJson);
+                var record = RawOtlpIngestor.CreateRecordFromPayloadJson(
+                    decodedPayload.PayloadJson,
+                    recognizedPayloadJson,
+                    observedAt);
                 metadata = sourceMetadataProvider.GetMetadata();
                 var decision = SourceCompatibilityEvaluator.Assess(
                     metadata.SourceSurface,

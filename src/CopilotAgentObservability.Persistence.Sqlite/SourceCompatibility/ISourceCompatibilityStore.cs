@@ -6,5 +6,7 @@ internal interface ISourceCompatibilityStore
 
     long RecordAdapterFailure(SourceAdapterFailureDraft failure);
 
+    SourceCompatibilityRow? GetByRawRecordId(long rawRecordId);
+
     IReadOnlyList<SourceCompatibilityRow> List(long? after, int limit);
 }

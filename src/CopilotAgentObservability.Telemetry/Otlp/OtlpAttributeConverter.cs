@@ -7,7 +7,8 @@ internal static class OtlpAttributeConverter
         var attributesObject = new JsonObject();
         foreach (var attribute in attributes.EnumerateArray())
         {
-            if (!attribute.TryGetProperty("key", out var keyElement)
+            if (attribute.ValueKind != JsonValueKind.Object
+                || !attribute.TryGetProperty("key", out var keyElement)
                 || keyElement.ValueKind != JsonValueKind.String
                 || !attribute.TryGetProperty("value", out var valueElement))
             {
@@ -28,9 +29,16 @@ internal static class OtlpAttributeConverter
 
     private static JsonNode? ConvertAttributeValue(JsonElement valueElement)
     {
+        if (valueElement.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
         if (valueElement.TryGetProperty("stringValue", out var stringValue))
         {
-            return JsonValue.Create(stringValue.GetString());
+            return stringValue.ValueKind == JsonValueKind.String
+                ? JsonValue.Create(stringValue.GetString())
+                : null;
         }
 
         if (valueElement.TryGetProperty("intValue", out var intValue))
@@ -39,7 +47,7 @@ internal static class OtlpAttributeConverter
             {
                 JsonValueKind.String when long.TryParse(intValue.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) => JsonValue.Create(parsed),
                 JsonValueKind.Number when intValue.TryGetInt64(out var parsed) => JsonValue.Create(parsed),
-                _ => JsonNode.Parse(intValue.GetRawText()),
+                _ => null,
             };
         }
 
@@ -49,7 +57,7 @@ internal static class OtlpAttributeConverter
             {
                 JsonValueKind.String when double.TryParse(doubleValue.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) => JsonValue.Create(parsed),
                 JsonValueKind.Number when doubleValue.TryGetDouble(out var parsed) => JsonValue.Create(parsed),
-                _ => JsonNode.Parse(doubleValue.GetRawText()),
+                _ => null,
             };
         }
 
@@ -57,27 +65,31 @@ internal static class OtlpAttributeConverter
         {
             return boolValue.ValueKind == JsonValueKind.True || boolValue.ValueKind == JsonValueKind.False
                 ? JsonValue.Create(boolValue.GetBoolean())
-                : JsonNode.Parse(boolValue.GetRawText());
+                : null;
         }
 
         if (valueElement.TryGetProperty("arrayValue", out var arrayValue))
         {
-            return ConvertArrayValue(arrayValue);
+            return arrayValue.ValueKind == JsonValueKind.Object
+                ? ConvertArrayValue(arrayValue)
+                : null;
         }
 
         if (valueElement.TryGetProperty("kvlistValue", out var kvlistValue))
         {
-            return ConvertKeyValueList(kvlistValue);
+            return kvlistValue.ValueKind == JsonValueKind.Object
+                ? ConvertKeyValueList(kvlistValue)
+                : null;
         }
 
         if (valueElement.TryGetProperty("bytesValue", out var bytesValue))
         {
             return bytesValue.ValueKind == JsonValueKind.String
                 ? JsonValue.Create(bytesValue.GetString())
-                : JsonNode.Parse(bytesValue.GetRawText());
+                : null;
         }
 
-        return JsonNode.Parse(valueElement.GetRawText());
+        return null;
     }
 
     private static JsonArray ConvertArrayValue(JsonElement arrayValue)

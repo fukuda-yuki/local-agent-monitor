@@ -250,6 +250,27 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
             ListUnknowns(connection, parent.Id))).ToArray();
     }
 
+    public SourceCompatibilityRow? GetByRawRecordId(long rawRecordId)
+    {
+        if (rawRecordId < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(rawRecordId));
+        }
+
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT id FROM source_schema_observations WHERE raw_record_id = $raw_record_id;";
+        command.Parameters.AddWithValue("$raw_record_id", rawRecordId);
+        var result = command.ExecuteScalar();
+        if (result is not long observationId)
+        {
+            return null;
+        }
+
+        return List(observationId - 1, 1).Single();
+    }
+
     internal static long InsertBatch(
         SqliteConnection connection,
         SqliteTransaction transaction,

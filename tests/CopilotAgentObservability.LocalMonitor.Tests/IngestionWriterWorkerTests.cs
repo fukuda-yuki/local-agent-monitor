@@ -302,6 +302,8 @@ public class IngestionWriterWorkerTests
 
         public long RecordAdapterFailure(SourceAdapterFailureDraft failure) => 1;
 
+        public SourceCompatibilityRow? GetByRawRecordId(long rawRecordId) => null;
+
         public IReadOnlyList<SourceCompatibilityRow> List(long? after, int limit) => [];
     }
 
@@ -318,6 +320,8 @@ public class IngestionWriterWorkerTests
             Failures.Add(failure);
             return 73;
         }
+
+        public SourceCompatibilityRow? GetByRawRecordId(long rawRecordId) => null;
 
         public IReadOnlyList<SourceCompatibilityRow> List(long? after, int limit) => [];
     }

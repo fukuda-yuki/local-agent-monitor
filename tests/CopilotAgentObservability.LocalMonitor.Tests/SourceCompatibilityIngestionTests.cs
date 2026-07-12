@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.Health;
+using CopilotAgentObservability.LocalMonitor.Projection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -27,7 +29,8 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.True(observationId > 0);
 
         var raw = Assert.Single(new RawTelemetryStore(temp.DatabasePath).ListRecords());
-        var observation = Assert.Single(new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
+        var compatibilityStore = new SqliteSourceCompatibilityStore(temp.DatabasePath);
+        var observation = Assert.Single(compatibilityStore.List(after: null, limit: 200));
         Assert.Equal(rawRecordId, raw.Id);
         Assert.Equal(observationId, observation.Id);
         Assert.Equal(rawRecordId, observation.RawRecordId);
@@ -36,6 +39,10 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.Equal("raw-otlp", observation.SourceAdapter);
         Assert.Equal("1", observation.AdapterVersion);
         Assert.Equal(SourceCompatibilityState.SchemaDriftDetected, observation.CompatibilityState);
+        var lookedUpObservation = Assert.IsType<SourceCompatibilityRow>(compatibilityStore.GetByRawRecordId(rawRecordId));
+        Assert.Equal(observation.Id, lookedUpObservation.Id);
+        Assert.Equal(observation.CompatibilityState, lookedUpObservation.CompatibilityState);
+        Assert.Null(compatibilityStore.GetByRawRecordId(rawRecordId + 1));
     }
 
     [Fact]
@@ -76,6 +83,47 @@ public sealed class SourceCompatibilityIngestionTests
     }
 
     [Fact]
+    public async Task PostTraces_UnknownProtobufFieldDoesNotPoisonRecognizedProjection()
+    {
+        const string marker = "unknown-protobuf-value-marker";
+        var payload = OtlpProtobufTestPayload.Message(
+            OtlpProtobufTestPayload.VscodeCopilotChatTraceRequest(),
+            OtlpProtobufTestPayload.StringField(100, marker));
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+        });
+        using var content = new ByteArrayContent(payload);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/x-protobuf");
+
+        var response = await host.Client.PostAsync("/v1/traces", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var rawStore = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var raw = Assert.Single(rawStore.ListRecords());
+        Assert.DoesNotContain(marker, raw.PayloadJson, StringComparison.Ordinal);
+        var observation = Assert.Single(
+            new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
+        Assert.True(observation.UnknownAttributeCount > 0);
+
+        var projectionStore = new RawTelemetryStoreProjectionStore(rawStore);
+        var health = new MonitorHealthState();
+        health.MarkMigrationComplete();
+        var worker = new ProjectionWorker(
+            projectionStore,
+            health,
+            new SqliteSourceCompatibilityStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
+
+        await worker.RunProjectionPassAsync();
+
+        Assert.Single(projectionStore.GetSpansForTrace("11111111111111111111111111111111"));
+        Assert.Equal(0, projectionStore.GetProjectionStatus().Backlog);
+        Assert.Equal(0, projectionStore.GetSpanProjectionStatus().Backlog);
+    }
+
+    [Fact]
     public async Task PostTraces_NewFingerprintIsCommittedAsDrift()
     {
         var known = OtlpTracePayloadDecoder.DecodeTracePayload(
@@ -100,6 +148,97 @@ public sealed class SourceCompatibilityIngestionTests
         var observation = Assert.Single(new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
         Assert.Equal(SourceCompatibilityState.SchemaDriftDetected, observation.CompatibilityState);
         Assert.Equal([SourceCompatibilityReasonCodes.SchemaDriftDetected], observation.ReasonCodes);
+    }
+
+    [Fact]
+    public async Task PostTraces_RecognitionProfileDeficitIsPersistedAsRecognizedRecordDrop()
+    {
+        const string sourceVersion = "fixture-v1";
+        var inventory = OtlpTracePayloadDecoder.DecodeTracePayload(
+            "application/json", Encoding.UTF8.GetBytes(EquivalentJson())).StructuralInventory;
+        var registry = VerifiedSourceFingerprintRegistry.Create(
+            [VerifiedSourceFingerprintEvidence.Create("raw-otlp", sourceVersion, inventory.SchemaFingerprint)],
+            [],
+            [SourceRecognitionProfileEvidence.Create(
+                "raw-otlp",
+                sourceVersion,
+                inventory.SchemaFingerprint,
+                SourceOccurrenceCount.Create(2))]);
+        var metadata = OtlpTraceSourceMetadata.Create(
+            "raw-otlp",
+            sourceVersion,
+            "raw-otlp",
+            "1",
+            SourceCaptureContentState.NotCaptured);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+            SourceFingerprintRegistry = registry,
+            SourceMetadataProvider = new FixedOtlpTraceSourceMetadataProvider(metadata),
+        });
+
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(EquivalentJson()));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var observation = Assert.Single(new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
+        Assert.Equal(SourceCompatibilityState.RecognizedRecordDropDetected, observation.CompatibilityState);
+        Assert.Equal([SourceCompatibilityReasonCodes.RecognizedRecordDropDetected], observation.ReasonCodes);
+    }
+
+    [Fact]
+    public async Task Projection_WrongRepresentationsStayRawOnlyAndBatchCompletes()
+    {
+        const string marker = "wrong-representation-raw-marker";
+        var payload = """
+        {
+          "resourceSpans": [{
+            "scopeSpans": [{
+              "spans": [{
+                "traceId":"11111111111111111111111111111111",
+                "spanId":{"marker":"wrong-representation-raw-marker"},
+                "parentSpanId":["wrong-representation-raw-marker"],
+                "attributes":[{
+                  "key":"gen_ai.request.model",
+                  "value":{"stringValue":{"marker":"wrong-representation-raw-marker"}}
+                }]
+              },{
+                "traceId":{"marker":"wrong-representation-raw-marker"},
+                "spanId":"valid-shape-id",
+                "attributes":[]
+              }]
+            }]
+          }]
+        }
+        """;
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+        });
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var rawStore = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var projectionStore = new RawTelemetryStoreProjectionStore(rawStore);
+        var health = new MonitorHealthState();
+        health.MarkMigrationComplete();
+        var worker = new ProjectionWorker(
+            projectionStore,
+            health,
+            new SqliteSourceCompatibilityStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
+
+        await worker.RunProjectionPassAsync();
+
+        var span = Assert.Single(projectionStore.GetSpansForTrace("11111111111111111111111111111111"));
+        Assert.Null(span.SpanId);
+        Assert.Null(span.ParentSpanId);
+        Assert.Null(span.RequestModel);
+        Assert.Single(projectionStore.ListMonitorSpans("11111111111111111111111111111111", 0, 200).Items);
+        Assert.Equal(0, projectionStore.GetProjectionStatus().Backlog);
+        Assert.Equal(0, projectionStore.GetSpanProjectionStatus().Backlog);
+        Assert.Contains(marker, Assert.Single(rawStore.ListRecords()).PayloadJson, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -155,6 +294,61 @@ public sealed class SourceCompatibilityIngestionTests
     }
 
     [Fact]
+    public async Task PostTraces_WrongHierarchyCommitsOriginalRawAndUnsupportedObservation()
+    {
+        const string marker = "wrong-hierarchy-raw-only-marker";
+        var payload = $$"""
+        {
+          "resourceSpans": {
+            "marker": "{{marker}}",
+            "scopeSpans": [{"spans": [{"traceId":"must-not-project"}]}]
+          }
+        }
+        """;
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+        });
+
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var raw = Assert.Single(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        Assert.Equal(payload, raw.PayloadJson);
+        Assert.Contains(marker, raw.PayloadJson, StringComparison.Ordinal);
+        Assert.Null(raw.TraceId);
+        Assert.Null(raw.ResourceAttributesJson);
+        var observation = Assert.Single(
+            new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
+        Assert.Equal(raw.Id, observation.RawRecordId);
+        Assert.Equal(SourceCompatibilityState.UnsupportedSourceVersion, observation.CompatibilityState);
+        Assert.Equal([SourceCompatibilityReasonCodes.UnsupportedSourceVersion], observation.ReasonCodes);
+    }
+
+    [Fact]
+    public async Task PostTraces_NonObjectRootRecordsParseFailureWithoutRaw()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+        });
+
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent("[]"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Empty(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        var failure = Assert.Single(
+            new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
+        Assert.Null(failure.RawRecordId);
+        Assert.Equal(SourceCompatibilityState.AdapterFailure, failure.CompatibilityState);
+        Assert.Equal([SourceCompatibilityReasonCodes.AdapterParseFailure], failure.ReasonCodes);
+    }
+
+    [Fact]
     public async Task PostTraces_ParseFailureRecordsSanitizedNullableDiagnosticWithoutRaw()
     {
         const string marker = "RAW_PARSE_FAILURE_MARKER_7cefb";
@@ -184,6 +378,40 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.Null(failure.SchemaFingerprint);
         Assert.Null(failure.InventoryHash);
         Assert.Null(failure.CaptureContentState);
+        Assert.Equal(SourceCompatibilityState.AdapterFailure, failure.CompatibilityState);
+        Assert.Equal([SourceCompatibilityReasonCodes.AdapterParseFailure], failure.ReasonCodes);
+        Assert.DoesNotContain(marker, Encoding.UTF8.GetString(File.ReadAllBytes(temp.DatabasePath)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PostTraces_MalformedProtobufRecordsSanitizedParseFailureWithoutRaw()
+    {
+        const string marker = "MALFORMED_PROTOBUF_EXCEPTION_BYTES_9fd31";
+        var payload = OtlpProtobufTestPayload.Message(
+            OtlpProtobufTestPayload.StringField(100, marker),
+            [0x0a, 0x80]);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+        });
+        using var content = new ByteArrayContent(payload);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/x-protobuf");
+
+        var response = await host.Client.PostAsync("/v1/traces", content);
+
+        var responseBody = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("invalid_payload", responseBody);
+        Assert.DoesNotContain(marker, responseBody, StringComparison.Ordinal);
+        Assert.Empty(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        var failure = Assert.Single(
+            new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
+        Assert.Null(failure.RawRecordId);
+        Assert.Null(failure.IngestBatchId);
+        Assert.Null(failure.SchemaFingerprint);
+        Assert.Null(failure.InventoryHash);
         Assert.Equal(SourceCompatibilityState.AdapterFailure, failure.CompatibilityState);
         Assert.Equal([SourceCompatibilityReasonCodes.AdapterParseFailure], failure.ReasonCodes);
         Assert.DoesNotContain(marker, Encoding.UTF8.GetString(File.ReadAllBytes(temp.DatabasePath)), StringComparison.Ordinal);
