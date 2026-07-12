@@ -256,6 +256,33 @@ public sealed class SetupRuntimeTests
     }
 
     [Fact]
+    public void SetupLock_NestedReentrantDisposeSurfacesTheReleaseExceptionAtTheOutermostSuccessfulExit()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
+        var paths = new SetupRuntimePaths(platform);
+        var releaseFailure = new IOException("synthetic handle release failure");
+        var handle = new CountingSetupExclusiveFileLock(releaseFailure);
+        var setupLock = SetupLock.CreateForTesting(handle, platform, paths);
+        var outerContinued = false;
+
+        var actual = Assert.Throws<IOException>(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
+        {
+            setupLock.ExecuteWhileHeld(platform, paths, () =>
+            {
+                setupLock.Dispose();
+                Assert.Equal(0, handle.DisposeCount);
+            });
+            outerContinued = true;
+        }));
+        setupLock.Dispose();
+
+        Assert.Same(releaseFailure, actual);
+        Assert.True(outerContinued);
+        Assert.Equal(1, handle.DisposeCount);
+        AssertLockRequired(() => setupLock.ExecuteWhileHeld(platform, paths, () => { }));
+    }
+
+    [Fact]
     public void SetupLock_CallbackExceptionTakesPrecedenceOverADeferredHandleReleaseException()
     {
         var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch, "C:\\runtime\\local-app-data");
