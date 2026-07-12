@@ -318,7 +318,7 @@ public sealed class SourceCapabilityContractTests
     {
         var path = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", relativePath.Replace('/', Path.DirectorySeparatorChar));
         Assert.True(File.Exists(path), $"Missing canonical Issue #61 document: {relativePath}");
-        return File.ReadAllText(path);
+        return File.ReadAllText(path).ReplaceLineEndings("\n");
     }
 
     private static string GetMarkdownSection(string document, string heading, string? endHeading)
