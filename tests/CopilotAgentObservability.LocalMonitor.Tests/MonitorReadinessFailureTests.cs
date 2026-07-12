@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
+using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -20,7 +21,7 @@ public class MonitorReadinessFailureTests
         var time = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
         var health = MonitorTestHealth.Ready(time);
         var queue = new IngestionQueue(capacity: 1);
-        Assert.True(queue.TryEnqueue(SyntheticRecord(), out _));
+        Assert.True(queue.TryEnqueue(SyntheticBatch(), out _));
         await using var host = await StartHostAsync(temp, health, queue: queue, ingestionStallThresholdSeconds: 2);
 
         var failedPost = await host.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
@@ -154,14 +155,25 @@ public class MonitorReadinessFailureTests
             projectionLagThresholdSeconds: projectionLagThresholdSeconds);
     }
 
-    private static RawTelemetryRecord SyntheticRecord() =>
-        new(
+    private static ValidatedIngestionBatch SyntheticBatch()
+    {
+        var record = new RawTelemetryRecord(
             Id: null,
             Source: RawTelemetrySources.RawOtlp,
             TraceId: "trace",
             ReceivedAt: DateTimeOffset.UnixEpoch,
             ResourceAttributesJson: null,
             PayloadJson: "{}");
+        var inventory = OtlpJsonStructuralWalker.Build(
+            """{"resourceSpans":[{"scopeSpans":[{"spans":[{}]}]}]}""",
+            DateTimeOffset.UnixEpoch);
+        var observation = SourceObservationBatchDraft.Create(
+            "batch-trace", "raw-otlp", null, "raw-otlp", "1", inventory,
+            SourceCompatibilityEvaluator.Assess(
+                "raw-otlp", null, inventory, 1, VerifiedSourceFingerprintRegistry.Create([], [], [])),
+            SourceCaptureContentState.Unsupported, DateTimeOffset.UnixEpoch);
+        return ValidatedIngestionBatch.Create(record, observation);
+    }
 
     private static StringContent JsonContent(string json) => new(json, Encoding.UTF8, "application/json");
 

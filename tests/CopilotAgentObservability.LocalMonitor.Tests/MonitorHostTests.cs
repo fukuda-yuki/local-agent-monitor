@@ -6,6 +6,7 @@ using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
+using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
@@ -221,12 +222,12 @@ public class MonitorHostTests
     }
 
     [Fact]
-    public async Task PostTraces_InvalidPayloadReturns400AndHostKeepsServing()
+    public async Task PostTraces_MalformedPayloadReturns400AndHostKeepsServing()
     {
         using var tempDirectory = new MonitorTempDirectory();
         await using var host = await StartHostAsync(tempDirectory);
 
-        var invalid = await host.Client.PostAsync("/v1/traces", JsonContent("""{"resourceSpans":[]}"""));
+        var invalid = await host.Client.PostAsync("/v1/traces", JsonContent("""{"resourceSpans":["""));
         var valid = await host.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
 
         Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
@@ -358,10 +359,10 @@ public class MonitorHostTests
     public async Task PostTraces_ResponseIsWithheldUntilCommitAck()
     {
         using var tempDirectory = new MonitorTempDirectory();
-        var writer = new GatedRawWriter();
+        var writer = new GatedCommitStore();
         await using var host = await StartHostAsync(
             tempDirectory,
-            testOptions: new MonitorHostTestOptions { Writer = writer });
+            testOptions: new MonitorHostTestOptions { IngestionCommitStore = writer });
 
         var postTask = host.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
         await writer.Entered;
@@ -380,7 +381,7 @@ public class MonitorHostTests
     {
         using var tempDirectory = new MonitorTempDirectory();
         var queue = new IngestionQueue(capacity: 1);
-        Assert.True(queue.TryEnqueue(SyntheticRecord(), out _));
+        Assert.True(queue.TryEnqueue(SyntheticBatch(), out _));
         await using var host = await StartHostAsync(
             tempDirectory,
             testOptions: new MonitorHostTestOptions { Queue = queue, StartWriter = false });
@@ -454,7 +455,7 @@ public class MonitorHostTests
         using var tempDirectory = new MonitorTempDirectory();
         await using var host = await StartHostAsync(
             tempDirectory,
-            testOptions: new MonitorHostTestOptions { Writer = new ThrowingRawWriter(busy: true) });
+            testOptions: new MonitorHostTestOptions { IngestionCommitStore = new ThrowingCommitStore(busy: true) });
 
         var response = await host.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
 
@@ -468,7 +469,7 @@ public class MonitorHostTests
         using var tempDirectory = new MonitorTempDirectory();
         await using var host = await StartHostAsync(
             tempDirectory,
-            testOptions: new MonitorHostTestOptions { Writer = new ThrowingRawWriter(busy: false) });
+            testOptions: new MonitorHostTestOptions { IngestionCommitStore = new ThrowingCommitStore(busy: false) });
 
         var response = await host.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
 
@@ -517,7 +518,7 @@ public class MonitorHostTests
         using var tempDirectory = new MonitorTempDirectory();
         await using var host = await StartHostAsync(
             tempDirectory,
-            testOptions: new MonitorHostTestOptions { Writer = new ThrowingRawWriter(busy: false) });
+            testOptions: new MonitorHostTestOptions { IngestionCommitStore = new ThrowingCommitStore(busy: false) });
 
         var failed = await host.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
         var body = await failed.Content.ReadAsStringAsync();
@@ -646,14 +647,25 @@ public class MonitorHostTests
             testOptions: testOptions);
     }
 
-    private static RawTelemetryRecord SyntheticRecord() =>
-        new(
+    private static ValidatedIngestionBatch SyntheticBatch()
+    {
+        var record = new RawTelemetryRecord(
             Id: null,
             Source: RawTelemetrySources.RawOtlp,
             TraceId: "trace",
             ReceivedAt: DateTimeOffset.UnixEpoch,
             ResourceAttributesJson: null,
             PayloadJson: "{}");
+        var inventory = OtlpJsonStructuralWalker.Build(
+            """{"resourceSpans":[{"scopeSpans":[{"spans":[{}]}]}]}""",
+            DateTimeOffset.UnixEpoch);
+        var observation = SourceObservationBatchDraft.Create(
+            "batch-trace", "raw-otlp", null, "raw-otlp", "1", inventory,
+            SourceCompatibilityEvaluator.Assess(
+                "raw-otlp", null, inventory, 1, VerifiedSourceFingerprintRegistry.Create([], [], [])),
+            SourceCaptureContentState.Unsupported, DateTimeOffset.UnixEpoch);
+        return ValidatedIngestionBatch.Create(record, observation);
+    }
 
     private static StringContent JsonContent(string json)
     {
@@ -693,31 +705,27 @@ public class MonitorHostTests
         command.ExecuteNonQuery();
     }
 
-    private sealed class ThrowingRawWriter : IRawTelemetryWriter
+    private sealed class ThrowingCommitStore : IIngestionCommitStore
     {
         private readonly bool busy;
 
-        public ThrowingRawWriter(bool busy)
+        public ThrowingCommitStore(bool busy)
         {
             this.busy = busy;
         }
 
-        public void EnsureSchema()
-        {
-        }
-
-        public long Insert(RawTelemetryRecord record)
+        public CommittedIngestionIds Commit(ValidatedIngestionBatch batch)
         {
             if (busy)
             {
-                throw new PersistenceBusyException();
+                throw new IngestionCommitBusyException();
             }
 
-            throw new PersistenceFailedException();
+            throw new IngestionCommitFailedException();
         }
     }
 
-    private sealed class GatedRawWriter : IRawTelemetryWriter
+    private sealed class GatedCommitStore : IIngestionCommitStore
     {
         private readonly TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly ManualResetEventSlim gate = new(initialState: false);
@@ -727,15 +735,12 @@ public class MonitorHostTests
 
         public void Release() => gate.Set();
 
-        public void EnsureSchema()
-        {
-        }
-
-        public long Insert(RawTelemetryRecord record)
+        public CommittedIngestionIds Commit(ValidatedIngestionBatch batch)
         {
             entered.TrySetResult();
             gate.Wait();
-            return Interlocked.Increment(ref nextId);
+            var rawRecordId = Interlocked.Increment(ref nextId);
+            return new CommittedIngestionIds(rawRecordId, rawRecordId + 100);
         }
     }
 }

@@ -1,3 +1,5 @@
+using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
+
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
@@ -110,39 +112,46 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
     public long RecordAdapterFailure(SourceAdapterFailureDraft failure)
     {
         ArgumentNullException.ThrowIfNull(failure);
-        using var connection = OpenConnection();
-        using var transaction = connection.BeginTransaction();
-        var existing = FindObservationId(connection, transaction, failure.ObservationId);
-        if (existing is not null)
+        try
         {
-            transaction.Commit();
-            return existing.Value;
-        }
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction();
+            var existing = FindObservationId(connection, transaction, failure.ObservationId);
+            if (existing is not null)
+            {
+                transaction.Commit();
+                return existing.Value;
+            }
 
-        var id = InsertParent(
-            connection,
-            transaction,
-            failure.ObservationId,
-            rawRecordId: null,
-            failure.IngestBatchId,
-            failure.SourceSurface,
-            failure.SourceApplicationVersion,
-            failure.SourceAdapter,
-            failure.AdapterVersion,
-            schemaFingerprint: null,
-            inventoryHash: null,
-            failure.CompatibilityState,
-            failure.ReasonCodes,
-            failure.NextAction,
-            failure.CaptureContentState,
-            unknownSpanCount: 0,
-            unknownEventCount: 0,
-            unknownAttributeCount: 0,
-            overflowDistinctCount: 0,
-            overflowOccurrenceCount: 0,
-            failure.ObservedAt);
-        transaction.Commit();
-        return id;
+            var id = InsertParent(
+                connection,
+                transaction,
+                failure.ObservationId,
+                rawRecordId: null,
+                failure.IngestBatchId,
+                failure.SourceSurface,
+                failure.SourceApplicationVersion,
+                failure.SourceAdapter,
+                failure.AdapterVersion,
+                schemaFingerprint: null,
+                inventoryHash: null,
+                failure.CompatibilityState,
+                failure.ReasonCodes,
+                failure.NextAction,
+                failure.CaptureContentState,
+                unknownSpanCount: 0,
+                unknownEventCount: 0,
+                unknownAttributeCount: 0,
+                overflowDistinctCount: 0,
+                overflowOccurrenceCount: 0,
+                failure.ObservedAt);
+            transaction.Commit();
+            return id;
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            throw new IngestionCommitBusyException();
+        }
     }
 
     public IReadOnlyList<SourceCompatibilityRow> List(long? after, int limit)

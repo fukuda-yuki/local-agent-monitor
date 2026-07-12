@@ -7,6 +7,7 @@ using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
@@ -62,10 +63,14 @@ internal static class MonitorHost
             kestrelOptions.Limits.MaxRequestBodySize = options.MaxRequestBodyBytes;
         });
 
-        var queue = testOptions?.Queue ?? new IngestionQueue();
+        var timeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
+        var queue = testOptions?.Queue ?? new IngestionQueue(timeProvider);
         var health = testOptions?.Health ?? new MonitorHealthState();
         health.SetLoopbackBound(true);
         var commitTimeout = testOptions?.CommitTimeout ?? DefaultCommitTimeout;
+        var sourceMetadataProvider = testOptions?.SourceMetadataProvider ?? FixedOtlpTraceSourceMetadataProvider.Default;
+        var sourceFingerprintRegistry = testOptions?.SourceFingerprintRegistry
+            ?? VerifiedSourceFingerprintRegistry.Create([], [], []);
         var eventBroker = new MonitorEventBroker();
         builder.Services.AddRazorPages();
         builder.Services.AddSingleton(options);
@@ -73,10 +78,11 @@ internal static class MonitorHost
 
         if (testOptions?.StartWriter ?? true)
         {
-            var writer = testOptions?.Writer
-                ?? new RawTelemetryStoreWriter(
-                    new RawTelemetryStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
-            var worker = new IngestionWriterWorker(queue, writer, health);
+            var commitStore = testOptions?.IngestionCommitStore
+                ?? new SqliteIngestionCommitStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+            var compatibilityStore = testOptions?.SourceCompatibilityStore
+                ?? new SqliteSourceCompatibilityStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+            var worker = new IngestionWriterWorker(queue, commitStore, compatibilityStore, health);
             builder.Services.AddHostedService(_ => worker);
         }
 
@@ -91,7 +97,7 @@ internal static class MonitorHost
         var analysisStore = testOptions?.AnalysisStore ?? new SqliteMonitorAnalysisStore(options.DatabasePath);
         analysisStore.CreateSchema();
         builder.Services.AddSingleton(analysisStore);
-        var sessionTimeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
+        var sessionTimeProvider = timeProvider;
         ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, sessionTimeProvider);
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
@@ -793,11 +799,31 @@ internal static class MonitorHost
                 return;
             }
 
-            DecodedOtlpTracePayload decodedPayload;
+            ValidatedIngestionBatch batch;
+            OtlpTraceSourceMetadata? metadata = null;
             try
             {
-                decodedPayload = OtlpTracePayloadDecoder.DecodeTracePayload(context.Request.ContentType, body);
-                OtlpTracePayloadDecoder.EnsurePayloadContainsSpan(decodedPayload.PayloadJson);
+                var observedAt = timeProvider.GetUtcNow();
+                var decodedPayload = OtlpTracePayloadDecoder.DecodeTracePayload(context.Request.ContentType, body);
+                var record = RawOtlpIngestor.CreateRecordFromPayloadJson(decodedPayload.PayloadJson, observedAt);
+                metadata = sourceMetadataProvider.GetMetadata();
+                var decision = SourceCompatibilityEvaluator.Assess(
+                    metadata.SourceSurface,
+                    metadata.SourceApplicationVersion,
+                    decodedPayload.StructuralInventory,
+                    CountRecognizedSpanEnvelopes(decodedPayload.StructuralInventory),
+                    sourceFingerprintRegistry);
+                var observation = SourceObservationBatchDraft.Create(
+                    Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
+                    metadata.SourceSurface,
+                    metadata.SourceApplicationVersion,
+                    metadata.SourceAdapter,
+                    metadata.AdapterVersion,
+                    decodedPayload.StructuralInventory,
+                    decision,
+                    metadata.CaptureContentState,
+                    observedAt);
+                batch = ValidatedIngestionBatch.Create(record, observation);
             }
             catch (UnsupportedOtlpContentTypeException)
             {
@@ -806,63 +832,67 @@ internal static class MonitorHost
             }
             catch (JsonException)
             {
-                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_payload", "Trace payload is not valid OTLP JSON.");
+                await RecordAdapterFailureAsync(
+                    context,
+                    queue,
+                    health,
+                    commitTimeout,
+                    SourceAdapterFailureDraft.CreateParseFailure(
+                        Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
+                        null, null, null, null, null, null,
+                        timeProvider.GetUtcNow()),
+                    StatusCodes.Status400BadRequest,
+                    "invalid_payload",
+                    "Trace payload is not valid OTLP JSON.");
                 return;
             }
             catch (InvalidDataException)
             {
-                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_payload", "Trace payload is not valid OTLP trace data.");
+                await RecordAdapterFailureAsync(
+                    context,
+                    queue,
+                    health,
+                    commitTimeout,
+                    SourceAdapterFailureDraft.CreateParseFailure(
+                        Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
+                        null, null, null, null, null, null,
+                        timeProvider.GetUtcNow()),
+                    StatusCodes.Status400BadRequest,
+                    "invalid_payload",
+                    "Trace payload is not valid OTLP trace data.");
+                return;
+            }
+            catch (Exception)
+            {
+                await RecordAdapterFailureAsync(
+                    context,
+                    queue,
+                    health,
+                    commitTimeout,
+                    SourceAdapterFailureDraft.CreateAdapterException(
+                        Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
+                        null,
+                        metadata?.SourceSurface,
+                        metadata?.SourceApplicationVersion,
+                        metadata?.SourceAdapter,
+                        metadata?.AdapterVersion,
+                        metadata?.CaptureContentState,
+                        timeProvider.GetUtcNow()),
+                    StatusCodes.Status500InternalServerError,
+                    "internal_error",
+                    "The request could not be processed.");
                 return;
             }
 
-            RawTelemetryRecord record;
-            try
+            if (!queue.TryEnqueue(batch, out var request))
             {
-                record = RawOtlpIngestor.CreateRecordFromPayloadJson(decodedPayload.PayloadJson, DateTimeOffset.UtcNow);
-            }
-            catch (JsonException)
-            {
-                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_payload", "Trace payload is not valid OTLP JSON.");
-                return;
-            }
-            catch (InvalidDataException)
-            {
-                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_payload", "Trace payload is not valid OTLP trace data.");
+                await WriteQueueRejectedAsync(context, queue, health);
                 return;
             }
 
-            if (!queue.TryEnqueue(record, out var request))
+            var result = await AwaitCommitAsync(context, request, health, commitTimeout);
+            if (result is null)
             {
-                health.RecordBackpressure();
-                if (queue.IsClosed)
-                {
-                    await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "shutting_down", "The local monitor is shutting down.");
-                }
-                else
-                {
-                    await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "queue_full", "The local monitor ingestion queue is full.");
-                }
-
-                return;
-            }
-
-            IngestionCommitResult result;
-            try
-            {
-                result = await request.Completion.WaitAsync(commitTimeout, context.RequestAborted);
-            }
-            catch (TimeoutException)
-            {
-                // A commit that never acks is a form of "writer unable to commit":
-                // start the same stall window queue-full / persistence failures use
-                // so sustained timeouts surface as ingestion_stalled in readiness.
-                health.RecordBackpressure();
-                await WriteFailureAsync(context, StatusCodes.Status504GatewayTimeout, "commit_timeout", "Trace payload was not committed within the allowed time.");
-                return;
-            }
-            catch (OperationCanceledException)
-            {
-                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "shutting_down", "The local monitor is shutting down.");
                 return;
             }
 
@@ -871,7 +901,8 @@ internal static class MonitorHost
                 case IngestionCommitStatus.Committed:
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     context.Response.ContentType = JsonContentType;
-                    await context.Response.WriteAsync($$"""{"accepted":true,"rawRecordId":{{result.RawRecordId}}}""");
+                    await context.Response.WriteAsync(
+                        $$"""{"accepted":true,"rawRecordId":{{result.RawRecordId}},"observationId":{{result.ObservationId}}}""");
                     break;
                 case IngestionCommitStatus.Busy:
                     await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "Trace payload could not be persisted because the raw store is busy.");
@@ -891,6 +922,119 @@ internal static class MonitorHost
         });
 
         return app;
+    }
+
+    private static int CountRecognizedSpanEnvelopes(SourceStructuralInventory inventory)
+    {
+        var count = inventory.StructuralOccurrences
+            .Where(item => item.Envelope == SourceStructuralEnvelope.Span
+                && item.Role == SourceStructuralRole.Envelope
+                && item.Unknown is null)
+            .Sum(item => (long)item.Count.Value);
+        return checked((int)Math.Min(SourceOccurrenceCount.Maximum, count));
+    }
+
+    private static async Task RecordAdapterFailureAsync(
+        HttpContext context,
+        IngestionQueue queue,
+        MonitorHealthState health,
+        TimeSpan commitTimeout,
+        SourceAdapterFailureDraft failure,
+        int failureStatusCode,
+        string failureCode,
+        string failureMessage)
+    {
+        if (!queue.TryEnqueue(failure, out var request))
+        {
+            await WriteQueueRejectedAsync(context, queue, health);
+            return;
+        }
+
+        var result = await AwaitCommitAsync(context, request, health, commitTimeout);
+        if (result is null)
+        {
+            return;
+        }
+
+        switch (result.Status)
+        {
+            case IngestionCommitStatus.Committed:
+                await WriteFailureAsync(
+                    context,
+                    failureStatusCode,
+                    failureCode,
+                    failureMessage);
+                break;
+            case IngestionCommitStatus.Busy:
+                await WriteFailureAsync(
+                    context,
+                    StatusCodes.Status503ServiceUnavailable,
+                    "persistence_busy",
+                    "Trace payload could not be persisted because the raw store is busy.");
+                break;
+            default:
+                await WriteFailureAsync(
+                    context,
+                    StatusCodes.Status500InternalServerError,
+                    "persistence_failed",
+                    "Trace payload could not be persisted.");
+                break;
+        }
+    }
+
+    private static async Task WriteQueueRejectedAsync(
+        HttpContext context,
+        IngestionQueue queue,
+        MonitorHealthState health)
+    {
+        health.RecordBackpressure();
+        if (queue.IsClosed)
+        {
+            await WriteFailureAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "shutting_down",
+                "The local monitor is shutting down.");
+        }
+        else
+        {
+            await WriteFailureAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "queue_full",
+                "The local monitor ingestion queue is full.");
+        }
+    }
+
+    private static async Task<IngestionCommitResult?> AwaitCommitAsync(
+        HttpContext context,
+        IngestionWriteRequest request,
+        MonitorHealthState health,
+        TimeSpan commitTimeout)
+    {
+        try
+        {
+            return await request.Completion.WaitAsync(commitTimeout, context.RequestAborted);
+        }
+        catch (TimeoutException)
+        {
+            health.RecordBackpressure();
+            await WriteFailureAsync(
+                context,
+                StatusCodes.Status504GatewayTimeout,
+                "commit_timeout",
+                "Trace payload was not committed within the allowed time.");
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            await WriteFailureAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "shutting_down",
+                "The local monitor is shutting down.");
+            return null;
+        }
     }
 
     public static async Task<int> RunAsync(MonitorOptions options, TextWriter output, TextWriter error, CancellationToken cancellationToken)
@@ -1191,11 +1335,108 @@ internal static class MonitorHost
     }
 }
 
+internal interface IOtlpTraceSourceMetadataProvider
+{
+    OtlpTraceSourceMetadata GetMetadata();
+}
+
+internal sealed class OtlpTraceSourceMetadata
+{
+    private OtlpTraceSourceMetadata(
+        string sourceSurface,
+        string? sourceApplicationVersion,
+        string sourceAdapter,
+        string adapterVersion,
+        SourceCaptureContentState captureContentState)
+    {
+        SourceSurface = sourceSurface;
+        SourceApplicationVersion = sourceApplicationVersion;
+        SourceAdapter = sourceAdapter;
+        AdapterVersion = adapterVersion;
+        CaptureContentState = captureContentState;
+    }
+
+    public string SourceSurface { get; }
+    public string? SourceApplicationVersion { get; }
+    public string SourceAdapter { get; }
+    public string AdapterVersion { get; }
+    public SourceCaptureContentState CaptureContentState { get; }
+
+    public static OtlpTraceSourceMetadata Create(
+        string sourceSurface,
+        string? sourceApplicationVersion,
+        string sourceAdapter,
+        string adapterVersion,
+        SourceCaptureContentState captureContentState)
+    {
+        ValidateRequired(sourceSurface, nameof(sourceSurface));
+        ValidateOptional(sourceApplicationVersion, nameof(sourceApplicationVersion));
+        ValidateRequired(sourceAdapter, nameof(sourceAdapter));
+        ValidateRequired(adapterVersion, nameof(adapterVersion));
+        if (!Enum.IsDefined(captureContentState))
+        {
+            throw new ArgumentOutOfRangeException(nameof(captureContentState));
+        }
+
+        return new OtlpTraceSourceMetadata(
+            sourceSurface,
+            sourceApplicationVersion,
+            sourceAdapter,
+            adapterVersion,
+            captureContentState);
+    }
+
+    private static void ValidateRequired(string value, string parameterName)
+    {
+        if (!IsValid(value))
+        {
+            throw new ArgumentException("Source metadata must be non-empty, bounded, and control-character free.", parameterName);
+        }
+    }
+
+    private static void ValidateOptional(string? value, string parameterName)
+    {
+        if (value is not null && !IsValid(value))
+        {
+            throw new ArgumentException("Source metadata must be bounded and control-character free when present.", parameterName);
+        }
+    }
+
+    private static bool IsValid(string value) =>
+        value.Length is > 0 and <= 256 && value.All(character => !char.IsControl(character));
+}
+
+internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMetadataProvider
+{
+    public static FixedOtlpTraceSourceMetadataProvider Default { get; } = new(
+        OtlpTraceSourceMetadata.Create(
+            "raw-otlp",
+            sourceApplicationVersion: null,
+            "raw-otlp",
+            "1",
+            SourceCaptureContentState.Unsupported));
+
+    private readonly OtlpTraceSourceMetadata metadata;
+
+    public FixedOtlpTraceSourceMetadataProvider(OtlpTraceSourceMetadata metadata)
+    {
+        this.metadata = metadata ?? throw new ArgumentNullException(nameof(metadata));
+    }
+
+    public OtlpTraceSourceMetadata GetMetadata() => metadata;
+}
+
 internal sealed class MonitorHostTestOptions
 {
     public IngestionQueue? Queue { get; init; }
 
-    public IRawTelemetryWriter? Writer { get; init; }
+    public IIngestionCommitStore? IngestionCommitStore { get; init; }
+
+    public ISourceCompatibilityStore? SourceCompatibilityStore { get; init; }
+
+    public IOtlpTraceSourceMetadataProvider? SourceMetadataProvider { get; init; }
+
+    public VerifiedSourceFingerprintRegistry? SourceFingerprintRegistry { get; init; }
 
     public MonitorHealthState? Health { get; init; }
 

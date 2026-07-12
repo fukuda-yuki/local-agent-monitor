@@ -47,3 +47,7 @@ internal sealed record CommittedIngestionIds(long RawRecordId, long ObservationI
 internal sealed class IngestionCommitBusyException : Exception
 {
 }
+
+internal sealed class IngestionCommitFailedException : Exception
+{
+}
