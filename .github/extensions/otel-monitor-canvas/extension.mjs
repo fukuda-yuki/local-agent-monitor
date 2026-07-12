@@ -98,8 +98,32 @@ function isProposalHelperPath(path) {
 }
 
 function isProposalApplyHelperPath(path) {
-    return path === "/api/session-workspace/proposal-applies"
-        || path.startsWith("/api/session-workspace/proposal-applies/");
+    return path !== "/api/session-workspace/proposal-applies/receipts" && (path === "/api/session-workspace/proposal-applies"
+        || path.startsWith("/api/session-workspace/proposal-applies/"));
+}
+
+function effectComparisonRoute(path, method, url) {
+    const prefix = "/api/session-workspace";
+    const only = (...names) => [...url.searchParams.keys()].every(name => name === "t" || names.includes(name))
+        && names.every(name => url.searchParams.has(name));
+    if (path === `${prefix}/objective-evaluations` && method === "POST" && only()) return path;
+    if (path === `${prefix}/objective-evaluations` && method === "GET" && only("session_id")) {
+        const id = url.searchParams.get("session_id");
+        return matchesSessionId(id) ? `${path}?session_id=${encodeURIComponent(id)}` : false;
+    }
+    if (path === `${prefix}/proposal-applies/receipts` && method === "GET" && only("proposal_id")) {
+        const id = url.searchParams.get("proposal_id");
+        return matchesSessionId(id) ? `${path}?proposal_id=${encodeURIComponent(id)}` : false;
+    }
+    if (path === `${prefix}/effect-comparisons/candidates` && method === "GET" && only("proposal_id", "apply_id")) {
+        const proposalId = url.searchParams.get("proposal_id"), applyId = url.searchParams.get("apply_id");
+        return matchesSessionId(proposalId) && matchesSessionId(applyId) ? `${path}?proposal_id=${encodeURIComponent(proposalId)}&apply_id=${encodeURIComponent(applyId)}` : false;
+    }
+    if (path === `${prefix}/effect-comparisons` && method === "POST" && only()) return path;
+    const match = new RegExp(`^${prefix}/effect-comparisons/([^/]+)$`).exec(path);
+    if (!match || method !== "GET" || !only()) return null;
+    let id; try { id = decodeURIComponent(match[1]); } catch { return false; }
+    return matchesSessionId(id) ? `${prefix}/effect-comparisons/${encodeURIComponent(id)}` : false;
 }
 
 function proposalApplyRoute(path, method) {
@@ -288,6 +312,38 @@ async function handleProposalApplyProxy(req, res, { monitorUrl, path }) {
     } catch { sendJson(res, 502, { error: "monitor_unavailable" }); }
 }
 
+async function handleEffectComparisonProxy(req, res, { monitorUrl, path }) {
+    res.setHeader("Cache-Control", "no-store");
+    if (!isLoopbackUrl(monitorUrl)) { sendJson(res, 400, { error: "invalid_monitor_url" }); return; }
+    const write = req.method === "POST";
+    let body;
+    if (write) {
+        if (String(req.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase() !== "application/json") { sendJson(res, 415, { error: "unsupported_media_type" }); return; }
+        const length = Number(req.headers["content-length"]);
+        if (Number.isFinite(length) && length > 1048576) { sendJson(res, 413, { error: "request_too_large" }); return; }
+        const input = await readRequestBodyAtMost(req, 1048576);
+        if (input.exceeded) { sendJson(res, 413, { error: "request_too_large" }); return; }
+        try { JSON.parse(input.body); } catch { sendJson(res, 400, { error: "invalid_comparison_request" }); return; }
+        body = input.body;
+    }
+    try {
+        const result = await fetchHelperWorkspaceJson(monitorUrl, path, write ? { method: "POST", headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body } : undefined);
+        const errors = new Set(["invalid_objective_evaluation", "objective_evidence_not_exact", "objective_store_unavailable", "invalid_comparison_request", "proposal_revision_stale", "application_not_active", "cohort_not_confirmed", "comparison_evidence_stale", "comparison_not_found", "cross_origin_forbidden", "csrf_required", "unsupported_media_type", "request_too_large"]);
+        if (!result.response.ok) { sendJson(res, result.response.status, errors.has(result.parsed?.error) ? { error: result.parsed.error } : { error: "monitor_unavailable" }); return; }
+        const value = result.parsed ?? {}, pick = (source, keys) => Object.fromEntries(keys.filter(key => Object.hasOwn(source ?? {}, key)).map(key => [key, source[key]]));
+        const evidence = item => pick(item, ["session_id", "kind", "reference_id", "recorded_at", "human_verdict"]);
+        const safe = pick(value, ["objective_evaluation_id", "comparison_id", "cohort_revision", "proposal_id", "proposal_revision", "apply_id", "state", "application_state", "verification_state", "verdict", "recorded_at", "applied_at", "file_count"]);
+        if (value.receipt) safe.receipt = pick(value.receipt, ["comparison_id", "cohort_revision", "proposal_id", "proposal_revision", "apply_id", "verdict", "verification_state", "recorded_at"]);
+        if (value.summary) safe.summary = pick(value.summary, ["verdict", "pre_pass", "pre_count", "post_pass", "post_count", "pre_duration_median", "post_duration_median", "duration_delta", "pre_token_median", "post_token_median", "token_delta", "reasons"]);
+        if (Array.isArray(value.items)) safe.items = value.items.map(item => pick(item, ["objective_evaluation_id", "session_id", "run_id", "trace_id", "result", "severity", "evaluator_id", "evaluator_version", "criterion_id", "case_key", "evidence_refs", "recorded_at", "apply_id", "draft_id", "proposal_id", "proposal_revision", "selection_revision", "applied_at", "file_count", "state", "current_state", "status", "completeness", "started_at", "ended_at", "exact_bound", "evidence_available", "boundary_eligibility", "suggestion_reasons"]));
+        if (Array.isArray(value.sessions)) safe.sessions = value.sessions.map(item => pick(item, ["session_id", "classification", "case_key", "exclusion_reason", "effective_quality", "severe_failure"]));
+        if (Array.isArray(value.evidence)) safe.evidence = value.evidence.map(evidence);
+        if (Array.isArray(value.case_key_groups)) safe.case_key_groups = value.case_key_groups.map(group => ({ ...pick(group, ["case_key", "sessions"]), evidence: Array.isArray(group.evidence) ? group.evidence.map(evidence) : [] }));
+        if (Array.isArray(value.evidence_refs)) safe.evidence_refs = value.evidence_refs.map(item => pick(item, ["kind", "reference_id"]));
+        sendJson(res, result.response.status, safe);
+    } catch { sendJson(res, 502, { error: "monitor_unavailable" }); }
+}
+
 async function fetchHelperInstruction(monitorUrl, sessionId) {
     const detail = await fetchHelperWorkspaceJson(
         monitorUrl,
@@ -459,7 +515,7 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
         if (isProposalHelperPath(path)) {
             res.setHeader("Cache-Control", "no-store");
         }
-        if (isProposalApplyHelperPath(path)) res.setHeader("Cache-Control", "no-store");
+        if (isProposalApplyHelperPath(path) || path.startsWith("/api/session-workspace/objective-evaluations") || path.startsWith("/api/session-workspace/effect-comparisons") || path === "/api/session-workspace/proposal-applies/receipts") res.setHeader("Cache-Control", "no-store");
 
         // Token validation for all routes.
         const headerToken = req.headers["x-canvas-token"];
@@ -498,6 +554,14 @@ function createHelperServer({ instanceId, monitorUrl, healthState, statusCode, h
             if (target === false) { sendJson(res, 400, { error: "invalid_apply_request" }); return; }
             if (!target) { sendJson(res, 404, { error: "not_found" }); return; }
             await handleProposalApplyProxy(req, res, { monitorUrl, path: target });
+            return;
+        }
+
+        if (path.startsWith("/api/session-workspace/objective-evaluations") || path.startsWith("/api/session-workspace/effect-comparisons") || path === "/api/session-workspace/proposal-applies/receipts") {
+            const target = effectComparisonRoute(path, req.method, url);
+            if (target === false) { sendJson(res, 400, { error: "invalid_comparison_request" }); return; }
+            if (!target) { sendJson(res, 404, { error: "not_found" }); return; }
+            await handleEffectComparisonProxy(req, res, { monitorUrl, path: target });
             return;
         }
 

@@ -326,6 +326,47 @@ test("proposal apply helper server streams size limits and returns every canonic
     } finally { await new Promise(resolve => helper.server.close(resolve)); }
 });
 
+test("effect comparison helper proxy accepts only the six token-gated canonical routes", async () => {
+    const calls = [], proposalId = "0197d7c0-0000-7000-8000-000000000001", applyId = "0197d7c0-0000-7000-8000-000000000002", comparisonId = "0197d7c0-0000-7000-8000-000000000003";
+    const helper = await proposalApplyHelperServer(calls, { fetchResponse: () => new Response(JSON.stringify({ comparison_id: comparisonId, path: "secret-path", source: "secret-source", diff: "secret-diff", hash: "secret-hash", log: "secret-log" }), { status: 200 }) });
+    try {
+        const routes = [
+            ["POST", "/api/session-workspace/objective-evaluations", "{}"],
+            ["GET", `/api/session-workspace/objective-evaluations?session_id=${proposalId}`],
+            ["GET", `/api/session-workspace/proposal-applies/receipts?proposal_id=${proposalId}`],
+            ["GET", `/api/session-workspace/effect-comparisons/candidates?proposal_id=${proposalId}&apply_id=${applyId}`],
+            ["POST", "/api/session-workspace/effect-comparisons", "{}"],
+            ["GET", `/api/session-workspace/effect-comparisons/${comparisonId}`],
+        ];
+        for (const [method, path, body] of routes) {
+            const result = await helper.call(method, `${path}${path.includes("?") ? "&" : "?"}t=token`, body === undefined ? { authorization: "Bearer browser" } : { "content-type": "application/json", authorization: "Bearer browser", "x-monitor-csrf": "browser" }, body);
+            assert.equal(result.status, 200, `${method} ${path}`);
+            assert.equal(result.headers["cache-control"], "no-store");
+            assert.doesNotMatch(result.text, /secret-(path|source|diff|hash|log)/);
+        }
+        assert.equal(calls.length, 6);
+        for (const call of calls) {
+            assert.equal(call.init?.headers?.authorization, undefined);
+            assert.equal(call.init?.headers?.["x-monitor-csrf"], call.init?.method === "POST" ? "local-monitor" : undefined);
+        }
+        const before = calls.length;
+        for (const [method, path] of [["DELETE", "/api/session-workspace/effect-comparisons"], ["GET", "/api/session-workspace/effect-comparisons/candidates"], ["GET", `/api/session-workspace/effect-comparisons/${comparisonId}?extra=1`], ["GET", "/api/session-workspace/effect-comparisons/not-allowed"]]) {
+            const result = await helper.call(method, `${path}${path.includes("?") ? "&" : "?"}t=token`, { "x-canvas-token": "token" });
+            assert.ok([400, 404].includes(result.status), `${method} ${path}`);
+            assert.equal(result.headers["cache-control"], "no-store");
+        }
+        assert.equal(calls.length, before, "denied routes never reach upstream");
+    } finally { await new Promise(resolve => helper.server.close(resolve)); }
+});
+
+test("Compare workspace is explicit, inert, and never confirms a candidate automatically", () => {
+    const html = renderWorkspaceHtml({ monitorUrl: "http://127.0.0.1:4320", healthState: "ready", token: "synthetic-token" });
+    for (const value of ["比較を確定", "not_comparable", "wrong_case", "missing_evidence", "overlaps_application", "user_excluded", "insufficient_evidence", "no_change", "improved", "regressed", "case_key", "evidence_refs", "rollback", "textContent"]) assert.match(html, new RegExp(value));
+    assert.doesNotMatch(html, /Compare は後続 Issue/);
+    assert.doesNotMatch(html, /innerHTML/);
+    assert.doesNotMatch(html, /session\.send/);
+});
+
 test("emitted workspace IIFE requires explicit approval, sends zero-byte apply, and gives rollback failures terminal precedence", async () => {
     const calls = [];
     const id = "0197d7c0-0000-7000-8000-000000000001";

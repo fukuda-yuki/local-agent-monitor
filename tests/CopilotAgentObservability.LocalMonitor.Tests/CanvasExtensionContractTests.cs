@@ -160,6 +160,38 @@ public class CanvasExtensionContractTests
     }
 
     [Fact]
+    public void CanvasEffectComparison_UsesClosedTokenGatedProxyAndExplicitWorkspaceConfirmation()
+    {
+        var extension = File.ReadAllText(Path.Combine(ExtensionDirectory(), "extension.mjs"));
+        var workspace = File.ReadAllText(Path.Combine(ExtensionDirectory(), "canvas-workspace-helpers.mjs"));
+
+        foreach (var route in new[]
+        {
+            "/api/session-workspace/objective-evaluations",
+            "/api/session-workspace/proposal-applies/receipts",
+            "effect-comparisons/candidates",
+            "effect-comparisons/",
+        }) Assert.Contains(route, extension);
+        Assert.Contains("effectComparisonRoute", extension);
+        Assert.Contains("handleEffectComparisonProxy", extension);
+        Assert.Contains("x-monitor-csrf\": \"local-monitor", extension);
+        Assert.Contains("Cache-Control\", \"no-store", extension);
+        Assert.Contains("request_too_large", extension);
+        Assert.Contains("invalid_comparison_request", extension);
+        Assert.DoesNotContain("name: \"confirm_comparison\"", extension);
+        Assert.DoesNotContain("session.send", workspace, StringComparison.Ordinal);
+        Assert.DoesNotContain("innerHTML", workspace, StringComparison.Ordinal);
+        Assert.Contains("比較を確定", workspace);
+        Assert.Contains("not_comparable", workspace);
+        Assert.Contains("wrong_case", workspace);
+        Assert.Contains("missing_evidence", workspace);
+        Assert.Contains("overlaps_application", workspace);
+        Assert.Contains("user_excluded", workspace);
+        Assert.Contains("invalidated", workspace);
+        Assert.Contains("textContent", workspace);
+    }
+
+    [Fact]
     public void CanvasProposalLifecycle_RemainsMetadataOnlyAndNeverEnablesApply()
     {
         var extension = ReadExtension();
