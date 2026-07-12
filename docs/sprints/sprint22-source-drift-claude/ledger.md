@@ -6,8 +6,9 @@ Updated: 2026-07-12
 
 | Task | Issue | State | Commit range | Focused/full tests | Review | Unresolved minor |
 | --- | --- | --- | --- | --- | --- | --- |
-| Contract and plan | #62-#65 | Awaiting user spec review | `2105d46..2a37fc8` | SourceCapabilityContractTests 13/13 / not run | self-review complete | none |
+| Contract and plan | #62-#65 | Complete | `2105d46..7f33709` | SourceCapabilityContractTests 13/13 / full 1,250 | Plan Spec PASS; Executability APPROVED | outline-level test method detail (non-blocking) |
 | CRLF contract-test baseline fix | #62 prerequisite | Complete | `3fa8340..2105d46` | SourceCapabilityContractTests 13/13 / not run | Spec PASS, Quality APPROVED | none |
+| CRLF roadmap-row baseline fix | #62 prerequisite | Complete | `67af37d..6aa6d43` | SourceCapabilityContractTests 13/13; ConfigCli 314/314 / full 1,250 | Spec PASS, Quality APPROVED | none |
 | Schema observation migration | #62 | Pending | - | - | - | - |
 | Unknown representation | #62 | Pending | - | - | - | - |
 | Diagnostics and fidelity gate | #62 | Pending | - | - | - | - |
@@ -43,3 +44,11 @@ Updated: 2026-07-12
   blocker.
 - Source observation DTO has not yet been exercised through storage, HTTP, and
   UI in one executable test.
+
+## Baseline validation
+
+| Command | Result |
+| --- | --- |
+| `dotnet build CopilotAgentObservability.slnx` | PASS, 0 warnings, 0 errors |
+| `pwsh scripts\test\install-playwright-chromium.ps1` | PASS, Chromium 1228 installed in worktree artifacts |
+| `dotnet test CopilotAgentObservability.slnx` | PASS, ConfigCli 314 + LocalMonitor 936 = 1,250 |
