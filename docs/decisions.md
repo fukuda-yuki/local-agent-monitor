@@ -1853,6 +1853,11 @@ Issues #62-#65 implement the Issue #61 contract with the following boundaries:
   the exact blocker and a separate follow-up task are recorded. This does not
   replace fixture-backed implementation, security, migration, regression, or
   full-suite validation.
+- D051 process readiness remains unchanged. Source compatibility is exposed by
+  sanitized `GET /api/monitor/source-diagnostics`; it does not add a readiness
+  check, reason, threshold, or status transition.
+- OTLP structural inventory is captured before lossy normalization: directly
+  from accepted JSON or while decoding the original protobuf wire message.
 
 The canonical field, state, storage, HTTP, UI, safety, and test contract is
 [Source Schema Drift and Claude Code](specifications/interfaces/source-schema-drift-claude-code.md).

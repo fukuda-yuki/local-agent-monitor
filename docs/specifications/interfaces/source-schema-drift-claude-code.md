@@ -42,6 +42,13 @@ credentials, source text, or local paths. Compatibility compares the resulting
 schema fingerprint with fingerprints recorded by verified evidence; the
 inventory hash diagnoses batch-to-batch changes without redefining support.
 
+For OTLP/JSON, structural inventory is collected from the accepted source JSON
+before normalization. For OTLP/protobuf, the decoder collects structural
+inventory while reading the original wire message, before producing the
+canonical JSON used by the existing raw store. Fingerprinting only the lossy
+canonical JSON is invalid because an unhandled protobuf field could disappear
+before drift evaluation.
+
 Unknown observations are bounded per ingest batch and identity tuple. They
 contain kind (`span`, `event`, or `attribute`), bounded name or keyed hash,
 count, source version label, first/last observed time, and an opaque sample
@@ -95,10 +102,36 @@ Hook hash.
 | HTTP to UI | the same field names and enum values | UI does not reinterpret or invent fallback facts. |
 | HTTP to Canvas | existing execution graph DTO | No parallel Claude hierarchy DTO. |
 
-The exact Claude OTLP and Hook route shape is frozen by the Issue #63 observed
-producer inventory before route implementation. Existing monitor endpoints
-remain compatible. `/health/ready` and sanitized monitor/session DTOs may gain
-additive source diagnostic fields; no sanitized route may return raw content.
+The exact Claude OTLP and Hook producer shape is frozen by the Issue #63
+observed inventory before adapter implementation. Claude OTel continues to use
+the standard existing `POST /v1/traces` receiver. Claude command/HTTP Hook
+input is converted by the installed `hook-forward` path into the existing
+strict `POST /api/session-ingest/v1/events` envelope with distinct
+`source_adapter = claude-code-hook` and `source_surface = claude-code`.
+
+Source diagnostics use the additive sanitized endpoint
+`GET /api/monitor/source-diagnostics?after&limit`. `limit` defaults to 50 and
+is bounded to 1..200; malformed cursors or limits return the existing sanitized
+`400` failure shape. Its response is:
+
+```text
+{
+  items: [{
+    observation_id, ingest_batch_id, source_surface,
+    source_application_version, source_adapter, adapter_version,
+    schema_fingerprint, inventory_hash, compatibility_state,
+    reason_codes, unknown_span_count, unknown_event_count,
+    unknown_attribute_count, observed_at, next_action
+  }],
+  next_cursor
+}
+```
+
+All identifiers are opaque and all fields are sanitized metadata. Existing
+`/health/ready` body, status mapping, thresholds, and degraded reasons remain
+unchanged as required by D051. Source compatibility does not make process
+readiness fail. Existing monitor/session DTOs may gain the same additive
+source diagnostic field names; no sanitized route may return raw content.
 
 ## Diagnostics and UI
 

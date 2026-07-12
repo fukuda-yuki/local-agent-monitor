@@ -36,6 +36,11 @@ those DTOs without inventing hierarchy or missing values.
 6. Additive monitor/session projection, existing HTTP DTO extensions, and UI.
 7. Repository-safe live-validation template and blocker handoff.
 
+Source compatibility is served from the separate sanitized
+`GET /api/monitor/source-diagnostics` cursor endpoint. D051 process readiness
+is unchanged. JSON/protobuf structural inventory is captured before any lossy
+normalization step.
+
 ## Data flow and failure handling
 
 Raw persistence commits before an accepted response. Compatibility observation
