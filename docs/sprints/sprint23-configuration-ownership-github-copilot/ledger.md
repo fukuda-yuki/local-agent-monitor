@@ -16,9 +16,10 @@ Updated: 2026-07-12
 | Private plan and ledger v1 stores (Task 2c) | #66 | Complete | `0daee69..dcb7191` | SetupStorageTests 44/44; all Setup 193/193; ConfigCli 521/521; build 0/0 | Spec PASS; Quality/Security APPROVED | private desired-state schema is text JSON/env focused; binary expansion requires future schema |
 | JSONC and bounded TOML codecs (Task 3a) | #66 | Complete | `93398bb..97f757f` | SetupDocumentTests 51/51; ConfigSamplesTests 49/49; all Setup 244/244; ConfigCli 572/572 | Spec PASS; Quality/Security APPROVED | JSONC BOM handling deferred to file layer; bounded TOML non-goals explicit |
 | Path/hash/atomic file step (Task 3b) | #66 | Complete | `291b3bf..2ed9e8a` | SetupFileStepTests 63/63; SetupPlatformTests 26/26; all Setup 313/313; ConfigCli 641/641; build 0/0 | Implementation Spec PASS; Quality/Security APPROVED after re-audit | Windows native executed; Linux statx ABI probed/static reviewed and macOS attrlist static reviewed, but Linux/macOS .NET branches not executed |
+| Current-user environment member step (Task 4) | #66 | Complete | `f4f55ec..620448a` | SetupEnvironmentStepTests 69/69; SetupPlatformTests 36/36; all Setup 392/392; ConfigCli 720/720; build 0/0 | Spec PASS; Quality/Security APPROVED | actual Windows broadcast delivery not integration-tested; injected fixed failure/replay verified |
 | Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
 | Atomic file mutation | #66 | Complete through Task 3b | `291b3bf..2ed9e8a` | typed hash, path/reparse, backup/temp/replace/restore fault matrix | PASS/APPROVED | three-OS runtime evidence gap noted above |
-| User environment mutation | #66 | Pending | - | - | - | - |
+| User environment mutation | #66 | Complete through Task 4 | `f4f55ec..620448a` | full 3x3 state, backup, member fault, notification boundary matrix | PASS/APPROVED | coordinator journaling/recovery remains Task 5 |
 | Transaction and rollback | #66 | Pending | - | - | - | - |
 | Shared setup commands | #66 | Pending | - | - | - | - |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
