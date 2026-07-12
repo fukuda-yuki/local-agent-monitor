@@ -6,6 +6,7 @@ namespace CopilotAgentObservability.ConfigCli.Setup.Documents;
 internal sealed class TomlSettingsDocument
 {
     private const string InvalidDocumentMessage = "Settings document is malformed or unsupported.";
+    private const int MaximumInlineTableNestingDepth = 16;
     private readonly IReadOnlyList<TableSpan> tables;
     private readonly IReadOnlyList<AssignmentSpan> assignments;
 
@@ -243,8 +244,14 @@ internal sealed class TomlSettingsDocument
         {
             var position = lineStart;
             SkipHorizontalWhitespace(ref position, lineContentEnd);
-            if (position == lineContentEnd || content[position] == '#')
+            if (position == lineContentEnd)
             {
+                return;
+            }
+
+            if (content[position] == '#')
+            {
+                ValidateCommentCharacters(position + 1, lineContentEnd);
                 return;
             }
 
@@ -264,6 +271,11 @@ internal sealed class TomlSettingsDocument
                 if (position < lineContentEnd && content[position] != '#')
                 {
                     throw InvalidDocument();
+                }
+
+                if (position < lineContentEnd)
+                {
+                    ValidateCommentCharacters(position + 1, lineContentEnd);
                 }
 
                 if (!tableNames.Add(tableName))
@@ -287,7 +299,7 @@ internal sealed class TomlSettingsDocument
             SkipHorizontalWhitespace(ref position, lineContentEnd);
             var valueStart = position;
             var valueParser = new ValueParser(content, position, lineContentEnd);
-            var value = valueParser.Parse();
+            var value = valueParser.Parse(inlineTableDepth: 0);
             position = valueParser.Position;
             var valueEnd = position;
             SkipHorizontalWhitespace(ref position, lineContentEnd);
@@ -300,6 +312,7 @@ internal sealed class TomlSettingsDocument
                 }
 
                 commentStart = position;
+                ValidateCommentCharacters(position + 1, lineContentEnd);
             }
 
             if (!assignmentNames.Add((currentTable, key)))
@@ -356,13 +369,25 @@ internal sealed class TomlSettingsDocument
                 position++;
             }
         }
+
+        private void ValidateCommentCharacters(int start, int end)
+        {
+            for (var position = start; position < end; position++)
+            {
+                var character = content[position];
+                if ((character < ' ' && character != '\t') || character == '\u007f')
+                {
+                    throw InvalidDocument();
+                }
+            }
+        }
     }
 
     private sealed class ValueParser(string content, int start, int end)
     {
         public int Position { get; private set; } = start;
 
-        public ParsedValue Parse()
+        public ParsedValue Parse(int inlineTableDepth)
         {
             if (Position >= end)
             {
@@ -386,7 +411,12 @@ internal sealed class TomlSettingsDocument
 
             if (content[Position] == '{')
             {
-                ParseInlineTable();
+                if (inlineTableDepth >= MaximumInlineTableNestingDepth)
+                {
+                    throw InvalidDocument();
+                }
+
+                ParseInlineTable(inlineTableDepth + 1);
                 return new ParsedValue(ValueKind.InlineTable);
             }
 
@@ -444,7 +474,7 @@ internal sealed class TomlSettingsDocument
             throw InvalidDocument();
         }
 
-        private void ParseInlineTable()
+        private void ParseInlineTable(int inlineTableDepth)
         {
             Position++;
             SkipWhitespace();
@@ -466,7 +496,7 @@ internal sealed class TomlSettingsDocument
                 SkipWhitespace();
                 Expect('=');
                 SkipWhitespace();
-                _ = Parse();
+                _ = Parse(inlineTableDepth);
                 SkipWhitespace();
                 if (Peek() == '}')
                 {

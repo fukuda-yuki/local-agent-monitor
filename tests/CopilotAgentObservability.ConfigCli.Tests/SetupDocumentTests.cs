@@ -153,6 +153,53 @@ public sealed class SetupDocumentTests
         Assert.False(document.TryGetString("otel", "trace_exporter", out _));
     }
 
+    [Fact]
+    public void Toml_Parse_AcceptsMaximumInlineTableNestingDepth()
+    {
+        var source = CreateNestedInlineTableToml(16);
+
+        Assert.Equal(source, TomlSettingsDocument.Parse(source).Content);
+    }
+
+    [Fact]
+    public void Toml_Parse_RejectsOnePastMaximumInlineTableNestingDepth()
+    {
+        var source = CreateNestedInlineTableToml(17);
+
+        var exception = Assert.Throws<FormatException>(() => TomlSettingsDocument.Parse(source));
+
+        Assert.Equal(InvalidDocumentMessage, exception.Message);
+        Assert.DoesNotContain(source, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Toml_Parse_RejectsMuchDeeperInlineTableWithoutCrashingHost()
+    {
+        var source = CreateNestedInlineTableToml(1_024);
+
+        var exception = Assert.Throws<FormatException>(() => TomlSettingsDocument.Parse(source));
+
+        Assert.Equal(InvalidDocumentMessage, exception.Message);
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidTomlComments))]
+    public void Toml_Parse_RejectsControlCharactersInFullLineAndTrailingComments(string source)
+    {
+        var exception = Assert.Throws<FormatException>(() => TomlSettingsDocument.Parse(source));
+
+        Assert.Equal(InvalidDocumentMessage, exception.Message);
+        Assert.DoesNotContain(source, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Toml_Parse_AcceptsTabAndUnicodeInFullLineAndTrailingComments()
+    {
+        const string source = "#\t日本語 ✓\n[otel] #\t表 Ω\nvalue = true #\t末尾 café\n";
+
+        Assert.Equal(source, TomlSettingsDocument.Parse(source).Content);
+    }
+
     [Theory]
     [InlineData("[otel]\nvalue = [\"x\"]\n")]
     [InlineData("[[otel]]\nvalue = true\n")]
@@ -185,4 +232,21 @@ public sealed class SetupDocumentTests
         { CollectionProfileOptions.RemoteManagedCollector, ConfigSamples.CreateProfileCodexAppConfigToml(CollectionProfileOptions.RemoteManagedCollector) },
         { CollectionProfileOptions.RawLocalReceiver, ConfigSamples.CreateProfileCodexAppConfigToml(CollectionProfileOptions.RawLocalReceiver) },
     };
+
+    public static TheoryData<string> InvalidTomlComments => new()
+    {
+        { "# nul \0 comment\n" },
+        { "# vertical tab \v comment\n" },
+        { "# unit separator \u001f comment\n" },
+        { "# del \u007f comment\n" },
+        { "[otel]\nvalue = true # nul \0 comment\n" },
+        { "[otel]\nvalue = true # vertical tab \v comment\n" },
+        { "[otel]\nvalue = true # unit separator \u001f comment\n" },
+        { "[otel]\nvalue = true # del \u007f comment\n" },
+    };
+
+    private static string CreateNestedInlineTableToml(int depth)
+    {
+        return string.Concat("[otel]\nvalue = ", string.Concat(Enumerable.Repeat("{ level = ", depth)), "true", new string('}', depth), "\n");
+    }
 }
