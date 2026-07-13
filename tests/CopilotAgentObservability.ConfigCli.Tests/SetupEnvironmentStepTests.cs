@@ -99,6 +99,183 @@ public sealed class SetupEnvironmentStepTests
     }
 
     [Theory]
+    [InlineData("missing")]
+    [InlineData("directory")]
+    [InlineData("reparse")]
+    [InlineData("attributes")]
+    [InlineData("foreign-regular")]
+    public async Task ReadBackup_RejectsPathRebindingDuringBoundedReadWithoutWriting(string reboundKind)
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedUserEnvironment("VALUE", "private-original-value");
+        var step = new UserEnvironmentSetupStep(platform);
+        step.CreateBackup("private.backup", step.Capture(["VALUE"]));
+        var originalBytes = platform.ReadSeededFile("private.backup");
+        var expectedArtifact = originalBytes;
+        using var barrier = platform.AddBarrier("file.read-bounded:private.backup:2097152");
+        var operationCount = platform.Operations.Count;
+        var reading = Task.Run(() => step.ReadBackup("private.backup", ["VALUE"]));
+        try
+        {
+            barrier.WaitUntilReached(CancellationToken.None);
+            switch (reboundKind)
+            {
+                case "missing":
+                    platform.SeedPathMetadata("private.backup", SetupPathMetadata.Missing);
+                    break;
+                case "directory":
+                    platform.SeedPathMetadata(
+                        "private.backup",
+                        new SetupPathMetadata(true, SetupPathKind.Directory, FileAttributes.Directory));
+                    break;
+                case "reparse":
+                    platform.SeedPathMetadata(
+                        "private.backup",
+                        new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+                    break;
+                case "attributes":
+                    platform.SeedPathMetadata(
+                        "private.backup",
+                        new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReadOnly));
+                    break;
+                case "foreign-regular":
+                    var foreignPlatform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+                    foreignPlatform.SeedUserEnvironment("VALUE", "private-foreign-value");
+                    var foreignStep = new UserEnvironmentSetupStep(foreignPlatform);
+                    foreignStep.CreateBackup("private.backup", foreignStep.Capture(["VALUE"]));
+                    expectedArtifact = foreignPlatform.ReadSeededFile("private.backup");
+                    platform.SeedFile("private.backup", expectedArtifact);
+                    platform.SeedPathMetadata(
+                        "private.backup",
+                        new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Hidden));
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(reboundKind));
+            }
+
+            barrier.Release();
+            var exception = await Assert.ThrowsAsync<SetupEnvironmentStepException>(() => reading);
+
+            Assert.Equal(SetupCodes.InternalError, exception.Code);
+            Assert.Equal(SetupCodes.InternalError, exception.Message);
+            Assert.DoesNotContain("private", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            barrier.Release();
+            try
+            {
+                await reading;
+            }
+            catch (SetupEnvironmentStepException)
+            {
+            }
+        }
+
+        Assert.Equal(expectedArtifact, platform.ReadSeededFile("private.backup"));
+        Assert.DoesNotContain(platform.Operations.Skip(operationCount), operation =>
+            operation.StartsWith("file.write", StringComparison.Ordinal) ||
+            operation.StartsWith("file.delete", StringComparison.Ordinal) ||
+            operation.StartsWith("environment.set", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReadBackup_MetadataFaultsBeforeOrAfterBoundedReadUseFixedNonEchoFailure(bool afterRead)
+    {
+        const string marker = "private-metadata-failure";
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedUserEnvironment("VALUE", "private-value");
+        var step = new UserEnvironmentSetupStep(platform);
+        step.CreateBackup("private.backup", step.Capture(["VALUE"]));
+        var exactBytes = platform.ReadSeededFile("private.backup");
+        Task<UserEnvironmentCapture> reading;
+        SetupTestBarrier? barrier = null;
+        if (afterRead)
+        {
+            barrier = platform.AddBarrier("file.read-bounded:private.backup:2097152");
+            reading = Task.Run(() => step.ReadBackup("private.backup", ["VALUE"]));
+            barrier.WaitUntilReached(CancellationToken.None);
+            platform.InjectFault("file.metadata:private.backup", new IOException(marker));
+            barrier.Release();
+        }
+        else
+        {
+            platform.InjectFault("file.metadata:private.backup", new IOException(marker));
+            reading = Task.Run(() => step.ReadBackup("private.backup", ["VALUE"]));
+        }
+
+        try
+        {
+            var exception = await Assert.ThrowsAsync<SetupEnvironmentStepException>(() => reading);
+
+            Assert.Equal(SetupCodes.InternalError, exception.Code);
+            Assert.Equal(SetupCodes.InternalError, exception.Message);
+            Assert.DoesNotContain(marker, exception.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            barrier?.Release();
+            barrier?.Dispose();
+            try
+            {
+                await reading;
+            }
+            catch (SetupEnvironmentStepException)
+            {
+            }
+        }
+
+        Assert.Equal(exactBytes, platform.ReadSeededFile("private.backup"));
+        Assert.DoesNotContain("file.delete:private.backup", platform.Operations);
+    }
+
+    [Fact]
+    public async Task RestoreMember_RejectsBackupPathRebindingDuringBoundedReadWithoutEnvironmentWrite()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedUserEnvironment("VALUE", "before");
+        var step = new UserEnvironmentSetupStep(platform);
+        var capture = step.Capture(["VALUE"]);
+        step.CreateBackup("private.backup", capture);
+        var exactBytes = platform.ReadSeededFile("private.backup");
+        var applied = step.ApplyMember("VALUE", capture.Members[0].Hash, UserEnvironmentValue.Present("desired"));
+        using var barrier = platform.AddBarrier("file.read-bounded:private.backup:2097152");
+        var operationCount = platform.Operations.Count;
+        var restoring = Task.Run(() => step.RestoreMember(
+            "VALUE", "private.backup", applied.AppliedHash, capture.Members[0].Hash));
+        try
+        {
+            barrier.WaitUntilReached(CancellationToken.None);
+            platform.SeedPathMetadata(
+                "private.backup",
+                new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+            barrier.Release();
+
+            Assert.Equal(
+                SetupCodes.InternalError,
+                (await Assert.ThrowsAsync<SetupEnvironmentStepException>(() => restoring)).Code);
+        }
+        finally
+        {
+            barrier.Release();
+            try
+            {
+                await restoring;
+            }
+            catch (SetupEnvironmentStepException)
+            {
+            }
+        }
+
+        Assert.Equal(exactBytes, platform.ReadSeededFile("private.backup"));
+        Assert.Equal("desired", platform.ReadUserEnvironment("VALUE"));
+        Assert.DoesNotContain(platform.Operations.Skip(operationCount), operation =>
+            operation.StartsWith("environment.set", StringComparison.Ordinal));
+    }
+
+    [Theory]
     [InlineData(2 * 1024 * 1024)]
     [InlineData(2 * 1024 * 1024 + 1)]
     [InlineData(8 * 1024 * 1024)]

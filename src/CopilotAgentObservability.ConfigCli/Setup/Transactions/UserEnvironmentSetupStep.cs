@@ -131,20 +131,7 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
         ValidateNames(orderedNames);
         try
         {
-            var metadata = platform.FileSystem.GetPathMetadata(backupPath);
-            if (!metadata.Exists || metadata.Kind != SetupPathKind.File ||
-                (metadata.Attributes & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new FormatException();
-            }
-
-            var read = platform.FileSystem.ReadAtMostBytes(backupPath, MaximumBackupBytes);
-            if (!read.IsComplete)
-            {
-                throw new FormatException();
-            }
-
-            var capture = DeserializeBackup(read.Bytes);
+            var capture = DeserializeBackup(ReadValidatedBackupBytes(backupPath));
             if (capture.Members.Count != orderedNames.Count ||
                 capture.Members.Where((member, index) =>
                     !string.Equals(member.Name, orderedNames[index], StringComparison.Ordinal)).Any())
@@ -230,26 +217,33 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
     {
         try
         {
-            var metadata = platform.FileSystem.GetPathMetadata(backupPath);
-            if (!metadata.Exists || metadata.Kind != SetupPathKind.File ||
-                (metadata.Attributes & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new FormatException();
-            }
-
-            var read = platform.FileSystem.ReadAtMostBytes(backupPath, MaximumBackupBytes);
-            if (!read.IsComplete)
-            {
-                throw new FormatException();
-            }
-
-            return DeserializeBackup(read.Bytes).Members.Single(member =>
+            return DeserializeBackup(ReadValidatedBackupBytes(backupPath)).Members.Single(member =>
                 string.Equals(member.Name, name, StringComparison.Ordinal));
         }
         catch (Exception)
         {
             throw new SetupEnvironmentStepException(SetupCodes.InternalError);
         }
+    }
+
+    private byte[] ReadValidatedBackupBytes(string backupPath)
+    {
+        var before = platform.FileSystem.GetPathMetadata(backupPath);
+        ValidateBackupMetadata(before);
+        var read = platform.FileSystem.ReadAtMostBytes(backupPath, MaximumBackupBytes);
+        if (!read.IsComplete)
+        {
+            throw new FormatException();
+        }
+
+        var after = platform.FileSystem.GetPathMetadata(backupPath);
+        ValidateBackupMetadata(after);
+        if (before != after)
+        {
+            throw new FormatException();
+        }
+
+        return read.Bytes;
     }
 
     private UserEnvironmentValue ReadMember(string name)
