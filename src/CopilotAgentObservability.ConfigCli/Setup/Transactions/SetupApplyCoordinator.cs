@@ -428,28 +428,77 @@ internal sealed class SetupApplyCoordinator
             try
             {
                 platform.Execution.Checkpoint(SetupFaultPoint.AfterRestoreIntentBeforeRestore);
+            }
+            catch (Exception)
+            {
+                return ClassifyRestoreFailure(
+                    setupLock,
+                    changeSetId,
+                    target,
+                    step,
+                    safeToPreserveAndContinue: false);
+            }
+
+            try
+            {
                 RestoreStep(changeSetId, target, step);
+            }
+            catch (Exception)
+            {
+                return ClassifyRestoreFailure(
+                    setupLock,
+                    changeSetId,
+                    target,
+                    step,
+                    safeToPreserveAndContinue: true);
+            }
+
+            try
+            {
                 platform.Execution.Checkpoint(SetupFaultPoint.AfterRestoreBeforeCompletion);
             }
             catch (Exception)
             {
-                var afterFailure = Classify(target, step);
-                if (afterFailure == CompensationClassification.Prior)
-                {
-                    return TryCompleteRestore(setupLock, changeSetId, target.RecordId, step.MemberKey)
-                        ? null
-                        : new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
-                }
-
-                return afterFailure == CompensationClassification.ThirdParty
-                    ? new CompensationFailure(target.RecordId, SetupCodes.RollbackStale, SetupLedgerRollbackStatus.Stale)
-                    : new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+                return ClassifyRestoreFailure(
+                    setupLock,
+                    changeSetId,
+                    target,
+                    step,
+                    safeToPreserveAndContinue: false);
             }
         }
 
         return TryCompleteRestore(setupLock, changeSetId, target.RecordId, step.MemberKey)
             ? null
             : new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+    }
+
+    private CompensationFailure? ClassifyRestoreFailure(
+        SetupLock setupLock,
+        Guid changeSetId,
+        SetupPrivatePlanTarget target,
+        SetupJournalStep step,
+        bool safeToPreserveAndContinue)
+    {
+        var afterFailure = Classify(target, step);
+        if (afterFailure == CompensationClassification.Prior)
+        {
+            return TryCompleteRestore(setupLock, changeSetId, target.RecordId, step.MemberKey)
+                ? null
+                : new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+        }
+
+        return afterFailure == CompensationClassification.ThirdParty
+            ? new CompensationFailure(
+                target.RecordId,
+                SetupCodes.RollbackStale,
+                SetupLedgerRollbackStatus.Stale,
+                SafeToPreserveAndContinue: safeToPreserveAndContinue)
+            : new CompensationFailure(
+                target.RecordId,
+                SetupCodes.InternalError,
+                SetupLedgerRollbackStatus.Failed,
+                SafeToPreserveAndContinue: safeToPreserveAndContinue);
     }
 
     private bool TryMarkStepPhase(
