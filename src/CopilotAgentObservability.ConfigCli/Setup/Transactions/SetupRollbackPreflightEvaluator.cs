@@ -400,49 +400,51 @@ internal sealed class SetupRollbackPreflightObserver
                 continue;
             }
 
+            AtomicFileCapture? fileCurrent = null;
+            UserEnvironmentCapture? environmentCurrent = null;
             try
             {
                 if (planTarget.TargetKind == SetupTargetKind.Env)
                 {
                     var names = planTarget.Members.Select(member => member.SettingKey).ToArray();
-                    var current = environmentStep.Capture(names);
+                    environmentCurrent = environmentStep.Capture(names);
                     var backup = ledgerTarget.AppliedStateHash is null
                         ? null
                         : environmentStep.ReadBackup(
                             paths.GetBackup(evidence.ChangeSet.ChangeSetId, planTarget.RecordId),
                             names);
                     observations.Add(new SetupRollbackTargetObservation(
-                        planTarget.RecordId, null, null, current, backup, null));
+                        planTarget.RecordId, null, null, environmentCurrent, backup, null));
                 }
                 else
                 {
-                    var current = fileStep.Capture(GetAllowedRoot(planTarget.TargetLocation), planTarget.TargetLocation);
+                    fileCurrent = fileStep.Capture(GetAllowedRoot(planTarget.TargetLocation), planTarget.TargetLocation);
                     var backup = ledgerTarget.AppliedStateHash is null
                         ? null
                         : fileStep.ReadBackup(
                             paths.GetBackup(evidence.ChangeSet.ChangeSetId, planTarget.RecordId),
                             planTarget.BaseStateHash);
                     observations.Add(new SetupRollbackTargetObservation(
-                        planTarget.RecordId, current, backup, null, null, null));
+                        planTarget.RecordId, fileCurrent, backup, null, null, null));
                 }
             }
             catch (SetupFileStepException exception)
             {
                 observations.Add(new SetupRollbackTargetObservation(
-                    planTarget.RecordId, null, null, null, null,
+                    planTarget.RecordId, fileCurrent, null, environmentCurrent, null,
                     exception.Code == SetupCodes.UnsafePath ? SetupCodes.UnsafePath : SetupCodes.InternalError));
                 break;
             }
             catch (SetupEnvironmentStepException)
             {
                 observations.Add(new SetupRollbackTargetObservation(
-                    planTarget.RecordId, null, null, null, null, SetupCodes.InternalError));
+                    planTarget.RecordId, fileCurrent, null, environmentCurrent, null, SetupCodes.InternalError));
                 break;
             }
             catch (Exception)
             {
                 observations.Add(new SetupRollbackTargetObservation(
-                    planTarget.RecordId, null, null, null, null, SetupCodes.RecoveryRequired));
+                    planTarget.RecordId, fileCurrent, null, environmentCurrent, null, SetupCodes.RecoveryRequired));
                 break;
             }
         }

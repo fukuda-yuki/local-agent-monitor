@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
@@ -12,6 +14,7 @@ internal sealed class SetupStatusProjector
     private readonly SetupTransactionJournalStore journalStore;
     private readonly SetupStatusTargetObserver targetObserver;
     private readonly SetupRollbackPreflightObserver rollbackObserver;
+    private readonly SetupStatusActiveEvidenceValidator activeEvidenceValidator;
 
     public SetupStatusProjector(
         ISetupPlatform platform,
@@ -23,6 +26,7 @@ internal sealed class SetupStatusProjector
         this.journalStore = journalStore;
         targetObserver = new SetupStatusTargetObserver(platform);
         rollbackObserver = new SetupRollbackPreflightObserver(platform, paths);
+        activeEvidenceValidator = new SetupStatusActiveEvidenceValidator(platform, paths);
     }
 
     public SetupChangeSetStatusResult Project(SetupLedgerChangeSet changeSet)
@@ -31,6 +35,7 @@ internal sealed class SetupStatusProjector
         var terminal = IsTerminal(changeSet.State);
         SetupPrivatePlan? plan;
         SetupTransactionJournal? journal;
+        IReadOnlyDictionary<Guid, SetupReferenceState>? activeReferences = null;
         try
         {
             plan = planStore.Load(changeSet.ChangeSetId);
@@ -55,6 +60,12 @@ internal sealed class SetupStatusProjector
 
                 return Unavailable(changeSet);
             }
+
+            if (!terminal && journal is not null)
+            {
+                RequireActiveJournalLifecycle(changeSet.State, journal);
+                activeReferences = activeEvidenceValidator.Validate(plan, changeSet, journal);
+            }
         }
         catch (SetupStorageException) when (terminal)
         {
@@ -72,9 +83,15 @@ internal sealed class SetupStatusProjector
         {
             throw new SetupStorageException(SetupCodes.RecoveryRequired);
         }
+        catch (Exception exception) when (!terminal && exception is SetupFileStepException or SetupEnvironmentStepException)
+        {
+            throw new SetupStorageException(SetupCodes.RecoveryRequired);
+        }
 
-        var observations = ObserveTargets(plan!, changeSet);
         var rollback = EvaluateRollback(plan!, changeSet, journal);
+        var observations = rollback.Observations is null
+            ? ObserveTargets(plan!, changeSet)
+            : ObserveTargets(plan!, changeSet, rollback.Observations);
         var targets = new SetupTargetResult[changeSet.Targets.Count];
         for (var index = 0; index < targets.Length; index++)
         {
@@ -85,6 +102,11 @@ internal sealed class SetupStatusProjector
                     changeSet.State,
                     ledgerTarget,
                     observations[index],
+                    activeReferences is not null && activeReferences.TryGetValue(
+                        ledgerTarget.RecordId,
+                        out var activeReference)
+                            ? activeReference
+                            : null,
                     rollback.TargetAvailability.TryGetValue(ledgerTarget.RecordId, out var available) && available);
         }
 
@@ -118,6 +140,19 @@ internal sealed class SetupStatusProjector
         return observations;
     }
 
+    private IReadOnlyList<SetupStatusTargetObservation> ObserveTargets(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet changeSet,
+        SetupRollbackPreflightObservations rollbackObservations)
+    {
+        var observed = rollbackObservations.Targets.ToDictionary(target => target.RecordId);
+        return plan.Targets.Select((target, index) => target.TargetKind == SetupTargetKind.Guidance
+            ? SetupStatusTargetObservation.Guidance
+            : observed.TryGetValue(target.RecordId, out var observation)
+                ? targetObserver.FromRollback(target, changeSet.Targets[index], observation)
+                : SetupStatusTargetObservation.Unavailable).ToArray();
+    }
+
     private SetupStatusRollbackResult EvaluateRollback(
         SetupPrivatePlan plan,
         SetupLedgerChangeSet changeSet,
@@ -127,7 +162,7 @@ internal sealed class SetupStatusProjector
         var preparation = SetupRollbackPreflightEvaluator.Prepare(plan, changeSet, journal);
         if (preparation.Evidence is not { } evidence)
         {
-            return new SetupStatusRollbackResult(false, availability);
+            return new SetupStatusRollbackResult(false, availability, null);
         }
 
         var observations = rollbackObserver.Capture(evidence);
@@ -142,7 +177,7 @@ internal sealed class SetupStatusProjector
                 target.RecordId);
         }
 
-        return new SetupStatusRollbackResult(result.IsAvailable, availability);
+        return new SetupStatusRollbackResult(result.IsAvailable, availability, observations);
     }
 
     private static SetupTargetResult CreateGuidanceTarget(SetupLedgerTarget target)
@@ -170,9 +205,10 @@ internal sealed class SetupStatusProjector
         SetupChangeSetState state,
         SetupLedgerTarget ledgerTarget,
         SetupStatusTargetObservation observation,
+        SetupReferenceState? activeReference,
         bool rollbackAvailable)
     {
-        var projectedState = ProjectState(state, observation);
+        var projectedState = ProjectState(state, observation, activeReference);
         var projection = ledgerTarget.StatusProjection;
         return new SetupTargetResult(
             ledgerTarget.RecordId.ToString("D"),
@@ -194,7 +230,8 @@ internal sealed class SetupStatusProjector
 
     private static SetupStatusProjectedState ProjectState(
         SetupChangeSetState state,
-        SetupStatusTargetObservation observation)
+        SetupStatusTargetObservation observation,
+        SetupReferenceState? activeReference)
     {
         if (observation.Classification == SetupStatusTargetClassification.Unavailable)
         {
@@ -217,7 +254,7 @@ internal sealed class SetupStatusProjector
                 observation.MatchesPrevious),
             SetupChangeSetState.Partial or SetupChangeSetState.Applying or
                 SetupChangeSetState.Compensating or SetupChangeSetState.RollingBack =>
-                ProjectDynamic(state, observation.Classification),
+                ProjectDynamic(observation.Classification, activeReference ?? throw new InvalidOperationException()),
             _ => throw new InvalidOperationException(),
         };
     }
@@ -226,14 +263,12 @@ internal sealed class SetupStatusProjector
         new(reference, matches ? SetupCurrentState.Current : SetupCurrentState.Stale);
 
     private static SetupStatusProjectedState ProjectDynamic(
-        SetupChangeSetState state,
-        SetupStatusTargetClassification classification) =>
+        SetupStatusTargetClassification classification,
+        SetupReferenceState priorReference) =>
         classification switch
         {
             SetupStatusTargetClassification.Desired => new(SetupReferenceState.Desired, SetupCurrentState.Current),
-            SetupStatusTargetClassification.Previous => new(
-                state == SetupChangeSetState.Applying ? SetupReferenceState.Base : SetupReferenceState.Previous,
-                SetupCurrentState.Current),
+            SetupStatusTargetClassification.Previous => new(priorReference, SetupCurrentState.Current),
             SetupStatusTargetClassification.Diverged => new(SetupReferenceState.None, SetupCurrentState.Diverged),
             _ => new(SetupReferenceState.None, SetupCurrentState.Unavailable),
         };
@@ -308,13 +343,253 @@ internal sealed class SetupStatusProjector
     private static bool RequiresJournal(SetupChangeSetState state) => state is not
         SetupChangeSetState.Planned and not SetupChangeSetState.NoChanges;
 
+    private static void RequireActiveJournalLifecycle(
+        SetupChangeSetState state,
+        SetupTransactionJournal journal)
+    {
+        var coherent = state switch
+        {
+            SetupChangeSetState.Applying => journal.Operation == SetupJournalOperation.Apply &&
+                journal.Phase is SetupJournalPhase.Prepared or SetupJournalPhase.Applying,
+            SetupChangeSetState.Compensating => journal.Operation == SetupJournalOperation.Apply &&
+                journal.Phase == SetupJournalPhase.Compensating,
+            SetupChangeSetState.RollingBack => journal.Operation == SetupJournalOperation.Rollback &&
+                journal.Phase is SetupJournalPhase.Prepared or SetupJournalPhase.RollingBack,
+            SetupChangeSetState.Partial => journal.Phase == SetupJournalPhase.Partial,
+            _ => false,
+        };
+        if (!coherent)
+        {
+            throw new FormatException();
+        }
+    }
+
     private sealed record SetupStatusRollbackResult(
         bool ChangeSetAvailable,
-        IReadOnlyDictionary<Guid, bool> TargetAvailability);
+        IReadOnlyDictionary<Guid, bool> TargetAvailability,
+        SetupRollbackPreflightObservations? Observations);
 
     private sealed record SetupStatusProjectedState(
         SetupReferenceState ReferenceState,
         SetupCurrentState CurrentState);
+}
+
+internal sealed class SetupStatusActiveEvidenceValidator
+{
+    private static readonly byte[] EnvironmentAggregateHashDomain =
+        Encoding.ASCII.GetBytes("CAO-USER-ENV-AGGREGATE\0");
+    private static readonly Encoding EnvironmentCanonicalEncoding =
+        new UnicodeEncoding(bigEndian: true, byteOrderMark: false, throwOnInvalidBytes: true);
+    private readonly SetupRuntimePaths paths;
+    private readonly AtomicFileSetupStep fileStep;
+    private readonly UserEnvironmentSetupStep environmentStep;
+
+    public SetupStatusActiveEvidenceValidator(ISetupPlatform platform, SetupRuntimePaths paths)
+    {
+        this.paths = paths;
+        fileStep = new AtomicFileSetupStep(platform);
+        environmentStep = new UserEnvironmentSetupStep(platform);
+    }
+
+    public IReadOnlyDictionary<Guid, SetupReferenceState> Validate(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet changeSet,
+        SetupTransactionJournal journal)
+    {
+        if (journal.ChangeSetId != changeSet.ChangeSetId ||
+            journal.EnvironmentNotification != ExpectedNotification(journal))
+        {
+            throw new FormatException();
+        }
+
+        var expectedTargets = plan.Targets
+            .Select((target, index) => (Plan: target, Ledger: changeSet.Targets[index]))
+            .Where(item => item.Plan.TargetKind != SetupTargetKind.Guidance &&
+                item.Plan.Members.Any(member => member.Operation != SetupOperation.NoOp))
+            .ToArray();
+        if (expectedTargets.Length != journal.Targets.Count)
+        {
+            throw new FormatException();
+        }
+
+        var references = new Dictionary<Guid, SetupReferenceState>();
+        for (var index = 0; index < expectedTargets.Length; index++)
+        {
+            var (planTarget, ledgerTarget) = expectedTargets[index];
+            var journalTarget = journal.Targets[index];
+            if (journalTarget.RecordId != planTarget.RecordId ||
+                journalTarget.TargetKind != planTarget.TargetKind ||
+                !string.Equals(ledgerTarget.BackupReference, planTarget.RecordId.ToString("D"), StringComparison.Ordinal) ||
+                !OwnershipMatches(changeSet.State, journal.Operation, ledgerTarget))
+            {
+                throw new FormatException();
+            }
+
+            ValidateTarget(plan.ChangeSetId, planTarget, ledgerTarget, journalTarget, journal.Operation);
+            references.Add(
+                planTarget.RecordId,
+                journal.Operation == SetupJournalOperation.Apply &&
+                journal.Phase is SetupJournalPhase.Prepared or SetupJournalPhase.Applying
+                    ? SetupReferenceState.Base
+                    : SetupReferenceState.Previous);
+        }
+
+        var participating = expectedTargets.Select(item => item.Plan.RecordId).ToHashSet();
+        if (changeSet.Targets.Where(target => !participating.Contains(target.RecordId)).Any(target =>
+                target.AppliedStateHash is not null ||
+                target.BackupReference is not null ||
+                target.RollbackStatus != SetupLedgerRollbackStatus.NotAvailable))
+        {
+            throw new FormatException();
+        }
+
+        return references;
+    }
+
+    private void ValidateTarget(
+        Guid changeSetId,
+        SetupPrivatePlanTarget planTarget,
+        SetupLedgerTarget ledgerTarget,
+        SetupJournalTarget journalTarget,
+        SetupJournalOperation operation)
+    {
+        var backupReference = planTarget.RecordId.ToString("D");
+        if (planTarget.TargetKind == SetupTargetKind.Env)
+        {
+            var names = planTarget.Members.Select(member => member.SettingKey).ToArray();
+            var backup = environmentStep.ReadBackup(paths.GetBackup(changeSetId, planTarget.RecordId), names);
+            if (!string.Equals(backup.AggregateHash, planTarget.BaseStateHash, StringComparison.Ordinal) ||
+                !string.Equals(backup.AggregateHash, ledgerTarget.PreviousStateHash, StringComparison.Ordinal))
+            {
+                throw new FormatException();
+            }
+
+            var changed = planTarget.Members.Select((member, index) => (Member: member, Index: index))
+                .Where(item => item.Member.Operation != SetupOperation.NoOp)
+                .ToArray();
+            if (changed.Length != journalTarget.Steps.Count)
+            {
+                throw new FormatException();
+            }
+
+            for (var index = 0; index < changed.Length; index++)
+            {
+                var item = changed[index];
+                var step = journalTarget.Steps[index];
+                if (!string.Equals(step.MemberKey, item.Member.SettingKey, StringComparison.Ordinal) ||
+                    !string.Equals(step.PriorStateHash, backup.Members[item.Index].Hash, StringComparison.Ordinal) ||
+                    !string.Equals(step.DesiredStateHash,
+                        UserEnvironmentSetupStep.HashPlannedMember(item.Member), StringComparison.Ordinal) ||
+                    !string.Equals(step.BackupReference, backupReference, StringComparison.Ordinal))
+                {
+                    throw new FormatException();
+                }
+            }
+
+            if (operation == SetupJournalOperation.Rollback && !string.Equals(
+                    ledgerTarget.AppliedStateHash,
+                    ExpectedEnvironmentAppliedHash(planTarget, backup),
+                    StringComparison.Ordinal))
+            {
+                throw new FormatException();
+            }
+
+            return;
+        }
+
+        var fileBackup = fileStep.ReadBackup(
+            paths.GetBackup(changeSetId, planTarget.RecordId),
+            planTarget.BaseStateHash);
+        var expectedDesired = SetupHash.File(true, Encoding.UTF8.GetBytes(planTarget.DesiredState));
+        if (!string.Equals(fileBackup.Hash, ledgerTarget.PreviousStateHash, StringComparison.Ordinal) ||
+            journalTarget.Steps.Count != 1 ||
+            journalTarget.Steps[0].MemberKey is not null ||
+            !string.Equals(journalTarget.Steps[0].PriorStateHash, planTarget.BaseStateHash, StringComparison.Ordinal) ||
+            !string.Equals(journalTarget.Steps[0].DesiredStateHash, expectedDesired, StringComparison.Ordinal) ||
+            !string.Equals(journalTarget.Steps[0].BackupReference, backupReference, StringComparison.Ordinal) ||
+            operation == SetupJournalOperation.Rollback &&
+            !string.Equals(ledgerTarget.AppliedStateHash, expectedDesired, StringComparison.Ordinal))
+        {
+            throw new FormatException();
+        }
+    }
+
+    private static bool OwnershipMatches(
+        SetupChangeSetState state,
+        SetupJournalOperation operation,
+        SetupLedgerTarget target)
+    {
+        var hashMatches = operation == SetupJournalOperation.Apply
+            ? target.AppliedStateHash is null
+            : target.AppliedStateHash is not null;
+        if (!hashMatches)
+        {
+            return false;
+        }
+
+        if (state != SetupChangeSetState.Partial)
+        {
+            return target.OutcomeCode is null &&
+                target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
+        }
+
+        return target.RollbackStatus switch
+        {
+            SetupLedgerRollbackStatus.Pending => target.OutcomeCode is null || string.Equals(
+                target.OutcomeCode, SetupCodes.ApplySucceeded, StringComparison.Ordinal),
+            SetupLedgerRollbackStatus.Stale => string.Equals(
+                target.OutcomeCode, SetupCodes.RollbackStale, StringComparison.Ordinal),
+            SetupLedgerRollbackStatus.Failed => string.Equals(
+                target.OutcomeCode, SetupCodes.InternalError, StringComparison.Ordinal),
+            SetupLedgerRollbackStatus.NotAvailable => string.Equals(
+                target.OutcomeCode, SetupCodes.InterruptedRecoveryFailed, StringComparison.Ordinal),
+            _ => false,
+        };
+    }
+
+    private static SetupEnvironmentNotification ExpectedNotification(SetupTransactionJournal journal) =>
+        journal.Targets.Any(target => target.TargetKind == SetupTargetKind.Env &&
+            target.Steps.Any(step => step.Phase != SetupJournalStepPhase.Pending))
+                ? SetupEnvironmentNotification.Pending
+                : SetupEnvironmentNotification.NotRequired;
+
+    private static string ExpectedEnvironmentAppliedHash(
+        SetupPrivatePlanTarget target,
+        UserEnvironmentCapture backup)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(EnvironmentAggregateHashDomain);
+        AppendUInt32(hash, checked((uint)target.Members.Count));
+        for (var index = 0; index < target.Members.Count; index++)
+        {
+            var member = target.Members[index];
+            var value = member.Operation == SetupOperation.NoOp
+                ? backup.Members[index].Value
+                : SetupEnvironmentPlanValue.Desired(member);
+            AppendString(hash, member.SettingKey);
+            hash.AppendData([value.Exists ? (byte)1 : (byte)0]);
+            if (value.Exists)
+            {
+                AppendString(hash, value.Value!);
+            }
+        }
+
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
+
+    private static void AppendString(IncrementalHash hash, string value)
+    {
+        var bytes = EnvironmentCanonicalEncoding.GetBytes(value);
+        AppendUInt32(hash, checked((uint)bytes.Length));
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendUInt32(IncrementalHash hash, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(bytes, value);
+        hash.AppendData(bytes);
+    }
 }
 
 internal enum SetupStatusTargetClassification
@@ -331,6 +606,9 @@ internal sealed record SetupStatusTargetObservation(
     bool MatchesDesired)
 {
     public static SetupStatusTargetObservation Guidance { get; } =
+        new(SetupStatusTargetClassification.Unavailable, false, false);
+
+    public static SetupStatusTargetObservation Unavailable { get; } =
         new(SetupStatusTargetClassification.Unavailable, false, false);
 }
 
@@ -364,11 +642,33 @@ internal sealed class SetupStatusTargetObserver
         }
     }
 
-    private SetupStatusTargetObservation CaptureFile(SetupPrivatePlanTarget target)
+    public SetupStatusTargetObservation FromRollback(
+        SetupPrivatePlanTarget planTarget,
+        SetupLedgerTarget ledgerTarget,
+        SetupRollbackTargetObservation observation)
     {
-        var current = fileStep.Capture(
-            Path.GetDirectoryName(target.TargetLocation) ?? throw new FormatException(),
-            target.TargetLocation).Hash;
+        return planTarget.TargetKind == SetupTargetKind.Env
+            ? CaptureEnvironment(planTarget, ledgerTarget, observation.EnvironmentCurrent)
+            : CaptureFile(planTarget, observation.FileCurrent);
+    }
+
+    private SetupStatusTargetObservation CaptureFile(SetupPrivatePlanTarget target) =>
+        CaptureFile(
+            target,
+            fileStep.Capture(
+                Path.GetDirectoryName(target.TargetLocation) ?? throw new FormatException(),
+                target.TargetLocation));
+
+    private static SetupStatusTargetObservation CaptureFile(
+        SetupPrivatePlanTarget target,
+        AtomicFileCapture? capture)
+    {
+        if (capture is null)
+        {
+            return SetupStatusTargetObservation.Unavailable;
+        }
+
+        var current = capture.Hash;
         var desired = SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState));
         var matchesPrevious = string.Equals(current, target.BaseStateHash, StringComparison.Ordinal);
         var matchesDesired = string.Equals(current, desired, StringComparison.Ordinal);
@@ -384,9 +684,20 @@ internal sealed class SetupStatusTargetObserver
 
     private SetupStatusTargetObservation CaptureEnvironment(
         SetupPrivatePlanTarget planTarget,
-        SetupLedgerTarget ledgerTarget)
+        SetupLedgerTarget ledgerTarget) => CaptureEnvironment(
+            planTarget,
+            ledgerTarget,
+            environmentStep.Capture(planTarget.Members.Select(member => member.SettingKey).ToArray()));
+
+    private static SetupStatusTargetObservation CaptureEnvironment(
+        SetupPrivatePlanTarget planTarget,
+        SetupLedgerTarget ledgerTarget,
+        UserEnvironmentCapture? capture)
     {
-        var capture = environmentStep.Capture(planTarget.Members.Select(member => member.SettingKey).ToArray());
+        if (capture is null)
+        {
+            return SetupStatusTargetObservation.Unavailable;
+        }
         var matchesPrevious = string.Equals(capture.AggregateHash, planTarget.BaseStateHash, StringComparison.Ordinal) &&
             string.Equals(capture.AggregateHash, ledgerTarget.PreviousStateHash, StringComparison.Ordinal);
         var desiredHashes = planTarget.Members.Select(UserEnvironmentSetupStep.HashPlannedMember).ToArray();

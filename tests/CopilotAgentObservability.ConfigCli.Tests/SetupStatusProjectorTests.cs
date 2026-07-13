@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters;
 using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
@@ -63,6 +64,9 @@ public sealed class SetupStatusProjectorTests
         Assert.Equal(preflight.IsAvailable, status.RollbackAvailable);
         var changed = Assert.Single(status.Targets, target => target.Operation != SetupOperation.NoOp);
         Assert.Equal(variant is "fresh" or "all-noop-drift", changed.RollbackAvailable);
+        Assert.Equal(
+            variant == "target-drift" ? SetupCurrentState.Stale : SetupCurrentState.Current,
+            changed.CurrentState);
         var noOp = status.Targets.SingleOrDefault(target => target.Operation == SetupOperation.NoOp);
         if (noOp is not null)
         {
@@ -117,8 +121,8 @@ public sealed class SetupStatusProjectorTests
     {
         var fixture = StatusFixture.Create();
         fixture.Apply();
+        fixture.MakeRollbackPartial();
         fixture.SeedTarget(currentValue);
-        fixture.SetLifecycle(SetupChangeSetState.Partial);
 
         var result = fixture.Project();
 
@@ -129,26 +133,78 @@ public sealed class SetupStatusProjectorTests
         Assert.False(result.RollbackAvailable);
     }
 
-    [Theory]
-    [InlineData(SetupChangeSetState.Applying, SetupReferenceState.Base)]
-    [InlineData(SetupChangeSetState.Compensating, SetupReferenceState.Previous)]
-    [InlineData(SetupChangeSetState.RollingBack, SetupReferenceState.Previous)]
-    public void Project_ActiveLifecycle_UsesJournalRelativePriorReference(
-        SetupChangeSetState state,
-        SetupReferenceState expectedReference)
+    [Fact]
+    public async Task Project_ApplyingLifecycle_UsesCoherentProducerJournalBaseReference()
     {
         var fixture = StatusFixture.Create();
-        fixture.Apply();
-        fixture.SeedTarget("previous");
-        fixture.SetLifecycle(state);
+        using var barrier = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}");
+        var apply = Task.Run(fixture.ApplyWithoutAssert);
+        barrier.WaitUntilReached(CancellationToken.None);
 
         var result = fixture.Project();
 
         var target = Assert.Single(result.Targets);
-        Assert.Equal(expectedReference, target.ReferenceState);
+        Assert.Equal(SetupReferenceState.Base, target.ReferenceState);
         Assert.Equal(SetupCurrentState.Current, target.CurrentState);
         Assert.False(target.RollbackAvailable);
         Assert.False(result.RollbackAvailable);
+        barrier.Release();
+        Assert.Equal(SetupChangeSetState.Applied, (await apply).State);
+    }
+
+    [Fact]
+    public async Task Project_CompensatingLifecycle_UsesCoherentProducerJournalDesiredReference()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Platform.InjectFault(
+            $"checkpoint:{SetupFaultPoint.AfterCompletionBeforeCommit}",
+            new IOException("synthetic"));
+        using var barrier = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterRestoreIntentBeforeRestore}");
+        var apply = Task.Run(fixture.ApplyWithoutAssert);
+        barrier.WaitUntilReached(CancellationToken.None);
+
+        var result = fixture.Project();
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(SetupReferenceState.Desired, target.ReferenceState);
+        Assert.Equal(SetupCurrentState.Current, target.CurrentState);
+        Assert.False(result.RollbackAvailable);
+        barrier.Release();
+        await Assert.ThrowsAsync<SetupApplyException>(async () => await apply);
+    }
+
+    [Fact]
+    public async Task Project_RollingBackLifecycle_UsesCoherentProducerJournalDesiredReference()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Apply();
+        using var barrier = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}");
+        var rollback = Task.Run(fixture.RollbackWithoutAssert);
+        barrier.WaitUntilReached(CancellationToken.None);
+
+        var result = fixture.Project();
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(SetupReferenceState.Desired, target.ReferenceState);
+        Assert.Equal(SetupCurrentState.Current, target.CurrentState);
+        Assert.False(result.RollbackAvailable);
+        barrier.Release();
+        Assert.True((await rollback).Success);
+    }
+
+    [Fact]
+    public void Project_ActiveLifecycleRejectsCompletedJournalReboundToActiveLedger()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Apply();
+        fixture.SetLifecycle(SetupChangeSetState.Applying);
+
+        var exception = Assert.Throws<SetupStorageException>(() => fixture.Project());
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
     }
 
     [Fact]
@@ -156,8 +212,8 @@ public sealed class SetupStatusProjectorTests
     {
         var fixture = StatusFixture.CreateEnvironment();
         fixture.Apply();
+        fixture.MakeRollbackPartial();
         fixture.Platform.SeedUserEnvironment("ENV_A", "old-a");
-        fixture.SetLifecycle(SetupChangeSetState.Partial);
 
         var result = fixture.Project();
 
@@ -265,6 +321,198 @@ public sealed class SetupStatusProjectorTests
         Assert.DoesNotContain("PRIVATE_JOURNAL_SECRET", exception.ToString(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("operation")]
+    [InlineData("phase")]
+    [InlineData("target-id")]
+    [InlineData("target-kind")]
+    [InlineData("prior-hash")]
+    [InlineData("desired-hash")]
+    [InlineData("backup-reference")]
+    [InlineData("step-phase")]
+    [InlineData("notification")]
+    public void Project_ActiveJournalMismatch_RequiresRecoveryWithoutPrivateData(string variant)
+    {
+        var fixture = StatusFixture.Create();
+        fixture.PrepareApplying();
+        fixture.RebindJournal(variant);
+
+        var exception = Assert.Throws<SetupStorageException>(() => fixture.Project());
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.DoesNotContain(fixture.TargetPath, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("PRIVATE_ACTIVE_SECRET", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Project_ActiveEnvironmentMemberMismatch_RequiresRecovery()
+    {
+        var fixture = StatusFixture.CreateEnvironment();
+        fixture.PrepareApplying();
+        fixture.RebindJournal("member-key");
+
+        var exception = Assert.Throws<SetupStorageException>(() => fixture.Project());
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+    }
+
+    [Fact]
+    public void Project_ActiveOwnershipMismatch_RequiresRecovery()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.PrepareApplying();
+        fixture.RebindActiveOwnership();
+
+        var exception = Assert.Throws<SetupStorageException>(() => fixture.Project());
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+    }
+
+    [Fact]
+    public async Task Project_AppliedTargets_UsesOneCoherentCurrentObservationForStateAndRollback()
+    {
+        var fixture = StatusFixture.Create(additionalFileCount: 1);
+        fixture.Apply();
+        using var barrier = fixture.Platform.AddBarrier($"file.read:{fixture.AdditionalTargetPath}");
+        var projection = Task.Run(fixture.Project);
+        barrier.WaitUntilReached(CancellationToken.None);
+        fixture.SeedTarget("third-party-after-first-observation");
+        barrier.Release();
+
+        var result = await projection;
+
+        var first = result.Targets[0];
+        Assert.Equal(SetupCurrentState.Current, first.CurrentState);
+        Assert.True(first.RollbackAvailable);
+        Assert.True(result.RollbackAvailable);
+    }
+
+    [Theory]
+    [InlineData("desired", SetupReferenceState.Desired, SetupCurrentState.Current)]
+    [InlineData("diverged", SetupReferenceState.None, SetupCurrentState.Diverged)]
+    [InlineData("unavailable", SetupReferenceState.None, SetupCurrentState.Unavailable)]
+    public void Project_ApplyingTarget_ClassifiesFreshJournalBoundState(
+        string variant,
+        SetupReferenceState expectedReference,
+        SetupCurrentState expectedCurrent)
+    {
+        var fixture = StatusFixture.Create();
+        fixture.PrepareApplying();
+        fixture.ApplyCurrentVariant(variant);
+
+        var result = fixture.Project();
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(expectedReference, target.ReferenceState);
+        Assert.Equal(expectedCurrent, target.CurrentState);
+        Assert.False(target.RollbackAvailable);
+    }
+
+    [Theory]
+    [InlineData("unavailable", SetupCurrentState.Unavailable)]
+    [InlineData("missing", SetupCurrentState.Diverged)]
+    public void Project_PartialTarget_DistinguishesUnavailableFromCanonicalMissing(
+        string variant,
+        SetupCurrentState expected)
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Apply();
+        fixture.MakeRollbackPartial();
+        fixture.ApplyCurrentVariant(variant);
+
+        var result = fixture.Project();
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(SetupReferenceState.None, target.ReferenceState);
+        Assert.Equal(expected, target.CurrentState);
+        Assert.False(result.RollbackAvailable);
+    }
+
+    [Fact]
+    public void Project_MultiWritable_DivergedPrecedesUnavailableAndCurrent()
+    {
+        var fixture = StatusFixture.Create(additionalFileCount: 2);
+        fixture.Apply();
+        fixture.MakeRollbackPartial();
+        fixture.SeedTarget("third-party");
+        fixture.MakeAdditionalTargetUnavailable(1);
+
+        var result = fixture.Project();
+
+        Assert.Equal(SetupCurrentState.Diverged, result.CurrentState);
+    }
+
+    [Fact]
+    public void Project_MultiWritable_StalePrecedesUnavailableAndCurrent()
+    {
+        var fixture = StatusFixture.Create(additionalFileCount: 2);
+        fixture.Apply();
+        fixture.SeedTarget("third-party");
+        fixture.MakeAdditionalTargetUnavailable(1);
+
+        var result = fixture.Project();
+
+        Assert.Equal(SetupCurrentState.Stale, result.CurrentState);
+    }
+
+    [Fact]
+    public void Project_MultiWritable_UnavailablePrecedesCurrentAndPreservesOrder()
+    {
+        var fixture = StatusFixture.Create(additionalFileCount: 2);
+        fixture.MakeAdditionalTargetUnavailable(1);
+        var expectedOrder = fixture.RecordIds;
+
+        var result = fixture.Project();
+
+        Assert.Equal(SetupCurrentState.Unavailable, result.CurrentState);
+        Assert.Equal(expectedOrder, result.Targets.Select(target => Guid.Parse(target.RecordId)));
+    }
+
+    [Fact]
+    public void Project_DoesNotMutateTargetLedgerPlanOrJournal()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Apply();
+        var before = fixture.CaptureArtifacts();
+
+        _ = fixture.Project();
+
+        Assert.Equal(before, fixture.CaptureArtifacts());
+    }
+
+    [Fact]
+    public void Projector_HasNoAdapterDetectionDependency()
+    {
+        var parameters = typeof(SetupStatusProjector).GetConstructors()
+            .SelectMany(constructor => constructor.GetParameters())
+            .Select(parameter => parameter.ParameterType)
+            .ToArray();
+
+        Assert.DoesNotContain(parameters, type => typeof(ISetupAdapter).IsAssignableFrom(type));
+        Assert.DoesNotContain(typeof(SetupAdapterRegistry), parameters);
+    }
+
+    [Theory]
+    [InlineData("missing-plan")]
+    [InlineData("corrupt-plan")]
+    [InlineData("rebound-plan")]
+    [InlineData("missing-journal")]
+    [InlineData("corrupt-journal")]
+    [InlineData("rebound-journal")]
+    [InlineData("missing-backup")]
+    public void Project_NonTerminalArtifactFailure_RequiresRecoveryWithoutPrivateData(string variant)
+    {
+        var fixture = StatusFixture.Create();
+        fixture.PrepareApplying();
+        fixture.ApplyArtifactVariant(variant);
+
+        var exception = Assert.Throws<SetupStorageException>(() => fixture.Project());
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.DoesNotContain(fixture.TargetPath, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("PRIVATE", exception.ToString(), StringComparison.Ordinal);
+    }
+
     private sealed class StatusFixture
     {
         private static readonly DateTimeOffset Now = new(2026, 7, 14, 1, 2, 3, TimeSpan.Zero);
@@ -297,11 +545,16 @@ public sealed class SetupStatusProjectorTests
         public SetupRuntimePaths Paths { get; }
         public Guid ChangeSetId { get; }
         public string TargetPath { get; }
+        public string AdditionalTargetPath => "C:\\private-status\\settings-1.json";
+        public IReadOnlyList<Guid> RecordIds => ledgerStore.LoadForRecovery().ChangeSets
+            .Single(changeSet => changeSet.ChangeSetId == ChangeSetId)
+            .Targets.Select(target => target.RecordId).ToArray();
 
         public static StatusFixture Create(
             SetupOperation operation = SetupOperation.Replace,
             bool includeAllNoOpEnvironment = false,
-            bool historicalManifest = false)
+            bool historicalManifest = false,
+            int additionalFileCount = 0)
         {
             var platform = CreatePlatform();
             var paths = new SetupRuntimePaths(platform);
@@ -344,6 +597,51 @@ public sealed class SetupStatusProjectorTests
                         [new SetupMemberChangeResult(member.SettingKey, operation, "planned_previous", "configured_loopback", "none", false)]),
                     "1.2.3"),
             };
+            for (var index = 1; index <= additionalFileCount; index++)
+            {
+                var additionalId = Guid.Parse($"00000000-0000-7000-8000-{670 + index:D12}");
+                var additionalPath = $"C:\\private-status\\settings-{index}.json";
+                var previous = $"previous-{index}";
+                var additionalDesired = $"desired-{index}";
+                const string settingKey = "github.copilot.chat.otel.enabled";
+                platform.SeedFile(additionalPath, Encoding.UTF8.GetBytes(previous));
+                var additionalBase = fileStep.Capture("C:\\private-status", additionalPath).Hash;
+                planTargets.Add(new SetupPrivatePlanTarget(
+                    additionalId,
+                    SetupTargetKind.Json,
+                    additionalPath,
+                    additionalBase,
+                    additionalDesired,
+                    [new SetupPrivatePlanMember(settingKey, SetupOperation.Replace, "safe-state")]));
+                ledgerTargets.Add(new SetupLedgerTarget(
+                    additionalId,
+                    SetupTargetKind.Json,
+                    "vscode-user-settings",
+                    "github-copilot",
+                    [new SetupLedgerMember(settingKey, SetupOperation.Replace)],
+                    additionalBase,
+                    null,
+                    null,
+                    null,
+                    SetupLedgerRollbackStatus.NotAvailable,
+                    SetupRestartRequirement.RestartVsCode,
+                    new SetupStatusProjection(
+                        true,
+                        "1.128.7",
+                        SetupOperation.Replace,
+                        SetupEffectiveSource.UserSetting,
+                        "http://127.0.0.1:4320",
+                        CreateManifest(historicalManifest),
+                        null,
+                        [new SetupMemberChangeResult(
+                            settingKey,
+                            SetupOperation.Replace,
+                            "planned_previous",
+                            "configured_loopback",
+                            "none",
+                            false)]),
+                    "1.2.3"));
+            }
             if (includeAllNoOpEnvironment)
             {
                 var envRecordId = Guid.Parse("00000000-0000-7000-8000-000000000664");
@@ -509,19 +807,185 @@ public sealed class SetupStatusProjectorTests
 
         public void Apply()
         {
+            var result = ApplyWithoutAssert();
+            Assert.Equal(guidanceOnly ? SetupChangeSetState.NoChanges : SetupChangeSetState.Applied, result.State);
+        }
+
+        public SetupLedgerChangeSet ApplyWithoutAssert()
+        {
             using var acquisition = SetupLock.TryAcquire(Platform, Paths);
-            var result = new SetupApplyCoordinator(
+            return new SetupApplyCoordinator(
                     Platform, Paths, planStore, ledgerStore, journalStore, new PassRevalidator())
                 .Apply(acquisition.Lock!, ChangeSetId);
-            Assert.Equal(guidanceOnly ? SetupChangeSetState.NoChanges : SetupChangeSetState.Applied, result.State);
         }
 
         public void Rollback()
         {
-            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
-            var result = new SetupRollbackCoordinator(Platform, Paths, planStore, ledgerStore, journalStore)
-                .Rollback(acquisition.Lock!, ChangeSetId);
+            var result = RollbackWithoutAssert();
             Assert.True(result.Success);
+        }
+
+        public SetupRollbackExecutionResult RollbackWithoutAssert()
+        {
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            return new SetupRollbackCoordinator(Platform, Paths, planStore, ledgerStore, journalStore)
+                .Rollback(acquisition.Lock!, ChangeSetId);
+        }
+
+        public void MakeRollbackPartial()
+        {
+            var row = ledgerStore.LoadForRecovery().ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
+            var plan = planStore.Load(ChangeSetId)!;
+            var journal = journalStore.Load(ChangeSetId)!;
+            var preparation = SetupRollbackPreflightEvaluator.Prepare(plan, row, journal);
+            var preflight = SetupRollbackPreflightEvaluator.Evaluate(
+                preparation.Evidence!,
+                new SetupRollbackPreflightObserver(Platform, Paths).Capture(preparation.Evidence!));
+            Assert.True(preflight.IsAvailable);
+
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            journalStore.SupersedeWithPreparedRollback(acquisition.Lock!, ChangeSetId, preflight.RollbackTargets);
+            journalStore.MarkTransactionPhase(acquisition.Lock!, ChangeSetId, SetupJournalPhase.RollingBack);
+            journalStore.MarkTransactionPhase(acquisition.Lock!, ChangeSetId, SetupJournalPhase.Partial);
+            var ledger = ledgerStore.LoadForRecovery();
+            ledgerStore.Save(acquisition.Lock!, ledger with
+            {
+                ChangeSets = ledger.ChangeSets.Select(changeSet => changeSet.ChangeSetId == ChangeSetId
+                    ? changeSet with
+                    {
+                        State = SetupChangeSetState.Partial,
+                        OutcomeCode = SetupCodes.PartialRollback,
+                    }
+                    : changeSet).ToArray(),
+            });
+        }
+
+        public void PrepareApplying()
+        {
+            var plan = planStore.Load(ChangeSetId)!;
+            var journalTargets = new List<SetupJournalTarget>();
+            Platform.FileSystem.CreateDirectory(Paths.Backups);
+            foreach (var target in plan.Targets.Where(target =>
+                         target.TargetKind != SetupTargetKind.Guidance &&
+                         target.Members.Any(member => member.Operation != SetupOperation.NoOp)))
+            {
+                var backupReference = target.RecordId.ToString("D");
+                if (target.TargetKind == SetupTargetKind.Env)
+                {
+                    var environmentStep = new UserEnvironmentSetupStep(Platform);
+                    var capture = environmentStep.Capture(target.Members.Select(member => member.SettingKey).ToArray());
+                    environmentStep.CreateBackup(Paths.GetBackup(ChangeSetId, target.RecordId), capture);
+                    var steps = target.Members.Select((member, index) => (member, index))
+                        .Where(item => item.member.Operation != SetupOperation.NoOp)
+                        .Select(item => new SetupJournalStep(
+                            item.member.SettingKey,
+                            capture.Members[item.index].Hash,
+                            UserEnvironmentSetupStep.HashPlannedMember(item.member),
+                            backupReference,
+                            SetupJournalStepPhase.Pending))
+                        .ToArray();
+                    journalTargets.Add(new SetupJournalTarget(target.RecordId, target.TargetKind, steps));
+                }
+                else
+                {
+                    var fileStep = new AtomicFileSetupStep(Platform);
+                    var capture = fileStep.Capture(Path.GetDirectoryName(target.TargetLocation)!, target.TargetLocation);
+                    fileStep.CreateBackup(Paths.GetBackup(ChangeSetId, target.RecordId), capture);
+                    journalTargets.Add(new SetupJournalTarget(
+                        target.RecordId,
+                        target.TargetKind,
+                        [new SetupJournalStep(
+                            null,
+                            capture.Hash,
+                            SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState)),
+                            backupReference,
+                            SetupJournalStepPhase.Pending)]));
+                }
+            }
+
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            journalStore.CreatePrepared(acquisition.Lock!, ChangeSetId, SetupJournalOperation.Apply, journalTargets);
+            var ledger = ledgerStore.LoadForRecovery();
+            ledgerStore.Save(acquisition.Lock!, ledger with
+            {
+                ChangeSets = ledger.ChangeSets.Select(changeSet => changeSet.ChangeSetId == ChangeSetId
+                    ? changeSet with
+                    {
+                        State = SetupChangeSetState.Applying,
+                        Targets = changeSet.Targets.Select(target => journalTargets.Any(item => item.RecordId == target.RecordId)
+                            ? target with
+                            {
+                                BackupReference = target.RecordId.ToString("D"),
+                                RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                            }
+                            : target).ToArray(),
+                    }
+                    : changeSet).ToArray(),
+            });
+            journalStore.MarkTransactionPhase(acquisition.Lock!, ChangeSetId, SetupJournalPhase.Applying);
+        }
+
+        public void RebindJournal(string variant)
+        {
+            var path = Paths.GetTransactionJournal(ChangeSetId);
+            var root = JsonNode.Parse(Platform.ReadSeededFile(path))!.AsObject();
+            var target = root["targets"]!.AsArray()[0]!.AsObject();
+            var step = target["steps"]!.AsArray()[0]!.AsObject();
+            switch (variant)
+            {
+                case "operation":
+                    root["operation"] = "rollback";
+                    root["phase"] = "rolling_back";
+                    break;
+                case "phase":
+                    root["phase"] = "compensating";
+                    break;
+                case "target-id":
+                    target["record_id"] = "00000000-0000-7000-8000-000000009999";
+                    break;
+                case "target-kind":
+                    target["target_kind"] = "toml";
+                    break;
+                case "member-key":
+                    step["member_key"] = "ENV_REBOUND";
+                    break;
+                case "prior-hash":
+                    step["prior_state_hash"] = new string('0', 64);
+                    break;
+                case "desired-hash":
+                    step["desired_state_hash"] = new string('f', 64);
+                    break;
+                case "backup-reference":
+                    step["backup_reference"] = "rebound";
+                    break;
+                case "step-phase":
+                    step["phase"] = "restore_started";
+                    break;
+                case "notification":
+                    root["environment_notification"] = "pending";
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(variant));
+            }
+
+            Platform.SeedFile(path, Encoding.UTF8.GetBytes(root.ToJsonString()));
+        }
+
+        public void RebindActiveOwnership()
+        {
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            var ledger = ledgerStore.LoadForRecovery();
+            ledgerStore.Save(acquisition.Lock!, ledger with
+            {
+                ChangeSets = ledger.ChangeSets.Select(changeSet => changeSet.ChangeSetId == ChangeSetId
+                    ? changeSet with
+                    {
+                        Targets = changeSet.Targets.Select(target => target.BackupReference is null
+                            ? target
+                            : target with { BackupReference = "rebound" }).ToArray(),
+                    }
+                    : changeSet).ToArray(),
+            });
         }
 
         public SetupChangeSetStatusResult Project()
@@ -630,6 +1094,15 @@ public sealed class SetupStatusProjectorTests
                 case "corrupt-journal":
                     Platform.SeedFile(Paths.GetTransactionJournal(ChangeSetId), Encoding.UTF8.GetBytes("PRIVATE_JOURNAL_SECRET"));
                     break;
+                case "rebound-journal":
+                    RebindJournal("target-id");
+                    break;
+                case "missing-backup":
+                    var changed = ledgerStore.LoadForRecovery().ChangeSets
+                        .Single(changeSet => changeSet.ChangeSetId == ChangeSetId)
+                        .Targets.Single(target => target.BackupReference is not null);
+                    Platform.FileSystem.DeleteFile(Paths.GetBackup(ChangeSetId, changed.RecordId));
+                    break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(variant));
             }
@@ -638,6 +1111,44 @@ public sealed class SetupStatusProjectorTests
         public void DeletePlan() => Platform.FileSystem.DeleteFile(Paths.GetPlan(ChangeSetId));
 
         public void SeedTarget(string value) => Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes(value));
+
+        public void ApplyCurrentVariant(string variant)
+        {
+            switch (variant)
+            {
+                case "desired":
+                    SeedTarget("desired");
+                    break;
+                case "diverged":
+                    SeedTarget("third-party");
+                    break;
+                case "unavailable":
+                    Platform.SeedPathMetadata(
+                        TargetPath,
+                        new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+                    break;
+                case "missing":
+                    Platform.FileSystem.DeleteFile(TargetPath);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(variant));
+            }
+        }
+
+        public void MakeAdditionalTargetUnavailable(int index)
+        {
+            var path = $"C:\\private-status\\settings-{index}.json";
+            Platform.SeedPathMetadata(path, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        }
+
+        public string CaptureArtifacts()
+        {
+            return string.Join("|",
+                Convert.ToBase64String(Platform.ReadSeededFile(TargetPath)),
+                Convert.ToBase64String(Platform.ReadSeededFile(Paths.OwnershipLedger)),
+                Convert.ToBase64String(Platform.ReadSeededFile(Paths.GetPlan(ChangeSetId))),
+                Convert.ToBase64String(Platform.ReadSeededFile(Paths.GetTransactionJournal(ChangeSetId))));
+        }
 
         private static SetupTestPlatform CreatePlatform()
         {
