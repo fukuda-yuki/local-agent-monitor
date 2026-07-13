@@ -187,8 +187,9 @@ internal sealed class SetupRollbackCoordinator
             throw new FormatException();
         }
 
-        var hasEnvironmentTarget = plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env);
-        var expectedNotification = terminalApply && hasEnvironmentTarget
+        var hasOwnedEnvironmentTarget = journal.Targets.Any(
+            target => target.TargetKind == SetupTargetKind.Env);
+        var expectedNotification = terminalApply && hasOwnedEnvironmentTarget
             ? SetupEnvironmentNotification.Completed
             : SetupEnvironmentNotification.NotRequired;
         if (journal.EnvironmentNotification != expectedNotification)
@@ -229,12 +230,19 @@ internal sealed class SetupRollbackCoordinator
 
             if (planTarget.TargetKind == SetupTargetKind.Env)
             {
-                ValidateEnvironmentPreflight(
-                    plan.ChangeSetId,
-                    planTarget,
-                    ledgerTarget,
-                    journal,
-                    terminalApply);
+                if (HasNoOwnership(ledgerTarget))
+                {
+                    ValidateUnownedEnvironmentPreflight(planTarget, ledgerTarget, journal);
+                }
+                else
+                {
+                    ValidateEnvironmentPreflight(
+                        plan.ChangeSetId,
+                        planTarget,
+                        ledgerTarget,
+                        journal,
+                        terminalApply);
+                }
                 continue;
             }
 
@@ -279,6 +287,38 @@ internal sealed class SetupRollbackCoordinator
         {
             Steps = target.Steps.Select(step => step with { Phase = SetupJournalStepPhase.Pending }).ToArray(),
         }).ToArray();
+    }
+
+    private void ValidateUnownedEnvironmentPreflight(
+        SetupPrivatePlanTarget planTarget,
+        SetupLedgerTarget ledgerTarget,
+        SetupTransactionJournal journal)
+    {
+        if (planTarget.Members.Any(member => member.Operation != SetupOperation.NoOp) ||
+            journal.Targets.Any(target => target.RecordId == planTarget.RecordId))
+        {
+            throw new FormatException();
+        }
+
+        var names = planTarget.Members.Select(member => member.SettingKey).ToArray();
+        var current = environmentStep.Capture(names);
+        for (var index = 0; index < planTarget.Members.Count; index++)
+        {
+            var member = planTarget.Members[index];
+            var desiredHash = environmentStep.HashMember(
+                member.SettingKey,
+                DesiredEnvironmentValue(member));
+            if (!string.Equals(current.Members[index].Hash, desiredHash, StringComparison.Ordinal))
+            {
+                throw new SetupRollbackStaleException();
+            }
+        }
+
+        if (!string.Equals(current.AggregateHash, planTarget.BaseStateHash, StringComparison.Ordinal) ||
+            !string.Equals(current.AggregateHash, ledgerTarget.PreviousStateHash, StringComparison.Ordinal))
+        {
+            throw new FormatException();
+        }
     }
 
     private void ValidateEnvironmentPreflight(
