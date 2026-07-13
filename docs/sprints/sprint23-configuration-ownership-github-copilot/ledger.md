@@ -42,7 +42,7 @@ Updated: 2026-07-14
 | Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
 | Atomic file mutation | #66 | Complete through Task 3b | `291b3bf..2ed9e8a` | typed hash, path/reparse, backup/temp/replace/restore fault matrix | PASS/APPROVED | three-OS runtime evidence gap noted above |
 | User environment mutation | #66 | Complete through Task 4 | `f4f55ec..620448a` | full 3x3 state, backup, member fault, notification boundary matrix | PASS/APPROVED | coordinator journaling/recovery remains Task 5 |
-| Transaction and rollback | #66 | In progress through Task 6a3 | `2d88eff..a0b3256` | journal/store, exact artifact reuse, terminal/active Apply recovery, file, single-environment, mixed active/committed rollback recovery, committed lagging-ledger reconciliation, notification ambiguity/replay recovery, apply/compensation, lock-lifetime evidence, rollback journal supersession primitive, fault/rebind hardening, supersession lock-lifetime evidence, file-only, single-environment, and mixed/all-NoOp normal rollback producer evidence, pre/post rollback race and crash matrices, direct-versus-recovery notification provenance, and zero-I/O replay evidence above | Tasks through 6a3 and Lock A-C PASS/APPROVED | same-byte regular-file identity is a nonblocking residual; status semantics/order and public Task 7 remain pending |
+| Transaction and rollback | #66 | In progress through Task 6a3; integration review blocked | `2d88eff..a0b3256` | journal/store, exact artifact reuse, terminal/active Apply recovery, file, single-environment, mixed active/committed rollback recovery, committed lagging-ledger reconciliation, notification ambiguity/replay recovery, apply/compensation, lock-lifetime evidence, rollback journal supersession primitive, fault/rebind hardening, supersession lock-lifetime evidence, file-only, single-environment, and mixed/all-NoOp normal rollback producer evidence, pre/post rollback race and crash matrices, direct-versus-recovery notification provenance, and zero-I/O replay evidence above; integration review head `07ab09e`, combined 889/889 | Tasks through 6a3 and Lock A-C PASS/APPROVED locally; independent transaction integration review CHANGES | P1 Apply operation/hash coherence; P2 direct compensation early-stop; P2 terminal environment hash binding; real Apply active-recovery producer coverage gap; status semantics/order and public Task 7 remain pending |
 | Shared setup commands | #66 | Pending | - | - | - | - |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
@@ -78,6 +78,15 @@ Updated: 2026-07-14
 | Full regression | Build, Playwright bootstrap, full solution tests | Baseline build 0/0, bootstrap exit 0, full 1,250/1,250 |
 
 ## Unverified Issue interfaces
+
+- Early Issue #66 transaction integration review at `07ab09e` (combined
+  889/889) is not integration-approved. Spec, quality, security, and
+  concurrency review result is CHANGES pending remediation of: (P1) Apply
+  operation/hash coherence, (P2) direct compensation early-stop semantics,
+  (P2) terminal environment hash binding, and the real Apply producer to
+  active-recovery consumer executable coverage gap. Migration review approves
+  strict v1-only handling; no legacy migration is required. HTTP, proxy, and UI
+  remain N/A. Task-level approvals do not supersede this integration gate.
 
 - The canonical physical-target/member-change DTO is defined but has not yet
   been compiled or consumed across the CLI/PowerShell boundary.
