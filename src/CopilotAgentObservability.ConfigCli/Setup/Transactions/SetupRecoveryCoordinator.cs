@@ -192,9 +192,9 @@ internal sealed class SetupRecoveryCoordinator
                 }
             }
 
-            if (IsActiveFileApply(journal))
+            if (IsActiveApply(journal))
             {
-                return RecoverActiveFileApply(setupLock, changeSet, plan, journal);
+                return RecoverActiveApply(setupLock, changeSet, plan, journal);
             }
 
             if (journal.Operation == SetupJournalOperation.Apply &&
@@ -218,17 +218,12 @@ internal sealed class SetupRecoveryCoordinator
         return new SetupRecoveryResult(SetupRecoveryDisposition.None, null, null, null, null);
     }
 
-    private SetupRecoveryResult RecoverActiveFileApply(
+    private SetupRecoveryResult RecoverActiveApply(
         SetupLock setupLock,
         SetupLedgerChangeSet changeSet,
         SetupPrivatePlan plan,
         SetupTransactionJournal journal)
     {
-        if (plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env))
-        {
-            return ActiveFileRecoveryRequired(changeSet);
-        }
-
         if (!ActiveFileLifecycleMatches(changeSet.State, journal.Phase))
         {
             return Failed(SetupCodes.RecoveryRequired, changeSet.ChangeSetId,
@@ -264,14 +259,17 @@ internal sealed class SetupRecoveryCoordinator
                 SetupJournalStep step;
                 try
                 {
-                    step = LoadActiveFileStep(changeSet.ChangeSetId, journalTarget.RecordId);
+                    step = LoadActiveStep(
+                        changeSet.ChangeSetId,
+                        journalTarget.RecordId,
+                        journalTarget.Steps[stepIndex].MemberKey);
                 }
                 catch (Exception)
                 {
                     return ActiveFileRecoveryRequired(changeSet);
                 }
 
-                var outcome = RecoverActiveFileStep(
+                var outcome = RecoverActiveStep(
                     setupLock,
                     changeSet.ChangeSetId,
                     planTarget,
@@ -292,11 +290,9 @@ internal sealed class SetupRecoveryCoordinator
             }
         }
 
-        foreach (var target in plan.Targets.Where(target =>
-                     target.TargetKind is not (SetupTargetKind.Guidance or SetupTargetKind.Env)))
+        foreach (var target in plan.Targets.Where(target => target.TargetKind != SetupTargetKind.Guidance))
         {
-            var classification = ClassifyActiveFile(target, target.BaseStateHash,
-                SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState)));
+            var classification = ClassifyAggregatePrior(target);
             if (classification != ActiveFileClassification.Prior)
             {
                 failures[target.RecordId] = classification == ActiveFileClassification.ThirdParty
@@ -320,10 +316,11 @@ internal sealed class SetupRecoveryCoordinator
         }
 
         SetupLedgerChangeSet restored;
+        SetupOwnershipLedger recoveryLedger;
         try
         {
-            var ledger = ledgerStore.LoadForRecovery();
-            var current = ledger.ChangeSets.Single(item => item.ChangeSetId == changeSet.ChangeSetId);
+            recoveryLedger = ledgerStore.LoadForRecovery();
+            var current = recoveryLedger.ChangeSets.Single(item => item.ChangeSetId == changeSet.ChangeSetId);
             var journalRecordIds = journal.Targets.Select(target => target.RecordId).ToHashSet();
             var physicalRecordIds = plan.Targets
                 .Where(target => target.TargetKind != SetupTargetKind.Guidance)
@@ -346,14 +343,30 @@ internal sealed class SetupRecoveryCoordinator
                     }
                     : target).ToArray(),
             };
-            SaveChangeSetOrConfirm(setupLock, ledger, restored);
+            SaveChangeSetOrConfirm(setupLock, recoveryLedger, restored);
         }
         catch (Exception)
         {
             return ActiveFileRecoveryRequired(changeSet);
         }
 
-        return Recovered(restored, SetupRecoveryOperation.Apply);
+        SetupTransactionJournal terminal;
+        try
+        {
+            terminal = LoadJournalForRecovery(changeSet.ChangeSetId) ?? throw new FormatException();
+        }
+        catch (Exception)
+        {
+            return ActiveFileRecoveryRequired(changeSet);
+        }
+
+        return terminal.EnvironmentNotification == SetupEnvironmentNotification.Pending
+            ? CompleteNotification(
+                setupLock,
+                recoveryLedger,
+                restored,
+                terminal)
+            : Recovered(restored, SetupRecoveryOperation.Apply);
     }
 
     private void ValidateActiveFileApplyEvidence(
@@ -364,8 +377,7 @@ internal sealed class SetupRecoveryCoordinator
         RequireImmutableIdentity(plan, changeSet);
         if (journal.ChangeSetId != changeSet.ChangeSetId ||
             journal.Operation != SetupJournalOperation.Apply ||
-            journal.EnvironmentNotification != SetupEnvironmentNotification.NotRequired ||
-            journal.Targets.Any(target => target.TargetKind == SetupTargetKind.Env))
+            journal.EnvironmentNotification != ExpectedActiveNotification(journal))
         {
             throw new FormatException();
         }
@@ -459,13 +471,13 @@ internal sealed class SetupRecoveryCoordinator
         }
     }
 
-    private ActiveFileStepOutcome RecoverActiveFileStep(
+    private ActiveFileStepOutcome RecoverActiveStep(
         SetupLock setupLock,
         Guid changeSetId,
         SetupPrivatePlanTarget target,
         SetupJournalStep step)
     {
-        var classification = ClassifyActiveFile(target, step.PriorStateHash, step.DesiredStateHash);
+        var classification = ClassifyActiveStep(target, step);
         if (step.Phase == SetupJournalStepPhase.Pending)
         {
             return classification == ActiveFileClassification.Prior
@@ -491,6 +503,7 @@ internal sealed class SetupRecoveryCoordinator
                     setupLock,
                     changeSetId,
                     target.RecordId,
+                    step.MemberKey,
                     step.Phase,
                     SetupJournalStepPhase.RestoreStarted))
             {
@@ -503,17 +516,12 @@ internal sealed class SetupRecoveryCoordinator
             try
             {
                 platform.Execution.Checkpoint(SetupFaultPoint.AfterRestoreIntentBeforeRestore);
-                fileStep.Restore(
-                    GetAllowedRoot(target.TargetLocation),
-                    target.TargetLocation,
-                    paths.GetBackup(changeSetId, target.RecordId),
-                    step.DesiredStateHash,
-                    step.PriorStateHash);
+                RestoreActiveStep(changeSetId, target, step);
                 platform.Execution.Checkpoint(SetupFaultPoint.AfterRestoreBeforeCompletion);
             }
             catch (Exception)
             {
-                var afterFailure = ClassifyActiveFile(target, step.PriorStateHash, step.DesiredStateHash);
+                var afterFailure = ClassifyActiveStep(target, step);
                 if (afterFailure != ActiveFileClassification.Prior)
                 {
                     return ClassificationFailure(afterFailure);
@@ -525,6 +533,7 @@ internal sealed class SetupRecoveryCoordinator
             setupLock,
             changeSetId,
             target.RecordId,
+            step.MemberKey,
             SetupJournalStepPhase.RestoreStarted,
             SetupJournalStepPhase.RestoreCompleted)
                 ? ActiveFileStepOutcome.Completed
@@ -570,12 +579,13 @@ internal sealed class SetupRecoveryCoordinator
         SetupLock setupLock,
         Guid changeSetId,
         Guid recordId,
+        string? memberKey,
         SetupJournalStepPhase expected,
         SetupJournalStepPhase next)
     {
         try
         {
-            var current = LoadActiveFileStep(changeSetId, recordId);
+            var current = LoadActiveStep(changeSetId, recordId, memberKey);
             if (current.Phase == next)
             {
                 return true;
@@ -586,14 +596,14 @@ internal sealed class SetupRecoveryCoordinator
                 return false;
             }
 
-            journalStore.MarkStepPhase(setupLock, changeSetId, recordId, null, expected, next);
-            return LoadActiveFileStep(changeSetId, recordId).Phase == next;
+            journalStore.MarkStepPhase(setupLock, changeSetId, recordId, memberKey, expected, next);
+            return LoadActiveStep(changeSetId, recordId, memberKey).Phase == next;
         }
         catch (Exception)
         {
             try
             {
-                return LoadActiveFileStep(changeSetId, recordId).Phase == next;
+                return LoadActiveStep(changeSetId, recordId, memberKey).Phase == next;
             }
             catch (Exception)
             {
@@ -602,27 +612,29 @@ internal sealed class SetupRecoveryCoordinator
         }
     }
 
-    private SetupJournalStep LoadActiveFileStep(Guid changeSetId, Guid recordId)
+    private SetupJournalStep LoadActiveStep(Guid changeSetId, Guid recordId, string? memberKey)
     {
         var journal = LoadJournalForRecovery(changeSetId) ?? throw new FormatException();
         var target = journal.Targets.Single(item => item.RecordId == recordId);
-        return target.Steps.Single(step => step.MemberKey is null);
+        return target.Steps.Single(step =>
+            string.Equals(step.MemberKey, memberKey, StringComparison.Ordinal));
     }
 
-    private ActiveFileClassification ClassifyActiveFile(
+    private ActiveFileClassification ClassifyActiveStep(
         SetupPrivatePlanTarget target,
-        string priorHash,
-        string desiredHash)
+        SetupJournalStep step)
     {
         try
         {
-            var current = fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation).Hash;
-            if (string.Equals(current, priorHash, StringComparison.Ordinal))
+            var current = target.TargetKind == SetupTargetKind.Env
+                ? environmentStep.Capture([step.MemberKey!]).Members[0].Hash
+                : fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation).Hash;
+            if (string.Equals(current, step.PriorStateHash, StringComparison.Ordinal))
             {
                 return ActiveFileClassification.Prior;
             }
 
-            return string.Equals(current, desiredHash, StringComparison.Ordinal)
+            return string.Equals(current, step.DesiredStateHash, StringComparison.Ordinal)
                 ? ActiveFileClassification.Desired
                 : ActiveFileClassification.ThirdParty;
         }
@@ -630,6 +642,70 @@ internal sealed class SetupRecoveryCoordinator
         {
             return ActiveFileClassification.Unavailable;
         }
+    }
+
+    private ActiveFileClassification ClassifyAggregatePrior(SetupPrivatePlanTarget target)
+    {
+        try
+        {
+            if (target.TargetKind == SetupTargetKind.Env)
+            {
+                var capture = environmentStep.Capture(
+                    target.Members.Select(member => member.SettingKey).ToArray());
+                if (string.Equals(capture.AggregateHash, target.BaseStateHash, StringComparison.Ordinal))
+                {
+                    return ActiveFileClassification.Prior;
+                }
+
+                return target.Members.Where((member, index) => !string.Equals(
+                        capture.Members[index].Hash,
+                        environmentStep.HashMember(member.SettingKey, DesiredEnvironmentValue(member)),
+                        StringComparison.Ordinal)).Any()
+                    ? ActiveFileClassification.ThirdParty
+                    : ActiveFileClassification.Desired;
+            }
+
+            var current = fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation).Hash;
+            if (string.Equals(current, target.BaseStateHash, StringComparison.Ordinal))
+            {
+                return ActiveFileClassification.Prior;
+            }
+
+            return string.Equals(
+                current,
+                SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState)),
+                StringComparison.Ordinal)
+                    ? ActiveFileClassification.Desired
+                    : ActiveFileClassification.ThirdParty;
+        }
+        catch (Exception)
+        {
+            return ActiveFileClassification.Unavailable;
+        }
+    }
+
+    private void RestoreActiveStep(
+        Guid changeSetId,
+        SetupPrivatePlanTarget target,
+        SetupJournalStep step)
+    {
+        var backupPath = paths.GetBackup(changeSetId, target.RecordId);
+        if (target.TargetKind == SetupTargetKind.Env)
+        {
+            environmentStep.RestoreMember(
+                step.MemberKey!,
+                backupPath,
+                step.DesiredStateHash,
+                step.PriorStateHash);
+            return;
+        }
+
+        fileStep.Restore(
+            GetAllowedRoot(target.TargetLocation),
+            target.TargetLocation,
+            backupPath,
+            step.DesiredStateHash,
+            step.PriorStateHash);
     }
 
     private SetupRecoveryResult PersistActiveFileFailure(
@@ -695,11 +771,17 @@ internal sealed class SetupRecoveryCoordinator
             ? ActiveFileStepOutcome.Stale
             : ActiveFileStepOutcome.Unavailable;
 
-    private static bool IsActiveFileApply(SetupTransactionJournal journal) =>
+    private static bool IsActiveApply(SetupTransactionJournal journal) =>
         journal.Operation == SetupJournalOperation.Apply &&
         journal.Phase is (SetupJournalPhase.Prepared or SetupJournalPhase.Applying or
-            SetupJournalPhase.Compensating or SetupJournalPhase.Partial) &&
-        journal.Targets.All(target => target.TargetKind != SetupTargetKind.Env);
+            SetupJournalPhase.Compensating or SetupJournalPhase.Partial);
+
+    private static SetupEnvironmentNotification ExpectedActiveNotification(
+        SetupTransactionJournal journal) => journal.Targets.Any(target =>
+            target.TargetKind == SetupTargetKind.Env &&
+            target.Steps.Any(step => step.Phase != SetupJournalStepPhase.Pending))
+                ? SetupEnvironmentNotification.Pending
+                : SetupEnvironmentNotification.NotRequired;
 
     private static bool ActiveFileLifecycleMatches(
         SetupChangeSetState state,
