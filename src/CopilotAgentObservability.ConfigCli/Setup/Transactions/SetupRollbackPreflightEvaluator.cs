@@ -187,6 +187,39 @@ internal static class SetupRollbackPreflightEvaluator
         }
     }
 
+    public static bool IsTargetAvailable(
+        SetupRollbackPreflightEvidence evidence,
+        SetupRollbackPreflightObservations observations,
+        Guid recordId)
+    {
+        try
+        {
+            var index = evidence.Plan.Targets.Select((target, index) => (target, index))
+                .Single(item => item.target.RecordId == recordId).index;
+            var planTarget = evidence.Plan.Targets[index];
+            var ledgerTarget = evidence.ChangeSet.Targets[index];
+            if (planTarget.TargetKind == SetupTargetKind.Guidance || HasNoOwnership(ledgerTarget))
+            {
+                return false;
+            }
+
+            var observation = observations.Targets.Single(target => target.RecordId == recordId);
+            if (observation.FailureCode is not null)
+            {
+                return false;
+            }
+
+            var failure = planTarget.TargetKind == SetupTargetKind.Env
+                ? EvaluateEnvironment(evidence, planTarget, ledgerTarget, observation)
+                : EvaluateFile(evidence, planTarget, ledgerTarget, observation);
+            return failure is null;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private static SetupRollbackPreflightResult? EvaluateFile(
         SetupRollbackPreflightEvidence evidence,
         SetupPrivatePlanTarget planTarget,

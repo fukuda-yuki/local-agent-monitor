@@ -271,9 +271,12 @@ public static class SetupContractValidator
 
         var writableTargets = changeSet.Targets.Where(target => target is not null && target.TargetKind != SetupTargetKind.Guidance).ToArray();
         var expectedCurrentState = AggregateCurrentState(writableTargets);
+        var rollbackTargets = writableTargets.Where(target => target.Operation != SetupOperation.NoOp).ToArray();
         var expectedRollbackAvailable = changeSet.State == SetupChangeSetState.Applied &&
-            writableTargets.Length > 0 &&
-            writableTargets.All(target => target.CurrentState == SetupCurrentState.Current && target.RollbackAvailable);
+            rollbackTargets.Length > 0 &&
+            rollbackTargets.All(target => target.CurrentState == SetupCurrentState.Current && target.RollbackAvailable) &&
+            writableTargets.Where(target => target.Operation == SetupOperation.NoOp)
+                .All(target => target.CurrentState == SetupCurrentState.Current && !target.RollbackAvailable);
 
         if (changeSet.CurrentState != expectedCurrentState || changeSet.RollbackAvailable != expectedRollbackAvailable)
         {
