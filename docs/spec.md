@@ -70,6 +70,17 @@ flushes a write-ahead intent before each file/environment-member mutation or
 restore. Recovery classifies prior/desired/third-party state per step,
 compensates in reverse step order, and persists partial outcomes without
 overwriting third-party state. Rollback is hash-guarded and has no force mode.
+Ledger v1 persists each plan-time repository-safe status-target projection as
+an immutable snapshot, including the then-current canonical expected-result
+facts. Ledger-origin expected results remain valid when they satisfy the strict
+v1 shape, closed codes, safety, and target/surface invariants; unlike a newly
+created plan, they need not equal the currently embedded manifest. Status
+combines the snapshot with freshly verified lifecycle, current-target,
+ownership, and backup facts. All-no-op targets own no backup and are outside the
+ownership quorum, but their fresh base-state guard still participates in the
+same change-set-wide rollback preflight used by rollback itself. The complete
+ledger retains its 1 MiB cap; finitely bounded snapshot fields must permit the
+largest legal single change set to fit without adding a second cap or pruning.
 Results distinguish requested/created and recovered change-set IDs. No HTTP,
 proxy, Canvas, or Local Monitor UI DTO is added.
 

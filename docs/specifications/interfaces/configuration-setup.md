@@ -139,8 +139,9 @@ Each target record contains:
 `guidance`. A target record is one physical mutation boundary: one file, one
 current-user environment allowlist, one startup task, or one no-write guidance
 result. `detected` reports bounded target/package presence and
-`detected_version` is a sanitized semantic version string or null; neither may
-contain a path or free-form command output. `operation` is `add`, `replace`,
+`detected_version` is a sanitized semantic version string of at most 128 UTF-16
+code units (`string.Length`) or null; neither may contain a path or free-form
+command output. `operation` is `add`, `replace`,
 `remove`, `mixed`, or `no-op`. It is `no-op` when every member is no-op, the
 single non-no-op operation when all changed members agree, and `mixed` when two
 or more non-no-op member operations differ. Each physical
@@ -152,10 +153,15 @@ foreign endpoints are reported only as `loopback`, `remote`,
 `credential_bearing`, or `invalid` state.
 
 `expected_result` is copied from the matching Issue #61 manifest without
-inventing capabilities. VS Code uses surface `github-copilot-vscode`; terminal
-CLI uses `github-copilot-cli`. App/SDK has no Issue #61 manifest and returns a
-null manifest with `planned_source_not_enabled` guidance rather than borrowing
-another surface's capability declaration.
+inventing capabilities. A newly produced plan must match the currently embedded
+canonical manifest exactly, with JSON property order ignored. VS Code uses
+surface `github-copilot-vscode`; terminal CLI uses `github-copilot-cli`.
+App/SDK has no Issue #61 manifest and returns a null manifest with
+`planned_source_not_enabled` guidance rather than borrowing another surface's
+capability declaration. Ledger-origin status validation is deliberately
+separate, as defined below, so a valid immutable historical snapshot is not
+silently rewritten or rejected only because the embedded manifest later
+changes.
 
 `reference_state` and `current_state` are null in plan/apply/rollback target
 results. In status, `reference_state` is `base`, `desired`, `previous`, or
@@ -167,25 +173,72 @@ It never contains a discovered caller path or file content.
 
 ### Status projection
 
-After applying the optional adapter filter, `setup status` orders eligible
-change sets by these classes: (1) `partial`, `applying`, `compensating`, and
-`rolling_back`; (2) `planned`; (3) terminal states. Within each class it orders
-by `updated_at` descending and then canonical lowercase UUID string ordinal
-ascending. It returns the first `min(100, eligible_count)` entries and sets
-`truncated` to `eligible_count > returned_count`. Thus recovery-blocking entries
-are prioritized within, but never exempt from, the hard 100-entry bound. Each
-entry contains only the
-repository-safe change-set fields, physical target summaries, current
-verification state (`current`, `stale`, `diverged`, `unavailable`, or
-`not_applicable`),
-and whether rollback remains available. It never returns private plan or backup
-content.
+After mandatory recovery and any failed-recovery overlay, `setup status`
+applies the optional exact adapter-ID filter before ordering or counting. It
+then assigns each eligible row to one priority class: (1)
+`partial`, `applying`, `compensating`, or `rolling_back`; (2) `planned`; or (3)
+terminal (`applied`, `no_changes`, `restored`, or `rolled_back`). The four
+states in class 1 have equal priority; they are not
+sub-ranked by state name. Within each class rows sort by `updated_at` descending,
+then by the canonical lowercase UUID string using ordinal ascending comparison.
+The command returns the first `min(100, eligible_count)` rows and sets
+`truncated` exactly to `eligible_count > returned_count`. Filtering therefore
+precedes priority, ordering, cap, and truncation. Recovery-blocking rows are
+prioritized but never exempt from the hard 100-row cap.
 
 Each status entry has exactly `change_set_id`, `adapter`, `selected_target`,
 `created_at`, `updated_at`, `state`, nullable `outcome_code`, `current_state`,
 `rollback_available`, and `targets`. Its target summaries use the same bounded
 public target DTO but omit `guidance.sample` after the original plan result;
 they retain only `guidance.kind` and `guidance.language`.
+
+Ledger v1 persists an immutable repository-safe `status_projection` snapshot
+inside every physical target row when the planned row is created. Lifecycle
+updates never rewrite it. Status does not rerun adapter detection or reconstruct
+immutable DTO fields from a current adapter, private value, path, or command
+output. The backend-to-CLI source contract is:
+
+| Public status field | Internal backend source | Status rule |
+| --- | --- | --- |
+| top-level `contract_version`, `command`, `change_set_id`, `targets` | fixed result contract | `setup.v1`, `status`, null, and empty respectively |
+| top-level `success`, `code`, `recovered_change_set_id`, `recovery_operation`, `warnings`, `next_actions` | requested status outcome plus the mandatory recovery result | fixed-code/correlation rules in this document; never inferred from target content |
+| top-level `adapter` | normalized optional status filter | exact adapter ID when filtered, otherwise null |
+| top-level `change_sets`, `truncated` | filtered/ordered/capped ledger projection | ordering and count rule above |
+| change-set `change_set_id`, `adapter`, `selected_target`, `created_at` | immutable ledger change-set fields | copied exactly |
+| change-set `updated_at`, `state`, `outcome_code` | current ledger lifecycle fields, with the documented failed-recovery overlay | copied after recovery/overlay, never taken from the private plan |
+| change-set `targets` | immutable ledger target order | no adapter rediscovery, insertion, or reordering |
+| target `record_id`, `target_kind`, `target_label`, `restart_requirement` | immutable ledger target fields | copied exactly |
+| target `detected`, `detected_version`, `operation`, `effective_source`, `endpoint`, `expected_result` | immutable ledger `status_projection` | plan-time safe facts; ledger-origin `expected_result` uses the historical validation below, not current-manifest equality; these fields are not claims about later installation, policy, precedence, endpoint ownership, or manifest changes |
+| target `guidance` | immutable ledger `status_projection` plus fixed contract sample | persist plan-time `kind` and `language` only; rehydrate the one fixed in-memory sample required by the DTO/validator, while status JSON still omits `sample` and never reopens a caller path |
+| target `changes[].setting_key`, `operation`, `previous_state`, `new_state`, `conflict`, `managed` | immutable ordered ledger `status_projection.changes` | copied exactly; states/conflict are fixed redacted names and `managed` is the plan-time observation |
+| target `reference_state`, `current_state` | lifecycle/journal plus fresh private-plan/current-target classification | recomputed on every status request after recovery under the matrix below |
+| target `rollback_available` | fresh lifecycle, ownership, current-target, private-plan, and backup verification | recomputed on every status request; the persisted rollback status alone is insufficient |
+| change-set `current_state` | current target results | recomputed by the aggregation below |
+| change-set `rollback_available` | shared fresh rollback preflight | recomputed from the owned target/backup quorum plus every unowned all-NoOp target's base-state guard |
+
+The snapshot stores only public-safe immutable facts. `detected_version` remains
+a sanitized semantic version of at most 128 UTF-16 code units or null;
+`endpoint` remains a canonical credential-free loopback origin or null;
+`expected_result` is the canonical Issue #61 manifest object copied at plan time
+or null; guidance stores no sample; and member state/conflict names remain
+fixed redacted identifiers. The
+snapshot contains no desired/previous value, target location, command output,
+credential, token, authorization header, raw exception, prompt/response, tool
+content, or PII.
+
+Ledger-origin `expected_result` validation is a separate strict path. It
+requires the exact source-capability v1 object shape with no unknown or
+duplicate fields, `contract_version: "v1"`, the fixed
+`github-copilot-vscode` or `github-copilot-cli` public surface matching that
+snapshot target, `source_adapter: "otel-http+copilot-compatible-hook"`, the
+schema's closed support/stability/availability codes and fixed
+provenance/completeness arrays, and all source-capability safety and cross-field
+invariants. No free-form manifest string remains. Guidance must keep
+`expected_result` null. A violation is `ledger_corrupt`. A schema-valid,
+target-matched historical manifest is not required to equal the currently
+embedded manifest and is never replaced with current facts. This exception
+applies only to an immutable ledger snapshot; new plan output continues to use
+exact-current canonical matching.
 
 Status uses lifecycle-relative reference state for each writable target:
 
@@ -195,11 +248,18 @@ Status uses lifecycle-relative reference state for each writable target:
 | `no_changes` | `desired` (identical to the observed base) |
 | `applied` | `desired` |
 | `restored` or `rolled_back` | `previous` |
-| `partial` | aggregate member outcomes: `desired` when every member/file remains desired, `previous` when every member/file is previous, or `none` for a safely classified mixture or failed classification |
-| in-progress state | journal-derived `base`, `desired`, or `previous`; a failed recovery is projected effectively as `partial` |
+| `partial` | freshly classified aggregate: `desired` when every member/file is desired, `previous` when every member/file is previous, or `none` for a safe mixture/third-party state or unavailable classification |
+| `applying`, `compensating`, or `rolling_back` | freshly checked journal-derived `base`, `desired`, or `previous` when the whole target has one reference; otherwise `none`; a failed recovery is projected effectively as `partial` |
 
-For `base`, `desired`, or `previous`, `current` means the canonical current
-state equals that reference and `stale` means a later known mismatch.
+For each returned row, status resolves a target location only from its private
+immutable plan, uses the same no-follow/path/hash/member classification as
+apply/recovery/rollback, and observes the current target during that request. It
+does not trust a previously persisted current hash as proof that the target is
+still current. For `base`, `desired`, or `previous`, `current` means the freshly
+observed canonical state equals that reference and `stale` means a safely known
+mismatch, including a missing current value when the typed reference is not
+missing.
+
 `diverged` means the transaction safely classified a target that has no single
 aggregate reference: desired/previous members are mixed, or at least one
 third-party member/file was preserved. Its reference is `none`. `unavailable`
@@ -207,20 +267,56 @@ means at least one member/file could not be safely verified or classified, also
 with reference `none`. Guidance is
 `not_applicable` with reference `none`.
 
+A missing private plan for a non-terminal change set is `recovery_required` and
+prevents projection. For a terminal row, a missing/unreadable required private
+plan or unsafe/unreadable current target makes that target `unavailable` with
+reference `none` and rollback unavailable; status never guesses or reruns the
+adapter. A missing current file/member that can be represented by the typed
+canonical state is a known state, not an I/O failure, and therefore compares as
+`current` or `stale` normally.
+
 Change-set `current_state` is `diverged` if any writable target is diverged,
 otherwise `stale` if any is stale, otherwise `unavailable` if any is
 unavailable, otherwise `current` when all writable targets are current, and
-`not_applicable` when there are no writable targets. Change-set
-`rollback_available` is true only when lifecycle is
-`applied`, at least one writable target exists, every writable target is
-`current`, and every writable target has a valid backup and reports
-`rollback_available=true`. Guidance targets do not participate in either
-writable-target aggregation. Every `partial` change set reports
+`not_applicable` when there are no writable targets. Guidance targets do not
+participate in current-state aggregation.
+
+A rollback-participating target is a writable physical target with at least one
+non-`no-op` member and current ledger ownership: an applied hash, opaque backup
+reference, and pending rollback status created by the successful apply. A
+writable target whose members are all `no-op` has no applied hash, backup, or
+ownership; it remains visible and participates in current-state aggregation but
+reports target `rollback_available=false` and is excluded from the ownership and
+backup quorum. It is not excluded from the change-set-wide fresh preflight
+guard. A mixed target with any changed member participates as one physical
+target, and its full immutable member list, including no-op members, remains
+part of its aggregate stale guard.
+
+For status, a participating target reports `rollback_available=true` only when
+the change-set lifecycle is `applied`, its fresh current state equals the
+applied/desired aggregate, its ledger ownership fields are internally
+consistent, and its private plan and safe regular non-reparse backup are
+present and verify against the recorded previous-state hash. The persisted
+rollback status or backup reference alone never proves availability.
+
+Change-set rollback availability uses the same pure preflight evaluation as
+`setup rollback` at the state observed by that status request: immutable
+plan/ledger/journal identity and lifecycle must agree; at least one changed
+physical target must have ownership; every owned target must have internally
+consistent applied hash, pending rollback status, journal evidence, and a safe
+backup matching its previous-state hash; every owned target must still equal
+its applied state; and every unowned all-`no-op` physical target must still
+equal its immutable base state. The unowned target does not need a backup and
+does not join the ownership quorum, but any fresh guard mismatch makes the
+whole change set unavailable, exactly as rollback would return no-write
+`rollback_stale`. Guidance never participates. Subject only to a concurrent
+change after observation, status reports change-set `rollback_available=true`
+if and only if an immediately invoked rollback would pass that preflight. Every
+`partial` change set reports
 `rollback_available=false`, including an all-desired or all-previous partial
 whose unresolved transaction outcome has not reached a terminal lifecycle.
 
-A missing private plan for a non-terminal change set is `recovery_required`. A
-corrupt or unsupported ledger fails the whole command with `ledger_corrupt` or
+A corrupt or unsupported ledger fails the whole command with `ledger_corrupt` or
 `ledger_version_unsupported`; it is not treated as an empty ledger. Status is
 the only command allowed while an unresolved partial recovery exists.
 
@@ -302,12 +398,29 @@ CI artifacts, docs, Issues, or committed files. The default retention is
 indefinite so rollback remains available. Automatic cleanup is not part of
 Issues #66/#67.
 
+The ownership ledger retains its existing hard limit of 1 MiB for the complete
+serialized file, on bounded read and before atomic replacement. This is the one
+storage cap; `status_projection` adds no second per-row or per-snapshot cap. All
+snapshot fields are nevertheless strictly shaped and bounded, including the
+128-UTF-16-code-unit `detected_version`, so the largest legal single change set
+(16 targets, 32 changes per target, and the largest accepted safe snapshot
+fields) is finite and must serialize below 1 MiB in an executable boundary
+test. Indefinite retention does not imply unlimited history: once appending a
+legal row would exceed the ledger cap, the write fails closed without replacing
+the durable ledger or leaving a claimed change set. That finite local-history
+capacity is an accepted constraint for Issues #66/#67; automatic pruning,
+retention policy, and a larger or second cap are not introduced here.
+
 Schema version `1` is the first shipped ownership-ledger version. There is no
 fabricated v0 migration fixture. The loader accepts exactly version 1 and fails
 closed with `ledger_version_unsupported` for an unknown version. Tests must
 write, close, reopen, and verify the shipped v1 state. A later schema version
 must add fixtures from every actually shipped older version and verify migration
-through restart.
+through restart. The status projection is being added before ledger v1 ships,
+so it is a required v1 field rather than a migration or optional extension. A
+v1 target missing it, containing unknown projection fields, or violating its
+cross-field invariants is `ledger_corrupt`; the loader does not fall back to
+adapter rediscovery, a private-plan reconstruction, or an older v1 shape.
 
 ## Ownership ledger v1
 
@@ -337,7 +450,36 @@ Every record contains:
 - rollback status: `not_available`, `pending`, `succeeded`, `failed`, or
   `stale`;
 - restart requirement;
+- immutable repository-safe `status_projection`;
 - tool version.
+
+`status_projection` has exactly these fields:
+
+- `detected`: boolean plan-time target/package presence;
+- nullable sanitized semantic-version `detected_version`, at most 128 UTF-16
+  code units (`string.Length`);
+- aggregate `operation`;
+- nullable `effective_source`;
+- nullable canonical loopback `endpoint`;
+- nullable canonical Issue #61 `expected_result` object;
+- nullable guidance object containing exactly `kind` and `language` (never the
+  sample);
+- ordered `changes`, each containing exactly `setting_key`, `operation`,
+  redacted `previous_state`, redacted `new_state`, fixed `conflict`, and boolean
+  plan-time `managed`.
+
+The snapshot target `operation` must equal the aggregate of snapshot member
+operations. Its ordered `changes` keys and operations must exactly equal the
+ledger target's operational member keys and operations. Its expected-result
+surface must match the target registered for that plan, under the separate
+ledger-origin historical-manifest validation above. Guidance targets have an
+empty member list, `no-op`, null source/endpoint/expected-result, and non-null
+guidance metadata. Writable targets have one or more members and null guidance.
+An all-`no-op` writable record has null applied hash/backup reference and
+`not_available` rollback status; a target with any changed member follows the
+lifecycle ownership invariants. The existing ledger `record_id`, `target_kind`,
+`target_label`, and `restart_requirement` complete the immutable public status
+target and are not duplicated inside `status_projection`.
 
 The ledger contains no raw target path, setting value, credential, token,
 authorization header, raw exception, prompt, response, tool argument/result, or
@@ -371,8 +513,10 @@ member list remain outside capture, hashing, backup, status, and mutation.
 4. calculates effective source and managed state;
 5. produces only redacted previous/new state;
 6. records restart and rollback availability;
-7. writes and flushes the private immutable plan first, then atomically replaces
-   the repository-safe ledger with its planned record.
+7. builds the immutable repository-safe status snapshot from the same validated
+   plan result, with guidance sample removed;
+8. writes and flushes the private immutable plan first, then atomically replaces
+   the repository-safe ledger with its planned record and status snapshot.
 
 The two files cannot be atomically replaced together. Their ordering is
 crash-consistent: a private plan without a ledger row is an ignored orphan; a
@@ -747,7 +891,10 @@ Fixtures are synthetic and use the production DTO serializer.
 
 Focused validation covers:
 
-- ledger v1 write-close-reopen and unknown-version rejection;
+- ledger v1 status snapshot write-close-reopen, exact-shape/cross-field
+  validation, plan/current-manifest versus ledger/historical-manifest validation,
+  128-code-unit detected-version boundary, missing-snapshot/unknown-version
+  rejection, and largest-legal-change-set size below the retained 1 MiB cap;
 - JSONC/TOML malformed fail-closed behavior;
 - file backup/temp/atomic replace and non-reparse path policy;
 - deterministic stale apply/rollback and lock contention;
@@ -770,11 +917,18 @@ Focused validation covers:
 - recovery DTO correlation for plan/apply/rollback/status and readable-ledger
   projection after failed recovery;
 - status hard-cap, priority, timestamp/UUID tie-break, and adapter-filter order;
+- status immutable-field reconstruction from the ledger snapshot while changed
+  installation/version/policy/manifest facts are not rediscovered;
+- fresh current/reference/backup verification after external target or backup
+  changes, including terminal missing-plan/unavailable classification;
 - endpoint, supported-version, and managed-state changes between plan and apply
   produce no mutation artifacts or target writes;
 - environment notification faults before and after delivery, allowing recovery
   replay but forbidding notification before a final state;
-- ownership preservation and repeated-apply no-op;
+- ownership preservation, repeated-apply no-op, all-no-op physical-target
+  exclusion from ownership/backup quorum, and status/rollback preflight
+  equivalence when that unowned target remains current, drifts, or is
+  unavailable;
 - VS Code/CLI/App-SDK detection and plan contracts;
 - mixed-member target-operation aggregation;
 - per-target and change-set status state/rollback aggregation for mixed
@@ -786,6 +940,19 @@ Focused validation covers:
 - policy/environment/user-setting precedence;
 - Release ZIP and repository wrapper invocation;
 - secret/header/value/path negative evidence.
+
+The status/ledger implementation must keep this requirement-to-test mapping:
+
+| Requirement | Executable proof |
+| --- | --- |
+| strict unshipped v1 snapshot, constructor/fixture coverage, immutable lifecycle updates, no migration/fallback | `SetupStorageTests` round-trip the production serializer and committed `Fixtures/Setup/v1/ownership-ledger.v1.json`; all ledger-target constructor fixtures in apply, compensation, rollback, and recovery tests compile with the required snapshot |
+| new-plan exact-current manifest matching versus ledger-origin historical v1 validation | `SetupContractValidationTests` reject a non-current plan manifest; `SetupStorageTests` accept a schema-safe target-matched historical snapshot and reject unknown shape/code, unsafe data, surface mismatch, and cross-field mismatch |
+| finite legal snapshot under the retained ledger cap | `SetupStorageTests` construct the largest accepted 16-target/32-change shape with 128-code-unit versions and largest safe fields, prove it serializes below 1 MiB, and prove an over-cap complete ledger is rejected before replacement |
+| immutable status DTO fields, adapter not rerun, and guidance sample omission/rehydration | `SetupStatusTests` project from the ledger after current installation/policy/manifest facts change and use an adapter fake that fails if invoked; `SetupContractShapeTests` prove the fixed in-memory guidance sample validates while status JSON omits `sample` |
+| missing private plan distinction and fresh target/backup checks | `SetupStatusTests` prove non-terminal missing plan returns `recovery_required`, terminal missing/unreadable plan or current target projects unavailable, and missing/unsafe/mismatched owned backup makes rollback unavailable |
+| status and rollback use equivalent fresh preflight, including all-NoOp guard-only targets | paired `SetupStatusTests` and `SetupRollbackTests` fixtures assert the same availability/preflight outcome for valid state, owned-target drift, backup mismatch, and unowned all-NoOp target drift; no adapter detection is used |
+| lifecycle/reference/current aggregation and partial rollback false | `SetupStatusTests` cover planned/no-change/applied/restored/rolled-back/in-progress/partial plus desired, previous, mixed, third-party, missing, and unavailable member states |
+| filter, priority, deterministic tie-break, hard 100-row cap, truncation | `SetupStatusOrderingTests` cover adapter filter before 99/100/101-row ordering and cap, equal-priority states, timestamp order, and lowercase UUID ordinal ties |
 
 Required repository validation remains:
 

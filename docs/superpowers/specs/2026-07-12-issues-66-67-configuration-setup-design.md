@@ -88,7 +88,8 @@ not need a new remote or browser-mediated surface. Rejected.
 New Config CLI responsibilities are grouped under `Setup/`:
 
 - `Contracts`: fixed enums/records and JSON serialization.
-- `Storage`: private immutable plans/backups/journals and repository-safe ledger v1.
+- `Storage`: private immutable plans/backups/journals and repository-safe ledger
+  v1, including the immutable plan-time status-target projection snapshot.
 - `Transactions`: exclusive lock, hashes, atomic file operations, current-user
   environment operations, compensation, rollback, and fault points.
 - `Adapters`: registration and the `github-copilot` implementation.
@@ -113,7 +114,8 @@ must extend the codec contract before accepting broader TOML.
 ```text
 detect target/version/policy/current state/port
   -> adapter creates bounded physical targets/member changes + exact base hashes
-  -> coordinator stores private immutable plan and safe planned ledger row
+  -> coordinator stores private immutable plan and safe planned ledger row,
+     including the immutable status-target projection snapshot
   -> user explicitly applies change-set ID
   -> exclusive lock + all-target preflight
   -> flushed backups + per-file/per-env-member write-ahead intents
@@ -129,16 +131,32 @@ registry views, processes, endpoint probes, barriers, and fault points.
 ## Ownership and private data
 
 The ledger records fixed IDs/labels, timestamps, state/outcome codes, hashes,
-opaque backup references, restart requirements, and rollback status. It never
-records an absolute path or value. A successful applied record grants the adapter
-authority only over its listed member settings at that physical target's
-post-apply hash.
+opaque backup references, restart requirements, rollback status, and the
+immutable repository-safe target fields needed by public status. The snapshot
+retains plan-time detection/version/source/endpoint/manifest/guidance metadata
+and redacted member states; it never records an absolute path or raw value.
+New plans require exact equality with the current canonical manifest. Historical
+ledger manifests instead use a strict v1 schema/closed-code/safety/
+target-surface/cross-field validator, so status preserves a valid plan-time fact
+without requiring equality to a later embedded manifest. Status does not rerun
+adapter detection. It uses private artifacts and the current target only to
+freshly derive reference/current/rollback facts. A successful applied record
+grants the adapter authority only over its listed changed member settings at
+that physical target's post-apply hash; an all-no-op physical target grants no
+authority or backup but retains its base-state rollback preflight guard.
 
 Private plans hold target locations and validated desired values, not previous
 values. Flushed apply-time backups hold the exact previous state required for
 restore. Journals record physical-target progress. All are local runtime data,
 not repository-safe output. Backups are retained until a future explicitly
 designed cleanup feature.
+
+The complete ledger keeps its existing 1 MiB cap. Snapshot fields are strictly
+bounded, including detected versions at 128 UTF-16 code units, and an executable
+boundary proves the largest accepted single change set fits under that cap.
+Snapshot storage adds no second cap. Indefinite retention therefore has finite
+history capacity; an append that would exceed 1 MiB fails closed without
+replacing the durable ledger, and no automatic pruning is added.
 
 ## Transaction semantics
 
@@ -187,13 +205,16 @@ All public target results include bounded `detected` and sanitized
 `detected_version`; App/SDK uses them to report package presence/version without
 exposing a path. Status adds per-target verification state. The change-set state
 is diverged before stale before unavailable before current, considering writable targets only,
-and rollback is available only when every writable target is current and backed
-up. Guidance targets are not part of this aggregation. Each target carries a
-lifecycle-relative base/desired/previous/none reference; partial targets use
-aggregate member outcomes. All-desired and all-previous targets keep that
-reference; mixed desired/previous or preserved third-party state is explicitly
-diverged with no single reference, while classification failure is unavailable.
-Every partial change set has rollback unavailable.
+and rollback availability is equivalent to the rollback command's fresh
+change-set preflight. Changed targets form the ownership/backup quorum; unowned
+all-no-op targets need no backup but must still equal their base state, so their
+drift makes the whole rollback unavailable. Guidance targets are not part of
+either calculation. Each target carries a lifecycle-relative
+base/desired/previous/none reference; partial targets use aggregate member
+outcomes. All-desired and all-previous targets keep that reference; mixed
+desired/previous or preserved third-party state is explicitly diverged with no
+single reference, while classification failure is unavailable. Every partial
+change set has rollback unavailable.
 
 ## GitHub Copilot target behavior
 
@@ -237,7 +258,15 @@ Every production behavior begins with a failing test. Required early executable
 contracts are:
 
 - serializer round-trip from production DTOs through CLI and wrapper fixtures;
-- ledger v1 close/reopen and unknown-version rejection;
+- strict ledger v1 status-snapshot close/reopen, cross-field validation, and
+  missing-snapshot/unknown-version rejection, including all affected ledger
+  constructor fixtures and the largest legal snapshot below 1 MiB;
+- exact-current manifest validation for new plans and separate strict
+  historical-manifest validation for ledger-origin status;
+- guidance sample omission from storage/status JSON and fixed in-memory
+  rehydration for DTO validation;
+- terminal/non-terminal missing-plan behavior, fresh backup checks, adapter-not-
+  rerun proof, and paired status/rollback preflight-equivalence cases;
 - atomic file and ownership-preservation tests;
 - barrier-controlled stale/lock/concurrent-edit cases without sleeps;
 - failure at every mutation and compensation boundary;

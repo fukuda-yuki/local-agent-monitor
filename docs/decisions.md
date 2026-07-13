@@ -1841,11 +1841,14 @@ a thin argument/result wrapper.
   rollback require its UUIDv7 ID. Public output is the fixed repository-safe
   `setup.v1` JSON contract.
 - The version-1 ownership ledger lives under the current user's Local Monitor
-  runtime root and stores only fixed labels, timestamps, state/error codes,
-  hashes, and opaque backup references. Exact values and paths are confined to
+  runtime root and stores fixed labels, timestamps, state/error codes, hashes,
+  opaque backup references, and the immutable repository-safe plan-time target
+  projection required by `status`. Exact values and paths are confined to
   private plans/backups/journals. Plans retain desired state but not previous
   values; exact previous state is captured only in apply-time backups. Version 1 is the first shipped schema; unknown versions
-  fail closed and no synthetic v0 migration is invented.
+  fail closed and no synthetic v0 migration is invented. The complete ledger
+  retains its 1 MiB cap; bounded snapshots add no second cap or automatic
+  pruning, so finite history capacity is accepted.
 - One physical file or current-user environment allowlist is one ledger target
   with one base/applied hash and backup; setting changes are bounded members.
   Apply preflights every base hash and path before writing, flushes backups and
@@ -1865,6 +1868,17 @@ a thin argument/result wrapper.
   none reference. A third-party value preserved during a transaction is
   `diverged`, as is a safely classified aggregate target whose members mix
   desired and previous state. Classification failure is `unavailable` instead.
+  Status rebuilds immutable detected/version/source/endpoint/manifest/guidance/
+  redacted-member fields from the ledger snapshot, but freshly verifies
+  reference/current/rollback facts from the lifecycle, private artifacts, and
+  current target. A ledger-origin manifest is validated against the strict v1
+  shape, closed codes, safety rules, and target/surface invariants without being
+  compared to the currently embedded manifest; a newly produced plan must still
+  match the current canonical manifest exactly. An all-`no-op` physical target
+  grants no rollback ownership and needs no backup, but its fresh base-state
+  check remains part of the change-set-wide rollback preflight. Drift in that
+  unowned target therefore makes rollback unavailable, matching the rollback
+  command's no-write `rollback_stale` behavior.
 - Symlink/junction/reparse/path traversal, malformed structured configuration,
   machine-wide environment, `setx`, implicit administrator elevation, raw
   exception output, and DB/log/runtime-data deletion are excluded.

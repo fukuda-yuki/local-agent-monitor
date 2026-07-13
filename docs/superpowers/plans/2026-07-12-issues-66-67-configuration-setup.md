@@ -163,13 +163,63 @@ all-target preflight, no force, rolling_back before restore, per-member restore
 intents, barrier edit after preflight, idempotent restart, and rolled_back versus
 partial. Commit: `Issue #66: feat: rollback setup change sets`.
 
+### Task 6b0 — Pin status/ledger source contract
+
+Own `docs/requirements.md`, `docs/spec.md`, `docs/decisions.md`,
+`docs/specifications/interfaces/configuration-setup.md`, and this design/plan
+pair; inspect architecture and the task roadmap for consistency. Before status
+implementation, pin the strict unshipped ledger-v1 status-target snapshot,
+plan-current versus ledger-historical expected-result validation, every public
+field's persisted or freshly verified source, lifecycle and stale semantics,
+all-no-op ownership-quorum exclusion without weakening the rollback preflight,
+the retained 1 MiB ledger-capacity constraint, and filter/order/cap rules. This
+is a spec-only task; it adds no compatibility shim or migration from a shipped
+version. Commit:
+`Issue #66: docs: pin setup status projection contract`.
+
+### Task 6b1 — Persist immutable status-target snapshot in ledger v1
+
+Own `Setup/Storage/SetupLedgerStore.cs`,
+`Setup/Contracts/SetupContracts.cs`, `SetupJson.cs`, and
+`SetupContractValidator.cs`; the ledger-origin manifest validator under
+`Setup/Capabilities/`; `tests/.../SetupStorageTests.cs`,
+`SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`;
+`tests/.../Fixtures/Setup/v1/ownership-ledger.v1.json`; and the ledger-target
+constructor fixtures in `SetupApplyTests.cs`, `SetupCompensationTests.cs`,
+`SetupRollbackTests.cs`, and `SetupRecoveryTests.cs`. Do not alter unrelated
+concurrent test-platform/recovery behavior while updating those constructors.
+RED/GREEN the three owned contract/storage test classes, then their affected
+transaction fixture classes. Extend the strict unshipped v1 shape; cover exact
+snapshot round-trip, immutable update preservation, operational-member
+cross-field matching, 128-UTF-16-code-unit detected-version validation,
+unsafe-field rejection, missing/unknown projection rejection, all-no-op
+no-ownership invariants, and the largest accepted snapshot below the retained
+1 MiB complete-ledger cap. Keep new-plan exact-current manifest validation, but
+use separate strict schema/closed-code/safety/target-surface/cross-field
+validation for a ledger-origin historical manifest. Prove status guidance
+stores no sample and the status serializer omits it. Do not add an older-v1
+reader, migration, fallback, or second size cap. Commit:
+`Issue #66: feat: persist setup status snapshot`.
+
 ### Task 6b — Lifecycle-relative status semantics
 
-Own `Setup/Status/SetupStatusProjector.cs` and
-`tests/.../SetupStatusTests.cs`. RED/GREEN filter `SetupStatusTests`. Cover every
-lifecycle reference, all-desired/all-previous/desired+previous/third-party/
-unavailable aggregate targets, guidance exclusion, partial rollback false, and
-change-set aggregation. Commit:
+Own `Setup/Status/SetupStatusProjector.cs`, a shared pure rollback-preflight
+evaluator under `Setup/Transactions/`, the narrow integration in
+`SetupRollbackCoordinator.cs`, and the guidance DTO/validator/serializer files
+from Task 6b1 when needed; own `tests/.../SetupStatusTests.cs`, paired
+`SetupRollbackTests.cs` cases, and the affected
+`SetupContractShapeTests.cs`/`SetupContractValidationTests.cs` cases.
+RED/GREEN the status tests, paired rollback tests, and affected contract tests.
+Cover every lifecycle reference, all-desired/all-previous/
+desired+previous/third-party/unavailable aggregate targets, terminal versus
+non-terminal missing private plans, missing/unsafe/mismatched backups, guidance
+exclusion and fixed-sample in-memory rehydration with wire omission, partial
+rollback false, and change-set aggregation. Rebuild immutable DTO fields from
+the ledger snapshot and use an adapter fake that fails if status reruns
+detection. Freshly verify reference/current/rollback facts. All-no-op/unowned
+physical targets remain visible and outside the ownership/backup quorum, but
+the shared preflight must make both status and rollback unavailable when their
+fresh base-state guard mismatches. Commit:
 `Issue #66: feat: project setup ownership status`.
 
 ### Task 6c — Status filtering, priority, and hard cap
