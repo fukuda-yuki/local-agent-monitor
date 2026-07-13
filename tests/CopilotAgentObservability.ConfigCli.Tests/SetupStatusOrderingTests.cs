@@ -11,11 +11,13 @@ public sealed class SetupStatusOrderingTests
 
     public static TheoryData<string> InvalidAdapterIds => new()
     {
+        string.Empty,
         "UPPERCASE",
         "adapter_name",
         "-adapter",
         "adapter-",
         "adapter--name",
+        "adapter-é",
         new string('a', 129),
     };
 
@@ -172,6 +174,23 @@ public sealed class SetupStatusOrderingTests
         Assert.Equal(selected.ChangeSetId.ToString("D"), Assert.Single(projected.ChangeSets).ChangeSetId);
         Assert.Equal("1", document.RootElement.GetProperty("adapter").GetString());
         Assert.Equal("1", document.RootElement.GetProperty("change_sets")[0].GetProperty("adapter").GetString());
+    }
+
+    [Fact]
+    public void Project_MaximumLengthAdapterFiltersHistoricalLedgerExactlyAndSerializes()
+    {
+        var adapter = $"1-{new string('a', 126)}";
+        var selected = Row("00000000-0000-7000-8000-000000000001", SetupChangeSetState.Planned, 1, adapter);
+        var other = Row("00000000-0000-7000-8000-000000000002", SetupChangeSetState.Planned, 2);
+
+        var projected = SetupStatusListProjector.Project(StatusResult(), [other, selected], adapter, null, Project);
+        using var document = JsonDocument.Parse(SetupJson.Serialize(projected));
+
+        Assert.Equal(128, adapter.Length);
+        Assert.Equal(adapter, projected.Adapter);
+        Assert.Equal(adapter, Assert.Single(projected.ChangeSets).Adapter);
+        Assert.Equal(adapter, document.RootElement.GetProperty("adapter").GetString());
+        Assert.Equal(adapter, document.RootElement.GetProperty("change_sets")[0].GetProperty("adapter").GetString());
     }
 
     [Fact]

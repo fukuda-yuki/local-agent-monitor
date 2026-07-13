@@ -14,6 +14,7 @@ public sealed class SetupContractValidationTests
         "-adapter",
         "adapter-",
         "adapter--name",
+        "adapter-é",
         new string('a', 129),
     };
 
@@ -273,6 +274,64 @@ public sealed class SetupContractValidationTests
 
         Assert.Equal("1", document.RootElement.GetProperty("adapter").GetString());
         Assert.Equal("1", document.RootElement.GetProperty("change_sets")[0].GetProperty("adapter").GetString());
+    }
+
+    [Fact]
+    public void Serialize_WhenAdapterSlugIsMaximumLength_PreservesTopLevelAndStatusAdapter()
+    {
+        var adapter = $"1-{new string('a', 126)}";
+        var status = CreateAppliedStatus("2026-07-12T00:00:00Z", "2026-07-12T00:01:00Z") with
+        {
+            Adapter = adapter,
+        };
+        var result = new SetupCommandResult(
+            SetupCommand.Status,
+            true,
+            SetupCodes.StatusReady,
+            null,
+            null,
+            null,
+            adapter,
+            [],
+            [status],
+            [],
+            [],
+            false);
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal(128, adapter.Length);
+        Assert.Equal(adapter, document.RootElement.GetProperty("adapter").GetString());
+        Assert.Equal(adapter, document.RootElement.GetProperty("change_sets")[0].GetProperty("adapter").GetString());
+    }
+
+    [Fact]
+    public void Serialize_WhenAdapterSlugIsEmpty_RejectsTopLevelAndStatusAdapter()
+    {
+        var topLevelResult = CreatePlanResult([]) with { Adapter = string.Empty };
+        var status = CreateAppliedStatus("2026-07-12T00:00:00Z", "2026-07-12T00:01:00Z") with
+        {
+            Adapter = string.Empty,
+        };
+        var statusResult = new SetupCommandResult(
+            SetupCommand.Status,
+            true,
+            SetupCodes.StatusReady,
+            null,
+            null,
+            null,
+            "github-copilot",
+            [],
+            [status],
+            [],
+            [],
+            false);
+
+        var topLevelException = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(topLevelResult));
+        var statusException = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(statusResult));
+
+        Assert.Equal(SetupContractValidator.InvalidContractCode, topLevelException.Message);
+        Assert.Equal(SetupContractValidator.InvalidContractCode, statusException.Message);
     }
 
     [Theory]
