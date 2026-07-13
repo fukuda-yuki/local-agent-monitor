@@ -89,7 +89,8 @@ internal sealed class SetupRollbackCoordinator
 
         if (plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env))
         {
-            return Result(changeSetId, false, SetupCodes.RollbackNotAvailable, changeSet);
+            return PersistAttemptOutcome(
+                setupLock, ledger, changeSet, SetupCodes.RollbackNotAvailable);
         }
 
         IReadOnlyList<SetupJournalTarget> rollbackTargets;
@@ -143,18 +144,18 @@ internal sealed class SetupRollbackCoordinator
         }
 
         if (execution.Disposition == SetupRecoveryDisposition.Failed &&
+            execution.Code == SetupCodes.PartialRollback &&
             execution.RecoveredChangeSetId == changeSetId &&
             execution.EffectiveChangeSet?.State == SetupChangeSetState.Partial)
         {
             return Result(changeSetId, false, SetupCodes.PartialRollback, execution.EffectiveChangeSet);
         }
 
-        return new SetupRollbackExecutionResult(
+        return Result(
             changeSetId,
             false,
             execution.Code ?? SetupCodes.RecoveryRequired,
-            execution.EffectiveChangeSet,
-            execution);
+            execution.EffectiveChangeSet);
     }
 
     private IReadOnlyList<SetupJournalTarget> ValidatePreflight(
