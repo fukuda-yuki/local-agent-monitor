@@ -3,7 +3,7 @@
   "source_surface": "claude-code",
   "source_adapter": "claude-code-otel",
   "registry_label": "claude-code-otel+claude-code-hook",
-  "mapping_status": "documentation_only_not_live_observed",
+  "mapping_status": "print_mode_live_observed",
   "manifest_rule": "Official documentation supplies candidate field semantics only. Manifest availability changes only from approved observed producer evidence.",
   "transport": {
     "implementation_path": "otel-http",
@@ -20,7 +20,8 @@
   "evidence_sources": [
     { "id": "official-monitoring", "kind": "official_documentation", "reference": "https://code.claude.com/docs/en/monitoring-usage", "evidence_status": "documented_not_live_observed" },
     { "id": "inventory-interactive", "kind": "approved_inventory", "reference": "../inventories/claude-code-interactive.json", "evidence_status": "blocked_no_producer_structure_observed" },
-    { "id": "inventory-print", "kind": "approved_inventory", "reference": "../inventories/claude-code-print.json", "evidence_status": "completed_no_producer_structure_observed" },
+    { "id": "inventory-print", "kind": "approved_inventory", "reference": "../inventories/claude-code-print.json", "evidence_status": "live_observed_print_structure" },
+    { "id": "live-print-observation", "kind": "live_observation", "reference": "../../../../../sprints/issue-99-claude-live-validation.md", "evidence_status": "live_observed" },
     { "id": "inventory-agent-sdk", "kind": "approved_inventory", "reference": "../inventories/claude-agent-sdk.json", "evidence_status": "blocked_no_producer_structure_observed" },
     { "id": "no-producer-evidence", "kind": "absence_record", "reference": "../inventories/claude-code-print.json", "evidence_status": "not_documented_or_live_observed" }
   ],
@@ -32,7 +33,7 @@
     { "field_id": "otel.end_time", "producer_path": "resourceSpans[].scopeSpans[].spans[].endTimeUnixNano", "selector": "every OTLP span", "producer_type": "OTLP fixed64 or decimal-string nanoseconds", "required": true, "content_gate": "none", "evidence_source": "official-monitoring", "evidence_status": "documented_not_live_observed", "semantic_class": "span_timing", "disposition": "normalized", "authority": "otel_timing", "normalized_target": "CopilotAgentObservability.Telemetry.MonitorSpanProjection.EndTime", "raw_storage_target": null, "transform": "Format through the existing OTLP timestamp conversion.", "absence_behavior": "Keep EndTime null; never substitute Hook capture time." },
     { "field_id": "otel.status_code", "producer_path": "resourceSpans[].scopeSpans[].spans[].status.code", "selector": "every OTLP span status object", "producer_type": "OTLP StatusCode enum", "required": false, "content_gate": "none", "evidence_source": "official-monitoring", "evidence_status": "documented_not_live_observed", "semantic_class": "span_status", "disposition": "normalized", "authority": "sole_otel_status_authority", "normalized_target": "CopilotAgentObservability.Telemetry.MonitorSpanProjection.Status", "raw_storage_target": null, "transform": "Resolve only through derived mapping otel.status_resolution.", "absence_behavior": "Keep Status null; tool success is never a fallback.", "resolver_group": "otel_status" },
     { "field_id": "otel.status_message", "producer_path": "resourceSpans[].scopeSpans[].spans[].status.message", "selector": "every OTLP span status object", "producer_type": "string", "required": false, "content_gate": "none", "evidence_source": "official-monitoring", "evidence_status": "documented_not_live_observed", "semantic_class": "raw_error_detail", "disposition": "documented_unmapped", "authority": "none", "normalized_target": null, "raw_storage_target": "CopilotAgentObservability.Telemetry.RawTelemetryRecord.PayloadJson", "transform": "No field-level extraction; retain only inside the existing raw OTLP payload.", "absence_behavior": "Do not invent a raw-error DTO or copy the message into sanitized metadata." },
-    { "field_id": "otel.span_name", "producer_path": "resourceSpans[].scopeSpans[].spans[].name", "selector": "every OTLP span", "producer_type": "string", "required": true, "content_gate": "none", "evidence_source": "official-monitoring", "evidence_status": "documented_not_live_observed", "semantic_class": "producer_span_name", "disposition": "documented_unmapped", "authority": "none", "normalized_target": null, "raw_storage_target": "CopilotAgentObservability.Telemetry.RawTelemetryRecord.PayloadJson", "transform": "No normalization because MonitorSpanProjection.Operation is not a raw span-name field.", "absence_behavior": "Keep Operation null unless a later adapter specifies an exact recognized-name transform." },
+    { "field_id": "otel.span_name", "producer_path": "resourceSpans[].scopeSpans[].spans[].name", "selector": "every OTLP span", "producer_type": "string", "required": true, "content_gate": "none", "evidence_source": "live-print-observation", "evidence_status": "live_observed", "semantic_class": "producer_span_name", "disposition": "normalized", "authority": "otel_observed_value", "normalized_target": "CopilotAgentObservability.Telemetry.MonitorSpanProjection.Operation", "raw_storage_target": "CopilotAgentObservability.Telemetry.RawTelemetryRecord.PayloadJson", "transform": "Resolve only through derived mappings otel.operation_classification and otel.category_classification; the raw span name itself stays inside the raw payload.", "absence_behavior": "Keep Operation null and Category unknown for absent or unrecognized names.", "resolver_group": "claude_span_classification" },
     { "field_id": "otel.span_type", "producer_path": "resourceSpans[].scopeSpans[].spans[].attributes[\"span.type\"]", "selector": "every OTLP span carrying the attribute", "producer_type": "string", "required": false, "content_gate": "documented detailed trace emission", "evidence_source": "official-monitoring", "evidence_status": "documented_not_live_observed", "semantic_class": "producer_span_type", "disposition": "documented_unmapped", "authority": "none", "normalized_target": null, "raw_storage_target": "CopilotAgentObservability.Telemetry.RawTelemetryRecord.PayloadJson", "transform": "No field-level extraction.", "absence_behavior": "Do not invent source_span_type." },
     { "field_id": "otel.session_id", "producer_path": "resourceSpans[].scopeSpans[].spans[].attributes[\"session.id\"]", "selector": "every OTLP span carrying the attribute", "producer_type": "string", "required": false, "content_gate": "documented session-ID telemetry setting", "evidence_source": "official-monitoring", "evidence_status": "documented_not_live_observed", "semantic_class": "native_session_candidate", "disposition": "corroboration_only", "authority": "identical_native_id_candidate_only", "normalized_target": null, "raw_storage_target": "CopilotAgentObservability.Telemetry.RawTelemetryRecord.PayloadJson", "transform": "Compare byte-for-byte only after a Claude Hook native session ID exists; never persist as a new native ID by itself.", "absence_behavior": "Leave OTel evidence unbound.", "resolver_group": "exact_native_session_binding" },
     { "field_id": "otel.request_model", "producer_path": "resourceSpans[].scopeSpans[].spans[claude_code.llm_request].attributes[\"gen_ai.request.model\"]", "selector": "span.name == \"claude_code.llm_request\"", "producer_type": "string", "required": false, "content_gate": "documented trace span is emitted", "evidence_source": "official-monitoring", "evidence_status": "documented_not_live_observed", "semantic_class": "request_model", "disposition": "normalized", "authority": "otel_observed_value", "normalized_target": "CopilotAgentObservability.Telemetry.MonitorSpanProjection.RequestModel", "raw_storage_target": null, "transform": "Copy the emitted model string.", "absence_behavior": "Keep RequestModel null; do not use configured/requested defaults." },
@@ -78,6 +79,22 @@
       "transform": "When both timestamps exist and end is not before start, compute (end-start)/1,000,000; otherwise null."
     },
     {
+      "mapping_id": "otel.operation_classification",
+      "input_field_ids": ["otel.span_name"],
+      "authority": "otel_observed_value",
+      "normalized_target": "CopilotAgentObservability.Telemetry.MonitorSpanProjection.Operation",
+      "raw_storage_target": null,
+      "transform": "Exact recognized-name transform per the canonical classification table: claude_code.llm_request => chat; claude_code.tool => execute_tool; claude_code.interaction, claude_code.tool.blocked_on_user, claude_code.tool.execution, claude_code.hook => null. Unrecognized names never classify by substring, attribute inference, or hierarchy position."
+    },
+    {
+      "mapping_id": "otel.category_classification",
+      "input_field_ids": ["otel.span_name", "otel.status_code"],
+      "authority": "otel_observed_value",
+      "normalized_target": "CopilotAgentObservability.Telemetry.MonitorSpanProjection.Category",
+      "raw_storage_target": null,
+      "transform": "When the resolved status is error, Category is error. Otherwise per the canonical classification table: claude_code.llm_request => llm_call; claude_code.tool => tool_call; claude_code.hook => hook; claude_code.interaction, claude_code.tool.blocked_on_user, claude_code.tool.execution => unknown. agent_invocation is never derived from these names or tool_name values."
+    },
+    {
       "mapping_id": "otel.status_resolution",
       "input_field_ids": ["otel.status_code", "otel.tool_success"],
       "authority": "otel.status_code_only",
@@ -96,7 +113,7 @@
   ],
   "surface_validation": [
     { "surface_mode": "interactive", "state": "unverified", "evidence_source": "inventory-interactive" },
-    { "surface_mode": "print", "state": "executed_no_structural_telemetry_observed", "evidence_source": "inventory-print" },
+    { "surface_mode": "print", "state": "executed_structural_telemetry_observed", "evidence_source": "inventory-print" },
     { "surface_mode": "agent-sdk", "state": "unverified", "evidence_source": "inventory-agent-sdk" }
   ]
 }
