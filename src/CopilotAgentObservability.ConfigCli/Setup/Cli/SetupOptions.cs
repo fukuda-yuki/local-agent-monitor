@@ -11,8 +11,11 @@ internal sealed record SetupOptions(
     bool IncludeContentCapture,
     Guid? ChangeSetId)
 {
-    private const string GitHubCopilotAdapter = "github-copilot";
     private const string DefaultEndpoint = "http://127.0.0.1:4320";
+    private static readonly Regex SafeSlug = new(
+        "\\A[a-z0-9]+(?:-[a-z0-9]+)*\\z",
+        RegexOptions.CultureInvariant,
+        TimeSpan.FromSeconds(1));
 
     public static SetupOptionsParseResult Parse(string[] args)
     {
@@ -95,14 +98,9 @@ internal sealed record SetupOptions(
             return Failure(SetupCodes.InvalidArguments);
         }
 
-        if (!string.Equals(adapter, GitHubCopilotAdapter, StringComparison.Ordinal))
+        if (!IsSafeSlug(adapter) || !IsSafeSlug(target))
         {
-            return Failure(SetupCodes.UnsupportedAdapter);
-        }
-
-        if (target is not "vscode" and not "cli" and not "app-sdk" and not "all")
-        {
-            return Failure(SetupCodes.UnsupportedTarget);
+            return Failure(SetupCodes.InvalidArguments);
         }
 
         return Success(new SetupOptions(
@@ -152,9 +150,9 @@ internal sealed record SetupOptions(
             index++;
         }
 
-        if (adapter is not null && !string.Equals(adapter, GitHubCopilotAdapter, StringComparison.Ordinal))
+        if (adapter is not null && !IsSafeSlug(adapter))
         {
-            return Failure(SetupCodes.UnsupportedAdapter);
+            return Failure(SetupCodes.InvalidArguments);
         }
 
         return Success(new SetupOptions(SetupCommand.Status, adapter, null, null, false, null));
@@ -198,6 +196,9 @@ internal sealed record SetupOptions(
         endpoint = $"http://{host}:{uri.Port}";
         return true;
     }
+
+    private static bool IsSafeSlug(string? value) =>
+        value is { Length: >= 1 and <= 128 } && SafeSlug.IsMatch(value);
 
     private static bool TryParseCanonicalUuidV7(string value, out Guid changeSetId)
     {

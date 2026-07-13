@@ -96,6 +96,48 @@ public class SetupOptionsTests
     }
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(128)]
+    public void Parse_Plan_AcceptsBoundedWellFormedAdapterSlug(int length)
+    {
+        var adapter = new string('a', length);
+
+        var result = SetupOptions.Parse(
+        [
+            "setup",
+            "plan",
+            "--adapter",
+            adapter,
+            "--target",
+            "future-target",
+        ]);
+
+        var options = Assert.IsType<SetupOptions>(result.Options);
+        Assert.Null(result.Code);
+        Assert.Equal(adapter, options.Adapter);
+        Assert.Equal("future-target", options.Target);
+    }
+
+    [Fact]
+    public void Parse_Plan_AcceptsUnknownAdapterForLaterRegistryResolution()
+    {
+        var result = SetupOptions.Parse(
+        [
+            "setup",
+            "plan",
+            "--adapter",
+            "future-adapter",
+            "--target",
+            "editor",
+        ]);
+
+        var options = Assert.IsType<SetupOptions>(result.Options);
+        Assert.Null(result.Code);
+        Assert.Equal("future-adapter", options.Adapter);
+        Assert.Equal("editor", options.Target);
+    }
+
+    [Theory]
     [InlineData("apply")]
     [InlineData("rollback")]
     public void Parse_ChangeSetCommand_AcceptsCanonicalUuidV7(string command)
@@ -136,6 +178,20 @@ public class SetupOptionsTests
         var options = Assert.IsType<SetupOptions>(result.Options);
         Assert.Null(result.Code);
         Assert.Null(options.Adapter);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(128)]
+    public void Parse_Status_AcceptsBoundedHistoricalAdapterFilter(int length)
+    {
+        var adapter = new string('a', length);
+
+        var result = SetupOptions.Parse(["setup", "status", "--adapter", adapter]);
+
+        var options = Assert.IsType<SetupOptions>(result.Options);
+        Assert.Null(result.Code);
+        Assert.Equal(adapter, options.Adapter);
     }
 
     [Theory]
@@ -256,23 +312,47 @@ public class SetupOptionsTests
     }
 
     [Theory]
-    [InlineData("plan", "--adapter", "other")]
-    [InlineData("status", "--adapter", "other")]
-    public void Parse_ReturnsUnsupportedAdapterWithoutEchoingTheValue(string command, string option, string value)
+    [InlineData("plan", "Future-adapter")]
+    [InlineData("plan", "-future")]
+    [InlineData("plan", "future-")]
+    [InlineData("plan", "future--adapter")]
+    [InlineData("plan", "future_adapter")]
+    [InlineData("plan", "futuré")]
+    [InlineData("status", "Future-adapter")]
+    [InlineData("status", "future--adapter")]
+    [InlineData("status", "future_adapter")]
+    public void Parse_ReturnsInvalidArgumentsForMalformedAdapterWithoutEchoingTheValue(string command, string value)
     {
         var result = SetupOptions.Parse(command == "plan"
-            ? ["setup", command, option, value, "--target", "vscode"]
-            : ["setup", command, option, value]);
+            ? ["setup", command, "--adapter", value, "--target", "vscode"]
+            : ["setup", command, "--adapter", value]);
 
         Assert.Null(result.Options);
-        Assert.Equal(SetupCodes.UnsupportedAdapter, result.Code);
+        Assert.Equal(SetupCodes.InvalidArguments, result.Code);
         Assert.DoesNotContain(value, result.Code, StringComparison.Ordinal);
     }
 
     [Theory]
-    [InlineData("editor")]
-    [InlineData("all-targets")]
-    public void Parse_ReturnsUnsupportedTargetWithoutEchoingTheValue(string target)
+    [InlineData("plan")]
+    [InlineData("status")]
+    public void Parse_ReturnsInvalidArgumentsForOverlongAdapterWithoutEchoingTheValue(string command)
+    {
+        var adapter = new string('a', 129);
+        var result = SetupOptions.Parse(command == "plan"
+            ? ["setup", command, "--adapter", adapter, "--target", "vscode"]
+            : ["setup", command, "--adapter", adapter]);
+
+        Assert.Null(result.Options);
+        Assert.Equal(SetupCodes.InvalidArguments, result.Code);
+        Assert.DoesNotContain(adapter, result.Code, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Future-target")]
+    [InlineData("future--target")]
+    [InlineData("future_target")]
+    [InlineData("../future-target")]
+    public void Parse_ReturnsInvalidArgumentsForUnsafeTargetSyntaxWithoutEchoingTheValue(string target)
     {
         var result = SetupOptions.Parse(
         [
@@ -285,7 +365,7 @@ public class SetupOptionsTests
         ]);
 
         Assert.Null(result.Options);
-        Assert.Equal(SetupCodes.UnsupportedTarget, result.Code);
+        Assert.Equal(SetupCodes.InvalidArguments, result.Code);
         Assert.DoesNotContain(target, result.Code, StringComparison.Ordinal);
     }
 
