@@ -1681,8 +1681,15 @@ internal sealed class SetupRecoveryCoordinator
                 var expectedSteps = new List<SetupJournalStep>();
                 for (var memberIndex = 0; memberIndex < target.Members.Count; memberIndex++)
                 {
+                    var member = target.Members[memberIndex];
                     var desiredHash = environmentStep.HashMember(
-                        names[memberIndex], DesiredEnvironmentValue(target.Members[memberIndex]));
+                        names[memberIndex], DesiredEnvironmentValue(member));
+                    if (member.Operation == SetupOperation.NoOp)
+                    {
+                        RequireEqual(backup.Members[memberIndex].Hash, desiredHash);
+                        continue;
+                    }
+
                     if (!string.Equals(backup.Members[memberIndex].Hash, desiredHash, StringComparison.Ordinal))
                     {
                         expectedSteps.Add(new SetupJournalStep(
