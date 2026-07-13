@@ -400,6 +400,20 @@ public sealed class SetupStorageTests
     }
 
     [Fact]
+    public void PersistPlannedChangeSet_RejectsStaleOutcomeAsTheInitialPlanRow()
+    {
+        var context = CreateContext();
+        var staleObservation = CreatePlannedChangeSet() with { OutcomeCode = SetupCodes.StalePlan };
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.PersistPlannedChangeSet(context.Lock, CreatePlan(), staleObservation));
+
+        Assert.Equal(SetupStorageCodes.PlanLedgerMismatch, exception.Code);
+        Assert.False(context.Platform.FileSystem.FileExists(context.Paths.GetPlan(ChangeSetId)));
+        Assert.False(context.Platform.FileSystem.FileExists(context.Paths.OwnershipLedger));
+    }
+
+    [Fact]
     public void VersionOneFixture_IsExactlyTheProductionSerializedShippedState()
     {
         var fixturePath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Setup", "v1", "ownership-ledger.v1.json");
@@ -840,6 +854,49 @@ public sealed class SetupStorageTests
             Assert.Throws<FormatException>(() => context.Store.Save(context.Lock, new SetupOwnershipLedger(1, [row])));
             Assert.DoesNotContain(context.Platform.Operations, operation => operation.StartsWith("file.write:", StringComparison.Ordinal));
         }
+    }
+
+    [Fact]
+    public void LedgerValidation_AcceptsOnlyPristineOrStalePlannedOutcomeTimestampPairs()
+    {
+        var pristine = CreatePlannedChangeSet();
+        var staleAtCreation = pristine with { OutcomeCode = SetupCodes.StalePlan };
+        var staleAfterCreation = staleAtCreation with { UpdatedAt = CreatedAt.AddMinutes(1) };
+
+        Assert.NotEmpty(SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [pristine])));
+        Assert.NotEmpty(SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [staleAtCreation])));
+        Assert.NotEmpty(SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [staleAfterCreation])));
+
+        foreach (var invalid in new[]
+        {
+            pristine with { UpdatedAt = CreatedAt.AddMinutes(1) },
+            pristine with { OutcomeCode = SetupCodes.PlanReady },
+            staleAfterCreation with { UpdatedAt = CreatedAt.AddTicks(-1) },
+            staleAfterCreation with
+            {
+                Targets = [CreateLedgerTarget() with { OutcomeCode = SetupCodes.StalePlan }],
+            },
+        })
+        {
+            Assert.Throws<FormatException>(() => SetupLedgerStore.Serialize(
+                new SetupOwnershipLedger(1, [invalid])));
+        }
+    }
+
+    [Fact]
+    public void PlanLedgerValidation_AcceptsStaleObservationForRetryButRejectsAgedPristineRow()
+    {
+        var stale = CreatePlannedChangeSet() with
+        {
+            UpdatedAt = CreatedAt.AddMinutes(1),
+            OutcomeCode = SetupCodes.StalePlan,
+        };
+
+        SetupStorageValidation.ValidatePlanAndLedger(CreatePlan(), stale);
+
+        var pristineWithLaterTimestamp = stale with { OutcomeCode = null };
+        Assert.Throws<FormatException>(() =>
+            SetupStorageValidation.ValidatePlanAndLedger(CreatePlan(), pristineWithLaterTimestamp));
     }
 
     [Fact]

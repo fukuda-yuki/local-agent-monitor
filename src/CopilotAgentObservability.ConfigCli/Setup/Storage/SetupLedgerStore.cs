@@ -155,6 +155,12 @@ internal sealed class SetupLedgerStore
         setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
             SetupStorageValidation.ValidatePlanAndLedger(plan, plannedChangeSet);
+            if (plannedChangeSet.OutcomeCode is not null ||
+                plannedChangeSet.UpdatedAt != plannedChangeSet.CreatedAt)
+            {
+                throw new SetupStorageException(SetupStorageCodes.PlanLedgerMismatch);
+            }
+
             var ledger = Load();
             if (ledger.ChangeSets.Any(changeSet => changeSet.ChangeSetId == plan.ChangeSetId))
             {
@@ -601,7 +607,9 @@ internal static partial class SetupStorageValidation
             var targets = RequireNotNull(changeSet.Targets);
             if (changeSet.State == SetupChangeSetState.Planned)
             {
-                Require(changeSet.OutcomeCode is null);
+                Require(changeSet.OutcomeCode is null or SetupCodes.StalePlan);
+                Require(changeSet.OutcomeCode == SetupCodes.StalePlan ||
+                    changeSet.UpdatedAt == changeSet.CreatedAt);
             }
 
             Require(targets.Count <= 16);
@@ -678,7 +686,7 @@ internal static partial class SetupStorageValidation
             plan.Adapter == changeSet.Adapter &&
             plan.SelectedTarget == changeSet.SelectedTarget &&
             plan.CreatedAt == changeSet.CreatedAt &&
-            plan.CreatedAt == changeSet.UpdatedAt &&
+            (plan.CreatedAt == changeSet.UpdatedAt || changeSet.OutcomeCode == SetupCodes.StalePlan) &&
             plan.ToolVersion == changeSet.ToolVersion &&
             plan.Targets.Count == changeSet.Targets.Count;
         if (matches)
