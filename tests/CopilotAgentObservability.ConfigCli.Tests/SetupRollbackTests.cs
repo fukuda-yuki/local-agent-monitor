@@ -150,11 +150,13 @@ public sealed class SetupRollbackTests
     }
 
     [Theory]
-    [InlineData("backup")]
-    [InlineData("applied")]
-    [InlineData("base")]
-    [InlineData("private-read-fault")]
-    public void Rollback_Environment_evidence_mismatch_fails_closed_without_artifacts_or_value_echo(string variant)
+    [InlineData("backup", SetupCodes.InternalError)]
+    [InlineData("applied", SetupCodes.RollbackStale)]
+    [InlineData("base", SetupCodes.RecoveryRequired)]
+    [InlineData("private-read-fault", SetupCodes.InternalError)]
+    public void Rollback_Environment_evidence_mismatch_fails_closed_without_artifacts_or_value_echo(
+        string variant,
+        string expectedCode)
     {
         var fixture = EnvironmentRollbackFixture.Create([
             new("ENV_PRIVATE", "old-private", SetupOperation.Replace, "desired-private"),
@@ -183,12 +185,7 @@ public sealed class SetupRollbackTests
         var result = fixture.Rollback();
 
         Assert.False(result.Success);
-        Assert.Contains(result.Code, new[]
-        {
-            SetupCodes.InternalError,
-            SetupCodes.RollbackStale,
-            SetupCodes.RecoveryRequired,
-        });
+        Assert.Equal(expectedCode, result.Code);
         Assert.DoesNotContain("PRIVATE", result.Code, StringComparison.Ordinal);
         Assert.Equal("desired-private", fixture.Platform.ReadUserEnvironment("ENV_PRIVATE"));
         Assert.Equal(SetupJournalOperation.Apply, fixture.LoadJournal().Operation);
