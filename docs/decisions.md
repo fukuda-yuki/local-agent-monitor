@@ -1882,28 +1882,48 @@ a thin argument/result wrapper.
 - Symlink/junction/reparse/path traversal, malformed structured configuration,
   machine-wide environment, `setx`, implicit administrator elevation, raw
   exception output, and DB/log/runtime-data deletion are excluded.
-- The initial adapter ID is `github-copilot`. Stable VS Code 1.128+ writes only
-  documented Copilot OTel user settings; terminal Copilot CLI 1.0.4+ writes a
-  bounded current-user OTel environment allowlist; GitHub Copilot App/SDK is
-  caller-managed guidance and performs no write.
-- Effective precedence is managed policy, environment, user setting, default.
-  Locally observable managed sources are read-only and conflicts block apply.
-  Signed-in-account server policy that an external CLI cannot prove is surfaced
-  as unverified; setup does not claim an effective value until the user checks
-  VS Code policy diagnostics.
+- The initial adapter ID is `github-copilot`. VS Code Stable and Insiders
+  1.128+ write only documented Copilot OTel settings in each channel's Default
+  Profile. Non-default profiles are never opened or edited and produce the
+  fixed warning `vscode_non_default_profiles_not_modified`. Terminal Copilot
+  CLI 1.0.4+ writes the exact bounded current-user OTel environment allowlist on
+  Windows only. macOS/Linux detect and plan the CLI target, but apply returns
+  `unsupported_target` without a shell-profile or target write. GitHub Copilot
+  App/SDK is caller-managed guidance and performs no write.
+- Managed channels use native > server > file precedence and the highest
+  present channel wins wholesale without field merging. Windows
+  `Software\Policies\Microsoft\VSCode` is a native-tier source alongside the
+  official Copilot MDM source; official macOS/Linux native and file locations
+  are also read-only. Per-setting effective precedence is managed policy,
+  environment, user setting, default. Conflicts in an observed winning or
+  potentially winning source block apply. Signed-in-account server policy that
+  an external CLI cannot prove is `managed_policy_unverified`; Copilot CLI uses
+  environment-only detection and always reports the same warning.
 - Content capture is preserved by default. Enabling it requires the independent
   `--include-content-capture` option, a separate member plan change, and a sensitive
-  warning. Global `client.kind`, headers/credentials, and unrelated resource
-  attributes are not changed.
+  warning. Global `client.kind`, `OTEL_SERVICE_NAME`,
+  `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`,
+  `COPILOT_OTEL_SOURCE_NAME`, credentials, and unrelated resource attributes
+  are not changed.
 - Setup static verification does not prove telemetry receipt. First-trace
   diagnosis remains Issue #69. No HTTP, proxy, Canvas action, Razor UI, database,
   or AppHost resource is added.
 - Public results separate the requested/created `change_set_id` from
   `recovered_change_set_id` and `recovery_operation`. Apply revalidates target
-  support, managed state, and loopback endpoint ownership immediately before
-  creating mutation artifacts. Status is bounded to 100 entries with
+  OS support, version, VS Code Default Profile extension presence, managed
+  state, exact logical members, and loopback endpoint ownership immediately
+  before creating mutation artifacts. Applying a valid persisted plan after its
+  adapter is removed from the registry is the allowed
+  `apply`/`unsupported_adapter` result and leaves the existing plan/ledger
+  unchanged. Status is bounded to 100 entries with
   recovery-blocking states prioritized, and may perform mandatory recovery
   before projection.
+- Local Monitor recognition is exactly a no-redirect
+  `GET <origin>/health/live` under one 500 ms total timeout and a 4096-byte body
+  cap. Only HTTP 200 and an exact JSON object containing solely string
+  `status=live` is accepted. Refused/no-listener is `monitor_not_running`; every
+  connected timeout, redirect, non-200, oversize, malformed/non-object, or
+  different JSON response is `port_owned_by_foreign_process`.
 - Environment notification is attempted after an uninterrupted final state.
   Recovery may replay it because exactly-once delivery cannot be proven across
   a process crash without an acknowledgement protocol.

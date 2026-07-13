@@ -771,12 +771,26 @@ After a temp-path failure, setup never unlinks that pathname because another
 actor may have rebound it. Recovery uses journaled target state, not temp cleanup.
 Rollback requires the current post-apply hash; force rollback does not exist.
 
-Current-user environment writes use the user environment API only, never
-machine scope or `setx`. The adapter does not add global `client.kind`, alter
-headers/credentials, or implicitly enable content capture. Managed policy
-sources are read-only. A locally observed conflict blocks the relevant write;
-an unobservable server-managed policy is reported as unverified rather than
-treated as absent.
+Current-user environment writes for Issue #67 are Windows-only and use the user
+environment API, never machine scope or `setx`. macOS/Linux Copilot CLI plans
+are inspectable but their apply returns `unsupported_target`; setup never edits
+a shell profile or system environment file. The adapter does not add global
+`client.kind`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
+`OTEL_EXPORTER_OTLP_HEADERS`, `COPILOT_OTEL_SOURCE_NAME`, or any credential,
+and it does not implicitly enable content capture.
+
+VS Code Stable and Insiders writes are limited to each channel's Default
+Profile settings file. Non-default profile directories are observed only for
+the fixed `vscode_non_default_profiles_not_modified` warning and are never
+opened, hashed, backed up, or mutated. Managed policy sources are read-only.
+The adapter selects one whole managed channel in native > server > file order;
+it never merges fields from multiple channels. Windows VS Code enterprise
+`Software\Policies\Microsoft\VSCode`, Copilot native MDM, macOS managed
+preferences/configuration profiles, Linux `/etc/vscode/policy.json`, and the
+three official `managed-settings.json` paths retain their upstream read-only
+role. A locally observed conflict blocks the relevant write. An unobservable
+server-managed policy is `managed_policy_unverified`, not absence; Copilot CLI
+uses environment-only detection and therefore always returns that warning.
 
 Transaction concurrency uses a non-waiting exclusive lock and deterministic
 stale checks. There is no retry loop or timing-based conflict recovery. The
@@ -792,12 +806,23 @@ recovery correlation, while further mutation is blocked until the private local
 state is resolved. Status requests no new setup mutation, but recovery may
 restore targets before projection.
 
-Apply revalidates every distinct loopback endpoint before creating backups or
-mutation artifacts. The probe prevents writing a plan whose endpoint is already
-owned by an observed foreign listener; it is not a lease and does not claim the
-listener cannot change afterward. Environment notification happens only after a
-final state. Recovery may replay the notification when prior delivery cannot be
-proven; exactly-once external broadcast is not claimed.
+Apply revalidates adapter registration, planning OS support, every target
+version, VS Code Default Profile extension presence, managed policy, logical
+member semantics, and every distinct loopback endpoint before creating backups
+or mutation artifacts. A removed persisted adapter returns
+`unsupported_adapter`; macOS/Linux CLI apply returns `unsupported_target`; both
+leave the plan/ledger and targets unchanged.
+
+Endpoint recognition is a no-redirect `GET /health/live` with a 500 ms total
+budget and 4096-byte response cap. Only HTTP 200 with a JSON object containing
+exactly the string property `status: live` is Local Monitor. Connection refused
+or a proved absent listener is `monitor_not_running`; any connected timeout,
+redirect, non-200, oversize, malformed/non-object, extra-property, or other JSON
+response is `port_owned_by_foreign_process`. The probe is not a lease and does
+not claim the listener cannot change afterward. Environment notification
+happens only after a final state. Recovery may replay the notification when
+prior delivery cannot be proven; exactly-once external broadcast is not
+claimed.
 
 ## Proposal Apply Boundary
 

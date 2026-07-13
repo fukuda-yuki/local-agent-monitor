@@ -1,387 +1,263 @@
 # Issues #66/#67 Configuration Setup Implementation Plan
 
-> Execute sequentially with `superpowers:subagent-driven-development`. Every
-> task uses a fresh implementer and then an independent read-only reviewer.
+**Goal:** Complete the approved `setup.v1` ownership framework and deliver the
+GitHub Copilot VS Code/CLI/App-SDK adapter with one production DTO path, bounded
+user-scoped mutation, and no claim that static setup proves telemetry receipt.
 
-**Goal:** Deliver the approved `setup.v1` ownership ledger and reversible setup
-commands, then the GitHub Copilot VS Code/CLI/App-SDK guided setup.
+**Architecture:** Config CLI is the only result producer. Adapters produce
+internal plans, the #66 coordinator owns every mutation/recovery/rollback, the
+CLI serializes `SetupCommandResult`, and PowerShell forwards the JSON unchanged.
+No HTTP, proxy, UI, database, AppHost resource, project, or dependency is added.
 
-**Architecture:** Existing Config CLI is the only DTO producer. Private plans,
-backups, and journals are separate from the repository-safe ledger. Repository
-and Release PowerShell wrappers forward the real producer output. No HTTP,
-proxy, UI, database, new project, or new dependency.
+**Contract:** `docs/specifications/interfaces/configuration-setup.md`, D057,
+`docs/specifications/security-data-boundaries.md`, and the paired design.
 
-**Contract:** `docs/specifications/interfaces/configuration-setup.md`, D057, and
-`docs/specifications/security-data-boundaries.md`.
+## Completed baseline and evidence preservation
 
-**Exact path roots used below:** `Setup/` means
-`src/CopilotAgentObservability.ConfigCli/Setup/`; `tests/.../` means
-`tests/CopilotAgentObservability.ConfigCli.Tests/`. These are path aliases, not
-wildcards. Every filename following them is an exact owned file.
+T0 current-spec alignment supersedes the old prospective Task 1a-13b ordering.
+It does not erase completed #66 work or rename historical evidence. Exact
+commit ranges, focused counts, reviews, residuals, and the old task labels
+(1a-8a, including split recovery/rollback remediations) remain canonical in
+`docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md`.
 
-## Per-task protocol
+The implementation DAG starts from these completed prerequisites:
 
-Every dispatch names purpose, owned files, non-scope, constraints, completion,
-verification, and report path. The implementer records RED and GREEN commands in
-`artifacts/sdd/<task>-report.md`, updates the durable ledger, and creates the
-listed local commit only after review fixes pass. A reviewer inspects the diff
-and requirement-to-test mapping; it does not edit. Two consecutive fix cycles
-in one area stop patching and trigger contract/test-design re-audit. Tasks are
-sequential because contracts and transaction states are shared.
+- `setup.v1` result types, serializer, bounds, and redaction validation;
+- runtime #61 manifest loader (old Task 8a);
+- runtime paths, private plans, ownership ledger v1, status snapshot schema,
+  JSONC/TOML codecs, path/hash/atomic file primitives, and Windows current-user
+  environment primitives;
+- journal, apply, reverse compensation, restart recovery, rollback producer,
+  notification replay, and their recorded fault/review evidence;
+- SetupOptions parsing through the durable-ledger entry recorded on 2026-07-14.
 
-## #66 — Shared ownership framework
+Do not rewrite those rows as new T1-T9 work. New reports append to the durable
+ledger and identify both the current T-number and any historical task whose
+residual they close.
 
-### Task 1a — Result DTO and serializer
+## Bounded dependency DAG
 
-Own `src/CopilotAgentObservability.ConfigCli/Setup/Contracts/SetupContracts.cs`,
-`SetupCodes.cs`, `SetupJson.cs`, and
-`tests/CopilotAgentObservability.ConfigCli.Tests/SetupContractShapeTests.cs`.
-RED/GREEN:
-
-```powershell
-dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~SetupContractShapeTests
+```text
+T0 current-spec alignment (this document set)
+ |
+ +--> T1 #66 status/terminal closure -----------------+
+ +--> T2 #66 public command producer                  |
+          |                                           |
+          v                                           |
+         T3 #67 detection/policy/probe foundation     |
+          |          |          |                     |
+          v          v          v                     v
+         T4         T5         T6 -------------> T7 real #66->#67 integration
+       VS Code     CLI       App/SDK                  |
+                                                       v
+                                               T8 package/docs/evidence
+                                                       |
+                                                       v
+                                               T9 reviews/full validation
 ```
 
-Pin exact fields/casing/enums/order and one `setup.v1` serializer. Commit:
-`Issue #66: feat: define setup result contract`.
+T1 and T2 may proceed concurrently. T3 follows T2 so the shared registry/CLI
+contract has one owner. T4, T5, and T6 may proceed concurrently after T3 and
+own only their target-specific implementation/tests; T7 owns their production
+registry join. No adapter may declare completion before T7. T8 and T9 are
+sequential closeout.
 
-### Task 1b — Result bounds, redaction, and recovery correlation
+Every task uses test-driven changes, an independent read-only review, a focused
+RED/GREEN command, `git diff --check`, and a coherent local commit. Workers do
+not revert concurrent edits and adjust to the shared contract. Two consecutive
+fix cycles in one area trigger a contract/test-design re-audit.
 
-Own `Setup/Contracts/SetupContractValidator.cs` and
-`tests/.../SetupContractValidationTests.cs` (full prefix:
-`tests/CopilotAgentObservability.ConfigCli.Tests/`). RED/GREEN filter
-`FullyQualifiedName~SetupContractValidationTests`. Cover target/member/status
-bounds, sanitized versions/labels, forbidden path/value/secret markers,
-mixed-operation derivation, and requested/recovered IDs. Commit:
-`Issue #66: feat: validate setup result safety`.
+## T1 - Close #66 status and terminal invariants
 
-**Review-discovered dependency gate:** execute Task 8a immediately after the
-structural Task 1b work and before Task 1b can receive final approval. Then
-resume Task 1b with a narrow integration that calls the runtime canonical
-matcher for every non-null `expected_result`. The generic serializer validates
-canonical membership only; Task 8b owns target-to-surface pairing. Do not copy
-manifest JSON or hard-code fingerprints in the validator.
+**Own:** `Setup/Status/`, the shared pure rollback-preflight evaluator and its
+narrow rollback integration, status-related contract/serializer code only when
+required, `SetupStatusTests.cs`, `SetupStatusOrderingTests.cs`, paired
+`SetupRollbackTests.cs`, and remaining terminal-evidence tests.
 
-### Task 2a — Platform contracts and deterministic fake
+**Deliver:** lifecycle-relative reference/current state, immutable ledger
+snapshot reconstruction without adapter rediscovery, fresh private-plan/target/
+backup checks, all-NoOp guard-only equivalence with rollback, partial rollback
+false, filter -> priority -> deterministic order -> hard 100 cap -> truncation,
+and the remaining terminal environment hash/evidence residuals recorded in the
+durable ledger.
 
-Own `Setup/Platform/ISetupPlatform.cs`, `SystemSetupPlatform.cs`, and
-`tests/.../SetupTestPlatform.cs`, `SetupPlatformTests.cs`. RED/GREEN filter
-`SetupPlatformTests`. Expose only #66 filesystem, user environment,
-notification, clock, UUID, barrier, and fault seams without sleeps. Registry,
-process/version, and endpoint detection are added in Task 8b. No transaction
-logic. Commit:
-`Issue #66: refactor: add setup platform boundary`.
+**Verify:** focused `SetupStatus|SetupRollback|SetupRecovery` tests, then all
+Setup tests. Do not change #67 target behavior. Commit:
+`Issue #66: feat(setup): complete ownership status`.
 
-### Task 2b — Runtime paths and non-waiting lock
+## T2 - Expose the real #66 command producer
 
-Own `Setup/Storage/SetupRuntimePaths.cs`, `SetupLock.cs`, and
-`tests/.../SetupRuntimeTests.cs`. RED/GREEN filter `SetupRuntimeTests`. Cover the
-exact LocalAppData layout, safe IDs, exclusive non-waiting contention, no retry,
-and disposal/reacquire. Commit: `Issue #66: feat: guard setup runtime`.
+**Own:** `Setup/Adapters/ISetupAdapter.cs`, adapter registry, `Setup/Cli/`,
+`CliApplication.cs`, `CliHelpText.cs`, setup CLI tests, and repository
+`scripts/local-monitor/setup.ps1` plus its exact wrapper tests.
 
-### Task 2c — Private plan and ledger v1 stores
+**Deliver:** all four commands through the real coordinator, one JSON stdout
+producer, fixed stderr/exit mapping, mandatory recovery correlation, mutation
+blocking, and exact wrapper forwarding. Pin the closed command matrix:
 
-Own `Setup/Storage/SetupPlanStore.cs`, `SetupLedgerStore.cs`,
-`tests/.../SetupStorageTests.cs`, and production-serialized fixtures under
-`tests/CopilotAgentObservability.ConfigCli.Tests/Fixtures/Setup/v1/`.
-RED/GREEN filter `SetupStorageTests`. Cover plan-first/ledger-second ordering,
-orphan plan, missing plan, atomic replace, close/reopen v1, corrupt/unknown
-version, and repository-safe output. Do not create v0/migration fixtures.
-Commit: `Issue #66: feat: persist setup ownership ledger`.
+- unknown adapter at plan -> `plan`/`unsupported_adapter`;
+- valid persisted plan whose adapter is no longer registered ->
+  `apply`/`unsupported_adapter`, persisted adapter ID retained, no platform
+  probe, artifact, ledger transition, or target write;
+- macOS/Linux CLI persisted plan -> `apply`/`unsupported_target`, no shell
+  profile, artifact, ledger transition, notification, or target write.
 
-### Task 3a — JSONC and bounded TOML documents
+**Verify:** `SetupCliTests`, `SetupContractShapeTests`,
+`SetupContractValidationTests`, `LocalMonitorScriptTests`, then full ConfigCli
+tests. Commit: `Issue #66: feat(setup): expose reversible setup commands`.
 
-Own `Setup/Documents/JsoncSettingsDocument.cs`, `TomlSettingsDocument.cs`, and
-`tests/.../SetupDocumentTests.cs`. RED/GREEN filter `SetupDocumentTests`. Cover
-comments/trailing commas/unrelated-key preservation and only the existing sample
-TOML table/scalar subset; malformed/unsupported input fails closed. No package.
-Commit: `Issue #66: feat: edit bounded setup documents`.
+## T3 - Build the #67 detection, policy, and endpoint foundation
 
-### Task 3b — Path/hash policy and atomic file step
+**Depends on:** T2.
 
-Own `Setup/Transactions/SetupPathPolicy.cs`, `SetupHash.cs`,
-`AtomicFileSetupStep.cs`, and `tests/.../SetupFileStepTests.cs`. RED/GREEN filter
-`SetupFileStepTests`. Cover missing versus empty hashes, traversal/UNC/device/
-reparse rejection, same-directory temp+flush+replace, backup restore, and faults
-before/after each boundary. Failure paths never delete a temp pathname; a
-rebinding callback proves foreign replacement bytes survive. Native metadata
-tests cover read-only regular files, links, FIFO, socket, and character devices
-on Windows/Linux/macOS; another OS fails closed. Commit:
-`Issue #66: feat: add atomic setup file step`.
+**Own:** the shared `Setup/Adapters/GitHubCopilot/` composite-adapter,
+detection, policy, endpoint-probe, and target-extension-point files; only the
+required platform interface/fake extensions; `GitHubCopilotDetectionTests.cs`;
+and `GitHubCopilotEndpointProbeTests.cs`. T3 does not register unfinished target
+implementations in the production adapter registry.
 
-### Task 4 — Current-user environment member step
+**Deliver:** the real adapter foundation and internal #66 plan DTO path;
+Stable/Insiders and CLI version detection; planning OS capture; canonical #61
+manifest pairing; official read-only managed-source tables; native > server >
+file whole-channel selection with no merge; and the exact endpoint classifier:
 
-Own `Setup/Transactions/UserEnvironmentSetupStep.cs`,
-`Setup/Platform/ISetupPlatform.cs`, `tests/.../SetupTestPlatform.cs`, and
-`tests/.../SetupEnvironmentStepTests.cs`. Extend the platform/fake only if an
-exact approved member operation was absent in 2a. RED/GREEN filter
-`SetupEnvironmentStepTests`. Cover missing/empty/value states, allowlist hash,
-unrelated keys, User-only/no-setx, every member fault boundary, no early
-notification, one uninterrupted attempt, and replay after uncertain delivery.
-Commit: `Issue #66: feat: add user environment setup step`.
+- no-redirect `GET <origin>/health/live`;
+- one 500 ms total budget and maximum 4096 complete body bytes;
+- accept only HTTP 200 and exactly `{ "status": "live" }` modulo JSON
+  whitespace/property order, with no duplicate/extra property;
+- refused/proved no-listener -> warning `monitor_not_running`;
+- every other transport failure, timeout, redirect, non-200, oversize,
+  malformed/non-object, or different JSON ->
+  `port_owned_by_foreign_process`.
 
-### Task 5a — Journal schema and atomic store
+Apply revalidates OS support, endpoint, policy, version, extension presence, and
+exact member semantics before backup/journal/lifecycle transition/write.
 
-Own `Setup/Storage/SetupTransactionJournalStore.cs`,
-`Setup/Transactions/SetupFaultPoint.cs`, and `tests/.../SetupJournalStoreTests.cs`.
-RED/GREEN filter `SetupJournalStoreTests`. Pin prepared/started/completed/
-committed step records, apply/restore operation, atomic flush, close/reopen, and
-corrupt/unknown rejection. Commit:
-`Issue #66: feat: persist setup transaction journal`.
+**Verify:** `GitHubCopilotDetectionTests`, `GitHubCopilotEndpointProbeTests`,
+runtime manifest tests, and contract validation tests. Commit:
+`Issue #67: feat(setup): add Copilot detection foundation`.
 
-### Task 5b — Apply preflight and forward write intents
+## T4 - Implement VS Code Stable/Insiders Default Profile setup
 
-Own `Setup/Transactions/SetupApplyCoordinator.cs` and
-`tests/.../SetupApplyTests.cs`. RED/GREEN filter `SetupApplyTests`. Cover full
-preflight before artifacts, per-step started/completed ordering, final desired
-verification, successful commit ordering, and applying/applied transitions. Use
-barriers/faults only. Commit: `Issue #66: feat: coordinate setup apply`.
+**Depends on:** T3.
 
-### Task 5c — Reverse compensation
+**Own:** VS Code adapter files and `VsCodeSetupAdapterTests.cs`. Do not edit the
+shared production adapter registry; T7 owns the join.
 
-Own `Setup/Transactions/SetupApplyCoordinator.cs` and
-`tests/.../SetupCompensationTests.cs`. RED/GREEN filter
-`SetupCompensationTests`. Cover every forward failure boundary, reverse order,
-pre-restore intent, immediate desired/prior/third-party classification,
-preserved external edits, and restored/partial transitions. Commit:
-`Issue #66: feat: compensate failed setup apply`.
+**Deliver:** Stable and Insiders 1.128+; deterministic Stable-then-Insiders
+physical targets when both are eligible; per-channel Default Profile paths on
+Windows/macOS/Linux; per-channel `GitHub.copilot-chat` requirement; exact
+members `github.copilot.chat.otel.enabled`, `.exporterType`, `.otlpEndpoint`,
+and optional separate `.captureContent`; JSONC preservation; restart guidance;
+and fixed warning `vscode_non_default_profiles_not_modified` exactly once when
+any non-default profile exists. Non-default profile files are never opened,
+hashed, parsed, planned, backed up, written, or rolled back.
 
-### Task 5d — Restart recovery and reconciliation
+Read official native/server/file managed sources only. Windows
+`Software\Policies\Microsoft\VSCode` is native tier. The winning channel is
+whole, not field-merged. Native absence produces
+`managed_policy_unverified` because server presence cannot be proved.
 
-Own `Setup/Transactions/SetupRecoveryCoordinator.cs` and
-`tests/.../SetupRecoveryTests.cs`. RED/GREEN filter `SetupRecoveryTests`. For
-file and each environment member, close/reopen after intent, write, completion,
-journal commit, and before ledger commit. Cover prior/desired/mixed/third-party,
-committed-ledger lag, failed-recovery projection input, and notification replay.
-Commit: `Issue #66: feat: recover setup transactions`.
+**Verify:** `VsCodeSetupAdapterTests` cover three-OS paths, both channels,
+profile no-open proof, exact warning de-duplication, managed-source precedence,
+content opt-in, forbidden global keys, and apply-time version/extension/policy/
+member revalidation. Commit:
+`Issue #67: feat(setup): guide VS Code Copilot telemetry`.
 
-### Task 6a — Hash-guarded rollback
+## T5 - Implement OS-bounded Copilot CLI setup
 
-Own `Setup/Transactions/SetupRollbackCoordinator.cs` and
-`tests/.../SetupRollbackTests.cs`. RED/GREEN filter `SetupRollbackTests`. Cover
-all-target preflight, no force, rolling_back before restore, per-member restore
-intents, barrier edit after preflight, idempotent restart, and rolled_back versus
-partial. Commit: `Issue #66: feat: rollback setup change sets`.
+**Depends on:** T3.
 
-### Task 6b0 — Pin status/ledger source contract
+**Own:** Copilot CLI adapter files and `CopilotCliSetupAdapterTests.cs`. Do not
+edit the shared production adapter registry; T7 owns the join.
 
-Own `docs/requirements.md`, `docs/spec.md`, `docs/decisions.md`,
-`docs/specifications/interfaces/configuration-setup.md`, and this design/plan
-pair; inspect architecture and the task roadmap for consistency. Before status
-implementation, pin the strict unshipped ledger-v1 status-target snapshot,
-plan-current versus ledger-historical expected-result validation, every public
-field's persisted or freshly verified source, lifecycle and stale semantics,
-all-no-op ownership-quorum exclusion without weakening the rollback preflight,
-the retained 1 MiB ledger-capacity constraint, and filter/order/cap rules. This
-is a spec-only task; it adds no compatibility shim or migration from a shipped
-version. Commit:
-`Issue #66: docs: pin setup status projection contract`.
+**Deliver:** CLI 1.0.4+ and the exact default allowlist:
+`COPILOT_OTEL_ENABLED`, `COPILOT_OTEL_EXPORTER_TYPE`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_EXPORTER_OTLP_PROTOCOL`; optional
+content capture adds only
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`. Never write
+`client.kind`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
+`OTEL_EXPORTER_OTLP_HEADERS`, `COPILOT_OTEL_SOURCE_NAME`, or credentials.
 
-### Task 6b1 — Persist immutable status-target snapshot in ledger v1
+CLI policy detection is environment-only and every successful plan includes
+`managed_policy_unverified`. Windows alone writes the current-user environment.
+macOS/Linux run detect/plan but their persisted plan applies as the fixed
+`unsupported_target` no-write combination; never edit a shell profile. Preserve
+current-process/current-user difference and restart guidance on Windows.
 
-Own `Setup/Storage/SetupLedgerStore.cs`,
-`Setup/Contracts/SetupContracts.cs`, `SetupJson.cs`, and
-`SetupContractValidator.cs`; the ledger-origin manifest validator under
-`Setup/Capabilities/`; `tests/.../SetupStorageTests.cs`,
-`SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`;
-`tests/.../Fixtures/Setup/v1/ownership-ledger.v1.json`; and the ledger-target
-constructor fixtures in `SetupApplyTests.cs`, `SetupCompensationTests.cs`,
-`SetupRollbackTests.cs`, and `SetupRecoveryTests.cs`. Do not alter unrelated
-concurrent test-platform/recovery behavior while updating those constructors.
-RED/GREEN the three owned contract/storage test classes, then their affected
-transaction fixture classes. Extend the strict unshipped v1 shape; cover exact
-snapshot round-trip, immutable update preservation, operational-member
-cross-field matching, 128-UTF-16-code-unit detected-version validation,
-unsafe-field rejection, missing/unknown projection rejection, all-no-op
-no-ownership invariants, and the largest accepted snapshot below the retained
-1 MiB complete-ledger cap. Keep new-plan exact-current manifest validation, but
-use separate strict schema/closed-code/safety/target-surface/cross-field
-validation for a ledger-origin historical manifest. Prove status guidance
-stores no sample and the status serializer omits it. Do not add an older-v1
-reader, migration, fallback, or second size cap. Commit:
-`Issue #66: feat: persist setup status snapshot`.
+**Verify:** `CopilotCliSetupAdapterTests` cover exact allowlist/forbidden keys,
+Windows state matrix, macOS/Linux plan then refusal, no-artifact proof, warning,
+capture option, and endpoint/version/member revalidation. Commit:
+`Issue #67: feat(setup): guide Copilot CLI telemetry`.
 
-### Task 6b — Lifecycle-relative status semantics
+## T6 - Implement App/SDK no-write guidance
 
-Own `Setup/Status/SetupStatusProjector.cs`, a shared pure rollback-preflight
-evaluator under `Setup/Transactions/`, the narrow integration in
-`SetupRollbackCoordinator.cs`, and the guidance DTO/validator/serializer files
-from Task 6b1 when needed; own `tests/.../SetupStatusTests.cs`, paired
-`SetupRollbackTests.cs` cases, and the affected
-`SetupContractShapeTests.cs`/`SetupContractValidationTests.cs` cases.
-RED/GREEN the status tests, paired rollback tests, and affected contract tests.
-Cover every lifecycle reference, all-desired/all-previous/
-desired+previous/third-party/unavailable aggregate targets, terminal versus
-non-terminal missing private plans, missing/unsafe/mismatched backups, guidance
-exclusion and fixed-sample in-memory rehydration with wire omission, partial
-rollback false, and change-set aggregation. Rebuild immutable DTO fields from
-the ledger snapshot and use an adapter fake that fails if status reruns
-detection. Freshly verify reference/current/rollback facts. All-no-op/unowned
-physical targets remain visible and outside the ownership/backup quorum, but
-the shared preflight must make both status and rollback unavailable when their
-fresh base-state guard mismatches. Commit:
-`Issue #66: feat: project setup ownership status`.
+**Depends on:** T3.
 
-### Task 6c — Status filtering, priority, and hard cap
+**Own:** App/SDK guidance adapter files, `CopilotSdkGuidanceAdapterTests.cs`, and
+the existing LocalMonitor SDK compile contract test. Do not edit the shared
+production adapter registry and do not add/change a PackageReference.
 
-Own `Setup/Status/SetupStatusProjector.cs` and
-`tests/.../SetupStatusOrderingTests.cs`. RED/GREEN filter
-`SetupStatusOrderingTests`. Cover filter→priority→100 cap, 99/100/101 rows,
-timestamps, lowercase UUID ordinal ties, truncated, and recovery-blocking rows.
-Commit: `Issue #66: feat: bound setup status history`.
+**Deliver:** detected package/version without path, one guidance target, null
+manifest, no mutation/rollback, and the exact .NET `TelemetryConfig` sample with
+loopback endpoint and `http/protobuf`. Other languages remain caller-managed.
 
-### Task 7a — Adapter registry and four CLI commands
+**Verify:** guidance adapter tests and SDK telemetry compile test. Commit:
+`Issue #67: feat(setup): add Copilot SDK guidance`.
 
-Own `Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`,
-`Setup/Cli/SetupOptions.cs`, `SetupCommand.cs`, `Cli/CliApplication.cs`,
-`Cli/CliHelpText.cs`, and `tests/.../SetupCliTests.cs`. RED/GREEN filter
-`SetupCliTests`, then run the full ConfigCli test project. Use a fake adapter
-only to prove parsing/dispatch, exact exit mapping, stdout single producer JSON,
-fixed stderr, recovery correlation, and mutation block. Commit:
-`Issue #66: feat: expose reversible setup commands`.
+## T7 - Join the real #66 producer to all #67 adapters
 
-### Task 7b — Repository PowerShell wrapper
+**Depends on:** T1, T2, T4, T5, T6.
 
-Own `scripts/local-monitor/setup.ps1` and the RequiredScripts/parser/repository-
-wrapper cases in
-`tests/CopilotAgentObservability.LocalMonitor.Tests/LocalMonitorScriptTests.cs`.
-RED/GREEN:
+**Own:** the production adapter/target registry join, narrow production
+integration points, and `ConfigurationSetupContractTests.cs`; adapter-specific
+files only for findings.
 
-```powershell
-dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~LocalMonitorScriptTests
-```
+**Deliver:** real plan/apply/rollback/status for all targets through the same
+ledger/transaction/result types, all-target `all` behavior, stale and rollback
+boundaries, recovery correlation, repeated no-op, exact manifest pairing, and
+the two exceptional apply/code combinations. Verify that App/SDK and Unix CLI
+never become mutation authorities. HTTP/proxy/UI remain N/A.
 
-Invoke the real ConfigCli project, forward exact args/stdout/stderr/exit, and do
-not reshape JSON. Commit: `Issue #66: feat: add repository setup wrapper`.
+**Early real-producer gate:** invoke the real CLI, parse `setup.v1`, prove the
+runtime #61 manifests and production `SetupCommandResult`/target DTO types, and
+record HTTP/proxy/UI N/A. A fake adapter cannot satisfy this gate.
 
-## #67 — GitHub Copilot adapter
+**Verify:** all test classes matching
+`Setup|GitHubCopilot|VsCode|CopilotCli|CopilotSdk|ConfigurationSetupContract`
+and the full ConfigCli project. Commit:
+`Issues #66-#67: test(setup): verify guided setup integration`.
 
-### Task 8a — Runtime #61 manifest resource and loader
+## T8 - Package and document only verified behavior
 
-Own `src/CopilotAgentObservability.ConfigCli/CopilotAgentObservability.ConfigCli.csproj`,
-`Setup/Capabilities/SourceCapabilityManifest.cs`,
-`SourceCapabilityManifestLoader.cs`, and `tests/.../SourceCapabilityRuntimeTests.cs`.
-Embed/link the canonical files
-`docs/specifications/contracts/source-capabilities/v1/manifests/github-copilot-vscode.json`
-and `github-copilot-cli.json` into the ConfigCli assembly so Release does not
-depend on `docs/`. RED/GREEN filter `SourceCapabilityRuntimeTests`; compare the
-runtime typed loader against canonical JSON and reject unknown/malformed data.
-Do not copy a test fixture. Commit:
-`Issue #67: feat: load Copilot capability manifests`.
+**Depends on:** T7.
 
-This task is pulled forward to the Task 1b dependency gate. Its loader provides
-semantic canonical matching that ignores JSON whitespace/object-property order
-but preserves property names, values, value kinds, and array order. Task 1b
-consumes that matcher; Task 8b later consumes target selection.
+**Own:** release package script/layout tests, setup wrapper packaging, current
+user/operator docs listed by the original plan, and Sprint23 durable ledger/
+README/task status. Do not change unrelated startup/user-env scripts or the
+release workflow.
 
-### Task 8b — Real GitHub Copilot plan producer
+**Deliver:** self-contained `app/config-cli/`, exact wrapper parity, no installed
+.NET runtime requirement, implemented examples that never claim first trace,
+and a requirement-to-test ledger with exact counts, remaining minors, and
+interfaces. Preserve all completed #66 evidence rows.
 
-Own `Setup/Adapters/GitHubCopilot/GitHubCopilotAdapter.cs`,
-`GitHubCopilotDetection.cs`, `GitHubCopilotPolicy.cs`,
-`GitHubCopilotEndpointProbe.cs`, `GitHubCopilotTargetRegistry.cs`,
-`Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Platform/ISetupPlatform.cs`,
-`tests/.../SetupTestPlatform.cs`, and
-`tests/.../GitHubCopilotDetectionTests.cs`.
-RED/GREEN filter `GitHubCopilotDetectionTests`. Register the real adapter and
-produce a real #66 DTO through `setup plan`; cover typed #61 manifests,
-target/version detection, policy>env>user>default, observed/unverified policy,
-loopback probe, and apply-time endpoint/version/policy no-artifact failures.
-Commit: `Issue #67: feat: detect GitHub Copilot setup targets`.
+**Verify:** `LocalMonitorScriptTests`, CLI/wrapper parsed DTO parity, link/path
+checks, `git diff --check`. Commit:
+`Issues #66-#67: docs(setup): record guided setup evidence`.
 
-**Early interface gate:** A separate reviewer invokes the real CLI producer for
-Task 8b, parses its `setup.v1` JSON, verifies runtime #61 manifest content and
-that the adapter creates production `SetupCommandResult`/target DTO instances
-serialized directly by the CLI, and records HTTP/proxy/UI as N/A. A
-fake adapter cannot satisfy this gate. Resolve findings before Tasks 9–11.
+## T9 - Independent review, validation, and closeout
 
-### Task 9 — VS Code adapter
+**Depends on:** T8.
 
-Own `Setup/Adapters/GitHubCopilot/VsCodeSetupAdapter.cs`,
-`Setup/Adapters/GitHubCopilot/GitHubCopilotTargetRegistry.cs`, and
-`tests/.../VsCodeSetupAdapterTests.cs`. RED/GREEN filter
-`VsCodeSetupAdapterTests`. Register the target and execute real
-`setup plan --adapter github-copilot --target vscode`. Cover stable 1.128+/
-extension, unsupported older and
-Insiders, observable policy sources, JSONC preservation, exact enabled/type/
-endpoint members, restart, capture default preservation and explicit warning,
-and forbidden credential/resource/client.kind writes. Commit:
-`Issue #67: feat: guide VS Code Copilot telemetry`.
+Run separate final reviews for:
 
-### Task 10 — Copilot CLI adapter
+1. #66 transaction/security/concurrency/status and shipped-v1 migration N/A;
+2. #67 official-source/profile/OS/managed/endpoint/forbidden-key contracts;
+3. real #66 -> #67 DTO/manifest/wrapper integration and HTTP/proxy/UI N/A;
+4. repository-safe negative markers and exact full diff.
 
-Own `Setup/Adapters/GitHubCopilot/CopilotCliSetupAdapter.cs`,
-`Setup/Adapters/GitHubCopilot/GitHubCopilotTargetRegistry.cs`, and
-`tests/.../CopilotCliSetupAdapterTests.cs`. RED/GREEN filter
-`CopilotCliSetupAdapterTests`. Register the target and execute real
-`setup plan --adapter github-copilot --target cli`. Cover 1.0.4+, process/user diff, exact enabled/
-exporter/endpoint/protocol allowlist, shared-variable warning, explicit capture,
-terminal restart, and forbidden keys/headers. Commit:
-`Issue #67: feat: guide Copilot CLI telemetry`.
-
-### Task 11 — App/SDK no-write guidance
-
-Own `Setup/Adapters/GitHubCopilot/CopilotSdkGuidanceAdapter.cs`,
-`Setup/Adapters/GitHubCopilot/GitHubCopilotTargetRegistry.cs`,
-`tests/.../CopilotSdkGuidanceAdapterTests.cs`, and
-`tests/CopilotAgentObservability.LocalMonitor.Tests/CopilotSdkTelemetryContractTests.cs`.
-The latter uses the existing LocalMonitor project reference and its already
-pinned `GitHub.Copilot.SDK` 1.0.4 transitive compile asset; do not add/change a
-PackageReference or use network restore as proof. RED/GREEN filters
-`CopilotSdkGuidanceAdapterTests` and `CopilotSdkTelemetryContractTests`.
-Register the target and execute real
-`setup plan --adapter github-copilot --target app-sdk`. Cover
-detected/version/no path, no write/rollback, no borrowed manifest, and compile
-the exact sample. Commit: `Issue #67: feat: add Copilot SDK setup guidance`.
-
-### Task 12 — Self-contained Release packaging
-
-Own `scripts/local-monitor/package-release.ps1` and the package/layout/
-executable cases in `LocalMonitorScriptTests.cs`. The existing
-`.github/workflows/local-monitor-release.yml` already invokes the package script
-and is explicitly not modified by this task.
-RED/GREEN filter `LocalMonitorScriptTests`. Extend its deterministic temp output
-helper to run the real package script, assert `app/config-cli/`, `setup.ps1`, and
-manifest layout, invoke the self-contained published ConfigCli executable
-directly (not through `dotnet`) to prove no installed runtime is required,
-and compare parsed DTO shape with repository wrapper output. Do not alter other
-install/startup/user-env scripts. Commit:
-`Issue #67: feat: package guided setup workflow`.
-
-## Documentation, reviews, and integration
-
-### Task 13a — Exact user and operator workflow
-
-Own `README.md`, `scripts/local-monitor/README.md`,
-`docs/user-guide/local-monitor.md`,
-`docs/agent-guides/repository-workflow.md`, and
-`docs/specifications/interfaces/config-cli.md`. Update only implemented behavior
-and examples; never claim first-trace success. Review-only, then commit:
-`Issues #66-#67: docs: document guided setup workflow`.
-
-### Task 13b — Executable requirement matrix and durable closeout
-
-Own `tests/CopilotAgentObservability.ConfigCli.Tests/ConfigurationSetupContractTests.cs`,
-`docs/sprints/sprint23-configuration-ownership-github-copilot/README.md`,
-`ledger.md`, and `docs/task.md`. RED/GREEN filter
-`ConfigurationSetupContractTests`; it maps every acceptance row to the real
-focused test/producer contract without copying DTO fixtures. Run all test
-classes matching `Setup|GitHubCopilot|VsCode|CopilotCli|CopilotSdk` plus
-`LocalMonitorScriptTests`. Commit only after final reviews/validation:
-`Issues #66-#67: docs: record guided setup evidence`.
-
-### Required independent reviews
-
-1. Task review after every task; implementer and reviewer differ.
-2. Early real #66→#67 interface gate after Task 8b.
-3. Security/concurrency/migration review after Task 12: secret/path negatives,
-   lock/barriers, crash/rollback/partial states, v1 close/reopen, future-real-
-   version migration rule, no fake v0.
-4. Separate final integration review: #66↔#67, #61 runtime manifests,
-   repository/Release parity, HTTP/proxy/UI N/A, requirement-to-test table.
-
-### Final validation
-
-Run exactly in order:
+Resolve findings, then run exactly:
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
@@ -389,7 +265,7 @@ pwsh scripts\test\install-playwright-chromium.ps1
 dotnet test CopilotAgentObservability.slnx
 ```
 
-Then run `git diff --check`, inspect the full commit range/worktree, update the
-durable ledger with exact counts and remaining minors/interfaces, and create the
-13b evidence commit. On failure use `superpowers:systematic-debugging`; do not
-substitute commands, guess-fix, retry, push, or open a PR.
+Finally run contradiction searches and `git diff --check`, inspect the complete
+commit range/worktree, and update the durable ledger with exact results and
+unverified scope. On failure use systematic debugging; do not substitute a
+command, guess-fix, retry blindly, push, or open a PR.

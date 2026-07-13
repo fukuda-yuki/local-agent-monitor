@@ -22,6 +22,12 @@ first trace.
 - Ledger/backups have no automatic retention limit in these issues.
 - Unsupported versions and managed conflicts fail closed.
 - App/SDK is caller-managed guidance and never an automatic file mutation.
+- VS Code Stable and Insiders are supported only through their Default Profile;
+  every non-default profile is read-only and yields the fixed
+  `vscode_non_default_profiles_not_modified` warning.
+- Copilot CLI persistent user-environment apply is Windows-only. macOS/Linux
+  retain detect/plan but apply returns `unsupported_target`; shell profiles are
+  never a mutation target.
 
 ## Context and verified producer contracts
 
@@ -31,15 +37,25 @@ Release ZIP publishes the Local Monitor app plus PowerShell operations. Issue
 #61 declares the `github-copilot-vscode` and `github-copilot-cli` source
 capabilities; it has no App/SDK manifest.
 
-Official upstream facts checked on 2026-07-12:
+Official upstream facts rechecked on 2026-07-14:
 
-- VS Code 1.119 introduced the stable Copilot OTel settings; guided apply uses
-  1.128+ because that release first enforces managed-channel precedence. Current VS Code
-  documentation defines policy > environment > user setting > default
-  precedence and documents the `github.copilot.chat.otel.*` user settings.
-- Copilot managed settings may arrive through native MDM, signed-in-account
-  server policy, or a well-known `managed-settings.json`. An external CLI can
-  read local MDM/file sources but cannot prove the signed-in-account result.
+- VS Code 1.119 introduced the Copilot OTel settings; guided apply uses Stable
+  and Insiders 1.128+ because that release first enforces managed-channel
+  precedence. Current VS Code documentation defines policy > environment > user
+  setting > default precedence and documents the
+  `github.copilot.chat.otel.*` user settings for both channels.
+- VS Code user settings are channel- and profile-scoped. Official paths separate
+  Stable `Code` from Insiders `Code - Insiders`, and non-default settings live
+  below `User/profiles/<profile-id>`; the product decision is to mutate Default
+  Profile only.
+- Copilot managed settings arrive through native MDM, signed-in-account server
+  policy, or a well-known per-OS `managed-settings.json`. VS Code 1.128+ selects
+  native > server > file as one authoritative channel without merge. Windows
+  VS Code enterprise `CopilotOtel*` policies under
+  `Software\Policies\Microsoft\VSCode`, macOS configuration profiles, and Linux
+  `/etc/vscode/policy.json` are also official native enterprise-policy sources.
+  An external CLI can read local native/file sources but cannot prove the
+  signed-in-account result.
 - Copilot CLI 1.0.4 introduced OpenTelemetry instrumentation. Current GitHub
   documentation defines `COPILOT_OTEL_ENABLED`,
   `COPILOT_OTEL_EXPORTER_TYPE`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and protocol
@@ -52,6 +68,9 @@ Primary references:
 - https://code.visualstudio.com/updates/v1_119
 - https://code.visualstudio.com/docs/agents/guides/monitoring-agents
 - https://code.visualstudio.com/docs/enterprise/ai-settings
+- https://code.visualstudio.com/docs/enterprise/policies
+- https://code.visualstudio.com/docs/configure/settings
+- https://code.visualstudio.com/docs/configure/profiles
 - https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference
 - https://docs.github.com/en/copilot/how-tos/copilot-sdk/observability/opentelemetry
 
@@ -128,6 +147,14 @@ All mutable operations are injected behind interfaces. Production uses the
 real current user; tests use synthetic files, environment dictionaries,
 registry views, processes, endpoint probes, barriers, and fault points.
 
+The source boundary stays single-producer: adapters return the internal
+`SetupChangePlan`/`SetupChangeRecord` model, the coordinator returns
+`SetupCommandResult`, the CLI serializes that result, and PowerShell forwards
+it unchanged. Apply loads the persisted private plan; it never asks an adapter
+to recreate a public DTO. If that plan's adapter is no longer registered,
+`apply` returns `unsupported_adapter` and leaves the plan/ledger byte-for-byte
+unchanged with no platform probe or mutation artifact.
+
 ## Ownership and private data
 
 The ledger records fixed IDs/labels, timestamps, state/outcome codes, hashes,
@@ -199,7 +226,10 @@ The result contract keeps requested/created `change_set_id` separate from
 `recovered_change_set_id` and `recovery_operation`. Recovery-blocking status
 entries outrank planned and terminal history within the hard 100-entry bound.
 Apply revalidates supported versions, managed state, and distinct writable
-endpoint ownership before creating backups or mutation artifacts.
+endpoint ownership before creating backups or mutation artifacts. Issue #67
+extends this gate to planning-OS support, VS Code Default Profile extension
+presence, and exact logical member semantics. Any failure is no-artifact and
+no-write.
 
 All public target results include bounded `detected` and sanitized
 `detected_version`; App/SDK uses them to report package presence/version without
@@ -220,20 +250,40 @@ change set has rollback unavailable.
 
 ### VS Code
 
-Detect stable `code`, version 1.128+, `GitHub.copilot-chat`, running processes,
-user settings, current/user environment, local managed-policy sources, and the
-endpoint. Write only enabled/exporterType/endpoint settings. Keep captureContent
-unchanged unless the sensitive option is explicit. A managed conflict blocks
-the relevant write; an unobservable signed-in policy yields an unverified
-effective-state warning and Policy Diagnostics next action.
+Detect Stable `code` and Insiders `code-insiders`, require version 1.128+ and
+`GitHub.copilot-chat` for every installed requested channel, and plan physical
+targets in Stable-then-Insiders order. Write only each channel's Default Profile
+enabled/exporterType/endpoint settings. Detect non-default profile directories
+only to emit `vscode_non_default_profiles_not_modified`; never open or mutate
+their settings. Keep captureContent unchanged unless the sensitive option is
+explicit.
+
+Managed sources are read-only. Select the entire native, server, or file object
+in that order; never merge channels. Treat Windows GitHub Copilot MDM and VS
+Code `Software\Policies\Microsoft\VSCode`, macOS managed
+preferences/configuration profiles, Linux `/etc/vscode/policy.json`, and the
+official per-OS `managed-settings.json` paths according to the canonical table.
+A managed conflict blocks the relevant write. Native absence leaves the
+unobservable signed-in server tier unresolved, yielding
+`managed_policy_unverified` and Policy Diagnostics guidance.
 
 ### Terminal CLI
 
 Detect `copilot version`, require 1.0.4+, compare current-process and
-current-user environments, and write only enabled/exporter type/base endpoint/
-protocol. Do not set global client identity, resource attributes, or headers.
-Capture content is a separate optional record. Restart instructions apply to
-existing terminals and sessions.
+current-user environments on Windows, and write only
+`COPILOT_OTEL_ENABLED`, `COPILOT_OTEL_EXPORTER_TYPE`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_EXPORTER_OTLP_PROTOCOL`. The optional
+content member is exactly
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`. Do not set global client
+identity, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
+`OTEL_EXPORTER_OTLP_HEADERS`, `COPILOT_OTEL_SOURCE_NAME`, or credentials.
+Managed state is environment-only/unverified for this target.
+
+Windows apply uses only the #66 current-user API. macOS/Linux execute the same
+detection/redacted plan path, persist the planning OS, and return
+`unsupported_target` at apply with no shell-profile, backup, journal, ledger
+transition, notification, or target write. Restart instructions apply to
+existing Windows terminals and sessions.
 
 ### App/SDK
 
@@ -249,8 +299,13 @@ config, unsafe path, permission denial, foreign port owner, busy lock, partial
 apply, and partial rollback have distinct outcomes and next actions.
 
 No-listener endpoint is a warning because setup may precede monitor startup.
-A listening but unrecognized service is a conflict. Static success never means
-that traces or metrics arrived.
+Recognition sends a no-redirect `GET /health/live` under one 500 ms total
+budget, reads at most 4096 bytes, and accepts only HTTP 200 with a JSON object
+containing exactly string `status=live`. Refused/no-listener is
+`monitor_not_running`; timeout after connection, redirect, non-200, oversize,
+malformed/non-object, extra-property, or other JSON is
+`port_owned_by_foreign_process`. Static success never means that traces or
+metrics arrived.
 
 ## Testing strategy
 
@@ -272,7 +327,15 @@ contracts are:
 - failure at every mutation and compensation boundary;
 - negative secret/header/value/path markers across all safe outputs;
 - real Issue #61 manifest consumption by the VS Code/CLI adapter;
-- policy/environment/user/default precedence;
+- Stable/Insiders Default Profile path and dual-channel order, fixed non-default
+  warning, and proof that profile files outside Default are never opened;
+- official three-OS managed source locations, native/server/file whole-channel
+  selection, policy/environment/user/default precedence, and CLI always-
+  unverified environment-only behavior;
+- exact endpoint 500 ms/no-redirect/4096-byte/JSON recognition matrix;
+- apply-time endpoint/policy/version/extension/member revalidation with no
+  artifacts, plus persisted-adapter removal and macOS/Linux CLI apply command/
+  code combinations;
 - Release ZIP and repository wrapper invocation using the same result DTO.
 
 There is no old ownership-ledger version, so migration testing is explicitly

@@ -90,16 +90,27 @@ DTOs, and configured values use the canonical no-trailing-slash origin. Userinfo
 non-root paths, query, fragment, HTTPS, remote hosts, and implicit ports fail
 closed.
 
-The initial `github-copilot` adapter supports stable VS Code 1.128+ and terminal
-Copilot CLI 1.0.4+, and returns caller-managed .NET App/SDK telemetry guidance.
-VS Code effective precedence is managed policy, environment, user setting,
-then default. The adapter reads locally observable managed policy sources but
-does not edit them; a server-managed signed-in-account policy that an external
-CLI cannot prove is reported as unverified. VS Code writes only the documented
-Copilot OTel user settings. Terminal CLI writes only a bounded current-user OTel
-environment allowlist. Content capture remains unchanged unless the user selects
-the explicit sensitive option. App/SDK is no-write. Setup success means static
-configuration verification, never first-trace receipt. The complete contract is
+The initial `github-copilot` adapter supports VS Code Stable and Insiders 1.128+
+Default Profiles, terminal Copilot CLI 1.0.4+, and caller-managed .NET App/SDK
+telemetry guidance. Non-default VS Code profiles are detected only to emit
+`vscode_non_default_profiles_not_modified` and are never edited. Managed
+channels use native > server > file precedence; the highest present channel
+wins wholesale without merging. The resolved per-setting precedence is managed
+policy, environment, user setting, then default. Observable managed sources
+are read-only, while an unobservable signed-in-account policy is
+`managed_policy_unverified`. VS Code writes only the documented Copilot OTel
+user settings. Terminal CLI detection is environment-only and always reports
+managed policy as unverified. Its bounded current-user OTel environment
+allowlist is writable on Windows; macOS/Linux plans remain inspectable but
+apply returns `unsupported_target` without writing a shell profile or any
+target. Content capture remains unchanged unless the user selects the explicit
+sensitive option. App/SDK is no-write. Setup recognizes Local Monitor only by
+a bounded no-redirect `GET /health/live` response, revalidates endpoint, policy,
+VS Code/CLI version, extension presence, and planned member semantics before
+creating mutation artifacts, and never treats a static success as first-trace
+receipt. Applying a persisted plan whose adapter is no longer registered
+returns `unsupported_adapter` with no mutation artifact or state transition.
+The complete contract is
 [configuration setup](specifications/interfaces/configuration-setup.md) and the
 security decision is D057.
 
