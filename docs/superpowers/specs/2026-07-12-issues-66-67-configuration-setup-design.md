@@ -123,7 +123,8 @@ New Config CLI responsibilities are grouped under `Setup/`:
 - `Adapters`: registration and the `github-copilot` implementation.
 - `Platform`: filesystem, environment, registry, process, endpoint, and time
   boundaries used by deterministic tests.
-- `Cli`: option parsing and result-code/exit-code mapping.
+- `Cli`: option parsing, the generic four-command dispatcher, and result-code/
+  exit-code mapping.
 
 The existing manual `profile-*` generators and legacy user-environment scripts
 remain compatible entry points. New guided setup mutations are the changes
@@ -157,12 +158,29 @@ real current user; tests use synthetic files, environment dictionaries,
 registry views, processes, endpoint probes, barriers, and fault points.
 
 The source boundary stays single-producer: adapters return the internal
-`SetupChangePlan`/`SetupChangeRecord` model, the coordinator returns
+`SetupChangePlan`/`SetupChangeRecord` model, transaction coordinators return
+internal execution evidence, the generic `SetupCommandDispatcher` alone builds
 `SetupCommandResult`, the CLI serializes that result, and PowerShell forwards
 it unchanged. Apply loads the persisted private plan; it never asks an adapter
 to recreate a public DTO. If that plan's adapter is no longer registered,
 `apply` returns `unsupported_adapter` and leaves the plan/ledger byte-for-byte
 unchanged with no platform probe or mutation artifact.
+
+The implementation ownership inside the sequential T2 gate is explicit:
+
+| T2 unit | Exclusive implementation boundary | Handoff |
+| --- | --- | --- |
+| T2a contract/registry | adapter bridge, registry, options, and the bounded #66 public-result/catalog sections | freezes plan persistence and persisted-adapter resolution before diagnostics are added |
+| T2b diagnostics carrier | the generic plan/revalidation success metadata and sanitized failure carrier, `ISetupApplyRevalidator`, and the apply-coordinator handoff | carries only a fixed code plus closed `warnings`/`next_actions`; no raw exception text or target-specific inference |
+| T2c command dispatcher | `SetupCommandDispatcher` and its tests | owns the one lock/recovery policy and the sole construction of `SetupCommandResult` for all four verbs |
+| T2d process/wrapper surface | `CliApplication`, help/exit/stderr mapping, and the thin PowerShell wrapper | serializes/forwards the T2c result without recreating adapter or transaction behavior |
+
+These units run T2a -> T2b -> T2c -> T2d and are reviewed separately; they are
+not parallel file owners. T3 may add GitHub Copilot-specific fixed warning,
+next-action, and failure values only after T2d freezes the generic carrier and
+dispatcher. T3 does not change carrier semantics. T7 alone constructs the
+production composition root, registers the completed target partitions, and
+passes them into the already-frozen T2 dispatcher.
 
 ## Ownership and private data
 

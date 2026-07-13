@@ -76,7 +76,7 @@ Gate releases are explicit:
 | Gate | Release condition |
 | --- | --- |
 | T1 -> T2 | exact T1 status/rollback/recovery tests, including the implemented status-lifecycle validation invariant, and all Setup tests pass; review and commit are complete |
-| T2 -> T3 | registry, generic CLI seam, four-command producer, wrapper tests, exact #66 exceptional apply combinations, and the predeclared closed #67 catalog pass; review and commit are complete |
+| T2 -> T3 | sequential T2a contract/registry, T2b typed diagnostics carrier, T2c dispatcher, and T2d process/wrapper gates all pass; the four-command producer and exact #66 exceptional apply combinations are reviewed and committed, while target-specific #67 values remain T3-owned |
 | T3 -> T4/T5/T6 | remaining #67 shared catalog/validation/runtime, platform, manifest-pairing, detection, policy, and endpoint tests pass; the shared seam is then frozen |
 | T4/T5/T6 -> T7 | all three target partitions pass focused tests and are separately reviewed and committed without editing T3-owned files |
 | T7 -> T8 | the real composition root and CLI handoff pass the cross-target producer gate and full ConfigCli tests |
@@ -89,7 +89,10 @@ file ownership:
 | Files | Active owner and bounded section |
 | --- | --- |
 | `SetupContractValidator.cs` and `SetupStatusProjectorTests.cs` | T1 through its gate owns the already-implemented `ValidateStatusChangeSet` lifecycle/aggregate invariant and its projector serialization proof; that hunk then freezes |
-| `SetupCodes.cs`, `SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs` | after T1 releases, T2 owns only the exact #66 `apply`/`unsupported_adapter` and `apply`/`unsupported_target` combinations and predeclares the closed #67 code/warning/action catalog needed by the public-command gate; those sections then freeze |
+| `SetupCodes.cs`, `SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs` | after T1 releases, T2 owns only the exact #66 `apply`/`unsupported_adapter` and `apply`/`unsupported_target` combinations plus generic carrier/result validation; those sections then freeze, while T3 owns the target-specific #67 code/warning/action values |
+| `ISetupAdapter.cs` and `SetupAdapterRegistryTests.cs` | T2a owns the adapter-plan/registry bridge, then hands these files sequentially to T2b for only the generic warnings/next-actions and sanitized failure-carrier additions; T2b freezes that carrier before T2c starts |
+| `ISetupApplyRevalidator.cs`, `SetupApplyCoordinator.cs`, and `SetupApplyTests.cs` | T2b alone owns the generic revalidation carrier handoff and its no-artifact/fixed-diagnostic tests; no T2c/T3 target owner may reopen transaction semantics through these files |
+| `SetupCommandDispatcher.cs` and `SetupCommandDispatcherTests.cs` | T2c alone owns the generic four-command producer, exact lock/recovery delegation, target projection, and result construction; T2d consumes this seam and T7 only composes it |
 | the same four shared contract files plus `SourceCapabilityRuntimeTests.cs` | after T2 releases, T3 receives them for only the remaining #67 catalog, validator, shape/validation, and runtime-manifest additions; T3 then freezes the complete shared seam |
 
 No two tasks edit these files concurrently. A finding reopens the task that owns
@@ -124,33 +127,127 @@ Setup tests. Do not change #67 target behavior. Commit:
 
 ## T2 - Expose the real #66 command producer
 
+T2 is four small sequential review units. T2a -> T2b -> T2c -> T2d is mandatory;
+none may run in parallel, and T3 starts only after the T2d gate. Each unit owns
+only the files listed below, runs its exact focused command, receives an
+independent review, and commits before handing off shared files.
+
+### T2a - Freeze the generic contract, options, and adapter registry
+
 **Own exactly:** `Setup/Adapters/ISetupAdapter.cs`,
 `Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Cli/SetupOptions.cs`,
-`Cli/CliApplication.cs`, `Cli/CliHelpText.cs`, `SetupAdapterRegistryTests.cs`,
-`SetupOptionsTests.cs`, `CliApplicationTests.cs`, and the new repository
-`scripts/local-monitor/setup.ps1` plus new `SetupWrapperTests.cs`; after the T1
-gate, the bounded #66 exceptional-apply and closed-catalog sections of
-`Setup/Contracts/SetupCodes.cs`, `Setup/Contracts/SetupContractValidator.cs`,
-`SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`. T2 exposes
-a generic CLI/composition handoff but does not register a #67 adapter or alter
-the frozen T1 status-lifecycle hunk.
+`SetupAdapterRegistryTests.cs`, and `SetupOptionsTests.cs`; after the T1 gate,
+only the bounded #66 exceptional-apply and generic carrier/result-validation
+sections of `Setup/Contracts/SetupCodes.cs`,
+`Setup/Contracts/SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and
+`SetupContractValidationTests.cs`.
 
-**Deliver:** all four commands through the real coordinator, one JSON stdout
-producer, fixed stderr/exit mapping, mandatory recovery correlation, mutation
-blocking, and exact wrapper forwarding. Pin the closed command matrix:
+**Deliver:** private-plan/planned-ledger/public-target bridging, adapter-slug
+parsing without early registry resolution, persisted-adapter lookup, and the
+closed `apply`/`unsupported_adapter` and `apply`/`unsupported_target` result
+shapes. Do not add GitHub Copilot target values or construct a public command
+result.
 
-- unknown adapter at plan -> `plan`/`unsupported_adapter`;
-- valid persisted plan whose adapter is no longer registered ->
-  `apply`/`unsupported_adapter`, persisted adapter ID retained, no platform
-  probe, artifact, ledger transition, or target write;
-- macOS/Linux CLI persisted plan -> `apply`/`unsupported_target`, no shell
-  profile, artifact, ledger transition, notification, or target write.
+**Verify:**
 
-**Verify:** `SetupAdapterRegistryTests`, `SetupOptionsTests`,
-`CliApplicationTests`, `SetupWrapperTests`, the exact exceptional combinations
-in `SetupContractShapeTests`/`SetupContractValidationTests`, then full ConfigCli
-tests. Commit:
-`Issue #66: feat(setup): expose reversible setup commands`.
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupAdapterRegistryTests|FullyQualifiedName~SetupOptionsTests|FullyQualifiedName~SetupContractShapeTests|FullyQualifiedName~SetupContractValidationTests"
+git diff --check
+```
+
+Commit: `Issues #66-#67: feat(setup): close generic setup contracts`.
+
+### T2b - Carry sanitized adapter and revalidation diagnostics
+
+**Depends on:** T2a.
+
+**Own exactly:** the diagnostics-carrier additions in
+`Setup/Adapters/ISetupAdapter.cs` and `SetupAdapterRegistryTests.cs` after the
+T2a handoff; `Setup/Transactions/ISetupApplyRevalidator.cs`,
+`Setup/Transactions/SetupApplyCoordinator.cs`, and `SetupApplyTests.cs`.
+
+**Deliver:** one immutable generic carrier vocabulary whose only public-safe
+diagnostic fields are an allowed nullable failure code plus ordered closed
+`warnings` and `next_actions`. Adapter plan success carries targets and those
+two arrays; adapter plan failure carries the fixed code and arrays without raw
+exception text. `ISetupApplyRevalidator` uses the same vocabulary for fresh
+success/failure diagnostics, and `SetupApplyCoordinator` returns or throws the
+typed safe payload needed by the later dispatcher without rerunning the
+adapter. Unexpected/framework failures keep both arrays empty. Persisted-
+adapter removal and `unsupported_target` also keep both arrays empty.
+
+T2b owns only the generic transport and validation. T3 later supplies the
+GitHub Copilot-specific fixed values; T4/T5 may emit those values through the
+frozen carrier but may not change its shape. Do not edit status/rollback
+projection, CLI/process files, or `SetupCommandDispatcher`.
+
+**Verify:**
+
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupAdapterRegistryTests|FullyQualifiedName~SetupApplyTests|FullyQualifiedName~SetupContractShapeTests|FullyQualifiedName~SetupContractValidationTests"
+git diff --check
+```
+
+Commit: `Issue #66: feat(setup): carry sanitized adapter diagnostics`.
+
+### T2c - Implement the generic four-command dispatcher
+
+**Depends on:** T2b.
+
+**Own exactly:** new `Setup/Cli/SetupCommandDispatcher.cs` and new
+`SetupCommandDispatcherTests.cs`.
+
+**Deliver:** the sole generic constructor of `SetupCommandResult` for plan,
+apply, rollback, and status. Plan/apply each acquire one non-waiting lock and
+run common recovery once; rollback delegates its one recovery pass to
+`SetupRollbackCoordinator` under the same held lock; status delegates directly
+to `SetupStatusService` with no outer lock/recovery. The dispatcher preserves
+requested versus recovered correlation, adapter/ledger target order, plan
+prospective versus apply actual rollback availability, typed warnings/actions,
+`no_changes` persistence, missing-row/private-plan distinctions, and the closed
+exceptional apply matrix. It never serializes JSON and never resolves target-
+specific values.
+
+**Verify:**
+
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupCommandDispatcherTests|FullyQualifiedName~SetupApplyTests|FullyQualifiedName~SetupRollbackTests|FullyQualifiedName~SetupRecoveryTests|FullyQualifiedName~SetupStatus"
+git diff --check
+```
+
+Commit: `Issue #66: feat(setup): dispatch reversible setup commands`.
+
+### T2d - Expose the process and wrapper surfaces
+
+**Depends on:** T2c.
+
+**Own exactly:** `Cli/CliApplication.cs`, `Cli/CliHelpText.cs`,
+`CliApplicationTests.cs`, new repository `scripts/local-monitor/setup.ps1`, and
+new `SetupWrapperTests.cs`.
+
+**Deliver:** recognized setup grammar, exactly one JSON stdout result for each
+recognized verb, fixed stderr/exit mapping, bare/unknown setup-verb handling,
+preserved legacy top-level behavior, and byte-for-byte wrapper forwarding. T2d
+only consumes T2c; it does not recreate lock, recovery, adapter, target, or
+diagnostics behavior.
+
+**Verify:**
+
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~CliApplicationTests|FullyQualifiedName~SetupWrapperTests"
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj
+git diff --check
+```
+
+Commit: `Issue #66: feat(setup): expose reversible setup commands`.
+
+The T2 gate releases only after all four commits and reviews exist. Its closed
+command matrix is: unknown adapter at plan -> `plan`/`unsupported_adapter`;
+valid persisted plan whose adapter is removed ->
+`apply`/`unsupported_adapter` with retained adapter ID and zero platform/
+artifact/lifecycle/target activity; macOS/Linux CLI persisted plan ->
+`apply`/`unsupported_target` with no shell profile, artifact, lifecycle,
+notification, or target write.
 
 ## T3 - Build the #67 detection, policy, and endpoint foundation
 
@@ -189,7 +286,11 @@ classifier:
 T3 exposes bounded observations/classifiers only. It does not own target plan
 creation or target-specific apply revalidation: T4 owns VS Code version/
 extension/policy/member/endpoint revalidation and T5 owns CLI OS/version/
-environment-member/endpoint revalidation.
+environment-member/endpoint revalidation. T3 declares the GitHub Copilot fixed
+warning/next-action/failure values in its bounded shared-contract sections and
+makes them available to the target partitions, but it does not edit the T2b
+carrier or T2c dispatcher. T4/T5 emit those fixed values through the frozen
+generic carrier; T6 emits only its bounded guidance diagnostics.
 
 **Verify:** `SetupContractShapeTests`, `SetupContractValidationTests`,
 `SourceCapabilityRuntimeTests`, `GitHubCopilotDetectionTests`, and
