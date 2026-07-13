@@ -6,8 +6,9 @@ user-scoped mutation, and no claim that static setup proves telemetry receipt.
 
 **Architecture:** Config CLI is the only result producer. Adapters produce
 internal plans, the #66 coordinator owns every mutation/recovery/rollback, the
-CLI serializes `SetupCommandResult`, and PowerShell forwards the JSON unchanged.
-No HTTP, proxy, UI, database, AppHost resource, project, or dependency is added.
+generic dispatcher alone constructs `SetupCommandResult`, the CLI serializes
+it, and PowerShell forwards the JSON unchanged. No HTTP, proxy, UI, database,
+AppHost resource, project, or dependency is added.
 
 **Contract:** `docs/specifications/interfaces/configuration-setup.md`, D057,
 `docs/specifications/security-data-boundaries.md`, and the paired design.
@@ -29,7 +30,19 @@ The implementation DAG starts from these completed prerequisites:
   environment primitives;
 - journal, apply, reverse compensation, restart recovery, rollback producer,
   notification replay, and their recorded fault/review evidence;
-- SetupOptions parsing through the durable-ledger entry recorded on 2026-07-14.
+- the initial SetupOptions/parser and adapter-registry work recorded before the
+  audited T2 reopen.
+
+The T2 reopen does not reassign the already-declared closed catalog. Commit
+`139338a` remains the owner of those code/warning/action declarations and their
+closed allowlist checks. T2a reopens only SetupOptions parsing/reachability;
+T3 later adds semantic positive validation/emission tests for the already-
+declared #67 values without editing `SetupCodes.cs` or validator declarations.
+
+The current untracked `SetupCommandDispatcher.cs` and
+`SetupCommandDispatcherTests.cs` draft predates the audited carrier contract.
+It must be abandoned before T2a or T2b starts. No code or test is copied from
+that draft; T2c starts fresh with a RED test after T2b freezes the carrier.
 
 Do not rewrite those rows as new T1-T9 work. T9 alone appends the final results
 to the durable ledger and identifies both the current T-number and any
@@ -44,10 +57,20 @@ T0 current-spec alignment
 T1 #66 status/terminal closure
  |
  v
-T2 #66 public command producer
+T2a -> T2b -> T2c -> T2d
+#66 public command producer
  |
  v
-T3 #67 shared detection/policy/probe foundation
+T3a platform observations
+ |          |
+ v          v
+T3b        T3c
+policy     endpoint
+ |          |
+ +----+-----+
+      |
+      v
+T3d aggregate/partition seam
  |          |          |
  v          v          v
 T4         T5         T6
@@ -65,38 +88,53 @@ T8 package/docs/evidence
 T9 reviews/full validation
 ```
 
-The only permitted order is T1 -> T2 -> T3 -> {T4 || T5 || T6} -> T7 -> T8 ->
-T9. T4, T5, and T6 may proceed concurrently only after T3 freezes the shared
-contract/platform/GitHubCopilot seam. Each target task owns only its partition;
-T7 owns the composition-root join. No adapter may declare completion before T7.
-T8 and T9 are sequential closeout.
+The only permitted order is T1 -> T2a -> T2b -> T2c -> T2d -> T3a ->
+{T3b || T3c} -> T3d -> {T4 || T5 || T6} -> T7 -> T8 -> T9. T3b/T3c and
+T4/T5/T6 are the only parallel groups. Target work starts only after T3d freezes
+the shared platform/GitHubCopilot aggregate seam. Each target task owns only its
+partition; T7 owns the composition-root join. No adapter may declare completion
+before T7. T8 and T9 are sequential closeout.
 
 Gate releases are explicit:
 
 | Gate | Release condition |
 | --- | --- |
 | T1 -> T2 | exact T1 status/rollback/recovery tests, including the implemented status-lifecycle validation invariant, and all Setup tests pass; review and commit are complete |
-| T2 -> T3 | sequential T2a contract/registry, T2b typed diagnostics carrier, T2c dispatcher, and T2d process/wrapper gates all pass; the four-command producer and exact #66 exceptional apply combinations are reviewed and committed, while target-specific #67 values remain T3-owned |
-| T3 -> T4/T5/T6 | remaining #67 shared catalog/validation/runtime, platform, manifest-pairing, detection, policy, and endpoint tests pass; the shared seam is then frozen |
+| T2 -> T3 | sequential T2a options reopen, T2b typed diagnostics carrier, T2c fresh dispatcher, and T2d process/wrapper gates all pass; the four-command producer and exact #66 exceptional apply combinations are reviewed and committed |
+| T3 -> T4/T5/T6 | T3a platform observations, parallel T3b policy and T3c endpoint services, then T3d aggregate/partition join and positive semantic/catalog/manifest tests pass; the shared seam is frozen |
 | T4/T5/T6 -> T7 | all three target partitions pass focused tests and are separately reviewed and committed without editing T3-owned files |
 | T7 -> T8 | the real composition root and CLI handoff pass the cross-target producer gate and full ConfigCli tests |
 | T8 -> T9 | package, wrapper parity, links, and operator documentation checks pass; review and commit are complete |
 | T9 -> close | final reviews, required repository validation, contradiction searches, clean range/worktree inspection, and the sole ledger update pass |
 
-Shared contract files use sequential hunk/section ownership, never parallel
-file ownership:
+The audited active owner matrix is exact. `...` below is never recursive unless
+the row explicitly says a target subdirectory.
 
-| Files | Active owner and bounded section |
+| Unit | Exclusive files/hunks |
 | --- | --- |
-| `SetupContractValidator.cs` and `SetupStatusProjectorTests.cs` | T1 through its gate owns the already-implemented `ValidateStatusChangeSet` lifecycle/aggregate invariant and its projector serialization proof; that hunk then freezes |
-| `SetupCodes.cs`, `SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs` | after T1 releases, T2 owns only the exact #66 `apply`/`unsupported_adapter` and `apply`/`unsupported_target` combinations plus generic carrier/result validation; those sections then freeze, while T3 owns the target-specific #67 code/warning/action values |
-| `ISetupAdapter.cs` and `SetupAdapterRegistryTests.cs` | T2a owns the adapter-plan/registry bridge, then hands these files sequentially to T2b for only the generic warnings/next-actions and sanitized failure-carrier additions; T2b freezes that carrier before T2c starts |
-| `ISetupApplyRevalidator.cs`, `SetupApplyCoordinator.cs`, and `SetupApplyTests.cs` | T2b alone owns the generic revalidation carrier handoff and its no-artifact/fixed-diagnostic tests; no T2c/T3 target owner may reopen transaction semantics through these files |
-| `SetupCommandDispatcher.cs` and `SetupCommandDispatcherTests.cs` | T2c alone owns the generic four-command producer, exact lock/recovery delegation, target projection, and result construction; T2d consumes this seam and T7 only composes it |
-| the same four shared contract files plus `SourceCapabilityRuntimeTests.cs` | after T2 releases, T3 receives them for only the remaining #67 catalog, validator, shape/validation, and runtime-manifest additions; T3 then freezes the complete shared seam |
+| completed T1 | the already-implemented `ValidateStatusChangeSet` hunk in `Setup/Contracts/SetupContractValidator.cs` and its lifecycle/aggregate assertions in `SetupStatusProjectorTests.cs`; frozen except the T2b compile-only signature hunk named below |
+| completed catalog baseline (`139338a`) | existing #66 exceptional combinations and every already-declared #67 code/warning/action plus their closed allowlist/shape assertions in `Setup/Contracts/SetupCodes.cs`, `Setup/Contracts/SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`; declarations remain frozen |
+| T2a reopen | `Setup/Cli/SetupOptions.cs`, `SetupOptionsTests.cs` only |
+| T2b | production: `Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Transactions/ISetupApplyRevalidator.cs`, `Setup/Transactions/SetupApplyCoordinator.cs`; semantic tests: `SetupAdapterRegistryTests.cs`, `SetupApplyTests.cs`; compile-only signature hunks: `SetupCompensationTests.cs`, `SetupRollbackTests.cs`, `SetupRecoveryTests.cs`, `SetupStatusProjectorTests.cs` |
+| T2c | fresh `Setup/Cli/SetupCommandDispatcher.cs`, fresh `SetupCommandDispatcherTests.cs` only |
+| T2d | `Cli/CliApplication.cs`, `Cli/CliHelpText.cs`, `CliApplicationTests.cs`, new `scripts/local-monitor/setup.ps1`, new `SetupWrapperTests.cs` only |
+| T3a | `Setup/Platform/ISetupPlatform.cs`, `Setup/Platform/SystemSetupPlatform.cs`, `SetupTestPlatform.cs`, new `Setup/Adapters/GitHubCopilot/GitHubCopilotDetection.cs`, and `GitHubCopilotDetectionTests.cs` |
+| T3b | new `Setup/Adapters/GitHubCopilot/GitHubCopilotManagedPolicyResolver.cs` and new `GitHubCopilotManagedPolicyTests.cs` only |
+| T3c | new `Setup/Adapters/GitHubCopilot/GitHubCopilotEndpointProbe.cs` and `GitHubCopilotEndpointProbeTests.cs` only |
+| T3d | new `Setup/Adapters/GitHubCopilot/IGitHubCopilotTargetPartition.cs`, new `Setup/Adapters/GitHubCopilot/GitHubCopilotSetupAdapter.cs`, new `GitHubCopilotSetupAdapterTests.cs`, `SourceCapabilityRuntimeTests.cs`, and only new semantic-positive #67 methods in `SetupContractShapeTests.cs`/`SetupContractValidationTests.cs` |
+| T4 | target subdirectory `Setup/Adapters/GitHubCopilot/VsCode/` and `VsCodeSetupAdapterTests.cs` |
+| T5 | target subdirectory `Setup/Adapters/GitHubCopilot/CopilotCli/` and `CopilotCliSetupAdapterTests.cs` |
+| T6 | target subdirectory `Setup/Adapters/GitHubCopilot/AppSdk/`, `CopilotSdkGuidanceAdapterTests.cs`, and `CopilotSdkTelemetryCompileTests.cs` |
+| T7 | `Program.cs`, new `Setup/SetupCompositionRoot.cs`, new `ConfigurationSetupIntegrationTests.cs` |
+| T8 | `scripts/local-monitor/package-release.ps1`, the package/layout/wrapper-parity methods in `tests/CopilotAgentObservability.LocalMonitor.Tests/LocalMonitorScriptTests.cs`, and the documentation files listed in T8 |
+| T9 | read-only reviews/validation and `docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md` only |
 
 No two tasks edit these files concurrently. A finding reopens the task that owns
-the affected hunk/section and invalidates its downstream releases.
+the affected hunk/section and invalidates its downstream releases. A T2b
+compile-only hunk may update only construction/signature plumbing required by
+the carrier; it may not change a frozen domain assertion, fixture meaning, or
+behavior. Any semantic change in one of those four test files reopens that
+domain owner rather than expanding T2b.
 
 Every task uses test-driven changes, an independent read-only review, a focused
 RED/GREEN command, `git diff --check`, and a coherent local commit. Workers do
@@ -113,7 +151,10 @@ integration in `Setup/Transactions/SetupRollbackCoordinator.cs`, and
 `SetupRollbackTests.cs`, and `SetupRecoveryTests.cs`; plus only the implemented
 `ValidateStatusChangeSet` lifecycle/aggregate hunk in
 `Setup/Contracts/SetupContractValidator.cs` and its projector serialization
-invariant in `SetupStatusProjectorTests.cs`.
+invariant in `SetupStatusProjectorTests.cs`. This is semantic ownership: after
+the completed T1 gate, T2b may touch only the compile-only carrier-signature
+hunks explicitly listed in the matrix, without changing a T1 assertion,
+fixture meaning, or production behavior.
 
 **Deliver:** lifecycle-relative reference/current state, immutable ledger
 snapshot reconstruction without adapter rediscovery, fresh private-plan/target/
@@ -132,39 +173,37 @@ none may run in parallel, and T3 starts only after the T2d gate. Each unit owns
 only the files listed below, runs its exact focused command, receives an
 independent review, and commits before handing off shared files.
 
-### T2a - Freeze the generic contract, options, and adapter registry
+### T2a - Reopen options parsing only
 
-**Own exactly:** `Setup/Adapters/ISetupAdapter.cs`,
-`Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Cli/SetupOptions.cs`,
-`SetupAdapterRegistryTests.cs`, and `SetupOptionsTests.cs`; after the T1 gate,
-only the bounded #66 exceptional-apply and generic carrier/result-validation
-sections of `Setup/Contracts/SetupCodes.cs`,
-`Setup/Contracts/SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and
-`SetupContractValidationTests.cs`.
+**Own exactly:** `Setup/Cli/SetupOptions.cs` and `SetupOptionsTests.cs`.
 
-**Deliver:** private-plan/planned-ledger/public-target bridging, adapter-slug
-parsing without early registry resolution, persisted-adapter lookup, and the
-closed `apply`/`unsupported_adapter` and `apply`/`unsupported_target` result
-shapes. Do not add GitHub Copilot target values or construct a public command
-result.
+**Deliver:** parse a bounded lowercase adapter slug without registry lookup;
+leave plan target validation to the adapter; make status adapter input an exact
+historical filter; preserve exact recognized-verb grammar and loopback endpoint
+normalization. Do not edit the adapter registry, catalog/validator declarations,
+transactions, dispatcher, or CLI host. The catalog already declared in
+`139338a` remains frozen.
 
 **Verify:**
 
 ```powershell
-dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupAdapterRegistryTests|FullyQualifiedName~SetupOptionsTests|FullyQualifiedName~SetupContractShapeTests|FullyQualifiedName~SetupContractValidationTests"
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~SetupOptionsTests
 git diff --check
 ```
 
-Commit: `Issues #66-#67: feat(setup): close generic setup contracts`.
+Commit: `Issue #66: fix(setup): defer adapter resolution until dispatch`.
 
 ### T2b - Carry sanitized adapter and revalidation diagnostics
 
 **Depends on:** T2a.
 
-**Own exactly:** the diagnostics-carrier additions in
-`Setup/Adapters/ISetupAdapter.cs` and `SetupAdapterRegistryTests.cs` after the
-T2a handoff; `Setup/Transactions/ISetupApplyRevalidator.cs`,
-`Setup/Transactions/SetupApplyCoordinator.cs`, and `SetupApplyTests.cs`.
+**Own exactly:** four production files:
+`Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`,
+`Setup/Transactions/ISetupApplyRevalidator.cs`, and
+`Setup/Transactions/SetupApplyCoordinator.cs`; two semantic test files:
+`SetupAdapterRegistryTests.cs` and `SetupApplyTests.cs`; compile-only signature
+hunks in `SetupCompensationTests.cs`, `SetupRollbackTests.cs`,
+`SetupRecoveryTests.cs`, and `SetupStatusProjectorTests.cs`.
 
 **Deliver:** one immutable generic carrier vocabulary whose only public-safe
 diagnostic fields are an allowed nullable failure code plus ordered closed
@@ -173,18 +212,26 @@ two arrays; adapter plan failure carries the fixed code and arrays without raw
 exception text. `ISetupApplyRevalidator` uses the same vocabulary for fresh
 success/failure diagnostics, and `SetupApplyCoordinator` returns or throws the
 typed safe payload needed by the later dispatcher without rerunning the
-adapter. Unexpected/framework failures keep both arrays empty. Persisted-
+adapter. `SetupAdapterRegistry` consumes the changed carrier and validates/
+copies bounded diagnostics directly. T2b removes its temporary
+`SetupCommandResult`; neither the registry nor coordinator may construct the
+public DTO. Unexpected/framework failures keep both arrays empty. Persisted-
 adapter removal and `unsupported_target` also keep both arrays empty.
 
-T2b owns only the generic transport and validation. T3 later supplies the
-GitHub Copilot-specific fixed values; T4/T5 may emit those values through the
-frozen carrier but may not change its shape. Do not edit status/rollback
-projection, CLI/process files, or `SetupCommandDispatcher`.
+T2b owns only the generic transport and semantic assertions in its two named
+test files. The four compile-only test hunks may adjust constructors, return
+unwrapping, or test doubles solely so the frozen compensation/rollback/
+recovery/status suites compile; their assertions and fixture meaning cannot
+change. The target-specific values are already declared by `139338a`; T3/T4/
+T5/T6 later validate and emit them through the frozen carrier. Do not edit
+status/rollback production, CLI/process files, catalog/validator declarations,
+or `SetupCommandDispatcher`.
 
 **Verify:**
 
 ```powershell
-dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupAdapterRegistryTests|FullyQualifiedName~SetupApplyTests|FullyQualifiedName~SetupContractShapeTests|FullyQualifiedName~SetupContractValidationTests"
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupAdapterRegistryTests|FullyQualifiedName~SetupApplyTests"
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupCompensationTests|FullyQualifiedName~SetupRollbackTests|FullyQualifiedName~SetupRecoveryTests|FullyQualifiedName~SetupStatusProjectorTests"
 git diff --check
 ```
 
@@ -197,6 +244,10 @@ Commit: `Issue #66: feat(setup): carry sanitized adapter diagnostics`.
 **Own exactly:** new `Setup/Cli/SetupCommandDispatcher.cs` and new
 `SetupCommandDispatcherTests.cs`.
 
+The pre-audit untracked files with those names must already be removed. This
+task creates both files fresh from its first failing test and does not copy the
+abandoned draft.
+
 **Deliver:** the sole generic constructor of `SetupCommandResult` for plan,
 apply, rollback, and status. Plan/apply each acquire one non-waiting lock and
 run common recovery once; rollback delegates its one recovery pass to
@@ -205,8 +256,9 @@ to `SetupStatusService` with no outer lock/recovery. The dispatcher preserves
 requested versus recovered correlation, adapter/ledger target order, plan
 prospective versus apply actual rollback availability, typed warnings/actions,
 `no_changes` persistence, missing-row/private-plan distinctions, and the closed
-exceptional apply matrix. It never serializes JSON and never resolves target-
-specific values.
+exceptional apply matrix. It is the only code that constructs any
+`SetupCommandResult`, including contract-validation instances. It never
+serializes JSON and never resolves target-specific values.
 
 **Verify:**
 
@@ -223,13 +275,15 @@ Commit: `Issue #66: feat(setup): dispatch reversible setup commands`.
 
 **Own exactly:** `Cli/CliApplication.cs`, `Cli/CliHelpText.cs`,
 `CliApplicationTests.cs`, new repository `scripts/local-monitor/setup.ps1`, and
-new `SetupWrapperTests.cs`.
+new `SetupWrapperTests.cs` only.
 
 **Deliver:** recognized setup grammar, exactly one JSON stdout result for each
 recognized verb, fixed stderr/exit mapping, bare/unknown setup-verb handling,
-preserved legacy top-level behavior, and byte-for-byte wrapper forwarding. T2d
-only consumes T2c; it does not recreate lock, recovery, adapter, target, or
-diagnostics behavior.
+preserved legacy top-level behavior, a generic `CliApplication` dispatcher-
+injection seam, and byte-for-byte wrapper forwarding. T2d only consumes T2c;
+it does not construct the production dispatcher, register an adapter, edit
+`Program.cs`, or recreate lock, recovery, target, or diagnostics behavior. The
+repository wrapper is not added to the release layout until T8.
 
 **Verify:**
 
@@ -249,57 +303,118 @@ artifact/lifecycle/target activity; macOS/Linux CLI persisted plan ->
 `apply`/`unsupported_target` with no shell profile, artifact, lifecycle,
 notification, or target write.
 
-## T3 - Build the #67 detection, policy, and endpoint foundation
+## T3 - Build the #67 shared aggregate foundation
 
-**Depends on:** T2.
+T3 runs T3a -> {T3b || T3c} -> T3d. Only T3b and T3c may run in parallel;
+their production/test files do not overlap. T4/T5/T6 start only after T3d is
+reviewed and committed.
 
-**Own after the T2 gate:** shared files directly under
-`Setup/Adapters/GitHubCopilot/` (target files must live in the T4/T5/T6
-subdirectories); only the remaining #67 sections in
-`Setup/Contracts/SetupCodes.cs`, `Setup/Contracts/SetupContractValidator.cs`,
-`SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`;
-`Setup/Platform/ISetupPlatform.cs`, `Setup/Platform/SystemSetupPlatform.cs`,
-`SetupTestPlatform.cs`, `SourceCapabilityRuntimeTests.cs`,
-`GitHubCopilotDetectionTests.cs`, and `GitHubCopilotEndpointProbeTests.cs`. T3
-preserves the frozen T1 lifecycle hunk and T2 exceptional-combination/catalog
-sections and does not register unfinished targets. After this gate, no later
-task edits the shared seam; a finding reopens its hunk owner.
+### T3a - Freeze platform observations and common detection
 
-**Deliver:** the real adapter foundation and internal #66 plan DTO path;
-Stable/Insiders and CLI version detection; planning OS capture; canonical #61
-manifest pairing; official read-only managed-source tables; native > server >
-file whole-channel selection with no merge inside the Copilot system;
-independent VS Code enterprise-policy observation; and the exact endpoint
-classifier:
+**Depends on:** T2d.
 
-- no-redirect `GET <origin>/health/live`;
-- one 500 ms total budget; connect/read/total timeout is foreign-owner;
-- maximum 4096 payload bytes, using one sentinel byte unless a trustworthy
-  `Content-Length` already proves oversize;
-- accept only HTTP 200 and exactly `{ "status": "live" }` modulo JSON
-  whitespace/property order, with no duplicate/extra property;
-- refused/proved no-listener -> warning `monitor_not_running`;
-- every other transport failure, timeout, redirect, non-200, oversize,
-  malformed/non-object, or different JSON ->
-  `port_owned_by_foreign_process`.
+**Own exactly:** `Setup/Platform/ISetupPlatform.cs`,
+`Setup/Platform/SystemSetupPlatform.cs`, `SetupTestPlatform.cs`, new
+`Setup/Adapters/GitHubCopilot/GitHubCopilotDetection.cs`, and
+`GitHubCopilotDetectionTests.cs`.
 
-T3 exposes bounded observations/classifiers only. It does not own target plan
-creation or target-specific apply revalidation: T4 owns VS Code version/
-extension/policy/member/endpoint revalidation and T5 owns CLI OS/version/
-environment-member/endpoint revalidation. T3 declares the GitHub Copilot fixed
-warning/next-action/failure values in its bounded shared-contract sections and
-makes them available to the target partitions, but it does not edit the T2b
-carrier or T2c dispatcher. T4/T5 emit those fixed values through the frozen
-generic carrier; T6 emits only its bounded guidance diagnostics.
+**Deliver:** deterministic OS/runtime-root, filesystem, current-user
+environment, registry/preferences/file, process, and HTTP observation
+boundaries; Stable/Insiders/CLI version observations; planning-OS capture; and
+the official local managed-source locations. Expose bounded observations only.
+Do not resolve policy precedence, classify the endpoint, build an adapter plan,
+or edit catalog/validator declarations.
 
-**Verify:** `SetupContractShapeTests`, `SetupContractValidationTests`,
-`SourceCapabilityRuntimeTests`, `GitHubCopilotDetectionTests`, and
-`GitHubCopilotEndpointProbeTests`. Commit:
-`Issue #67: feat(setup): add Copilot detection foundation`.
+**Verify:**
+
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupRuntimeTests|FullyQualifiedName~GitHubCopilotDetectionTests"
+git diff --check
+```
+
+Commit: `Issue #67: feat(setup): observe Copilot setup platforms`.
+
+### T3b - Resolve managed policy
+
+**Depends on:** T3a. May run in parallel with T3c.
+
+**Own exactly:** new
+`Setup/Adapters/GitHubCopilot/GitHubCopilotManagedPolicyResolver.cs` and new
+`GitHubCopilotManagedPolicyTests.cs`.
+
+**Deliver:** Copilot native > server > file whole-channel selection with no
+merge, independent VS Code enterprise-policy evaluation, equal managed/no-write
+versus differing conflict classification, and the unverified-server boundary.
+Consume only T3a observations and already-declared fixed codes/warnings. Do not
+edit platform, aggregate, target partition, catalog, or validator files.
+
+**Verify:**
+
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~GitHubCopilotManagedPolicyTests
+git diff --check
+```
+
+Commit: `Issue #67: feat(setup): resolve Copilot managed policy`.
+
+### T3c - Classify Local Monitor endpoint ownership
+
+**Depends on:** T3a. May run in parallel with T3b.
+
+**Own exactly:** new
+`Setup/Adapters/GitHubCopilot/GitHubCopilotEndpointProbe.cs` and
+`GitHubCopilotEndpointProbeTests.cs`.
+
+**Deliver:** no-redirect `GET <origin>/health/live`; one 500 ms total budget;
+connect/read/total timeout as foreign-owner; maximum 4096 payload bytes plus
+one sentinel byte unless trustworthy `Content-Length` proves oversize; accept
+only HTTP 200 and exactly `{ "status": "live" }` modulo JSON whitespace/
+property order with no duplicate/extra property. Refused/proved no-listener
+uses the already-declared `monitor_not_running`; every other transport failure,
+timeout, redirect, non-200, oversize, malformed/non-object, or different JSON
+uses `port_owned_by_foreign_process`.
+
+**Verify:**
+
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~GitHubCopilotEndpointProbeTests
+git diff --check
+```
+
+Commit: `Issue #67: feat(setup): classify monitor endpoint ownership`.
+
+### T3d - Join the shared aggregate and target-partition seam
+
+**Depends on:** T3b and T3c.
+
+**Own exactly:** new
+`Setup/Adapters/GitHubCopilot/IGitHubCopilotTargetPartition.cs`, new
+`Setup/Adapters/GitHubCopilot/GitHubCopilotSetupAdapter.cs`, new
+`GitHubCopilotSetupAdapterTests.cs`, `SourceCapabilityRuntimeTests.cs`, and only
+new semantic-positive #67 methods in `SetupContractShapeTests.cs` and
+`SetupContractValidationTests.cs`.
+
+**Deliver:** one shared aggregate adapter with ID exactly `github-copilot`, a
+stable partition contract consumed by T4/T5/T6, deterministic selected-target/
+`all` aggregation, canonical #61 manifest pairing, and typed carrier emission
+using the T2a-declared catalog. The positive tests prove the already-declared
+warning/action/code values are accepted and emitted in their intended semantic
+combinations. T3d does not edit `SetupCodes.cs`, any validator declaration,
+the generic T2 carrier/dispatcher, or target subdirectories. It creates the
+aggregate type but does not register it in production; T7 owns that join.
+
+**Verify:**
+
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~GitHubCopilotSetupAdapterTests|FullyQualifiedName~SourceCapabilityRuntimeTests|FullyQualifiedName~SetupContractShapeTests|FullyQualifiedName~SetupContractValidationTests"
+git diff --check
+```
+
+Commit: `Issue #67: feat(setup): freeze Copilot aggregate seam`.
 
 ## T4 - Implement VS Code Stable/Insiders Default Profile setup
 
-**Depends on:** T3.
+**Depends on:** T3d.
 
 **Own exactly:** the target partition
 `Setup/Adapters/GitHubCopilot/VsCode/` and `VsCodeSetupAdapterTests.cs`. Do not
@@ -319,10 +434,9 @@ Extension listing is exactly `code --list-extensions --show-versions` or
 setup never creates/selects a named profile. Insiders paths use the official
 Profiles rule that replaces intermediate folder `Code` with `Code - Insiders`.
 
-Read official Copilot native/server/file managed sources and select their
-winning channel whole, not field-merged. Separately read VS Code enterprise
-`CopilotOtel*` policies; never let them suppress Copilot server/file. A
-differing observed constraint from either system blocks. Copilot native absence
+Consume the frozen T3a observations and T3b whole-channel/enterprise-policy
+evaluation; do not reopen their locations or precedence. A differing observed
+constraint from either system blocks the target plan. Copilot native absence
 produces `managed_policy_unverified` because server presence cannot be proved.
 
 **Verify:** `VsCodeSetupAdapterTests` cover three-OS paths, both channels,
@@ -333,7 +447,7 @@ member revalidation. Commit:
 
 ## T5 - Implement OS-bounded Copilot CLI setup
 
-**Depends on:** T3.
+**Depends on:** T3d.
 
 **Own exactly:** the target partition
 `Setup/Adapters/GitHubCopilot/CopilotCli/` and
@@ -359,6 +473,8 @@ CLI policy detection is environment-only and every successful plan includes
 macOS/Linux run detect/plan but their persisted plan applies as the fixed
 `unsupported_target` no-write combination; never edit a shell profile. Preserve
 current-process/current-user difference and restart guidance on Windows.
+Consume the frozen T3a observations and T3c endpoint classifier; do not reopen
+their platform or transport logic.
 
 **Verify:** `CopilotCliSetupAdapterTests` cover exact allowlist/forbidden keys,
 Windows state matrix, macOS/Linux plan then refusal, no-artifact proof, warning,
@@ -367,7 +483,7 @@ capture option, and endpoint/version/member revalidation. Commit:
 
 ## T6 - Implement App/SDK no-write guidance
 
-**Depends on:** T3.
+**Depends on:** T3d.
 
 **Own exactly:** the target partition
 `Setup/Adapters/GitHubCopilot/AppSdk/`, `CopilotSdkGuidanceAdapterTests.cs`, and
@@ -383,13 +499,16 @@ loopback endpoint and `http/protobuf`. Other languages remain caller-managed.
 
 ## T7 - Join the real #66 producer to all #67 adapters
 
-**Depends on:** T1, T2, T4, T5, T6.
+**Depends on:** T1, T2d, T3d, T4, T5, T6.
 
 **Own exactly:** `Program.cs`, new `Setup/SetupCompositionRoot.cs`, and new
-`ConfigurationSetupIntegrationTests.cs`. T7 registers the three target
-partitions and passes the real setup producer into the generic T2 CLI seam. It
-does not edit adapter, shared-contract, platform, or target-specific files;
-findings reopen the originating owner and downstream gates.
+`ConfigurationSetupIntegrationTests.cs`. T7 composes the three completed target
+partitions into the single T3d `GitHubCopilotSetupAdapter`, registers exactly
+that one adapter under ID `github-copilot`, constructs the production T2c
+dispatcher, and passes it through the T2d `CliApplication` injection seam. It
+does not separately register VS Code, CLI, or App/SDK adapters and does not edit
+adapter, shared-contract, platform, dispatcher, CLI-host, or target-specific
+files; findings reopen the originating owner and downstream gates.
 
 **Deliver:** real plan/apply/rollback/status for all targets through the same
 ledger/transaction/result types, all-target `all` behavior, stale and rollback
@@ -418,8 +537,9 @@ executable and wrapper-parity cases in
 `docs/agent-guides/repository-workflow.md`;
 `docs/specifications/interfaces/config-cli.md`;
 `docs/sprints/sprint23-configuration-ownership-github-copilot/README.md`;
-and `docs/task.md`. Package the T2-owned `scripts/local-monitor/setup.ps1`
-without changing its command contract.
+and `docs/task.md`. Package the T2d-owned `scripts/local-monitor/setup.ps1`
+and T7-composed Config CLI into the existing release layout without changing
+the wrapper command contract or any setup runtime behavior.
 Do not change unrelated startup/user-env scripts or the release workflow.
 
 **Deliver:** self-contained `app/config-cli/`, exact wrapper parity, no installed

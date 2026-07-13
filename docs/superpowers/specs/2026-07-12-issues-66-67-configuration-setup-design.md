@@ -159,28 +159,77 @@ registry views, processes, endpoint probes, barriers, and fault points.
 
 The source boundary stays single-producer: adapters return the internal
 `SetupChangePlan`/`SetupChangeRecord` model, transaction coordinators return
-internal execution evidence, the generic `SetupCommandDispatcher` alone builds
-`SetupCommandResult`, the CLI serializes that result, and PowerShell forwards
-it unchanged. Apply loads the persisted private plan; it never asks an adapter
-to recreate a public DTO. If that plan's adapter is no longer registered,
-`apply` returns `unsupported_adapter` and leaves the plan/ledger byte-for-byte
+internal execution evidence, and the generic `SetupCommandDispatcher` is the
+only code that constructs any `SetupCommandResult`, including a result used for
+contract validation before emission. The adapter registry validates and copies
+typed bounded diagnostics directly; it does not construct a temporary public
+result. The CLI serializes the dispatcher result and PowerShell forwards it
+unchanged. Apply loads the persisted private plan; it never asks an adapter to
+recreate a public DTO. If that plan's adapter is no longer registered, `apply`
+returns `unsupported_adapter` and leaves the plan/ledger byte-for-byte
 unchanged with no platform probe or mutation artifact.
 
 The implementation ownership inside the sequential T2 gate is explicit:
 
 | T2 unit | Exclusive implementation boundary | Handoff |
 | --- | --- | --- |
-| T2a contract/registry | adapter bridge, registry, options, and the bounded #66 public-result/catalog sections | freezes plan persistence and persisted-adapter resolution before diagnostics are added |
-| T2b diagnostics carrier | the generic plan/revalidation success metadata and sanitized failure carrier, `ISetupApplyRevalidator`, and the apply-coordinator handoff | carries only a fixed code plus closed `warnings`/`next_actions`; no raw exception text or target-specific inference |
-| T2c command dispatcher | `SetupCommandDispatcher` and its tests | owns the one lock/recovery policy and the sole construction of `SetupCommandResult` for all four verbs |
-| T2d process/wrapper surface | `CliApplication`, help/exit/stderr mapping, and the thin PowerShell wrapper | serializes/forwards the T2c result without recreating adapter or transaction behavior |
+| T2a options reopen | only `SetupOptions` and its tests | corrects generic parsing/reachability after the already-committed catalog and registry baselines; no carrier or dispatcher work |
+| T2b diagnostics carrier | `ISetupAdapter`, `SetupAdapterRegistry`, `ISetupApplyRevalidator`, `SetupApplyCoordinator`, their two semantic test files, and compile-only signature updates in four frozen-domain test files | carries only a fixed code plus closed `warnings`/`next_actions`, removes the registry's temporary `SetupCommandResult`, and hands a public-DTO-free seam to T2c |
+| T2c command dispatcher | a fresh `SetupCommandDispatcher` and its tests only | owns the one lock/recovery policy and the sole construction of every `SetupCommandResult` for all four verbs |
+| T2d process/wrapper surface | `CliApplication`, help/exit/stderr mapping, their tests, and the thin PowerShell wrapper/tests | serializes/forwards the T2c result without recreating adapter or transaction behavior |
 
 These units run T2a -> T2b -> T2c -> T2d and are reviewed separately; they are
-not parallel file owners. T3 may add GitHub Copilot-specific fixed warning,
-next-action, and failure values only after T2d freezes the generic carrier and
-dispatcher. T3 does not change carrier semantics. T7 alone constructs the
-production composition root, registers the completed target partitions, and
-passes them into the already-frozen T2 dispatcher.
+not parallel file owners. The currently untracked dispatcher draft predates
+this audited ownership contract and must be abandoned before T2a or T2b starts;
+T2c begins from fresh tests after the carrier is frozen. The complete code,
+warning, and next-action catalog was already declared by `139338a`. T3 does not
+redeclare it: T3 owns semantic positive validation and
+emission tests plus the GitHub Copilot-specific observations that select those
+values. T3 also freezes the shared aggregate/partition seam before target work.
+T7 alone constructs the production composition root, registers exactly one
+aggregate `github-copilot` adapter containing the completed target partitions,
+and passes it into the already-frozen T2 dispatcher.
+
+T3 itself uses the sequential/parallel split T3a -> {T3b || T3c} -> T3d. T3a
+freezes the shared platform observations. T3b owns managed-policy resolution;
+T3c independently owns the bounded endpoint probe. T3d joins those two pure
+shared services into the aggregate `github-copilot` adapter/target-partition
+seam and adds semantic positive catalog/manifest tests. T4, T5, and T6 then own
+only their target subdirectories; they cannot edit the shared aggregate seam.
+
+Exact active file ownership is:
+
+| Unit | Files/hunks |
+| --- | --- |
+| T2a reopen | `Setup/Cli/SetupOptions.cs`, `SetupOptionsTests.cs` |
+| T2b | `Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Transactions/ISetupApplyRevalidator.cs`, `Setup/Transactions/SetupApplyCoordinator.cs`; semantic `SetupAdapterRegistryTests.cs`/`SetupApplyTests.cs`; compile-only signature hunks in `SetupCompensationTests.cs`, `SetupRollbackTests.cs`, `SetupRecoveryTests.cs`, `SetupStatusProjectorTests.cs` |
+| T2c | fresh `Setup/Cli/SetupCommandDispatcher.cs`, fresh `SetupCommandDispatcherTests.cs` |
+| T2d | `Cli/CliApplication.cs`, `Cli/CliHelpText.cs`, `CliApplicationTests.cs`, `scripts/local-monitor/setup.ps1`, `SetupWrapperTests.cs` |
+| T3a | `Setup/Platform/ISetupPlatform.cs`, `Setup/Platform/SystemSetupPlatform.cs`, `SetupTestPlatform.cs`, `Setup/Adapters/GitHubCopilot/GitHubCopilotDetection.cs`, `GitHubCopilotDetectionTests.cs` |
+| T3b | `Setup/Adapters/GitHubCopilot/GitHubCopilotManagedPolicyResolver.cs`, `GitHubCopilotManagedPolicyTests.cs` |
+| T3c | `Setup/Adapters/GitHubCopilot/GitHubCopilotEndpointProbe.cs`, `GitHubCopilotEndpointProbeTests.cs` |
+| T3d | `Setup/Adapters/GitHubCopilot/IGitHubCopilotTargetPartition.cs`, `Setup/Adapters/GitHubCopilot/GitHubCopilotSetupAdapter.cs`, `GitHubCopilotSetupAdapterTests.cs`, `SourceCapabilityRuntimeTests.cs`, and new semantic-positive #67 methods only in `SetupContractShapeTests.cs`/`SetupContractValidationTests.cs` |
+| T4 | `Setup/Adapters/GitHubCopilot/VsCode/`, `VsCodeSetupAdapterTests.cs` |
+| T5 | `Setup/Adapters/GitHubCopilot/CopilotCli/`, `CopilotCliSetupAdapterTests.cs` |
+| T6 | `Setup/Adapters/GitHubCopilot/AppSdk/`, `CopilotSdkGuidanceAdapterTests.cs`, `CopilotSdkTelemetryCompileTests.cs` |
+| T7 | `Program.cs`, `Setup/SetupCompositionRoot.cs`, `ConfigurationSetupIntegrationTests.cs` |
+| T8 | `scripts/local-monitor/package-release.ps1`; package/layout/wrapper-parity methods in `tests/CopilotAgentObservability.LocalMonitor.Tests/LocalMonitorScriptTests.cs`; `README.md`; `scripts/local-monitor/README.md`; `docs/user-guide/local-monitor.md`; `docs/agent-guides/repository-workflow.md`; `docs/specifications/interfaces/config-cli.md`; `docs/sprints/sprint23-configuration-ownership-github-copilot/README.md`; `docs/task.md` |
+| T9 | read-only final review/validation and `docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md` |
+
+The focused verification filters are likewise fixed:
+
+- T2a: `SetupOptionsTests`;
+- T2b semantic: `SetupAdapterRegistryTests|SetupApplyTests`;
+- T2b compile-only: `SetupCompensationTests|SetupRollbackTests|SetupRecoveryTests|SetupStatusProjectorTests`;
+- T2c: `SetupCommandDispatcherTests` plus affected apply/rollback/recovery/status suites;
+- T2d: `CliApplicationTests|SetupWrapperTests`, then full ConfigCli;
+- T3a: `SetupRuntimeTests|GitHubCopilotDetectionTests`;
+- T3b: `GitHubCopilotManagedPolicyTests`;
+- T3c: `GitHubCopilotEndpointProbeTests`;
+- T3d: `GitHubCopilotSetupAdapterTests|SourceCapabilityRuntimeTests|SetupContractShapeTests|SetupContractValidationTests`.
+
+Each unit also runs `git diff --check`; the paired implementation plan contains
+the exact `dotnet test` commands.
 
 ## Ownership and private data
 
