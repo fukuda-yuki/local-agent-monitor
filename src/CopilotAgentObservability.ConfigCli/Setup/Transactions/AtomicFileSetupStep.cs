@@ -132,25 +132,7 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
         string expectedAppliedHash,
         string expectedPreviousHash)
     {
-        BackupState backup;
-        try
-        {
-            var metadata = platform.FileSystem.GetPathMetadata(backupPath);
-            if (!metadata.Exists || metadata.Kind != SetupPathKind.File || (metadata.Attributes & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new FormatException();
-            }
-
-            backup = DeserializeBackup(platform.FileSystem.ReadAllBytes(backupPath));
-            if (!string.Equals(SetupHash.File(backup.Exists, backup.Bytes), expectedPreviousHash, StringComparison.Ordinal))
-            {
-                throw new FormatException();
-            }
-        }
-        catch (Exception)
-        {
-            throw new SetupFileStepException(SetupCodes.InternalError);
-        }
+        var backup = ReadAndValidateBackup(backupPath, expectedPreviousHash);
 
         var target = SetupPathPolicy.ValidateFileTarget(platform, allowedRoot, targetPath);
         var current = ReadTarget(target);
@@ -206,6 +188,9 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
         return new AtomicFileRestoreResult(expectedPreviousHash);
     }
 
+    public void ValidateBackup(string backupPath, string expectedPreviousHash) =>
+        _ = ReadAndValidateBackup(backupPath, expectedPreviousHash);
+
     private TargetState ReadTarget(string path)
     {
         try
@@ -250,6 +235,36 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
         }
 
         ValidateBackupMetadata(platform.FileSystem.GetPathMetadata(backupPath));
+    }
+
+    private BackupState ReadAndValidateBackup(string backupPath, string expectedPreviousHash)
+    {
+        try
+        {
+            var metadata = platform.FileSystem.GetPathMetadata(backupPath);
+            if (!metadata.Exists || metadata.Kind != SetupPathKind.File || (metadata.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new FormatException();
+            }
+
+            var backup = DeserializeBackup(platform.FileSystem.ReadAllBytes(backupPath));
+            if (!string.Equals(SetupHash.File(backup.Exists, backup.Bytes), expectedPreviousHash, StringComparison.Ordinal))
+            {
+                throw new FormatException();
+            }
+
+            var after = platform.FileSystem.GetPathMetadata(backupPath);
+            if (!after.Exists || after.Kind != SetupPathKind.File || (after.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new FormatException();
+            }
+
+            return backup;
+        }
+        catch (Exception)
+        {
+            throw new SetupFileStepException(SetupCodes.InternalError);
+        }
     }
 
     private static void ValidateBackupMetadata(SetupPathMetadata metadata)

@@ -78,10 +78,17 @@ internal sealed class SetupRecoveryCoordinator
     public SetupRecoveryResult RecoverNext(SetupLock setupLock)
     {
         ArgumentNullException.ThrowIfNull(setupLock);
-        return setupLock.ExecuteWhileHeld(platform, paths, () => RecoverNextCore(setupLock));
+        return setupLock.ExecuteWhileHeld(platform, paths, () => RecoverNextCore(setupLock, null));
     }
 
-    private SetupRecoveryResult RecoverNextCore(SetupLock setupLock)
+    internal SetupRecoveryResult CompleteRequestedRollback(SetupLock setupLock, Guid changeSetId)
+    {
+        ArgumentNullException.ThrowIfNull(setupLock);
+        return setupLock.ExecuteWhileHeld(
+            platform, paths, () => RecoverNextCore(setupLock, changeSetId));
+    }
+
+    private SetupRecoveryResult RecoverNextCore(SetupLock setupLock, Guid? normalRollbackChangeSetId)
     {
         SetupOwnershipLedger ledger;
         try
@@ -234,7 +241,12 @@ internal sealed class SetupRecoveryCoordinator
 
                 if (IsActiveRollback(journal))
                 {
-                    return RecoverActiveFileRollback(setupLock, changeSet, plan, journal);
+                    return RecoverActiveFileRollback(
+                        setupLock,
+                        changeSet,
+                        plan,
+                        journal,
+                        normalRollbackChangeSetId == changeSet.ChangeSetId);
                 }
 
                 if (journal.Phase == SetupJournalPhase.Committed &&
@@ -275,7 +287,7 @@ internal sealed class SetupRecoveryCoordinator
         SetupLedgerChangeSet changeSet,
         SetupTransactionJournal journal)
     {
-        RequireImmutableIdentity(plan, changeSet);
+        SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
         if (journal.ChangeSetId != changeSet.ChangeSetId ||
             journal.Operation != SetupJournalOperation.Rollback ||
             journal.Phase != SetupJournalPhase.Prepared ||
@@ -313,7 +325,8 @@ internal sealed class SetupRecoveryCoordinator
         SetupLock setupLock,
         SetupLedgerChangeSet changeSet,
         SetupPrivatePlan plan,
-        SetupTransactionJournal journal)
+        SetupTransactionJournal journal,
+        bool normalRollback)
     {
         if (!ActiveFileRollbackLifecycleMatches(changeSet.State, journal.Phase))
         {
@@ -331,7 +344,8 @@ internal sealed class SetupRecoveryCoordinator
                 setupLock,
                 changeSet,
                 journal,
-                new Dictionary<Guid, ActiveFileFailureKind>());
+                new Dictionary<Guid, ActiveFileFailureKind>(),
+                normalRollback);
         }
 
         if (!TryEnterActiveFileRollback(setupLock, changeSet.ChangeSetId, journal.Phase) ||
@@ -402,7 +416,8 @@ internal sealed class SetupRecoveryCoordinator
 
         if (failures.Count > 0)
         {
-            return PersistActiveFileRollbackFailure(setupLock, changeSet, journal, failures);
+            return PersistActiveFileRollbackFailure(
+                setupLock, changeSet, journal, failures, normalRollback);
         }
 
         if (!TryMarkJournalPhaseOrConfirm(
@@ -414,7 +429,7 @@ internal sealed class SetupRecoveryCoordinator
             return ActiveFileRollbackRecoveryRequired(changeSet);
         }
 
-        return PersistRecoveredFileRollback(setupLock, changeSet, plan, journal);
+        return PersistRecoveredFileRollback(setupLock, changeSet, plan, journal, normalRollback);
     }
 
     private void ValidateActiveFileRollbackEvidence(
@@ -422,7 +437,7 @@ internal sealed class SetupRecoveryCoordinator
         SetupLedgerChangeSet changeSet,
         SetupTransactionJournal journal)
     {
-        RequireImmutableIdentity(plan, changeSet);
+        SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
         if (journal.ChangeSetId != changeSet.ChangeSetId ||
             journal.Operation != SetupJournalOperation.Rollback ||
             journal.EnvironmentNotification != ExpectedActiveNotification(journal))
@@ -630,7 +645,8 @@ internal sealed class SetupRecoveryCoordinator
         SetupLock setupLock,
         SetupLedgerChangeSet original,
         SetupTransactionJournal journal,
-        IReadOnlyDictionary<Guid, ActiveFileFailureKind> failures)
+        IReadOnlyDictionary<Guid, ActiveFileFailureKind> failures,
+        bool normalRollback = false)
     {
         if (!TryEnterActiveFileRollback(setupLock, original.ChangeSetId, journal.Phase) ||
             !TryPersistRollingBackLedger(setupLock, original.ChangeSetId) ||
@@ -647,10 +663,13 @@ internal sealed class SetupRecoveryCoordinator
         {
             var ledger = ledgerStore.LoadForRecovery();
             var current = ledger.ChangeSets.Single(item => item.ChangeSetId == original.ChangeSetId);
+            var outcomeCode = normalRollback
+                ? SetupCodes.PartialRollback
+                : SetupCodes.InterruptedRecoveryFailed;
             var partial = current with
             {
                 UpdatedAt = platform.Clock.UtcNow,
-                OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+                OutcomeCode = outcomeCode,
                 State = SetupChangeSetState.Partial,
                 Targets = current.Targets.Select(target => failures.TryGetValue(target.RecordId, out var failure)
                     ? target with
@@ -666,7 +685,7 @@ internal sealed class SetupRecoveryCoordinator
             };
             SaveChangeSetOrConfirm(setupLock, ledger, partial);
             return Failed(
-                SetupCodes.InterruptedRecoveryFailed,
+                outcomeCode,
                 original.ChangeSetId,
                 SetupRecoveryOperation.Rollback,
                 partial);
@@ -687,7 +706,7 @@ internal sealed class SetupRecoveryCoordinator
         {
             ValidateActiveFileRollbackEvidence(plan, changeSet, journal);
             _ = VerifyTerminalState(plan, changeSet, journal, desired: false);
-            return PersistRecoveredFileRollback(setupLock, changeSet, plan, journal);
+            return PersistRecoveredFileRollback(setupLock, changeSet, plan, journal, normalRollback: false);
         }
         catch (Exception)
         {
@@ -703,7 +722,8 @@ internal sealed class SetupRecoveryCoordinator
         SetupLock setupLock,
         SetupLedgerChangeSet original,
         SetupPrivatePlan plan,
-        SetupTransactionJournal journal)
+        SetupTransactionJournal journal,
+        bool normalRollback)
     {
         try
         {
@@ -714,10 +734,13 @@ internal sealed class SetupRecoveryCoordinator
                 .Where(target => target.TargetKind != SetupTargetKind.Guidance)
                 .Select(target => target.RecordId)
                 .ToHashSet();
+            var outcomeCode = normalRollback
+                ? SetupCodes.RollbackSucceeded
+                : SetupCodes.InterruptedRollbackRecovered;
             var recovered = current with
             {
                 UpdatedAt = platform.Clock.UtcNow,
-                OutcomeCode = SetupCodes.InterruptedRollbackRecovered,
+                OutcomeCode = outcomeCode,
                 State = SetupChangeSetState.RolledBack,
                 Targets = current.Targets.Select(target => physicalRecordIds.Contains(target.RecordId)
                     ? target with
@@ -725,7 +748,7 @@ internal sealed class SetupRecoveryCoordinator
                         AppliedStateHash = null,
                         BackupReference = null,
                         OutcomeCode = journalRecordIds.Contains(target.RecordId)
-                            ? SetupCodes.InterruptedRollbackRecovered
+                            ? outcomeCode
                             : null,
                         RollbackStatus = journalRecordIds.Contains(target.RecordId)
                             ? SetupLedgerRollbackStatus.Succeeded
@@ -911,7 +934,7 @@ internal sealed class SetupRecoveryCoordinator
         SetupLedgerChangeSet changeSet,
         SetupTransactionJournal journal)
     {
-        RequireImmutableIdentity(plan, changeSet);
+        SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
         if (journal.ChangeSetId != changeSet.ChangeSetId ||
             journal.Operation != SetupJournalOperation.Apply ||
             journal.EnvironmentNotification != ExpectedActiveNotification(journal))
@@ -1403,7 +1426,7 @@ internal sealed class SetupRecoveryCoordinator
         SetupLedgerChangeSet changeSet,
         SetupTransactionJournal journal)
     {
-        RequireImmutableIdentity(plan, changeSet);
+        SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
         if (journal.ChangeSetId != plan.ChangeSetId ||
             journal.EnvironmentNotification != SetupEnvironmentNotification.NotRequired)
         {
@@ -1528,7 +1551,7 @@ internal sealed class SetupRecoveryCoordinator
     {
         try
         {
-            RequireImmutableIdentity(plan, changeSet);
+            SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
             var appliedHashes = VerifyTerminalState(plan, changeSet, journal, desired: true);
             var journalRecordIds = journal.Targets.Select(target => target.RecordId).ToHashSet();
             var recovered = changeSet with
@@ -1568,7 +1591,7 @@ internal sealed class SetupRecoveryCoordinator
     {
         try
         {
-            RequireImmutableIdentity(plan, changeSet);
+            SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
             _ = VerifyTerminalState(plan, changeSet, journal, desired: false);
             var journalRecordIds = journal.Targets.Select(target => target.RecordId).ToHashSet();
             var recovered = changeSet with
@@ -1916,42 +1939,6 @@ internal sealed class SetupRecoveryCoordinator
         }
     }
 
-    private static void RequireImmutableIdentity(SetupPrivatePlan plan, SetupLedgerChangeSet changeSet)
-    {
-        if (plan.ChangeSetId != changeSet.ChangeSetId ||
-            !string.Equals(plan.Adapter, changeSet.Adapter, StringComparison.Ordinal) ||
-            !string.Equals(plan.SelectedTarget, changeSet.SelectedTarget, StringComparison.Ordinal) ||
-            plan.CreatedAt != changeSet.CreatedAt ||
-            !string.Equals(plan.ToolVersion, changeSet.ToolVersion, StringComparison.Ordinal) ||
-            plan.Targets.Count != changeSet.Targets.Count)
-        {
-            throw new FormatException();
-        }
-
-        for (var targetIndex = 0; targetIndex < plan.Targets.Count; targetIndex++)
-        {
-            var expected = plan.Targets[targetIndex];
-            var actual = changeSet.Targets[targetIndex];
-            if (expected.RecordId != actual.RecordId ||
-                expected.TargetKind != actual.TargetKind ||
-                !string.Equals(expected.BaseStateHash, actual.PreviousStateHash, StringComparison.Ordinal) ||
-                expected.Members.Count != actual.Members.Count)
-            {
-                throw new FormatException();
-            }
-
-            for (var memberIndex = 0; memberIndex < expected.Members.Count; memberIndex++)
-            {
-                if (!string.Equals(expected.Members[memberIndex].SettingKey,
-                        actual.Members[memberIndex].SettingKey, StringComparison.Ordinal) ||
-                    expected.Members[memberIndex].Operation != actual.Members[memberIndex].Operation)
-                {
-                    throw new FormatException();
-                }
-            }
-        }
-    }
-
     private static SetupLedgerChangeSet OverlayFailure(
         SetupLedgerChangeSet changeSet,
         bool preserveTerminalLifecycle = false) => changeSet with
@@ -2148,7 +2135,9 @@ internal sealed class SetupRecoveryCoordinator
         SetupLedgerChangeSet changeSet,
         SetupRecoveryOperation operation) => new(
         SetupRecoveryDisposition.Recovered,
-        operation == SetupRecoveryOperation.Apply
+        changeSet.OutcomeCode == SetupCodes.RollbackSucceeded
+            ? SetupCodes.RollbackSucceeded
+            : operation == SetupRecoveryOperation.Apply
             ? SetupCodes.InterruptedApplyRecovered
             : SetupCodes.InterruptedRollbackRecovered,
         changeSet.ChangeSetId,
