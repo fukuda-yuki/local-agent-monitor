@@ -172,6 +172,90 @@ internal sealed partial class SetupTransactionJournalStore
         });
     }
 
+    public SetupPreparedJournalOpenResult SupersedeWithPreparedRollback(
+        SetupLock setupLock,
+        Guid changeSetId,
+        IReadOnlyList<SetupJournalTarget> targets)
+    {
+        return setupLock.ExecuteWhileHeld(platform, paths, () =>
+        {
+            try
+            {
+                var expected = new SetupTransactionJournal(
+                    1,
+                    changeSetId,
+                    SetupJournalOperation.Rollback,
+                    platform.Clock.UtcNow,
+                    SetupJournalPhase.Prepared,
+                    targets);
+                ValidateForWrite(expected);
+
+                var destination = paths.GetTransactionJournal(changeSetId);
+                ValidateJournalMetadata(platform.FileSystem.GetPathMetadata(destination));
+                var read = platform.FileSystem.ReadAtMostBytes(destination, MaximumJournalBytes);
+                if (!read.IsComplete)
+                {
+                    throw new FormatException();
+                }
+
+                var existing = Deserialize(read.Bytes);
+                ValidateJournalMetadata(platform.FileSystem.GetPathMetadata(destination));
+                if (existing.ChangeSetId != changeSetId)
+                {
+                    throw new FormatException();
+                }
+
+                if (existing.Operation == SetupJournalOperation.Rollback &&
+                    existing.Phase == SetupJournalPhase.Prepared &&
+                    existing.EnvironmentNotification == SetupEnvironmentNotification.NotRequired &&
+                    TargetsExactlyEqual(existing.Targets, targets))
+                {
+                    return SetupPreparedJournalOpenResult.Reused;
+                }
+
+                var requiresNotification = existing.Targets.Any(target => target.TargetKind == SetupTargetKind.Env);
+                if (existing.Operation != SetupJournalOperation.Apply ||
+                    existing.Phase != SetupJournalPhase.Committed ||
+                    existing.EnvironmentNotification != (requiresNotification
+                        ? SetupEnvironmentNotification.Completed
+                        : SetupEnvironmentNotification.NotRequired))
+                {
+                    throw new SetupStorageException(SetupJournalStorageCodes.AlreadyExists);
+                }
+
+                var rollbackTargets = existing.Targets
+                    .Select(target => target with
+                    {
+                        Steps = target.Steps
+                            .Select(step => step with { Phase = SetupJournalStepPhase.Pending })
+                            .ToArray(),
+                    })
+                    .ToArray();
+                if (!TargetsExactlyEqual(rollbackTargets, targets))
+                {
+                    throw new SetupStorageException(SetupJournalStorageCodes.AlreadyExists);
+                }
+
+                Save(existing with
+                {
+                    Operation = SetupJournalOperation.Rollback,
+                    Phase = SetupJournalPhase.Prepared,
+                    Targets = rollbackTargets,
+                    EnvironmentNotification = SetupEnvironmentNotification.NotRequired,
+                });
+                return SetupPreparedJournalOpenResult.Created;
+            }
+            catch (SetupStorageException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (SetupStorageException.ShouldMap(exception))
+            {
+                throw new SetupStorageException(SetupJournalStorageCodes.Corrupt);
+            }
+        });
+    }
+
     public SetupTransactionJournal? Load(Guid changeSetId)
     {
         var source = paths.GetTransactionJournal(changeSetId);

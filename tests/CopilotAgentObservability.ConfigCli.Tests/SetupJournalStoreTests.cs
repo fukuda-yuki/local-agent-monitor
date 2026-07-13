@@ -17,6 +17,213 @@ public sealed class SetupJournalStoreTests
     private const int MaximumJournalBytes = 1024 * 1024;
 
     [Fact]
+    public void SupersedeWithPreparedRollback_TerminalApplyBecomesPreparedRollbackAtSamePath()
+    {
+        var context = CreateCommittedApplyContext();
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var earlierCreatedAt = CreatedAt.AddDays(-1);
+        var terminalBytes = Encoding.UTF8.GetString(context.Platform.ReadSeededFile(destination))
+            .Replace(
+                SetupStorageJson.FormatTimestamp(CreatedAt),
+                SetupStorageJson.FormatTimestamp(earlierCreatedAt),
+                StringComparison.Ordinal);
+        context.Platform.SeedFile(destination, Encoding.UTF8.GetBytes(terminalBytes));
+        var apply = context.Store.Load(ChangeSetId)!;
+        Assert.Equal(earlierCreatedAt, apply.CreatedAt);
+
+        var result = context.Store.SupersedeWithPreparedRollback(
+            context.Lock, ChangeSetId, ValidTargets());
+
+        var rollback = context.Store.Load(ChangeSetId)!;
+        Assert.Equal(SetupPreparedJournalOpenResult.Created, result);
+        Assert.Equal(destination, context.Paths.GetTransactionJournal(rollback.ChangeSetId));
+        Assert.Equal(SetupJournalOperation.Rollback, rollback.Operation);
+        Assert.Equal(SetupJournalPhase.Prepared, rollback.Phase);
+        Assert.Equal(apply.CreatedAt, rollback.CreatedAt);
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, rollback.EnvironmentNotification);
+        Assert.Equivalent(ValidTargets(), rollback.Targets, strict: true);
+        Assert.All(rollback.Targets.SelectMany(target => target.Steps),
+            step => Assert.Equal(SetupJournalStepPhase.Pending, step.Phase));
+        Assert.Contains(context.Platform.Operations,
+            operation => operation.StartsWith("file.replace:", StringComparison.Ordinal) &&
+                operation.EndsWith($"->{destination}", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SupersedeWithPreparedRollback_ExactPreparedRollbackIsReusedWithoutWrite()
+    {
+        var context = CreateCommittedApplyContext();
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        context.Store.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, ValidTargets());
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var exact = context.Platform.ReadSeededFile(destination);
+        var operationCount = context.Platform.Operations.Count;
+
+        var result = new SetupTransactionJournalStore(context.Platform, context.Paths)
+            .SupersedeWithPreparedRollback(context.Lock, ChangeSetId, ValidTargets());
+
+        Assert.Equal(SetupPreparedJournalOpenResult.Reused, result);
+        Assert.Equal(exact, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
+    public void SupersedeWithPreparedRollback_TerminalFileOnlyApplyDoesNotRequireNotification()
+    {
+        var context = CreateContext();
+        var targets = FileOnlyTargets();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, targets);
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        CompleteAllSteps(context, mutation: true);
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Committed);
+
+        var result = context.Store.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, targets);
+
+        Assert.Equal(SetupPreparedJournalOpenResult.Created, result);
+        var rollback = context.Store.Load(ChangeSetId)!;
+        Assert.Equal(SetupJournalOperation.Rollback, rollback.Operation);
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, rollback.EnvironmentNotification);
+    }
+
+    [Theory]
+    [InlineData("prepared-apply")]
+    [InlineData("applying-apply")]
+    [InlineData("compensating-apply")]
+    [InlineData("restored-apply")]
+    [InlineData("partial-apply")]
+    [InlineData("committed-apply-notification-pending")]
+    [InlineData("rolling-back")]
+    [InlineData("committed-rollback")]
+    public void SupersedeWithPreparedRollback_NonTerminalApplyStateFailsClosedWithoutWrite(string state)
+    {
+        var context = CreateSupersessionState(state);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var exact = context.Platform.ReadSeededFile(destination);
+        var operationCount = context.Platform.Operations.Count;
+        var expected = PendingTargets(context.Store.Load(ChangeSetId)!.Targets);
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, expected));
+
+        Assert.Equal(SetupJournalStorageCodes.AlreadyExists, exception.Code);
+        Assert.Equal(exact, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData("target-count")]
+    [InlineData("target-order")]
+    [InlineData("target-kind")]
+    [InlineData("record-id")]
+    [InlineData("step-order")]
+    [InlineData("member-key")]
+    [InlineData("prior-hash")]
+    [InlineData("desired-hash")]
+    [InlineData("backup-reference")]
+    public void SupersedeWithPreparedRollback_ExpectedIdentityMismatchFailsClosedWithoutWrite(string mismatch)
+    {
+        var context = CreateCommittedApplyContext();
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var exact = context.Platform.ReadSeededFile(destination);
+        var expected = ValidTargets().ToArray();
+        switch (mismatch)
+        {
+            case "target-count": expected = [expected[0]]; break;
+            case "target-order": expected = expected.Reverse().ToArray(); break;
+            case "target-kind": expected[0] = expected[0] with { TargetKind = SetupTargetKind.Toml }; break;
+            case "record-id": expected[0] = expected[0] with { RecordId = Guid.Parse("00000000-0000-7000-8000-000000000104") }; break;
+            case "step-order": expected[1] = expected[1] with { Steps = expected[1].Steps.Reverse().ToArray() }; break;
+            case "member-key": expected[1] = expected[1] with { Steps = ReplaceStep(expected[1], 0, step => step with { MemberKey = "COPILOT_C" }) }; break;
+            case "prior-hash": expected[0] = expected[0] with { Steps = ReplaceStep(expected[0], 0, step => step with { PriorStateHash = DesiredHash }) }; break;
+            case "desired-hash": expected[0] = expected[0] with { Steps = ReplaceStep(expected[0], 0, step => step with { DesiredStateHash = PriorHash }) }; break;
+            case "backup-reference": expected[0] = expected[0] with { Steps = ReplaceStep(expected[0], 0, step => step with { BackupReference = "backup-file-other" }) }; break;
+        }
+        var operationCount = context.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, expected));
+
+        Assert.Equal(SetupJournalStorageCodes.AlreadyExists, exception.Code);
+        Assert.Equal(exact, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData(SetupPathKind.File, FileAttributes.ReparsePoint)]
+    [InlineData(SetupPathKind.Directory, FileAttributes.Directory)]
+    public void SupersedeWithPreparedRollback_NonRegularOrReparseJournalFailsClosedWithoutWrite(
+        SetupPathKind kind,
+        FileAttributes attributes)
+    {
+        var context = CreateCommittedApplyContext();
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        context.Platform.SeedPathMetadata(destination, new SetupPathMetadata(true, kind, attributes));
+        var operationCount = context.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, ValidTargets()));
+
+        Assert.Equal(SetupJournalStorageCodes.Corrupt, exception.Code);
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData("oversize")]
+    [InlineData("unknown-version")]
+    [InlineData("malformed")]
+    public void SupersedeWithPreparedRollback_InvalidV1ArtifactFailsFixedWithoutWrite(string invalid)
+    {
+        var context = CreateCommittedApplyContext();
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var valid = context.Platform.ReadSeededFile(destination);
+        var bytes = invalid switch
+        {
+            "oversize" => Enumerable.Repeat((byte)'X', MaximumJournalBytes + 1).ToArray(),
+            "unknown-version" => Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(valid).Replace(
+                "\"schema_version\": 1", "\"schema_version\": 2", StringComparison.Ordinal)),
+            _ => Encoding.UTF8.GetBytes("{\"PRIVATE_VALUE_MARKER\":"),
+        };
+        context.Platform.SeedFile(destination, bytes);
+        var operationCount = context.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, ValidTargets()));
+
+        Assert.Equal(
+            invalid == "unknown-version"
+                ? SetupJournalStorageCodes.VersionUnsupported
+                : SetupJournalStorageCodes.Corrupt,
+            exception.Code);
+        Assert.Equal(bytes, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
+        Assert.DoesNotContain("PRIVATE_VALUE_MARKER", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(destination, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SupersedeWithPreparedRollback_RequiresLiveSameRuntimeLock()
+    {
+        var context = CreateCommittedApplyContext();
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        var foreignPlatform = new SetupTestPlatform(CreatedAt, "D:\\foreign");
+        var foreignPaths = new SetupRuntimePaths(foreignPlatform);
+        using var foreignAcquire = SetupLock.TryAcquire(foreignPlatform, foreignPaths);
+
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.Store.SupersedeWithPreparedRollback(
+                foreignAcquire.Lock!, ChangeSetId, ValidTargets())).Code);
+
+        context.Lock.Dispose();
+        Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
+            context.Store.SupersedeWithPreparedRollback(
+                context.Lock, ChangeSetId, ValidTargets())).Code);
+    }
+
+    [Fact]
     public void OpenOrCreatePrepared_CloseAndReopenExactJournalReturnsReusedWithoutWriting()
     {
         var context = CreateContext();
@@ -1479,6 +1686,68 @@ public sealed class SetupJournalStoreTests
             new("COPILOT_B", DesiredHash, PriorHash, "backup-env-103", SetupJournalStepPhase.Pending),
         ]),
     ];
+
+    private static IReadOnlyList<SetupJournalTarget> FileOnlyTargets() =>
+    [
+        new(FileRecordId, SetupTargetKind.Json,
+        [
+            new(null, PriorHash, DesiredHash, "backup-file-102", SetupJournalStepPhase.Pending),
+        ]),
+    ];
+
+    private static IReadOnlyList<SetupJournalTarget> PendingTargets(IReadOnlyList<SetupJournalTarget> targets) =>
+        targets.Select(target => target with
+        {
+            Steps = target.Steps.Select(step => step with { Phase = SetupJournalStepPhase.Pending }).ToArray(),
+        }).ToArray();
+
+    private static TestContext CreateSupersessionState(string state)
+    {
+        var context = CreateContext();
+        if (state is "rolling-back" or "committed-rollback")
+        {
+            context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Rollback, FileOnlyTargets());
+            context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.RollingBack);
+            if (state == "committed-rollback")
+            {
+                CompleteAllSteps(context, mutation: false);
+                context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Committed);
+            }
+
+            return context;
+        }
+
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        if (state == "prepared-apply")
+        {
+            return context;
+        }
+
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        if (state == "applying-apply")
+        {
+            return context;
+        }
+
+        if (state == "committed-apply-notification-pending")
+        {
+            CompleteAllSteps(context, mutation: true);
+            context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Committed);
+            return context;
+        }
+
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Compensating);
+        if (state == "compensating-apply")
+        {
+            return context;
+        }
+
+        context.Store.MarkTransactionPhase(
+            context.Lock,
+            ChangeSetId,
+            state == "restored-apply" ? SetupJournalPhase.Restored : SetupJournalPhase.Partial);
+        return context;
+    }
 
     private static IReadOnlyList<SetupJournalStep> ReplaceStep(
         SetupJournalTarget target,
