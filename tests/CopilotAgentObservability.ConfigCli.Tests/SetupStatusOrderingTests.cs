@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Status;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -71,12 +72,27 @@ public sealed class SetupStatusOrderingTests
             .Select(index => Row($"00000000-0000-7000-8000-{index:D12}", SetupChangeSetState.Planned, index))
             .Reverse()
             .ToArray();
+        var projectedIds = new List<Guid>();
 
-        var projected = SetupStatusListProjector.Project(StatusResult(), rows, null, null, Project);
+        var projected = SetupStatusListProjector.Project(
+            StatusResult(),
+            rows,
+            null,
+            null,
+            changeSet =>
+            {
+                projectedIds.Add(changeSet.ChangeSetId);
+                return Project(changeSet);
+            });
 
         Assert.Equal(Math.Min(count, 100), projected.ChangeSets.Count);
+        Assert.Equal(Math.Min(count, 100), projectedIds.Count);
         Assert.Equal(expectedTruncated, projected.Truncated);
         Assert.Equal($"00000000-0000-7000-8000-{count:D12}", projected.ChangeSets[0].ChangeSetId);
+        if (count == 101)
+        {
+            Assert.DoesNotContain(Guid.ParseExact("00000000-0000-7000-8000-000000000001", "D"), projectedIds);
+        }
     }
 
     [Fact]
@@ -106,6 +122,76 @@ public sealed class SetupStatusOrderingTests
         Assert.False(projected.Truncated);
     }
 
+    [Fact]
+    public void Project_FilteredResultUsesAuthoritativeAdapterInValidStatusWireObject()
+    {
+        var row = Row("00000000-0000-7000-8000-000000000111", SetupChangeSetState.Planned, 1);
+
+        var projected = SetupStatusListProjector.Project(
+            StatusResult(),
+            [row],
+            "github-copilot",
+            null,
+            Project);
+
+        Assert.Equal("github-copilot", projected.Adapter);
+        using var document = JsonDocument.Parse(SetupJson.Serialize(projected));
+        Assert.Equal("github-copilot", document.RootElement.GetProperty("adapter").GetString());
+        var targets = document.RootElement.GetProperty("change_sets")[0].GetProperty("targets")
+            .EnumerateArray()
+            .ToArray();
+        Assert.Equal(
+            ["first", "second"],
+            targets.Select(target => target.GetProperty("target_label").GetString()));
+        Assert.All(targets, target =>
+            Assert.False(target.GetProperty("guidance").TryGetProperty("sample", out _)));
+        Assert.All(projected.ChangeSets[0].Targets, target =>
+            Assert.False(string.IsNullOrEmpty(target.Guidance?.Sample)));
+    }
+
+    [Fact]
+    public void Project_NoAdapterFilterClearsStaleInputAdapterWithoutMutatingInputs()
+    {
+        var statusResult = StatusResult("stale-adapter");
+        var originalResultTargets = statusResult.Targets;
+        var originalResultChangeSets = statusResult.ChangeSets;
+        var rows = new[]
+        {
+            Row("00000000-0000-7000-8000-000000000002", SetupChangeSetState.Planned, 2),
+            Row("00000000-0000-7000-8000-000000000001", SetupChangeSetState.Applied, 1),
+        };
+        var originalRows = rows.ToArray();
+
+        var projected = SetupStatusListProjector.Project(statusResult, rows, null, null, Project);
+
+        Assert.Null(projected.Adapter);
+        Assert.Equal("stale-adapter", statusResult.Adapter);
+        Assert.Same(originalResultTargets, statusResult.Targets);
+        Assert.Same(originalResultChangeSets, statusResult.ChangeSets);
+        Assert.Equal(originalRows, rows);
+        Assert.All(rows.Select((row, index) => (row, index)), item =>
+            Assert.Same(originalRows[item.index], item.row));
+        Assert.All(rows.Select((row, index) => (row, index)), item =>
+            Assert.Same(originalRows[item.index].Targets, item.row.Targets));
+    }
+
+    [Fact]
+    public void Project_AdapterFilterOverwritesMismatchedInputAdapter()
+    {
+        var statusResult = StatusResult("other-adapter");
+        var row = Row("00000000-0000-7000-8000-000000000001", SetupChangeSetState.Planned, 1);
+
+        var projected = SetupStatusListProjector.Project(
+            statusResult,
+            [row],
+            "github-copilot",
+            null,
+            Project);
+
+        Assert.Equal("github-copilot", projected.Adapter);
+        Assert.Equal("other-adapter", statusResult.Adapter);
+    }
+
     [Theory]
     [InlineData("GitHub-Copilot", null)]
     [InlineData("github-copilot", "00000000-0000-7000-8000-0000000000AA")]
@@ -125,6 +211,19 @@ public sealed class SetupStatusOrderingTests
         Assert.Throws<FormatException>(() => SetupStatusListProjector.Project(StatusResult(), [row], null, null, Project));
     }
 
+    [Fact]
+    public void Project_RejectsNonCanonicalLedgerAdapter()
+    {
+        var row = Row(
+            "00000000-0000-7000-8000-000000000001",
+            SetupChangeSetState.Planned,
+            1,
+            "GitHub-Copilot");
+
+        Assert.Throws<FormatException>(() =>
+            SetupStatusListProjector.Project(StatusResult(), [row], null, null, Project));
+    }
+
     private static SetupLedgerChangeSet Row(string id, SetupChangeSetState state, int seconds, string adapter = "github-copilot") => new(
         Guid.ParseExact(id, "D"),
         adapter,
@@ -136,14 +235,14 @@ public sealed class SetupStatusOrderingTests
         state,
         []);
 
-    private static SetupCommandResult StatusResult() => new(
+    private static SetupCommandResult StatusResult(string? adapter = null) => new(
         SetupCommand.Status,
         true,
         SetupCodes.StatusReady,
         null,
         null,
         null,
-        null,
+        adapter,
         [],
         [],
         [],
@@ -154,8 +253,8 @@ public sealed class SetupStatusOrderingTests
         changeSet.ChangeSetId.ToString("D"),
         changeSet.Adapter,
         changeSet.SelectedTarget,
-        changeSet.CreatedAt.ToString("O"),
-        changeSet.UpdatedAt.ToString("O"),
+        SetupStorageJson.FormatTimestamp(changeSet.CreatedAt),
+        SetupStorageJson.FormatTimestamp(changeSet.UpdatedAt),
         changeSet.State,
         changeSet.OutcomeCode,
         SetupCurrentState.NotApplicable,
@@ -179,6 +278,7 @@ public sealed class SetupStatusOrderingTests
         false,
         null,
         null,
-        new SetupGuidance("caller_managed_sample", "dotnet", string.Empty),
+        SetupContractValidator.RehydrateStatusGuidance(
+            new SetupStatusGuidance("caller_managed_sample", "dotnet")),
         []);
 }

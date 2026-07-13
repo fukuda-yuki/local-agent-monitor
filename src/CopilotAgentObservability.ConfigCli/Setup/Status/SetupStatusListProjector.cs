@@ -46,6 +46,7 @@ internal static class SetupStatusListProjector
 
         return statusResult with
         {
+            Adapter = adapterFilter,
             ChangeSets = returned,
             Truncated = eligible.Length > returned.Length,
         };
