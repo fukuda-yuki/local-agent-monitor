@@ -89,7 +89,9 @@ ZIP mode invokes the self-contained Config CLI published under
 
 ## Result contract
 
-Every command writes one JSON object to stdout. The stable top-level shape is:
+Each recognized exact setup verb (`plan`, `apply`, `rollback`, or `status`)
+returns one `SetupCommandResult` JSON object on stdout. The stable top-level
+shape is:
 
 ```json
 {
@@ -675,7 +677,8 @@ specified.
 Lifecycle transitions are:
 
 ```text
-planned -> applying -> applied
+planned -> no_changes (apply only)
+        -> applying -> applied
                     -> compensating -> restored
                                     -> partial
                        partial -> compensating
