@@ -65,9 +65,12 @@ one attribute-representation identity recurs).
 
 Raw span names for this trace (structural OTel operation identifiers only,
 not content) were confirmed directly from `raw_records.payload_json`:
-`claude_code.interaction`, `claude_code.llm_request` (x3), `claude_code.tool`
+`claude_code.interaction`, `claude_code.llm_request` (x4), `claude_code.tool`
 (x2), `claude_code.tool.blocked_on_user` (x2), `claude_code.tool.execution`
 (x2) — an 11-span nested tree consistent with a sub-agent turn structure.
+The sub-agent's own `llm_request` and `tool` spans are parented by the Task
+tool's `claude_code.tool.execution` span and carry an `agent_id` attribute
+key.
 
 ### Compatibility finding: `any_value.int` arrives as `double`
 

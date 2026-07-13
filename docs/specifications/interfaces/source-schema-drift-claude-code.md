@@ -260,6 +260,47 @@ spec-first interface. Until that DTO exists, a shared trace ID is insufficient
 and must remain unbound; only identical native session ID or an explicit
 resume/handoff may produce an exact Claude link.
 
+## Claude span classification
+
+Live print-mode producer structure was observed on 2026-07-13
+(`docs/sprints/issue-99-claude-live-validation.md`), satisfying the mapping
+contract's promotion condition for `otel.span_name`. Classification is an
+exact recognized-name transform; no unrecognized name is ever classified by
+substring, attribute inference, or hierarchy position.
+
+| Span name | `Operation` | `Category` (non-error) | Counted as |
+| --- | --- | --- | --- |
+| `claude_code.llm_request` | `chat` | `llm_call` | one turn; token/model rollup |
+| `claude_code.tool` | `execute_tool` | `tool_call` | one tool call |
+| `claude_code.tool.execution` | null | `unknown` | not counted (child detail of `claude_code.tool`) |
+| `claude_code.tool.blocked_on_user` | null | `unknown` | not counted (no permission category exists) |
+| `claude_code.interaction` | null | `unknown` | not counted (root container) |
+| `claude_code.hook` | null (documentation-backed name) | `hook` | not counted |
+
+Rules:
+
+- When the span status resolves to `error`, `Category` is `error` and the
+  operation value from the table is kept, matching the existing GitHub
+  Copilot classification precedence.
+- `claude_code.tool.execution`, `claude_code.tool.blocked_on_user`, and
+  `claude_code.interaction` are intentionally uncounted so turn, tool,
+  token, and model rollups never double count the parent `claude_code.tool`
+  and `claude_code.llm_request` spans.
+- Measurement counting applies the same exact names: `claude_code.llm_request`
+  counts as an LLM turn, `claude_code.tool` counts as a tool call, and the
+  other four names are known non-counted spans.
+- `agent_invocation` is never derived from these names or from
+  `tool_name == "Task"`; Claude sub-agent detection stays out of scope and
+  the agent graph honestly reports no detected agents.
+- Classification is independent of `compatibility_state`; a
+  `schema_drift_detected` batch still classifies recognized names. Token
+  extraction remains governed by the descriptor's representation rules, so
+  the open `any_value.int`-as-`double` drift question does not change this
+  table.
+- `claude_code.hook` classification is documentation-backed
+  (`hook` spans were not present in the observed print-mode traces) and keeps
+  a null operation until live evidence records the emitted shape.
+
 ## Cross-surface DTO contract
 
 | Boundary | Required data | Rule |

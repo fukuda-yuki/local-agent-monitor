@@ -24,8 +24,6 @@ public sealed class ClaudeCodeSpanAdapterTests
         foreach (var span in spans)
         {
             Assert.Equal("11111111111111111111111111111111", span.TraceId);
-            Assert.Null(span.Operation);
-            Assert.Equal("unknown", span.Category);
             Assert.Null(span.ToolType);
             Assert.Null(span.McpToolName);
             Assert.Null(span.McpServerHash);
@@ -39,6 +37,12 @@ public sealed class ClaudeCodeSpanAdapterTests
             Assert.Equal("ok", span.Status);
         }
 
+        Assert.Equal(
+            [null, "chat", "execute_tool", null, null, null],
+            spans.Select(span => span.Operation));
+        Assert.Equal(
+            ["unknown", "llm_call", "tool_call", "unknown", "unknown", "hook"],
+            spans.Select(span => span.Category));
         Assert.Equal(Enumerable.Range(0, 6), spans.Select(span => span.SpanOrdinal));
 
         Assert.Null(spans[0].RequestModel);
@@ -123,15 +127,16 @@ public sealed class ClaudeCodeSpanAdapterTests
     }
 
     [Theory]
-    [InlineData("0", "false", "ok")]
-    [InlineData("1", "false", "ok")]
-    [InlineData("2", "true", "error")]
-    [InlineData(null, "false", null)]
-    [InlineData("9", "true", null)]
+    [InlineData("0", "false", "ok", "unknown")]
+    [InlineData("1", "false", "ok", "unknown")]
+    [InlineData("2", "true", "error", "error")]
+    [InlineData(null, "false", null, "unknown")]
+    [InlineData("9", "true", null, "unknown")]
     public void Build_StatusCodeIsSoleAuthorityAndToolSuccessNeverFillsIt(
         string? statusCode,
         string success,
-        string? expectedStatus)
+        string? expectedStatus,
+        string expectedCategory)
     {
         var status = statusCode is null ? string.Empty : $",\"status\":{{\"code\":{statusCode}}}";
         var payload =
@@ -147,7 +152,7 @@ public sealed class ClaudeCodeSpanAdapterTests
         Assert.Equal("CcDd", span.SpanId);
         Assert.Equal("EeFf", span.ParentSpanId);
         Assert.Equal(expectedStatus, span.Status);
-        Assert.Equal("unknown", span.Category);
+        Assert.Equal(expectedCategory, span.Category);
     }
 
     [Fact]
@@ -211,7 +216,8 @@ public sealed class ClaudeCodeSpanAdapterTests
         var spans = MonitorSpanProjectionBuilder.Build(Record(payload));
 
         Assert.Equal(4, spans.Count);
-        Assert.Null(spans[0].Operation);
+        Assert.Equal("chat", spans[0].Operation);
+        Assert.Equal("error", spans[0].Category);
         Assert.Null(spans[0].AgentName);
         Assert.Null(spans[0].ResponseModel);
         Assert.Null(spans[0].TotalTokens);
@@ -316,6 +322,103 @@ public sealed class ClaudeCodeSpanAdapterTests
         Assert.Equal("ok", span.Status);
     }
 
+    [Fact]
+    public void Build_ObservedToolFailureShapeClassifiesAndRollsUpWithoutDoubleCounting()
+    {
+        var spans = MonitorSpanProjectionBuilder.Build(Record(ObservedToolFailurePayload));
+        var rollup = MonitorTraceRollupBuilder.ComputeRollup(spans);
+
+        Assert.Equal(6, spans.Count);
+        Assert.Equal(
+            ["unknown", "llm_call", "tool_call", "unknown", "error", "llm_call"],
+            spans.Select(span => span.Category));
+        Assert.Equal(2, rollup.TurnCount);
+        Assert.Equal(0, rollup.AgentInvocationCount);
+        Assert.Equal(20, rollup.InputTokens);
+        Assert.Equal(6, rollup.OutputTokens);
+        Assert.Equal(MonitorTraceStatus.Recovered, rollup.TraceStatus);
+
+        var measurement = Assert.Single(RawMeasurementNormalizer.Normalize(ObservedToolFailurePayload));
+        Assert.Equal(2, measurement.TurnCount);
+        Assert.Equal(1, measurement.ToolCallCount);
+        Assert.Equal(1, measurement.ErrorCount);
+    }
+
+    [Fact]
+    public void Build_ObservedSubAgentDelegationShapeClassifiesAndRollsUpWithoutDoubleCounting()
+    {
+        var spans = MonitorSpanProjectionBuilder.Build(Record(ObservedSubAgentPayload));
+        var rollup = MonitorTraceRollupBuilder.ComputeRollup(spans);
+
+        Assert.Equal(11, spans.Count);
+        Assert.Equal(4, spans.Count(span => span.Category == "llm_call"));
+        Assert.Equal(2, spans.Count(span => span.Category == "tool_call"));
+        Assert.Equal(5, spans.Count(span => span.Category == "unknown"));
+        Assert.Equal(4, rollup.TurnCount);
+        Assert.Equal(0, rollup.AgentInvocationCount);
+        Assert.Equal(40, rollup.InputTokens);
+        Assert.Equal(MonitorTraceStatus.Ok, rollup.TraceStatus);
+
+        var measurement = Assert.Single(RawMeasurementNormalizer.Normalize(ObservedSubAgentPayload));
+        Assert.Equal(4, measurement.TurnCount);
+        Assert.Equal(2, measurement.ToolCallCount);
+        Assert.Equal(0, measurement.ErrorCount);
+    }
+
+    private static string ClaudeSpan(
+        string name,
+        string spanId,
+        string? parentSpanId,
+        long startNano,
+        long endNano,
+        string? statusCode = "0",
+        string extraAttributes = "")
+    {
+        var parent = parentSpanId is null ? string.Empty : $"\"parentSpanId\":\"{parentSpanId}\",";
+        var status = statusCode is null ? string.Empty : $",\"status\":{{\"code\":{statusCode}}}";
+        return
+            $"{{\"traceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"spanId\":\"{spanId}\",{parent}" +
+            $"\"name\":\"{name}\",\"startTimeUnixNano\":\"{startNano}\",\"endTimeUnixNano\":\"{endNano}\"," +
+            $"\"attributes\":[{extraAttributes}]{status}}}";
+    }
+
+    private const string LlmTokens =
+        "{\"key\":\"input_tokens\",\"value\":{\"intValue\":\"10\"}}," +
+        "{\"key\":\"output_tokens\",\"value\":{\"intValue\":\"3\"}}";
+
+    private const string ToolNameAttribute =
+        "{\"key\":\"tool_name\",\"value\":{\"stringValue\":\"SYNTHETIC_TOOL\"}}";
+
+    // Mirrors the 2026-07-13 observed print-mode tool-failure trace:
+    // interaction root, llm x2, tool with blocked_on_user + failing execution.
+    private static readonly string ObservedToolFailurePayload =
+        "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[" +
+        ClaudeSpan("claude_code.interaction", "a000000000000001", null, 1_000_000_000, 9_000_000_000) + "," +
+        ClaudeSpan("claude_code.llm_request", "a000000000000002", "a000000000000001", 1_100_000_000, 2_000_000_000, extraAttributes: LlmTokens) + "," +
+        ClaudeSpan("claude_code.tool", "a000000000000003", "a000000000000001", 2_100_000_000, 4_000_000_000, extraAttributes: ToolNameAttribute) + "," +
+        ClaudeSpan("claude_code.tool.blocked_on_user", "a000000000000004", "a000000000000003", 2_200_000_000, 2_400_000_000) + "," +
+        ClaudeSpan("claude_code.tool.execution", "a000000000000005", "a000000000000003", 2_500_000_000, 3_900_000_000, statusCode: "2") + "," +
+        ClaudeSpan("claude_code.llm_request", "a000000000000006", "a000000000000001", 4_100_000_000, 8_900_000_000, extraAttributes: LlmTokens) +
+        "]}]}]}";
+
+    // Mirrors the 2026-07-13 observed print-mode sub-agent delegation trace:
+    // the Task tool's claude_code.tool.execution parents the sub-agent's own
+    // llm_request and tool spans (11 spans total).
+    private static readonly string ObservedSubAgentPayload =
+        "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[" +
+        ClaudeSpan("claude_code.interaction", "b000000000000001", null, 1_000_000_000, 20_000_000_000) + "," +
+        ClaudeSpan("claude_code.llm_request", "b000000000000002", "b000000000000001", 1_100_000_000, 2_000_000_000, extraAttributes: LlmTokens) + "," +
+        ClaudeSpan("claude_code.tool", "b000000000000003", "b000000000000001", 2_100_000_000, 15_000_000_000, extraAttributes: ToolNameAttribute) + "," +
+        ClaudeSpan("claude_code.tool.blocked_on_user", "b000000000000004", "b000000000000003", 2_200_000_000, 2_400_000_000) + "," +
+        ClaudeSpan("claude_code.tool.execution", "b000000000000005", "b000000000000003", 2_500_000_000, 14_900_000_000) + "," +
+        ClaudeSpan("claude_code.llm_request", "b000000000000006", "b000000000000005", 3_000_000_000, 4_000_000_000, extraAttributes: LlmTokens) + "," +
+        ClaudeSpan("claude_code.tool", "b000000000000007", "b000000000000005", 4_100_000_000, 6_000_000_000, extraAttributes: ToolNameAttribute) + "," +
+        ClaudeSpan("claude_code.tool.blocked_on_user", "b000000000000008", "b000000000000007", 4_200_000_000, 4_400_000_000) + "," +
+        ClaudeSpan("claude_code.tool.execution", "b000000000000009", "b000000000000007", 4_500_000_000, 5_900_000_000) + "," +
+        ClaudeSpan("claude_code.llm_request", "b00000000000000a", "b000000000000005", 6_100_000_000, 7_000_000_000, extraAttributes: LlmTokens) + "," +
+        ClaudeSpan("claude_code.llm_request", "b00000000000000b", "b000000000000001", 15_100_000_000, 19_900_000_000, extraAttributes: LlmTokens) +
+        "]}]}]}";
+
     private static IReadOnlyList<MonitorSpanProjection> BuildFixture(string fileName) =>
         MonitorSpanProjectionBuilder.Build(Record(File.ReadAllText(FixturePath(fileName))));
 
@@ -332,11 +435,15 @@ public sealed class ClaudeCodeSpanAdapterTests
                 ("6666666666666666", "1111111111111111"),
             ],
             spans.Select(span => (span.SpanId, span.ParentSpanId)));
+        Assert.Equal(
+            [null, "chat", "execute_tool", null, null, null],
+            spans.Select(span => span.Operation));
+        Assert.Equal(
+            ["unknown", "llm_call", "tool_call", "unknown", "unknown", "hook"],
+            spans.Select(span => span.Category));
         Assert.All(spans, span =>
         {
             Assert.Equal("11111111111111111111111111111111", span.TraceId);
-            Assert.Null(span.Operation);
-            Assert.Equal("unknown", span.Category);
             Assert.Null(span.ToolType);
             Assert.Null(span.McpToolName);
             Assert.Null(span.McpServerHash);

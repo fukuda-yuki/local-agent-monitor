@@ -29,14 +29,15 @@ internal static class ClaudeCodeSpanAdapter
         var outputTokens = isLlmRequest ? OtlpSpanReader.ReadInt(span.Attributes, "output_tokens") : null;
         var cacheReadTokens = isLlmRequest ? OtlpSpanReader.ReadInt(span.Attributes, "cache_read_tokens") : null;
         var cacheCreationTokens = isLlmRequest ? OtlpSpanReader.ReadInt(span.Attributes, "cache_creation_tokens") : null;
+        var status = ResolveStatus(span.StatusCode);
 
         projection = new MonitorSpanProjection(
             TraceId: span.TraceId,
             SpanId: span.SpanId,
             ParentSpanId: span.ParentSpanId,
             SpanOrdinal: ordinal,
-            Operation: null,
-            Category: "unknown",
+            Operation: ClassifyOperation(span.Name),
+            Category: ClassifyCategory(span.Name, status),
             ToolName: isTool
                 ? MeasurementSanitizer.SanitizeFreeFormName(OtlpSpanReader.ReadString(span.Attributes, "tool_name"))
                 : null,
@@ -54,7 +55,7 @@ internal static class ClaudeCodeSpanAdapter
             ReasoningTokens: null,
             CacheReadTokens: cacheReadTokens,
             CacheCreationTokens: cacheCreationTokens,
-            Status: ResolveStatus(span.StatusCode),
+            Status: status,
             ErrorType: null,
             FinishReasons: null,
             ConversationId: null,
@@ -62,6 +63,29 @@ internal static class ClaudeCodeSpanAdapter
             StartTime: FormatTimestamp(span.StartTimeUnixNano),
             EndTime: FormatTimestamp(span.EndTimeUnixNano));
         return true;
+    }
+
+    private static string? ClassifyOperation(string spanName) => spanName switch
+    {
+        "claude_code.llm_request" => "chat",
+        "claude_code.tool" => "execute_tool",
+        _ => null,
+    };
+
+    private static string ClassifyCategory(string spanName, string? status)
+    {
+        if (string.Equals(status, "error", StringComparison.Ordinal))
+        {
+            return "error";
+        }
+
+        return spanName switch
+        {
+            "claude_code.llm_request" => "llm_call",
+            "claude_code.tool" => "tool_call",
+            "claude_code.hook" => "hook",
+            _ => "unknown",
+        };
     }
 
     private static string? ResolveStatus(string? statusCode) => statusCode switch

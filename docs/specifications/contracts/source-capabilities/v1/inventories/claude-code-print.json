@@ -51,10 +51,18 @@
   },
   "content_capture_modes": {
     "content_disabled": {
-      "execution_status": "executed_no_structural_telemetry_observed",
-      "otel_structure_fixture": null,
+      "execution_status": "executed_structural_telemetry_observed",
+      "execution_note": "2026-07-13 re-run with CLAUDE_CODE_ENABLE_TELEMETRY=1 and CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1 both set; the earlier no-telemetry result was caused by the missing beta trace gate, not by the producer. Evidence: docs/sprints/issue-99-claude-live-validation.md.",
+      "otel_structure_fixture": "claude-code-print.otel.structure.json",
       "hook_structure_fixture": null,
-      "verified_fingerprints": []
+      "verified_fingerprints": [
+        "dd626c6113b77e9898aed98022ea16c09cdcb9900b2ea414bbf96fbe933bd3ec",
+        "298cbb4ffab69f38c62dbcbd574c47af31450b7b0c2c3e3c37aec281e356c1d6",
+        "d3af59c0e48356b655e4671107b7388e13f1c853705e61bd8b26cf0600a55858",
+        "37ebc057248cf6c9c0f9b167e2e2f2e1f4747d0768754bfab94b7f7e53283549",
+        "a12a7f6bd29e415eb1c29e0995e62bca9998b4015ce08675a2d4a89b6141c183",
+        "1128855c783d43652d21e85ee0750ec0fc2cb28758310aa907c09c08a44264fe"
+      ]
     },
     "content_enabled_with_synthetic_markers_only": {
       "execution_status": "not_executed",
@@ -64,37 +72,32 @@
     }
   },
   "tool_error_path": {
-    "status": "not_executed",
-    "evidence": "Authorization for a tool or error-path stimulus was outside the approved bounded run; the completed run requested no tool use."
+    "status": "executed",
+    "evidence": "Operator-authorized 2026-07-13 runs exercised one allowed safe tool call, one deterministic tool failure (claude_code.tool.execution with error status), and one sub-agent delegation; only structural facts were retained."
   },
   "opaque_trace_reference": {
-    "status": "not_observed",
-    "reference": null,
-    "evidence": "No structural trace telemetry was emitted by the completed print-mode run."
+    "status": "observed",
+    "reference": "e3a37e3412059ed7b0c4bb2832baddc8",
+    "evidence": "Structural trace telemetry reached the disposable loopback receiver; additional run references are recorded in docs/sprints/issue-99-claude-live-validation.md."
   },
   "opaque_session_reference": {
-    "status": "not_observed",
+    "status": "attribute_key_observed_value_not_retained",
     "reference": null,
-    "evidence": "No structural telemetry containing an opaque native session reference was emitted by the completed print-mode run."
+    "evidence": "Every observed span carried a session.id attribute key; the value was intentionally not retained in repository-safe evidence."
   },
   "observed_capabilities": {
-    "otel_traces": "not_observed",
-    "otel_logs": "not_observed",
-    "otel_metrics": "not_observed",
+    "otel_traces": "observed",
+    "otel_logs": "export_attempted_receiver_unsupported",
+    "otel_metrics": "export_attempted_receiver_unsupported",
     "hook_events": "not_observed",
-    "native_session_identity": "not_observed",
-    "trace_span_identity": "not_observed",
-    "content_capture_gate": "not_observed"
+    "native_session_identity": "attribute_key_observed_value_not_retained",
+    "trace_span_identity": "observed",
+    "content_capture_gate": "observed_disabled"
   },
   "missing_structural_evidence": [
-    "content-disabled OTel structure",
     "content-enabled OTel structure",
     "Hook event structure",
-    "OTel schema fingerprints",
-    "Hook schema fingerprints",
-    "tool or error-path structure",
-    "opaque trace reference",
-    "opaque session reference"
+    "Hook schema fingerprints"
   ],
   "documentation_provenance": [
     {
@@ -125,23 +128,23 @@
     }
   ],
   "blocker": {
-    "code": "no_emitted_structural_telemetry",
-    "evidence": "The 75-second content-disabled print run exited 0, but its captured output contained no structural marker for Claude Code interaction, request, tool, Hook, or trace-response telemetry.",
-    "not_substituted": "interactive mode, Agent SDK, documentation-only structure, or invented fixture evidence"
+    "code": "resolved_no_emitted_structural_telemetry",
+    "evidence": "The original no-telemetry result came from running without CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1; the 2026-07-13 re-runs with both telemetry gates set emitted structural OTel traces. Hook structure remains uncaptured because no Hook forwarder was configured.",
+    "not_substituted": "interactive mode, Agent SDK, Hook structure, or content-enabled synthetic-marker structure"
   },
   "named_follow_up": {
-    "name": "claude-code-print-otel-hook-structure-capture",
+    "name": "claude-code-print-content-enabled-and-hook-structure-capture",
     "required_preconditions": [
       "Claude Code remains installed and authenticated",
       "a disposable local OTLP receiver can capture and reduce producer output to repository-safe structure only",
-      "explicit authorization exists for one safe print-mode tool or error-path stimulus",
-      "explicit authorization exists for a separate content-enabled synthetic-marker run"
+      "explicit authorization exists for a separate content-enabled synthetic-marker run",
+      "a configured Hook forwarder exists for Hook structure capture"
     ],
     "required_execution": [
-      "run bounded claude -p content-disabled and content-enabled synthetic-marker sessions with the receiver configured before process start",
-      "execute one authorized safe tool or error-path stimulus",
+      "run a bounded claude -p content-enabled synthetic-marker session with the receiver configured before process start",
+      "capture Hook event structure through the configured forwarder",
       "record only emitted names, structural types, occurrence counts, settings labels, opaque references, and deterministic fingerprints",
-      "create print otel.structure.json and hooks.structure.json only if their corresponding real producer records are captured",
+      "create hooks.structure.json only if real Hook producer records are captured",
       "remove only artifacts created by the follow-up"
     ]
   },
