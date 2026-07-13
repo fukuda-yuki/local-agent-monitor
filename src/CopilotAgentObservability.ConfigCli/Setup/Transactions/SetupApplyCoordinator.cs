@@ -223,12 +223,21 @@ internal sealed class SetupApplyCoordinator
 
                         if (!failure.SafeToPreserveAndContinue || failure.RecordId is null)
                         {
-                            return PersistPartial(setupLock, changeSetId, failure)
+                            if (failure.RecordId is not null)
+                            {
+                                RecordEffectiveFailure(failures, failure);
+                                return PersistPartial(setupLock, changeSetId, failures.Values)
+                                    ? CompensationOutcome.Partial
+                                    : CompensationOutcome.RecoveryRequired;
+                            }
+
+                            var terminalFailures = failures.Values.Append(failure).ToArray();
+                            return PersistPartial(setupLock, changeSetId, terminalFailures)
                                 ? CompensationOutcome.Partial
                                 : CompensationOutcome.RecoveryRequired;
                         }
 
-                        failures[failure.RecordId.Value] = failure;
+                        RecordEffectiveFailure(failures, failure);
                     }
                 }
             }
@@ -557,21 +566,40 @@ internal sealed class SetupApplyCoordinator
                         StringComparison.Ordinal);
                 if (!matches)
                 {
-                    failures[target.RecordId] = new CompensationFailure(
+                    RecordEffectiveFailure(failures, new CompensationFailure(
                         target.RecordId,
                         SetupCodes.RollbackStale,
-                        SetupLedgerRollbackStatus.Stale);
+                        SetupLedgerRollbackStatus.Stale));
                 }
             }
             catch (Exception)
             {
-                failures[target.RecordId] = new CompensationFailure(
+                RecordEffectiveFailure(failures, new CompensationFailure(
                     target.RecordId,
                     SetupCodes.InternalError,
-                    SetupLedgerRollbackStatus.Failed);
+                    SetupLedgerRollbackStatus.Failed));
             }
         }
     }
+
+    private static void RecordEffectiveFailure(
+        IDictionary<Guid, CompensationFailure> failures,
+        CompensationFailure candidate)
+    {
+        var recordId = candidate.RecordId!.Value;
+        if (!failures.TryGetValue(recordId, out var current) ||
+            FailureStrength(candidate) >= FailureStrength(current))
+        {
+            failures[recordId] = candidate;
+        }
+    }
+
+    private static int FailureStrength(CompensationFailure failure) => failure.RollbackStatus switch
+    {
+        SetupLedgerRollbackStatus.Failed => 1,
+        SetupLedgerRollbackStatus.Stale => 0,
+        _ => -1,
+    };
 
     private bool PersistPartial(SetupLock setupLock, Guid changeSetId, CompensationFailure failure)
     {

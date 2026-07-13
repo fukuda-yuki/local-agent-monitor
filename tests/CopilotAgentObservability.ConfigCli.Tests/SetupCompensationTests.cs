@@ -273,7 +273,6 @@ public sealed class SetupCompensationTests
             () =>
             {
                 fixture.Platform.InjectFault("environment.get:ENV_B", new IOException("CAPTURE_PRIVATE_ONE"));
-                fixture.Platform.InjectFault("environment.get:ENV_B", new IOException("CAPTURE_PRIVATE_TWO"));
             });
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
@@ -348,6 +347,66 @@ public sealed class SetupCompensationTests
         Assert.Equal(SetupCodes.RollbackStale, environment.OutcomeCode);
         Assert.Equal(SetupLedgerRollbackStatus.Stale, environment.RollbackStatus);
         Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public async Task Apply_AccumulatedSafeFailureIsPersistedWithLaterHardRestoreFailure()
+    {
+        var fixture = CompensationFixture.Create();
+        var fileClassificationReady = new TaskCompletionSource<SetupTestBarrier>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Platform.InjectAfterEffectFault(
+            "environment.set:ENV_C",
+            new IOException("FORWARD_PRIVATE"),
+            () =>
+            {
+                fixture.Platform.SeedUserEnvironment("ENV_B", "third-party");
+                fileClassificationReady.SetResult(
+                    fixture.Platform.AddBarrier($"file.metadata:{fixture.TargetPath}"));
+            });
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        using var fileClassification = await fileClassificationReady.Task;
+        fileClassification.WaitUntilReached(CancellationToken.None);
+        using var fileRestore = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterRestoreIntentBeforeRestore}");
+        fileClassification.Release();
+        fileRestore.WaitUntilReached(CancellationToken.None);
+        var restoreTemporary = NextTemporaryPath(fixture.Platform.Operations, fixture.TargetPath);
+        fixture.Platform.InjectFault(
+            $"file.replace:{restoreTemporary}->{fixture.TargetPath}",
+            new IOException("RESTORE_PRIVATE"));
+        fileRestore.Release();
+
+        var exception = await applying;
+
+        Assert.Equal(SetupCodes.PartialApply, exception.Code);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal("old-c", fixture.Platform.ReadUserEnvironment("ENV_C"));
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        var journal = fixture.JournalStore.Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Partial, journal.Phase);
+        Assert.Equal(SetupJournalStepPhase.RestoreStarted, journal.Targets[0].Steps[0].Phase);
+        var environmentSteps = journal.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId).Steps;
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted, environmentSteps.Single(step => step.MemberKey == "ENV_A").Phase);
+        Assert.Equal(SetupJournalStepPhase.MutationCompleted, environmentSteps.Single(step => step.MemberKey == "ENV_B").Phase);
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted, environmentSteps.Single(step => step.MemberKey == "ENV_C").Phase);
+        var changeSet = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Partial, changeSet.State);
+        var file = changeSet.Targets.Single(target => target.RecordId == fixture.FileRecordId);
+        Assert.Equal(SetupCodes.InternalError, file.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.Failed, file.RollbackStatus);
+        var environment = changeSet.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId);
+        Assert.Equal(SetupCodes.RollbackStale, environment.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.Stale, environment.RollbackStatus);
+        var operations = fixture.Platform.Operations;
+        Assert.True(
+            LastIndexContaining(operations, $"->{fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)}") <
+            LastIndexContaining(operations, $"->{fixture.Paths.OwnershipLedger}"));
+        Assert.DoesNotContain("environment.notify", operations);
     }
 
     [Fact]
