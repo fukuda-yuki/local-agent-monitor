@@ -7,8 +7,19 @@ namespace CopilotAgentObservability.ConfigCli.Setup.Adapters;
 
 internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
 {
+    private const int MaximumTargets = 16;
+    private const int MaximumChangesPerTarget = 32;
+
     private static readonly Regex AdapterIdPattern = new(
         "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        RegexOptions.CultureInvariant,
+        TimeSpan.FromSeconds(1));
+    private static readonly Regex DiagnosticCodePattern = new(
+        "^[a-z][a-z0-9_]{0,127}$",
+        RegexOptions.CultureInvariant,
+        TimeSpan.FromSeconds(1));
+    private static readonly Regex TargetLabelPattern = new(
+        "^[a-z][a-z0-9_-]{0,127}$",
         RegexOptions.CultureInvariant,
         TimeSpan.FromSeconds(1));
 
@@ -40,14 +51,33 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
             : throw new SetupAdapterNotRegisteredException(adapterId);
     }
 
-    public SetupPlannedChangeSet Plan(SetupPlanRequest request)
+    public SetupPlanResult<SetupPlannedChangeSet> Plan(SetupPlanRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         var adapter = Resolve(request.Adapter);
-        var aggregate = adapter.Plan(request) ?? throw new InvalidOperationException("Setup adapter returned no plan.");
+        var result = adapter.Plan(request) ?? throw SetupPlanResult.InvalidOutput();
+        ValidateDiagnostics(result);
+
+        if (result is SetupPlanFailure<SetupChangePlan> failure)
+        {
+            ValidateDiagnosticCode(failure.Code);
+            return SetupPlanResult.Failure<SetupPlannedChangeSet>(
+                failure.Code,
+                failure.Targets,
+                failure.Warnings,
+                failure.NextActions);
+        }
+
+        if (result is not SetupPlanSuccess<SetupChangePlan> success)
+        {
+            throw SetupPlanResult.InvalidOutput();
+        }
+
+        var aggregate = SetupPlanResult.SnapshotPlan(success.Value);
         RequireMatchingRequest(aggregate, request);
-        var records = aggregate.Records?.ToArray() ?? throw new InvalidOperationException("Setup adapter returned no records.");
+        var records = aggregate.Records.ToArray();
         ValidateGuidanceConsistency(records);
+        ValidateTargetIdentity(records, success.Targets);
 
         var privatePlan = new SetupPrivatePlan(
             1,
@@ -56,13 +86,14 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
             aggregate.SelectedTarget,
             aggregate.CreatedAt,
             aggregate.ToolVersion,
-            records.Select(record => new SetupPrivatePlanTarget(
-                record.RecordId,
-                record.TargetKind,
-                record.TargetLocation,
-                record.BaseStateHash,
-                record.DesiredState,
-                record.Members)).ToArray());
+            Array.AsReadOnly(records.Select(record => new SetupPrivatePlanTarget(
+                    record.RecordId,
+                    record.TargetKind,
+                    record.TargetLocation,
+                    record.BaseStateHash,
+                    record.DesiredState,
+                    record.Members))
+                .ToArray()));
 
         var plannedChangeSet = new SetupLedgerChangeSet(
             aggregate.ChangeSetId,
@@ -73,37 +104,37 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
             aggregate.ToolVersion,
             null,
             SetupChangeSetState.Planned,
-            records.Select(record => new SetupLedgerTarget(
-                record.RecordId,
-                record.TargetKind,
-                record.TargetLabel,
-                aggregate.Adapter,
-                record.Members.Select(member => new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray(),
-                record.BaseStateHash,
-                null,
-                null,
-                null,
-                SetupLedgerRollbackStatus.NotAvailable,
-                record.RestartRequirement,
-                record.StatusProjection,
-                aggregate.ToolVersion)).ToArray());
+            Array.AsReadOnly(records.Select(record => new SetupLedgerTarget(
+                    record.RecordId,
+                    record.TargetKind,
+                    record.TargetLabel,
+                    aggregate.Adapter,
+                    Array.AsReadOnly(record.Members
+                        .Select(member => new SetupLedgerMember(member.SettingKey, member.Operation))
+                        .ToArray()),
+                    record.BaseStateHash,
+                    null,
+                    null,
+                    null,
+                    SetupLedgerRollbackStatus.NotAvailable,
+                    record.RestartRequirement,
+                    record.StatusProjection,
+                    aggregate.ToolVersion))
+                .ToArray()));
 
-        SetupStorageValidation.ValidatePlanAndLedger(privatePlan, plannedChangeSet);
-        var targets = records.Select(ToPlanTarget).ToArray();
-        SetupContractValidator.Validate(new SetupCommandResult(
-            SetupCommand.Plan,
-            true,
-            SetupCodes.PlanReady,
-            aggregate.ChangeSetId.ToString("D"),
-            null,
-            null,
-            aggregate.Adapter,
-            targets,
-            [],
-            [],
-            [],
-            false));
-        return new SetupPlannedChangeSet(privatePlan, plannedChangeSet, targets);
+        try
+        {
+            SetupStorageValidation.ValidatePlanAndLedger(privatePlan, plannedChangeSet);
+        }
+        catch (FormatException)
+        {
+            throw SetupPlanResult.InvalidOutput();
+        }
+        return SetupPlanResult.Success(
+            new SetupPlannedChangeSet(privatePlan, plannedChangeSet),
+            success.Targets,
+            success.Warnings,
+            success.NextActions);
     }
 
     void ISetupApplyRevalidator.Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
@@ -114,23 +145,6 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
         Resolve(plan.Adapter).Revalidate(plan, plannedChangeSet);
     }
 
-    private static SetupTargetResult ToPlanTarget(SetupChangeRecord record) => new(
-        record.RecordId.ToString("D"),
-        record.TargetKind,
-        record.TargetLabel,
-        record.StatusProjection.Detected,
-        record.StatusProjection.DetectedVersion,
-        record.StatusProjection.Operation,
-        record.StatusProjection.EffectiveSource,
-        null,
-        null,
-        record.RestartRequirement,
-        false,
-        record.StatusProjection.Endpoint,
-        record.StatusProjection.ExpectedResult,
-        record.Guidance,
-        record.StatusProjection.Changes);
-
     private static void RequireMatchingRequest(SetupChangePlan aggregate, SetupPlanRequest request)
     {
         if (aggregate.ChangeSetId != request.ChangeSetId ||
@@ -139,7 +153,7 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
             aggregate.CreatedAt != request.CreatedAt ||
             !string.Equals(aggregate.ToolVersion, request.ToolVersion, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("Setup adapter returned a plan with mismatched identity.");
+            throw SetupPlanResult.InvalidOutput();
         }
     }
 
@@ -149,12 +163,12 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
         {
             if (record is null)
             {
-                throw new InvalidOperationException("Setup adapter returned an invalid record.");
+                throw SetupPlanResult.InvalidOutput();
             }
 
             if (record.StatusProjection is null)
             {
-                throw new InvalidOperationException("Setup adapter returned an invalid status projection.");
+                throw SetupPlanResult.InvalidOutput();
             }
 
             var snapshotGuidance = record.StatusProjection.Guidance;
@@ -167,10 +181,104 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
                 !string.Equals(record.Guidance.Kind, snapshotGuidance.Kind, StringComparison.Ordinal) ||
                 !string.Equals(record.Guidance.Language, snapshotGuidance.Language, StringComparison.Ordinal))
             {
-                throw new InvalidOperationException("Setup adapter returned inconsistent guidance.");
+                throw SetupPlanResult.InvalidOutput();
             }
         }
     }
+
+    private static void ValidateDiagnostics<T>(SetupPlanResult<T> result)
+        where T : class
+    {
+        if (result.Targets.Count > MaximumTargets)
+        {
+            throw SetupPlanResult.InvalidOutput();
+        }
+
+        var recordIds = new HashSet<Guid>();
+        foreach (var target in result.Targets)
+        {
+            if (target is null ||
+                target.RecordId == Guid.Empty ||
+                !recordIds.Add(target.RecordId) ||
+                !Enum.IsDefined(target.TargetKind) ||
+                target.TargetLabel is null ||
+                !TargetLabelPattern.IsMatch(target.TargetLabel) ||
+                target.DetectedVersion?.Length > 128 ||
+                !Enum.IsDefined(target.Operation) ||
+                target.EffectiveSource is { } effectiveSource && !Enum.IsDefined(effectiveSource) ||
+                !Enum.IsDefined(target.RestartRequirement) ||
+                target.Changes is null ||
+                target.Changes.Count > MaximumChangesPerTarget ||
+                target.Changes.Any(change => change is null || !Enum.IsDefined(change.Operation)))
+            {
+                throw SetupPlanResult.InvalidOutput();
+            }
+        }
+
+        foreach (var warning in result.Warnings)
+        {
+            ValidateDiagnosticCode(warning);
+        }
+
+        foreach (var nextAction in result.NextActions)
+        {
+            ValidateDiagnosticCode(nextAction);
+        }
+    }
+
+    private static void ValidateDiagnosticCode(string? code)
+    {
+        if (code is null || !DiagnosticCodePattern.IsMatch(code))
+        {
+            throw SetupPlanResult.InvalidOutput();
+        }
+    }
+
+    private static void ValidateTargetIdentity(
+        IReadOnlyList<SetupChangeRecord> records,
+        IReadOnlyList<SetupPlanTarget> targets)
+    {
+        if (records.Count != targets.Count)
+        {
+            throw SetupPlanResult.InvalidOutput();
+        }
+
+        for (var index = 0; index < records.Count; index++)
+        {
+            var expected = SetupPlanTarget.FromRecord(records[index]);
+            var actual = targets[index];
+            if (expected.RecordId != actual.RecordId ||
+                expected.TargetKind != actual.TargetKind ||
+                !string.Equals(expected.TargetLabel, actual.TargetLabel, StringComparison.Ordinal) ||
+                expected.Detected != actual.Detected ||
+                !string.Equals(expected.DetectedVersion, actual.DetectedVersion, StringComparison.Ordinal) ||
+                expected.Operation != actual.Operation ||
+                expected.EffectiveSource != actual.EffectiveSource ||
+                expected.RestartRequirement != actual.RestartRequirement ||
+                expected.ProspectiveRollbackAvailable != actual.ProspectiveRollbackAvailable ||
+                !string.Equals(expected.Endpoint, actual.Endpoint, StringComparison.Ordinal) ||
+                !JsonEquals(expected.ExpectedResult, actual.ExpectedResult) ||
+                !GuidanceEquals(expected.Guidance, actual.Guidance) ||
+                !expected.Changes.SequenceEqual(actual.Changes))
+            {
+                throw SetupPlanResult.InvalidOutput();
+            }
+        }
+    }
+
+    private static bool JsonEquals(
+        System.Text.Json.JsonElement? left,
+        System.Text.Json.JsonElement? right) =>
+        left is null && right is null ||
+        left is { } leftValue && right is { } rightValue &&
+        string.Equals(leftValue.GetRawText(), rightValue.GetRawText(), StringComparison.Ordinal);
+
+    private static bool GuidanceEquals(SetupGuidance? left, SetupGuidance? right) =>
+        left is null && right is null ||
+        left is not null && right is not null &&
+        string.Equals(left.Kind, right.Kind, StringComparison.Ordinal) &&
+        string.Equals(left.Language, right.Language, StringComparison.Ordinal) &&
+        string.Equals(left.Sample, right.Sample, StringComparison.Ordinal);
 
     private static void EnsureAdapterId(string? adapterId, string parameterName)
     {
