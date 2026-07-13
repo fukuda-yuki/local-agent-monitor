@@ -41,7 +41,7 @@ public sealed class SetupApplyTests
         Assert.False(second.IsCompleted);
 
         mutation.Release();
-        var applied = await first;
+        var applied = (await first).Value;
         var rejected = await second;
 
         Assert.Equal(SetupCodes.ApplySucceeded, applied.OutcomeCode);
@@ -189,8 +189,8 @@ public sealed class SetupApplyTests
         {
             AssertNoTransactionArtifacts(fixture);
             fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("changed"));
-            throw new SetupApplyException(SetupCodes.UnsupportedVersion);
         };
+        fixture.Revalidator.Result = SetupPlanResult.Failure<SetupRevalidation>(SetupCodes.UnsupportedVersion);
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
         var exception = Assert.Throws<SetupApplyException>(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
@@ -205,8 +205,7 @@ public sealed class SetupApplyTests
     public void Apply_AdapterOperationMismatchRequiresRecoveryBeforeArtifactsOrWrites()
     {
         var fixture = ApplyFixture.Create();
-        fixture.Revalidator.OnRevalidate = (_, _) =>
-            throw new SetupApplyException(SetupCodes.RecoveryRequired);
+        fixture.Revalidator.Result = SetupPlanResult.Failure<SetupRevalidation>(SetupCodes.RecoveryRequired);
         var operationCount = fixture.Platform.Operations.Count;
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
@@ -286,7 +285,7 @@ public sealed class SetupApplyTests
         fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("old"));
         fixture.Revalidator.OnRevalidate = null;
 
-        var applied = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var applied = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupChangeSetState.Applied, applied.State);
         Assert.Equal(SetupCodes.ApplySucceeded, applied.OutcomeCode);
@@ -308,7 +307,7 @@ public sealed class SetupApplyTests
         fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("old"));
         fixture.Revalidator.OnRevalidate = null;
 
-        var noChanges = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var noChanges = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupChangeSetState.NoChanges, noChanges.State);
         Assert.Equal(SetupCodes.NoChanges, noChanges.OutcomeCode);
@@ -360,7 +359,7 @@ public sealed class SetupApplyTests
         Assert.Equal(SetupChangeSetState.Applying, applying.State);
         Assert.Null(applying.OutcomeCode);
         barrier.Release();
-        Assert.Equal(SetupChangeSetState.Applied, (await retry).State);
+        Assert.Equal(SetupChangeSetState.Applied, (await retry).Value.State);
     }
 
     [Theory]
@@ -375,8 +374,10 @@ public sealed class SetupApplyTests
         bool afterEffect)
     {
         var fixture = ApplyFixture.Create();
-        fixture.Revalidator.OnRevalidate = (_, _) =>
-            fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("external"));
+        fixture.Revalidator.Result = SetupPlanResult.Failure<SetupRevalidation>(
+            SetupCodes.StalePlan,
+            [SetupCodes.ManagedPolicyUnverified],
+            [SetupCodes.RunVsCodePolicyDiagnostics]);
         var temporary = fixture.Paths.OwnershipLedger + ".tmp";
         var operation = boundary switch
         {
@@ -401,6 +402,8 @@ public sealed class SetupApplyTests
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
         Assert.Equal(SetupCodes.InternalError, exception.Message);
+        Assert.Empty(exception.Failure.Warnings);
+        Assert.Empty(exception.Failure.NextActions);
         AssertNoTransactionArtifacts(fixture);
         var durable = fixture.LoadChangeSet();
         Assert.Equal(SetupChangeSetState.Planned, durable.State);
@@ -481,7 +484,7 @@ public sealed class SetupApplyTests
             new EnvironmentOperationCase(priorExists, priorValue, operation, desiredValue));
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(expectedCode, result.OutcomeCode);
         if (operation == SetupOperation.NoOp)
@@ -636,7 +639,7 @@ public sealed class SetupApplyTests
         fixture.RewriteMemberOperation(fixture.FileRecordId, "setting", operation);
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
         Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
@@ -650,7 +653,7 @@ public sealed class SetupApplyTests
         fixture.RewriteFileMemberOperations(SetupOperation.NoOp, SetupOperation.Replace);
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
         Assert.Equal(
@@ -721,7 +724,7 @@ public sealed class SetupApplyTests
         var operationCount = fixture.Platform.Operations.Count;
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
         Assert.Equal(exactFileBackup, fixture.Platform.ReadSeededFile(fileBackup));
@@ -824,7 +827,7 @@ public sealed class SetupApplyTests
         var operationCount = fixture.Platform.Operations.Count;
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
         Assert.Equal(SetupChangeSetState.Applied, result.State);
@@ -1025,12 +1028,17 @@ public sealed class SetupApplyTests
         string expectedFirstStepPhase)
     {
         var fixture = ApplyFixture.Create();
+        fixture.Revalidator.Result = SetupPlanResult.Revalidated(
+            [SetupCodes.ManagedPolicyUnverified],
+            [SetupCodes.RunVsCodePolicyDiagnostics]);
         fixture.Platform.InjectFault($"checkpoint:{faultPoint}", new IOException("private raw detail"));
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
         var exception = Assert.Throws<SetupApplyException>(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Empty(exception.Failure.Warnings);
+        Assert.Empty(exception.Failure.NextActions);
         Assert.Equal(expectedLedgerState, fixture.LoadChangeSet().State);
         var reopenedJournal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
         Assert.Equal(expectedJournalPhase, reopenedJournal.Phase.ToString());
@@ -1044,7 +1052,7 @@ public sealed class SetupApplyTests
         var fixture = ApplyFixture.Create();
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
         var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
@@ -1072,7 +1080,7 @@ public sealed class SetupApplyTests
         var fixture = ApplyFixture.Create();
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var applied = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var applied = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupChangeSetState.Applied, applied.State);
         Assert.Equal(SetupCodes.ApplySucceeded, applied.OutcomeCode);
@@ -1115,7 +1123,7 @@ public sealed class SetupApplyTests
         Assert.Equal(SetupJournalStepPhase.MutationStarted, journalAtApiBoundary.Targets[1].Steps[0].Phase);
         barrier.Release();
 
-        var result = await applying;
+        var result = (await applying).Value;
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
     }
 
@@ -1173,6 +1181,9 @@ public sealed class SetupApplyTests
     public void Apply_NotificationFailureLeavesAppliedLedgerAndPendingJournalForRecovery(bool afterEffect)
     {
         var fixture = ApplyFixture.Create();
+        fixture.Revalidator.Result = SetupPlanResult.Revalidated(
+            [SetupCodes.ManagedPolicyUnverified],
+            [SetupCodes.RunVsCodePolicyDiagnostics]);
         if (afterEffect)
         {
             fixture.Platform.InjectAfterEffectFault("environment.notify", new IOException("private notification detail"));
@@ -1186,6 +1197,8 @@ public sealed class SetupApplyTests
         var exception = Assert.Throws<SetupApplyException>(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Empty(exception.Failure.Warnings);
+        Assert.Empty(exception.Failure.NextActions);
         Assert.DoesNotContain("private notification detail", exception.Message, StringComparison.Ordinal);
         Assert.Equal(SetupChangeSetState.Applied, fixture.LoadChangeSet().State);
         var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
@@ -1195,26 +1208,158 @@ public sealed class SetupApplyTests
     }
 
     [Theory]
+    [InlineData(false, SetupChangeSetState.Applied, SetupCodes.ApplySucceeded)]
+    [InlineData(true, SetupChangeSetState.NoChanges, SetupCodes.NoChanges)]
+    public void Apply_SuccessPreservesOrderedImmutableRevalidationDiagnostics(
+        bool noChanges,
+        SetupChangeSetState expectedState,
+        string expectedCode)
+    {
+        var fixture = ApplyFixture.Create(noChanges: noChanges);
+        fixture.Revalidator.Result = SetupPlanResult.Revalidated(
+            [SetupCodes.ManagedPolicyUnverified, SetupCodes.MonitorNotRunning],
+            [SetupCodes.RunVsCodePolicyDiagnostics, SetupCodes.StartLocalMonitor]);
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(expectedState, result.Value.State);
+        Assert.Equal(expectedCode, result.Value.OutcomeCode);
+        Assert.Equal([SetupCodes.ManagedPolicyUnverified, SetupCodes.MonitorNotRunning], result.Warnings);
+        Assert.Equal([SetupCodes.RunVsCodePolicyDiagnostics, SetupCodes.StartLocalMonitor], result.NextActions);
+        Assert.Equal(1, fixture.Revalidator.Calls);
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<string>)result.Warnings).Add(SetupCodes.ContentCaptureSensitive));
+    }
+
+    [Theory]
     [InlineData(SetupCodes.UnsupportedVersion)]
     [InlineData(SetupCodes.ManagedPolicyConflict)]
+    [InlineData(SetupCodes.EnvironmentOverrideConflict)]
     [InlineData(SetupCodes.PortOwnedByForeignProcess)]
     [InlineData(SetupCodes.UnsafePath)]
     [InlineData(SetupCodes.TargetNotInstalled)]
     [InlineData(SetupCodes.MalformedSettings)]
     [InlineData(SetupCodes.PermissionDenied)]
-    [InlineData(SetupCodes.StalePlan)]
+    [InlineData(SetupCodes.RecoveryRequired)]
     [InlineData(SetupCodes.InternalError)]
-    public void Apply_AllAdapterPreflightFailuresAreFixedAndArtifactFree(string code)
+    public void Apply_AllowedTypedPreflightFailuresPreserveDiagnosticsAndWriteNothing(string code)
     {
         var fixture = ApplyFixture.Create();
-        fixture.Revalidator.OnRevalidate = (_, _) => throw new SetupApplyException(code);
+        var planBefore = fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId));
+        var ledgerBefore = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
+        fixture.Revalidator.Result = SetupPlanResult.Failure<SetupRevalidation>(
+            code,
+            [SetupCodes.ManagedPolicyUnverified, SetupCodes.MonitorNotRunning],
+            [SetupCodes.RunVsCodePolicyDiagnostics, SetupCodes.StartLocalMonitor]);
+        var operationCount = fixture.Platform.Operations.Count;
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var exception = Assert.Throws<SetupApplyException>(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
 
         Assert.Equal(code, exception.Code);
+        Assert.Equal([SetupCodes.ManagedPolicyUnverified, SetupCodes.MonitorNotRunning], exception.Failure.Warnings);
+        Assert.Equal([SetupCodes.RunVsCodePolicyDiagnostics, SetupCodes.StartLocalMonitor], exception.Failure.NextActions);
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<string>)exception.Failure.NextActions).Add(SetupCodes.RerunRequestedSetupCommand));
+        Assert.Equal(1, fixture.Revalidator.Calls);
+        Assert.Equal(planBefore, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId)));
+        Assert.Equal(ledgerBefore, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
         AssertNoTransactionArtifacts(fixture);
-        Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData(SetupCodes.UnsupportedAdapter)]
+    [InlineData(SetupCodes.UnsupportedTarget)]
+    public void Apply_ExceptionalTypedPreflightFailuresForceEmptyDiagnosticsAndByteIdenticalArtifacts(string code)
+    {
+        var fixture = ApplyFixture.Create();
+        var planBefore = fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId));
+        var ledgerBefore = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
+        fixture.Revalidator.Result = SetupPlanResult.Failure<SetupRevalidation>(
+            code,
+            [SetupCodes.ManagedPolicyUnverified],
+            [SetupCodes.RunVsCodePolicyDiagnostics]);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(code, exception.Code);
+        Assert.Empty(exception.Failure.Warnings);
+        Assert.Empty(exception.Failure.NextActions);
+        Assert.Equal(1, fixture.Revalidator.Calls);
+        Assert.Equal(planBefore, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId)));
+        Assert.Equal(ledgerBefore, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
+        AssertNoTransactionArtifacts(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
+    public void Apply_TypedStalePlanPersistsRetryableOutcomeAndPreservesDiagnostics()
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.Revalidator.Result = SetupPlanResult.Failure<SetupRevalidation>(
+            SetupCodes.StalePlan,
+            [SetupCodes.ManagedPolicyUnverified],
+            [SetupCodes.RunVsCodePolicyDiagnostics]);
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.StalePlan, exception.Code);
+        Assert.Equal([SetupCodes.ManagedPolicyUnverified], exception.Failure.Warnings);
+        Assert.Equal([SetupCodes.RunVsCodePolicyDiagnostics], exception.Failure.NextActions);
+        Assert.Equal(1, fixture.Revalidator.Calls);
+        var stale = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Planned, stale.State);
+        Assert.Equal(SetupCodes.StalePlan, stale.OutcomeCode);
+        AssertNoTransactionArtifacts(fixture);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+    }
+
+    [Theory]
+    [InlineData("non-apply")]
+    [InlineData("unknown")]
+    [InlineData("null")]
+    [InlineData("throw")]
+    [InlineData("malformed")]
+    public void Apply_UnexpectedRevalidationOutputReturnsEmptyInternalErrorWithoutRawDetail(string kind)
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.Revalidator.Result = kind switch
+        {
+            "non-apply" => SetupPlanResult.Failure<SetupRevalidation>(SetupCodes.PlanReady),
+            "unknown" => SetupPlanResult.Failure<SetupRevalidation>("private-result-marker"),
+            "null" => null,
+            "malformed" => SetupPlanResult.Revalidated(["private-warning-marker"], []),
+            _ => fixture.Revalidator.Result,
+        };
+        if (kind == "throw")
+        {
+            fixture.Revalidator.OnRevalidate = (_, _) =>
+                throw new InvalidOperationException("private-exception-marker");
+        }
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Empty(exception.Failure.Warnings);
+        Assert.Empty(exception.Failure.NextActions);
+        Assert.DoesNotContain("private-", exception.ToString(), StringComparison.Ordinal);
+        Assert.Equal(1, fixture.Revalidator.Calls);
+        AssertApplyInputsUnchanged(fixture);
+        AssertNoTransactionArtifacts(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
     }
 
     [Fact]
@@ -1227,6 +1372,8 @@ public sealed class SetupApplyTests
         var exception = Assert.Throws<SetupApplyException>(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Empty(exception.Failure.Warnings);
+        Assert.Empty(exception.Failure.NextActions);
         Assert.DoesNotContain("private-path-and-value", exception.Message, StringComparison.Ordinal);
         AssertNoTransactionArtifacts(fixture);
     }
@@ -1277,7 +1424,7 @@ public sealed class SetupApplyTests
         var fixture = ApplyFixture.Create(noChanges: true);
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupChangeSetState.NoChanges, result.State);
         Assert.Equal(SetupCodes.NoChanges, result.OutcomeCode);
@@ -1296,7 +1443,7 @@ public sealed class SetupApplyTests
         var fixture = ApplyFixture.Create(fileNoChange: true);
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
         var file = result.Targets.Single(target => target.RecordId == fixture.FileRecordId);
@@ -1314,7 +1461,7 @@ public sealed class SetupApplyTests
         var fixture = ApplyFixture.Create(environmentANoChange: true);
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
         var environmentJournal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths)
@@ -1370,7 +1517,7 @@ public sealed class SetupApplyTests
         var fixture = ApplyFixture.Create(environmentNoChange: true);
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         var environment = result.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId);
         Assert.Null(environment.BackupReference);
@@ -1389,7 +1536,7 @@ public sealed class SetupApplyTests
         var fixture = ApplyFixture.Create(includeEnvironment: false);
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
 
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
         var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
@@ -1401,6 +1548,9 @@ public sealed class SetupApplyTests
     public void Apply_RealCapturePathFailureBeforeArtifactsPreservesSafeCode()
     {
         var fixture = ApplyFixture.Create();
+        fixture.Revalidator.Result = SetupPlanResult.Revalidated(
+            [SetupCodes.ManagedPolicyUnverified],
+            [SetupCodes.RunVsCodePolicyDiagnostics]);
         fixture.Revalidator.OnRevalidate = (_, _) => fixture.Platform.SeedPathMetadata(
             fixture.TargetPath,
             new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
@@ -1409,6 +1559,8 @@ public sealed class SetupApplyTests
         var exception = Assert.Throws<SetupApplyException>(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
 
         Assert.Equal(SetupCodes.UnsafePath, exception.Code);
+        Assert.Empty(exception.Failure.Warnings);
+        Assert.Empty(exception.Failure.NextActions);
         AssertNoTransactionArtifacts(fixture);
         Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
     }
@@ -1422,8 +1574,6 @@ public sealed class SetupApplyTests
     [InlineData(SetupCodes.InterruptedApplyRecovered)]
     [InlineData(SetupCodes.InterruptedRollbackRecovered)]
     [InlineData(SetupCodes.InvalidArguments)]
-    [InlineData(SetupCodes.UnsupportedAdapter)]
-    [InlineData(SetupCodes.UnsupportedTarget)]
     [InlineData(SetupCodes.RollbackStale)]
     [InlineData(SetupCodes.RollbackNotAvailable)]
     [InlineData(SetupCodes.PartialApply)]
@@ -1435,12 +1585,15 @@ public sealed class SetupApplyTests
     public void Apply_MapsKnownNonPreflightRevalidatorCodesToInternalError(string wrongCode)
     {
         var fixture = ApplyFixture.Create();
-        fixture.Revalidator.OnRevalidate = (_, _) => throw new SetupApplyException(wrongCode);
+        fixture.Revalidator.Result = SetupPlanResult.Failure<SetupRevalidation>(wrongCode);
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
         var exception = Assert.Throws<SetupApplyException>(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Empty(exception.Failure.Warnings);
+        Assert.Empty(exception.Failure.NextActions);
+        Assert.Equal(1, fixture.Revalidator.Calls);
         AssertNoTransactionArtifacts(fixture);
     }
 
@@ -1635,7 +1788,7 @@ public sealed class SetupApplyTests
         public SetupLedgerChangeSet Apply()
         {
             using var acquisition = SetupLock.TryAcquire(Platform, Paths);
-            return Coordinator.Apply(acquisition.Lock!, ChangeSetId);
+            return Coordinator.Apply(acquisition.Lock!, ChangeSetId).Value;
         }
 
         public SetupLedgerChangeSet LoadChangeSet() =>
@@ -1971,13 +2124,15 @@ public sealed class SetupApplyTests
 
         public Action<SetupPrivatePlan, SetupLedgerChangeSet>? OnRevalidate { get; set; }
 
+        public SetupPlanResult<SetupRevalidation>? Result { get; set; } = SetupPlanResult.Revalidated();
+
         public SetupPlanResult<SetupRevalidation> Revalidate(
             SetupPrivatePlan plan,
             SetupLedgerChangeSet plannedChangeSet)
         {
             Calls++;
             OnRevalidate?.Invoke(plan, plannedChangeSet);
-            return SetupPlanResult.Revalidated();
+            return Result!;
         }
     }
 

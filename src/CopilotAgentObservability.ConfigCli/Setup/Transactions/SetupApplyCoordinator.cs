@@ -1,4 +1,5 @@
 using System.Text;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -12,6 +13,7 @@ internal sealed class SetupApplyCoordinator
         SetupCodes.TargetNotInstalled,
         SetupCodes.UnsupportedVersion,
         SetupCodes.ManagedPolicyConflict,
+        SetupCodes.EnvironmentOverrideConflict,
         SetupCodes.MalformedSettings,
         SetupCodes.PermissionDenied,
         SetupCodes.UnsafePath,
@@ -19,6 +21,30 @@ internal sealed class SetupApplyCoordinator
         SetupCodes.RecoveryRequired,
         SetupCodes.PortOwnedByForeignProcess,
         SetupCodes.InternalError,
+    };
+    private static readonly HashSet<string> RevalidationWarningCodes = new(StringComparer.Ordinal)
+    {
+        SetupCodes.ContentCaptureSensitive,
+        SetupCodes.ManagedPolicyUnverified,
+        SetupCodes.MonitorNotRunning,
+        SetupCodes.SharedUserEnvironmentAffectsOtherProcesses,
+        SetupCodes.VscodeNonDefaultProfilesNotModified,
+        SetupCodes.CliTraceProtocolOverrideNotModified,
+    };
+    private static readonly HashSet<string> RevalidationNextActionCodes = new(StringComparer.Ordinal)
+    {
+        SetupCodes.InstallVsCode,
+        SetupCodes.InstallGitHubCopilotChatExtension,
+        SetupCodes.UpgradeVsCode,
+        SetupCodes.InstallCopilotCli,
+        SetupCodes.UpgradeCopilotCli,
+        SetupCodes.RunVsCodePolicyDiagnostics,
+        SetupCodes.RestartVsCode,
+        SetupCodes.RestartTerminalSession,
+        SetupCodes.StartLocalMonitor,
+        SetupCodes.ReviewContentCaptureWarning,
+        SetupCodes.ReviewCliTraceProtocolOverride,
+        SetupCodes.RunFirstTraceDoctor,
     };
 
     private readonly ISetupPlatform platform;
@@ -48,13 +74,13 @@ internal sealed class SetupApplyCoordinator
         environmentStep = new UserEnvironmentSetupStep(platform);
     }
 
-    public SetupLedgerChangeSet Apply(SetupLock setupLock, Guid changeSetId)
+    public SetupPlanSuccess<SetupLedgerChangeSet> Apply(SetupLock setupLock, Guid changeSetId)
     {
         ArgumentNullException.ThrowIfNull(setupLock);
         return setupLock.ExecuteWhileHeld(platform, paths, () => ApplyCore(setupLock, changeSetId));
     }
 
-    private SetupLedgerChangeSet ApplyCore(SetupLock setupLock, Guid changeSetId)
+    private SetupPlanSuccess<SetupLedgerChangeSet> ApplyCore(SetupLock setupLock, Guid changeSetId)
     {
         var compensationEligible = false;
         try
@@ -69,14 +95,18 @@ internal sealed class SetupApplyCoordinator
                 throw new SetupApplyException(SetupCodes.RecoveryRequired);
             }
 
-            RunRevalidation(plan, planned);
+            var revalidation = RunRevalidation(plan, planned);
             var captures = CaptureAndValidateBases(plan);
             var changedCaptures = captures.Where(capture => capture.HasChanges).ToArray();
             if (changedCaptures.Length == 0)
             {
                 var noChanges = CreateNoChangesChangeSet(planned);
                 SaveChangedSet(setupLock, ledger, changeSetIndex, noChanges);
-                return noChanges;
+                return SetupPlanResult.Success(
+                    noChanges,
+                    [],
+                    revalidation.Warnings,
+                    revalidation.NextActions);
             }
 
             var journalTargets = CreateJournalTargets(changedCaptures);
@@ -119,7 +149,11 @@ internal sealed class SetupApplyCoordinator
                 journalStore.MarkEnvironmentNotificationCompleted(setupLock, changeSetId);
             }
 
-            return applied;
+            return SetupPlanResult.Success(
+                applied,
+                [],
+                revalidation.Warnings,
+                revalidation.NextActions);
         }
         catch (Exception exception)
         {
@@ -142,6 +176,12 @@ internal sealed class SetupApplyCoordinator
                 {
                     throw new SetupApplyException(SetupCodes.RecoveryRequired);
                 }
+            }
+
+            if (exception is SetupApplyException applyException &&
+                string.Equals(applyException.Code, outcomeCode, StringComparison.Ordinal))
+            {
+                throw;
             }
 
             throw new SetupApplyException(outcomeCode);
@@ -893,19 +933,59 @@ internal sealed class SetupApplyCoordinator
         _ => SetupCodes.InternalError,
     };
 
-    private void RunRevalidation(SetupPrivatePlan plan, SetupLedgerChangeSet planned)
+    private SetupPlanSuccess<SetupRevalidation> RunRevalidation(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet planned)
     {
+        SetupPlanResult<SetupRevalidation>? result;
         try
         {
-            revalidator.Revalidate(plan, planned);
+            result = revalidator.Revalidate(plan, planned);
         }
-        catch (SetupApplyException exception)
+        catch (Exception)
         {
-            throw ApplyPreflightCodes.Contains(exception.Code)
-                ? exception
-                : new SetupApplyException(SetupCodes.InternalError);
+            throw new SetupApplyException(SetupCodes.InternalError);
         }
+
+        if (result is null || !HasValidRevalidationDiagnostics(result))
+        {
+            throw new SetupApplyException(SetupCodes.InternalError);
+        }
+
+        if (result is SetupPlanSuccess<SetupRevalidation> success)
+        {
+            if (success.Targets.Count != 0)
+            {
+                throw new SetupApplyException(SetupCodes.InternalError);
+            }
+
+            return SetupPlanResult.Revalidated(success.Warnings, success.NextActions);
+        }
+
+        if (result is not SetupPlanFailure<SetupRevalidation> failure)
+        {
+            throw new SetupApplyException(SetupCodes.InternalError);
+        }
+
+        if (failure.Code is SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget)
+        {
+            throw new SetupApplyException(failure.Code);
+        }
+
+        if (!ApplyPreflightCodes.Contains(failure.Code))
+        {
+            throw new SetupApplyException(SetupCodes.InternalError);
+        }
+
+        throw new SetupApplyException(SetupPlanResult.Failure<SetupLedgerChangeSet>(
+            failure.Code,
+            failure.Warnings,
+            failure.NextActions));
     }
+
+    private static bool HasValidRevalidationDiagnostics(SetupPlanResult<SetupRevalidation> result) =>
+        result.Warnings.All(RevalidationWarningCodes.Contains) &&
+        result.NextActions.All(RevalidationNextActionCodes.Contains);
 
     private IReadOnlyList<TargetCapture> CaptureAndValidateBases(SetupPrivatePlan plan)
     {

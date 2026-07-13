@@ -13,10 +13,17 @@ internal interface ISetupApplyRevalidator
 internal sealed class SetupApplyException : Exception
 {
     public SetupApplyException(string code)
-        : base(code)
+        : this(SetupPlanResult.Failure<SetupLedgerChangeSet>(code))
     {
-        Code = code;
     }
 
-    public string Code { get; }
+    public SetupApplyException(SetupPlanFailure<SetupLedgerChangeSet> failure)
+        : base((failure ?? throw new ArgumentNullException(nameof(failure))).Code)
+    {
+        Failure = failure;
+    }
+
+    public SetupPlanFailure<SetupLedgerChangeSet> Failure { get; }
+
+    public string Code => Failure.Code;
 }

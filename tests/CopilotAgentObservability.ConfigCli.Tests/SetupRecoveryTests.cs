@@ -285,7 +285,7 @@ public sealed class SetupRecoveryTests
         var fixture = new ApplyProducedRecoveryFixture(missingNoOp: true);
         using (var applyLock = fixture.AcquireLock())
         {
-            var applied = fixture.CreateApplyCoordinator().Apply(applyLock, fixture.ChangeSetId);
+            var applied = fixture.CreateApplyCoordinator().Apply(applyLock, fixture.ChangeSetId).Value;
             Assert.Equal(SetupChangeSetState.Applied, applied.State);
         }
         var appliedEnvironment = Assert.Single(
@@ -875,7 +875,7 @@ public sealed class SetupRecoveryTests
         using (var applyLock = fixture.AcquireLock())
         {
             Assert.Equal(SetupChangeSetState.Applied,
-                fixture.CreateApplyCoordinator().Apply(applyLock, fixture.ChangeSetId).State);
+                fixture.CreateApplyCoordinator().Apply(applyLock, fixture.ChangeSetId).Value.State);
         }
         Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
         fixture.Platform.FileSystem.DeleteFile(fixture.Paths.GetPlan(fixture.ChangeSetId));
@@ -6520,7 +6520,7 @@ public sealed class SetupRecoveryTests
                     using (var applyLock = AcquireLock())
                     {
                         Assert.Equal(SetupChangeSetState.Applied,
-                            CreateApplyCoordinator().Apply(applyLock, ChangeSetId).State);
+                            CreateApplyCoordinator().Apply(applyLock, ChangeSetId).Value.State);
                     }
 
                     Platform.InjectFault(

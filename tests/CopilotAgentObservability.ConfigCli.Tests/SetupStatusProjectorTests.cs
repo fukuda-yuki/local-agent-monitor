@@ -1214,7 +1214,7 @@ public sealed class SetupStatusProjectorTests
             using var acquisition = SetupLock.TryAcquire(Platform, Paths);
             return new SetupApplyCoordinator(
                     Platform, Paths, planStore, ledgerStore, journalStore, new PassRevalidator())
-                .Apply(acquisition.Lock!, ChangeSetId);
+                .Apply(acquisition.Lock!, ChangeSetId).Value;
         }
 
         public void Rollback()

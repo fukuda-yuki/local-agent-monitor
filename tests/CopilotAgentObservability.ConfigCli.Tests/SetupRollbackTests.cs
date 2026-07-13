@@ -1533,7 +1533,7 @@ public sealed class SetupRollbackTests
                 ledgerStore.PersistPlannedChangeSet(acquisition.Lock!, plan, ledger);
                 var applied = new SetupApplyCoordinator(
                         Platform, Paths, planStore, ledgerStore, journalStore, new PassRevalidator())
-                    .Apply(acquisition.Lock!, ChangeSetId);
+                    .Apply(acquisition.Lock!, ChangeSetId).Value;
                 if (applied.State != SetupChangeSetState.Applied)
                 {
                     throw new InvalidOperationException("The real apply producer did not establish rollback evidence.");
