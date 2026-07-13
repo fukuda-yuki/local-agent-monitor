@@ -7,7 +7,7 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     private readonly object gate = new();
     private readonly Dictionary<string, byte[]> files;
     private readonly Dictionary<string, string?> environment;
-    private readonly Dictionary<string, Queue<Exception>> faults = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Queue<(Exception Exception, Action? Callback)>> faults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<(Exception Exception, Action? Callback)>> afterEffectFaults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SetupTestBarrierState> barriers = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SetupPathMetadata> pathMetadata;
@@ -58,17 +58,17 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         }
     }
 
-    public void InjectFault(string operation, Exception exception)
+    public void InjectFault(string operation, Exception exception, Action? callback = null)
     {
         lock (gate)
         {
             if (!faults.TryGetValue(operation, out var queuedFaults))
             {
-                queuedFaults = new Queue<Exception>();
+                queuedFaults = new Queue<(Exception, Action?)>();
                 faults.Add(operation, queuedFaults);
             }
 
-            queuedFaults.Enqueue(exception);
+            queuedFaults.Enqueue((exception, callback));
         }
     }
 
@@ -131,17 +131,31 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 
     private void Record(string operation)
     {
+        (Exception Exception, Action? Callback)? fault = null;
         SetupTestBarrierState? barrier;
         lock (gate)
         {
             operations.Add(operation);
-            if (faults.TryGetValue(operation, out var queuedFaults) && queuedFaults.TryDequeue(out var exception))
+            if (faults.TryGetValue(operation, out var queuedFaults) && queuedFaults.TryDequeue(out var queuedFault))
             {
-                throw exception;
+                fault = queuedFault;
             }
 
-            barriers.TryGetValue(operation, out barrier);
-            barrier?.AcquireLease();
+            if (fault is null)
+            {
+                barriers.TryGetValue(operation, out barrier);
+                barrier?.AcquireLease();
+            }
+            else
+            {
+                barrier = null;
+            }
+        }
+
+        if (fault is { } beforeEffectFault)
+        {
+            beforeEffectFault.Callback?.Invoke();
+            throw beforeEffectFault.Exception;
         }
 
         if (barrier is null)
