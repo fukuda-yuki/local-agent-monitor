@@ -195,6 +195,7 @@ internal sealed class SetupApplyCoordinator
                 return CompensationOutcome.RecoveryRequired;
             }
 
+            var failures = new Dictionary<Guid, CompensationFailure>();
             for (var targetIndex = journal.Targets.Count - 1; targetIndex >= 0; targetIndex--)
             {
                 var target = journal.Targets[targetIndex];
@@ -215,17 +216,27 @@ internal sealed class SetupApplyCoordinator
                     var failure = CompensateStep(setupLock, changeSetId, planTarget, step);
                     if (failure is not null)
                     {
-                        return PersistPartial(setupLock, changeSetId, failure)
-                            ? CompensationOutcome.Partial
-                            : CompensationOutcome.RecoveryRequired;
+                        if (failure.RequiresRecovery)
+                        {
+                            return CompensationOutcome.RecoveryRequired;
+                        }
+
+                        if (!failure.SafeToPreserveAndContinue || failure.RecordId is null)
+                        {
+                            return PersistPartial(setupLock, changeSetId, failure)
+                                ? CompensationOutcome.Partial
+                                : CompensationOutcome.RecoveryRequired;
+                        }
+
+                        failures[failure.RecordId.Value] = failure;
                     }
                 }
             }
 
-            var verificationFailure = VerifyAllPrevious(plan, journal);
-            if (verificationFailure is not null)
+            VerifyAllPrevious(plan, journal, failures);
+            if (failures.Count > 0)
             {
-                return PersistPartial(setupLock, changeSetId, verificationFailure)
+                return PersistPartial(setupLock, changeSetId, failures.Values)
                     ? CompensationOutcome.Partial
                     : CompensationOutcome.RecoveryRequired;
             }
@@ -369,12 +380,20 @@ internal sealed class SetupApplyCoordinator
         var classification = Classify(target, step);
         if (classification == CompensationClassification.ThirdParty)
         {
-            return new CompensationFailure(target.RecordId, SetupCodes.RollbackStale, SetupLedgerRollbackStatus.Stale);
+            return new CompensationFailure(
+                target.RecordId,
+                SetupCodes.RollbackStale,
+                SetupLedgerRollbackStatus.Stale,
+                SafeToPreserveAndContinue: true);
         }
 
         if (classification == CompensationClassification.Error)
         {
-            return new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+            return new CompensationFailure(
+                target.RecordId,
+                SetupCodes.InternalError,
+                SetupLedgerRollbackStatus.Failed,
+                SafeToPreserveAndContinue: true);
         }
 
         if (step.Phase is SetupJournalStepPhase.MutationStarted or SetupJournalStepPhase.MutationCompleted)
@@ -387,7 +406,11 @@ internal sealed class SetupApplyCoordinator
                     step.Phase,
                     SetupJournalStepPhase.RestoreStarted))
             {
-                return new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+                return new CompensationFailure(
+                    target.RecordId,
+                    SetupCodes.InternalError,
+                    SetupLedgerRollbackStatus.Failed,
+                    RequiresRecovery: true);
             }
         }
 
@@ -513,9 +536,10 @@ internal sealed class SetupApplyCoordinator
         }
     }
 
-    private CompensationFailure? VerifyAllPrevious(
+    private void VerifyAllPrevious(
         SetupPrivatePlan plan,
-        SetupTransactionJournal journal)
+        SetupTransactionJournal journal,
+        IDictionary<Guid, CompensationFailure> failures)
     {
         foreach (var journalTarget in journal.Targets)
         {
@@ -533,19 +557,31 @@ internal sealed class SetupApplyCoordinator
                         StringComparison.Ordinal);
                 if (!matches)
                 {
-                    return new CompensationFailure(target.RecordId, SetupCodes.RollbackStale, SetupLedgerRollbackStatus.Stale);
+                    failures[target.RecordId] = new CompensationFailure(
+                        target.RecordId,
+                        SetupCodes.RollbackStale,
+                        SetupLedgerRollbackStatus.Stale);
                 }
             }
             catch (Exception)
             {
-                return new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+                failures[target.RecordId] = new CompensationFailure(
+                    target.RecordId,
+                    SetupCodes.InternalError,
+                    SetupLedgerRollbackStatus.Failed);
             }
         }
-
-        return null;
     }
 
     private bool PersistPartial(SetupLock setupLock, Guid changeSetId, CompensationFailure failure)
+    {
+        return PersistPartial(setupLock, changeSetId, [failure]);
+    }
+
+    private bool PersistPartial(
+        SetupLock setupLock,
+        Guid changeSetId,
+        IReadOnlyCollection<CompensationFailure> failures)
     {
         SetupTransactionJournal? journal;
         if (!TryLoadJournalOnce(changeSetId, out journal) || journal is null)
@@ -568,17 +604,13 @@ internal sealed class SetupApplyCoordinator
         return PersistPartialLedger(
             setupLock,
             changeSetId,
-            failure.RecordId,
-            failure.Code,
-            failure.RollbackStatus);
+            failures);
     }
 
     private bool PersistPartialLedger(
         SetupLock setupLock,
         Guid changeSetId,
-        Guid? failedRecordId,
-        string failureCode,
-        SetupLedgerRollbackStatus rollbackStatus)
+        IReadOnlyCollection<CompensationFailure> failures)
     {
         SetupOwnershipLedger ledger;
         try
@@ -603,9 +635,19 @@ internal sealed class SetupApplyCoordinator
             UpdatedAt = platform.Clock.UtcNow,
             OutcomeCode = SetupCodes.PartialApply,
             State = SetupChangeSetState.Partial,
-            Targets = current.Targets.Select(target => target.RecordId == failedRecordId || failedRecordId is null
-                ? target with { OutcomeCode = failureCode, RollbackStatus = rollbackStatus }
-                : target).ToArray(),
+            Targets = current.Targets.Select(target =>
+            {
+                var failure = failures.FirstOrDefault(candidate =>
+                    candidate.RecordId == target.RecordId) ??
+                    failures.FirstOrDefault(candidate => candidate.RecordId is null);
+                return failure is null
+                    ? target
+                    : target with
+                    {
+                        OutcomeCode = failure.Code,
+                        RollbackStatus = failure.RollbackStatus,
+                    };
+            }).ToArray(),
         };
         try
         {
@@ -1218,5 +1260,7 @@ internal sealed class SetupApplyCoordinator
     private sealed record CompensationFailure(
         Guid? RecordId,
         string Code,
-        SetupLedgerRollbackStatus RollbackStatus);
+        SetupLedgerRollbackStatus RollbackStatus,
+        bool SafeToPreserveAndContinue = false,
+        bool RequiresRecovery = false);
 }

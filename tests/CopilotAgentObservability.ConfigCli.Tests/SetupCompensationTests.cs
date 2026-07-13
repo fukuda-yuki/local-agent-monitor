@@ -222,26 +222,129 @@ public sealed class SetupCompensationTests
     }
 
     [Fact]
-    public void Apply_ThirdPartyValueBeforeClassificationIsPreservedAndStopsEarlierRestores()
+    public void Apply_ThirdPartyEnvironmentMemberIsPreservedWhileEarlierOwnedStepsAreRestored()
     {
         var fixture = CompensationFixture.Create();
         fixture.Platform.InjectAfterEffectFault(
-            "environment.set:ENV_B",
+            "environment.set:ENV_C",
             new IOException("PRIVATE_VALUE"),
-            () => fixture.Platform.SeedUserEnvironment("ENV_A", "third-party"));
+            () => fixture.Platform.SeedUserEnvironment("ENV_B", "third-party"));
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
         var exception = Assert.Throws<SetupApplyException>(() =>
             fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
 
         Assert.Equal(SetupCodes.PartialApply, exception.Code);
-        Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal("old-c", fixture.Platform.ReadUserEnvironment("ENV_C"));
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        var journal = fixture.JournalStore.Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Partial, journal.Phase);
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted, journal.Targets[0].Steps[0].Phase);
+        var environmentSteps = journal.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId).Steps;
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted, environmentSteps.Single(step => step.MemberKey == "ENV_A").Phase);
+        Assert.Equal(SetupJournalStepPhase.MutationCompleted, environmentSteps.Single(step => step.MemberKey == "ENV_B").Phase);
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted, environmentSteps.Single(step => step.MemberKey == "ENV_C").Phase);
+        var changeSet = fixture.LoadChangeSet();
+        var file = changeSet.Targets.Single(target => target.RecordId == fixture.FileRecordId);
+        Assert.Null(file.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.Pending, file.RollbackStatus);
+        var environment = changeSet.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId);
+        Assert.Equal(SetupCodes.RollbackStale, environment.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.Stale, environment.RollbackStatus);
+        var operations = fixture.Platform.Operations;
+        Assert.True(
+            LastIndexOf(operations, "environment.set:ENV_C") <
+            LastIndexOf(operations, "environment.set:ENV_A"));
+        Assert.True(
+            LastIndexOf(operations, "environment.set:ENV_A") <
+            LastIndexContaining(operations, $"->{fixture.TargetPath}"));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public void Apply_UnavailableEnvironmentMemberDoesNotBlockEarlierOwnedRestores()
+    {
+        var fixture = CompensationFixture.Create();
+        fixture.Platform.InjectAfterEffectFault(
+            "environment.set:ENV_C",
+            new IOException("FORWARD_PRIVATE"),
+            () =>
+            {
+                fixture.Platform.InjectFault("environment.get:ENV_B", new IOException("CAPTURE_PRIVATE_ONE"));
+                fixture.Platform.InjectFault("environment.get:ENV_B", new IOException("CAPTURE_PRIVATE_TWO"));
+            });
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.PartialApply, exception.Code);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal("old-c", fixture.Platform.ReadUserEnvironment("ENV_C"));
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        var journal = fixture.JournalStore.Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Partial, journal.Phase);
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted, journal.Targets[0].Steps[0].Phase);
+        var environmentSteps = journal.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId).Steps;
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted, environmentSteps.Single(step => step.MemberKey == "ENV_A").Phase);
+        Assert.Equal(SetupJournalStepPhase.MutationCompleted, environmentSteps.Single(step => step.MemberKey == "ENV_B").Phase);
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted, environmentSteps.Single(step => step.MemberKey == "ENV_C").Phase);
+        var changeSet = fixture.LoadChangeSet();
+        var file = changeSet.Targets.Single(target => target.RecordId == fixture.FileRecordId);
+        Assert.Null(file.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.Pending, file.RollbackStatus);
+        var environment = changeSet.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId);
+        Assert.Equal(SetupCodes.InternalError, environment.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.Failed, environment.RollbackStatus);
+        var operations = fixture.Platform.Operations;
+        Assert.True(
+            LastIndexOf(operations, "environment.set:ENV_C") <
+            LastIndexOf(operations, "environment.set:ENV_A"));
+        Assert.True(
+            LastIndexOf(operations, "environment.set:ENV_A") <
+            LastIndexContaining(operations, $"->{fixture.TargetPath}"));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public void Apply_MixedFileAndEnvironmentFailuresAggregateWhileNoOpMemberRemainsUnowned()
+    {
+        var fixture = CompensationFixture.Create(environmentCNoChange: true);
+        fixture.Platform.InjectAfterEffectFault(
+            "environment.set:ENV_B",
+            new IOException("FORWARD_PRIVATE"),
+            () =>
+            {
+                fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("third-party-file"));
+                fixture.Platform.SeedUserEnvironment("ENV_A", "third-party-a");
+                fixture.Platform.SeedUserEnvironment("ENV_C", "third-party-c");
+            });
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.PartialApply, exception.Code);
+        Assert.Equal("third-party-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
         Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
-        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("third-party-c", fixture.Platform.ReadUserEnvironment("ENV_C"));
+        Assert.Equal("third-party-file", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.DoesNotContain("environment.set:ENV_C", fixture.Platform.Operations);
         var journal = fixture.JournalStore.Load(fixture.ChangeSetId)!;
         Assert.Equal(SetupJournalPhase.Partial, journal.Phase);
         Assert.Equal(SetupJournalStepPhase.MutationCompleted, journal.Targets[0].Steps[0].Phase);
-        var environment = fixture.LoadChangeSet().Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId);
+        var environmentSteps = journal.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId).Steps;
+        Assert.Equal(["ENV_A", "ENV_B"], environmentSteps.Select(step => step.MemberKey));
+        Assert.Equal(SetupJournalStepPhase.MutationCompleted, environmentSteps[0].Phase);
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted, environmentSteps[1].Phase);
+        var changeSet = fixture.LoadChangeSet();
+        var file = changeSet.Targets.Single(target => target.RecordId == fixture.FileRecordId);
+        Assert.Equal(SetupCodes.RollbackStale, file.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.Stale, file.RollbackStatus);
+        var environment = changeSet.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId);
         Assert.Equal(SetupCodes.RollbackStale, environment.OutcomeCode);
         Assert.Equal(SetupLedgerRollbackStatus.Stale, environment.RollbackStatus);
         Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
@@ -558,7 +661,7 @@ public sealed class SetupCompensationTests
 
     private sealed class CompensationFixture
     {
-        private CompensationFixture(bool fileNoChange, bool includeEnvironment)
+        private CompensationFixture(bool fileNoChange, bool includeEnvironment, bool environmentCNoChange)
         {
             Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 12, 1, 2, 3, TimeSpan.Zero));
             Paths = new SetupRuntimePaths(Platform);
@@ -597,7 +700,10 @@ public sealed class SetupCompensationTests
                     [
                         new SetupPrivatePlanMember("ENV_A", SetupOperation.Replace, "desired-a"),
                         new SetupPrivatePlanMember("ENV_B", SetupOperation.Remove, null),
-                        new SetupPrivatePlanMember("ENV_C", SetupOperation.Replace, "desired-c"),
+                        new SetupPrivatePlanMember(
+                            "ENV_C",
+                            environmentCNoChange ? SetupOperation.NoOp : SetupOperation.Replace,
+                            environmentCNoChange ? "old-c" : "desired-c"),
                     ]));
             }
 
@@ -635,7 +741,9 @@ public sealed class SetupCompensationTests
                     [
                         new SetupLedgerMember("ENV_A", SetupOperation.Replace),
                         new SetupLedgerMember("ENV_B", SetupOperation.Remove),
-                        new SetupLedgerMember("ENV_C", SetupOperation.Replace),
+                        new SetupLedgerMember(
+                            "ENV_C",
+                            environmentCNoChange ? SetupOperation.NoOp : SetupOperation.Replace),
                     ],
                     plan.Targets[1].BaseStateHash,
                     null,
@@ -681,8 +789,11 @@ public sealed class SetupCompensationTests
         public SetupTransactionJournalStore JournalStore { get; }
         public SetupApplyCoordinator Coordinator { get; }
 
-        public static CompensationFixture Create(bool fileNoChange = false, bool includeEnvironment = true) =>
-            new(fileNoChange, includeEnvironment);
+        public static CompensationFixture Create(
+            bool fileNoChange = false,
+            bool includeEnvironment = true,
+            bool environmentCNoChange = false) =>
+            new(fileNoChange, includeEnvironment, environmentCNoChange);
 
         public SetupLedgerChangeSet LoadChangeSet() =>
             LedgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
