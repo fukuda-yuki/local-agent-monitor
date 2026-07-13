@@ -366,6 +366,7 @@ Failure codes:
 - `target_not_installed`
 - `unsupported_version`
 - `managed_policy_conflict`
+- `environment_override_conflict`
 - `malformed_settings`
 - `permission_denied`
 - `unsafe_path`
@@ -382,17 +383,32 @@ Failure codes:
 - `ledger_version_unsupported`
 - `internal_error`
 
-Argument failures use exit code `2`; stale/conflict failures `3`; target
+Argument failures use exit code `2`; stale/conflict failures, including
+`environment_override_conflict`, use `3`; target
 availability failures `4`; apply/IO failures `5`; partial rollback failures
 `6`. Success uses `0`. stderr may contain only the fixed result code.
+`environment_override_conflict` is valid only for a CLI-target `plan` or
+pre-artifact `apply` revalidation.
 
 ## Runtime storage and versioning
 
-Default private runtime root:
+The private runtime root is available on every supported planning OS so a
+macOS/Linux CLI plan can be persisted before a later apply returns
+`unsupported_target`:
 
-```text
-%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\setup\
-```
+| OS | Default private runtime root |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\setup\` |
+| macOS | `$HOME/Library/Application Support/CopilotAgentObservability/LocalMonitor/setup/` |
+| Linux | `${XDG_DATA_HOME:-$HOME/.local/share}/CopilotAgentObservability/LocalMonitor/setup/` |
+
+Production resolves the base with
+`Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)`.
+On Linux, .NET uses an absolute non-empty `XDG_DATA_HOME`; an unset, empty, or
+non-absolute value falls back to `$HOME/.local/share`. An injected
+`ISetupPlatform.LocalApplicationData` replaces only that base for a trusted
+host/test platform. There is no `setup` CLI flag or setup-specific environment
+variable that overrides this root.
 
 Layout:
 
@@ -619,14 +635,16 @@ notification, or any target write:
    supported version (`target_not_installed` or `unsupported_version`);
 4. every planned VS Code channel still has `GitHub.copilot-chat` installed in
    its Default Profile (`target_not_installed`);
-5. managed-channel selection and every managed telemetry value are reread for
-   VS Code, with a conflicting winning value returning
+5. Copilot managed-channel selection and the independent VS Code enterprise
+   policy values are reread for VS Code, with any differing observed constraint returning
    `managed_policy_conflict`; CLI remains environment-only and unverified;
 6. every file/environment member is logically re-derived from current state and
    must match the immutable key, desired value, and `add`/`replace`/`remove`/
    `no-op` operation (`recovery_required` on mismatch);
-7. every distinct endpoint passes the exact recognition probe below, with no
-   listener remaining a warning and every connected non-recognition outcome
+7. CLI `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` is reclassified as the detect-only
+   guard below (`environment_override_conflict` on a conflicting value);
+8. every distinct endpoint passes the exact recognition probe below, with no
+   listener remaining a warning and every other non-recognition outcome
    returning `port_owned_by_foreign_process`.
 
 After this adapter preflight, the generic all-target base/path/hash/reparse
@@ -794,7 +812,7 @@ The adapter/backend/CLI source contract is:
 
 | Selected target | Adapter detection/plan source | Physical target DTO | Apply-time adapter source | Mutation owner |
 | --- | --- | --- | --- | --- |
-| `vscode` | Stable/Insiders executable version, per-channel Default Profile extension list and user settings, current environment, read-only managed sources, endpoint probe, canonical `github-copilot-vscode` manifest | one JSON target per eligible installed channel, Stable then Insiders; labels are exactly `vscode-stable-default-user-settings` and `vscode-insiders-default-user-settings`; `expected_result` is the exact manifest | persisted channel/OS/member facts revalidated against current version, Default Profile extension, managed channel, settings members, and endpoint | generic #66 file transaction only |
+| `vscode` | Stable/Insiders executable version, per-channel Default Profile extension list and user settings, current environment, read-only Copilot managed channels plus independent VS Code enterprise policies, endpoint probe, canonical `github-copilot-vscode` manifest | one JSON target per eligible installed channel, Stable then Insiders; labels are exactly `vscode-stable-default-user-settings` and `vscode-insiders-default-user-settings`; `expected_result` is the exact manifest | persisted channel/OS/member facts revalidated against current version, Default Profile extension, both policy systems, settings members, and endpoint | generic #66 file transaction only |
 | `cli` | Copilot CLI version, current process environment, Windows current-user environment when available, endpoint probe, canonical `github-copilot-cli` manifest; managed sources are deliberately not opened | one `copilot-cli-user-environment` env target; `expected_result` is the exact manifest; macOS/Linux plan remains inspectable but non-applicable | persisted OS/version/member/endpoint facts; Windows is writable, macOS/Linux returns `unsupported_target` | generic #66 Windows user-environment transaction only |
 | `app-sdk` | current repository .NET package/version and canonical fixed sample | one `github-copilot-app-sdk-guidance` no-write guidance target with null `expected_result` | no target revalidation or write | none |
 
@@ -811,8 +829,9 @@ minimum because it is the first release that enforces the required precedence
 across managed-setting delivery channels. Versions 1.119 through 1.127 are
 detected but the whole requested `vscode` plan returns `unsupported_version`
 with `upgrade_vscode`; no channel is mutated. For every installed channel the
-adapter runs the channel's `--version` and `--list-extensions --show-versions`
-commands through a bounded process runner and requires
+adapter runs exactly `code --version` and
+`code --list-extensions --show-versions` for Stable, or the same arguments with
+`code-insiders` for Insiders, through a bounded process runner and requires
 `GitHub.copilot-chat`. A missing extension in any installed supported channel
 returns `target_not_installed` with
 `install_github_copilot_chat_extension`; it does not produce a partial plan.
@@ -825,6 +844,15 @@ Only each channel's Default Profile user `settings.json` is a writable target:
 | --- | --- | --- | --- |
 | Stable | `%APPDATA%\Code\User\settings.json` | `$HOME/Library/Application Support/Code/User/settings.json` | `$HOME/.config/Code/User/settings.json` |
 | Insiders | `%APPDATA%\Code - Insiders\User\settings.json` | `$HOME/Library/Application Support/Code - Insiders/User/settings.json` | `$HOME/.config/Code - Insiders/User/settings.json` |
+
+These are the documented standard user-data locations: the VS Code settings
+documentation supplies the Stable paths, and the Profiles documentation
+explicitly says Insiders replaces the intermediate `Code` folder with
+`Code - Insiders`. Extension detection deliberately omits `--profile`. The
+official CLI treats `--profile <name>` as a named-profile selector and creates
+a new empty profile when the name does not exist, so setup never passes
+`--profile`, never names `Default`, and never creates or selects a non-default
+profile while checking extensions.
 
 The adapter may enumerate the documented sibling `profiles/<profile-id>/`
 directories only to determine whether non-default profiles exist. It never
@@ -860,18 +888,20 @@ never silently deleted.
 
 The adapter reads these official managed sources without modifying them:
 
-| Managed tier | Windows | macOS | Linux |
+| Copilot managed tier | Windows | macOS | Linux |
 | --- | --- | --- | --- |
-| native | `HKEY_LOCAL_MACHINE\SOFTWARE\Policies\GitHubCopilot`; VS Code enterprise `CopilotOtel*` policy values under both `HKEY_LOCAL_MACHINE\Software\Policies\Microsoft\VSCode` and `HKEY_CURRENT_USER\Software\Policies\Microsoft\VSCode` (computer policy wins over user policy) | managed preferences for the `com.github.copilot` domain and installed VS Code configuration-profile `CopilotOtel*` values | VS Code enterprise `CopilotOtel*` values in `/etc/vscode/policy.json` |
+| native | `HKEY_LOCAL_MACHINE\SOFTWARE\Policies\GitHubCopilot` | managed preferences for the `com.github.copilot` domain | not available; Linux uses server/file delivery |
 | server | signed-in GitHub account policy; not locally observable to this external CLI | same | same |
 | file | `%ProgramFiles%\GitHubCopilot\managed-settings.json` | `/Library/Application Support/GitHubCopilot/managed-settings.json` | `/etc/github-copilot/managed-settings.json` |
+
+Linux has no native Copilot managed-settings channel.
 
 Managed tiers use `native > server > file`. The first tier that supplies any
 managed settings is the sole managed object; lower managed tiers are ignored
 wholesale and fields are never merged across channels. Per setting, a value in
 that winning object is then above environment, user setting, and product
-default. An observed conflicting value in the winning or potentially winning
-read-only source yields `managed_policy_conflict` and no plan. Because the
+default. An observed conflicting value in the winning Copilot managed-settings
+channel yields `managed_policy_conflict` and no plan. Because the
 server tier cannot be proved present or absent by an external CLI, when native
 is absent a successful plan includes warning `managed_policy_unverified` and
 next action `run_vscode_policy_diagnostics`; a locally observed file remains a
@@ -879,15 +909,25 @@ bounded fact but is not claimed effective over a possibly present server tier.
 When native is present, it proves the winning managed channel and server/file
 are ignored without merging.
 
-Multiple native mechanisms do not create a merge exception. On Windows, first
-resolve the VS Code enterprise-policy candidate as computer (HKLM) when it has
-any `CopilotOtel*` value, otherwise user (HKCU). Compare that whole candidate
-with the whole GitHub Copilot native-MDM telemetry object. If both are present,
-their canonical telemetry objects must be identical; otherwise the result is
-`managed_policy_conflict`. The same exact-object rule applies if macOS exposes
-distinct Copilot managed-preference and VS Code configuration-profile telemetry
-objects. The adapter never unions disjoint fields from same-tier native
-mechanisms.
+VS Code enterprise policy is a separate policy system, not a fourth delivery
+channel and not part of the precedence above. The adapter also reads these
+official sources without modifying them:
+
+| OS | Independent VS Code enterprise policy source |
+| --- | --- |
+| Windows | `CopilotOtel*` values under both `HKEY_LOCAL_MACHINE\Software\Policies\Microsoft\VSCode` and `HKEY_CURRENT_USER\Software\Policies\Microsoft\VSCode`; computer policy wins over user policy within this system |
+| macOS | installed VS Code configuration-profile `CopilotOtel*` values |
+| Linux | `CopilotOtel*` values in `/etc/vscode/policy.json` |
+
+The adapter resolves the Copilot managed-settings object and the VS Code
+enterprise-policy values independently. It never lets a Microsoft VS Code
+policy suppress Copilot server/file discovery and never merges an enterprise
+policy into the winning Copilot object. For each planned telemetry field, any
+observed value from either system that differs from the desired value returns
+`managed_policy_conflict`; equal observed constraints are reported as managed
+without being rewritten. When Copilot native MDM is absent, an observed VS Code
+enterprise policy does not prove the Copilot server tier absent, so
+`managed_policy_unverified` and Policy Diagnostics guidance remain required.
 
 If a `Code` process is running, restart requirement is `restart_vscode`.
 Post-apply verification reparses the settings, rechecks the target hashes and
@@ -914,6 +954,18 @@ The default plan does not change content capture. With
 `--include-content-capture`, it separately proposes
 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` and emits the same
 sensitive warning.
+
+`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` is detect-only and is never added to that
+write allowlist. GitHub documents it as overriding
+`OTEL_EXPORTER_OTLP_PROTOCOL` for traces. If it is already exactly
+`http/protobuf`, the plan leaves it unchanged and emits
+`cli_trace_protocol_override_not_modified`. If it has any other value, the
+requested global protocol cannot become effective for traces: plan fails with
+`environment_override_conflict`, includes
+`review_cli_trace_protocol_override`, and creates no private plan or target
+artifact. Apply repeats this detect-only classification before mutation
+artifacts; a then-conflicting value returns the same code/action and no write.
+Setup never removes or rewrites the override.
 
 On Windows, the plan displays current-process versus current-user environment
 state and warns `shared_user_environment_affects_other_processes`. Apply uses
@@ -977,9 +1029,11 @@ all other validation, but before backups or any write:
 
 - send `GET <canonical-origin>/health/live` with redirects disabled;
 - enforce one 500 ms total budget covering connect, request, response headers,
-  and body read;
-- read at most 4096 response-body bytes, failing as soon as a larger body is
-  observed;
+  and body read; connect, read, and total-budget timeout all classify as a
+  foreign owner once the probe attempt begins;
+- if a trustworthy valid `Content-Length` exceeds 4096, fail immediately;
+  otherwise read at most 4096 payload bytes plus one sentinel byte so an
+  unknown/chunked 4097-byte response is detected without an unbounded read;
 - recognize Local Monitor only for HTTP 200 whose complete body parses as a
   JSON object with exactly one property, case-sensitive string
   `"status":"live"`; JSON whitespace and property order are irrelevant, but
@@ -996,25 +1050,34 @@ all other validation, but before backups or any write:
 The apply-time probe is an observation and does not claim that port ownership
 cannot change after the probe.
 
-Other fixed next actions include:
+The warning allowlist is closed and exhaustive:
 
-- `install_vscode`
-- `install_github_copilot_chat_extension`
-- `upgrade_vscode`
-- `install_copilot_cli`
-- `upgrade_copilot_cli`
-- `run_vscode_policy_diagnostics`
-- `restart_vscode`
-- `restart_terminal_session`
-- `start_local_monitor`
-- `review_content_capture_warning`
-- `run_first_trace_doctor` (Issue #69, never performed here)
+| Warning | Exact condition |
+| --- | --- |
+| `content_capture_sensitive` | explicit content-capture member is planned |
+| `managed_policy_unverified` | VS Code Copilot server tier is unobservable, or CLI uses environment-only managed detection |
+| `monitor_not_running` | connection is refused or an equivalent positive no-listener result is observed |
+| `shared_user_environment_affects_other_processes` | Windows CLI user-environment target is planned |
+| `vscode_non_default_profiles_not_modified` | one or both channels have a non-default profile; emitted once per command, with no remediation action |
+| `cli_trace_protocol_override_not_modified` | existing trace-specific protocol override already equals `http/protobuf` and is left untouched |
 
-Fixed warning codes additionally include
-`vscode_non_default_profiles_not_modified`. It is emitted once per command even
-when both Stable and Insiders have non-default profiles. It has no automatic
-write/remediation next action because those profiles are outside the mutation
-scope.
+The `next_actions` allowlist is also closed and exhaustive:
+
+| Next action | Exact use |
+| --- | --- |
+| `install_vscode` | neither requested VS Code channel is installed |
+| `install_github_copilot_chat_extension` | an installed requested channel lacks the extension in Default Profile |
+| `upgrade_vscode` | an installed requested channel is below 1.128 |
+| `install_copilot_cli` | Copilot CLI is not installed |
+| `upgrade_copilot_cli` | Copilot CLI is below 1.0.4 |
+| `run_vscode_policy_diagnostics` | emitted whenever `managed_policy_unverified` is returned for VS Code |
+| `restart_vscode` | a VS Code target requires reload/restart |
+| `restart_terminal_session` | a Windows CLI user-environment change requires a new process |
+| `start_local_monitor` | endpoint probe proves no listener |
+| `review_content_capture_warning` | explicit sensitive content capture was requested |
+| `review_cli_trace_protocol_override` | trace-specific protocol override blocks the requested global protocol |
+| `run_first_trace_doctor` | handoff to Issue #69 after static setup; never performed here |
+| `rerun_requested_setup_command` | mandatory recovery completed instead of the requested command |
 
 ## Security and evidence rules
 
@@ -1073,19 +1136,26 @@ Focused validation covers:
   mutation artifacts or target writes;
 - endpoint recognition covers exact 200 JSON, whitespace, refused/no-listener,
   every 3xx without redirect following, non-200, connect/read/total timeout,
-  4096/4097-byte boundaries, malformed/non-object/extra-property/wrong-status
-  JSON, and proves the 500 ms total budget;
+  valid oversized `Content-Length`, sentinel-based 4096/4097-byte boundaries,
+  malformed/non-object/extra-property/wrong-status JSON, and proves the 500 ms
+  total budget;
 - VS Code Stable/Insiders Default Profile path selection on Windows/macOS/Linux,
   deterministic dual-channel order, non-default-profile warning de-duplication,
-  and proof that no non-default profile is opened or included in a plan;
-- managed source matrices for the official Windows/macOS/Linux native and file
-  locations, Windows VS Code registry policies as native, native > server >
-  file whole-channel selection without merge, server-unobservable warning, and
-  read-only source behavior;
+  exact no-`--profile` extension-listing commands, and proof that no non-default
+  profile is created, selected, opened, or included in a plan;
+- managed source matrices for official Copilot native/server/file locations and
+  independent Windows/macOS/Linux VS Code enterprise policies, whole-channel
+  Copilot selection without merge, cross-system conflict/equality behavior,
+  server-unobservable warning, and read-only source behavior;
 - Copilot CLI exact environment allowlist/forbidden global keys, always-
   unverified managed state, Windows user-environment apply, and macOS/Linux
   detect/plan followed by `apply`/`unsupported_target` with no shell-profile or
-  mutation artifact;
+  mutation artifact; matching/conflicting
+  `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` is detected without entering the write
+  allowlist;
+- private runtime-root selection covers Windows, macOS, Linux absolute/invalid/
+  missing `XDG_DATA_HOME`, and the trusted injected base while proving there is
+  no public setup override;
 - a valid persisted plan whose adapter is removed from the registry returns the
   permitted `apply`/`unsupported_adapter` result and leaves all durable bytes
   and targets unchanged;
@@ -1125,9 +1195,10 @@ The setup implementation must keep this requirement-to-test mapping:
 | filter, priority, deterministic tie-break, hard 100-row cap, truncation | `SetupStatusOrderingTests` cover adapter filter before 99/100/101-row ordering and cap, equal-priority states, timestamp order, and lowercase UUID ordinal ties |
 | terminal pending environment notification artifact identity and notification-only target isolation | `SetupRecoveryTests` use actual `SetupApplyCoordinator` artifacts for successful replay and valid-64-hex tampering of journal prior/desired hashes and ledger previous/applied aggregates; they also cover missing/corrupt/rebound plan or backup, canonical backup reference, applied/restored/rolled-back terminal lifecycles, current-target drift, no target reads/writes, preserved terminal durable lifecycle, fixed failed overlay, and unchanged completed-notification handling |
 | closed apply/error command composition | `SetupCliTests` and `SetupContractValidationTests` accept persisted-adapter removal as `apply`/`unsupported_adapter` and macOS/Linux CLI as `apply`/`unsupported_target`, while proving unchanged plan/ledger bytes and no new artifact/platform write |
-| VS Code channel/profile and managed-source contract | `VsCodeSetupAdapterTests` cover Stable/Insiders Default Profiles on all three OS path maps, dual-channel order, fixed non-default warning/no-open behavior, native/server/file whole-channel precedence, official source locations, and apply-time version/extension/policy/member revalidation |
-| Copilot CLI OS and exact environment contract | `CopilotCliSetupAdapterTests` cover the five-member explicit-capture allowlist, forbidden global identity/resource/header/credential keys, environment-only managed warning, Windows apply, and macOS/Linux no-write apply refusal |
-| Local Monitor recognition | `GitHubCopilotEndpointProbeTests` cover the 500 ms/no-redirect/4096-byte/exact-JSON matrix and fixed refused-versus-connected failure mapping |
+| VS Code channel/profile and managed-source contract | `VsCodeSetupAdapterTests` cover Stable/Insiders Default Profiles on all three OS path maps, exact no-`--profile` extension commands, dual-channel order, fixed non-default warning/no-create/no-open behavior, Copilot whole-channel precedence, independent enterprise-policy equality/conflict, and apply-time version/extension/policy/member revalidation; contract shape/validation tests close the warning allowlist |
+| Copilot CLI OS and exact environment contract | `CopilotCliSetupAdapterTests` cover the five-member explicit-capture allowlist, forbidden global identity/resource/header/credential keys, matching/conflicting detect-only trace protocol override, environment-only managed warning, Windows apply, and macOS/Linux no-write apply refusal; contract shape/validation tests close the new code/warning/action values |
+| cross-platform private setup root | `SetupRuntimeTests` cover Windows/macOS/Linux local-application-data mappings, absolute and invalid/unset `XDG_DATA_HOME`, injected platform base, and absence of a CLI/environment override |
+| Local Monitor recognition | `GitHubCopilotEndpointProbeTests` cover the 500 ms/no-redirect/4096-byte-plus-sentinel or oversized-`Content-Length`/exact-JSON matrix and fixed refused-versus-timeout/connected failure mapping |
 
 Required repository validation remains:
 

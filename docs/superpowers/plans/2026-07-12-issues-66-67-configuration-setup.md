@@ -88,7 +88,9 @@ Setup tests. Do not change #67 target behavior. Commit:
 ## T2 - Expose the real #66 command producer
 
 **Own:** `Setup/Adapters/ISetupAdapter.cs`, adapter registry, `Setup/Cli/`,
-`CliApplication.cs`, `CliHelpText.cs`, setup CLI tests, and repository
+`Setup/Contracts/SetupContractValidator.cs`, `CliApplication.cs`,
+`CliHelpText.cs`, `SetupCliTests.cs`, and the command-composition cases in
+`SetupContractValidationTests.cs`/`SetupContractShapeTests.cs`; plus repository
 `scripts/local-monitor/setup.ps1` plus its exact wrapper tests.
 
 **Deliver:** all four commands through the real coordinator, one JSON stdout
@@ -119,10 +121,14 @@ implementations in the production adapter registry.
 **Deliver:** the real adapter foundation and internal #66 plan DTO path;
 Stable/Insiders and CLI version detection; planning OS capture; canonical #61
 manifest pairing; official read-only managed-source tables; native > server >
-file whole-channel selection with no merge; and the exact endpoint classifier:
+file whole-channel selection with no merge inside the Copilot system;
+independent VS Code enterprise-policy observation; and the exact endpoint
+classifier:
 
 - no-redirect `GET <origin>/health/live`;
-- one 500 ms total budget and maximum 4096 complete body bytes;
+- one 500 ms total budget; connect/read/total timeout is foreign-owner;
+- maximum 4096 payload bytes, using one sentinel byte unless a trustworthy
+  `Content-Length` already proves oversize;
 - accept only HTTP 200 and exactly `{ "status": "live" }` modulo JSON
   whitespace/property order, with no duplicate/extra property;
 - refused/proved no-listener -> warning `monitor_not_running`;
@@ -130,19 +136,23 @@ file whole-channel selection with no merge; and the exact endpoint classifier:
   malformed/non-object, or different JSON ->
   `port_owned_by_foreign_process`.
 
-Apply revalidates OS support, endpoint, policy, version, extension presence, and
-exact member semantics before backup/journal/lifecycle transition/write.
+T3 exposes bounded observations/classifiers only. It does not own target plan
+creation or target-specific apply revalidation: T4 owns VS Code version/
+extension/policy/member/endpoint revalidation and T5 owns CLI OS/version/
+environment-member/endpoint revalidation.
 
 **Verify:** `GitHubCopilotDetectionTests`, `GitHubCopilotEndpointProbeTests`,
-runtime manifest tests, and contract validation tests. Commit:
+and runtime manifest tests. Commit:
 `Issue #67: feat(setup): add Copilot detection foundation`.
 
 ## T4 - Implement VS Code Stable/Insiders Default Profile setup
 
 **Depends on:** T3.
 
-**Own:** VS Code adapter files and `VsCodeSetupAdapterTests.cs`. Do not edit the
-shared production adapter registry; T7 owns the join.
+**Own:** VS Code adapter files, `VsCodeSetupAdapterTests.cs`, and the narrow
+`SetupCodes.cs`/`SetupContractValidator.cs`/`SetupContractShapeTests.cs`/
+`SetupContractValidationTests.cs` additions for the fixed non-default-profile
+warning. Do not edit the shared production adapter registry; T7 owns the join.
 
 **Deliver:** Stable and Insiders 1.128+; deterministic Stable-then-Insiders
 physical targets when both are eligible; per-channel Default Profile paths on
@@ -153,10 +163,16 @@ and fixed warning `vscode_non_default_profiles_not_modified` exactly once when
 any non-default profile exists. Non-default profile files are never opened,
 hashed, parsed, planned, backed up, written, or rolled back.
 
-Read official native/server/file managed sources only. Windows
-`Software\Policies\Microsoft\VSCode` is native tier. The winning channel is
-whole, not field-merged. Native absence produces
-`managed_policy_unverified` because server presence cannot be proved.
+Extension listing is exactly `code --list-extensions --show-versions` or
+`code-insiders --list-extensions --show-versions`, with no `--profile` argument;
+setup never creates/selects a named profile. Insiders paths use the official
+Profiles rule that replaces intermediate folder `Code` with `Code - Insiders`.
+
+Read official Copilot native/server/file managed sources and select their
+winning channel whole, not field-merged. Separately read VS Code enterprise
+`CopilotOtel*` policies; never let them suppress Copilot server/file. A
+differing observed constraint from either system blocks. Copilot native absence
+produces `managed_policy_unverified` because server presence cannot be proved.
 
 **Verify:** `VsCodeSetupAdapterTests` cover three-OS paths, both channels,
 profile no-open proof, exact warning de-duplication, managed-source precedence,
@@ -168,8 +184,10 @@ member revalidation. Commit:
 
 **Depends on:** T3.
 
-**Own:** Copilot CLI adapter files and `CopilotCliSetupAdapterTests.cs`. Do not
-edit the shared production adapter registry; T7 owns the join.
+**Own:** Copilot CLI adapter files, `CopilotCliSetupAdapterTests.cs`, and the
+narrow `SetupCodes.cs`/`SetupContractValidator.cs`/shape-validation additions
+for the trace-protocol override conflict/warning/action. Do not edit the shared
+production adapter registry; T7 owns the join.
 
 **Deliver:** CLI 1.0.4+ and the exact default allowlist:
 `COPILOT_OTEL_ENABLED`, `COPILOT_OTEL_EXPORTER_TYPE`,
@@ -178,6 +196,12 @@ content capture adds only
 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`. Never write
 `client.kind`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
 `OTEL_EXPORTER_OTLP_HEADERS`, `COPILOT_OTEL_SOURCE_NAME`, or credentials.
+
+Detect-only `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` never joins the write
+allowlist. Matching `http/protobuf` is retained with
+`cli_trace_protocol_override_not_modified`; any other value returns
+`environment_override_conflict` plus `review_cli_trace_protocol_override` and
+does not persist a plan.
 
 CLI policy detection is environment-only and every successful plan includes
 `managed_policy_unverified`. Windows alone writes the current-user environment.
@@ -232,10 +256,18 @@ and the full ConfigCli project. Commit:
 
 **Depends on:** T7.
 
-**Own:** release package script/layout tests, setup wrapper packaging, current
-user/operator docs listed by the original plan, and Sprint23 durable ledger/
-README/task status. Do not change unrelated startup/user-env scripts or the
-release workflow.
+**Own exactly:** `scripts/local-monitor/package-release.ps1`; the package/layout/
+executable and wrapper-parity cases in
+`tests/CopilotAgentObservability.LocalMonitor.Tests/LocalMonitorScriptTests.cs`;
+`README.md`; `scripts/local-monitor/README.md`;
+`docs/user-guide/local-monitor.md`;
+`docs/agent-guides/repository-workflow.md`;
+`docs/specifications/interfaces/config-cli.md`;
+`docs/sprints/sprint23-configuration-ownership-github-copilot/README.md`;
+`docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md`; and
+`docs/task.md`. Package the already implemented
+`scripts/local-monitor/setup.ps1` without changing its T2 command contract.
+Do not change unrelated startup/user-env scripts or the release workflow.
 
 **Deliver:** self-contained `app/config-cli/`, exact wrapper parity, no installed
 .NET runtime requirement, implemented examples that never claim first trace,

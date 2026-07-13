@@ -1841,9 +1841,14 @@ a thin argument/result wrapper.
   rollback require its UUIDv7 ID. Public output is the fixed repository-safe
   `setup.v1` JSON contract.
 - The version-1 ownership ledger lives under the current user's Local Monitor
-  runtime root and stores fixed labels, timestamps, state/error codes, hashes,
-  opaque backup references, and the immutable repository-safe plan-time target
-  projection required by `status`. Exact values and paths are confined to
+  runtime root: `%LOCALAPPDATA%` on Windows,
+  `$HOME/Library/Application Support` on macOS, or absolute `XDG_DATA_HOME`
+  with `$HOME/.local/share` fallback on Linux, followed by
+  `CopilotAgentObservability/LocalMonitor/setup/`. This cross-platform private
+  root lets macOS/Linux persist an inspectable plan before apply refuses its
+  CLI target. The ledger stores fixed labels, timestamps, state/error codes,
+  hashes, opaque backup references, and the immutable repository-safe plan-time
+  target projection required by `status`. Exact values and paths are confined to
   private plans/backups/journals. Plans retain desired state but not previous
   values; exact previous state is captured only in apply-time backups. Version 1 is the first shipped schema; unknown versions
   fail closed and no synthetic v0 migration is invented. The complete ledger
@@ -1890,21 +1895,30 @@ a thin argument/result wrapper.
   Windows only. macOS/Linux detect and plan the CLI target, but apply returns
   `unsupported_target` without a shell-profile or target write. GitHub Copilot
   App/SDK is caller-managed guidance and performs no write.
-- Managed channels use native > server > file precedence and the highest
-  present channel wins wholesale without field merging. Windows
-  `Software\Policies\Microsoft\VSCode` is a native-tier source alongside the
-  official Copilot MDM source; official macOS/Linux native and file locations
-  are also read-only. Per-setting effective precedence is managed policy,
-  environment, user setting, default. Conflicts in an observed winning or
-  potentially winning source block apply. Signed-in-account server policy that
-  an external CLI cannot prove is `managed_policy_unverified`; Copilot CLI uses
-  environment-only detection and always reports the same warning.
+- Copilot managed-settings channels use native > server > file precedence and
+  the highest present channel wins wholesale without field merging. Its native
+  sources are only Windows `HKEY_LOCAL_MACHINE\SOFTWARE\Policies\GitHubCopilot`
+  and macOS `com.github.copilot`; Linux has no native channel. VS Code
+  enterprise `CopilotOtel*` policies under `Software\Policies\Microsoft\VSCode`,
+  macOS configuration profiles, and `/etc/vscode/policy.json` are a separate
+  policy system. Both systems are read-only and resolved independently; an
+  enterprise policy never suppresses Copilot server/file discovery. Any
+  observed differing telemetry constraint blocks with
+  `managed_policy_conflict`, while an equal constraint is managed/no-write.
+  Signed-in-account server policy that an external CLI cannot prove is
+  `managed_policy_unverified` even when an enterprise policy is observed;
+  Copilot CLI uses environment-only detection and always reports the same
+  warning.
 - Content capture is preserved by default. Enabling it requires the independent
   `--include-content-capture` option, a separate member plan change, and a sensitive
   warning. Global `client.kind`, `OTEL_SERVICE_NAME`,
   `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`,
   `COPILOT_OTEL_SOURCE_NAME`, credentials, and unrelated resource attributes
-  are not changed.
+  are not changed. Existing `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` is detect-only:
+  exact `http/protobuf` is preserved with
+  `cli_trace_protocol_override_not_modified`; any other value returns
+  `environment_override_conflict` and no plan. It is never added to the write
+  allowlist.
 - Setup static verification does not prove telemetry receipt. First-trace
   diagnosis remains Issue #69. No HTTP, proxy, Canvas action, Razor UI, database,
   or AppHost resource is added.
@@ -1920,10 +1934,12 @@ a thin argument/result wrapper.
   before projection.
 - Local Monitor recognition is exactly a no-redirect
   `GET <origin>/health/live` under one 500 ms total timeout and a 4096-byte body
-  cap. Only HTTP 200 and an exact JSON object containing solely string
-  `status=live` is accepted. Refused/no-listener is `monitor_not_running`; every
-  connected timeout, redirect, non-200, oversize, malformed/non-object, or
-  different JSON response is `port_owned_by_foreign_process`.
+  cap. The probe reads at most 4096 payload bytes plus one sentinel byte unless
+  a trustworthy `Content-Length` already proves oversize. Only HTTP 200 and an
+  exact JSON object containing solely string `status=live` is accepted.
+  Refused/no-listener is `monitor_not_running`; every connect/read/total
+  timeout, redirect, non-200, oversize, malformed/non-object, or different JSON
+  response is `port_owned_by_foreign_process`.
 - Environment notification is attempted after an uninterrupted final state.
   Recovery may replay it because exactly-once delivery cannot be proven across
   a process crash without an acknowledgement protocol.

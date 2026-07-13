@@ -750,8 +750,12 @@ credentials, tokens, authorization headers, raw exception text, raw telemetry,
 prompts/responses, tool input/output, source fragments, or PII.
 
 Immutable apply plans, backups, and transaction journals are private local
-runtime data under
-`%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\setup\`. Plans retain
+runtime data under the platform local-application-data base plus
+`CopilotAgentObservability/LocalMonitor/setup/`: `%LOCALAPPDATA%` on Windows,
+`$HOME/Library/Application Support` on macOS, and absolute `XDG_DATA_HOME` or
+`$HOME/.local/share` on Linux. The injected platform base is the only trusted
+override; no setup command option or setup-specific environment override is
+accepted. Plans retain
 only target locations and validated desired values; they do not retain previous
 values read during preview. Flushed apply-time backups retain the exact previous
 local state needed for rollback. None is emitted to stdout/stderr, logs, CI,
@@ -778,19 +782,26 @@ a shell profile or system environment file. The adapter does not add global
 `client.kind`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
 `OTEL_EXPORTER_OTLP_HEADERS`, `COPILOT_OTEL_SOURCE_NAME`, or any credential,
 and it does not implicitly enable content capture.
+`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` is read only: a matching
+`http/protobuf` override is retained with a fixed warning, and any other value
+returns `environment_override_conflict` before a plan is persisted.
 
 VS Code Stable and Insiders writes are limited to each channel's Default
 Profile settings file. Non-default profile directories are observed only for
 the fixed `vscode_non_default_profiles_not_modified` warning and are never
 opened, hashed, backed up, or mutated. Managed policy sources are read-only.
-The adapter selects one whole managed channel in native > server > file order;
-it never merges fields from multiple channels. Windows VS Code enterprise
-`Software\Policies\Microsoft\VSCode`, Copilot native MDM, macOS managed
-preferences/configuration profiles, Linux `/etc/vscode/policy.json`, and the
-three official `managed-settings.json` paths retain their upstream read-only
-role. A locally observed conflict blocks the relevant write. An unobservable
-server-managed policy is `managed_policy_unverified`, not absence; Copilot CLI
-uses environment-only detection and therefore always returns that warning.
+The adapter selects one whole Copilot managed-settings channel in native >
+server > file order; its native channel is only Windows `GitHubCopilot` or
+macOS `com.github.copilot`, and Linux has no native channel. It never merges
+fields from multiple Copilot channels. VS Code enterprise `CopilotOtel*`
+policies under `Software\Policies\Microsoft\VSCode`, macOS configuration
+profiles, and Linux `/etc/vscode/policy.json` form an independent policy
+system. They are checked separately and never suppress Copilot server/file
+evaluation. A differing observed constraint from either system blocks the
+relevant plan; an equal value is managed/no-write. An unobservable
+server-managed policy remains `managed_policy_unverified`, even when an
+enterprise policy is present; Copilot CLI uses environment-only detection and
+therefore always returns that warning.
 
 Transaction concurrency uses a non-waiting exclusive lock and deterministic
 stale checks. There is no retry loop or timing-based conflict recovery. The
@@ -808,17 +819,19 @@ restore targets before projection.
 
 Apply revalidates adapter registration, planning OS support, every target
 version, VS Code Default Profile extension presence, managed policy, logical
-member semantics, and every distinct loopback endpoint before creating backups
-or mutation artifacts. A removed persisted adapter returns
-`unsupported_adapter`; macOS/Linux CLI apply returns `unsupported_target`; both
-leave the plan/ledger and targets unchanged.
+member semantics, CLI detect-only protocol overrides, and every distinct
+loopback endpoint before creating backups or mutation artifacts. A removed
+persisted adapter returns `unsupported_adapter`; macOS/Linux CLI apply returns
+`unsupported_target`; both leave the plan/ledger and targets unchanged.
 
 Endpoint recognition is a no-redirect `GET /health/live` with a 500 ms total
-budget and 4096-byte response cap. Only HTTP 200 with a JSON object containing
+budget and 4096-byte response cap. A trustworthy `Content-Length` may prove
+oversize up front; otherwise the probe reads at most 4096 payload bytes plus
+one sentinel byte. Only HTTP 200 with a JSON object containing
 exactly the string property `status: live` is Local Monitor. Connection refused
-or a proved absent listener is `monitor_not_running`; any connected timeout,
-redirect, non-200, oversize, malformed/non-object, extra-property, or other JSON
-response is `port_owned_by_foreign_process`. The probe is not a lease and does
+or a proved absent listener is `monitor_not_running`; any connect/read/total
+timeout, redirect, non-200, oversize, malformed/non-object, extra-property, or
+other JSON response is `port_owned_by_foreign_process`. The probe is not a lease and does
 not claim the listener cannot change afterward. Environment notification
 happens only after a final state. Recovery may replay the notification when
 prior delivery cannot be proven; exactly-once external broadcast is not

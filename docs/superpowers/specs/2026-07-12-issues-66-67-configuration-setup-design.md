@@ -50,16 +50,21 @@ Official upstream facts rechecked on 2026-07-14:
   Profile only.
 - Copilot managed settings arrive through native MDM, signed-in-account server
   policy, or a well-known per-OS `managed-settings.json`. VS Code 1.128+ selects
-  native > server > file as one authoritative channel without merge. Windows
-  VS Code enterprise `CopilotOtel*` policies under
-  `Software\Policies\Microsoft\VSCode`, macOS configuration profiles, and Linux
-  `/etc/vscode/policy.json` are also official native enterprise-policy sources.
-  An external CLI can read local native/file sources but cannot prove the
-  signed-in-account result.
+  native > server > file as one authoritative channel without merge. The native
+  Copilot locations are only Windows `GitHubCopilot` and macOS
+  `com.github.copilot`; Linux has no native Copilot channel. VS Code enterprise
+  `CopilotOtel*` policies under `Software\Policies\Microsoft\VSCode`, macOS
+  configuration profiles, and Linux `/etc/vscode/policy.json` are an explicitly
+  separate policy system. An external CLI can read local sources but cannot
+  prove the signed-in-account result.
 - Copilot CLI 1.0.4 introduced OpenTelemetry instrumentation. Current GitHub
   documentation defines `COPILOT_OTEL_ENABLED`,
   `COPILOT_OTEL_EXPORTER_TYPE`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and protocol
-  variables.
+  variables, including `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` as a trace-specific
+  override of the global protocol.
+- The existing runtime uses .NET `LocalApplicationData`. Its macOS mapping is
+  `$HOME/Library/Application Support`; on Linux it is an absolute
+  `XDG_DATA_HOME` or `$HOME/.local/share` fallback.
 - GitHub Copilot SDK exposes a caller-provided `TelemetryConfig`, including the
   .NET `OtlpEndpoint` and `OtlpProtocol` fields.
 
@@ -71,8 +76,12 @@ Primary references:
 - https://code.visualstudio.com/docs/enterprise/policies
 - https://code.visualstudio.com/docs/configure/settings
 - https://code.visualstudio.com/docs/configure/profiles
+- https://code.visualstudio.com/docs/configure/command-line
 - https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference
 - https://docs.github.com/en/copilot/how-tos/copilot-sdk/observability/opentelemetry
+- https://opentelemetry.io/docs/specs/otel/protocol/exporter/
+- https://learn.microsoft.com/en-us/dotnet/api/system.environment.specialfolder
+- https://source.dot.net/System.Private.CoreLib/src/runtime/src/libraries/System.Private.CoreLib/src/System/Environment.GetFolderPathCore.Unix.cs.html
 
 ## Considered approaches
 
@@ -178,6 +187,12 @@ restore. Journals record physical-target progress. All are local runtime data,
 not repository-safe output. Backups are retained until a future explicitly
 designed cleanup feature.
 
+The private root exists on every planning platform: `%LOCALAPPDATA%` on
+Windows, `$HOME/Library/Application Support` on macOS, or absolute
+`XDG_DATA_HOME` with `$HOME/.local/share` fallback on Linux, then
+`CopilotAgentObservability/LocalMonitor/setup/`. A trusted injected platform can
+replace the base for tests/hosting; no setup CLI/environment override exists.
+
 The complete ledger keeps its existing 1 MiB cap. Snapshot fields are strictly
 bounded, including detected versions at 128 UTF-16 code units, and an executable
 boundary proves the largest accepted single change set fits under that cap.
@@ -258,13 +273,21 @@ only to emit `vscode_non_default_profiles_not_modified`; never open or mutate
 their settings. Keep captureContent unchanged unless the sensitive option is
 explicit.
 
-Managed sources are read-only. Select the entire native, server, or file object
-in that order; never merge channels. Treat Windows GitHub Copilot MDM and VS
-Code `Software\Policies\Microsoft\VSCode`, macOS managed
-preferences/configuration profiles, Linux `/etc/vscode/policy.json`, and the
-official per-OS `managed-settings.json` paths according to the canonical table.
-A managed conflict blocks the relevant write. Native absence leaves the
-unobservable signed-in server tier unresolved, yielding
+Extension detection uses exactly each channel executable with
+`--list-extensions --show-versions` and no `--profile`. Official VS Code CLI
+behavior can create a missing named profile, so setup never passes a profile
+name, never names `Default`, and never creates/selects a non-default profile.
+Stable paths come from the settings documentation; the official Profiles page
+qualifies the Insiders mapping by replacing intermediate folder `Code` with
+`Code - Insiders`.
+
+Managed sources are read-only. Select the entire Copilot native, server, or
+file object in that order; never merge those channels. Resolve VS Code
+enterprise `CopilotOtel*` policies independently rather than treating them as
+Copilot native. A differing observed constraint from either system blocks the
+plan, while an equal value is managed/no-write. Enterprise policy presence
+never suppresses Copilot server/file evaluation. Copilot native absence leaves
+the unobservable signed-in server tier unresolved, yielding
 `managed_policy_unverified` and Policy Diagnostics guidance.
 
 ### Terminal CLI
@@ -278,6 +301,12 @@ content member is exactly
 identity, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
 `OTEL_EXPORTER_OTLP_HEADERS`, `COPILOT_OTEL_SOURCE_NAME`, or credentials.
 Managed state is environment-only/unverified for this target.
+
+Detect but never write `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`. Preserve
+`http/protobuf` with `cli_trace_protocol_override_not_modified`; any other
+value blocks plan with `environment_override_conflict` and
+`review_cli_trace_protocol_override` because it overrides the global protocol
+for traces.
 
 Windows apply uses only the #66 current-user API. macOS/Linux execute the same
 detection/redacted plan path, persist the planning OS, and return
@@ -300,9 +329,11 @@ apply, and partial rollback have distinct outcomes and next actions.
 
 No-listener endpoint is a warning because setup may precede monitor startup.
 Recognition sends a no-redirect `GET /health/live` under one 500 ms total
-budget, reads at most 4096 bytes, and accepts only HTTP 200 with a JSON object
+budget. A trustworthy `Content-Length` may reject oversize immediately;
+otherwise the probe reads at most 4096 payload bytes plus one sentinel byte.
+It accepts only HTTP 200 with a JSON object
 containing exactly string `status=live`. Refused/no-listener is
-`monitor_not_running`; timeout after connection, redirect, non-200, oversize,
+`monitor_not_running`; connect/read/total timeout, redirect, non-200, oversize,
 malformed/non-object, extra-property, or other JSON is
 `port_owned_by_foreign_process`. Static success never means that traces or
 metrics arrived.
@@ -329,10 +360,14 @@ contracts are:
 - real Issue #61 manifest consumption by the VS Code/CLI adapter;
 - Stable/Insiders Default Profile path and dual-channel order, fixed non-default
   warning, and proof that profile files outside Default are never opened;
-- official three-OS managed source locations, native/server/file whole-channel
-  selection, policy/environment/user/default precedence, and CLI always-
-  unverified environment-only behavior;
-- exact endpoint 500 ms/no-redirect/4096-byte/JSON recognition matrix;
+- official three-OS managed source locations, Copilot native/server/file whole-
+  channel selection, independent VS Code enterprise-policy conflicts,
+  policy/environment/user/default precedence, and CLI always-unverified
+  environment-only behavior;
+- closed warning/next-action allowlists and trace-specific protocol override
+  matching/conflicting cases without expanding the write allowlist;
+- exact endpoint 500 ms/no-redirect/4096-byte-plus-sentinel or
+  `Content-Length`/JSON recognition matrix;
 - apply-time endpoint/policy/version/extension/member revalidation with no
   artifacts, plus persisted-adapter removal and macOS/Linux CLI apply command/
   code combinations;
