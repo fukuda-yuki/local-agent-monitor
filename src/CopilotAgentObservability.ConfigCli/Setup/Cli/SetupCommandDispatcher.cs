@@ -10,10 +10,12 @@ internal sealed class SetupCommandDispatcher
 {
     private readonly ISetupPlatform platform;
     private readonly SetupRuntimePaths paths;
+    private readonly SetupPlanStore planStore;
     private readonly SetupLedgerStore ledgerStore;
     private readonly SetupAdapterRegistry adapterRegistry;
     private readonly string toolVersion;
     private readonly Func<SetupLock, SetupRecoveryResult> recover;
+    private readonly Func<SetupLock, Guid, SetupPlanSuccess<SetupLedgerChangeSet>> apply;
 
     public SetupCommandDispatcher(
         ISetupPlatform platform,
@@ -26,32 +28,44 @@ internal sealed class SetupCommandDispatcher
         : this(
             platform ?? throw new ArgumentNullException(nameof(platform)),
             paths ?? throw new ArgumentNullException(nameof(paths)),
+            planStore ?? throw new ArgumentNullException(nameof(planStore)),
             ledgerStore ?? throw new ArgumentNullException(nameof(ledgerStore)),
             adapterRegistry ?? throw new ArgumentNullException(nameof(adapterRegistry)),
             toolVersion ?? throw new ArgumentNullException(nameof(toolVersion)),
             CreateRecovery(
                 platform,
                 paths,
-                planStore ?? throw new ArgumentNullException(nameof(planStore)),
+                planStore,
                 ledgerStore,
-                journalStore ?? throw new ArgumentNullException(nameof(journalStore))))
+                journalStore ?? throw new ArgumentNullException(nameof(journalStore))),
+            CreateApply(
+                platform,
+                paths,
+                planStore,
+                ledgerStore,
+                journalStore,
+                adapterRegistry))
     {
     }
 
     internal SetupCommandDispatcher(
         ISetupPlatform platform,
         SetupRuntimePaths paths,
+        SetupPlanStore planStore,
         SetupLedgerStore ledgerStore,
         SetupAdapterRegistry adapterRegistry,
         string toolVersion,
-        Func<SetupLock, SetupRecoveryResult> recover)
+        Func<SetupLock, SetupRecoveryResult> recover,
+        Func<SetupLock, Guid, SetupPlanSuccess<SetupLedgerChangeSet>> apply)
     {
         this.platform = platform ?? throw new ArgumentNullException(nameof(platform));
         this.paths = paths ?? throw new ArgumentNullException(nameof(paths));
+        this.planStore = planStore ?? throw new ArgumentNullException(nameof(planStore));
         this.ledgerStore = ledgerStore ?? throw new ArgumentNullException(nameof(ledgerStore));
         this.adapterRegistry = adapterRegistry ?? throw new ArgumentNullException(nameof(adapterRegistry));
         this.toolVersion = toolVersion ?? throw new ArgumentNullException(nameof(toolVersion));
         this.recover = recover ?? throw new ArgumentNullException(nameof(recover));
+        this.apply = apply ?? throw new ArgumentNullException(nameof(apply));
     }
 
     private static Func<SetupLock, SetupRecoveryResult> CreateRecovery(
@@ -62,12 +76,30 @@ internal sealed class SetupCommandDispatcher
         SetupTransactionJournalStore journalStore) =>
         new SetupRecoveryCoordinator(platform, paths, planStore, ledgerStore, journalStore).RecoverNext;
 
+    private static Func<SetupLock, Guid, SetupPlanSuccess<SetupLedgerChangeSet>> CreateApply(
+        ISetupPlatform platform,
+        SetupRuntimePaths paths,
+        SetupPlanStore planStore,
+        SetupLedgerStore ledgerStore,
+        SetupTransactionJournalStore journalStore,
+        SetupAdapterRegistry adapterRegistry) =>
+        new SetupApplyCoordinator(
+            platform,
+            paths,
+            planStore,
+            ledgerStore,
+            journalStore,
+            adapterRegistry).Apply;
+
     public SetupCommandResult Dispatch(SetupOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        return options.Command == SetupCommand.Plan
-            ? DispatchPlan(options)
-            : Validate(Unimplemented(options));
+        return options.Command switch
+        {
+            SetupCommand.Plan => DispatchPlan(options),
+            SetupCommand.Apply => DispatchApply(options),
+            _ => Validate(Unimplemented(options)),
+        };
     }
 
     private SetupCommandResult DispatchPlan(SetupOptions options)
@@ -83,7 +115,7 @@ internal sealed class SetupCommandDispatcher
             var recovery = recover(acquisition.Lock!);
             if (recovery.Disposition != SetupRecoveryDisposition.None)
             {
-                return Validate(RecoveryResult(recovery, options.Adapter));
+                return Validate(RecoveryResult(recovery, SetupCommand.Plan, null, options.Adapter));
             }
 
             if (recovery.Code is not null ||
@@ -155,8 +187,135 @@ internal sealed class SetupCommandDispatcher
         }
     }
 
+    private SetupCommandResult DispatchApply(SetupOptions options)
+    {
+        var changeSetId = options.ChangeSetId!.Value;
+        var correlationId = changeSetId.ToString("D");
+        try
+        {
+            using var acquisition = SetupLock.TryAcquire(platform, paths);
+            if (!acquisition.Acquired)
+            {
+                return Validate(ApplyFailure(SetupCodes.SetupBusy, correlationId, null));
+            }
+
+            var recovery = recover(acquisition.Lock!);
+            if (recovery.Disposition != SetupRecoveryDisposition.None)
+            {
+                return Validate(RecoveryResult(
+                    recovery,
+                    SetupCommand.Apply,
+                    correlationId,
+                    null));
+            }
+
+            if (recovery.Code is not null ||
+                recovery.RecoveredChangeSetId is not null ||
+                recovery.Operation is not null ||
+                recovery.EffectiveChangeSet is not null)
+            {
+                return Validate(ApplyFailure(SetupCodes.InternalError, correlationId, null));
+            }
+
+            var ledger = ledgerStore.LoadForRecovery();
+            var changeSet = ledger.ChangeSets.SingleOrDefault(candidate => candidate.ChangeSetId == changeSetId);
+            if (changeSet is null)
+            {
+                return Validate(ApplyFailure(SetupCodes.InvalidArguments, correlationId, null));
+            }
+
+            SetupPrivatePlan? plan;
+            try
+            {
+                plan = planStore.Load(changeSetId);
+                if (plan is null)
+                {
+                    return Validate(ApplyFailure(
+                        SetupCodes.RecoveryRequired,
+                        correlationId,
+                        changeSet.Adapter));
+                }
+
+                SetupStorageValidation.ValidatePlan(plan);
+                SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
+            }
+            catch (Exception exception) when (
+                exception is SetupStorageException or FormatException or ArgumentException or InvalidOperationException)
+            {
+                return Validate(ApplyFailure(
+                    SetupCodes.RecoveryRequired,
+                    correlationId,
+                    changeSet.Adapter));
+            }
+
+            if (changeSet.State != SetupChangeSetState.Planned)
+            {
+                return Validate(ApplyFailure(
+                    SetupCodes.InvalidArguments,
+                    correlationId,
+                    changeSet.Adapter,
+                    ProjectApplyTargets(changeSet, SetupCodes.InvalidArguments)));
+            }
+
+            try
+            {
+                SetupStorageValidation.ValidatePlanAndLedger(plan, changeSet);
+            }
+            catch (Exception exception) when (
+                exception is SetupStorageException or FormatException or ArgumentException or InvalidOperationException)
+            {
+                return Validate(ApplyFailure(
+                    SetupCodes.RecoveryRequired,
+                    correlationId,
+                    changeSet.Adapter));
+            }
+
+            _ = Validate(new SetupCommandResult(
+                SetupCommand.Apply,
+                true,
+                SetupCodes.ApplySucceeded,
+                correlationId,
+                null,
+                null,
+                changeSet.Adapter,
+                ProjectApplyTargets(changeSet, SetupCodes.ApplySucceeded),
+                [],
+                [],
+                [],
+                false));
+
+            try
+            {
+                _ = adapterRegistry.Resolve(changeSet.Adapter);
+            }
+            catch (SetupAdapterNotRegisteredException)
+            {
+                return Validate(ApplyFailure(
+                    SetupCodes.UnsupportedAdapter,
+                    correlationId,
+                    changeSet.Adapter));
+            }
+
+            _ = apply;
+            return Validate(ApplyFailure(
+                SetupCodes.InternalError,
+                correlationId,
+                changeSet.Adapter));
+        }
+        catch (SetupStorageException exception)
+        {
+            return Validate(ApplyFailure(MapStorageCode(exception.Code), correlationId, null));
+        }
+        catch (Exception)
+        {
+            return Validate(ApplyFailure(SetupCodes.InternalError, correlationId, null));
+        }
+    }
+
     private static SetupCommandResult RecoveryResult(
         SetupRecoveryResult recovery,
+        SetupCommand command,
+        string? changeSetId,
         string? adapter)
     {
         if (recovery.Disposition == SetupRecoveryDisposition.Recovered &&
@@ -166,10 +325,10 @@ internal sealed class SetupCommandDispatcher
             IsRecoveredEvidence(recovery.EffectiveChangeSet, recoveredId, operation, recovery.Code))
         {
             return new SetupCommandResult(
-                SetupCommand.Plan,
+                command,
                 true,
                 recovery.Code,
-                null,
+                changeSetId,
                 recoveredId.ToString("D"),
                 operation,
                 adapter,
@@ -188,10 +347,10 @@ internal sealed class SetupCommandDispatcher
             IsFailedEvidence(recovery.EffectiveChangeSet, failedId))
         {
             return new SetupCommandResult(
-                SetupCommand.Plan,
+                command,
                 false,
                 SetupCodes.InterruptedRecoveryFailed,
-                null,
+                changeSetId,
                 failedId.ToString("D"),
                 failedOperation,
                 adapter,
@@ -208,7 +367,7 @@ internal sealed class SetupCommandDispatcher
             (recovery.Operation is null || Enum.IsDefined(recovery.Operation.Value)) &&
             IsFailedEvidence(recovery.EffectiveChangeSet, recoveryRequiredId))
         {
-            return Failure(SetupCodes.RecoveryRequired, adapter);
+            return CommandFailure(command, SetupCodes.RecoveryRequired, changeSetId, adapter);
         }
 
         if (recovery.Disposition == SetupRecoveryDisposition.Failed &&
@@ -216,10 +375,10 @@ internal sealed class SetupCommandDispatcher
             recovery.Operation is null &&
             recovery.EffectiveChangeSet is null)
         {
-            return Failure(MapRecoveryCode(recovery.Code), adapter);
+            return CommandFailure(command, MapRecoveryCode(recovery.Code), changeSetId, adapter);
         }
 
-        return Failure(SetupCodes.InternalError, adapter);
+        return CommandFailure(command, SetupCodes.InternalError, changeSetId, adapter);
     }
 
     private static bool IsRecoveredEvidence(
@@ -327,6 +486,32 @@ internal sealed class SetupCommandDispatcher
         Snapshot(warnings ?? []),
         Snapshot(nextActions ?? []),
         false);
+
+    private static SetupCommandResult ApplyFailure(
+        string code,
+        string changeSetId,
+        string? adapter,
+        IReadOnlyList<SetupTargetResult>? targets = null) => new(
+        SetupCommand.Apply,
+        false,
+        code,
+        changeSetId,
+        null,
+        null,
+        adapter,
+        targets ?? [],
+        [],
+        [],
+        [],
+        false);
+
+    private static SetupCommandResult CommandFailure(
+        SetupCommand command,
+        string code,
+        string? changeSetId,
+        string? adapter) => command == SetupCommand.Plan
+        ? Failure(code, adapter)
+        : ApplyFailure(code, changeSetId!, adapter);
 
     private static SetupCommandResult Unimplemented(SetupOptions options) => new(
         options.Command,

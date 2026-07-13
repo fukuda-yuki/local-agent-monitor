@@ -506,10 +506,9 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Theory]
-    [InlineData(SetupCommand.Apply)]
     [InlineData(SetupCommand.Rollback)]
     [InlineData(SetupCommand.Status)]
-    public void Dispatch_UnimplementedCommandUsesValidatorValidFixedGuardWithoutLocking(SetupCommand command)
+    public void Dispatch_UnimplementedRollbackOrStatusUsesValidatorValidFixedGuardWithoutLocking(SetupCommand command)
     {
         var adapter = new RecordingAdapter("test-adapter", _ => throw new InvalidOperationException("adapter must not run"));
         var fixture = DispatcherFixture.Create(adapter, _ => throw new InvalidOperationException("recovery must not run"));
@@ -527,6 +526,293 @@ public sealed class SetupCommandDispatcherTests
         Assert.Equal(command, result.Command);
         Assert.DoesNotContain(fixture.Platform.Operations, operation =>
             operation == $"file.lock:{fixture.Paths.Lock}");
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_WhenBusyKeepsRequestedCorrelationWithoutRecoveryOrAdapter()
+    {
+        var fixture = DispatcherFixture.Create([], _ => throw new InvalidOperationException("recovery must not run"));
+        var applyCalls = new CallCounter();
+        var dispatcher = CreateApplyDispatcher(
+            fixture,
+            [],
+            _ => throw new InvalidOperationException("recovery must not run"),
+            applyCalls);
+        var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        using var held = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(changeSetId));
+
+        Assert.Equal(SetupCodes.SetupBusy, result.Code);
+        Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.Adapter);
+        Assert.Equal(0, applyCalls.Value);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_RecoveryKeepsRequestedIdAndCorrelatesRecoveredTransactionBeforeLedgerRead()
+    {
+        var requestedId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var recoveredId = Guid.Parse("00000000-0000-7000-8000-000000000700");
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var recoveryCalls = 0;
+        var operationCount = fixture.Platform.Operations.Count;
+        var effective = CreateApplyChangeSet([CreateOwnedApplyTarget(RecordId)]) with
+        {
+            ChangeSetId = recoveredId,
+            OutcomeCode = SetupCodes.InterruptedApplyRecovered,
+        };
+        var applyCalls = new CallCounter();
+        var dispatcher = CreateApplyDispatcher(
+            fixture,
+            [],
+            _ =>
+            {
+                recoveryCalls++;
+                return new SetupRecoveryResult(
+                    SetupRecoveryDisposition.Recovered,
+                    SetupCodes.InterruptedApplyRecovered,
+                    recoveredId,
+                    SetupRecoveryOperation.Apply,
+                    effective);
+            },
+            applyCalls);
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(requestedId));
+
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.InterruptedApplyRecovered, result.Code);
+        Assert.Equal(requestedId.ToString("D"), result.ChangeSetId);
+        Assert.Equal(recoveredId.ToString("D"), result.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Apply, result.RecoveryOperation);
+        Assert.Null(result.Adapter);
+        Assert.Equal([SetupCodes.RerunRequestedSetupCommand], result.NextActions);
+        Assert.DoesNotContain(
+            fixture.Platform.Operations.Skip(operationCount),
+            operation => operation.Contains(fixture.Paths.OwnershipLedger, StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(1, recoveryCalls);
+        Assert.Equal(0, applyCalls.Value);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_FailedRecoveryKeepsRequestedIdAndProjectsRecoveredCorrelationWithoutAdapter()
+    {
+        var requestedId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var recoveredId = Guid.Parse("00000000-0000-7000-8000-000000000700");
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var effective = CreateApplyChangeSet([CreateOwnedApplyTarget(RecordId)]) with
+        {
+            ChangeSetId = recoveredId,
+            State = SetupChangeSetState.Partial,
+            OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+        };
+        var applyCalls = new CallCounter();
+        var dispatcher = CreateApplyDispatcher(
+            fixture,
+            [],
+            _ => new SetupRecoveryResult(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.InterruptedRecoveryFailed,
+                recoveredId,
+                SetupRecoveryOperation.Apply,
+                effective),
+            applyCalls);
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(requestedId));
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(requestedId.ToString("D"), result.ChangeSetId);
+        Assert.Equal(recoveredId.ToString("D"), result.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Apply, result.RecoveryOperation);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.ChangeSets);
+        Assert.Equal(0, applyCalls.Value);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DispatchApply_MissingLedgerRowReturnsInvalidArgumentsWithoutReadingPlan(bool orphanPlan)
+    {
+        var adapter = new RecordingAdapter("persisted-adapter", request =>
+            SetupPlanResult.Planned(CreatePlan(
+                request,
+                [CreateRecord(RecordId, "first-target", SetupOperation.Replace)])));
+        var fixture = DispatcherFixture.Create(adapter, _ => NoRecovery());
+        var requestedId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        if (orphanPlan)
+        {
+            var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions("persisted-adapter"));
+            requestedId = Guid.Parse(planned.ChangeSetId!);
+            using var setupLock = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+            fixture.LedgerStore.Save(setupLock.Lock!, new SetupOwnershipLedger(1, []));
+        }
+
+        var baseline = fixture.Platform.Operations.Count;
+        var applyCalls = new CallCounter();
+        var dispatcher = CreateApplyDispatcher(fixture, [adapter], _ => NoRecovery(), applyCalls);
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(requestedId));
+        var operations = fixture.Platform.Operations.Skip(baseline).ToArray();
+
+        Assert.Equal(SetupCodes.InvalidArguments, result.Code);
+        Assert.Equal(requestedId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.Adapter);
+        Assert.DoesNotContain(operations, operation =>
+            operation.Contains(fixture.Paths.GetPlan(requestedId), StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(0, applyCalls.Value);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("unreadable")]
+    [InlineData("mismatch")]
+    public void DispatchApply_RowArtifactFailureReturnsRecoveryRequiredWithPersistedAdapter(string variant)
+    {
+        var adapter = new RecordingAdapter("persisted-adapter", request =>
+            SetupPlanResult.Planned(CreatePlan(
+                request,
+                [CreateRecord(RecordId, "first-target", SetupOperation.Replace)])));
+        var fixture = DispatcherFixture.Create(adapter, _ => NoRecovery());
+        var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions("persisted-adapter"));
+        var changeSetId = Guid.Parse(planned.ChangeSetId!);
+        var originalPlan = fixture.PlanStore.Load(changeSetId)!;
+        using (var setupLock = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
+        {
+            fixture.PlanStore.Delete(setupLock.Lock!, changeSetId);
+            if (variant == "unreadable")
+            {
+                fixture.Platform.SeedFile(fixture.Paths.GetPlan(changeSetId), Encoding.UTF8.GetBytes("{not-json"));
+            }
+            else if (variant == "mismatch")
+            {
+                fixture.PlanStore.Create(setupLock.Lock!, originalPlan with { SelectedTarget = "different-target" });
+            }
+        }
+
+        var applyCalls = new CallCounter();
+        var dispatcher = CreateApplyDispatcher(fixture, [], _ => NoRecovery(), applyCalls);
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(changeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Equal("persisted-adapter", result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Equal(0, applyCalls.Value);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_ValidNonPlannedRowProjectsHistoricalLedgerBeforeAdapterResolution()
+    {
+        var adapter = new RecordingAdapter("persisted-adapter", request =>
+            SetupPlanResult.Planned(CreatePlan(request, [CreateManifestRecord(request)])));
+        var fixture = DispatcherFixture.Create(adapter, _ => NoRecovery());
+        var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions("persisted-adapter"));
+        var changeSetId = Guid.Parse(planned.ChangeSetId!);
+        using var historical = CreateHistoricalVsCodeManifest();
+        using (var setupLock = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
+        {
+            var ledger = fixture.LedgerStore.LoadForRecovery();
+            var row = Assert.Single(ledger.ChangeSets);
+            var target = Assert.Single(row.Targets);
+            fixture.LedgerStore.Save(setupLock.Lock!, ledger with
+            {
+                ChangeSets = [row with
+                {
+                    State = SetupChangeSetState.Applied,
+                    OutcomeCode = SetupCodes.ApplySucceeded,
+                    UpdatedAt = Timestamp.AddSeconds(1),
+                    Targets = [target with
+                    {
+                        AppliedStateHash = new string('b', 64),
+                        BackupReference = target.RecordId.ToString("D"),
+                        OutcomeCode = SetupCodes.ApplySucceeded,
+                        RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                        StatusProjection = target.StatusProjection with
+                        {
+                            ExpectedResult = historical.RootElement.Clone(),
+                        },
+                    }],
+                }],
+            });
+        }
+
+        var applyCalls = new CallCounter();
+        var dispatcher = CreateApplyDispatcher(fixture, [], _ => NoRecovery(), applyCalls);
+        var result = dispatcher.Dispatch(CreateApplyOptions(changeSetId));
+        var json = SetupJson.Serialize(result);
+
+        Assert.Equal(SetupCodes.InvalidArguments, result.Code);
+        Assert.Equal("persisted-adapter", result.Adapter);
+        var projected = Assert.Single(result.Targets);
+        Assert.False(projected.RollbackAvailable);
+        Assert.Equal("planned", projected.ExpectedResult!.Value.GetProperty("support_status").GetString());
+        Assert.Contains("\"stability\":\"preview\"", json, StringComparison.Ordinal);
+        Assert.Equal(0, applyCalls.Value);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData(false, SetupCodes.UnsupportedAdapter)]
+    [InlineData(true, SetupCodes.InternalError)]
+    public void DispatchApply_ValidPlannedRowPrevalidatesThenResolvesWithoutCallingApply(
+        bool registered,
+        string expectedCode)
+    {
+        var adapter = new RecordingAdapter("persisted-adapter", request =>
+            SetupPlanResult.Planned(CreatePlan(request, [CreateManifestRecord(request)])));
+        var fixture = DispatcherFixture.Create(adapter, _ => NoRecovery());
+        var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions("persisted-adapter"));
+        var changeSetId = Guid.Parse(planned.ChangeSetId!);
+        using (var historical = CreateHistoricalVsCodeManifest())
+        using (var setupLock = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
+        {
+            var ledger = fixture.LedgerStore.LoadForRecovery();
+            var row = Assert.Single(ledger.ChangeSets);
+            var target = Assert.Single(row.Targets);
+            fixture.LedgerStore.Save(setupLock.Lock!, ledger with
+            {
+                ChangeSets = [row with
+                {
+                    Targets = [target with
+                    {
+                        StatusProjection = target.StatusProjection with
+                        {
+                            ExpectedResult = historical.RootElement.Clone(),
+                        },
+                    }],
+                }],
+            });
+        }
+        var planBytes = fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(changeSetId));
+        var ledgerBytes = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
+        var applyCalls = new CallCounter();
+        var dispatcher = CreateApplyDispatcher(
+            fixture,
+            registered ? [adapter] : [],
+            _ => NoRecovery(),
+            applyCalls);
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(changeSetId));
+
+        Assert.Equal(expectedCode, result.Code);
+        Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Equal("persisted-adapter", result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.ChangeSets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.Equal(0, applyCalls.Value);
+        Assert.Equal(planBytes, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(changeSetId)));
+        Assert.Equal(ledgerBytes, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
         SetupContractValidator.Validate(result);
     }
 
@@ -769,6 +1055,33 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Fact]
+    public void DispatchApply_ProductionConstructorBindsCoordinatorButStopsAtB1SentinelWithoutMutation()
+    {
+        var adapter = new RecordingAdapter("test-adapter", request =>
+            SetupPlanResult.Planned(CreatePlan(
+                request,
+                [CreateRecord(RecordId, "first-target", SetupOperation.Replace)])));
+        var fixture = DispatcherFixture.CreateProduction(adapter);
+        var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions());
+        var changeSetId = Guid.Parse(planned.ChangeSetId!);
+        var planBytes = fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(changeSetId));
+        var ledgerBytes = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Dispatcher.Dispatch(CreateApplyOptions(changeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Equal("test-adapter", result.Adapter);
+        Assert.Equal(planBytes, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(changeSetId)));
+        Assert.Equal(ledgerBytes, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
+        Assert.Single(
+            fixture.Platform.Operations.Skip(baseline),
+            operation => operation == $"file.lock:{fixture.Paths.Lock}");
+        Assert.Equal(SetupChangeSetState.Planned, Assert.Single(fixture.LedgerStore.Load().ChangeSets).State);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
     public void DispatchPlan_ProductionConstructorReturnsActualInterruptedApplyRecoveryEvidence()
     {
         var platform = new SetupTestPlatform(Timestamp);
@@ -874,6 +1187,32 @@ public sealed class SetupCommandDispatcherTests
         "http://127.0.0.1:4320",
         false,
         null);
+
+    private static SetupOptions CreateApplyOptions(Guid changeSetId) => new(
+        SetupCommand.Apply,
+        null,
+        null,
+        null,
+        false,
+        changeSetId);
+
+    private static SetupCommandDispatcher CreateApplyDispatcher(
+        DispatcherFixture fixture,
+        IEnumerable<ISetupAdapter> adapters,
+        Func<SetupLock, SetupRecoveryResult> recover,
+        CallCounter applyCalls) => new(
+        fixture.Platform,
+        fixture.Paths,
+        fixture.PlanStore,
+        fixture.LedgerStore,
+        new SetupAdapterRegistry(adapters),
+        "1.2.3",
+        recover,
+        (_, _) =>
+        {
+            applyCalls.Value++;
+            throw new InvalidOperationException("B1 apply seam must not run");
+        });
 
     private static SetupRecoveryResult NoRecovery() => new(
         SetupRecoveryDisposition.None,
@@ -1012,6 +1351,32 @@ public sealed class SetupCommandDispatcherTests
                 SetupEffectiveSource.UserSetting,
                 null,
                 null,
+                null,
+                [change]));
+    }
+
+    private static SetupChangeRecord CreateManifestRecord(SetupPlanRequest request)
+    {
+        var current = SourceCapabilityManifestLoader
+            .LoadForTarget(GitHubCopilotSetupTarget.VsCode)!
+            .CanonicalJson;
+        var change = CreateApplyChange(SetupOperation.Replace);
+        return new SetupChangeRecord(
+            RecordId,
+            SetupTargetKind.Json,
+            "private://vscode-stable-default-user-settings",
+            "vscode-stable-default-user-settings",
+            new string('a', 64),
+            "configured",
+            [new SetupPrivatePlanMember(change.SettingKey, change.Operation, "configured")],
+            SetupRestartRequirement.RestartVsCode,
+            new SetupStatusProjection(
+                true,
+                "1.2.3",
+                SetupOperation.Replace,
+                SetupEffectiveSource.UserSetting,
+                request.Endpoint,
+                current.Clone(),
                 null,
                 [change]));
     }
@@ -1225,6 +1590,11 @@ public sealed class SetupCommandDispatcherTests
             SetupLedgerChangeSet plannedChangeSet) => SetupPlanResult.Revalidated();
     }
 
+    private sealed class CallCounter
+    {
+        public int Value { get; set; }
+    }
+
     private sealed record DispatcherFixture(
         SetupTestPlatform Platform,
         SetupRuntimePaths Paths,
@@ -1247,10 +1617,12 @@ public sealed class SetupCommandDispatcherTests
             var dispatcher = new SetupCommandDispatcher(
                 platform,
                 paths,
+                planStore,
                 ledgerStore,
                 new SetupAdapterRegistry(adapters),
                 "1.2.3",
-                recover);
+                recover,
+                (_, _) => throw new InvalidOperationException("apply must not run"));
             return new DispatcherFixture(platform, paths, planStore, ledgerStore, dispatcher);
         }
 
