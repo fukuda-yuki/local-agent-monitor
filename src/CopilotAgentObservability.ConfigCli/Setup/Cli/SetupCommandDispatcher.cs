@@ -271,6 +271,45 @@ internal sealed class SetupCommandDispatcher
             change.Conflict,
             change.Managed)).ToArray()));
 
+    internal static IReadOnlyList<SetupTargetResult> ProjectApplyTargets(
+        SetupLedgerChangeSet changeSet,
+        string code)
+    {
+        ArgumentNullException.ThrowIfNull(changeSet);
+        return Array.AsReadOnly(changeSet.Targets.Select(target => new SetupTargetResult(
+            target.RecordId.ToString("D"),
+            target.TargetKind,
+            target.TargetLabel,
+            target.StatusProjection.Detected,
+            target.StatusProjection.DetectedVersion,
+            target.StatusProjection.Operation,
+            target.StatusProjection.EffectiveSource,
+            null,
+            null,
+            target.RestartRequirement,
+            HasAppliedOwnership(target, code),
+            target.StatusProjection.Endpoint,
+            target.StatusProjection.ExpectedResult?.Clone(),
+            target.StatusProjection.Guidance is { } guidance
+                ? SetupContractValidator.RehydrateStatusGuidance(guidance)
+                : null,
+            Array.AsReadOnly(target.StatusProjection.Changes.Select(change => new SetupMemberChangeResult(
+                change.SettingKey,
+                change.Operation,
+                change.PreviousState,
+                change.NewState,
+                change.Conflict,
+                change.Managed)).ToArray()))).ToArray());
+    }
+
+    private static bool HasAppliedOwnership(SetupLedgerTarget target, string code) =>
+        code == SetupCodes.ApplySucceeded &&
+        target.TargetKind != SetupTargetKind.Guidance &&
+        target.Members.Any(member => member.Operation != SetupOperation.NoOp) &&
+        target.AppliedStateHash is not null &&
+        string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) &&
+        target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
+
     private static SetupCommandResult Failure(
         string code,
         string? adapter,

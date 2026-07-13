@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.ConfigCli.Setup.Cli;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -529,6 +531,223 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Fact]
+    public void ProjectApplyTargets_CopiesImmutableLedgerProjectionInOriginalOrder()
+    {
+        var secondRecordId = Guid.Parse("00000000-0000-7000-8000-000000000702");
+        var second = CreateOwnedApplyTarget(secondRecordId) with
+        {
+            TargetLabel = "second-target",
+            RestartRequirement = SetupRestartRequirement.RestartTerminalSession,
+            StatusProjection = CreateApplyStatusProjection(
+                SetupOperation.Replace,
+                detected: false,
+                detectedVersion: null,
+                effectiveSource: SetupEffectiveSource.Environment,
+                endpoint: null),
+        };
+        var first = CreateOwnedApplyTarget(RecordId) with
+        {
+            TargetLabel = "first-target",
+            StatusProjection = CreateApplyStatusProjection(
+                SetupOperation.Replace,
+                detected: true,
+                detectedVersion: "1.2.3",
+                effectiveSource: SetupEffectiveSource.UserSetting,
+                endpoint: "http://127.0.0.1:4320"),
+        };
+        var changeSet = CreateApplyChangeSet([second, first]);
+
+        var targets = SetupCommandDispatcher.ProjectApplyTargets(changeSet, SetupCodes.ApplySucceeded);
+
+        Assert.Equal([secondRecordId.ToString("D"), RecordId.ToString("D")],
+            targets.Select(target => target.RecordId));
+        var projectedSecond = targets[0];
+        Assert.Equal(second.TargetKind, projectedSecond.TargetKind);
+        Assert.Equal(second.TargetLabel, projectedSecond.TargetLabel);
+        Assert.Equal(second.StatusProjection.Detected, projectedSecond.Detected);
+        Assert.Equal(second.StatusProjection.DetectedVersion, projectedSecond.DetectedVersion);
+        Assert.Equal(second.StatusProjection.Operation, projectedSecond.Operation);
+        Assert.Equal(second.StatusProjection.EffectiveSource, projectedSecond.EffectiveSource);
+        Assert.Equal(second.RestartRequirement, projectedSecond.RestartRequirement);
+        Assert.Equal(second.StatusProjection.Endpoint, projectedSecond.Endpoint);
+        Assert.Null(projectedSecond.ReferenceState);
+        Assert.Null(projectedSecond.CurrentState);
+        Assert.True(projectedSecond.RollbackAvailable);
+        Assert.Equivalent(second.StatusProjection.Changes, projectedSecond.Changes, strict: true);
+    }
+
+    [Theory]
+    [InlineData("complete", SetupCodes.ApplySucceeded, true)]
+    [InlineData("missing-applied-hash", SetupCodes.ApplySucceeded, false)]
+    [InlineData("missing-backup", SetupCodes.ApplySucceeded, false)]
+    [InlineData("mismatched-backup", SetupCodes.ApplySucceeded, false)]
+    [InlineData("uppercase-backup", SetupCodes.ApplySucceeded, false)]
+    [InlineData("not-available", SetupCodes.ApplySucceeded, false)]
+    [InlineData("succeeded", SetupCodes.ApplySucceeded, false)]
+    [InlineData("failed", SetupCodes.ApplySucceeded, false)]
+    [InlineData("stale", SetupCodes.ApplySucceeded, false)]
+    [InlineData("all-no-op", SetupCodes.ApplySucceeded, false)]
+    [InlineData("guidance", SetupCodes.ApplySucceeded, false)]
+    [InlineData("complete", SetupCodes.NoChanges, false)]
+    [InlineData("complete", SetupCodes.PartialApply, false)]
+    [InlineData("complete", SetupCodes.InternalError, false)]
+    public void ProjectApplyTargets_ReportsRollbackOnlyForCompleteChangedOwnership(
+        string variant,
+        string code,
+        bool expected)
+    {
+        var alphabeticRecordId = Guid.Parse("abcdefab-cdef-7abc-8def-abcdefabcdef");
+        var target = variant switch
+        {
+            "missing-applied-hash" => CreateOwnedApplyTarget(RecordId) with { AppliedStateHash = null },
+            "missing-backup" => CreateOwnedApplyTarget(RecordId) with { BackupReference = null },
+            "mismatched-backup" => CreateOwnedApplyTarget(RecordId) with
+            {
+                BackupReference = "00000000-0000-7000-8000-000000000799",
+            },
+            "uppercase-backup" => CreateOwnedApplyTarget(alphabeticRecordId) with
+            {
+                BackupReference = alphabeticRecordId.ToString("D").ToUpperInvariant(),
+            },
+            "not-available" => CreateOwnedApplyTarget(RecordId) with
+            {
+                RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
+            },
+            "succeeded" => CreateOwnedApplyTarget(RecordId) with
+            {
+                RollbackStatus = SetupLedgerRollbackStatus.Succeeded,
+            },
+            "failed" => CreateOwnedApplyTarget(RecordId) with
+            {
+                RollbackStatus = SetupLedgerRollbackStatus.Failed,
+            },
+            "stale" => CreateOwnedApplyTarget(RecordId) with
+            {
+                RollbackStatus = SetupLedgerRollbackStatus.Stale,
+            },
+            "all-no-op" => CreateAllNoOpApplyTarget(RecordId),
+            "guidance" => CreateApplyGuidanceTarget(RecordId),
+            _ => CreateOwnedApplyTarget(RecordId),
+        };
+
+        var projected = Assert.Single(SetupCommandDispatcher.ProjectApplyTargets(
+            CreateApplyChangeSet([target]),
+            code));
+
+        Assert.Equal(expected, projected.RollbackAvailable);
+    }
+
+    [Fact]
+    public void ProjectApplyTargets_PreservesHistoricalManifestThroughValidatedResultAndJson()
+    {
+        var manifestDocument = CreateHistoricalVsCodeManifest();
+        var historicalJson = manifestDocument.RootElement.GetRawText();
+        var target = CreateOwnedApplyTarget(RecordId) with
+        {
+            TargetKind = SetupTargetKind.Json,
+            TargetLabel = "vscode-stable-default-user-settings",
+            StatusProjection = CreateApplyStatusProjection(
+                SetupOperation.Replace,
+                expectedResult: manifestDocument.RootElement),
+        };
+        var changeSet = CreateApplyChangeSet([target]);
+        var targets = SetupCommandDispatcher.ProjectApplyTargets(changeSet, SetupCodes.ApplySucceeded);
+        manifestDocument.Dispose();
+        var result = new SetupCommandResult(
+            SetupCommand.Apply,
+            true,
+            SetupCodes.ApplySucceeded,
+            changeSet.ChangeSetId.ToString("D"),
+            null,
+            null,
+            changeSet.Adapter,
+            targets,
+            [],
+            [],
+            [],
+            false);
+
+        SetupContractValidator.Validate(result);
+        var json = SetupJson.Serialize(result);
+        using var serialized = JsonDocument.Parse(json);
+        var expectedResult = serialized.RootElement.GetProperty("targets")[0].GetProperty("expected_result");
+
+        Assert.True(JsonNode.DeepEquals(
+            JsonNode.Parse(historicalJson),
+            JsonNode.Parse(expectedResult.GetRawText())));
+        Assert.Equal("planned", expectedResult.GetProperty("support_status").GetString());
+        Assert.Equal("preview", expectedResult.GetProperty("stability").GetString());
+        Assert.DoesNotContain("\"support_status\":\"active\"", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProjectApplyTargets_RehydratesOnlyFixedGuidanceSample()
+    {
+        var source = CreateApplyGuidanceTarget(RecordId);
+        var changeSet = CreateApplyChangeSet([source]);
+
+        var projected = Assert.Single(SetupCommandDispatcher.ProjectApplyTargets(
+            changeSet,
+            SetupCodes.NoChanges));
+        var result = new SetupCommandResult(
+            SetupCommand.Apply,
+            true,
+            SetupCodes.NoChanges,
+            changeSet.ChangeSetId.ToString("D"),
+            null,
+            null,
+            changeSet.Adapter,
+            [projected],
+            [],
+            [],
+            [],
+            false);
+
+        var expected = SetupContractValidator.RehydrateStatusGuidance(source.StatusProjection.Guidance!);
+        Assert.Equal(expected, projected.Guidance);
+        Assert.Empty(projected.Changes);
+        Assert.Null(projected.ExpectedResult);
+        Assert.False(projected.RollbackAvailable);
+        Assert.DoesNotContain("C:\\", projected.Guidance!.Sample, StringComparison.Ordinal);
+        SetupContractValidator.Validate(result);
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+        Assert.Equal(
+            expected.Sample,
+            document.RootElement.GetProperty("targets")[0].GetProperty("guidance").GetProperty("sample").GetString());
+    }
+
+    [Fact]
+    public void ProjectApplyTargets_SnapshotsCollectionsWithoutMutatingLedgerInput()
+    {
+        var sourceChanges = new List<SetupMemberChangeResult>
+        {
+            CreateApplyChange(SetupOperation.Replace),
+        };
+        var sourceTarget = CreateOwnedApplyTarget(RecordId) with
+        {
+            StatusProjection = CreateApplyStatusProjection(SetupOperation.Replace) with
+            {
+                Changes = sourceChanges,
+            },
+        };
+        var sourceTargets = new List<SetupLedgerTarget> { sourceTarget };
+        var changeSet = CreateApplyChangeSet(sourceTargets);
+
+        var projected = SetupCommandDispatcher.ProjectApplyTargets(changeSet, SetupCodes.ApplySucceeded);
+
+        Assert.Single(changeSet.Targets);
+        Assert.Equal(SetupOperation.Replace, changeSet.Targets[0].StatusProjection.Changes[0].Operation);
+        sourceChanges[0] = CreateApplyChange(SetupOperation.Remove);
+        sourceTargets.Clear();
+        Assert.Single(projected);
+        Assert.Equal(SetupOperation.Replace, projected[0].Changes[0].Operation);
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<SetupTargetResult>)projected)[0] = projected[0]);
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<SetupMemberChangeResult>)projected[0].Changes)[0] = projected[0].Changes[0]);
+    }
+
+    [Fact]
     public void DispatchPlan_ProductionConstructorRunsMandatoryRecoveryBeforeAdapter()
     {
         var adapterCalled = false;
@@ -672,6 +891,98 @@ public sealed class SetupCommandDispatcherTests
         request.CreatedAt,
         request.ToolVersion,
         records);
+
+    private static SetupLedgerChangeSet CreateApplyChangeSet(IReadOnlyList<SetupLedgerTarget> targets) => new(
+        Guid.Parse("00000000-0000-7000-8000-000000000700"),
+        "test-adapter",
+        "sample",
+        Timestamp,
+        Timestamp,
+        "1.2.3",
+        SetupCodes.ApplySucceeded,
+        SetupChangeSetState.Applied,
+        targets);
+
+    private static SetupLedgerTarget CreateOwnedApplyTarget(Guid recordId) => new(
+        recordId,
+        SetupTargetKind.File,
+        "apply-target",
+        "test-adapter",
+        [new SetupLedgerMember("setting_1", SetupOperation.Replace)],
+        new string('a', 64),
+        new string('b', 64),
+        recordId.ToString("D"),
+        SetupCodes.ApplySucceeded,
+        SetupLedgerRollbackStatus.Pending,
+        SetupRestartRequirement.RestartVsCode,
+        CreateApplyStatusProjection(SetupOperation.Replace),
+        "1.2.3");
+
+    private static SetupLedgerTarget CreateAllNoOpApplyTarget(Guid recordId) =>
+        CreateOwnedApplyTarget(recordId) with
+        {
+            Members = [new SetupLedgerMember("setting_1", SetupOperation.NoOp)],
+            AppliedStateHash = null,
+            BackupReference = null,
+            RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
+            StatusProjection = CreateApplyStatusProjection(SetupOperation.NoOp),
+        };
+
+    private static SetupLedgerTarget CreateApplyGuidanceTarget(Guid recordId) =>
+        CreateOwnedApplyTarget(recordId) with
+        {
+            TargetKind = SetupTargetKind.Guidance,
+            TargetLabel = "github-copilot-app-sdk-guidance",
+            Members = [],
+            AppliedStateHash = null,
+            BackupReference = null,
+            RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
+            RestartRequirement = SetupRestartRequirement.None,
+            StatusProjection = new SetupStatusProjection(
+                false,
+                null,
+                SetupOperation.NoOp,
+                null,
+                null,
+                null,
+                new SetupStatusGuidance("caller_managed_sample", "dotnet"),
+                []),
+        };
+
+    private static SetupStatusProjection CreateApplyStatusProjection(
+        SetupOperation operation,
+        bool detected = true,
+        string? detectedVersion = "1.2.3",
+        SetupEffectiveSource? effectiveSource = SetupEffectiveSource.UserSetting,
+        string? endpoint = null,
+        JsonElement? expectedResult = null) => new(
+        detected,
+        detectedVersion,
+        operation,
+        effectiveSource,
+        endpoint,
+        expectedResult,
+        null,
+        [CreateApplyChange(operation)]);
+
+    private static SetupMemberChangeResult CreateApplyChange(SetupOperation operation) => new(
+        "setting_1",
+        operation,
+        operation == SetupOperation.NoOp ? "present_same" : "present_different",
+        "configured",
+        "none",
+        false);
+
+    private static JsonDocument CreateHistoricalVsCodeManifest()
+    {
+        var current = SourceCapabilityManifestLoader
+            .LoadForTarget(GitHubCopilotSetupTarget.VsCode)!
+            .CanonicalJson;
+        var historical = JsonNode.Parse(current.GetRawText())!.AsObject();
+        historical["support_status"] = "planned";
+        historical["stability"] = "preview";
+        return JsonDocument.Parse(historical.ToJsonString());
+    }
 
     private static SetupChangeRecord CreateRecord(
         Guid recordId,
