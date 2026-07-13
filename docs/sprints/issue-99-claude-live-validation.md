@@ -161,30 +161,41 @@ No supported Agent SDK package or authorized credential was available in this
 session; no SDK query was started. Named follow-up `#63-live-agent-sdk-inventory`
 remains the accepted path.
 
-## Remaining scope for #99 close condition
+## Closeout classification
 
-- [x] `claude -p` content-disabled structural telemetry: passed (this record).
-- [x] Failed tool call structural evidence via `claude -p`: passed (Run 3).
-- [x] Sub-agent invocation structural evidence via `claude -p`: spans captured
-      (Run 4), but category/operation classification does not surface it —
-      see implementation finding above.
-- [ ] `claude -p` content-enabled synthetic-marker run: not attempted (requires
-      separate explicit authorization distinct from the tool-call
-      authorization already given).
-- [ ] Permission-wait-with-duration scenario: not attempted (`bypassPermissions`
-      skips the wait rather than exercising it).
-- [ ] Exact/native-session binding (Hook-based): not exercised; all runs used
-      the OTel-only path (`binding_state=otel_only`).
-- [ ] Local Monitor restart/reconnect during an active Claude Code session:
-      not attempted.
-- [ ] Interactive Claude Code CLI: blocked, unchanged.
-- [ ] Claude Agent SDK: blocked, unchanged.
+Per #99's own close condition, every matrix case is classified below as
+`passed | blocked | not-applicable`. `blocked`/`not-applicable` are terminal
+states for this closeout and are not treated as `passed`.
 
-`blocked` items above are not treated as `passed`. The `schema_drift_detected`
-finding does not block close by itself under #99's own contract (a "new
-fingerprint" is a valid recorded outcome, not a failure), but it does mean no
-real Claude Code trace will project as `supported` until the repository owner
-reviews the `any_value.int`/`double` representation question. The
-`ClaudeCodeSpanAdapter` category/operation gap is a separate, independent
-implementation defect (not a live-validation blocker) and should not be
-conflated with either compatibility finding when deciding #99's close state.
+| Case | Classification | Reason |
+| --- | --- | --- |
+| `claude -p` content-disabled structural telemetry | **passed** | Run 1 (this record) |
+| Successful tool call | **passed** | Run 2 |
+| Failed tool call / retry | **passed** | Run 3 |
+| Sub-agent invocation structural evidence | **passed** | Run 4; spans captured with correct hierarchy. Category/operation classification was fixed separately in #101 (merged) |
+| Permission-wait span structure | **passed** | `claude_code.tool.blocked_on_user` spans with `duration_ms`/`decision` attribute keys were observed in Runs 3 and 4 even under `--permission-mode bypassPermissions`; only key names were confirmed, not values, per repository-safety practice. Corrects the earlier "not attempted" note in this record |
+| Diagnostic states (supported/known-fingerprint/new-fingerprint) | **passed** | `schema_drift_detected` (new-fingerprint case) observed and correctly degraded, not silently dropped |
+| Session/trace list, detail, flow/waterfall display | **passed** | Verified after #101: real trace shows `turn_count=2`, `tool_call_count=1`, `primary_model` populated (previously all-unknown) |
+| `claude -p` content-enabled synthetic-marker run | **blocked** — `not_authorized_this_session` | Requires a separate explicit authorization distinct from the tool-call authorization already given in this session; operator has not yet given it |
+| Exact/native-session binding (Hook-based) | **not-applicable (this pass)** — `no_hook_forwarder_configured` | All runs used the OTel-only ingestion path (`binding_state=otel_only`); no Hook forwarder was configured for this validation pass, so Hook-side binding was never exercised, positively or negatively |
+| Local Monitor restart/reconnect during an active session | **blocked** — `not_attempted_no_blocker_recorded` | No external blocker; simply not exercised in this session. Deferred rather than fabricated |
+| `--sanitized-only` mode check for Claude Code ingestion/UI | **blocked** — `not_attempted_no_blocker_recorded` | Not exercised in this session for the Claude surface specifically |
+| Interactive Claude Code CLI | **blocked** — `interactive_tty_unavailable` | Unchanged from Sprint22 M5; requires the operator's own real terminal |
+| Claude Agent SDK | **blocked** — `agent_sdk_package_and_credential_unavailable` | Unchanged from Sprint22 M5; requires an installed SDK package and authorized credential |
+
+The `schema_drift_detected` finding does not block close by itself under
+#99's own contract (a "new fingerprint" is a valid recorded outcome, not a
+failure), but it does mean no real Claude Code trace will project as
+`supported` until the repository owner reviews the `any_value.int`/`double`
+representation question (tracked here, not as a fix issue).
+
+The `ClaudeCodeSpanAdapter` category/operation gap identified during this
+validation was a contract-promotion opportunity, not an unnoticed defect; it
+was resolved in Issue #101 (merged to `main`) and verified end-to-end against
+a real `claude -p` trace.
+
+## Follow-up
+
+The four `blocked`/`not-applicable` items above (content-enabled run, Hook
+binding, restart/reconnect, `--sanitized-only` check) are carried forward to
+a new follow-up issue rather than blocking this record's closeout matrix.
