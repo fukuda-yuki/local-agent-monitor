@@ -73,6 +73,7 @@ internal enum SetupLedgerRollbackStatus
 
 internal sealed class SetupLedgerStore
 {
+    internal const int MaximumLedgerBytes = 1024 * 1024;
     private readonly ISetupPlatform platform;
     private readonly SetupRuntimePaths paths;
     private readonly SetupPlanStore planStore;
@@ -84,17 +85,31 @@ internal sealed class SetupLedgerStore
         this.planStore = planStore;
     }
 
-    public SetupOwnershipLedger Load()
-    {
-        if (!platform.FileSystem.FileExists(paths.OwnershipLedger))
-        {
-            return new SetupOwnershipLedger(1, []);
-        }
+    public SetupOwnershipLedger Load() => LoadCore(LedgerReadPolicy.RequireNonTerminalPlans);
 
+    internal SetupOwnershipLedger LoadForRecovery() => LoadCore(LedgerReadPolicy.AllowMissingNonTerminalPlans);
+
+    private SetupOwnershipLedger LoadCore(LedgerReadPolicy readPolicy)
+    {
+        var source = paths.OwnershipLedger;
         SetupOwnershipLedger ledger;
         try
         {
-            ledger = Deserialize(platform.FileSystem.ReadAllBytes(paths.OwnershipLedger));
+            var initialMetadata = platform.FileSystem.GetPathMetadata(source);
+            if (!initialMetadata.Exists)
+            {
+                return new SetupOwnershipLedger(1, []);
+            }
+
+            ValidateLedgerMetadata(initialMetadata);
+            var read = platform.FileSystem.ReadAtMostBytes(source, MaximumLedgerBytes);
+            if (!read.IsComplete)
+            {
+                throw new FormatException();
+            }
+
+            ledger = Deserialize(read.Bytes);
+            ValidateLedgerMetadata(platform.FileSystem.GetPathMetadata(source));
         }
         catch (SetupStorageException)
         {
@@ -105,15 +120,28 @@ internal sealed class SetupLedgerStore
             throw new SetupStorageException(SetupCodes.LedgerCorrupt);
         }
 
-        foreach (var changeSet in ledger.ChangeSets.Where(changeSet => !IsTerminal(changeSet.State)))
+        if (readPolicy == LedgerReadPolicy.RequireNonTerminalPlans)
         {
-            if (planStore.Load(changeSet.ChangeSetId) is null)
+            foreach (var changeSet in ledger.ChangeSets.Where(changeSet => !IsTerminal(changeSet.State)))
             {
-                throw new SetupStorageException(SetupCodes.RecoveryRequired);
+                if (planStore.Load(changeSet.ChangeSetId) is null)
+                {
+                    throw new SetupStorageException(SetupCodes.RecoveryRequired);
+                }
             }
         }
 
         return ledger;
+    }
+
+    private static void ValidateLedgerMetadata(SetupPathMetadata metadata)
+    {
+        if (!metadata.Exists ||
+            metadata.Kind != SetupPathKind.File ||
+            (metadata.Attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new FormatException();
+        }
     }
 
     public void Save(SetupLock setupLock, SetupOwnershipLedger ledger)
@@ -322,6 +350,12 @@ internal sealed class SetupLedgerStore
         SetupChangeSetState.NoChanges or
         SetupChangeSetState.Restored or
         SetupChangeSetState.RolledBack;
+
+    private enum LedgerReadPolicy
+    {
+        RequireNonTerminalPlans,
+        AllowMissingNonTerminalPlans,
+    }
 }
 
 internal static class SetupStorageFile

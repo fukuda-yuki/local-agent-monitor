@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
@@ -74,6 +75,142 @@ public sealed class SetupStorageTests
 
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Message);
+        Assert.Null(exception.InnerException);
+    }
+
+    [Fact]
+    public void LoadForRecovery_ReturnsExactMissingPlanRowAndPreservesMixedOrderWithoutLiveLock()
+    {
+        var context = CreateContext();
+        var terminal = CreateAppliedChangeSet() with
+        {
+            ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000102"),
+            Targets =
+            [
+                CreateLedgerTarget() with
+                {
+                    RecordId = Guid.Parse("00000000-0000-7000-8000-000000000202"),
+                    AppliedStateHash = HashB,
+                    BackupReference = "backup-00000000-0000-7000-8000-000000000202",
+                    RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                    OutcomeCode = SetupCodes.ApplySucceeded,
+                },
+            ],
+        };
+        var expected = new SetupOwnershipLedger(1, [terminal, CreatePlannedChangeSet()]);
+        context.Store.Save(context.Lock, expected);
+        context.Lock.Dispose();
+        var operationCount = context.Platform.Operations.Count;
+
+        var recovered = context.Store.LoadForRecovery();
+
+        Assert.Equivalent(expected, recovered, strict: true);
+        Assert.Equal([terminal.ChangeSetId, ChangeSetId], recovered.ChangeSets.Select(changeSet => changeSet.ChangeSetId));
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), operation =>
+            operation.StartsWith("file.write", StringComparison.Ordinal) ||
+            operation.StartsWith("file.flush", StringComparison.Ordinal) ||
+            operation.StartsWith("file.move", StringComparison.Ordinal) ||
+            operation.StartsWith("file.replace", StringComparison.Ordinal) ||
+            operation.StartsWith("file.lock", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("not-json-PREVIOUS_SECRET_MARKER", SetupCodes.LedgerCorrupt)]
+    [InlineData("{\"schema_version\":0,\"change_sets\":[],\"marker\":\"PREVIOUS_SECRET_MARKER\"}", SetupCodes.LedgerVersionUnsupported)]
+    [InlineData("{\"schema_version\":2,\"change_sets\":[],\"marker\":\"PREVIOUS_SECRET_MARKER\"}", SetupCodes.LedgerVersionUnsupported)]
+    public void LoadForRecovery_CorruptOrUnsupportedLedgerFailsClosedWithoutEcho(
+        string content,
+        string expectedCode)
+    {
+        var context = CreateContext();
+        context.Platform.SeedFile(context.Paths.OwnershipLedger, Encoding.UTF8.GetBytes(content));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.LoadForRecovery());
+
+        Assert.Equal(expectedCode, exception.Code);
+        Assert.Equal(expectedCode, exception.Message);
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadForRecovery_OversizeLedgerUsesBoundedReadAndFailsFixedWithoutEcho()
+    {
+        var context = CreateContext();
+        var source = context.Paths.OwnershipLedger;
+        context.Platform.SeedFile(
+            source,
+            Enumerable.Repeat((byte)'P', SetupLedgerStore.MaximumLedgerBytes + 1).ToArray());
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.LoadForRecovery());
+
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Code);
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Message);
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain(source, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            $"file.read-bounded:{source}:{SetupLedgerStore.MaximumLedgerBytes}",
+            context.Platform.Operations);
+        Assert.DoesNotContain($"file.read:{source}", context.Platform.Operations);
+    }
+
+    [Theory]
+    [InlineData(SetupPathKind.File, FileAttributes.ReparsePoint)]
+    [InlineData(SetupPathKind.Directory, FileAttributes.Directory)]
+    [InlineData(SetupPathKind.Other, FileAttributes.Normal)]
+    public void LoadForRecovery_NonRegularOrReparseLedgerFailsFixedBeforeReading(
+        SetupPathKind kind,
+        FileAttributes attributes)
+    {
+        var context = CreateContext();
+        var source = context.Paths.OwnershipLedger;
+        context.Platform.SeedFile(source, SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [])));
+        context.Platform.SeedPathMetadata(source, new SetupPathMetadata(true, kind, attributes));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.LoadForRecovery());
+
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Code);
+        Assert.DoesNotContain(context.Platform.Operations, operation =>
+            operation.StartsWith($"file.read-bounded:{source}:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void LoadForRecovery_MetadataFailureMapsToFixedCorruptWithoutEcho()
+    {
+        var context = CreateContext();
+        var source = context.Paths.OwnershipLedger;
+        context.Platform.SeedFile(source, SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [])));
+        context.Platform.InjectFault(
+            $"file.metadata:{source}",
+            new IOException("PREVIOUS_SECRET_MARKER"));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.LoadForRecovery());
+
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Code);
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Message);
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LoadForRecovery_ReboundLedgerFailsFixedAfterBoundedRead()
+    {
+        var context = CreateContext();
+        var source = context.Paths.OwnershipLedger;
+        context.Platform.SeedFile(source, SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [])));
+        using var barrier = context.Platform.AddBarrier(
+            $"file.read-bounded:{source}:{SetupLedgerStore.MaximumLedgerBytes}");
+
+        var load = Task.Run(() => Assert.Throws<SetupStorageException>(() => context.Store.LoadForRecovery()));
+        barrier.WaitUntilReached(CancellationToken.None);
+        context.Platform.SeedPathMetadata(
+            source,
+            new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        barrier.Release();
+        var exception = await load;
+
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Code);
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Message);
         Assert.Null(exception.InnerException);
     }
 
