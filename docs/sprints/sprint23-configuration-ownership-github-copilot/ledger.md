@@ -35,11 +35,12 @@ Updated: 2026-07-13
 | Rollback journal supersession fault/rebind hardening (Task 6a0b1) | #66 | Complete | `5ba62b3` | initial RED 32/2; focused 34/34; Journal 181/181; Storage+Journal 239/239; all Setup 1,030/1,030; ConfigCli 1,358/1,358; build 0 warnings/0 errors; `git diff --check` clean | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; no findings | same-byte regular-file identity remains a nonblocking residual; lock lifetime (Task 6a0b2) and normal rollback coordinator (Task 6a) remain pending |
 | Rollback journal supersession lock lifetime (Task 6a0b2) | #66 | Complete | `0793c9a` (test-only) | focused 41/41; related journal/storage transaction 268/268; all Setup 1,037/1,037; ConfigCli 1,365/1,365; exact build 0 warnings/0 errors; `git diff --check` clean | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; no findings | same-byte regular-file identity remains a nonblocking residual; normal rollback coordinator remains Task 6a |
 | File-only normal rollback producer (Task 6a) | #66 | Complete | `62c1198..2f3b1d9` | focused 27/27; related transaction 654/654; all Setup 1,064/1,064; ConfigCli 1,392/1,392; build 0 warnings/0 errors; `git diff --check` clean | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; no findings | env/mixed restore remains pending; public Task 7 remains pending |
+| Single-environment normal rollback core (Task 6a2a) | #66 | Complete | `06c44df..51f0059` | focused 39/39; related transaction 681/681; all Setup 1,076/1,076; ConfigCli 1,404/1,404; build 0 warnings/0 errors; `git diff --check` clean; Model-A full-backup ownership and changed-member-only journal/write/restore evidence; no-op members are not restored; exact prior/desired/third-party/unavailable classification and retry admission covered | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; no findings | notification fault matrix and mixed normal rollback remain pending; public Task 7 remains pending |
 | Setup lock operation lifetime (Lock A-C) | #66 | Complete | `08d716c..d06ffcc` | apply/compensation/runtime/storage/journal 286/286; all Setup 663/663; ConfigCli 991/991; build 0/0 | Spec/internal PASS; Quality/Security/Concurrency APPROVED after disposal-order re-audit | Windows cross-process executed; Linux/macOS runtime not executed |
 | Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
 | Atomic file mutation | #66 | Complete through Task 3b | `291b3bf..2ed9e8a` | typed hash, path/reparse, backup/temp/replace/restore fault matrix | PASS/APPROVED | three-OS runtime evidence gap noted above |
 | User environment mutation | #66 | Complete through Task 4 | `f4f55ec..620448a` | full 3x3 state, backup, member fault, notification boundary matrix | PASS/APPROVED | coordinator journaling/recovery remains Task 5 |
-| Transaction and rollback | #66 | In progress through Task 6a | `2d88eff..2f3b1d9` | journal/store, exact artifact reuse, terminal/active Apply recovery, file, single-environment, mixed active/committed rollback recovery, committed lagging-ledger reconciliation, notification ambiguity/replay recovery, apply/compensation, lock-lifetime evidence, rollback journal supersession primitive, fault/rebind hardening, supersession lock-lifetime evidence, and file-only normal rollback producer evidence above | Tasks through 6a and Lock A-C PASS/APPROVED | same-byte regular-file identity is a nonblocking residual; env/mixed restore and public Task 7 remain pending |
+| Transaction and rollback | #66 | In progress through Task 6a2a | `2d88eff..51f0059` | journal/store, exact artifact reuse, terminal/active Apply recovery, file, single-environment, mixed active/committed rollback recovery, committed lagging-ledger reconciliation, notification ambiguity/replay recovery, apply/compensation, lock-lifetime evidence, rollback journal supersession primitive, fault/rebind hardening, supersession lock-lifetime evidence, file-only and single-environment normal rollback producer evidence above | Tasks through 6a2a and Lock A-C PASS/APPROVED | same-byte regular-file identity is a nonblocking residual; notification fault matrix, mixed normal rollback, and public Task 7 remain pending |
 | Shared setup commands | #66 | Pending | - | - | - | - |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
@@ -78,10 +79,12 @@ Updated: 2026-07-13
 
 - The canonical physical-target/member-change DTO is defined but has not yet
   been compiled or consumed across the CLI/PowerShell boundary.
-- The normal rollback producer is not yet implemented or independently
-  reviewed; file, single-environment, mixed active/committed rollback
-  recovery, committed lagging-ledger reconciliation, and notification
-  ambiguity/replay recovery evidence is complete through Task 5d3b2b2.
+- The normal rollback producer is implemented and independently reviewed for
+  file-only and single-environment targets (Tasks 6a and 6a2a); mixed normal
+  rollback and the notification fault matrix remain unimplemented. Mixed
+  active/committed rollback recovery, committed lagging-ledger reconciliation,
+  and notification ambiguity/replay recovery evidence is complete through
+  Task 5d3b2b2.
 - Supported keys and floors are fixed from official sources: stable VS Code
   1.128+ for apply and terminal Copilot CLI 1.0.4+.
 - HTTP, proxy, and UI DTOs are explicitly N/A; independent re-review is pending.
