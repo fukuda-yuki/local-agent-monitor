@@ -25,6 +25,16 @@ present; reasoning and streaming deltas are absent.
 
 Status: not run in this repository-safe implementation session.
 
+## Automated Build & Test Evidence (2026-07-13)
+
+| Command | Result |
+|---------|--------|
+| `dotnet build CopilotAgentObservability.slnx` | 0 errors, 0 warnings |
+| `pwsh scripts\test\install-playwright-chromium.ps1` | exit 0 |
+| `dotnet test CopilotAgentObservability.slnx` | 2,577 passed, 0 failed, 0 skipped (ConfigCli 1,198 + LocalMonitor 1,379) |
+
+Environment: Windows, .NET SDK 10.0.300-preview.0.26177.108, net10.0, commit `main`.
+
 ## Copilot CLI Hook
 
 1. Set a temporary home directory and run the opt-in Hook install script.
