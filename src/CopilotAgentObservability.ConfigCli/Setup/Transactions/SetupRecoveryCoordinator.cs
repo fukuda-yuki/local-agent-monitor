@@ -2173,10 +2173,7 @@ internal sealed class SetupRecoveryCoordinator
 
     private static bool HasSingleEnvironmentPhysicalTarget(SetupPrivatePlan plan)
     {
-        var physicalTargets = plan.Targets
-            .Where(target => target.TargetKind != SetupTargetKind.Guidance)
-            .ToArray();
-        return physicalTargets.Length == 1 && physicalTargets[0].TargetKind == SetupTargetKind.Env;
+        return plan.Targets.Count(target => target.TargetKind == SetupTargetKind.Env) == 1;
     }
 
     private string ExpectedEnvironmentAppliedHash(Guid changeSetId, SetupPrivatePlanTarget target)
