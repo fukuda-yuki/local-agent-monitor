@@ -43,6 +43,28 @@ config-cli setup rollback --change-set <uuid-v7>
 config-cli setup status [--adapter github-copilot]
 ```
 
+The `setup.v1` surface is recognized only after the first token is exactly
+`setup` and the second token is exactly one of `plan`, `apply`, `rollback`, or
+`status`. Once a verb is recognized, every option/arity/value failure returns
+that command's repository-safe `setup.v1` result with `code=invalid_arguments`.
+A bare `setup` or `setup <unknown-verb>` is a special invalid setup invocation:
+it writes no stdout JSON, writes exactly `invalid_arguments` plus one newline to
+stderr, exits `2`, and performs no help rendering, lock acquisition, recovery,
+registry lookup, or storage read. An unknown top-level token other than `setup`
+remains outside this interface and preserves the existing Config CLI
+exit-`1`/help behavior.
+
+`--adapter` values are parsed as lowercase ASCII slugs matching
+`[a-z0-9]+(?:-[a-z0-9]+)*`, bounded to 1 through 128 UTF-16 code units as in the
+generic adapter registry. The parser validates only this safe shape; it does
+not hard-code `github-copilot` or consult the registry. For `plan`, registry
+resolution happens only after the command owns the setup lock and mandatory
+recovery has returned no work. An unregistered well-formed slug then produces
+`unsupported_adapter`. The owning adapter, not the generic parser, validates
+the selected target. For `status`, the optional well-formed adapter slug is an
+exact historical ledger filter and is never resolved against the current
+registry, so status remains usable after an adapter is removed.
+
 `--endpoint` defaults to `http://127.0.0.1:4320` and accepts only a loopback HTTP
 origin with an explicit port. Hosts are exactly `127.0.0.1`, `localhost`, or
 `::1`; userinfo, a non-root path, query, and fragment are forbidden. CLI input
@@ -119,6 +141,32 @@ apply to the requested command after recovery returns control:
 These `apply`/code pairs are valid `setup.v1` results. A generic result
 validator must not reject them merely because older command matrices associated
 `unsupported_adapter` or `unsupported_target` only with planning.
+
+For a recognized command, the generic command producer owns the one public
+`SetupCommandResult`; adapters never serialize another result shape. Adapter
+planning returns a typed carrier containing its ordered targets, closed
+warnings, and closed next actions, or a sanitized typed failure containing one
+allowed result code plus the same two closed arrays. Apply-time adapter
+revalidation uses the same success/failure carrier for fresh warnings and next
+actions. The command producer validates and copies those arrays without parsing
+an exception message, inventing a replacement action, or dropping an allowed
+adapter diagnostic. Unexpected exceptions map to `internal_error` with empty
+arrays. Framework-owned outcomes also have empty arrays except where this
+contract explicitly assigns one: successful interrupted recovery adds exactly
+`rerun_requested_setup_command`. The two exceptional apply results above keep
+both arrays empty.
+
+Normal non-status target projection is closed as follows. A normal requested
+outcome is one reached after successful syntax, lock, recovery, and applicable
+row/private-plan validation; lock/storage/recovery failures, a missing requested
+row, and the exceptional apply results above return an empty `targets` array.
+All non-status targets keep `reference_state` and `current_state` null.
+
+| Requested command/outcome | Immutable target source and order | Target `rollback_available` |
+| --- | --- | --- |
+| `plan` / `plan_ready` or `no_changes` | the validated adapter plan carrier, in adapter physical-target order; the same order is persisted in the private plan and ledger row | prospectively true only for a writable physical target with at least one non-`no-op` member whose successful apply would establish backup-backed ownership; false for an all-`no-op` target or guidance. This is capability of the planned mutation, not a claim that rollback can run before apply |
+| normal `apply` result | the requested row's immutable ledger target fields and `status_projection`, in ledger plan order; guidance rehydrates only the fixed public sample; the adapter does not recreate target DTOs | true only after `apply_succeeded` when that target has complete actual applied-hash, safe-backup, and pending-rollback ownership; false for `no_changes`, `partial_apply`, or any failed apply result, and false for all-`no-op`/guidance targets |
+| normal `rollback` result | the requested row's same immutable ledger projection, in ledger plan order; no adapter detection or DTO reconstruction | always false, including `rollback_succeeded`, `rollback_stale`, `rollback_not_available`, and `partial_rollback` |
 
 Each target record contains:
 
@@ -387,10 +435,22 @@ Failure codes:
 - `ledger_version_unsupported`
 - `internal_error`
 
-Argument failures use exit code `2`; stale/conflict failures, including
-`environment_override_conflict`, use `3`; target
-availability failures `4`; apply/IO failures `5`; partial rollback failures
-`6`. Success uses `0`. stderr may contain only the fixed result code.
+The process exit mapping is exhaustive over all 29 result codes:
+
+| Exit | Exact result codes |
+| --- | --- |
+| `0` | `plan_ready`, `no_changes`, `apply_succeeded`, `rollback_succeeded`, `status_ready`, `interrupted_apply_recovered`, `interrupted_rollback_recovered` |
+| `2` | `invalid_arguments` |
+| `3` | `managed_policy_conflict`, `environment_override_conflict`, `stale_plan`, `rollback_stale` |
+| `4` | `unsupported_adapter`, `unsupported_target`, `target_not_installed`, `unsupported_version`, `rollback_not_available`, `port_owned_by_foreign_process` |
+| `5` | `malformed_settings`, `permission_denied`, `unsafe_path`, `partial_apply`, `setup_busy`, `recovery_required`, `interrupted_recovery_failed`, `ledger_corrupt`, `ledger_version_unsupported`, `internal_error` |
+| `6` | `partial_rollback` |
+
+A recognized verb writes one result JSON object to stdout. Its successful result
+writes nothing to stderr; its failed result writes exactly that fixed result
+code plus one newline to stderr. The bare/unknown-setup-verb exception is the
+no-JSON behavior specified under Public commands. No raw exception text or help
+text may be appended to a setup result.
 `environment_override_conflict` is valid only for a CLI-target `plan` or
 pre-artifact `apply` revalidation.
 
@@ -554,11 +614,33 @@ member list remain outside capture, hashing, backup, status, and mutation.
 8. writes and flushes the private immutable plan first, then atomically replaces
    the repository-safe ledger with its planned record and status snapshot.
 
+A `plan` result whose code is `no_changes` is not artifact-free. It still
+persists the inspectable immutable private plan and a `planned` ledger row,
+returns that UUIDv7 as `change_set_id`, and creates no backup, journal, applied
+hash, or rollback ownership. A later `apply` consumes that same requested ID and
+transitions the row to terminal `no_changes` without writing a target. This
+distinguishes an inspectable no-change proposal from an unknown/missing change
+set and preserves the explicit plan-then-apply workflow.
+
 The two files cannot be atomically replaced together. Their ordering is
 crash-consistent: a private plan without a ledger row is an ignored orphan; a
 ledger non-terminal row without its private plan is `recovery_required` and
 blocks mutation. A normal write failure removes the orphan plan when possible,
 but recovery never depends on that cleanup.
+
+Requested-ID lookup checks the readable ledger before treating a private plan
+as authoritative. The missing-row/private-plan outcomes are exhaustive:
+
+| Durable condition after mandatory recovery | `apply` | `rollback` | `status` |
+| --- | --- | --- | --- |
+| no ledger row for the requested UUID, whether or not an orphan private plan exists | `invalid_arguments`; no adapter resolution or mutation artifact | `invalid_arguments`; no preflight or mutation artifact | not applicable because status has no requested UUID; no row is projected |
+| matching row exists but its required private plan is missing, unreadable, or fails immutable row/plan identity | `recovery_required`; no registry/platform/target activity | `recovery_required`; no restore artifact or target write | a non-terminal row makes the command `recovery_required`; a terminal row follows the existing target-`unavailable`, rollback-false projection rule |
+| readable row and valid bound private plan exist, but the row lifecycle is not accepted by the requested command | `invalid_arguments` unless another explicit apply result in this document applies | `rollback_not_available` unless interrupted recovery owns the row first | project according to the lifecycle matrix |
+
+An unreadable/corrupt/unsupported ledger still returns its fixed storage code
+before this table. A private plan is never enough to synthesize a missing ledger
+row, and a missing private plan is never downgraded to `invalid_arguments` when
+the ledger proves that the change set exists.
 
 Malformed JSON/JSONC or TOML is `malformed_settings`; the adapter does not
 best-effort replace it. JSONC comments and trailing commas are accepted for VS
@@ -573,6 +655,22 @@ shape.
 
 The coordinator acquires `setup.lock` with an exclusive, non-waiting file lock.
 Contention returns `setup_busy`; there is no sleep, retry, or timeout loop.
+Lock and mandatory-recovery ownership is exact; no command may acquire the lock
+twice or run the generic recovery scan twice:
+
+| Recognized command | Lock owner | Mandatory recovery owner | Normal-operation handoff |
+| --- | --- | --- | --- |
+| `plan` | generic command producer | generic command producer, once under that lock | only a `None` recovery result permits registry resolution and adapter planning under the same lock |
+| `apply` | generic command producer | generic command producer, once under that lock | only `None` permits requested ledger-row/private-plan validation, persisted-adapter resolution, and `SetupApplyCoordinator.Apply` under the same lock; the apply coordinator does not recover or reacquire |
+| `rollback` | generic command producer | `SetupRollbackCoordinator.Rollback`, once under the caller-held lock | the producer does not run common recovery first; the rollback coordinator performs recovery and, only for `None`, its requested preflight/mutation without reacquiring |
+| `status` | `SetupStatusService.Status` | `SetupStatusService.Status`, once under its own lock | the generic producer calls the service without an outer lock or recovery; the service retains the documented same-response recovery projection behavior |
+
+Parsing and result serialization own neither lock nor recovery. Lock contention
+is decided before registry lookup, ledger/plan reads, adapter/platform activity,
+or recovery. A recovery success/failure returns according to the correlation
+rules below and does not also run the requested normal operation, except that
+status projects readable ledger state in that same recovery response as already
+specified.
 
 Lifecycle transitions are:
 
@@ -1161,6 +1259,27 @@ Focused validation covers:
 - private runtime-root selection covers Windows, macOS, Linux absolute/invalid/
   missing `XDG_DATA_HOME`, and the trusted injected base while proving there is
   no public setup override;
+- setup CLI recognition covers all four exact verbs, recognized-verb option
+  failures, bare `setup`, unknown setup verbs, and an unknown non-setup
+  top-level command; all 29 result codes are mapped exhaustively to process
+  exits and exact stdout/stderr behavior;
+- adapter parsing covers the 1/128 UTF-16-code-unit lowercase-slug boundaries,
+  malformed/uppercase/over-bound input, plan registry resolution only after
+  lock/recovery, and status filtering after adapter removal without a registry
+  lookup;
+- plan/apply lock ownership and recovery happen exactly once, rollback delegates
+  its one recovery pass under the caller-held lock, and status owns its lock and
+  recovery without an outer dispatcher lock;
+- adapter plan/revalidation success and sanitized failure carriers preserve
+  their closed warnings/actions, while unexpected/framework failures cannot
+  leak exception text or invent diagnostics;
+- non-status targets use adapter order for plan and immutable ledger order for
+  apply/rollback, with prospective versus actual rollback availability proven
+  separately; plan `no_changes` persists an inspectable private plan and
+  `planned` row before apply reaches terminal `no_changes`;
+- requested-ID tests distinguish a missing ledger row, an orphan private plan,
+  a matching row with a missing/unreadable/mismatched private plan, and a
+  lifecycle that is ineligible for apply/rollback;
 - a valid persisted plan whose adapter is removed from the registry returns the
   permitted `apply`/`unsupported_adapter` result and leaves all durable bytes
   and targets unchanged;
@@ -1200,6 +1319,10 @@ The setup implementation must keep this requirement-to-test mapping:
 | filter, priority, deterministic tie-break, hard 100-row cap, truncation | `SetupStatusOrderingTests` cover adapter filter before 99/100/101-row ordering and cap, equal-priority states, timestamp order, and lowercase UUID ordinal ties |
 | terminal pending environment notification artifact identity and notification-only target isolation | `SetupRecoveryTests` use actual `SetupApplyCoordinator` artifacts for successful replay and valid-64-hex tampering of journal prior/desired hashes and ledger previous/applied aggregates; they also cover missing/corrupt/rebound plan or backup, canonical backup reference, applied/restored/rolled-back terminal lifecycles, current-target drift, no target reads/writes, preserved terminal durable lifecycle, fixed failed overlay, and unchanged completed-notification handling |
 | closed apply/error command composition | `SetupCliTests` and `SetupContractValidationTests` accept persisted-adapter removal as `apply`/`unsupported_adapter` and macOS/Linux CLI as `apply`/`unsupported_target`, while proving unchanged plan/ledger bytes and no new artifact/platform write |
+| setup.v1 recognition, generic adapter parsing, and exhaustive process mapping | `SetupOptionsTests` cover the 1/128 lowercase-slug bounds and recognized-verb grammar; `CliApplicationTests` cover each of the 29 result-code exits, one-JSON stdout/fixed stderr, bare/unknown setup verbs with no JSON/help/lock, and preserved legacy unknown-top-level behavior |
+| exact lock/recovery ownership and post-recovery resolution | `SetupCommandDispatcherTests` prove plan/apply one non-waiting lock and one recovery call, plan registry and persisted-apply adapter resolution only afterward, rollback recovery only inside `SetupRollbackCoordinator` under the same lock, and status lock/recovery only inside `SetupStatusService` |
+| diagnostics carrier and non-status target projection ownership | `SetupAdapterRegistryTests` and `SetupCommandDispatcherTests` serialize production plan/revalidation success and sanitized failure carriers, prove closed warning/action preservation and exception redaction, adapter-versus-ledger target source/order, prospective plan versus actual apply rollback availability, and rollback-false results |
+| no-change persistence and missing durable artifact distinctions | `SetupCommandDispatcherTests` prove `plan`/`no_changes` persists a private plan plus `planned` ledger row and later apply reaches terminal `no_changes`; paired apply/rollback/status cases distinguish no row, orphan plan, matching row with missing/unreadable/mismatched plan, and ineligible lifecycle without target activity |
 | VS Code channel/profile and managed-source contract | `VsCodeSetupAdapterTests` cover Stable/Insiders Default Profiles on all three OS path maps, exact no-`--profile` extension commands, dual-channel order, fixed non-default warning/no-create/no-open behavior, Copilot whole-channel precedence, independent enterprise-policy equality/conflict, and apply-time version/extension/policy/member revalidation; contract shape/validation tests close the warning allowlist |
 | Copilot CLI OS and exact environment contract | `CopilotCliSetupAdapterTests` cover the five-member explicit-capture allowlist, forbidden global identity/resource/header/credential keys, matching/conflicting detect-only trace protocol override, environment-only managed warning, Windows apply, and macOS/Linux no-write apply refusal; contract shape/validation tests close the new code/warning/action values |
 | cross-platform private setup root | `SetupRuntimeTests` cover Windows/macOS/Linux local-application-data mappings, absolute and invalid/unset `XDG_DATA_HOME`, injected platform base, and absence of a CLI/environment override |
