@@ -77,8 +77,29 @@ internal sealed class SetupRecoveryCoordinator
             }
             catch (SetupStorageException)
             {
+                if (IsTerminalLedgerState(changeSet.State))
+                {
+                    return PersistFailure(
+                        setupLock,
+                        ledger,
+                        changeSet,
+                        OperationFor(changeSet)!.Value,
+                        preserveTerminalLifecycle: true);
+                }
+
                 return Failed(SetupCodes.RecoveryRequired, changeSet.ChangeSetId, OperationFor(changeSet),
                     OverlayFailure(changeSet));
+            }
+
+            if (journal is not null && IsTerminalJournal(journal) &&
+                !TerminalEvidenceMatches(changeSet, journal))
+            {
+                return PersistFailure(
+                    setupLock,
+                    ledger,
+                    changeSet,
+                    OperationFor(journal, changeSet)!.Value,
+                    preserveTerminalLifecycle: IsTerminalLedgerState(changeSet.State));
             }
 
             if (journal is not null && IsMatchingTerminal(changeSet, journal))
@@ -780,6 +801,148 @@ internal sealed class SetupRecoveryCoordinator
             RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
         }).ToArray(),
     };
+
+    private static bool TerminalEvidenceMatches(
+        SetupLedgerChangeSet changeSet,
+        SetupTransactionJournal journal)
+    {
+        if (journal.ChangeSetId != changeSet.ChangeSetId ||
+            !TerminalLifecycleMatches(changeSet.State, journal.Operation, journal.Phase))
+        {
+            return false;
+        }
+
+        var expectedTargets = changeSet.Targets
+            .Where(target => target.TargetKind != SetupTargetKind.Guidance &&
+                target.Members.Any(member => member.Operation != SetupOperation.NoOp))
+            .ToArray();
+        if (expectedTargets.Length != journal.Targets.Count ||
+            changeSet.Targets.Any(target =>
+                (target.TargetKind == SetupTargetKind.Guidance ||
+                 target.Members.All(member => member.Operation == SetupOperation.NoOp)) &&
+                !HasNoRollbackOwnership(target)))
+        {
+            return false;
+        }
+
+        for (var targetIndex = 0; targetIndex < expectedTargets.Length; targetIndex++)
+        {
+            var ledgerTarget = expectedTargets[targetIndex];
+            var journalTarget = journal.Targets[targetIndex];
+            if (ledgerTarget.RecordId != journalTarget.RecordId ||
+                ledgerTarget.TargetKind != journalTarget.TargetKind ||
+                !RollbackOwnershipMatches(changeSet.State, ledgerTarget) ||
+                !TargetEvidenceMatches(ledgerTarget, journalTarget))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TargetEvidenceMatches(
+        SetupLedgerTarget ledgerTarget,
+        SetupJournalTarget journalTarget)
+    {
+        // Restored rows and cleared rollback rows no longer retain a backup reference to compare.
+        if (ledgerTarget.BackupReference is not null &&
+            journalTarget.Steps.Any(step => !string.Equals(
+                step.BackupReference,
+                ledgerTarget.BackupReference,
+                StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        if (ledgerTarget.TargetKind == SetupTargetKind.Env)
+        {
+            var changedMembers = ledgerTarget.Members
+                .Where(member => member.Operation != SetupOperation.NoOp)
+                .ToArray();
+            if (changedMembers.Length != journalTarget.Steps.Count)
+            {
+                return false;
+            }
+
+            for (var stepIndex = 0; stepIndex < changedMembers.Length; stepIndex++)
+            {
+                if (!string.Equals(
+                    changedMembers[stepIndex].SettingKey,
+                    journalTarget.Steps[stepIndex].MemberKey,
+                    StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            // Ledger environment hashes cover the full allowlist, while journal hashes are per changed member.
+            return true;
+        }
+
+        if (journalTarget.Steps.Count != 1 || journalTarget.Steps[0].MemberKey is not null)
+        {
+            return false;
+        }
+
+        var fileStep = journalTarget.Steps[0];
+        return string.Equals(fileStep.PriorStateHash, ledgerTarget.PreviousStateHash, StringComparison.Ordinal) &&
+            (ledgerTarget.AppliedStateHash is null ||
+             string.Equals(fileStep.DesiredStateHash, ledgerTarget.AppliedStateHash, StringComparison.Ordinal));
+    }
+
+    private static bool RollbackOwnershipMatches(
+        SetupChangeSetState state,
+        SetupLedgerTarget target) => state switch
+    {
+        SetupChangeSetState.Applying =>
+            target.AppliedStateHash is null &&
+            target.BackupReference is not null &&
+            target.RollbackStatus == SetupLedgerRollbackStatus.Pending,
+        SetupChangeSetState.Compensating =>
+            target.BackupReference is not null &&
+            target.RollbackStatus == SetupLedgerRollbackStatus.Pending,
+        SetupChangeSetState.Applied =>
+            target.AppliedStateHash is not null &&
+            target.BackupReference is not null &&
+            target.RollbackStatus == SetupLedgerRollbackStatus.Pending,
+        SetupChangeSetState.Restored => HasNoRollbackOwnership(target),
+        SetupChangeSetState.RollingBack =>
+            target.AppliedStateHash is not null &&
+            target.BackupReference is not null &&
+            target.RollbackStatus == SetupLedgerRollbackStatus.Pending,
+        SetupChangeSetState.RolledBack =>
+            HasNoRollbackOwnership(target) ||
+            target.AppliedStateHash is not null &&
+            target.BackupReference is not null &&
+            target.RollbackStatus == SetupLedgerRollbackStatus.Succeeded,
+        _ => false,
+    };
+
+    private static bool HasNoRollbackOwnership(SetupLedgerTarget target) =>
+        target.AppliedStateHash is null &&
+        target.BackupReference is null &&
+        target.RollbackStatus == SetupLedgerRollbackStatus.NotAvailable;
+
+    private static bool TerminalLifecycleMatches(
+        SetupChangeSetState state,
+        SetupJournalOperation operation,
+        SetupJournalPhase phase) => (operation, phase) switch
+    {
+        (SetupJournalOperation.Apply, SetupJournalPhase.Committed) =>
+            state is SetupChangeSetState.Applying or SetupChangeSetState.Applied,
+        (SetupJournalOperation.Apply, SetupJournalPhase.Restored) =>
+            state is SetupChangeSetState.Compensating or SetupChangeSetState.Restored,
+        (SetupJournalOperation.Rollback, SetupJournalPhase.Committed) =>
+            state is SetupChangeSetState.RollingBack or SetupChangeSetState.RolledBack,
+        _ => false,
+    };
+
+    private static bool IsTerminalLedgerState(SetupChangeSetState state) =>
+        state is SetupChangeSetState.Applied or SetupChangeSetState.Restored or SetupChangeSetState.RolledBack;
+
+    private static bool IsTerminalJournal(SetupTransactionJournal journal) =>
+        journal.Phase is SetupJournalPhase.Committed or SetupJournalPhase.Restored;
 
     private static bool IsMatchingTerminal(SetupLedgerChangeSet changeSet, SetupTransactionJournal journal) =>
         journal.Operation switch

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
@@ -681,6 +682,100 @@ public sealed class SetupRecoveryTests
             fixture.ReopenCoordinator().RecoverNext(secondLock).Disposition);
     }
 
+    public static TheoryData<string, bool> TerminalImmutableMismatchCases => new()
+    {
+        { "change-set-id", false },
+        { "change-set-id", true },
+        { "record-id", false },
+        { "record-id", true },
+        { "target-kind", false },
+        { "target-kind", true },
+        { "target-order", false },
+        { "target-order", true },
+        { "target-count", false },
+        { "target-count", true },
+        { "member-key", false },
+        { "member-key", true },
+        { "member-order", false },
+        { "member-order", true },
+        { "member-count", false },
+        { "member-count", true },
+        { "backup-reference", false },
+        { "backup-reference", true },
+        { "rollback-status", false },
+        { "rollback-status", true },
+        { "file-prior-hash", false },
+        { "file-prior-hash", true },
+        { "file-desired-hash", false },
+        { "file-desired-hash", true },
+        { "operation", false },
+        { "operation", true },
+        { "lifecycle", false },
+        { "lifecycle", true },
+    };
+
+    [Theory]
+    [MemberData(nameof(TerminalImmutableMismatchCases))]
+    public void RecoverNext_Rejects_planless_terminal_immutable_mismatch_without_notification_or_target_io(
+        string mismatch,
+        bool notificationCompleted)
+    {
+        var fixture = new TerminalEvidenceFixture();
+        fixture.SeedMismatchedTerminal(mismatch, notificationCompleted);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(fixture.ChangeSetId, result.RecoveredChangeSetId);
+        Assert.Equal(mismatch == "operation" ? SetupRecoveryOperation.Rollback : SetupRecoveryOperation.Apply,
+            result.Operation);
+        Assert.Equal(SetupChangeSetState.Partial, result.EffectiveChangeSet?.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.EffectiveChangeSet?.OutcomeCode);
+        Assert.Equal(mismatch == "lifecycle" ? SetupChangeSetState.Restored : SetupChangeSetState.Applied,
+            fixture.LoadChangeSet().State);
+        Assert.Equal(notificationCompleted
+                ? SetupEnvironmentNotification.Completed
+                : SetupEnvironmentNotification.Pending,
+            fixture.ReadJournalNotification());
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.DoesNotContain("environment.notify", operations);
+        Assert.DoesNotContain(operations, operation =>
+            operation.StartsWith("environment.get", StringComparison.Ordinal) ||
+            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
+            operation == $"file.read:{fixture.TargetPath}" ||
+            operation.StartsWith($"file.write:{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation.StartsWith($"file.write-new:{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RecoverNext_Dormant_environment_backup_rebinding_after_read_fails_closed()
+    {
+        var fixture = new EnvironmentRecoveryFixture();
+        fixture.SeedPreparedApplyJournalAndBackup();
+        var backup = fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.RecordId);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var barrier = fixture.Platform.AddBarrier(
+            $"file.read-bounded:{backup}:2097152",
+            cancellation.Token);
+        using var setupLock = fixture.AcquireLock();
+        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        barrier.WaitUntilReached(cancellation.Token);
+        fixture.Platform.SeedPathMetadata(
+            backup, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        barrier.Release();
+
+        var result = await recovery;
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("stable-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+    }
+
     [Fact]
     public void RecoverNext_Requires_live_matching_setup_lock()
     {
@@ -692,6 +787,372 @@ public sealed class SetupRecoveryTests
             fixture.ReopenCoordinator().RecoverNext(disposed));
 
         Assert.Equal(SetupStorageCodes.LockRequired, exception.Code);
+    }
+
+    private sealed class TerminalEvidenceFixture
+    {
+        private readonly Guid environmentRecordId =
+            Guid.Parse("00000000-0000-7000-8000-000000000901");
+        private readonly Guid fileRecordId =
+            Guid.Parse("00000000-0000-7000-8000-000000000902");
+        private readonly Guid mismatchedRecordId =
+            Guid.Parse("00000000-0000-7000-8000-000000000903");
+        private readonly Guid mismatchedChangeSetId =
+            Guid.Parse("00000000-0000-7000-8000-000000000904");
+        private readonly SetupLedgerChangeSet planned;
+        private readonly string environmentPreviousHash;
+        private readonly string environmentAppliedHash;
+        private readonly string environmentAPriorHash;
+        private readonly string environmentBPriorHash;
+        private readonly string environmentADesiredHash;
+        private readonly string environmentBDesiredHash;
+        private readonly string filePreviousHash;
+        private readonly string fileDesiredHash;
+
+        public TerminalEvidenceFixture()
+        {
+            Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 13, 3, 4, 5, TimeSpan.Zero));
+            Paths = new SetupRuntimePaths(Platform);
+            ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000900");
+            TargetPath = Path.Combine(Platform.LocalApplicationData, "terminal-evidence.json");
+            Platform.SeedDirectory("C:\\");
+            Platform.SeedDirectory(Platform.LocalApplicationData);
+            Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old-file"));
+            Platform.SeedUserEnvironment("ENV_A", "old-a");
+            Platform.SeedUserEnvironment("ENV_B", "old-b");
+            Platform.SeedUserEnvironment("ENV_NOOP", "stable");
+
+            var environmentStep = new UserEnvironmentSetupStep(Platform);
+            var previousEnvironment = environmentStep.Capture(["ENV_A", "ENV_B", "ENV_NOOP"]);
+            environmentPreviousHash = previousEnvironment.AggregateHash;
+            environmentAPriorHash = previousEnvironment.Members[0].Hash;
+            environmentBPriorHash = previousEnvironment.Members[1].Hash;
+            environmentADesiredHash = environmentStep.HashMember(
+                "ENV_A", UserEnvironmentValue.Present("desired-a"));
+            environmentBDesiredHash = environmentStep.HashMember(
+                "ENV_B", UserEnvironmentValue.Present("desired-b"));
+            filePreviousHash = SetupHash.File(true, Encoding.UTF8.GetBytes("old-file"));
+            fileDesiredHash = SetupHash.File(true, Encoding.UTF8.GetBytes("new-file"));
+
+            Platform.SeedUserEnvironment("ENV_A", "desired-a");
+            Platform.SeedUserEnvironment("ENV_B", "desired-b");
+            environmentAppliedHash = environmentStep.Capture(["ENV_A", "ENV_B", "ENV_NOOP"]).AggregateHash;
+            Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("new-file"));
+
+            var createdAt = Platform.Clock.UtcNow;
+            var plan = new SetupPrivatePlan(
+                1,
+                ChangeSetId,
+                "github-copilot",
+                "mixed",
+                createdAt,
+                "1.0.0",
+                [
+                    new SetupPrivatePlanTarget(
+                        environmentRecordId,
+                        SetupTargetKind.Env,
+                        "current-user",
+                        environmentPreviousHash,
+                        "environment-allowlist",
+                        [
+                            new SetupPrivatePlanMember("ENV_A", SetupOperation.Replace, "desired-a"),
+                            new SetupPrivatePlanMember("ENV_B", SetupOperation.Replace, "desired-b"),
+                            new SetupPrivatePlanMember("ENV_NOOP", SetupOperation.NoOp, "stable"),
+                        ]),
+                    new SetupPrivatePlanTarget(
+                        fileRecordId,
+                        SetupTargetKind.Json,
+                        TargetPath,
+                        filePreviousHash,
+                        "new-file",
+                        [new SetupPrivatePlanMember("file-setting", SetupOperation.Replace, "new-file")]),
+                ]);
+            planned = new SetupLedgerChangeSet(
+                ChangeSetId,
+                "github-copilot",
+                "mixed",
+                createdAt,
+                createdAt,
+                "1.0.0",
+                null,
+                SetupChangeSetState.Planned,
+                [
+                    new SetupLedgerTarget(
+                        environmentRecordId,
+                        SetupTargetKind.Env,
+                        "user-environment",
+                        "github-copilot",
+                        [
+                            new SetupLedgerMember("ENV_A", SetupOperation.Replace),
+                            new SetupLedgerMember("ENV_B", SetupOperation.Replace),
+                            new SetupLedgerMember("ENV_NOOP", SetupOperation.NoOp),
+                        ],
+                        environmentPreviousHash,
+                        null,
+                        null,
+                        null,
+                        SetupLedgerRollbackStatus.NotAvailable,
+                        SetupRestartRequirement.RestartTerminalSession,
+                        "1.0.0"),
+                    new SetupLedgerTarget(
+                        fileRecordId,
+                        SetupTargetKind.Json,
+                        "settings",
+                        "github-copilot",
+                        [new SetupLedgerMember("file-setting", SetupOperation.Replace)],
+                        filePreviousHash,
+                        null,
+                        null,
+                        null,
+                        SetupLedgerRollbackStatus.NotAvailable,
+                        SetupRestartRequirement.RestartVsCode,
+                        "1.0.0"),
+                ]);
+            var planStore = new SetupPlanStore(Platform, Paths);
+            using var setupLock = AcquireLock();
+            new SetupLedgerStore(Platform, Paths, planStore)
+                .PersistPlannedChangeSet(setupLock, plan, planned);
+        }
+
+        public SetupTestPlatform Platform { get; }
+        public SetupRuntimePaths Paths { get; }
+        public Guid ChangeSetId { get; }
+        public string TargetPath { get; }
+
+        public SetupLock AcquireLock()
+        {
+            var result = SetupLock.TryAcquire(Platform, Paths);
+            Assert.True(result.Acquired);
+            return result.Lock!;
+        }
+
+        public SetupRecoveryCoordinator ReopenCoordinator()
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            return new SetupRecoveryCoordinator(
+                Platform,
+                Paths,
+                planStore,
+                new SetupLedgerStore(Platform, Paths, planStore),
+                new SetupTransactionJournalStore(Platform, Paths));
+        }
+
+        public SetupLedgerChangeSet LoadChangeSet()
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            return Assert.Single(new SetupLedgerStore(Platform, Paths, planStore).LoadForRecovery().ChangeSets);
+        }
+
+        public SetupTransactionJournal LoadJournal() =>
+            new SetupTransactionJournalStore(Platform, Paths).Load(ChangeSetId)!;
+
+        public SetupEnvironmentNotification ReadJournalNotification()
+        {
+            var read = Platform.FileSystem.ReadAtMostBytes(
+                Paths.GetTransactionJournal(ChangeSetId),
+                SetupTransactionJournalStore.MaximumJournalBytes);
+            Assert.True(read.IsComplete);
+            using var document = JsonDocument.Parse(read.Bytes);
+            return document.RootElement.GetProperty("environment_notification").GetString() switch
+            {
+                "pending" => SetupEnvironmentNotification.Pending,
+                "completed" => SetupEnvironmentNotification.Completed,
+                _ => SetupEnvironmentNotification.NotRequired,
+            };
+        }
+
+        public void SeedMismatchedTerminal(string mismatch, bool notificationCompleted)
+        {
+            var environmentSteps = new[]
+            {
+                new SetupJournalStep(
+                    "ENV_A", environmentAPriorHash, environmentADesiredHash,
+                    environmentRecordId.ToString("D"), SetupJournalStepPhase.Pending),
+                new SetupJournalStep(
+                    "ENV_B", environmentBPriorHash, environmentBDesiredHash,
+                    environmentRecordId.ToString("D"), SetupJournalStepPhase.Pending),
+            };
+            var environmentTarget = new SetupJournalTarget(
+                environmentRecordId, SetupTargetKind.Env, environmentSteps);
+            var fileTarget = new SetupJournalTarget(
+                fileRecordId,
+                SetupTargetKind.Json,
+                [new SetupJournalStep(
+                    null, filePreviousHash, fileDesiredHash,
+                    fileRecordId.ToString("D"), SetupJournalStepPhase.Pending)]);
+            IReadOnlyList<SetupJournalTarget> journalTargets = [environmentTarget, fileTarget];
+            var operation = SetupJournalOperation.Apply;
+            var journalChangeSetId = ChangeSetId;
+            var applied = planned with
+            {
+                State = SetupChangeSetState.Applied,
+                OutcomeCode = SetupCodes.ApplySucceeded,
+                Targets =
+                [
+                    planned.Targets[0] with
+                    {
+                        AppliedStateHash = environmentAppliedHash,
+                        BackupReference = environmentRecordId.ToString("D"),
+                        OutcomeCode = SetupCodes.ApplySucceeded,
+                        RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                    },
+                    planned.Targets[1] with
+                    {
+                        AppliedStateHash = fileDesiredHash,
+                        BackupReference = fileRecordId.ToString("D"),
+                        OutcomeCode = SetupCodes.ApplySucceeded,
+                        RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                    },
+                ],
+            };
+
+            switch (mismatch)
+            {
+                case "change-set-id":
+                    journalChangeSetId = mismatchedChangeSetId;
+                    break;
+                case "record-id":
+                    journalTargets =
+                    [environmentTarget with { RecordId = mismatchedRecordId }, fileTarget];
+                    break;
+                case "target-kind":
+                    journalTargets =
+                    [environmentTarget, fileTarget with { TargetKind = SetupTargetKind.Toml }];
+                    break;
+                case "target-order":
+                    journalTargets = [fileTarget, environmentTarget];
+                    break;
+                case "target-count":
+                    journalTargets = [environmentTarget];
+                    break;
+                case "member-key":
+                    journalTargets =
+                    [environmentTarget with
+                    {
+                        Steps =
+                        [environmentSteps[0] with { MemberKey = "ENV_C" }, environmentSteps[1]],
+                    }, fileTarget];
+                    break;
+                case "member-order":
+                    journalTargets =
+                    [environmentTarget with { Steps = [environmentSteps[1], environmentSteps[0]] }, fileTarget];
+                    break;
+                case "member-count":
+                    journalTargets =
+                    [environmentTarget with { Steps = [environmentSteps[0]] }, fileTarget];
+                    break;
+                case "backup-reference":
+                    journalTargets =
+                    [environmentTarget with
+                    {
+                        Steps = environmentSteps.Select(step => step with
+                        {
+                            BackupReference = "different-backup",
+                        }).ToArray(),
+                    }, fileTarget];
+                    break;
+                case "rollback-status":
+                    applied = applied with
+                    {
+                        Targets =
+                        [applied.Targets[0], applied.Targets[1] with
+                        {
+                            RollbackStatus = SetupLedgerRollbackStatus.Succeeded,
+                        }],
+                    };
+                    break;
+                case "file-prior-hash":
+                    journalTargets =
+                    [environmentTarget, fileTarget with
+                    {
+                        Steps = [fileTarget.Steps[0] with { PriorStateHash = new string('1', 64) }],
+                    }];
+                    break;
+                case "file-desired-hash":
+                    journalTargets =
+                    [environmentTarget, fileTarget with
+                    {
+                        Steps = [fileTarget.Steps[0] with { DesiredStateHash = new string('2', 64) }],
+                    }];
+                    break;
+                case "operation":
+                    operation = SetupJournalOperation.Rollback;
+                    break;
+                case "lifecycle":
+                    applied = applied with
+                    {
+                        State = SetupChangeSetState.Restored,
+                        Targets = applied.Targets.Select(target => target with
+                        {
+                            AppliedStateHash = null,
+                            BackupReference = null,
+                            RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
+                        }).ToArray(),
+                    };
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(mismatch));
+            }
+
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            var journalStore = new SetupTransactionJournalStore(Platform, Paths);
+            using var setupLock = AcquireLock();
+            var ledger = ledgerStore.LoadForRecovery();
+            ledgerStore.Save(setupLock, ledger with { ChangeSets = [applied] });
+            journalStore.CreatePrepared(setupLock, journalChangeSetId, operation, journalTargets);
+            if (operation == SetupJournalOperation.Apply)
+            {
+                journalStore.MarkTransactionPhase(setupLock, journalChangeSetId, SetupJournalPhase.Applying);
+                foreach (var target in journalTargets)
+                {
+                    foreach (var step in target.Steps)
+                    {
+                        journalStore.MarkStepPhase(setupLock, journalChangeSetId, target.RecordId, step.MemberKey,
+                            SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
+                        journalStore.MarkStepPhase(setupLock, journalChangeSetId, target.RecordId, step.MemberKey,
+                            SetupJournalStepPhase.MutationStarted, SetupJournalStepPhase.MutationCompleted);
+                    }
+                }
+
+                journalStore.MarkTransactionPhase(setupLock, journalChangeSetId, SetupJournalPhase.Committed);
+            }
+            else
+            {
+                journalStore.MarkTransactionPhase(setupLock, journalChangeSetId, SetupJournalPhase.RollingBack);
+                foreach (var target in journalTargets)
+                {
+                    foreach (var step in target.Steps)
+                    {
+                        journalStore.MarkStepPhase(setupLock, journalChangeSetId, target.RecordId, step.MemberKey,
+                            SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted);
+                        journalStore.MarkStepPhase(setupLock, journalChangeSetId, target.RecordId, step.MemberKey,
+                            SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+                    }
+                }
+
+                journalStore.MarkTransactionPhase(setupLock, journalChangeSetId, SetupJournalPhase.Committed);
+            }
+
+            if (notificationCompleted)
+            {
+                journalStore.MarkEnvironmentNotificationCompleted(setupLock, journalChangeSetId);
+            }
+
+            if (journalChangeSetId != ChangeSetId)
+            {
+                var read = Platform.FileSystem.ReadAtMostBytes(
+                    Paths.GetTransactionJournal(journalChangeSetId),
+                    SetupTransactionJournalStore.MaximumJournalBytes);
+                Assert.True(read.IsComplete);
+                Platform.SeedFile(
+                    Paths.GetTransactionJournal(ChangeSetId),
+                    read.Bytes);
+                Platform.FileSystem.DeleteFile(Paths.GetTransactionJournal(journalChangeSetId));
+            }
+
+            Platform.FileSystem.DeleteFile(Paths.GetPlan(ChangeSetId));
+        }
     }
 
     private sealed class RecoveryFixture
@@ -1288,10 +1749,10 @@ public sealed class SetupRecoveryTests
                     OutcomeCode = SetupCodes.RollbackSucceeded,
                     Targets = [Planned.Targets[0] with
                     {
-                        AppliedStateHash = new string('a', 64),
-                        BackupReference = RecordId.ToString("D"),
+                        AppliedStateHash = null,
+                        BackupReference = null,
                         OutcomeCode = SetupCodes.RollbackSucceeded,
-                        RollbackStatus = SetupLedgerRollbackStatus.Succeeded,
+                        RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
                     }],
                 }],
             });
