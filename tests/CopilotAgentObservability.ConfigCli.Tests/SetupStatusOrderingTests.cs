@@ -9,6 +9,16 @@ public sealed class SetupStatusOrderingTests
 {
     private static readonly DateTimeOffset Timestamp = new(2026, 7, 14, 0, 0, 0, TimeSpan.Zero);
 
+    public static TheoryData<string> InvalidAdapterIds => new()
+    {
+        "UPPERCASE",
+        "adapter_name",
+        "-adapter",
+        "adapter-",
+        "adapter--name",
+        new string('a', 129),
+    };
+
     [Fact]
     public void Project_PrioritizesRecoveryRowsThenPlannedThenTerminalAndPreservesTargetOrder()
     {
@@ -150,6 +160,21 @@ public sealed class SetupStatusOrderingTests
     }
 
     [Fact]
+    public void Project_DigitLeadingAdapterFiltersHistoricalLedgerExactlyAndSerializes()
+    {
+        var selected = Row("00000000-0000-7000-8000-000000000001", SetupChangeSetState.Planned, 1, "1");
+        var other = Row("00000000-0000-7000-8000-000000000002", SetupChangeSetState.Planned, 2, "2");
+
+        var projected = SetupStatusListProjector.Project(StatusResult(), [other, selected], "1", null, Project);
+        using var document = JsonDocument.Parse(SetupJson.Serialize(projected));
+
+        Assert.Equal("1", projected.Adapter);
+        Assert.Equal(selected.ChangeSetId.ToString("D"), Assert.Single(projected.ChangeSets).ChangeSetId);
+        Assert.Equal("1", document.RootElement.GetProperty("adapter").GetString());
+        Assert.Equal("1", document.RootElement.GetProperty("change_sets")[0].GetProperty("adapter").GetString());
+    }
+
+    [Fact]
     public void Project_NoAdapterFilterClearsStaleInputAdapterWithoutMutatingInputs()
     {
         var statusResult = StatusResult("stale-adapter");
@@ -219,6 +244,30 @@ public sealed class SetupStatusOrderingTests
             SetupChangeSetState.Planned,
             1,
             "GitHub-Copilot");
+
+        Assert.Throws<FormatException>(() =>
+            SetupStatusListProjector.Project(StatusResult(), [row], null, null, Project));
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidAdapterIds))]
+    public void Project_RejectsMalformedAdapterFilter(string adapter)
+    {
+        var row = Row("00000000-0000-7000-8000-000000000001", SetupChangeSetState.Planned, 1);
+
+        Assert.Throws<FormatException>(() =>
+            SetupStatusListProjector.Project(StatusResult(), [row], adapter, null, Project));
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidAdapterIds))]
+    public void Project_RejectsMalformedHistoricalLedgerAdapter(string adapter)
+    {
+        var row = Row(
+            "00000000-0000-7000-8000-000000000001",
+            SetupChangeSetState.Planned,
+            1,
+            adapter);
 
         Assert.Throws<FormatException>(() =>
             SetupStatusListProjector.Project(StatusResult(), [row], null, null, Project));

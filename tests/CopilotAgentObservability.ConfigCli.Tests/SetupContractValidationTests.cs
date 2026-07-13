@@ -7,6 +7,16 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SetupContractValidationTests
 {
+    public static TheoryData<string> InvalidAdapterIds => new()
+    {
+        "UPPERCASE",
+        "adapter_name",
+        "-adapter",
+        "adapter-",
+        "adapter--name",
+        new string('a', 129),
+    };
+
     private const string AppSdkGuidanceSample = """
         new CopilotClientOptions
         {
@@ -209,6 +219,100 @@ public sealed class SetupContractValidationTests
 
         Assert.Equal("setup_contract_invalid", exception.Message);
         Assert.DoesNotContain(value, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Serialize_WhenPlanAdapterStartsWithDigit_PreservesAdapterSlug()
+    {
+        var result = CreatePlanResult([]) with { Adapter = "1" };
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal("1", document.RootElement.GetProperty("adapter").GetString());
+    }
+
+    [Fact]
+    public void Serialize_WhenUnsupportedAdapterStartsWithDigit_PreservesArtifactFreeFailure()
+    {
+        var result = CreatePlanResult([]) with
+        {
+            Success = false,
+            Code = SetupCodes.UnsupportedAdapter,
+            ChangeSetId = null,
+            Adapter = "1",
+        };
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal("unsupported_adapter", document.RootElement.GetProperty("code").GetString());
+        Assert.Equal("1", document.RootElement.GetProperty("adapter").GetString());
+    }
+
+    [Fact]
+    public void Serialize_WhenStatusEntryAdapterStartsWithDigit_PreservesAdapterSlug()
+    {
+        var status = CreateAppliedStatus("2026-07-12T00:00:00Z", "2026-07-12T00:01:00Z") with
+        {
+            Adapter = "1",
+        };
+        var result = new SetupCommandResult(
+            SetupCommand.Status,
+            true,
+            SetupCodes.StatusReady,
+            null,
+            null,
+            null,
+            "1",
+            [],
+            [status],
+            [],
+            [],
+            false);
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal("1", document.RootElement.GetProperty("adapter").GetString());
+        Assert.Equal("1", document.RootElement.GetProperty("change_sets")[0].GetProperty("adapter").GetString());
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidAdapterIds))]
+    public void Serialize_WhenTopLevelAdapterSlugIsMalformed_RejectsWithoutEcho(string adapter)
+    {
+        var result = CreatePlanResult([]) with { Adapter = adapter };
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal(SetupContractValidator.InvalidContractCode, exception.Message);
+        Assert.DoesNotContain(adapter, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidAdapterIds))]
+    public void Serialize_WhenStatusAdapterSlugIsMalformed_RejectsWithoutEcho(string adapter)
+    {
+        var status = CreateAppliedStatus("2026-07-12T00:00:00Z", "2026-07-12T00:01:00Z") with
+        {
+            Adapter = adapter,
+        };
+        var result = new SetupCommandResult(
+            SetupCommand.Status,
+            true,
+            SetupCodes.StatusReady,
+            null,
+            null,
+            null,
+            "github-copilot",
+            [],
+            [status],
+            [],
+            [],
+            false);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal(SetupContractValidator.InvalidContractCode, exception.Message);
+        Assert.DoesNotContain(adapter, exception.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

@@ -8,8 +8,8 @@ internal static class SetupStatusListProjector
 {
     private const int MaximumChangeSets = 100;
 
-    private static readonly Regex CanonicalIdentifier = new(
-        "^[a-z][a-z0-9_-]{0,127}$",
+    private static readonly Regex CanonicalAdapterIdentifier = new(
+        "\\A[a-z0-9]+(?:-[a-z0-9]+)*\\z",
         RegexOptions.CultureInvariant);
 
     public static SetupCommandResult Project(
@@ -55,7 +55,7 @@ internal static class SetupStatusListProjector
     private static SetupLedgerChangeSet RequireValidChangeSet(SetupLedgerChangeSet? changeSet)
     {
         if (changeSet is null ||
-            !CanonicalIdentifier.IsMatch(changeSet.Adapter) ||
+            !IsCanonicalAdapterIdentifier(changeSet.Adapter) ||
             !IsUuidV7(changeSet.ChangeSetId) ||
             !Enum.IsDefined(changeSet.State))
         {
@@ -67,11 +67,14 @@ internal static class SetupStatusListProjector
 
     private static void ValidateAdapterFilter(string? adapterFilter)
     {
-        if (adapterFilter is not null && !CanonicalIdentifier.IsMatch(adapterFilter))
+        if (adapterFilter is not null && !IsCanonicalAdapterIdentifier(adapterFilter))
         {
             throw new FormatException();
         }
     }
+
+    private static bool IsCanonicalAdapterIdentifier(string? value) =>
+        value is { Length: >= 1 and <= 128 } && CanonicalAdapterIdentifier.IsMatch(value);
 
     private static Guid? ParseChangeSetIdFilter(string? changeSetIdFilter)
     {

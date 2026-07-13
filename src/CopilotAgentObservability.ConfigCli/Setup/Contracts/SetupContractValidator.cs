@@ -33,6 +33,9 @@ public static class SetupContractValidator
     private static readonly Regex FixedIdentifier = new(
         "^[a-z][a-z0-9_-]{0,127}$",
         RegexOptions.CultureInvariant);
+    private static readonly Regex AdapterIdentifier = new(
+        "\\A[a-z0-9]+(?:-[a-z0-9]+)*\\z",
+        RegexOptions.CultureInvariant);
     private static readonly Regex SettingKey = new(
         "^[A-Za-z][A-Za-z0-9._-]{0,255}$",
         RegexOptions.CultureInvariant);
@@ -95,7 +98,7 @@ public static class SetupContractValidator
             Reject();
         }
 
-        ValidateOptionalIdentifier(result.Adapter);
+        ValidateOptionalAdapterIdentifier(result.Adapter);
         ValidateStringList(result.Warnings, WarningCodes);
         ValidateStringList(result.NextActions, NextActionCodes);
         ValidateResultCodeForCommand(result.Command, result.Code, result.Success);
@@ -274,7 +277,7 @@ public static class SetupContractValidator
         }
 
         ValidateUuidV7(changeSet.ChangeSetId);
-        ValidateFixedIdentifier(changeSet.Adapter);
+        ValidateAdapterIdentifier(changeSet.Adapter);
         ValidateFixedIdentifier(changeSet.SelectedTarget);
         var createdAt = ValidateUtcTimestamp(changeSet.CreatedAt);
         var updatedAt = ValidateUtcTimestamp(changeSet.UpdatedAt);
@@ -699,11 +702,19 @@ public static class SetupContractValidator
         return timestamp;
     }
 
-    private static void ValidateOptionalIdentifier(string? value)
+    private static void ValidateOptionalAdapterIdentifier(string? value)
     {
         if (value is not null)
         {
-            ValidateFixedIdentifier(value);
+            ValidateAdapterIdentifier(value);
+        }
+    }
+
+    private static void ValidateAdapterIdentifier(string? value)
+    {
+        if (value is null || value.Length is < 1 or > 128 || !AdapterIdentifier.IsMatch(value))
+        {
+            Reject();
         }
     }
 
