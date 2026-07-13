@@ -63,7 +63,6 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
             ValidateDiagnosticCode(failure.Code);
             return SetupPlanResult.Failure<SetupPlannedChangeSet>(
                 failure.Code,
-                failure.Targets,
                 failure.Warnings,
                 failure.NextActions);
         }
@@ -73,6 +72,7 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
             throw SetupPlanResult.InvalidOutput();
         }
 
+        ValidateTargets(success.Targets);
         var aggregate = SetupPlanResult.SnapshotPlan(success.Value);
         RequireMatchingRequest(aggregate, request);
         var records = aggregate.Records.ToArray();
@@ -189,13 +189,26 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
     private static void ValidateDiagnostics<T>(SetupPlanResult<T> result)
         where T : class
     {
-        if (result.Targets.Count > MaximumTargets)
+        foreach (var warning in result.Warnings)
+        {
+            ValidateDiagnosticCode(warning);
+        }
+
+        foreach (var nextAction in result.NextActions)
+        {
+            ValidateDiagnosticCode(nextAction);
+        }
+    }
+
+    private static void ValidateTargets(IReadOnlyList<SetupPlanTarget> targets)
+    {
+        if (targets.Count > MaximumTargets)
         {
             throw SetupPlanResult.InvalidOutput();
         }
 
         var recordIds = new HashSet<Guid>();
-        foreach (var target in result.Targets)
+        foreach (var target in targets)
         {
             if (target is null ||
                 target.RecordId == Guid.Empty ||
@@ -213,16 +226,6 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
             {
                 throw SetupPlanResult.InvalidOutput();
             }
-        }
-
-        foreach (var warning in result.Warnings)
-        {
-            ValidateDiagnosticCode(warning);
-        }
-
-        foreach (var nextAction in result.NextActions)
-        {
-            ValidateDiagnosticCode(nextAction);
         }
     }
 

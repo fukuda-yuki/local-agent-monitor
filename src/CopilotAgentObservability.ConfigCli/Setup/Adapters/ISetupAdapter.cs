@@ -49,22 +49,18 @@ internal abstract class SetupPlanResult<T>
     where T : class
 {
     private protected SetupPlanResult(
-        IEnumerable<SetupPlanTarget> targets,
         IEnumerable<string> warnings,
         IEnumerable<string> nextActions)
     {
-        Targets = Snapshot(targets);
         Warnings = Snapshot(warnings);
         NextActions = Snapshot(nextActions);
     }
-
-    public IReadOnlyList<SetupPlanTarget> Targets { get; }
 
     public IReadOnlyList<string> Warnings { get; }
 
     public IReadOnlyList<string> NextActions { get; }
 
-    private static IReadOnlyList<TItem> Snapshot<TItem>(IEnumerable<TItem> values)
+    private protected static IReadOnlyList<TItem> Snapshot<TItem>(IEnumerable<TItem> values)
     {
         if (values is null)
         {
@@ -83,12 +79,15 @@ internal sealed class SetupPlanSuccess<T> : SetupPlanResult<T>
         IEnumerable<SetupPlanTarget> targets,
         IEnumerable<string> warnings,
         IEnumerable<string> nextActions)
-        : base(targets, warnings, nextActions)
+        : base(warnings, nextActions)
     {
         Value = value ?? throw SetupPlanResult.InvalidOutput();
+        Targets = Snapshot(targets);
     }
 
     public T Value { get; }
+
+    public IReadOnlyList<SetupPlanTarget> Targets { get; }
 }
 
 internal sealed class SetupPlanFailure<T> : SetupPlanResult<T>
@@ -96,10 +95,9 @@ internal sealed class SetupPlanFailure<T> : SetupPlanResult<T>
 {
     internal SetupPlanFailure(
         string code,
-        IEnumerable<SetupPlanTarget> targets,
         IEnumerable<string> warnings,
         IEnumerable<string> nextActions)
-        : base(targets, warnings, nextActions)
+        : base(warnings, nextActions)
     {
         Code = code ?? throw SetupPlanResult.InvalidOutput();
     }
@@ -134,11 +132,10 @@ internal static class SetupPlanResult
 
     public static SetupPlanFailure<T> Failure<T>(
         string code,
-        IEnumerable<SetupPlanTarget>? targets = null,
         IEnumerable<string>? warnings = null,
         IEnumerable<string>? nextActions = null)
         where T : class =>
-        new(code, targets ?? [], warnings ?? [], nextActions ?? []);
+        new(code, warnings ?? [], nextActions ?? []);
 
     internal static InvalidOperationException InvalidOutput() => new(InvalidOutputMessage);
 

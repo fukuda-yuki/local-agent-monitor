@@ -82,26 +82,12 @@ public sealed class SetupAdapterRegistryTests
     }
 
     [Fact]
-    public void Plan_WhenAdapterReturnsSanitizedFailure_PreservesOnlyTypedDiagnostics()
+    public void Plan_WhenAdapterReturnsSanitizedFailure_PreservesImmutableDiagnosticsWithoutArtifacts()
     {
-        var diagnosticTarget = new SetupPlanTarget(
-            RecordId,
-            SetupTargetKind.Guidance,
-            "diagnostic-guidance",
-            false,
-            null,
-            SetupOperation.NoOp,
-            null,
-            SetupRestartRequirement.None,
-            null,
-            null,
-            null,
-            []);
         var adapter = new FixedResultAdapter(
             "test-adapter",
             SetupPlanResult.Failure<SetupChangePlan>(
                 SetupCodes.UnsupportedTarget,
-                [diagnosticTarget],
                 [SetupCodes.ManagedPolicyUnverified],
                 [SetupCodes.RunVsCodePolicyDiagnostics]));
         var registry = new SetupAdapterRegistry([adapter]);
@@ -110,11 +96,17 @@ public sealed class SetupAdapterRegistryTests
             registry.Plan(CreateRequest("test-adapter")));
 
         Assert.Equal(SetupCodes.UnsupportedTarget, result.Code);
-        Assert.Same(diagnosticTarget, Assert.Single(result.Targets));
-        Assert.False(result.Targets[0].ProspectiveRollbackAvailable);
         Assert.Equal([SetupCodes.ManagedPolicyUnverified], result.Warnings);
         Assert.Equal([SetupCodes.RunVsCodePolicyDiagnostics], result.NextActions);
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)result.Warnings)[0] = "changed");
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)result.NextActions)[0] = "changed");
         Assert.Null(result.GetType().GetProperty("Value"));
+        Assert.Null(result.GetType().GetProperty("Targets"));
+        Assert.DoesNotContain(
+            result.GetType().GetProperties(),
+            property => property.PropertyType == typeof(SetupPrivatePlan) ||
+                property.PropertyType == typeof(SetupLedgerChangeSet) ||
+                property.PropertyType == typeof(SetupPlannedChangeSet));
     }
 
     [Fact]
