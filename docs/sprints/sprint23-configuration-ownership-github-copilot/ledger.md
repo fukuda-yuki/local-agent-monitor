@@ -10,6 +10,7 @@ Updated: 2026-07-14
 | CRLF contract-test baseline fix | prerequisite | Complete | `3fa8340..3505565` | SourceCapabilityContractTests 13/13 / full 1,250/1,250 | Spec PASS, Quality APPROVED | none |
 | Setup result DTO and serializer (Task 1a) | #66 | Complete | `63deb36..98af0cc` | SetupContractShapeTests 47/47; `git diff --check` exit 0 | Spec PASS, Quality APPROVED; no findings after two required test-design re-audits | none |
 | Setup result validation (Task 1b) | #66 | Complete | `e62330b..92ced23` | SetupContractValidationTests 74/74; SetupContractShapeTests 47/47; ConfigCli 449/449 | Spec PASS; Security/Quality APPROVED after dependency re-audit | target pairing and CLI input normalization remain for Tasks 8b/7a |
+| SetupOptions parser (Task C1) | #66 | Complete | `0a484ff..c048946` | RED/GREEN; focused 70/70; build 0/0 | Independent initial review CHANGES (port 0/test gaps), then final PASS; no findings | full ConfigCli concurrent-state evidence is not final; status/terminal/C2+ remain open |
 | Runtime #61 manifest loader (Task 8a, pulled forward) | #67 dependency | Complete | `cce9a72..e7d44e2` | SourceCapabilityRuntimeTests 14/14; SourceCapabilityContractTests 13/13; ConfigCli 432/432 at task review | Spec PASS; Quality/Security APPROVED | target pairing remains for Task 8b real-producer gate |
 | Platform contracts and deterministic fake (Task 2a) | #66 | Complete | `2755269..fd36d38` | SetupPlatformTests 15/15; ConfigCli 464/464 | Spec PASS; Quality/Security APPROVED after concurrency re-audit | actual Windows notification delivery not integration-tested; injected classification verified |
 | Runtime paths and exclusive lock (Task 2b) | #66 | Complete | `9d962ff..ed820bb` | SetupRuntimeTests 8/8; SetupPlatformTests 20/20; ConfigCli 477/477 | Spec PASS; Quality/Security APPROVED after cross-process test re-audit | Linux/macOS runtime not executed on Windows host; mandatory cross-platform test no longer skips |
@@ -115,6 +116,9 @@ Updated: 2026-07-14
   1.128+ for apply and terminal Copilot CLI 1.0.4+.
 - HTTP, proxy, and UI DTOs are explicitly N/A; independent re-review is pending.
 - App/SDK guidance output has not yet consumed a real #66 plan DTO.
+- The #66 C1 SetupOptions parser is complete through `c048946`, but full
+  ConfigCli concurrent-state evidence is not final; status/terminal/C2+ remain
+  open.
 - The producer matrix and executable #66-to-#67 cross-surface interfaces remain
   unverified; this ledger closes B2b/finding 2 and Gap 4 only for the three
   audited actual-producer reopen windows, but does not close finding 3,
