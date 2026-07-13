@@ -78,11 +78,24 @@ internal sealed class SetupApplyCoordinator
                 return noChanges;
             }
 
-            CreateBackups(plan, changedCaptures);
-
             var journalTargets = CreateJournalTargets(changedCaptures);
+            var preparedJournalExists = platform.FileSystem
+                .GetPathMetadata(paths.GetTransactionJournal(changeSetId))
+                .Exists;
+            if (preparedJournalExists)
+            {
+                journalStore.OpenOrCreatePrepared(
+                    setupLock, changeSetId, SetupJournalOperation.Apply, journalTargets);
+                CreateOrValidateBackups(plan, changedCaptures, requireExisting: true);
+            }
+            else
+            {
+                CreateOrValidateBackups(plan, changedCaptures, requireExisting: false);
+                journalStore.OpenOrCreatePrepared(
+                    setupLock, changeSetId, SetupJournalOperation.Apply, journalTargets);
+            }
+
             compensationEligible = true;
-            journalStore.CreatePrepared(setupLock, changeSetId, SetupJournalOperation.Apply, journalTargets);
             platform.Execution.Checkpoint(SetupFaultPoint.AfterJournalPreparedBeforeLedger);
 
             var applying = CreateApplyingChangeSet(planned, changedCaptures);
@@ -800,20 +813,32 @@ internal sealed class SetupApplyCoordinator
         Targets = planned.Targets.Select(target => target with { OutcomeCode = SetupCodes.NoChanges }).ToArray(),
     };
 
-    private void CreateBackups(SetupPrivatePlan plan, IReadOnlyList<TargetCapture> captures)
+    private void CreateOrValidateBackups(
+        SetupPrivatePlan plan,
+        IReadOnlyList<TargetCapture> captures,
+        bool requireExisting)
     {
-        platform.FileSystem.CreateDirectory(paths.Backups);
-        platform.FileSystem.CreateDirectory(Path.Combine(paths.Backups, plan.ChangeSetId.ToString("D")));
+        if (!requireExisting)
+        {
+            platform.FileSystem.CreateDirectory(paths.Backups);
+            platform.FileSystem.CreateDirectory(Path.Combine(paths.Backups, plan.ChangeSetId.ToString("D")));
+        }
+
         foreach (var capture in captures)
         {
             var backupPath = paths.GetBackup(plan.ChangeSetId, capture.Target.RecordId);
+            if (requireExisting && !platform.FileSystem.GetPathMetadata(backupPath).Exists)
+            {
+                throw new SetupApplyException(SetupCodes.RecoveryRequired);
+            }
+
             if (capture.File is not null)
             {
-                fileStep.CreateBackup(backupPath, capture.File);
+                fileStep.CreateOrValidateBackup(backupPath, capture.File);
             }
             else
             {
-                environmentStep.CreateBackup(backupPath, capture.Environment!);
+                environmentStep.CreateOrValidateBackup(backupPath, capture.Environment!);
             }
         }
     }

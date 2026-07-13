@@ -217,6 +217,216 @@ public sealed class SetupApplyTests
         Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
     }
 
+    [Fact]
+    public void Apply_ReusesFirstExactOrphanBackupAndCreatesOnlyLaterMissingBackup()
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.SeedExactBackup(fixture.FileRecordId);
+        var fileBackup = fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId);
+        var exactFileBackup = fixture.Platform.ReadSeededFile(fileBackup);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
+        Assert.Equal(exactFileBackup, fixture.Platform.ReadSeededFile(fileBackup));
+        Assert.True(fixture.Platform.FileSystem.FileExists(
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.EnvironmentRecordId)));
+        Assert.DoesNotContain(
+            fixture.Platform.Operations.Skip(operationCount),
+            operation => IsWriteOperation(operation) && operation.Contains(fileBackup, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Apply_ReopensExactBackupsAndPreparedJournalThenContinuesWithoutArtifactWriteBeforeLedger()
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.SeedExactBackup(fixture.FileRecordId);
+        fixture.SeedExactBackup(fixture.EnvironmentRecordId);
+        fixture.SeedPreparedJournal(fixture.ExpectedJournalTargets());
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
+        Assert.Equal(SetupChangeSetState.Applied, result.State);
+        var operations = fixture.Platform.Operations.Skip(operationCount).ToArray();
+        var ledgerWrite = Array.FindIndex(
+            operations,
+            operation => IsWriteOperation(operation) &&
+                operation.Contains(fixture.Paths.OwnershipLedger, StringComparison.Ordinal));
+        Assert.True(ledgerWrite >= 0);
+        Assert.DoesNotContain(operations.Take(ledgerWrite), IsWriteOperation);
+        Assert.Equal(1, operations.Count(operation => operation == "environment.notify"));
+        Assert.Equal(SetupJournalPhase.Committed,
+            new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!.Phase);
+    }
+
+    [Theory]
+    [InlineData("operation")]
+    [InlineData("target-order")]
+    [InlineData("target-kind")]
+    [InlineData("member-key")]
+    [InlineData("prior-hash")]
+    [InlineData("desired-hash")]
+    [InlineData("backup-reference")]
+    [InlineData("step-order")]
+    public void Apply_NonExactPreparedJournalFailsClosedWithoutAnyWrite(string mismatch)
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.SeedExactBackup(fixture.FileRecordId);
+        fixture.SeedExactBackup(fixture.EnvironmentRecordId);
+        var targets = fixture.ExpectedJournalTargets().ToArray();
+        var operation = SetupJournalOperation.Apply;
+        switch (mismatch)
+        {
+            case "operation": operation = SetupJournalOperation.Rollback; break;
+            case "target-order": targets = targets.Reverse().ToArray(); break;
+            case "target-kind": targets[0] = targets[0] with { TargetKind = SetupTargetKind.Toml }; break;
+            case "member-key": targets[1] = ReplaceStep(targets[1], 0, step => step with { MemberKey = "ENV_C" }); break;
+            case "prior-hash": targets[0] = ReplaceStep(targets[0], 0, step => step with { PriorStateHash = Hash('a') }); break;
+            case "desired-hash": targets[0] = ReplaceStep(targets[0], 0, step => step with { DesiredStateHash = Hash('b') }); break;
+            case "backup-reference": targets[0] = ReplaceStep(targets[0], 0, step => step with { BackupReference = "other-backup" }); break;
+            case "step-order": targets[1] = targets[1] with { Steps = targets[1].Steps.Reverse().ToArray() }; break;
+        }
+        fixture.SeedPreparedJournal(targets, operation);
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        var exactJournal = fixture.Platform.ReadSeededFile(journalPath);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(exactJournal, fixture.Platform.ReadSeededFile(journalPath));
+        AssertApplyInputsUnchanged(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData("unsupported-version")]
+    [InlineData("notification")]
+    [InlineData("phase")]
+    public void Apply_UnsupportedOrNonDormantPreparedJournalFailsClosedWithoutAnyWrite(string mismatch)
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.SeedExactBackup(fixture.FileRecordId);
+        fixture.SeedExactBackup(fixture.EnvironmentRecordId);
+        fixture.SeedPreparedJournal(fixture.ExpectedJournalTargets());
+        if (mismatch == "phase")
+        {
+            fixture.MarkPreparedJournalApplying();
+        }
+        else
+        {
+            fixture.RewriteJournal(json => mismatch == "unsupported-version"
+                ? json.Replace("\"schema_version\": 1", "\"schema_version\": 2", StringComparison.Ordinal)
+                : json.Replace("\"environment_notification\": \"not_required\"", "\"environment_notification\": \"pending\"", StringComparison.Ordinal));
+        }
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        var exactJournal = fixture.Platform.ReadSeededFile(journalPath);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(exactJournal, fixture.Platform.ReadSeededFile(journalPath));
+        AssertApplyInputsUnchanged(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData("file-mismatch")]
+    [InlineData("environment-mismatch")]
+    [InlineData("file-rebound")]
+    [InlineData("environment-rebound")]
+    public void Apply_InvalidBackupReferencedByExactPreparedJournalFailsClosedWithoutAnyWrite(string mismatch)
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.SeedExactBackup(fixture.FileRecordId);
+        fixture.SeedExactBackup(fixture.EnvironmentRecordId);
+        fixture.SeedPreparedJournal(fixture.ExpectedJournalTargets());
+        var recordId = mismatch.StartsWith("file", StringComparison.Ordinal)
+            ? fixture.FileRecordId
+            : fixture.EnvironmentRecordId;
+        var backupPath = fixture.Paths.GetBackup(fixture.ChangeSetId, recordId);
+        if (mismatch.EndsWith("mismatch", StringComparison.Ordinal))
+        {
+            fixture.Platform.SeedFile(
+                backupPath,
+                fixture.Platform.ReadSeededFile(backupPath).Append((byte)0xff).ToArray());
+        }
+        else
+        {
+            fixture.Platform.SeedPathMetadata(
+                backupPath,
+                new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        }
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        var exactJournal = fixture.Platform.ReadSeededFile(journalPath);
+        var exactBackup = fixture.Platform.ReadSeededFile(backupPath);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(exactJournal, fixture.Platform.ReadSeededFile(journalPath));
+        Assert.Equal(exactBackup, fixture.Platform.ReadSeededFile(backupPath));
+        AssertApplyInputsUnchanged(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
+    public void Apply_MissingBackupReferencedByExactPreparedJournalRequiresRecoveryWithoutAnyWrite()
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.SeedExactBackup(fixture.EnvironmentRecordId);
+        fixture.SeedPreparedJournal(fixture.ExpectedJournalTargets());
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        var exactJournal = fixture.Platform.ReadSeededFile(journalPath);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.False(fixture.Platform.FileSystem.FileExists(
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId)));
+        Assert.Equal(exactJournal, fixture.Platform.ReadSeededFile(journalPath));
+        AssertApplyInputsUnchanged(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
+    public void Apply_StalePlanPreservesExactOrphanBackupWithoutCreatingJournal()
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.SeedExactBackup(fixture.FileRecordId);
+        var backupPath = fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId);
+        var exactBackup = fixture.Platform.ReadSeededFile(backupPath);
+        fixture.Revalidator.OnRevalidate = (_, _) =>
+            fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("third-party"));
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.StalePlan, exception.Code);
+        Assert.Equal(exactBackup, fixture.Platform.ReadSeededFile(backupPath));
+        Assert.False(fixture.Platform.FileSystem.FileExists(fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)));
+        Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
     [Theory]
     [InlineData(SetupFaultPoint.AfterJournalPreparedBeforeLedger, SetupChangeSetState.Restored, "Restored", "Pending")]
     [InlineData(SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent, SetupChangeSetState.Restored, "Restored", "Pending")]
@@ -300,7 +510,8 @@ public sealed class SetupApplyTests
         var notify = IndexOf(operations, "environment.notify", 0);
         var firstBackupWrite = operations
             .Select((operation, index) => (operation, index))
-            .First(item => item.operation.StartsWith($"file.write-new:{fixture.Paths.Backups}", StringComparison.Ordinal)).index;
+            .First(item => item.operation.StartsWith(
+                $"file.try-write-new-flushed:{fixture.Paths.Backups}", StringComparison.Ordinal)).index;
         Assert.True(operations.Take(firstBackupWrite).Count(operation => operation == "environment.get:ENV_B") >= 2);
         Assert.True(commitCheckpoint >= 0 && commitCheckpoint < notify);
         Assert.DoesNotContain(operations.Skip(notify + 1), operation => operation.StartsWith("environment.set:", StringComparison.Ordinal));
@@ -662,6 +873,37 @@ public sealed class SetupApplyTests
         return -1;
     }
 
+    private static SetupJournalTarget ReplaceStep(
+        SetupJournalTarget target,
+        int index,
+        Func<SetupJournalStep, SetupJournalStep> replace)
+    {
+        var steps = target.Steps.ToArray();
+        steps[index] = replace(steps[index]);
+        return target with { Steps = steps };
+    }
+
+    private static string Hash(char value) => new(value, 64);
+
+    private static bool IsWriteOperation(string operation) =>
+        operation.StartsWith("file.write:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.write-new:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.try-write-new-flushed:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.flush:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.replace:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.move:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.delete:", StringComparison.Ordinal) ||
+        operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+        operation == "environment.notify";
+
+    private static void AssertApplyInputsUnchanged(ApplyFixture fixture)
+    {
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
+    }
+
     private static void AssertNoTransactionArtifacts(ApplyFixture fixture)
     {
         Assert.False(fixture.Platform.FileSystem.FileExists(fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)));
@@ -753,6 +995,97 @@ public sealed class SetupApplyTests
         public string TargetPath { get; }
         public RecordingRevalidator Revalidator { get; }
         public SetupApplyCoordinator Coordinator { get; }
+
+        public SetupApplyCoordinator ReopenCoordinator()
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            return new SetupApplyCoordinator(
+                Platform,
+                Paths,
+                planStore,
+                new SetupLedgerStore(Platform, Paths, planStore),
+                new SetupTransactionJournalStore(Platform, Paths),
+                Revalidator);
+        }
+
+        public void SeedExactBackup(Guid recordId)
+        {
+            Platform.SeedDirectory(Paths.Backups);
+            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            var backupPath = Paths.GetBackup(ChangeSetId, recordId);
+            if (recordId == FileRecordId)
+            {
+                var step = new AtomicFileSetupStep(Platform);
+                step.CreateOrValidateBackup(
+                    backupPath,
+                    step.Capture(Path.GetDirectoryName(TargetPath)!, TargetPath));
+                return;
+            }
+
+            var environmentStep = new UserEnvironmentSetupStep(Platform);
+            environmentStep.CreateOrValidateBackup(
+                backupPath,
+                environmentStep.Capture(["ENV_A", "ENV_B"]));
+        }
+
+        public IReadOnlyList<SetupJournalTarget> ExpectedJournalTargets()
+        {
+            var fileStep = new AtomicFileSetupStep(Platform);
+            var fileCapture = fileStep.Capture(Path.GetDirectoryName(TargetPath)!, TargetPath);
+            var environmentStep = new UserEnvironmentSetupStep(Platform);
+            var environmentCapture = environmentStep.Capture(["ENV_A", "ENV_B"]);
+            return
+            [
+                new SetupJournalTarget(
+                    FileRecordId,
+                    SetupTargetKind.Json,
+                    [new SetupJournalStep(
+                        null,
+                        fileCapture.Hash,
+                        SetupHash.File(true, Encoding.UTF8.GetBytes("new")),
+                        FileRecordId.ToString("D"),
+                        SetupJournalStepPhase.Pending)]),
+                new SetupJournalTarget(
+                    EnvironmentRecordId,
+                    SetupTargetKind.Env,
+                    [
+                        new SetupJournalStep(
+                            "ENV_A",
+                            environmentCapture.Members[0].Hash,
+                            environmentStep.HashMember("ENV_A", UserEnvironmentValue.Present("desired-a")),
+                            EnvironmentRecordId.ToString("D"),
+                            SetupJournalStepPhase.Pending),
+                        new SetupJournalStep(
+                            "ENV_B",
+                            environmentCapture.Members[1].Hash,
+                            environmentStep.HashMember("ENV_B", UserEnvironmentValue.Missing),
+                            EnvironmentRecordId.ToString("D"),
+                            SetupJournalStepPhase.Pending),
+                    ])
+            ];
+        }
+
+        public void SeedPreparedJournal(
+            IReadOnlyList<SetupJournalTarget> targets,
+            SetupJournalOperation operation = SetupJournalOperation.Apply)
+        {
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            new SetupTransactionJournalStore(Platform, Paths).OpenOrCreatePrepared(
+                acquisition.Lock!, ChangeSetId, operation, targets);
+        }
+
+        public void MarkPreparedJournalApplying()
+        {
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            new SetupTransactionJournalStore(Platform, Paths).MarkTransactionPhase(
+                acquisition.Lock!, ChangeSetId, SetupJournalPhase.Applying);
+        }
+
+        public void RewriteJournal(Func<string, string> rewrite)
+        {
+            var path = Paths.GetTransactionJournal(ChangeSetId);
+            Platform.SeedFile(path, Encoding.UTF8.GetBytes(rewrite(Encoding.UTF8.GetString(Platform.ReadSeededFile(path)))));
+        }
 
         public static ApplyFixture Create(
             bool noChanges = false,
