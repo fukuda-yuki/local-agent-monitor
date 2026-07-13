@@ -552,9 +552,9 @@ public sealed class SetupRollbackTests
     }
 
     [Fact]
-    public void Rollback_Repeated_request_is_not_available_and_does_not_restore_again()
+    public void Rollback_Mixed_repeated_request_is_not_available_and_does_not_restore_again()
     {
-        var fixture = RollbackFixture.Create();
+        var fixture = RollbackFixture.Create(includeEnvironment: true);
         Assert.True(fixture.Rollback().Success);
         var baseline = fixture.Platform.Operations.Count;
 
@@ -563,8 +563,12 @@ public sealed class SetupRollbackTests
         Assert.False(repeated.Success);
         Assert.Equal(SetupCodes.RollbackNotAvailable, repeated.Code);
         Assert.Equal("old-0", fixture.ReadText(fixture.TargetPaths[0]));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
         Assert.DoesNotContain(fixture.Platform.Operations.Skip(baseline),
-            operation => IsTargetMutation(operation, fixture.TargetPaths));
+            operation => IsTargetMutation(operation, fixture.TargetPaths) ||
+                operation.StartsWith("environment.get:", StringComparison.Ordinal) ||
+                operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+                operation == "environment.notify");
         Assert.Equal(SetupChangeSetState.RolledBack, fixture.LoadChangeSet().State);
     }
 
@@ -602,9 +606,9 @@ public sealed class SetupRollbackTests
     }
 
     [Fact]
-    public void Rollback_Restores_missing_previous_state_by_deleting_the_applied_file()
+    public void Rollback_Mixed_restores_missing_previous_file_and_environment()
     {
-        var fixture = RollbackFixture.Create(previousMissing: true);
+        var fixture = RollbackFixture.Create(previousMissing: true, includeEnvironment: true);
         Assert.True(fixture.Platform.FileSystem.FileExists(fixture.TargetPaths[0]));
 
         var result = fixture.Rollback();
@@ -612,13 +616,14 @@ public sealed class SetupRollbackTests
         Assert.True(result.Success);
         Assert.Equal(SetupCodes.RollbackSucceeded, result.Code);
         Assert.False(fixture.Platform.FileSystem.FileExists(fixture.TargetPaths[0]));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
         Assert.Equal(SetupChangeSetState.RolledBack, fixture.LoadChangeSet().State);
     }
 
     [Fact]
-    public async Task Rollback_Same_lock_serializes_the_entire_operation_without_sleep_or_retry()
+    public async Task Rollback_Mixed_same_lock_serializes_the_entire_operation_without_sleep_or_retry()
     {
-        var fixture = RollbackFixture.Create();
+        var fixture = RollbackFixture.Create(includeEnvironment: true);
         using var boundary = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
         using var secondStarted = new ManualResetEventSlim();
@@ -640,6 +645,7 @@ public sealed class SetupRollbackTests
         Assert.True(firstResult.Success);
         Assert.Equal(SetupCodes.RollbackNotAvailable, secondResult.Code);
         Assert.Equal("old-0", fixture.ReadText(fixture.TargetPaths[0]));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
     }
 
     [Theory]
@@ -701,10 +707,279 @@ public sealed class SetupRollbackTests
         }
     }
 
+    [Theory]
+    [InlineData("file")]
+    [InlineData("environment")]
+    [InlineData("no-op")]
+    public void Rollback_Mixed_preflight_drift_preserves_every_physical_target_and_apply_artifact(
+        string drift)
+    {
+        var fixture = RollbackFixture.Create(
+            fileCount: 2,
+            includeEnvironment: true,
+            includeEnvironmentNoOp: true);
+        switch (drift)
+        {
+            case "file":
+                fixture.Platform.SeedFile(fixture.TargetPaths[0], Encoding.UTF8.GetBytes("third-file"));
+                break;
+            case "environment":
+                fixture.Platform.SeedUserEnvironment("ENV_A", "third-environment");
+                break;
+            case "no-op":
+                fixture.Platform.SeedUserEnvironment("ENV_NOOP", "third-noop");
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(drift));
+        }
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Rollback();
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.RollbackStale, result.Code);
+        Assert.Null(result.Recovery);
+        Assert.Equal(drift == "file" ? "third-file" : "new-0", fixture.ReadText(fixture.TargetPaths[0]));
+        Assert.Equal("new-1", fixture.ReadText(fixture.TargetPaths[1]));
+        Assert.Equal(
+            drift == "environment" ? "third-environment" : "desired-a",
+            fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("desired-second", fixture.Platform.ReadUserEnvironment("ENV_SECOND"));
+        Assert.Equal(
+            drift == "no-op" ? "third-noop" : "stable",
+            fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(baseline), operation =>
+            IsTargetMutation(operation, fixture.TargetPaths) ||
+            operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+            operation == "environment.notify");
+        Assert.Equal(SetupJournalOperation.Apply, fixture.LoadJournal().Operation);
+        Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Applied, durable.State);
+        Assert.Equal(SetupCodes.RollbackStale, durable.OutcomeCode);
+    }
+
+    [Theory]
+    [InlineData("file")]
+    [InlineData("environment")]
+    [InlineData("no-op")]
+    [InlineData("file-unavailable")]
+    [InlineData("environment-unavailable")]
+    public async Task Rollback_Mixed_post_preflight_conflict_restores_safe_targets_then_recovers_exact_partial(
+        string conflict)
+    {
+        var fixture = RollbackFixture.Create(
+            fileCount: 2,
+            includeEnvironment: true,
+            includeEnvironmentNoOp: true);
+        using var boundary = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
+        var rollingBack = Task.Run(fixture.Rollback);
+        boundary.WaitUntilReached(CancellationToken.None);
+        switch (conflict)
+        {
+            case "file":
+                fixture.Platform.SeedFile(fixture.TargetPaths[0], Encoding.UTF8.GetBytes("third-file"));
+                break;
+            case "environment":
+                fixture.Platform.SeedUserEnvironment("ENV_A", "third-environment");
+                break;
+            case "no-op":
+                fixture.Platform.SeedUserEnvironment("ENV_NOOP", "third-noop");
+                break;
+            case "file-unavailable":
+                fixture.Platform.InjectFault(
+                    $"file.read:{fixture.TargetPaths[0]}",
+                    new IOException("PRIVATE_MIXED_FILE_UNAVAILABLE"));
+                break;
+            case "environment-unavailable":
+                fixture.Platform.InjectFault(
+                    "environment.get:ENV_A",
+                    new IOException("PRIVATE_MIXED_ENV_UNAVAILABLE"));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(conflict));
+        }
+        var directBaseline = fixture.Platform.Operations.Count;
+        boundary.Release();
+
+        var direct = await rollingBack;
+
+        Assert.False(direct.Success);
+        Assert.Equal(SetupCodes.PartialRollback, direct.Code);
+        Assert.Null(direct.Recovery);
+        Assert.DoesNotContain("PRIVATE", direct.Code, StringComparison.Ordinal);
+        Assert.Equal("old-1", fixture.ReadText(fixture.TargetPaths[1]));
+        Assert.Equal(
+            conflict == "file" ? "third-file" : conflict == "file-unavailable" ? "new-0" : "old-0",
+            fixture.ReadText(fixture.TargetPaths[0]));
+        Assert.Equal(
+            conflict == "environment" ? "third-environment" :
+                conflict == "environment-unavailable" ? "desired-a" : "old-a",
+            fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-second", fixture.Platform.ReadUserEnvironment("ENV_SECOND"));
+        Assert.Equal(
+            conflict == "no-op" ? "third-noop" : "stable",
+            fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+        Assert.DoesNotContain("environment.set:ENV_NOOP", fixture.Platform.Operations.Skip(directBaseline));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations.Skip(directBaseline));
+        Assert.Equal(SetupJournalPhase.Partial, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+
+        switch (conflict)
+        {
+            case "file":
+                fixture.Platform.SeedFile(fixture.TargetPaths[0], Encoding.UTF8.GetBytes("new-0"));
+                break;
+            case "environment":
+                fixture.Platform.SeedUserEnvironment("ENV_A", "desired-a");
+                break;
+            case "no-op":
+                fixture.Platform.SeedUserEnvironment("ENV_NOOP", "stable");
+                break;
+        }
+        var recoveryBaseline = fixture.Platform.Operations.Count;
+
+        var recovered = fixture.Rollback(fixture.ReopenCoordinator());
+
+        Assert.True(recovered.Success);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, recovered.Code);
+        Assert.Null(recovered.ChangeSet);
+        Assert.Equal(fixture.ChangeSetId, recovered.Recovery?.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Rollback, recovered.Recovery?.Operation);
+        Assert.Equal(["old-0", "old-1"], fixture.TargetPaths.Select(fixture.ReadText));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-second", fixture.Platform.ReadUserEnvironment("ENV_SECOND"));
+        Assert.Equal("stable", fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+        Assert.DoesNotContain("environment.set:ENV_NOOP", fixture.Platform.Operations.Skip(recoveryBaseline));
+        Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.RolledBack, durable.State);
+        Assert.All(durable.Targets, target =>
+            Assert.Equal(SetupLedgerRollbackStatus.Succeeded, target.RollbackStatus));
+    }
+
     [Fact]
-    public void Rollback_Mixed_applied_artifact_persists_not_available_without_mutation()
+    public void Rollback_Mixed_dormant_supersession_retry_reuses_exact_prepared_journal()
+    {
+        var fixture = RollbackFixture.Create(
+            fileCount: 2,
+            includeEnvironment: true,
+            includeEnvironmentNoOp: true);
+        fixture.Platform.InjectFault(
+            $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}",
+            new IOException("PRIVATE_MIXED_DORMANT_ROLLBACK"));
+
+        var interrupted = fixture.Rollback();
+
+        Assert.False(interrupted.Success);
+        Assert.Equal(SetupCodes.RecoveryRequired, interrupted.Code);
+        Assert.Null(interrupted.Recovery);
+        Assert.Equal(SetupChangeSetState.Applied, fixture.LoadChangeSet().State);
+        var prepared = fixture.LoadJournal();
+        Assert.Equal(SetupJournalOperation.Rollback, prepared.Operation);
+        Assert.Equal(SetupJournalPhase.Prepared, prepared.Phase);
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, prepared.EnvironmentNotification);
+        Assert.Equal(["new-0", "new-1"], fixture.TargetPaths.Select(fixture.ReadText));
+        Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("desired-second", fixture.Platform.ReadUserEnvironment("ENV_SECOND"));
+        Assert.Equal("stable", fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+
+        var retried = fixture.Rollback(fixture.ReopenCoordinator());
+
+        Assert.True(retried.Success);
+        Assert.Equal(SetupCodes.RollbackSucceeded, retried.Code);
+        Assert.Null(retried.Recovery);
+        Assert.Equal(["old-0", "old-1"], fixture.TargetPaths.Select(fixture.ReadText));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-second", fixture.Platform.ReadUserEnvironment("ENV_SECOND"));
+        Assert.Equal(SetupChangeSetState.RolledBack, fixture.LoadChangeSet().State);
+    }
+
+    [Fact]
+    public void Rollback_Mixed_interruption_after_ledger_is_next_mandatory_recovery_with_correlation()
     {
         var fixture = RollbackFixture.Create(includeEnvironment: true);
+        fixture.Platform.InjectFault(
+            $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}",
+            new IOException("PRIVATE_MIXED_ACTIVE_ROLLBACK"));
+
+        var interrupted = fixture.Rollback();
+
+        Assert.False(interrupted.Success);
+        Assert.Equal(SetupCodes.RecoveryRequired, interrupted.Code);
+        Assert.Null(interrupted.Recovery);
+        Assert.Equal(SetupChangeSetState.RollingBack, fixture.LoadChangeSet().State);
+        Assert.Equal(SetupJournalPhase.Prepared, fixture.LoadJournal().Phase);
+        Assert.Equal("new-0", fixture.ReadText(fixture.TargetPaths[0]));
+        Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        var requested = Guid.Parse("00000000-0000-7000-8000-000000000998");
+        var coordinator = fixture.ReopenCoordinator();
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var recovered = coordinator.Rollback(acquisition.Lock!, requested);
+
+        Assert.True(recovered.Success);
+        Assert.Equal(requested, recovered.RequestedChangeSetId);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, recovered.Code);
+        Assert.Null(recovered.ChangeSet);
+        Assert.Equal(fixture.ChangeSetId, recovered.Recovery?.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Rollback, recovered.Recovery?.Operation);
+        Assert.Equal("old-0", fixture.ReadText(fixture.TargetPaths[0]));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Rollback_Mixed_notification_delivery_ambiguity_replays_without_target_io(bool afterEffect)
+    {
+        var fixture = RollbackFixture.Create(fileCount: 2, includeEnvironment: true);
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(
+                "environment.notify",
+                new IOException("PRIVATE_MIXED_NOTIFY_AFTER"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault(
+                "environment.notify",
+                new IOException("PRIVATE_MIXED_NOTIFY_BEFORE"));
+        }
+
+        var direct = fixture.Rollback();
+
+        Assert.False(direct.Success);
+        Assert.Equal(SetupCodes.PartialRollback, direct.Code);
+        Assert.Null(direct.Recovery);
+        Assert.Equal(["old-0", "old-1"], fixture.TargetPaths.Select(fixture.ReadText));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal(SetupChangeSetState.RolledBack, fixture.LoadChangeSet().State);
+        Assert.Equal(SetupEnvironmentNotification.Pending, fixture.LoadJournal().EnvironmentNotification);
+        var recoveryBaseline = fixture.Platform.Operations.Count;
+
+        var recovered = fixture.Rollback(fixture.ReopenCoordinator());
+
+        Assert.True(recovered.Success);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, recovered.Code);
+        Assert.Equal(fixture.ChangeSetId, recovered.Recovery?.RecoveredChangeSetId);
+        var recoveryOperations = fixture.Platform.Operations.Skip(recoveryBaseline).ToArray();
+        Assert.Equal(1, recoveryOperations.Count(operation => operation == "environment.notify"));
+        Assert.DoesNotContain(recoveryOperations, operation =>
+            IsTargetMutation(operation, fixture.TargetPaths) ||
+            operation.StartsWith("environment.get:", StringComparison.Ordinal) ||
+            operation.StartsWith("environment.set:", StringComparison.Ordinal));
+        Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, fixture.LoadChangeSet().OutcomeCode);
+    }
+
+    [Fact]
+    public void Rollback_Mixed_multiple_environment_aggregates_fail_closed_before_supersession()
+    {
+        var fixture = RollbackFixture.Create(
+            includeEnvironment: true,
+            includeSecondEnvironment: true);
         var baseline = fixture.Platform.Operations.Count;
 
         var result = fixture.Rollback();
@@ -714,21 +989,90 @@ public sealed class SetupRollbackTests
         Assert.Null(result.Recovery);
         Assert.Equal("new-0", fixture.ReadText(fixture.TargetPaths[0]));
         Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("desired-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
         Assert.DoesNotContain(fixture.Platform.Operations.Skip(baseline), operation =>
             IsTargetMutation(operation, fixture.TargetPaths) ||
+            operation.StartsWith("environment.get:", StringComparison.Ordinal) ||
             operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
             operation == "environment.notify");
-        var durable = fixture.LoadChangeSet();
-        Assert.Equal(SetupChangeSetState.Applied, durable.State);
-        Assert.Equal(SetupCodes.RollbackNotAvailable, durable.OutcomeCode);
-        Assert.All(durable.Targets, target =>
-        {
-            Assert.NotNull(target.AppliedStateHash);
-            Assert.NotNull(target.BackupReference);
-            Assert.Equal(SetupLedgerRollbackStatus.Pending, target.RollbackStatus);
-        });
         Assert.Equal(SetupJournalOperation.Apply, fixture.LoadJournal().Operation);
         Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.Applied, fixture.LoadChangeSet().State);
+    }
+
+    [Fact]
+    public void Rollback_Mixed_file_and_environment_targets_restore_in_reverse_order_and_clear_ownership()
+    {
+        var fixture = RollbackFixture.Create(
+            fileCount: 2,
+            includeEnvironment: true,
+            includeEnvironmentNoOp: true);
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Rollback();
+
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.RollbackSucceeded, result.Code);
+        Assert.Null(result.Recovery);
+        Assert.Equal(["old-0", "old-1"], fixture.TargetPaths.Select(fixture.ReadText));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-second", fixture.Platform.ReadUserEnvironment("ENV_SECOND"));
+        Assert.Equal("stable", fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+        var mutations = fixture.Platform.Operations.Skip(baseline)
+            .Where(operation => IsTargetMutation(operation, fixture.TargetPaths) ||
+                operation.StartsWith("environment.set:", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Equal("environment.set:ENV_SECOND", mutations[0]);
+        Assert.Equal("environment.set:ENV_A", mutations[1]);
+        Assert.EndsWith("->" + fixture.TargetPaths[1], mutations[2], StringComparison.Ordinal);
+        Assert.EndsWith("->" + fixture.TargetPaths[0], mutations[3], StringComparison.Ordinal);
+        Assert.DoesNotContain("environment.set:ENV_NOOP", mutations);
+        Assert.Equal(1, fixture.Platform.Operations.Skip(baseline)
+            .Count(operation => operation == "environment.notify"));
+        var operations = fixture.Platform.Operations.Skip(baseline).ToArray();
+        var notification = Array.IndexOf(operations, "environment.notify");
+        var beforeNotification = operations.Take(notification).ToArray();
+        var journalBeforeNotification = Array.FindLastIndex(
+            beforeNotification,
+            operation => operation.StartsWith("file.replace:", StringComparison.Ordinal) &&
+                operation.EndsWith(
+                    $"->{fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)}",
+                    StringComparison.Ordinal));
+        var ledgerBeforeNotification = Array.FindLastIndex(
+            beforeNotification,
+            operation => operation ==
+                $"file.replace:{fixture.Paths.OwnershipLedger}.tmp->{fixture.Paths.OwnershipLedger}");
+        var notificationMarker = Array.FindIndex(
+            operations,
+            notification + 1,
+            operation => operation.StartsWith("file.replace:", StringComparison.Ordinal) &&
+                operation.EndsWith(
+                    $"->{fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)}",
+                    StringComparison.Ordinal));
+        var lastTargetMutation = Array.FindLastIndex(operations, operation =>
+            IsTargetMutation(operation, fixture.TargetPaths) ||
+            operation.StartsWith("environment.set:", StringComparison.Ordinal));
+        Assert.True(lastTargetMutation < journalBeforeNotification &&
+            journalBeforeNotification < ledgerBeforeNotification &&
+            ledgerBeforeNotification < notification &&
+            notification < notificationMarker);
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.RolledBack, durable.State);
+        Assert.Equal(SetupCodes.RollbackSucceeded, durable.OutcomeCode);
+        Assert.All(durable.Targets, target =>
+        {
+            Assert.Null(target.AppliedStateHash);
+            Assert.Null(target.BackupReference);
+            Assert.Equal(SetupLedgerRollbackStatus.Succeeded, target.RollbackStatus);
+        });
+        var journal = fixture.LoadJournal();
+        Assert.Equal(SetupJournalOperation.Rollback, journal.Operation);
+        Assert.Equal(SetupJournalPhase.Committed, journal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Completed, journal.EnvironmentNotification);
+        Assert.Equal(
+            ["ENV_A", "ENV_SECOND"],
+            Assert.Single(journal.Targets, target => target.TargetKind == SetupTargetKind.Env)
+                .Steps.Select(step => step.MemberKey));
     }
 
     private static bool IsTargetMutation(string operation, IReadOnlyList<string> targetPaths) =>
@@ -1029,7 +1373,12 @@ public sealed class SetupRollbackTests
 
     private sealed class RollbackFixture
     {
-        private RollbackFixture(int fileCount, bool previousMissing, bool includeEnvironment)
+        private RollbackFixture(
+            int fileCount,
+            bool previousMissing,
+            bool includeEnvironment,
+            bool includeEnvironmentNoOp,
+            bool includeSecondEnvironment)
         {
             Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 13, 8, 9, 10, TimeSpan.Zero));
             Paths = new SetupRuntimePaths(Platform);
@@ -1060,14 +1409,45 @@ public sealed class SetupRollbackTests
             if (includeEnvironment)
             {
                 Platform.SeedUserEnvironment("ENV_A", "old-a");
-                var environmentCapture = new UserEnvironmentSetupStep(Platform).Capture(["ENV_A"]);
+                if (includeEnvironmentNoOp)
+                {
+                    Platform.SeedUserEnvironment("ENV_SECOND", "old-second");
+                    Platform.SeedUserEnvironment("ENV_NOOP", "stable");
+                }
+
+                var environmentMembers = new List<SetupPrivatePlanMember>
+                {
+                    new("ENV_A", SetupOperation.Replace, "desired-a"),
+                };
+                if (includeEnvironmentNoOp)
+                {
+                    environmentMembers.Add(new SetupPrivatePlanMember(
+                        "ENV_SECOND", SetupOperation.Replace, "desired-second"));
+                    environmentMembers.Add(new SetupPrivatePlanMember(
+                        "ENV_NOOP", SetupOperation.NoOp, "stable"));
+                }
+
+                var environmentCapture = new UserEnvironmentSetupStep(Platform).Capture(
+                    environmentMembers.Select(member => member.SettingKey).ToArray());
                 targets.Add(new SetupPrivatePlanTarget(
                     Guid.Parse("00000000-0000-7000-8000-000000000699"),
                     SetupTargetKind.Env,
                     "current-user",
                     environmentCapture.AggregateHash,
                     "environment-allowlist",
-                    [new SetupPrivatePlanMember("ENV_A", SetupOperation.Replace, "desired-a")]));
+                    environmentMembers));
+            }
+            if (includeSecondEnvironment)
+            {
+                Platform.SeedUserEnvironment("ENV_B", "old-b");
+                var environmentCapture = new UserEnvironmentSetupStep(Platform).Capture(["ENV_B"]);
+                targets.Add(new SetupPrivatePlanTarget(
+                    Guid.Parse("00000000-0000-7000-8000-000000000700"),
+                    SetupTargetKind.Env,
+                    "current-user",
+                    environmentCapture.AggregateHash,
+                    "environment-allowlist",
+                    [new SetupPrivatePlanMember("ENV_B", SetupOperation.Replace, "desired-b")]));
             }
             var plan = new SetupPrivatePlan(
                 1,
@@ -1091,9 +1471,9 @@ public sealed class SetupRollbackTests
                     target.TargetKind,
                     target.TargetKind == SetupTargetKind.Env ? "user-environment" : $"settings-{index}",
                     "github-copilot",
-                    target.TargetKind == SetupTargetKind.Env
-                        ? [new SetupLedgerMember("ENV_A", SetupOperation.Replace)]
-                        : [new SetupLedgerMember($"setting-{index}", SetupOperation.Replace)],
+                    target.Members.Select(member => new SetupLedgerMember(
+                        member.SettingKey,
+                        member.Operation)).ToArray(),
                     target.BaseStateHash,
                     null,
                     null,
@@ -1128,8 +1508,15 @@ public sealed class SetupRollbackTests
         public static RollbackFixture Create(
             int fileCount = 1,
             bool previousMissing = false,
-            bool includeEnvironment = false) =>
-            new(fileCount, previousMissing, includeEnvironment);
+            bool includeEnvironment = false,
+            bool includeEnvironmentNoOp = false,
+            bool includeSecondEnvironment = false) =>
+            new(
+                fileCount,
+                previousMissing,
+                includeEnvironment,
+                includeEnvironmentNoOp,
+                includeSecondEnvironment);
 
         public SetupRollbackExecutionResult Rollback()
         {
