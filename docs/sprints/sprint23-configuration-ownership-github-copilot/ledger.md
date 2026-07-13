@@ -38,6 +38,7 @@ Updated: 2026-07-14
 | Single-environment normal rollback core (Task 6a2a) | #66 | Complete | `06c44df..51f0059` | focused 39/39; related transaction 681/681; all Setup 1,076/1,076; ConfigCli 1,404/1,404; build 0 warnings/0 errors; `git diff --check` clean; Model-A full-backup ownership and changed-member-only journal/write/restore evidence; no-op members are not restored; exact prior/desired/third-party/unavailable classification and retry admission covered | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; no findings | notification fault matrix and mixed normal rollback remain pending; public Task 7 remains pending |
 | Single-environment normal rollback notification ambiguity (Task 6a2b) | #66 | Complete | `db83d84` | focused 8/8; related transaction 321/321; implementation 689/689; all Setup 1,084/1,084; ConfigCli 1,412/1,412; build 0 warnings/0 errors; `git diff --check` clean; eight deterministic notification faults, direct `partial_rollback` provenance distinct from recovery provenance, and zero-I/O notification-only replay covered | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; no findings | mixed normal rollback remains pending; public Task 7 remains pending |
 | Mixed/all-NoOp normal rollback producer and race hardening (Task 6a3) | #66 | Complete | `dea01d9..a0b3256` | new producer 2/2; focused Rollback 62/62; related transaction 784/784; all Setup 1,099/1,099; ConfigCli 1,427/1,427; build 0 warnings/0 errors; `git diff --check` clean; mixed and all-NoOp environment targets, pre/post rollback races, crash/fault recovery, notification ambiguity/replay, and direct-versus-recovery provenance covered | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; no findings | status semantics/order and public Task 7 remain pending |
+| Apply operation/hash coherence remediation (integration P1) | #66 | Complete | `8b38ac1`, `f184cdb`, `708a7d5`, `78acf1a`, `7d42ffb`, `fae367c` | fresh combined integration 820/820; Storage 64/64; build 0 warnings/0 errors; `git diff --check` clean; operation identity/hash coherence, adapter rejection, missing-environment no-op canonicalization, and recovery/rollback consumers covered | Independent A1/A2/A3 reviews PASS; aggregate integration closure PASS; no findings for this P1 | direct compensation early-stop, terminal environment hash binding, and real Apply active-recovery producer coverage remain open |
 | Setup lock operation lifetime (Lock A-C) | #66 | Complete | `08d716c..d06ffcc` | apply/compensation/runtime/storage/journal 286/286; all Setup 663/663; ConfigCli 991/991; build 0/0 | Spec/internal PASS; Quality/Security/Concurrency APPROVED after disposal-order re-audit | Windows cross-process executed; Linux/macOS runtime not executed |
 | Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
 | Atomic file mutation | #66 | Complete through Task 3b | `291b3bf..2ed9e8a` | typed hash, path/reparse, backup/temp/replace/restore fault matrix | PASS/APPROVED | three-OS runtime evidence gap noted above |
@@ -80,13 +81,15 @@ Updated: 2026-07-14
 ## Unverified Issue interfaces
 
 - Early Issue #66 transaction integration review at `07ab09e` (combined
-  889/889) is not integration-approved. Spec, quality, security, and
-  concurrency review result is CHANGES pending remediation of: (P1) Apply
-  operation/hash coherence, (P2) direct compensation early-stop semantics,
-  (P2) terminal environment hash binding, and the real Apply producer to
-  active-recovery consumer executable coverage gap. Migration review approves
-  strict v1-only handling; no legacy migration is required. HTTP, proxy, and UI
-  remain N/A. Task-level approvals do not supersede this integration gate.
+  889/889) had four findings. The P1 Apply operation/hash coherence finding is
+  closed by spec `8b38ac1` and remediations `f184cdb`, `708a7d5`, `78acf1a`,
+  `7d42ffb`, and `fae367c`; fresh combined 820/820, Storage 64/64, and build
+  0/0 passed, with independent A1/A2/A3 aggregate closure PASS. Remaining
+  findings are P2 direct compensation early-stop semantics, P2 terminal
+  environment hash binding, and the real Apply producer to active-recovery
+  consumer executable coverage gap. Migration review approves strict v1-only
+  handling; no legacy migration is required. HTTP, proxy, and UI remain N/A.
+  Task-level approvals do not supersede the remaining integration gate.
 
 - The canonical physical-target/member-change DTO is defined but has not yet
   been compiled or consumed across the CLI/PowerShell boundary.
