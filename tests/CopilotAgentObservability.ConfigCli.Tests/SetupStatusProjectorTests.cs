@@ -90,17 +90,24 @@ public sealed class SetupStatusProjectorTests
         var fixture = StatusFixture.Create(operation: state == SetupChangeSetState.NoChanges
             ? SetupOperation.NoOp
             : SetupOperation.Replace);
-        if (state is not SetupChangeSetState.Planned and not SetupChangeSetState.NoChanges)
+        if (state is not SetupChangeSetState.Planned and not SetupChangeSetState.NoChanges and not SetupChangeSetState.Restored)
         {
             fixture.Apply();
         }
 
-        if (state is SetupChangeSetState.Restored or SetupChangeSetState.RolledBack)
+        if (state == SetupChangeSetState.RolledBack)
         {
             fixture.Rollback();
         }
 
-        fixture.SetLifecycle(state);
+        if (state == SetupChangeSetState.Restored)
+        {
+            fixture.ArrangeLifecycle(state, "apply", "restored");
+        }
+        else
+        {
+            fixture.SetLifecycle(state);
+        }
 
         var result = fixture.Project();
 
@@ -151,6 +158,175 @@ public sealed class SetupStatusProjectorTests
         Assert.False(result.RollbackAvailable);
         barrier.Release();
         Assert.Equal(SetupChangeSetState.Applied, (await apply).State);
+    }
+
+    [Fact]
+    public void Project_PlannedWithPreparedApplyJournal_IsDormantBaseCurrentWithoutMutation()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.PrepareApplying(markApplying: false);
+        fixture.SetLifecycle(SetupChangeSetState.Planned);
+        var before = fixture.CaptureArtifacts();
+
+        var result = fixture.Project();
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(SetupReferenceState.Base, target.ReferenceState);
+        Assert.Equal(SetupCurrentState.Current, target.CurrentState);
+        Assert.False(target.RollbackAvailable);
+        Assert.False(result.RollbackAvailable);
+        Assert.Equal(before, fixture.CaptureArtifacts());
+    }
+
+    [Fact]
+    public void Project_DormantPreparedJournalEvidenceMismatch_RequiresRecoveryWithoutPrivateData()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.PrepareApplying(markApplying: false);
+        fixture.SetLifecycle(SetupChangeSetState.Planned);
+        fixture.RebindJournal("desired-hash");
+
+        var exception = Assert.Throws<SetupStorageException>(() => fixture.Project());
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.DoesNotContain(fixture.TargetPath, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("PRIVATE", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(SetupChangeSetState.Applying, "apply", "compensating", SetupReferenceState.Previous)]
+    [InlineData(SetupChangeSetState.Compensating, "apply", "partial", SetupReferenceState.Previous)]
+    [InlineData(SetupChangeSetState.RollingBack, "rollback", "partial", SetupReferenceState.Desired)]
+    [InlineData(SetupChangeSetState.Partial, "apply", "compensating", SetupReferenceState.Previous)]
+    [InlineData(SetupChangeSetState.Partial, "rollback", "rolling_back", SetupReferenceState.Desired)]
+    public void Project_LegalActiveLifecyclePair_UsesJournalBoundReference(
+        SetupChangeSetState state,
+        string operation,
+        string phase,
+        SetupReferenceState expectedReference)
+    {
+        var fixture = StatusFixture.Create();
+        fixture.ArrangeLifecycle(state, operation, phase);
+
+        var result = fixture.Project();
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(expectedReference, target.ReferenceState);
+        Assert.Equal(SetupCurrentState.Current, target.CurrentState);
+        Assert.False(target.RollbackAvailable);
+        Assert.False(result.RollbackAvailable);
+    }
+
+    [Theory]
+    [InlineData(SetupChangeSetState.Applying, "apply", "committed", SetupReferenceState.Desired)]
+    [InlineData(SetupChangeSetState.Compensating, "apply", "restored", SetupReferenceState.Previous)]
+    [InlineData(SetupChangeSetState.RollingBack, "rollback", "committed", SetupReferenceState.Previous)]
+    [InlineData(SetupChangeSetState.Partial, "rollback", "committed", SetupReferenceState.Previous)]
+    public void Project_LaggingTerminalJournalPair_UsesCompletedReference(
+        SetupChangeSetState state,
+        string operation,
+        string phase,
+        SetupReferenceState expectedReference)
+    {
+        var fixture = StatusFixture.Create();
+        fixture.ArrangeLifecycle(state, operation, phase);
+
+        var result = fixture.Project();
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(expectedReference, target.ReferenceState);
+        Assert.Equal(SetupCurrentState.Current, target.CurrentState);
+        Assert.False(target.RollbackAvailable);
+        Assert.False(result.RollbackAvailable);
+    }
+
+    [Fact]
+    public void Project_AppliedWithPreparedRollbackJournal_IsDormantDesiredCurrent()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.ArrangeLifecycle(
+            SetupChangeSetState.Applied,
+            "rollback",
+            "prepared");
+
+        var result = fixture.Project();
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(SetupReferenceState.Desired, target.ReferenceState);
+        Assert.Equal(SetupCurrentState.Current, target.CurrentState);
+        Assert.False(target.RollbackAvailable);
+        Assert.False(result.RollbackAvailable);
+    }
+
+    [Fact]
+    public void Project_AppliedWithPreparedRollbackArtifactFailure_IsUnavailableWithoutPrivateData()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.ArrangeLifecycle(
+            SetupChangeSetState.Applied,
+            "rollback",
+            "prepared");
+        fixture.ApplyArtifactVariant("missing-backup");
+
+        var result = fixture.Project();
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(SetupReferenceState.None, target.ReferenceState);
+        Assert.Equal(SetupCurrentState.Unavailable, target.CurrentState);
+        Assert.False(target.RollbackAvailable);
+        Assert.False(result.RollbackAvailable);
+        Assert.DoesNotContain(fixture.TargetPath, result.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("PRIVATE", result.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(SetupChangeSetState.Planned, "apply", "applying")]
+    [InlineData(SetupChangeSetState.Applying, "apply", "partial")]
+    [InlineData(SetupChangeSetState.Compensating, "apply", "applying")]
+    [InlineData(SetupChangeSetState.RollingBack, "rollback", "compensating")]
+    [InlineData(SetupChangeSetState.Partial, "apply", "applying")]
+    [InlineData(SetupChangeSetState.Partial, "rollback", "prepared")]
+    public void Project_InvalidNeighborLifecyclePair_RequiresRecovery(
+        SetupChangeSetState state,
+        string operation,
+        string phase)
+    {
+        var fixture = StatusFixture.Create();
+        fixture.ArrangeLifecycle(state, operation, phase);
+
+        var exception = Assert.Throws<SetupStorageException>(() => fixture.Project());
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+    }
+
+    [Theory]
+    [InlineData(SetupChangeSetState.Applying, "apply", "applying", SetupReferenceState.Base, SetupReferenceState.Base)]
+    [InlineData(SetupChangeSetState.Compensating, "apply", "compensating", SetupReferenceState.Previous, SetupReferenceState.Previous)]
+    [InlineData(SetupChangeSetState.RollingBack, "rollback", "rolling_back", SetupReferenceState.Desired, SetupReferenceState.Previous)]
+    [InlineData(SetupChangeSetState.Partial, "apply", "compensating", SetupReferenceState.Previous, SetupReferenceState.Desired)]
+    public void Project_ActiveMixedChangedAndAllNoOpTargets_UsesLazyReferencesInPlanOrder(
+        SetupChangeSetState state,
+        string operation,
+        string phase,
+        SetupReferenceState expectedChangedReference,
+        SetupReferenceState expectedNoOpReference)
+    {
+        var fixture = StatusFixture.Create(includeAllNoOpEnvironment: true);
+        fixture.ArrangeLifecycle(state, operation, phase);
+        var expectedOrder = fixture.RecordIds;
+
+        var result = fixture.Project();
+
+        Assert.Equal(expectedOrder, result.Targets.Select(target => Guid.Parse(target.RecordId)));
+        Assert.Equal(expectedChangedReference, result.Targets[0].ReferenceState);
+        Assert.Equal(expectedNoOpReference, result.Targets[1].ReferenceState);
+        Assert.All(result.Targets, target =>
+        {
+            Assert.Equal(SetupCurrentState.Current, target.CurrentState);
+            Assert.False(target.RollbackAvailable);
+        });
+        Assert.Equal(SetupCurrentState.Current, result.CurrentState);
+        Assert.False(result.RollbackAvailable);
     }
 
     [Fact]
@@ -860,7 +1036,100 @@ public sealed class SetupStatusProjectorTests
             });
         }
 
-        public void PrepareApplying()
+        public void ArrangeLifecycle(
+            SetupChangeSetState state,
+            string operation,
+            string phase)
+        {
+            var journalOperation = operation switch
+            {
+                "apply" => SetupJournalOperation.Apply,
+                "rollback" => SetupJournalOperation.Rollback,
+                _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+            };
+            var journalPhase = phase switch
+            {
+                "prepared" => SetupJournalPhase.Prepared,
+                "applying" => SetupJournalPhase.Applying,
+                "compensating" => SetupJournalPhase.Compensating,
+                "rolling_back" => SetupJournalPhase.RollingBack,
+                "committed" => SetupJournalPhase.Committed,
+                "restored" => SetupJournalPhase.Restored,
+                "partial" => SetupJournalPhase.Partial,
+                _ => throw new ArgumentOutOfRangeException(nameof(phase)),
+            };
+            if (journalOperation == SetupJournalOperation.Apply)
+            {
+                PrepareApplying(markApplying: false);
+            }
+            else
+            {
+                Apply();
+                PrepareRollback();
+            }
+
+            RewriteJournalPhase(journalOperation, journalPhase);
+            SetLifecycle(state);
+        }
+
+        private void PrepareRollback()
+        {
+            var row = ledgerStore.LoadForRecovery().ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
+            var plan = planStore.Load(ChangeSetId)!;
+            var journal = journalStore.Load(ChangeSetId)!;
+            var preparation = SetupRollbackPreflightEvaluator.Prepare(plan, row, journal);
+            var preflight = SetupRollbackPreflightEvaluator.Evaluate(
+                preparation.Evidence!,
+                new SetupRollbackPreflightObserver(Platform, Paths).Capture(preparation.Evidence!));
+            Assert.True(preflight.IsAvailable);
+
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            journalStore.SupersedeWithPreparedRollback(acquisition.Lock!, ChangeSetId, preflight.RollbackTargets);
+        }
+
+        private void RewriteJournalPhase(SetupJournalOperation operation, SetupJournalPhase phase)
+        {
+            var path = Paths.GetTransactionJournal(ChangeSetId);
+            var root = JsonNode.Parse(Platform.ReadSeededFile(path))!.AsObject();
+            Assert.Equal(operation == SetupJournalOperation.Apply ? "apply" : "rollback", root["operation"]!.GetValue<string>());
+            root["phase"] = phase switch
+            {
+                SetupJournalPhase.Prepared => "prepared",
+                SetupJournalPhase.Applying => "applying",
+                SetupJournalPhase.Compensating => "compensating",
+                SetupJournalPhase.RollingBack => "rolling_back",
+                SetupJournalPhase.Committed => "committed",
+                SetupJournalPhase.Restored => "restored",
+                SetupJournalPhase.Partial => "partial",
+                _ => throw new ArgumentOutOfRangeException(nameof(phase)),
+            };
+            var stepPhase = phase switch
+            {
+                SetupJournalPhase.Committed when operation == SetupJournalOperation.Apply => "mutation_completed",
+                SetupJournalPhase.Committed or SetupJournalPhase.Restored => "restore_completed",
+                _ => "pending",
+            };
+            foreach (var target in root["targets"]!.AsArray())
+            {
+                foreach (var step in target!["steps"]!.AsArray())
+                {
+                    step!["phase"] = stepPhase;
+                }
+            }
+
+            if (phase == SetupJournalPhase.Committed && operation == SetupJournalOperation.Apply)
+            {
+                SeedTarget("desired");
+            }
+            else if (phase is SetupJournalPhase.Committed or SetupJournalPhase.Restored)
+            {
+                SeedTarget("previous");
+            }
+
+            Platform.SeedFile(path, Encoding.UTF8.GetBytes(root.ToJsonString()));
+        }
+
+        public void PrepareApplying(bool markApplying = true)
         {
             var plan = planStore.Load(ChangeSetId)!;
             var journalTargets = new List<SetupJournalTarget>();
@@ -922,7 +1191,10 @@ public sealed class SetupStatusProjectorTests
                     }
                     : changeSet).ToArray(),
             });
-            journalStore.MarkTransactionPhase(acquisition.Lock!, ChangeSetId, SetupJournalPhase.Applying);
+            if (markApplying)
+            {
+                journalStore.MarkTransactionPhase(acquisition.Lock!, ChangeSetId, SetupJournalPhase.Applying);
+            }
         }
 
         public void RebindJournal(string variant)
@@ -938,7 +1210,7 @@ public sealed class SetupStatusProjectorTests
                     root["phase"] = "rolling_back";
                     break;
                 case "phase":
-                    root["phase"] = "compensating";
+                    root["phase"] = "partial";
                     break;
                 case "target-id":
                     target["record_id"] = "00000000-0000-7000-8000-000000009999";
@@ -1035,6 +1307,14 @@ public sealed class SetupStatusProjectorTests
                     BackupReference = null,
                     RollbackStatus = SetupLedgerRollbackStatus.Succeeded,
                 },
+                SetupChangeSetState.RollingBack => target with
+                {
+                    OutcomeCode = null,
+                    RollbackStatus = target.AppliedStateHash is null
+                        ? SetupLedgerRollbackStatus.NotAvailable
+                        : SetupLedgerRollbackStatus.Pending,
+                },
+                SetupChangeSetState.Partial => target with { OutcomeCode = null },
                 _ => target,
             }).ToArray();
             ledgerStore.Save(acquisition.Lock!, ledger with

@@ -35,6 +35,7 @@ internal sealed class SetupStatusProjector
         var terminal = IsTerminal(changeSet.State);
         SetupPrivatePlan? plan;
         SetupTransactionJournal? journal;
+        var journalDisposition = SetupStatusJournalDisposition.None;
         IReadOnlyDictionary<Guid, SetupReferenceState>? activeReferences = null;
         try
         {
@@ -51,19 +52,11 @@ internal sealed class SetupStatusProjector
 
             SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
             journal = journalStore.Load(changeSet.ChangeSetId);
-            if (RequiresJournal(changeSet.State) && journal is null)
+            journalDisposition = RequireJournalLifecycle(changeSet.State, journal);
+            if (journal is not null &&
+                (journalDisposition is SetupStatusJournalDisposition.Active or SetupStatusJournalDisposition.Dormant ||
+                    !terminal))
             {
-                if (!terminal)
-                {
-                    throw new SetupStorageException(SetupCodes.RecoveryRequired);
-                }
-
-                return Unavailable(changeSet);
-            }
-
-            if (!terminal && journal is not null)
-            {
-                RequireActiveJournalLifecycle(changeSet.State, journal);
                 activeReferences = activeEvidenceValidator.Validate(plan, changeSet, journal);
             }
         }
@@ -83,12 +76,16 @@ internal sealed class SetupStatusProjector
         {
             throw new SetupStorageException(SetupCodes.RecoveryRequired);
         }
+        catch (Exception exception) when (terminal && exception is SetupFileStepException or SetupEnvironmentStepException)
+        {
+            return Unavailable(changeSet);
+        }
         catch (Exception exception) when (!terminal && exception is SetupFileStepException or SetupEnvironmentStepException)
         {
             throw new SetupStorageException(SetupCodes.RecoveryRequired);
         }
 
-        var rollback = EvaluateRollback(plan!, changeSet, journal);
+        var rollback = EvaluateRollback(plan!, changeSet, journal, journalDisposition);
         var observations = rollback.Observations is null
             ? ObserveTargets(plan!, changeSet)
             : ObserveTargets(plan!, changeSet, rollback.Observations);
@@ -156,9 +153,21 @@ internal sealed class SetupStatusProjector
     private SetupStatusRollbackResult EvaluateRollback(
         SetupPrivatePlan plan,
         SetupLedgerChangeSet changeSet,
-        SetupTransactionJournal? journal)
+        SetupTransactionJournal? journal,
+        SetupStatusJournalDisposition journalDisposition)
     {
         var availability = changeSet.Targets.ToDictionary(target => target.RecordId, _ => false);
+        if (changeSet.State != SetupChangeSetState.Applied ||
+            journalDisposition != SetupStatusJournalDisposition.Completed ||
+            journal is not
+            {
+                Operation: SetupJournalOperation.Apply,
+                Phase: SetupJournalPhase.Committed,
+            })
+        {
+            return new SetupStatusRollbackResult(false, availability, null);
+        }
+
         var preparation = SetupRollbackPreflightEvaluator.Prepare(plan, changeSet, journal);
         if (preparation.Evidence is not { } evidence)
         {
@@ -254,7 +263,7 @@ internal sealed class SetupStatusProjector
                 observation.MatchesPrevious),
             SetupChangeSetState.Partial or SetupChangeSetState.Applying or
                 SetupChangeSetState.Compensating or SetupChangeSetState.RollingBack =>
-                ProjectDynamic(observation.Classification, activeReference ?? throw new InvalidOperationException()),
+                ProjectDynamic(state, observation, activeReference),
             _ => throw new InvalidOperationException(),
         };
     }
@@ -263,15 +272,43 @@ internal sealed class SetupStatusProjector
         new(reference, matches ? SetupCurrentState.Current : SetupCurrentState.Stale);
 
     private static SetupStatusProjectedState ProjectDynamic(
-        SetupStatusTargetClassification classification,
-        SetupReferenceState priorReference) =>
-        classification switch
+        SetupChangeSetState state,
+        SetupStatusTargetObservation observation,
+        SetupReferenceState? priorReference)
+    {
+        if (observation.MatchesPrevious && observation.MatchesDesired)
         {
-            SetupStatusTargetClassification.Desired => new(SetupReferenceState.Desired, SetupCurrentState.Current),
-            SetupStatusTargetClassification.Previous => new(priorReference, SetupCurrentState.Current),
+            return new SetupStatusProjectedState(EqualStateReference(state), SetupCurrentState.Current);
+        }
+
+        return observation.Classification switch
+        {
+            SetupStatusTargetClassification.Desired => new(
+                SetupReferenceState.Desired,
+                SetupCurrentState.Current),
+            SetupStatusTargetClassification.Previous => new(
+                priorReference ?? PreviousStateReference(state),
+                SetupCurrentState.Current),
             SetupStatusTargetClassification.Diverged => new(SetupReferenceState.None, SetupCurrentState.Diverged),
             _ => new(SetupReferenceState.None, SetupCurrentState.Unavailable),
         };
+    }
+
+    private static SetupReferenceState EqualStateReference(SetupChangeSetState state) => state switch
+    {
+        SetupChangeSetState.Applying => SetupReferenceState.Base,
+        SetupChangeSetState.Compensating or SetupChangeSetState.RollingBack => SetupReferenceState.Previous,
+        SetupChangeSetState.Partial => SetupReferenceState.Desired,
+        _ => throw new InvalidOperationException(),
+    };
+
+    private static SetupReferenceState PreviousStateReference(SetupChangeSetState state) => state switch
+    {
+        SetupChangeSetState.Applying => SetupReferenceState.Base,
+        SetupChangeSetState.Compensating or SetupChangeSetState.RollingBack or SetupChangeSetState.Partial =>
+            SetupReferenceState.Previous,
+        _ => throw new InvalidOperationException(),
+    };
 
     private static SetupChangeSetStatusResult Unavailable(SetupLedgerChangeSet changeSet)
     {
@@ -340,28 +377,58 @@ internal sealed class SetupStatusProjector
         SetupChangeSetState.Applied or SetupChangeSetState.NoChanges or
         SetupChangeSetState.Restored or SetupChangeSetState.RolledBack;
 
-    private static bool RequiresJournal(SetupChangeSetState state) => state is not
-        SetupChangeSetState.Planned and not SetupChangeSetState.NoChanges;
-
-    private static void RequireActiveJournalLifecycle(
+    private static SetupStatusJournalDisposition RequireJournalLifecycle(
         SetupChangeSetState state,
-        SetupTransactionJournal journal)
+        SetupTransactionJournal? journal)
     {
-        var coherent = state switch
+        if (journal is null)
         {
-            SetupChangeSetState.Applying => journal.Operation == SetupJournalOperation.Apply &&
-                journal.Phase is SetupJournalPhase.Prepared or SetupJournalPhase.Applying,
-            SetupChangeSetState.Compensating => journal.Operation == SetupJournalOperation.Apply &&
-                journal.Phase == SetupJournalPhase.Compensating,
-            SetupChangeSetState.RollingBack => journal.Operation == SetupJournalOperation.Rollback &&
-                journal.Phase is SetupJournalPhase.Prepared or SetupJournalPhase.RollingBack,
-            SetupChangeSetState.Partial => journal.Phase == SetupJournalPhase.Partial,
-            _ => false,
-        };
-        if (!coherent)
-        {
+            if (state is SetupChangeSetState.Planned or SetupChangeSetState.NoChanges)
+            {
+                return SetupStatusJournalDisposition.None;
+            }
+
             throw new FormatException();
         }
+
+        var disposition = (state, journal.Operation, journal.Phase) switch
+        {
+            (SetupChangeSetState.Planned, SetupJournalOperation.Apply, SetupJournalPhase.Prepared) =>
+                SetupStatusJournalDisposition.Dormant,
+            (SetupChangeSetState.Applying, SetupJournalOperation.Apply,
+                SetupJournalPhase.Prepared or SetupJournalPhase.Applying or SetupJournalPhase.Compensating) =>
+                SetupStatusJournalDisposition.Active,
+            (SetupChangeSetState.Applying, SetupJournalOperation.Apply, SetupJournalPhase.Committed) =>
+                SetupStatusJournalDisposition.Completed,
+            (SetupChangeSetState.Compensating, SetupJournalOperation.Apply,
+                SetupJournalPhase.Compensating or SetupJournalPhase.Partial) =>
+                SetupStatusJournalDisposition.Active,
+            (SetupChangeSetState.Compensating, SetupJournalOperation.Apply, SetupJournalPhase.Restored) =>
+                SetupStatusJournalDisposition.Completed,
+            (SetupChangeSetState.Applied, SetupJournalOperation.Apply, SetupJournalPhase.Committed) =>
+                SetupStatusJournalDisposition.Completed,
+            (SetupChangeSetState.Applied, SetupJournalOperation.Rollback, SetupJournalPhase.Prepared) =>
+                SetupStatusJournalDisposition.Dormant,
+            (SetupChangeSetState.Restored, SetupJournalOperation.Apply, SetupJournalPhase.Restored) =>
+                SetupStatusJournalDisposition.Completed,
+            (SetupChangeSetState.RollingBack, SetupJournalOperation.Rollback,
+                SetupJournalPhase.Prepared or SetupJournalPhase.RollingBack or SetupJournalPhase.Partial) =>
+                SetupStatusJournalDisposition.Active,
+            (SetupChangeSetState.RollingBack, SetupJournalOperation.Rollback, SetupJournalPhase.Committed) =>
+                SetupStatusJournalDisposition.Completed,
+            (SetupChangeSetState.Partial, SetupJournalOperation.Apply,
+                SetupJournalPhase.Compensating or SetupJournalPhase.Partial) =>
+                SetupStatusJournalDisposition.Active,
+            (SetupChangeSetState.Partial, SetupJournalOperation.Rollback,
+                SetupJournalPhase.RollingBack or SetupJournalPhase.Partial) =>
+                SetupStatusJournalDisposition.Active,
+            (SetupChangeSetState.Partial, SetupJournalOperation.Rollback, SetupJournalPhase.Committed) =>
+                SetupStatusJournalDisposition.Completed,
+            (SetupChangeSetState.RolledBack, SetupJournalOperation.Rollback, SetupJournalPhase.Committed) =>
+                SetupStatusJournalDisposition.Completed,
+            _ => throw new FormatException(),
+        };
+        return disposition;
     }
 
     private sealed record SetupStatusRollbackResult(
@@ -372,6 +439,14 @@ internal sealed class SetupStatusProjector
     private sealed record SetupStatusProjectedState(
         SetupReferenceState ReferenceState,
         SetupCurrentState CurrentState);
+
+    private enum SetupStatusJournalDisposition
+    {
+        None,
+        Dormant,
+        Active,
+        Completed,
+    }
 }
 
 internal sealed class SetupStatusActiveEvidenceValidator
@@ -419,8 +494,11 @@ internal sealed class SetupStatusActiveEvidenceValidator
             var journalTarget = journal.Targets[index];
             if (journalTarget.RecordId != planTarget.RecordId ||
                 journalTarget.TargetKind != planTarget.TargetKind ||
-                !string.Equals(ledgerTarget.BackupReference, planTarget.RecordId.ToString("D"), StringComparison.Ordinal) ||
-                !OwnershipMatches(changeSet.State, journal.Operation, ledgerTarget))
+                !OwnershipMatches(
+                    changeSet.State,
+                    journal.Operation,
+                    ledgerTarget,
+                    planTarget.RecordId.ToString("D")))
             {
                 throw new FormatException();
             }
@@ -517,19 +595,31 @@ internal sealed class SetupStatusActiveEvidenceValidator
     private static bool OwnershipMatches(
         SetupChangeSetState state,
         SetupJournalOperation operation,
-        SetupLedgerTarget target)
+        SetupLedgerTarget target,
+        string expectedBackupReference)
     {
-        var hashMatches = operation == SetupJournalOperation.Apply
-            ? target.AppliedStateHash is null
-            : target.AppliedStateHash is not null;
-        if (!hashMatches)
+        if (state == SetupChangeSetState.Planned)
+        {
+            return target.AppliedStateHash is null &&
+                target.BackupReference is null &&
+                target.OutcomeCode is null &&
+                target.RollbackStatus == SetupLedgerRollbackStatus.NotAvailable;
+        }
+
+        var requiresAppliedHash = state is SetupChangeSetState.Applied or SetupChangeSetState.RollingBack ||
+            state == SetupChangeSetState.Partial && operation == SetupJournalOperation.Rollback;
+        if (requiresAppliedHash != (target.AppliedStateHash is not null) ||
+            !string.Equals(target.BackupReference, expectedBackupReference, StringComparison.Ordinal))
         {
             return false;
         }
 
         if (state != SetupChangeSetState.Partial)
         {
-            return target.OutcomeCode is null &&
+            var expectedOutcome = state == SetupChangeSetState.Applied
+                ? SetupCodes.ApplySucceeded
+                : null;
+            return string.Equals(target.OutcomeCode, expectedOutcome, StringComparison.Ordinal) &&
                 target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
         }
 
@@ -550,8 +640,8 @@ internal sealed class SetupStatusActiveEvidenceValidator
     private static SetupEnvironmentNotification ExpectedNotification(SetupTransactionJournal journal) =>
         journal.Targets.Any(target => target.TargetKind == SetupTargetKind.Env &&
             target.Steps.Any(step => step.Phase != SetupJournalStepPhase.Pending))
-                ? SetupEnvironmentNotification.Pending
-                : SetupEnvironmentNotification.NotRequired;
+            ? SetupEnvironmentNotification.Pending
+            : SetupEnvironmentNotification.NotRequired;
 
     private static string ExpectedEnvironmentAppliedHash(
         SetupPrivatePlanTarget target,
