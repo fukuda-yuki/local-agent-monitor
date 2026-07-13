@@ -179,22 +179,42 @@ The implementation ownership inside the sequential T2 gate is explicit:
 | T2a1 target delegation | only `SetupOptions` and its tests | accepts an adapter slug matching exactly `[a-z0-9]+(?:-[a-z0-9]+)*`, preserves the target token, and delegates target validation without registry lookup |
 | T2a2 adapter identifier integration | adapter-predicate routing only in `SetupContractValidator`/`SetupContractValidationTests` and `SetupStatusListProjector`/`SetupStatusOrderingTests`, plus optional bounded adapter-predicate assertions in `SetupAdapterRegistryTests` | uses the same adapter-only predicate, including digit-leading historical status filters, without changing shared `FixedIdentifier`, status behavior, or catalog declarations |
 | T2b diagnostics carrier | `ISetupAdapter`, `SetupAdapterRegistry`, `ISetupApplyRevalidator`, `SetupApplyCoordinator`, their diagnostics-carrier semantic test hunks, and compile-only signature updates in four frozen-domain test files | carries only immutable typed fixed-code/`warnings`/`next_actions` data, removes the registry's temporary `SetupCommandResult`, and performs no duplicate catalog validation |
-| T2c command dispatcher | a fresh `SetupCommandDispatcher` and its tests only | owns the one lock/recovery policy, plan/apply/rollback result construction, final frozen-validator call, direct delegation to the status-service-produced result, and the parser-to-`SetupJson` executable test gate while production dispatch stays serializer-free |
-| T2d process/wrapper surface | `CliApplication`, help/exit/stderr mapping, their tests, and the thin PowerShell wrapper/tests | serializes/forwards the T2c result without recreating adapter or transaction behavior |
+| completed T2c1 plan dispatcher | the already-committed plan-specific hunks in `SetupCommandDispatcher` and its tests | freezes plan lock/recovery/registry/persistence/result behavior before the contract prerequisite |
+| T1b-contract prerequisite | disjoint T1bA semantic and T1bB fixture halves, integrated as one buildable commit | closes command-aware current-versus-historical manifest validation before T2c2 resumes |
+| T2c2 dispatcher completion | only the remaining apply/rollback/status hunks in `SetupCommandDispatcher` and its tests | completes generic dispatch and owns the historical-manifest cross-surface regression |
+| T2d process/wrapper surface | `CliApplication`, help/exit/stderr mapping, their tests, and the thin PowerShell wrapper/tests | serializes/forwards the T2c2 result without recreating adapter or transaction behavior |
 
 T2a1 and T2a2 both bound adapter identifiers to 1..128 UTF-16 code units in
 addition to the exact regex. T2a1 consumes exactly one nonempty `--target`
 option value, preserves it unchanged for the adapter, and maps an empty value to
-`invalid_arguments`. T2c regression tests prove that a digit-leading unknown
+`invalid_arguments`. T2c1 regression tests prove that a digit-leading unknown
 adapter serializes `plan`/`unsupported_adapter` only after lock/recovery, while
 an arbitrary nonempty target reaches a known fake adapter unchanged and its
 `unsupported_target` JSON does not contain the raw target.
 
-These units run T2a1 -> T2a2 -> T2b -> T2c -> T2d and are reviewed separately;
-they are not parallel file owners. The currently untracked dispatcher draft
+T1bA owns only `SetupContractValidator.cs`, `SetupContractValidationTests.cs`,
+`SetupContractShapeTests.cs`, and `SetupAdapterRegistryTests.cs`. It makes Plan
+require the exact current canonical manifest and Apply/Rollback/Status accept
+only a strict historical manifest. Its exact `ExpectedSurface` labels are
+`vscode-stable-default-user-settings`,
+`vscode-insiders-default-user-settings`, and
+`copilot-cli-user-environment`; obsolete aliases are rejected. T1bB owns only
+`SetupStorageTests.cs`, `SetupStatusProjectorTests.cs`, `SetupApplyTests.cs`,
+`SetupCompensationTests.cs`, `SetupRecoveryTests.cs`, `SetupRollbackTests.cs`,
+and `Fixtures/Setup/v1/ownership-ledger.v1.json`, changing only obsolete labels
+on manifest-bearing fixtures and never `ExpectedResult`-null synthetic rows.
+The halves have no overlapping files and integrate as one buildable commit with
+one independent review. This is not a schema migration and adds no compatibility
+alias; T9 remains the sole editor of
+`docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md`.
+
+These units run T2a1 -> T2a2 -> T2b -> T2c1 -> {T1bA || T1bB} -> integrated
+T1b PASS -> T2c2 -> T2d. Only the two T1b halves may be implemented in parallel
+inside this gate, and they are reviewed together. The currently untracked
+dispatcher draft
 predates this audited ownership contract and must be abandoned before T2a1
 starts;
-T2c begins from fresh tests after the carrier is frozen. The complete code,
+T2c1 begins from fresh tests after the carrier is frozen. The complete code,
 warning, and next-action catalog was already declared by `139338a`. T3 does not
 redeclare it: T3 owns semantic positive validation and
 emission tests plus the GitHub Copilot-specific observations that select those
@@ -217,7 +237,10 @@ Exact active file ownership is:
 | T2a1 | `Setup/Cli/SetupOptions.cs`, `SetupOptionsTests.cs` |
 | T2a2 | adapter-predicate routing only in `Setup/Contracts/SetupContractValidator.cs`, `SetupContractValidationTests.cs`, `Setup/Status/SetupStatusListProjector.cs`, `SetupStatusOrderingTests.cs`; optional new adapter-predicate cross-surface assertion methods only in `SetupAdapterRegistryTests.cs`, with no registry production edit |
 | T2b | `Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Transactions/ISetupApplyRevalidator.cs`, `Setup/Transactions/SetupApplyCoordinator.cs`; diagnostics-carrier semantic hunks only in `SetupAdapterRegistryTests.cs`/`SetupApplyTests.cs`, excluding frozen T2a2 assertion methods; compile-only signature hunks in `SetupCompensationTests.cs`, `SetupRollbackTests.cs`, `SetupRecoveryTests.cs`, `SetupStatusProjectorTests.cs` |
-| T2c | fresh `Setup/Cli/SetupCommandDispatcher.cs`, fresh `SetupCommandDispatcherTests.cs` |
+| completed T2c1 | already-committed plan-specific hunks in `Setup/Cli/SetupCommandDispatcher.cs` and `SetupCommandDispatcherTests.cs`; frozen before T1b |
+| T1bA | semantic manifest-validation hunks only in `Setup/Contracts/SetupContractValidator.cs`, `SetupContractValidationTests.cs`, `SetupContractShapeTests.cs`, `SetupAdapterRegistryTests.cs` |
+| T1bB | manifest-bearing obsolete-label fixture hunks only in `SetupStorageTests.cs`, `SetupStatusProjectorTests.cs`, `SetupApplyTests.cs`, `SetupCompensationTests.cs`, `SetupRecoveryTests.cs`, `SetupRollbackTests.cs`, `Fixtures/Setup/v1/ownership-ledger.v1.json`; excludes every `ExpectedResult`-null synthetic row |
+| T2c2 | remaining apply/rollback/status hunks only in `Setup/Cli/SetupCommandDispatcher.cs` and `SetupCommandDispatcherTests.cs`, including the historical-manifest cross-surface regression; excludes frozen T2c1 hunks |
 | T2d | `Cli/CliApplication.cs`, `Cli/CliHelpText.cs`, `CliApplicationTests.cs`, `scripts/local-monitor/setup.ps1`, `SetupWrapperTests.cs` |
 | T3a | `Setup/Platform/ISetupPlatform.cs`, `Setup/Platform/SystemSetupPlatform.cs`, `SetupTestPlatform.cs`, `Setup/Adapters/GitHubCopilot/GitHubCopilotDetection.cs`, `GitHubCopilotDetectionTests.cs` |
 | T3b | `Setup/Adapters/GitHubCopilot/GitHubCopilotManagedPolicyResolver.cs`, `GitHubCopilotManagedPolicyTests.cs` |
@@ -236,7 +259,11 @@ The focused verification filters are likewise fixed:
 - T2a2: `SetupContractValidationTests|SetupStatusOrderingTests`, plus `SetupAdapterRegistryTests` only if its optional bounded cross-surface assertions are added;
 - T2b semantic: `SetupAdapterRegistryTests|SetupApplyTests`;
 - T2b compile-only: `SetupCompensationTests|SetupRollbackTests|SetupRecoveryTests|SetupStatusProjectorTests`;
-- T2c: `SetupCommandDispatcherTests` plus affected apply/rollback/recovery/status suites;
+- T2c1: already-passed plan-focused `SetupCommandDispatcherTests`;
+- T1bA: `SetupContractValidationTests|SetupContractShapeTests|SetupAdapterRegistryTests`;
+- T1bB: `SetupStorageTests|SetupStatusProjectorTests|SetupApplyTests|SetupCompensationTests|SetupRecoveryTests|SetupRollbackTests`;
+- T1b integrated: the union of both filters, full ConfigCli, build, then independent review of the single commit;
+- T2c2: `SetupCommandDispatcherTests` plus affected apply/rollback/recovery/status suites, including the historical-manifest cross-surface regression;
 - T2d: `CliApplicationTests|SetupWrapperTests`, then full ConfigCli;
 - T3a: `SetupRuntimeTests|GitHubCopilotDetectionTests`;
 - T3b: `GitHubCopilotManagedPolicyTests`;

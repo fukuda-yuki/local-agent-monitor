@@ -44,7 +44,7 @@ declared #67 values without editing `SetupCodes.cs` or validator declarations.
 The current untracked `SetupCommandDispatcher.cs` and
 `SetupCommandDispatcherTests.cs` draft predates the audited carrier contract.
 It must be abandoned before T2a1 starts. No code or test is copied from
-that draft; T2c starts fresh with a RED test after T2b freezes the carrier.
+that draft; T2c1 starts fresh with a RED test after T2b freezes the carrier.
 
 Do not rewrite those rows as new T1-T9 work. T9 alone appends the final results
 to the durable ledger and identifies both the current T-number and any
@@ -59,7 +59,16 @@ T0 current-spec alignment
 T1 #66 status/terminal closure
  |
  v
-T2a1 -> T2a2 -> T2b -> T2c -> T2d
+T2a1 -> T2a2 -> T2b -> T2c1
+                         |
+                         v
+                 T1bA || T1bB
+                         |
+                         v
+                integrated T1b PASS
+                         |
+                         v
+                    T2c2 -> T2d
 #66 public command producer
  |
  v
@@ -90,10 +99,11 @@ T8 package/docs/evidence
 T9 reviews/full validation
 ```
 
-The only permitted order is T1 -> T2a1 -> T2a2 -> T2b -> T2c -> T2d -> T3a ->
-{T3b || T3c} -> T3d -> {T4 || T5 || T6} -> T7 -> T8 -> T9. T3b/T3c and
-T4/T5/T6 are the only parallel groups. Target work starts only after T3d freezes
-the shared platform/GitHubCopilot aggregate seam. Each target task owns only its
+The only permitted order is T1 -> T2a1 -> T2a2 -> T2b -> T2c1 ->
+{T1bA || T1bB} -> integrated T1b PASS -> T2c2 -> T2d -> T3a ->
+{T3b || T3c} -> T3d -> {T4 || T5 || T6} -> T7 -> T8 -> T9. T1bA/T1bB,
+T3b/T3c, and T4/T5/T6 are the only parallel groups. Target work starts only
+after T3d freezes the shared platform/GitHubCopilot aggregate seam. Each target task owns only its
 partition; T7 owns the composition-root join. No adapter may declare completion
 before T7. T8 and T9 are sequential closeout.
 
@@ -102,7 +112,9 @@ Gate releases are explicit:
 | Gate | Release condition |
 | --- | --- |
 | T1 -> T2 | exact T1 status/rollback/recovery tests, including the implemented status-lifecycle validation invariant, and all Setup tests pass; review and commit are complete |
-| T2 -> T3 | sequential T2a1 target delegation, T2a2 adapter-identifier integration, T2b typed diagnostics carrier, T2c fresh dispatcher, and T2d process/wrapper gates all pass; the four-command producer and exact #66 exceptional apply combinations are reviewed and committed |
+| T2b/T2c1 -> T1b | completed T1, T2b typed diagnostics, and the frozen T2c1 plan slice pass their focused tests and independent reviews |
+| T1b -> T2c2 | disjoint T1bA semantic and T1bB fixture halves are integrated as one buildable commit; focused union, full ConfigCli, build, and independent integrated review pass |
+| T2 -> T3 | T2c2 completes the four-command dispatcher and historical-manifest cross-surface regression, then T2d process/wrapper gates pass; exact #66 exceptional apply combinations are reviewed and committed |
 | T3 -> T4/T5/T6 | T3a platform observations, parallel T3b policy and T3c endpoint services, then T3d aggregate/partition join and positive semantic/catalog/manifest tests pass; the shared seam is frozen |
 | T4/T5/T6 -> T7 | all three target partitions pass focused tests and are separately reviewed and committed without editing T3-owned files |
 | T7 -> T8 | the real composition root and CLI handoff pass the cross-target producer gate and full ConfigCli tests |
@@ -114,12 +126,15 @@ the row explicitly says a target subdirectory.
 
 | Unit | Exclusive files/hunks |
 | --- | --- |
-| completed T1 | the already-implemented `ValidateStatusChangeSet` hunk in `Setup/Contracts/SetupContractValidator.cs` and its lifecycle/aggregate assertions in `SetupStatusProjectorTests.cs`; frozen except the T2a2 adapter-predicate routing and T2b compile-only signature hunk named below |
-| completed catalog baseline (`139338a`) | existing #66 exceptional combinations and every already-declared #67 code/warning/action plus their closed allowlist/shape assertions in `Setup/Contracts/SetupCodes.cs`, `Setup/Contracts/SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`; declarations remain frozen while T2a2 routes adapter fields through its separate predicate |
+| completed T1 | the already-implemented `ValidateStatusChangeSet` hunk in `Setup/Contracts/SetupContractValidator.cs` and its lifecycle/aggregate assertions in `SetupStatusProjectorTests.cs`; frozen except the exact T2a2 adapter-predicate, T2b compile-only, and T1bA/T1bB manifest hunks named below |
+| completed catalog baseline (`139338a`) | existing #66 exceptional combinations and every already-declared #67 code/warning/action plus their closed allowlist/shape assertions in `Setup/Contracts/SetupCodes.cs`, `Setup/Contracts/SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`; declarations remain frozen while T2a2 routes adapter fields and T1bA changes only command-aware manifest semantics/labels |
 | T2a1 | `Setup/Cli/SetupOptions.cs`, `SetupOptionsTests.cs` only |
 | T2a2 | adapter-predicate routing only in `Setup/Contracts/SetupContractValidator.cs`, `SetupContractValidationTests.cs`, `Setup/Status/SetupStatusListProjector.cs`, `SetupStatusOrderingTests.cs`; optional new adapter-predicate cross-surface assertion methods only in `SetupAdapterRegistryTests.cs`, with no registry production edit |
 | T2b | production: `Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Transactions/ISetupApplyRevalidator.cs`, `Setup/Transactions/SetupApplyCoordinator.cs`; diagnostics-carrier semantic hunks only in `SetupAdapterRegistryTests.cs` and `SetupApplyTests.cs`, excluding frozen T2a2 assertion methods; compile-only signature hunks: `SetupCompensationTests.cs`, `SetupRollbackTests.cs`, `SetupRecoveryTests.cs`, `SetupStatusProjectorTests.cs` |
-| T2c | fresh `Setup/Cli/SetupCommandDispatcher.cs`, fresh `SetupCommandDispatcherTests.cs` only |
+| completed T2c1 | already-committed plan-specific hunks in `Setup/Cli/SetupCommandDispatcher.cs` and `SetupCommandDispatcherTests.cs`; frozen before T1b |
+| T1bA | semantic manifest-validation hunks only in `Setup/Contracts/SetupContractValidator.cs`, `SetupContractValidationTests.cs`, `SetupContractShapeTests.cs`, `SetupAdapterRegistryTests.cs` |
+| T1bB | manifest-bearing obsolete-label fixture hunks only in `SetupStorageTests.cs`, `SetupStatusProjectorTests.cs`, `SetupApplyTests.cs`, `SetupCompensationTests.cs`, `SetupRecoveryTests.cs`, `SetupRollbackTests.cs`, `Fixtures/Setup/v1/ownership-ledger.v1.json`; excludes every `ExpectedResult`-null synthetic row |
+| T2c2 | remaining apply/rollback/status hunks only in `Setup/Cli/SetupCommandDispatcher.cs` and `SetupCommandDispatcherTests.cs`, including the historical-manifest cross-surface regression; excludes frozen T2c1 hunks |
 | T2d | `Cli/CliApplication.cs`, `Cli/CliHelpText.cs`, `CliApplicationTests.cs`, new `scripts/local-monitor/setup.ps1`, new `SetupWrapperTests.cs` only |
 | T3a | `Setup/Platform/ISetupPlatform.cs`, `Setup/Platform/SystemSetupPlatform.cs`, `SetupTestPlatform.cs`, new `Setup/Adapters/GitHubCopilot/GitHubCopilotDetection.cs`, and `GitHubCopilotDetectionTests.cs` |
 | T3b | new `Setup/Adapters/GitHubCopilot/GitHubCopilotManagedPolicyResolver.cs` and new `GitHubCopilotManagedPolicyTests.cs` only |
@@ -139,7 +154,15 @@ diagnostics-carrier assertions cannot edit or duplicate them. A T2b
 compile-only hunk may update only construction/signature plumbing required by
 the carrier; it may not change a frozen domain assertion, fixture meaning, or
 behavior. Any semantic change in one of those four test files reopens that
-domain owner rather than expanding T2b.
+domain owner rather than expanding T2b. T1bA and T1bB share no files and do not
+commit independently; only their integrated buildable result is committed and
+reviewed. T1bB changes only obsolete labels on manifest-bearing fixtures and
+must not touch `ExpectedResult`-null synthetic rows. T1b adds no migration,
+schema change, or compatibility alias. T9 remains the sole editor of
+`docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md`.
+T1bA's command/manifest methods remain disjoint from the frozen T2a2/T2b test
+hunks and the later T3d semantic-positive #67 methods. T1bB's fixture-only
+hunks remain disjoint from every frozen T1/T2b behavioral assertion.
 
 Every task uses test-driven changes, an independent read-only review, a focused
 RED/GREEN command, `git diff --check`, and a coherent local commit. Workers do
@@ -175,10 +198,12 @@ Setup tests. Do not change #67 target behavior. Commit:
 
 ## T2 - Expose the real #66 command producer
 
-T2 is five small sequential review units. T2a1 -> T2a2 -> T2b -> T2c -> T2d is
-mandatory; none may run in parallel, and T3 starts only after the T2d gate.
-Each unit owns only the files listed below, runs its exact focused command,
-receives an independent review, and commits before handing off shared files.
+T2 uses the sequential release path T2a1 -> T2a2 -> T2b -> T2c1 ->
+{T1bA || T1bB} -> integrated T1b PASS -> T2c2 -> T2d. Only the disjoint T1b
+implementation halves may run in parallel, and they produce one buildable
+commit and one integrated independent review. T3 starts only after the T2d
+gate. Each unit owns only the files listed below and runs its exact focused
+command before handing off shared files.
 
 ### T2a1 - Preserve and delegate the target token
 
@@ -282,30 +307,23 @@ git diff --check
 
 Commit: `Issue #66: feat(setup): carry sanitized adapter diagnostics`.
 
-### T2c - Implement the generic four-command dispatcher
+### T2c1 - Dispatch validated plans (completed)
 
 **Depends on:** T2b.
 
-**Own exactly:** new `Setup/Cli/SetupCommandDispatcher.cs` and new
-`SetupCommandDispatcherTests.cs`.
+**Own exactly:** the already-committed plan-specific hunks in
+`Setup/Cli/SetupCommandDispatcher.cs` and `SetupCommandDispatcherTests.cs`.
+Those hunks are frozen before T1b and excluded from T2c2.
 
 The pre-audit untracked files with those names must already be removed. This
 task creates both files fresh from its first failing test and does not copy the
 abandoned draft.
 
-**Deliver:** the sole generic producer of plan/apply/rollback
-`SetupCommandResult` values. Plan/apply each acquire one non-waiting lock and
-run common recovery once; rollback delegates its one recovery pass to
-`SetupRollbackCoordinator` under the same held lock. Status delegates directly
-to the frozen `SetupStatusService`, which constructs the status result, with no
-outer lock/recovery or DTO reconstruction. The dispatcher preserves
-requested versus recovered correlation, adapter/ledger target order, plan
-prospective versus apply actual rollback availability, typed warnings/actions,
-`no_changes` persistence, missing-row/private-plan distinctions, and the closed
-exceptional apply matrix. Before returning any requested-command result, it
-validates the final public DTO with the frozen `SetupContractValidator`; the
-registry does not duplicate that validation. It never serializes JSON or
-resolves target-specific values.
+**Deliver:** the sole generic Plan result producer, with one non-waiting lock,
+one recovery pass, registry/adapter dispatch, final DTO validation, and atomic
+private-plan/ledger persistence. It preserves requested versus recovered
+correlation, adapter/target order, typed diagnostics, prospective rollback
+availability, and `no_changes` persistence.
 
 Its executable cross-surface test gate owns the frozen parser -> non-waiting
 lock/recovery -> registry -> adapter -> validated result -> `SetupJson`
@@ -316,6 +334,74 @@ regressions assert that a digit-leading unknown adapter yields serialized
 nonempty target reaches a known fake adapter unchanged, returns
 `unsupported_target`, and is absent as raw text from the JSON.
 
+Recorded commits: `e2cc532` and correction `3ed6cfb`.
+
+### T1b-contract - Close command-aware manifest validation
+
+**Depends on:** completed T1, T2b, and frozen T2c1.
+
+T1b has two disjoint implementation halves that may run in parallel but must be
+integrated, built, committed, and independently reviewed as one result. Neither
+half creates its own commit.
+
+**T1bA semantic owner exactly:** `Setup/Contracts/SetupContractValidator.cs`,
+`SetupContractValidationTests.cs`, `SetupContractShapeTests.cs`, and
+`SetupAdapterRegistryTests.cs`.
+
+**T1bB selective fixture owner exactly:** `SetupStorageTests.cs`,
+`SetupStatusProjectorTests.cs`, `SetupApplyTests.cs`,
+`SetupCompensationTests.cs`, `SetupRecoveryTests.cs`, `SetupRollbackTests.cs`,
+and `Fixtures/Setup/v1/ownership-ledger.v1.json`.
+
+**Deliver:** T1bA makes manifest validation command-based: Plan requires exact
+equality with the current canonical manifest; Apply, Rollback, and Status use
+strict historical validation. The only `ExpectedSurface` labels are
+`vscode-stable-default-user-settings`,
+`vscode-insiders-default-user-settings`, and
+`copilot-cli-user-environment`; obsolete aliases are rejected. T1bB changes
+only obsolete labels on manifest-bearing fixtures and never touches an
+`ExpectedResult`-null synthetic row. Do not add a compatibility alias,
+migration, schema change, or ledger version. T9 remains the sole editor of
+`docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md`.
+
+**Verify the integrated result:**
+
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupContractValidationTests|FullyQualifiedName~SetupContractShapeTests|FullyQualifiedName~SetupAdapterRegistryTests"
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupStorageTests|FullyQualifiedName~SetupStatusProjectorTests|FullyQualifiedName~SetupApplyTests|FullyQualifiedName~SetupCompensationTests|FullyQualifiedName~SetupRecoveryTests|FullyQualifiedName~SetupRollbackTests"
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj
+dotnet build CopilotAgentObservability.slnx
+git diff --check
+```
+
+Commit both halves together: `Issues #66-#67: fix(setup): validate ledger-origin manifests`.
+
+T2c2 cannot resume until the integrated T1b commit receives an independent
+PASS.
+
+### T2c2 - Complete the generic dispatcher
+
+**Depends on:** integrated T1b independent PASS.
+
+**Own exactly:** remaining apply/rollback/status hunks only in
+`Setup/Cli/SetupCommandDispatcher.cs` and `SetupCommandDispatcherTests.cs`,
+excluding every frozen T2c1 hunk. T2c2 owns the dispatcher historical-manifest
+cross-surface regression.
+
+**Deliver:** complete the generic Apply and Rollback result producer. Apply
+acquires one non-waiting lock and runs common recovery once; Rollback delegates
+its one recovery pass to `SetupRollbackCoordinator` under the same held lock.
+Status delegates directly to the frozen `SetupStatusService`, which constructs
+the status result, with no outer lock/recovery or DTO reconstruction. Preserve
+apply actual rollback availability, missing-row/private-plan distinctions, the
+closed exceptional apply matrix, requested versus recovered correlation, and
+typed diagnostics. Validate every final public DTO with the frozen
+`SetupContractValidator`; the registry does not duplicate validation. Add the
+cross-surface regression proving a strict non-current historical ledger
+manifest survives dispatcher projection and `SetupJson` serialization for its
+ledger-origin command without weakening Plan's exact-current check. Production
+dispatch never serializes JSON or resolves target-specific values.
+
 **Verify:**
 
 ```powershell
@@ -323,11 +409,11 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 git diff --check
 ```
 
-Commit: `Issue #66: feat(setup): dispatch reversible setup commands`.
+Commit: `Issue #66: feat(setup): complete reversible setup dispatch`.
 
 ### T2d - Expose the process and wrapper surfaces
 
-**Depends on:** T2c.
+**Depends on:** T2c2.
 
 **Own exactly:** `Cli/CliApplication.cs`, `Cli/CliHelpText.cs`,
 `CliApplicationTests.cs`, new repository `scripts/local-monitor/setup.ps1`, and
@@ -336,7 +422,7 @@ new `SetupWrapperTests.cs` only.
 **Deliver:** recognized setup grammar, exactly one JSON stdout result for each
 recognized verb, fixed stderr/exit mapping, bare/unknown setup-verb handling,
 preserved legacy top-level behavior, a generic `CliApplication` dispatcher-
-injection seam, and byte-for-byte wrapper forwarding. T2d only consumes T2c;
+injection seam, and byte-for-byte wrapper forwarding. T2d only consumes T2c2;
 it does not construct the production dispatcher, register an adapter, edit
 `Program.cs`, or recreate lock, recovery, target, or diagnostics behavior. The
 repository wrapper is not added to the release layout until T8.
@@ -351,7 +437,8 @@ git diff --check
 
 Commit: `Issue #66: feat(setup): expose reversible setup commands`.
 
-The T2 gate releases only after all five commits and reviews exist. Its closed
+The T2 gate releases only after T2a1, T2a2, T2b, T2c1, integrated T1b, T2c2,
+and T2d commits and reviews exist. Its closed
 command matrix is: unknown adapter at plan -> `plan`/`unsupported_adapter`;
 valid persisted plan whose adapter is removed ->
 `apply`/`unsupported_adapter` with retained adapter ID and zero platform/
@@ -562,7 +649,7 @@ loopback endpoint and `http/protobuf`. Other languages remain caller-managed.
 **Own exactly:** `Program.cs`, new `Setup/SetupCompositionRoot.cs`, and new
 `ConfigurationSetupIntegrationTests.cs`. T7 composes the three completed target
 partitions into the single T3d `GitHubCopilotSetupAdapter`, registers exactly
-that one adapter under ID `github-copilot`, constructs the production T2c
+that one adapter under ID `github-copilot`, constructs the production T2c2
 dispatcher, and passes it through the T2d `CliApplication` injection seam. It
 does not separately register VS Code, CLI, or App/SDK adapters and does not edit
 adapter, shared-contract, platform, dispatcher, CLI-host, or target-specific
