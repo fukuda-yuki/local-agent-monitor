@@ -1844,6 +1844,156 @@ public sealed class SetupRecoveryTests
     }
 
     [Fact]
+    public void RecoverNext_File_rollback_restarts_completed_restore_when_exact_applied_state_returns()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileRollback("rolling_back", "restore_completed", "applied");
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, result.Code);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted,
+            Assert.Single(Assert.Single(fixture.LoadJournal().Targets).Steps).Phase);
+        Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.RolledBack, fixture.LoadChangeSet().State);
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        var redoIntent = Array.FindIndex(operations, operation =>
+            operation.StartsWith("file.replace:", StringComparison.Ordinal) &&
+            operation.EndsWith($"->{fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)}", StringComparison.Ordinal));
+        var restore = Array.FindIndex(operations, operation =>
+            operation.StartsWith("file.replace:", StringComparison.Ordinal) &&
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal));
+        Assert.True(redoIntent >= 0 && redoIntent < restore);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RecoverNext_File_rollback_completed_restore_redo_intent_requires_durable_proof(bool afterEffect)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileRollback("rolling_back", "restore_completed", "applied");
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        var temporary = fixture.NextTemporaryPath(journalPath, 0);
+        var operation = $"file.replace:{temporary}->{journalPath}";
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(operation, new IOException("PRIVATE_REDO_INTENT"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault(operation, new IOException("PRIVATE_REDO_INTENT"));
+        }
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Contains(operation, fixture.Platform.Operations);
+        Assert.Equal(afterEffect ? SetupRecoveryDisposition.Recovered : SetupRecoveryDisposition.Failed,
+            result.Disposition);
+        Assert.Equal(afterEffect ? SetupCodes.InterruptedRollbackRecovered : SetupCodes.RecoveryRequired,
+            result.Code);
+        Assert.Equal(afterEffect ? "old" : "new",
+            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal(afterEffect ? SetupJournalPhase.Committed : SetupJournalPhase.RollingBack,
+            fixture.LoadJournal().Phase);
+        Assert.Equal(afterEffect ? SetupChangeSetState.RolledBack : SetupChangeSetState.RollingBack,
+            fixture.LoadChangeSet().State);
+        if (!afterEffect)
+        {
+            Assert.Equal(SetupJournalStepPhase.RestoreCompleted,
+                Assert.Single(Assert.Single(fixture.LoadJournal().Targets).Steps).Phase);
+            Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), item =>
+                item == $"file.replace:{fixture.Paths.OwnershipLedger}.tmp->{fixture.Paths.OwnershipLedger}" ||
+                item.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+                item == $"file.delete:{fixture.TargetPath}");
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RecoverNext_File_rollback_completed_restore_redo_recaptures_primitive_effect(bool afterEffect)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileRollback("rolling_back", "restore_completed", "applied");
+        var temporary = fixture.NextTemporaryPath(fixture.TargetPath, 1);
+        var operation = $"file.replace:{temporary}->{fixture.TargetPath}";
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(operation, new IOException("PRIVATE_REDO_RESTORE"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault(operation, new IOException("PRIVATE_REDO_RESTORE"));
+        }
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Contains(operation, fixture.Platform.Operations);
+        Assert.Equal(afterEffect ? SetupRecoveryDisposition.Recovered : SetupRecoveryDisposition.Failed,
+            result.Disposition);
+        Assert.Equal(afterEffect ? SetupCodes.InterruptedRollbackRecovered : SetupCodes.InterruptedRecoveryFailed,
+            result.Code);
+        Assert.Equal(afterEffect ? "old" : "new",
+            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal(afterEffect ? SetupJournalPhase.Committed : SetupJournalPhase.Partial,
+            fixture.LoadJournal().Phase);
+        Assert.Equal(afterEffect ? SetupLedgerRollbackStatus.Succeeded : SetupLedgerRollbackStatus.Failed,
+            Assert.Single(fixture.LoadChangeSet().Targets).RollbackStatus);
+    }
+
+    [Fact]
+    public void RecoverNext_Committed_file_rollback_partial_remains_oldest_until_previous_state_is_restored()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileRollback("rolling_back", "restore_completed", "prior");
+        fixture.CommitRollbackJournalOnly();
+        fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("third"));
+        var later = fixture.AddFileChangeSet(
+            Guid.Parse("00000000-0000-7000-8000-000000000711"),
+            Guid.Parse("00000000-0000-7000-8000-000000000712"),
+            fixture.Plan.CreatedAt.AddMinutes(1),
+            "later-committed-partial");
+        fixture.SeedCommittedApplyJournalAndApplyingLedger(later);
+        var operationsBefore = fixture.Platform.Operations.Count;
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            using var setupLock = fixture.AcquireLock();
+            var failed = fixture.ReopenCoordinator().RecoverNext(setupLock);
+            Assert.Equal(SetupRecoveryDisposition.Failed, failed.Disposition);
+            Assert.Equal(SetupCodes.InterruptedRecoveryFailed, failed.Code);
+            Assert.Equal(fixture.ChangeSetId, failed.RecoveredChangeSetId);
+            Assert.Equal(SetupRecoveryOperation.Rollback, failed.Operation);
+            Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet(fixture.ChangeSetId).State);
+            Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet(later.ChangeSetId).State);
+        }
+
+        Assert.Equal("third", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+
+        fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("old"));
+        using var recoveryLock = fixture.AcquireLock();
+        var recovered = fixture.ReopenCoordinator().RecoverNext(recoveryLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, recovered.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, recovered.Code);
+        Assert.Equal(fixture.ChangeSetId, recovered.RecoveredChangeSetId);
+        Assert.Equal(SetupChangeSetState.RolledBack, fixture.LoadChangeSet(fixture.ChangeSetId).State);
+        Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet(later.ChangeSetId).State);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+    }
+
+    [Fact]
     public void RecoverNext_Active_environment_pending_prior_recovers_without_member_write_or_notification()
     {
         var fixture = new EnvironmentRecoveryFixture();

@@ -428,9 +428,14 @@ internal sealed class SetupRecoveryCoordinator
             if (journalTargets.TryGetValue(target.RecordId, out var journalTarget))
             {
                 var step = journalTarget.Steps.Single();
+                var interruptedTerminalRetry =
+                    changeSet.State == SetupChangeSetState.Partial &&
+                    string.Equals(changeSet.OutcomeCode, SetupCodes.InterruptedRecoveryFailed, StringComparison.Ordinal) &&
+                    string.Equals(target.OutcomeCode, SetupCodes.InterruptedRecoveryFailed, StringComparison.Ordinal) &&
+                    target.RollbackStatus == SetupLedgerRollbackStatus.NotAvailable;
                 var rollbackStatusMatches = changeSet.State == SetupChangeSetState.Partial
                     ? target.RollbackStatus is SetupLedgerRollbackStatus.Pending or
-                        SetupLedgerRollbackStatus.Stale or SetupLedgerRollbackStatus.Failed
+                        SetupLedgerRollbackStatus.Stale or SetupLedgerRollbackStatus.Failed || interruptedTerminalRetry
                     : target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
                 if (!string.Equals(target.AppliedStateHash, step.DesiredStateHash, StringComparison.Ordinal) ||
                     !string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) ||
@@ -525,12 +530,28 @@ internal sealed class SetupRecoveryCoordinator
         var classification = ClassifyActiveStep(target, step);
         if (step.Phase == SetupJournalStepPhase.RestoreCompleted)
         {
-            return classification == ActiveFileClassification.Prior
-                ? ActiveFileStepOutcome.Completed
-                : ClassificationFailure(classification);
-        }
+            if (classification == ActiveFileClassification.Prior)
+            {
+                return ActiveFileStepOutcome.Completed;
+            }
 
-        if (step.Phase == SetupJournalStepPhase.Pending)
+            if (classification is ActiveFileClassification.ThirdParty or ActiveFileClassification.Unavailable)
+            {
+                return ClassificationFailure(classification);
+            }
+
+            if (!TryMarkStepPhaseOrConfirm(
+                    setupLock,
+                    changeSetId,
+                    target.RecordId,
+                    step.MemberKey,
+                    SetupJournalStepPhase.RestoreCompleted,
+                    SetupJournalStepPhase.RestoreStarted))
+            {
+                return ActiveFileStepOutcome.JournalUnproven;
+            }
+        }
+        else if (step.Phase == SetupJournalStepPhase.Pending)
         {
             if (classification is ActiveFileClassification.ThirdParty or ActiveFileClassification.Unavailable)
             {
@@ -2017,6 +2038,11 @@ internal sealed class SetupRecoveryCoordinator
             target.AppliedStateHash is not null &&
             target.BackupReference is not null &&
             target.RollbackStatus == SetupLedgerRollbackStatus.Pending,
+        SetupChangeSetState.Partial =>
+            target.AppliedStateHash is not null &&
+            target.BackupReference is not null &&
+            string.Equals(target.OutcomeCode, SetupCodes.InterruptedRecoveryFailed, StringComparison.Ordinal) &&
+            target.RollbackStatus == SetupLedgerRollbackStatus.NotAvailable,
         SetupChangeSetState.RolledBack =>
             HasNoRollbackOwnership(target) ||
             target.AppliedStateHash is null &&
@@ -2040,7 +2066,7 @@ internal sealed class SetupRecoveryCoordinator
         (SetupJournalOperation.Apply, SetupJournalPhase.Restored) =>
             state is SetupChangeSetState.Compensating or SetupChangeSetState.Restored,
         (SetupJournalOperation.Rollback, SetupJournalPhase.Committed) =>
-            state is SetupChangeSetState.RollingBack or SetupChangeSetState.RolledBack,
+            state is SetupChangeSetState.RollingBack or SetupChangeSetState.Partial or SetupChangeSetState.RolledBack,
         _ => false,
     };
 
