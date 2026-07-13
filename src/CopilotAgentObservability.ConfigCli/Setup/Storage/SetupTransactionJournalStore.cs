@@ -468,6 +468,7 @@ internal sealed partial class SetupTransactionJournalStore
         (SetupJournalOperation.Apply, SetupJournalPhase.Compensating, SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted) => true,
         (SetupJournalOperation.Rollback, SetupJournalPhase.RollingBack, SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted) => true,
         (SetupJournalOperation.Rollback, SetupJournalPhase.RollingBack, SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted) => true,
+        (SetupJournalOperation.Rollback, SetupJournalPhase.RollingBack, SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.RestoreStarted) => true,
         _ => false,
     };
 

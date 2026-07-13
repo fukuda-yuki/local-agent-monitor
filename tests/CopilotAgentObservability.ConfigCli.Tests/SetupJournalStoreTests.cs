@@ -685,7 +685,156 @@ public sealed class SetupJournalStoreTests
         { SetupJournalOperation.Apply, SetupJournalPhase.Compensating, SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted },
         { SetupJournalOperation.Rollback, SetupJournalPhase.RollingBack, SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted },
         { SetupJournalOperation.Rollback, SetupJournalPhase.RollingBack, SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted },
+        { SetupJournalOperation.Rollback, SetupJournalPhase.RollingBack, SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.RestoreStarted },
     };
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RollbackRestoreCompleted_CanDurablyRecordFreshRestoreIntentWithoutResettingNotification(bool environmentStep)
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Rollback, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.RollingBack);
+        var recordId = environmentStep ? EnvironmentRecordId : FileRecordId;
+        var memberKey = environmentStep ? "COPILOT_A" : null;
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, recordId, memberKey,
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, recordId, memberKey,
+            SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+        var expectedNotification = environmentStep
+            ? SetupEnvironmentNotification.Pending
+            : SetupEnvironmentNotification.NotRequired;
+
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, recordId, memberKey,
+            SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.RestoreStarted);
+
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!;
+        var reopenedStep = reopened.Targets.Single(target => target.RecordId == recordId)
+            .Steps.Single(step => step.MemberKey == memberKey);
+        Assert.Equal(SetupJournalStepPhase.RestoreStarted, reopenedStep.Phase);
+        Assert.Equal(expectedNotification, reopened.EnvironmentNotification);
+
+        new SetupTransactionJournalStore(context.Platform, context.Paths).MarkStepPhase(
+            context.Lock, ChangeSetId, recordId, memberKey,
+            SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+
+        var completed = new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!;
+        Assert.Equal(
+            SetupJournalStepPhase.RestoreCompleted,
+            completed.Targets.Single(target => target.RecordId == recordId)
+                .Steps.Single(step => step.MemberKey == memberKey).Phase);
+        Assert.Equal(expectedNotification, completed.EnvironmentNotification);
+    }
+
+    [Fact]
+    public void RollbackRestoreCompleted_PartialMustReopenRollingBackBeforeFreshRestoreIntent()
+    {
+        var context = CreateRollbackWithCompletedFileStep();
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Partial);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var before = context.Platform.ReadSeededFile(destination);
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.MarkStepPhase(
+            context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.RestoreStarted));
+
+        Assert.Equal(SetupJournalStorageCodes.TransitionInvalid, exception.Code);
+        Assert.Equal(before, context.Platform.ReadSeededFile(destination));
+
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.RollingBack);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.RestoreStarted);
+
+        Assert.Equal(
+            SetupJournalStepPhase.RestoreStarted,
+            new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!.Targets[0].Steps[0].Phase);
+    }
+
+    [Fact]
+    public void ApplyRestoreCompleted_RejectsFreshRollbackRestoreIntentWithoutWrite()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Compensating);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.MutationStarted, SetupJournalStepPhase.RestoreStarted);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var before = context.Platform.ReadSeededFile(destination);
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.MarkStepPhase(
+            context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.RestoreStarted));
+
+        Assert.Equal(SetupJournalStorageCodes.TransitionInvalid, exception.Code);
+        Assert.Equal(before, context.Platform.ReadSeededFile(destination));
+    }
+
+    [Fact]
+    public void CommittedRollback_RejectsFreshRestoreIntentWithoutWrite()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Rollback, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.RollingBack);
+        CompleteAllSteps(context, mutation: false);
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Committed);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var before = context.Platform.ReadSeededFile(destination);
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.MarkStepPhase(
+            context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.RestoreStarted));
+
+        Assert.Equal(SetupJournalStorageCodes.TransitionInvalid, exception.Code);
+        Assert.Equal(before, context.Platform.ReadSeededFile(destination));
+    }
+
+    [Fact]
+    public void PreparedRollback_RejectsFreshRestoreIntentWithoutWrite()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Rollback, ValidTargets());
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var before = context.Platform.ReadSeededFile(destination);
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.MarkStepPhase(
+            context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.RestoreStarted));
+
+        Assert.Equal(SetupJournalStorageCodes.StaleUpdate, exception.Code);
+        Assert.Equal(before, context.Platform.ReadSeededFile(destination));
+    }
+
+    [Theory]
+    [InlineData(SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted)]
+    [InlineData(SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.MutationStarted)]
+    [InlineData(SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.MutationCompleted)]
+    public void RollbackRestoreCompleted_RejectsWrongExpectedOrForwardMutationPhaseWithoutWrite(
+        object expectedPhaseValue,
+        object nextPhaseValue)
+    {
+        var expectedPhase = (SetupJournalStepPhase)expectedPhaseValue;
+        var nextPhase = (SetupJournalStepPhase)nextPhaseValue;
+        var context = CreateRollbackWithCompletedFileStep();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var before = context.Platform.ReadSeededFile(destination);
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.MarkStepPhase(
+            context.Lock, ChangeSetId, FileRecordId, null, expectedPhase, nextPhase));
+
+        Assert.Equal(
+            expectedPhase == SetupJournalStepPhase.RestoreCompleted
+                ? SetupJournalStorageCodes.TransitionInvalid
+                : SetupJournalStorageCodes.StaleUpdate,
+            exception.Code);
+        Assert.Equal(before, context.Platform.ReadSeededFile(destination));
+        Assert.DoesNotContain("PRIVATE_PATH_MARKER", exception.ToString(), StringComparison.Ordinal);
+    }
 
     [Fact]
     public void MarkStepPhase_StaleExpectedPhaseRejectsWithoutWrite()
@@ -1031,6 +1180,48 @@ public sealed class SetupJournalStoreTests
     [InlineData("flush", true)]
     [InlineData("replace", false)]
     [InlineData("replace", true)]
+    public void RollbackRestoreRedo_FaultBoundaryReopensAsCompletedOrFreshIntentAndNeverDeletesTemporary(
+        string boundary,
+        bool afterEffect)
+    {
+        var context = CreateRollbackWithCompletedFileStep();
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var temporary = Temporary(destination, 5);
+        var operation = boundary switch
+        {
+            "write" => $"file.write-new:{temporary}",
+            "flush" => $"file.flush:{temporary}",
+            _ => $"file.replace:{temporary}->{destination}",
+        };
+        InjectFault(context.Platform, operation, afterEffect);
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.MarkStepPhase(
+            context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.RestoreStarted));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+        Assert.DoesNotContain("PRIVATE_PATH_MARKER", exception.ToString(), StringComparison.Ordinal);
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!;
+        Assert.Equal(
+            boundary == "replace" && afterEffect
+                ? SetupJournalStepPhase.RestoreStarted
+                : SetupJournalStepPhase.RestoreCompleted,
+            reopened.Targets[0].Steps[0].Phase);
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, reopened.EnvironmentNotification);
+        if (afterEffect && boundary != "replace")
+        {
+            Assert.True(context.Platform.FileSystem.FileExists(temporary));
+        }
+        Assert.DoesNotContain($"file.delete:{temporary}", context.Platform.Operations);
+    }
+
+    [Theory]
+    [InlineData("write", false)]
+    [InlineData("write", true)]
+    [InlineData("flush", false)]
+    [InlineData("flush", true)]
+    [InlineData("replace", false)]
+    [InlineData("replace", true)]
     public void EnvironmentPromotion_FaultBoundaryReopensAsCompleteOldOrNewPair(string boundary, bool afterEffect)
     {
         var context = CreateContext();
@@ -1238,6 +1429,11 @@ public sealed class SetupJournalStoreTests
         {
             context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null, SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted);
         }
+        else if (phase == SetupJournalStepPhase.RestoreCompleted)
+        {
+            context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null, SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted);
+            context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null, SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+        }
     }
 
     private static void PrepareStepTransition(
@@ -1366,6 +1562,18 @@ public sealed class SetupJournalStoreTests
         context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
         CompleteAllSteps(context, mutation: true);
         context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Committed);
+        return context;
+    }
+
+    private static TestContext CreateRollbackWithCompletedFileStep()
+    {
+        var context = CreateContext();
+        context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Rollback, ValidTargets());
+        context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.RollingBack);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted);
+        context.Store.MarkStepPhase(context.Lock, ChangeSetId, FileRecordId, null,
+            SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
         return context;
     }
 
