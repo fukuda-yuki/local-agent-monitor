@@ -189,6 +189,25 @@ public sealed class SetupApplyTests
     }
 
     [Fact]
+    public void Apply_AdapterOperationMismatchRequiresRecoveryBeforeArtifactsOrWrites()
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.Revalidator.OnRevalidate = (_, _) =>
+            throw new SetupApplyException(SetupCodes.RecoveryRequired);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(1, fixture.Revalidator.Calls);
+        AssertApplyInputsUnchanged(fixture);
+        AssertNoTransactionArtifacts(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
     public void Apply_RejectsChangedBaseAfterAdapterRevalidationBeforeCreatingArtifacts()
     {
         var fixture = ApplyFixture.Create();
@@ -333,6 +352,42 @@ public sealed class SetupApplyTests
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
         Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
         Assert.Equal(operation, Assert.Single(Assert.Single(result.Targets).Members).Operation);
+    }
+
+    [Fact]
+    public void Apply_OpaqueFileWithNoOpAndNonNoOpMembersUsesOnePhysicalJournalStep()
+    {
+        var fixture = ApplyFixture.Create(includeEnvironment: false);
+        fixture.RewriteFileMemberOperations(SetupOperation.NoOp, SetupOperation.Replace);
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
+        Assert.Equal(
+            [SetupOperation.NoOp, SetupOperation.Replace],
+            Assert.Single(result.Targets).Members.Select(member => member.Operation));
+        var target = Assert.Single(new SetupTransactionJournalStore(fixture.Platform, fixture.Paths)
+            .Load(fixture.ChangeSetId)!.Targets);
+        var step = Assert.Single(target.Steps);
+        Assert.Null(step.MemberKey);
+    }
+
+    [Fact]
+    public void Apply_OpaqueFileWithAnyNonNoOpMemberAndSameBytesRequiresRecoveryWithoutArtifacts()
+    {
+        var fixture = ApplyFixture.Create(fileNoChange: true, includeEnvironment: false);
+        fixture.RewriteFileMemberOperations(SetupOperation.NoOp, SetupOperation.Replace);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        AssertNoTransactionArtifacts(fixture);
+        Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
     }
 
     [Fact]
@@ -1076,7 +1131,6 @@ public sealed class SetupApplyTests
     [InlineData(SetupCodes.PartialApply)]
     [InlineData(SetupCodes.PartialRollback)]
     [InlineData(SetupCodes.SetupBusy)]
-    [InlineData(SetupCodes.RecoveryRequired)]
     [InlineData(SetupCodes.InterruptedRecoveryFailed)]
     [InlineData(SetupCodes.LedgerCorrupt)]
     [InlineData(SetupCodes.LedgerVersionUnsupported)]
@@ -1389,6 +1443,36 @@ public sealed class SetupApplyTests
                         ? member with { Operation = operation }
                         : member).ToArray(),
                 }).ToArray();
+            ledgerStore.Save(acquisition.Lock!, ledger with
+            {
+                ChangeSets = ledger.ChangeSets.Select(item => item.ChangeSetId == ChangeSetId
+                    ? item with { Targets = ledgerTargets }
+                    : item).ToArray(),
+            });
+        }
+
+        public void RewriteFileMemberOperations(params SetupOperation[] operations)
+        {
+            var members = operations.Select((operation, index) =>
+                new SetupPrivatePlanMember($"setting-{index}", operation, "desired")).ToArray();
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var plan = planStore.Load(ChangeSetId)!;
+            var planTargets = plan.Targets.Select(target => target.RecordId == FileRecordId
+                ? target with { Members = members }
+                : target).ToArray();
+            Platform.SeedFile(Paths.GetPlan(ChangeSetId), SetupPlanStore.Serialize(plan with { Targets = planTargets }));
+
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            var ledger = ledgerStore.Load();
+            var ledgerTargets = ledger.ChangeSets.Single(item => item.ChangeSetId == ChangeSetId).Targets
+                .Select(target => target.RecordId == FileRecordId
+                    ? target with
+                    {
+                        Members = members.Select(member =>
+                            new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray(),
+                    }
+                    : target).ToArray();
             ledgerStore.Save(acquisition.Lock!, ledger with
             {
                 ChangeSets = ledger.ChangeSets.Select(item => item.ChangeSetId == ChangeSetId

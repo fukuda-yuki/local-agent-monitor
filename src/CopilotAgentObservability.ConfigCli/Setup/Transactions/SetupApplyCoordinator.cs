@@ -16,6 +16,7 @@ internal sealed class SetupApplyCoordinator
         SetupCodes.PermissionDenied,
         SetupCodes.UnsafePath,
         SetupCodes.StalePlan,
+        SetupCodes.RecoveryRequired,
         SetupCodes.PortOwnedByForeignProcess,
         SetupCodes.InternalError,
     };
