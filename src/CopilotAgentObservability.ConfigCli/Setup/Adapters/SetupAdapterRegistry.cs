@@ -137,12 +137,37 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
             success.NextActions);
     }
 
-    void ISetupApplyRevalidator.Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
+    SetupPlanResult<SetupRevalidation> ISetupApplyRevalidator.Revalidate(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet plannedChangeSet)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(plannedChangeSet);
         SetupStorageValidation.ValidatePlanAndLedger(plan, plannedChangeSet);
-        Resolve(plan.Adapter).Revalidate(plan, plannedChangeSet);
+
+        if (!adapters.TryGetValue(plan.Adapter, out var adapter))
+        {
+            return SetupPlanResult.Failure<SetupRevalidation>(SetupCodes.UnsupportedAdapter);
+        }
+
+        var result = adapter.Revalidate(plan, plannedChangeSet) ?? throw SetupPlanResult.InvalidOutput();
+        ValidateDiagnostics(result);
+
+        if (result is SetupPlanFailure<SetupRevalidation> failure)
+        {
+            ValidateDiagnosticCode(failure.Code);
+            return SetupPlanResult.Failure<SetupRevalidation>(
+                failure.Code,
+                failure.Warnings,
+                failure.NextActions);
+        }
+
+        if (result is not SetupPlanSuccess<SetupRevalidation> success || success.Targets.Count != 0)
+        {
+            throw SetupPlanResult.InvalidOutput();
+        }
+
+        return SetupPlanResult.Revalidated(success.Warnings, success.NextActions);
     }
 
     private static void RequireMatchingRequest(SetupChangePlan aggregate, SetupPlanRequest request)

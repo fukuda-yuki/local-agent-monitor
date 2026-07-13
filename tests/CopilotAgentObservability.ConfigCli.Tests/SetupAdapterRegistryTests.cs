@@ -251,11 +251,18 @@ public sealed class SetupAdapterRegistryTests
             .GetMethods()
             .SelectMany(method => method.GetParameters().Select(parameter => parameter.ParameterType).Append(method.ReturnType));
         var plannedProperties = typeof(SetupPlannedChangeSet).GetProperties().Select(property => property.PropertyType);
+        var revalidateMethod = Assert.Single(
+            typeof(ISetupApplyRevalidator).GetMethods(),
+            method => method.Name == nameof(ISetupApplyRevalidator.Revalidate));
 
         Assert.DoesNotContain(typeof(SetupCommandResult), methodTypes);
         Assert.DoesNotContain(typeof(SetupTargetResult), methodTypes);
         Assert.DoesNotContain(typeof(SetupCommandResult), plannedProperties);
         Assert.DoesNotContain(typeof(SetupTargetResult), plannedProperties);
+        Assert.Equal(typeof(SetupPlanResult<SetupRevalidation>), revalidateMethod.ReturnType);
+        Assert.DoesNotContain(
+            revalidateMethod.GetParameters().Select(parameter => parameter.ParameterType).Append(revalidateMethod.ReturnType),
+            type => type == typeof(SetupCommandResult) || type == typeof(SetupTargetResult));
     }
 
     [Fact]
@@ -390,19 +397,141 @@ public sealed class SetupAdapterRegistryTests
     }
 
     [Fact]
-    public void Revalidate_ResolvesThePersistedAdapterAndPassesProductionArtifacts()
+    public void Revalidate_ResolvesThePersistedAdapterOnceAndSnapshotsTargetlessSuccess()
     {
-        var adapter = new RecordingAdapter("test-adapter");
+        var warnings = new List<string> { SetupCodes.ManagedPolicyUnverified };
+        var nextActions = new List<string> { SetupCodes.RunVsCodePolicyDiagnostics };
+        var carrier = SetupPlanResult.Revalidated(warnings, nextActions);
+        warnings.Clear();
+        nextActions.Clear();
+        var adapter = new RecordingAdapter("test-adapter", revalidate: (_, _) => carrier);
         var registry = new SetupAdapterRegistry([adapter]);
         var result = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
             registry.Plan(CreateRequest("test-adapter")));
         var planned = result.Value;
 
-        ((ISetupApplyRevalidator)registry).Revalidate(planned.PrivatePlan, planned.PlannedChangeSet);
+        var revalidation = Assert.IsType<SetupPlanSuccess<SetupRevalidation>>(
+            ((ISetupApplyRevalidator)registry).Revalidate(planned.PrivatePlan, planned.PlannedChangeSet));
 
+        Assert.Equal(1, adapter.RevalidationCalls);
+        Assert.Same(SetupRevalidation.Instance, revalidation.Value);
+        Assert.Empty(revalidation.Targets);
+        Assert.Equal([SetupCodes.ManagedPolicyUnverified], revalidation.Warnings);
+        Assert.Equal([SetupCodes.RunVsCodePolicyDiagnostics], revalidation.NextActions);
+        Assert.NotSame(carrier.Warnings, revalidation.Warnings);
+        Assert.NotSame(carrier.NextActions, revalidation.NextActions);
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<string>)revalidation.Warnings)[0] = "changed");
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<string>)revalidation.NextActions)[0] = "changed");
         Assert.Same(planned.PrivatePlan, adapter.RevalidatedPlan);
         Assert.Same(planned.PlannedChangeSet, adapter.RevalidatedChangeSet);
     }
+
+    [Fact]
+    public void Revalidate_WhenPersistedOwnerIsMissing_ReturnsUnsupportedAdapterWithoutCallingAnotherAdapter()
+    {
+        var ownerRegistry = new SetupAdapterRegistry([new RecordingAdapter("removed-adapter")]);
+        var planned = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            ownerRegistry.Plan(CreateRequest("removed-adapter"))).Value;
+        var otherAdapter = new RecordingAdapter("other-adapter");
+        var registry = new SetupAdapterRegistry([otherAdapter]);
+
+        var result = Assert.IsType<SetupPlanFailure<SetupRevalidation>>(
+            ((ISetupApplyRevalidator)registry).Revalidate(planned.PrivatePlan, planned.PlannedChangeSet));
+
+        Assert.Equal(SetupCodes.UnsupportedAdapter, result.Code);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.Null(result.GetType().GetProperty("Value"));
+        Assert.Null(result.GetType().GetProperty("Targets"));
+        Assert.Equal(0, otherAdapter.RevalidationCalls);
+    }
+
+    [Fact]
+    public void Revalidate_WhenAdapterReturnsFailure_CopiesCodeAndImmutableDiagnostics()
+    {
+        var carrier = SetupPlanResult.Failure<SetupRevalidation>(
+            SetupCodes.UnsupportedTarget,
+            [SetupCodes.ManagedPolicyUnverified],
+            [SetupCodes.RunVsCodePolicyDiagnostics]);
+        var adapter = new RecordingAdapter("test-adapter", revalidate: (_, _) => carrier);
+        var registry = new SetupAdapterRegistry([adapter]);
+        var planned = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            registry.Plan(CreateRequest("test-adapter"))).Value;
+
+        var result = Assert.IsType<SetupPlanFailure<SetupRevalidation>>(
+            ((ISetupApplyRevalidator)registry).Revalidate(planned.PrivatePlan, planned.PlannedChangeSet));
+
+        Assert.Equal(1, adapter.RevalidationCalls);
+        Assert.Equal(SetupCodes.UnsupportedTarget, result.Code);
+        Assert.Equal([SetupCodes.ManagedPolicyUnverified], result.Warnings);
+        Assert.Equal([SetupCodes.RunVsCodePolicyDiagnostics], result.NextActions);
+        Assert.NotSame(carrier.Warnings, result.Warnings);
+        Assert.NotSame(carrier.NextActions, result.NextActions);
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)result.Warnings)[0] = "changed");
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)result.NextActions)[0] = "changed");
+    }
+
+    [Fact]
+    public void Revalidate_DoesNotInterpretTheClosedDiagnosticCatalog()
+    {
+        var carrier = SetupPlanResult.Failure<SetupRevalidation>(
+            "future_failure",
+            ["future_warning"],
+            ["future_action"]);
+        var adapter = new RecordingAdapter("test-adapter", revalidate: (_, _) => carrier);
+        var registry = new SetupAdapterRegistry([adapter]);
+        var planned = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            registry.Plan(CreateRequest("test-adapter"))).Value;
+
+        var result = Assert.IsType<SetupPlanFailure<SetupRevalidation>>(
+            ((ISetupApplyRevalidator)registry).Revalidate(planned.PrivatePlan, planned.PlannedChangeSet));
+
+        Assert.Equal("future_failure", result.Code);
+        Assert.Equal(["future_warning"], result.Warnings);
+        Assert.Equal(["future_action"], result.NextActions);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("failure-code")]
+    [InlineData("warning")]
+    [InlineData("next-action")]
+    [InlineData("success-target")]
+    public void Revalidate_WhenAdapterReturnsMalformedOutput_FailsWithFixedSafeMessage(string malformedPart)
+    {
+        const string rawMarker = "PRIVATE_SECRET";
+        var adapter = new RecordingAdapter(
+            "test-adapter",
+            revalidate: (_, _) => CreateMalformedRevalidation(malformedPart, rawMarker)!);
+        var registry = new SetupAdapterRegistry([adapter]);
+        var planned = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            registry.Plan(CreateRequest("test-adapter"))).Value;
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ((ISetupApplyRevalidator)registry).Revalidate(planned.PrivatePlan, planned.PlannedChangeSet));
+
+        Assert.Equal(1, adapter.RevalidationCalls);
+        Assert.Equal("Setup adapter returned invalid output.", exception.Message);
+        Assert.DoesNotContain(rawMarker, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    private static SetupPlanResult<SetupRevalidation>? CreateMalformedRevalidation(
+        string malformedPart,
+        string rawMarker) => malformedPart switch
+        {
+            "null" => null,
+            "failure-code" => SetupPlanResult.Failure<SetupRevalidation>(rawMarker),
+            "warning" => SetupPlanResult.Revalidated([rawMarker], []),
+            "next-action" => SetupPlanResult.Revalidated([], [rawMarker]),
+            "success-target" => SetupPlanResult.Success(
+                SetupRevalidation.Instance,
+                [SetupPlanTarget.FromRecord(CreateRecord(RecordId, "user-environment"))],
+                [],
+                []),
+            _ => throw new InvalidOperationException(),
+        };
 
     private static SetupPlanRequest CreateRequest(string adapter) => new(
         adapter,
@@ -492,17 +621,20 @@ public sealed class SetupAdapterRegistryTests
         private readonly IReadOnlyList<SetupChangeRecord>? records;
         private readonly IReadOnlyList<string> warnings;
         private readonly IReadOnlyList<string> nextActions;
+        private readonly Func<SetupPrivatePlan, SetupLedgerChangeSet, SetupPlanResult<SetupRevalidation>>? revalidate;
 
         public RecordingAdapter(
             string adapterId,
             IReadOnlyList<SetupChangeRecord>? records = null,
             IReadOnlyList<string>? warnings = null,
-            IReadOnlyList<string>? nextActions = null)
+            IReadOnlyList<string>? nextActions = null,
+            Func<SetupPrivatePlan, SetupLedgerChangeSet, SetupPlanResult<SetupRevalidation>>? revalidate = null)
         {
             AdapterId = adapterId;
             this.records = records;
             this.warnings = warnings ?? [];
             this.nextActions = nextActions ?? [];
+            this.revalidate = revalidate;
         }
 
         public string AdapterId { get; }
@@ -510,6 +642,8 @@ public sealed class SetupAdapterRegistryTests
         public SetupPrivatePlan? RevalidatedPlan { get; private set; }
 
         public SetupLedgerChangeSet? RevalidatedChangeSet { get; private set; }
+
+        public int RevalidationCalls { get; private set; }
 
         public SetupPlanResult<SetupChangePlan> Plan(SetupPlanRequest request) => SetupPlanResult.Planned(
             new SetupChangePlan(
@@ -522,10 +656,16 @@ public sealed class SetupAdapterRegistryTests
             warnings,
             nextActions);
 
-        public void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
+        public SetupPlanResult<SetupRevalidation> Revalidate(
+            SetupPrivatePlan plan,
+            SetupLedgerChangeSet plannedChangeSet)
         {
+            RevalidationCalls++;
             RevalidatedPlan = plan;
             RevalidatedChangeSet = plannedChangeSet;
+            return revalidate is null
+                ? SetupPlanResult.Revalidated()
+                : revalidate(plan, plannedChangeSet);
         }
     }
 
@@ -543,8 +683,8 @@ public sealed class SetupAdapterRegistryTests
 
         public SetupPlanResult<SetupChangePlan> Plan(SetupPlanRequest request) => result;
 
-        public void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
-        {
-        }
+        public SetupPlanResult<SetupRevalidation> Revalidate(
+            SetupPrivatePlan plan,
+            SetupLedgerChangeSet plannedChangeSet) => SetupPlanResult.Revalidated();
     }
 }

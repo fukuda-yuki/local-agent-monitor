@@ -1,10 +1,13 @@
+using CopilotAgentObservability.ConfigCli.Setup.Adapters;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Transactions;
 
 internal interface ISetupApplyRevalidator
 {
-    void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet);
+    SetupPlanResult<SetupRevalidation> Revalidate(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet plannedChangeSet);
 }
 
 internal sealed class SetupApplyException : Exception

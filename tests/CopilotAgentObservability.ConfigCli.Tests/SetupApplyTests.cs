@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters;
 using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
@@ -1970,10 +1971,13 @@ public sealed class SetupApplyTests
 
         public Action<SetupPrivatePlan, SetupLedgerChangeSet>? OnRevalidate { get; set; }
 
-        public void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
+        public SetupPlanResult<SetupRevalidation> Revalidate(
+            SetupPrivatePlan plan,
+            SetupLedgerChangeSet plannedChangeSet)
         {
             Calls++;
             OnRevalidate?.Invoke(plan, plannedChangeSet);
+            return SetupPlanResult.Revalidated();
         }
     }
 

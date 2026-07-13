@@ -9,7 +9,9 @@ internal interface ISetupAdapter
 
     SetupPlanResult<SetupChangePlan> Plan(SetupPlanRequest request);
 
-    void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet);
+    SetupPlanResult<SetupRevalidation> Revalidate(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet plannedChangeSet);
 }
 
 internal sealed record SetupPlanRequest(
@@ -44,6 +46,15 @@ internal sealed record SetupChangeRecord(
 internal sealed record SetupPlannedChangeSet(
     SetupPrivatePlan PrivatePlan,
     SetupLedgerChangeSet PlannedChangeSet);
+
+internal sealed class SetupRevalidation
+{
+    private SetupRevalidation()
+    {
+    }
+
+    public static SetupRevalidation Instance { get; } = new();
+}
 
 internal abstract class SetupPlanResult<T>
     where T : class
@@ -136,6 +147,11 @@ internal static class SetupPlanResult
         IEnumerable<string>? nextActions = null)
         where T : class =>
         new(code, warnings ?? [], nextActions ?? []);
+
+    public static SetupPlanSuccess<SetupRevalidation> Revalidated(
+        IEnumerable<string>? warnings = null,
+        IEnumerable<string>? nextActions = null) =>
+        Success(SetupRevalidation.Instance, [], warnings ?? [], nextActions ?? []);
 
     internal static InvalidOperationException InvalidOutput() => new(InvalidOutputMessage);
 

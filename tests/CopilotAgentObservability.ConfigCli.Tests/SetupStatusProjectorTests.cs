@@ -1710,8 +1710,8 @@ public sealed class SetupStatusProjectorTests
 
     private sealed class PassRevalidator : ISetupApplyRevalidator
     {
-        public void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet changeSet)
-        {
-        }
+        public SetupPlanResult<SetupRevalidation> Revalidate(
+            SetupPrivatePlan plan,
+            SetupLedgerChangeSet changeSet) => SetupPlanResult.Revalidated();
     }
 }

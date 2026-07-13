@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters;
 using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
@@ -2005,8 +2006,8 @@ public sealed class SetupRollbackTests
 
     private sealed class PassRevalidator : ISetupApplyRevalidator
     {
-        public void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
-        {
-        }
+        public SetupPlanResult<SetupRevalidation> Revalidate(
+            SetupPrivatePlan plan,
+            SetupLedgerChangeSet plannedChangeSet) => SetupPlanResult.Revalidated();
     }
 }
