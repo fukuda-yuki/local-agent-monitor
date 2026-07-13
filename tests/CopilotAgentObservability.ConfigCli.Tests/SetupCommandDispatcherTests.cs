@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters;
 using CopilotAgentObservability.ConfigCli.Setup.Cli;
@@ -150,6 +151,39 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Fact]
+    public void DispatchPlan_SuccessWithUnknownDiagnosticsFailsValidationBeforePersistence()
+    {
+        var adapter = new RecordingAdapter("test-adapter", request => SetupPlanResult.Planned(
+            CreatePlan(request, [CreateRecord(RecordId, "first-target", SetupOperation.Replace)]),
+            ["future_warning"],
+            ["future_action"]));
+        var fixture = DispatcherFixture.Create(adapter, _ => NoRecovery());
+
+        var result = fixture.Dispatcher.Dispatch(CreatePlanOptions());
+
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        AssertNoPlannedArtifacts(fixture);
+        Assert.DoesNotContain("future_", SetupJson.Serialize(result), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DispatchPlan_SuccessWithInvalidPublicTargetFailsValidationBeforePersistenceWithoutRawText()
+    {
+        const string rawMarker = "PRIVATE_INVALID_SAMPLE";
+        var adapter = new RecordingAdapter("test-adapter", request => SetupPlanResult.Planned(
+            CreatePlan(request, [CreateInvalidGuidanceRecord(RecordId, rawMarker)])));
+        var fixture = DispatcherFixture.Create(adapter, _ => NoRecovery());
+
+        var result = fixture.Dispatcher.Dispatch(CreatePlanOptions());
+
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        AssertNoPlannedArtifacts(fixture);
+        Assert.DoesNotContain(rawMarker, SetupJson.Serialize(result), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DispatchPlan_WhenLockIsBusyStopsBeforeRecoveryAndAdapterResolution()
     {
         var recoveryCalls = 0;
@@ -185,7 +219,17 @@ public sealed class SetupCommandDispatcherTests
         var recoveredId = Guid.Parse("00000000-0000-7000-8000-000000000901");
         var recoveries = new Queue<SetupRecoveryResult>(
         [
-            new SetupRecoveryResult(SetupRecoveryDisposition.Recovered, code, recoveredId, operation, null),
+            new SetupRecoveryResult(
+                SetupRecoveryDisposition.Recovered,
+                code,
+                recoveredId,
+                operation,
+                CreateRecoveryEvidence(
+                    recoveredId,
+                    operation == SetupRecoveryOperation.Apply
+                        ? SetupChangeSetState.Applied
+                        : SetupChangeSetState.RolledBack,
+                    code)),
             NoRecovery(),
         ]);
         var adapter = new RecordingAdapter("test-adapter", request =>
@@ -223,7 +267,10 @@ public sealed class SetupCommandDispatcherTests
             SetupCodes.InterruptedRecoveryFailed,
             recoveredId,
             SetupRecoveryOperation.Apply,
-            null));
+            CreateRecoveryEvidence(
+                recoveredId,
+                SetupChangeSetState.Partial,
+                SetupCodes.InterruptedRecoveryFailed)));
 
         var result = fixture.Dispatcher.Dispatch(CreatePlanOptions());
 
@@ -239,7 +286,6 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Theory]
-    [InlineData(SetupCodes.RecoveryRequired)]
     [InlineData(SetupCodes.LedgerCorrupt)]
     [InlineData(SetupCodes.LedgerVersionUnsupported)]
     public void DispatchPlan_WhenRecoveryReturnsUncorrelatedStorageFailurePreservesOnlyFixedCode(string code)
@@ -263,21 +309,61 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Fact]
-    public void DispatchPlan_WhenRecoveryReturnsMalformedUncorrelatedEvidenceFailsClosed()
+    public void DispatchPlan_WhenRecoveryRequiresManualActionReturnsPublicCodeWithoutCorrelationAndStopsPlanning()
     {
+        var recoveredId = Guid.Parse("00000000-0000-7000-8000-000000000903");
         var adapter = new RecordingAdapter("test-adapter", _ => throw new InvalidOperationException("adapter must not run"));
         var fixture = DispatcherFixture.Create(adapter, _ => new SetupRecoveryResult(
             SetupRecoveryDisposition.Failed,
-            SetupCodes.LedgerCorrupt,
-            null,
-            null,
-            CreateLedgerRow()));
+            SetupCodes.RecoveryRequired,
+            recoveredId,
+            SetupRecoveryOperation.Apply,
+            CreateRecoveryEvidence(
+                recoveredId,
+                SetupChangeSetState.Partial,
+                SetupCodes.InterruptedRecoveryFailed)));
+
+        var result = fixture.Dispatcher.Dispatch(CreatePlanOptions());
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        Assert.Null(result.RecoveredChangeSetId);
+        Assert.Null(result.RecoveryOperation);
+        Assert.Equal(0, adapter.PlanCalls);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData("none-fields")]
+    [InlineData("recovered-missing-effective")]
+    [InlineData("recovered-mismatched-id")]
+    [InlineData("recovered-wrong-state")]
+    [InlineData("recovered-wrong-outcome")]
+    [InlineData("failed-interrupted-missing-effective")]
+    [InlineData("failed-interrupted-mismatched-id")]
+    [InlineData("failed-interrupted-wrong-state")]
+    [InlineData("failed-interrupted-wrong-outcome")]
+    [InlineData("failed-recovery-required-uncorrelated")]
+    [InlineData("failed-recovery-required-mismatched-id")]
+    [InlineData("failed-recovery-required-wrong-state")]
+    [InlineData("failed-recovery-required-wrong-outcome")]
+    [InlineData("failed-ledger-with-evidence")]
+    [InlineData("invalid-disposition")]
+    [InlineData("unknown-code")]
+    public void DispatchPlan_WhenRecoveryEvidenceIsMalformedFailsClosedWithoutPlanning(string variant)
+    {
+        var adapter = new RecordingAdapter("test-adapter", _ => throw new InvalidOperationException("adapter must not run"));
+        var fixture = DispatcherFixture.Create(adapter, _ => CreateMalformedRecovery(variant));
 
         var result = fixture.Dispatcher.Dispatch(CreatePlanOptions());
 
         Assert.False(result.Success);
         Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Null(result.ChangeSetId);
+        Assert.Null(result.RecoveredChangeSetId);
+        Assert.Null(result.RecoveryOperation);
         Assert.Equal(0, adapter.PlanCalls);
+        Assert.DoesNotContain("PRIVATE_RECOVERY_CODE", SetupJson.Serialize(result), StringComparison.Ordinal);
         SetupContractValidator.Validate(result);
     }
 
@@ -463,6 +549,103 @@ public sealed class SetupCommandDispatcherTests
         Assert.Single(fixture.LedgerStore.Load().ChangeSets);
     }
 
+    [Fact]
+    public void DispatchPlan_ProductionConstructorReturnsActualInterruptedApplyRecoveryEvidence()
+    {
+        var platform = new SetupTestPlatform(Timestamp);
+        var paths = new SetupRuntimePaths(platform);
+        var planStore = new SetupPlanStore(platform, paths);
+        var ledgerStore = new SetupLedgerStore(platform, paths, planStore);
+        var journalStore = new SetupTransactionJournalStore(platform, paths);
+        var targetPath = Path.Combine(platform.LocalApplicationData, "dispatcher-settings.json");
+        platform.SeedDirectory("C:\\");
+        platform.SeedDirectory(platform.LocalApplicationData);
+        platform.SeedFile(targetPath, Encoding.UTF8.GetBytes("old-file"));
+        var adapter = new RecordingAdapter("test-adapter", request =>
+            SetupPlanResult.Planned(CreatePlan(
+                request,
+                [CreateApplicableFileRecord(RecordId, targetPath)])));
+        var registry = new SetupAdapterRegistry([adapter]);
+        var dispatcher = new SetupCommandDispatcher(
+            platform,
+            paths,
+            planStore,
+            ledgerStore,
+            journalStore,
+            registry,
+            "1.2.3");
+        var planned = dispatcher.Dispatch(CreatePlanOptions());
+        var plannedId = Guid.Parse(planned.ChangeSetId!);
+        platform.InjectFault(
+            $"checkpoint:{SetupFaultPoint.AfterCommitBeforeLedger}",
+            new IOException("PRIVATE_APPLY_INTERRUPTION"));
+        using (var applyLock = SetupLock.TryAcquire(platform, paths))
+        {
+            var apply = new SetupApplyCoordinator(
+                platform,
+                paths,
+                planStore,
+                ledgerStore,
+                journalStore,
+                registry);
+
+            var exception = Assert.Throws<SetupApplyException>(() =>
+                apply.Apply(applyLock.Lock!, plannedId));
+
+            Assert.Equal(SetupCodes.InternalError, exception.Code);
+        }
+
+        var recovered = dispatcher.Dispatch(CreatePlanOptions());
+        var json = SetupJson.Serialize(recovered);
+
+        Assert.True(recovered.Success);
+        Assert.Equal(SetupCodes.InterruptedApplyRecovered, recovered.Code);
+        Assert.Null(recovered.ChangeSetId);
+        Assert.Equal(plannedId.ToString("D"), recovered.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Apply, recovered.RecoveryOperation);
+        Assert.Equal([SetupCodes.RerunRequestedSetupCommand], recovered.NextActions);
+        Assert.Equal(1, adapter.PlanCalls);
+        Assert.Equal("new-file", Encoding.UTF8.GetString(platform.ReadSeededFile(targetPath)));
+        using var document = JsonDocument.Parse(json);
+        Assert.Equal(JsonValueKind.Null, document.RootElement.GetProperty("change_set_id").ValueKind);
+        Assert.Equal(plannedId.ToString("D"), document.RootElement.GetProperty("recovered_change_set_id").GetString());
+        Assert.Equal("apply", document.RootElement.GetProperty("recovery_operation").GetString());
+        Assert.Equal(
+            SetupCodes.RerunRequestedSetupCommand,
+            document.RootElement.GetProperty("next_actions")[0].GetString());
+        Assert.DoesNotContain("PRIVATE_APPLY_INTERRUPTION", json, StringComparison.Ordinal);
+        SetupContractValidator.Validate(recovered);
+    }
+
+    [Theory]
+    [InlineData("platform")]
+    [InlineData("paths")]
+    [InlineData("planStore")]
+    [InlineData("ledgerStore")]
+    [InlineData("journalStore")]
+    [InlineData("adapterRegistry")]
+    [InlineData("toolVersion")]
+    public void ProductionConstructor_GuardsEveryDependencyBeforeCapturingRecovery(string dependency)
+    {
+        var platform = new SetupTestPlatform(Timestamp);
+        var paths = new SetupRuntimePaths(platform);
+        var planStore = new SetupPlanStore(platform, paths);
+        var ledgerStore = new SetupLedgerStore(platform, paths, planStore);
+        var journalStore = new SetupTransactionJournalStore(platform, paths);
+        var registry = new SetupAdapterRegistry([]);
+
+        var exception = Assert.Throws<ArgumentNullException>(() => new SetupCommandDispatcher(
+            dependency == "platform" ? null! : platform,
+            dependency == "paths" ? null! : paths,
+            dependency == "planStore" ? null! : planStore,
+            dependency == "ledgerStore" ? null! : ledgerStore,
+            dependency == "journalStore" ? null! : journalStore,
+            dependency == "adapterRegistry" ? null! : registry,
+            dependency == "toolVersion" ? null! : "1.2.3"));
+
+        Assert.Equal(dependency, exception.ParamName);
+    }
+
     private static SetupOptions CreatePlanOptions(
         string adapter = "test-adapter",
         string target = "sample") => new(
@@ -522,6 +705,35 @@ public sealed class SetupCommandDispatcherTests
                 [change]));
     }
 
+    private static SetupChangeRecord CreateApplicableFileRecord(Guid recordId, string targetPath)
+    {
+        var change = new SetupMemberChangeResult(
+            "setting_1",
+            SetupOperation.Replace,
+            "present_different",
+            "configured",
+            "none",
+            false);
+        return new SetupChangeRecord(
+            recordId,
+            SetupTargetKind.Json,
+            targetPath,
+            "dispatcher-settings",
+            SetupHash.File(true, Encoding.UTF8.GetBytes("old-file")),
+            "new-file",
+            [new SetupPrivatePlanMember(change.SettingKey, change.Operation, "new-file")],
+            SetupRestartRequirement.None,
+            new SetupStatusProjection(
+                true,
+                "1.0.0",
+                SetupOperation.Replace,
+                SetupEffectiveSource.UserSetting,
+                null,
+                null,
+                null,
+                [change]));
+    }
+
     private static SetupChangeRecord CreateGuidanceRecord(Guid recordId)
     {
         var statusGuidance = new SetupStatusGuidance("caller_managed_sample", "dotnet");
@@ -546,16 +758,139 @@ public sealed class SetupCommandDispatcherTests
             SetupContractValidator.RehydrateStatusGuidance(statusGuidance));
     }
 
-    private static SetupLedgerChangeSet CreateLedgerRow() => new(
-        Guid.Parse("00000000-0000-7000-8000-000000000999"),
+    private static SetupChangeRecord CreateInvalidGuidanceRecord(Guid recordId, string sample)
+    {
+        var record = CreateGuidanceRecord(recordId);
+        return record with
+        {
+            Guidance = new SetupGuidance(record.Guidance!.Kind, record.Guidance.Language, sample),
+        };
+    }
+
+    private static void AssertNoPlannedArtifacts(DispatcherFixture fixture)
+    {
+        Assert.Empty(fixture.LedgerStore.Load().ChangeSets);
+        Assert.False(fixture.Platform.FileSystem.FileExists(
+            fixture.Paths.GetPlan(Guid.Parse("00000000-0000-7000-8000-000000000001"))));
+    }
+
+    private static SetupLedgerChangeSet CreateRecoveryEvidence(
+        Guid changeSetId,
+        SetupChangeSetState state,
+        string outcomeCode) => new(
+        changeSetId,
         "test-adapter",
         "sample",
         Timestamp,
         Timestamp,
         "1.2.3",
-        null,
-        SetupChangeSetState.Planned,
+        outcomeCode,
+        state,
         []);
+
+    private static SetupRecoveryResult CreateMalformedRecovery(string variant)
+    {
+        var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000904");
+        var otherChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000905");
+        var recovered = CreateRecoveryEvidence(
+            changeSetId,
+            SetupChangeSetState.Applied,
+            SetupCodes.InterruptedApplyRecovered);
+        var failed = CreateRecoveryEvidence(
+            changeSetId,
+            SetupChangeSetState.Partial,
+            SetupCodes.InterruptedRecoveryFailed);
+        return variant switch
+        {
+            "none-fields" => new(SetupRecoveryDisposition.None, SetupCodes.LedgerCorrupt, null, null, null),
+            "recovered-missing-effective" => new(
+                SetupRecoveryDisposition.Recovered,
+                SetupCodes.InterruptedApplyRecovered,
+                changeSetId,
+                SetupRecoveryOperation.Apply,
+                null),
+            "recovered-mismatched-id" => new(
+                SetupRecoveryDisposition.Recovered,
+                SetupCodes.InterruptedApplyRecovered,
+                otherChangeSetId,
+                SetupRecoveryOperation.Apply,
+                recovered),
+            "recovered-wrong-state" => new(
+                SetupRecoveryDisposition.Recovered,
+                SetupCodes.InterruptedApplyRecovered,
+                changeSetId,
+                SetupRecoveryOperation.Apply,
+                recovered with { State = SetupChangeSetState.Partial }),
+            "recovered-wrong-outcome" => new(
+                SetupRecoveryDisposition.Recovered,
+                SetupCodes.InterruptedApplyRecovered,
+                changeSetId,
+                SetupRecoveryOperation.Apply,
+                recovered with { OutcomeCode = SetupCodes.InterruptedRollbackRecovered }),
+            "failed-interrupted-missing-effective" => new(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.InterruptedRecoveryFailed,
+                changeSetId,
+                SetupRecoveryOperation.Apply,
+                null),
+            "failed-interrupted-mismatched-id" => new(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.InterruptedRecoveryFailed,
+                otherChangeSetId,
+                SetupRecoveryOperation.Apply,
+                failed),
+            "failed-interrupted-wrong-state" => new(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.InterruptedRecoveryFailed,
+                changeSetId,
+                SetupRecoveryOperation.Apply,
+                failed with { State = SetupChangeSetState.Applied }),
+            "failed-interrupted-wrong-outcome" => new(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.InterruptedRecoveryFailed,
+                changeSetId,
+                SetupRecoveryOperation.Apply,
+                failed with { OutcomeCode = SetupCodes.ApplySucceeded }),
+            "failed-recovery-required-uncorrelated" => new(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.RecoveryRequired,
+                null,
+                null,
+                null),
+            "failed-recovery-required-mismatched-id" => new(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.RecoveryRequired,
+                otherChangeSetId,
+                SetupRecoveryOperation.Apply,
+                failed),
+            "failed-recovery-required-wrong-state" => new(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.RecoveryRequired,
+                changeSetId,
+                SetupRecoveryOperation.Apply,
+                failed with { State = SetupChangeSetState.Applied }),
+            "failed-recovery-required-wrong-outcome" => new(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.RecoveryRequired,
+                changeSetId,
+                SetupRecoveryOperation.Apply,
+                failed with { OutcomeCode = SetupCodes.ApplySucceeded }),
+            "failed-ledger-with-evidence" => new(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.LedgerCorrupt,
+                changeSetId,
+                SetupRecoveryOperation.Apply,
+                failed),
+            "invalid-disposition" => new((SetupRecoveryDisposition)999, null, null, null, null),
+            "unknown-code" => new(
+                SetupRecoveryDisposition.Failed,
+                "PRIVATE_RECOVERY_CODE",
+                null,
+                null,
+                null),
+            _ => throw new ArgumentOutOfRangeException(nameof(variant), variant, null),
+        };
+    }
 
     private sealed class RecordingAdapter(
         string adapterId,

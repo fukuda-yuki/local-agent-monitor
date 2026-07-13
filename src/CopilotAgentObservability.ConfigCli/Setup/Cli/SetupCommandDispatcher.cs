@@ -24,17 +24,17 @@ internal sealed class SetupCommandDispatcher
         SetupAdapterRegistry adapterRegistry,
         string toolVersion)
         : this(
-            platform,
-            paths,
-            ledgerStore,
-            adapterRegistry,
-            toolVersion,
-            new SetupRecoveryCoordinator(
+            platform ?? throw new ArgumentNullException(nameof(platform)),
+            paths ?? throw new ArgumentNullException(nameof(paths)),
+            ledgerStore ?? throw new ArgumentNullException(nameof(ledgerStore)),
+            adapterRegistry ?? throw new ArgumentNullException(nameof(adapterRegistry)),
+            toolVersion ?? throw new ArgumentNullException(nameof(toolVersion)),
+            CreateRecovery(
                 platform,
                 paths,
-                planStore,
+                planStore ?? throw new ArgumentNullException(nameof(planStore)),
                 ledgerStore,
-                journalStore).RecoverNext)
+                journalStore ?? throw new ArgumentNullException(nameof(journalStore))))
     {
     }
 
@@ -53,6 +53,14 @@ internal sealed class SetupCommandDispatcher
         this.toolVersion = toolVersion ?? throw new ArgumentNullException(nameof(toolVersion));
         this.recover = recover ?? throw new ArgumentNullException(nameof(recover));
     }
+
+    private static Func<SetupLock, SetupRecoveryResult> CreateRecovery(
+        ISetupPlatform platform,
+        SetupRuntimePaths paths,
+        SetupPlanStore planStore,
+        SetupLedgerStore ledgerStore,
+        SetupTransactionJournalStore journalStore) =>
+        new SetupRecoveryCoordinator(platform, paths, planStore, ledgerStore, journalStore).RecoverNext;
 
     public SetupCommandResult Dispatch(SetupOptions options)
     {
@@ -109,16 +117,12 @@ internal sealed class SetupCommandDispatcher
                 return Validate(Failure(SetupCodes.InternalError, options.Adapter));
             }
 
-            ledgerStore.PersistPlannedChangeSet(
-                acquisition.Lock!,
-                success.Value.PrivatePlan,
-                success.Value.PlannedChangeSet);
             var targets = Array.AsReadOnly(success.Targets.Select(Project).ToArray());
             var code = success.Targets.All(target =>
                 target.TargetKind == SetupTargetKind.Guidance || target.Operation == SetupOperation.NoOp)
                 ? SetupCodes.NoChanges
                 : SetupCodes.PlanReady;
-            return Validate(new SetupCommandResult(
+            var result = Validate(new SetupCommandResult(
                 SetupCommand.Plan,
                 true,
                 code,
@@ -131,6 +135,11 @@ internal sealed class SetupCommandDispatcher
                 Snapshot(success.Warnings),
                 Snapshot(success.NextActions),
                 false));
+            ledgerStore.PersistPlannedChangeSet(
+                acquisition.Lock!,
+                success.Value.PrivatePlan,
+                success.Value.PlannedChangeSet);
+            return result;
         }
         catch (SetupAdapterNotRegisteredException)
         {
@@ -153,7 +162,8 @@ internal sealed class SetupCommandDispatcher
         if (recovery.Disposition == SetupRecoveryDisposition.Recovered &&
             recovery.RecoveredChangeSetId is { } recoveredId &&
             recovery.Operation is { } operation &&
-            recovery.Code == RecoveredCode(operation))
+            recovery.Code == RecoveredCode(operation) &&
+            IsRecoveredEvidence(recovery.EffectiveChangeSet, recoveredId, operation, recovery.Code))
         {
             return new SetupCommandResult(
                 SetupCommand.Plan,
@@ -173,7 +183,9 @@ internal sealed class SetupCommandDispatcher
         if (recovery.Disposition == SetupRecoveryDisposition.Failed &&
             recovery.Code == SetupCodes.InterruptedRecoveryFailed &&
             recovery.RecoveredChangeSetId is { } failedId &&
-            recovery.Operation is { } failedOperation)
+            recovery.Operation is { } failedOperation &&
+            Enum.IsDefined(failedOperation) &&
+            IsFailedEvidence(recovery.EffectiveChangeSet, failedId))
         {
             return new SetupCommandResult(
                 SetupCommand.Plan,
@@ -191,6 +203,15 @@ internal sealed class SetupCommandDispatcher
         }
 
         if (recovery.Disposition == SetupRecoveryDisposition.Failed &&
+            recovery.Code == SetupCodes.RecoveryRequired &&
+            recovery.RecoveredChangeSetId is { } recoveryRequiredId &&
+            (recovery.Operation is null || Enum.IsDefined(recovery.Operation.Value)) &&
+            IsFailedEvidence(recovery.EffectiveChangeSet, recoveryRequiredId))
+        {
+            return Failure(SetupCodes.RecoveryRequired, adapter);
+        }
+
+        if (recovery.Disposition == SetupRecoveryDisposition.Failed &&
             recovery.RecoveredChangeSetId is null &&
             recovery.Operation is null &&
             recovery.EffectiveChangeSet is null)
@@ -200,6 +221,30 @@ internal sealed class SetupCommandDispatcher
 
         return Failure(SetupCodes.InternalError, adapter);
     }
+
+    private static bool IsRecoveredEvidence(
+        SetupLedgerChangeSet? effective,
+        Guid recoveredId,
+        SetupRecoveryOperation operation,
+        string code) =>
+        effective is not null &&
+        effective.ChangeSetId == recoveredId &&
+        string.Equals(effective.OutcomeCode, code, StringComparison.Ordinal) &&
+        operation switch
+        {
+            SetupRecoveryOperation.Apply => effective.State is SetupChangeSetState.Applied or SetupChangeSetState.Restored,
+            SetupRecoveryOperation.Rollback => effective.State == SetupChangeSetState.RolledBack,
+            _ => false,
+        };
+
+    private static bool IsFailedEvidence(SetupLedgerChangeSet? effective, Guid failedId) =>
+        effective is not null &&
+        effective.ChangeSetId == failedId &&
+        effective.State == SetupChangeSetState.Partial &&
+        string.Equals(
+            effective.OutcomeCode,
+            SetupCodes.InterruptedRecoveryFailed,
+            StringComparison.Ordinal);
 
     private static SetupTargetResult Project(SetupPlanTarget target) => new(
         target.RecordId.ToString("D"),
@@ -278,7 +323,6 @@ internal sealed class SetupCommandDispatcher
 
     private static string MapRecoveryCode(string? code) => code switch
     {
-        SetupCodes.RecoveryRequired => SetupCodes.RecoveryRequired,
         SetupCodes.LedgerCorrupt => SetupCodes.LedgerCorrupt,
         SetupCodes.LedgerVersionUnsupported => SetupCodes.LedgerVersionUnsupported,
         _ => SetupCodes.InternalError,
