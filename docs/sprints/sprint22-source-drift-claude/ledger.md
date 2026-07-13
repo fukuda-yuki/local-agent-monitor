@@ -32,7 +32,7 @@ Updated: 2026-07-13
 | Projection and HTTP DTO | #65 | Complete (Tasks 20-21) | `3bb2c9e..7bacf7e` | graph 33/33; backend/near-miss 44/44; build 0 | Independent graph/DTO review PASS | trace-id-only stays hook_only/otel_only |
 | Canvas/UI and Playwright | #65 | Complete (Task 22) | `2a2a252..cf12a2a` | Canvas contract 28/28; Node 31/31; Playwright 18/18; build 0 | Independent UI review PASS | live Claude producer evidence remains blocked |
 | User documentation and live-validation closeout | #65 | Complete with explicit live blockers (Task 23) | this docs closeout | `git diff --check` PASS; repository-safe docs review | Exact blockers and named follow-ups recorded for all three Claude surfaces | interactive TTY unavailable; print emitted no structural telemetry; Agent SDK package/runtime/credential unavailable |
-| Final integration | #62-#65 | Complete pending final evidence commit | `2e4743f` + final review evidence | build PASS; Playwright bootstrap PASS; full solution 2,577/2,577 PASS; diff-check PASS | final independent spec/security/UI review required before evidence commit | live producer follow-ups and complete trace-context DTO are explicit non-blocking follow-ups |
+| Final integration | #62-#65 | Complete | `2e4743f..577a39a` | build PASS; Playwright bootstrap PASS; full solution 2,577/2,577 PASS; diff-check PASS | independent security and Canvas reviews PASS; task-level spec/code reviews recorded | live producer follow-ups and complete trace-context DTO are explicit non-blocking follow-ups |
 
 ## Requirement-to-test evidence
 
