@@ -272,6 +272,158 @@ public sealed class SetupApplyTests
         Assert.Equal(fixture.Platform.Clock.UtcNow, stale.UpdatedAt);
     }
 
+    [Fact]
+    public void Apply_RetryAfterStaleAttemptAppliesAndClearsPriorAttemptOutcome()
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.RewritePlanTimestamp(fixture.Platform.Clock.UtcNow.AddMinutes(-1));
+        fixture.Revalidator.OnRevalidate = (_, _) =>
+            fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("external"));
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+        Assert.Equal(SetupCodes.StalePlan, Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)).Code);
+        fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("old"));
+        fixture.Revalidator.OnRevalidate = null;
+
+        var applied = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(SetupChangeSetState.Applied, applied.State);
+        Assert.Equal(SetupCodes.ApplySucceeded, applied.OutcomeCode);
+        Assert.Equal(2, fixture.Revalidator.Calls);
+        Assert.All(applied.Targets.Where(target => target.AppliedStateHash is not null), target =>
+            Assert.Equal(SetupCodes.ApplySucceeded, target.OutcomeCode));
+    }
+
+    [Fact]
+    public void Apply_RetryAfterStaleNoOpPlanPersistsNoChanges()
+    {
+        var fixture = ApplyFixture.Create(noChanges: true);
+        fixture.RewritePlanTimestamp(fixture.Platform.Clock.UtcNow.AddMinutes(-1));
+        fixture.Revalidator.OnRevalidate = (_, _) =>
+            fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("external"));
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+        Assert.Equal(SetupCodes.StalePlan, Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)).Code);
+        fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("old"));
+        fixture.Revalidator.OnRevalidate = null;
+
+        var noChanges = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(SetupChangeSetState.NoChanges, noChanges.State);
+        Assert.Equal(SetupCodes.NoChanges, noChanges.OutcomeCode);
+        Assert.Equal(2, fixture.Revalidator.Calls);
+        AssertNoTransactionArtifacts(fixture);
+    }
+
+    [Fact]
+    public void Apply_RepeatedStaleAttemptRemainsRetryableAndRecordsStalePlan()
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.RewritePlanTimestamp(fixture.Platform.Clock.UtcNow.AddMinutes(-1));
+        fixture.Revalidator.OnRevalidate = (_, _) =>
+            fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("external"));
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        Assert.Equal(SetupCodes.StalePlan, Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)).Code);
+        Assert.Equal(SetupCodes.StalePlan, Assert.Throws<SetupApplyException>(() =>
+            fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId)).Code);
+
+        var stale = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Planned, stale.State);
+        Assert.Equal(SetupCodes.StalePlan, stale.OutcomeCode);
+        Assert.Equal(2, fixture.Revalidator.Calls);
+        AssertNoTransactionArtifacts(fixture);
+    }
+
+    [Fact]
+    public async Task Apply_RetryApplyingEvidenceClearsStaleAttemptBeforeFirstMutationIntent()
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.RewritePlanTimestamp(fixture.Platform.Clock.UtcNow.AddMinutes(-1));
+        fixture.Revalidator.OnRevalidate = (_, _) =>
+            fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("external"));
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+        Assert.Equal(SetupCodes.StalePlan, Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)).Code);
+        fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("old"));
+        fixture.Revalidator.OnRevalidate = null;
+        using var barrier = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}");
+
+        var retry = Task.Run(() => fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        barrier.WaitUntilReached(timeout.Token);
+        var applying = fixture.LoadChangeSet();
+
+        Assert.Equal(SetupChangeSetState.Applying, applying.State);
+        Assert.Null(applying.OutcomeCode);
+        barrier.Release();
+        Assert.Equal(SetupChangeSetState.Applied, (await retry).State);
+    }
+
+    [Theory]
+    [InlineData("write", false)]
+    [InlineData("write", true)]
+    [InlineData("flush", false)]
+    [InlineData("flush", true)]
+    [InlineData("replace", false)]
+    [InlineData("replace", true)]
+    public void Apply_StaleOutcomePersistenceFaultReturnsInternalErrorWithoutMutationArtifacts(
+        string boundary,
+        bool afterEffect)
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.Revalidator.OnRevalidate = (_, _) =>
+            fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("external"));
+        var temporary = fixture.Paths.OwnershipLedger + ".tmp";
+        var operation = boundary switch
+        {
+            "write" => $"file.write:{temporary}",
+            "flush" => $"file.flush:{temporary}",
+            "replace" => $"file.replace:{temporary}->{fixture.Paths.OwnershipLedger}",
+            _ => throw new ArgumentOutOfRangeException(nameof(boundary)),
+        };
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(operation, new IOException("private-ledger-marker"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault(operation, new IOException("private-ledger-marker"));
+        }
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(SetupCodes.InternalError, exception.Message);
+        AssertNoTransactionArtifacts(fixture);
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Planned, durable.State);
+        Assert.Equal(boundary == "replace" && afterEffect ? SetupCodes.StalePlan : null, durable.OutcomeCode);
+        Assert.All(durable.Targets, target =>
+        {
+            Assert.Null(target.OutcomeCode);
+            Assert.Null(target.AppliedStateHash);
+            Assert.Null(target.BackupReference);
+            Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, target.RollbackStatus);
+        });
+        var privateArtifacts = new[]
+        {
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId),
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.EnvironmentRecordId),
+            fixture.Paths.GetTransactionJournal(fixture.ChangeSetId),
+        };
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), candidate =>
+            candidate.Contains(fixture.TargetPath, StringComparison.Ordinal) && IsWriteOperation(candidate) ||
+            privateArtifacts.Any(path => candidate.Contains(path, StringComparison.Ordinal)) && IsWriteOperation(candidate) ||
+            candidate.StartsWith("environment.set:", StringComparison.Ordinal) ||
+            candidate == "environment.notify");
+    }
+
     [Theory]
     [InlineData(true, "old", SetupOperation.NoOp, "desired")]
     [InlineData(true, "old", SetupOperation.Add, "desired")]

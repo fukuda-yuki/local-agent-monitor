@@ -1130,6 +1130,7 @@ internal sealed class SetupApplyCoordinator
         return planned with
         {
             UpdatedAt = platform.Clock.UtcNow,
+            OutcomeCode = null,
             State = SetupChangeSetState.Applying,
             Targets = planned.Targets.Select(target => changedRecordIds.Contains(target.RecordId)
                 ? target with
@@ -1295,7 +1296,6 @@ internal sealed class SetupApplyCoordinator
             !string.Equals(plan.Adapter, changeSet.Adapter, StringComparison.Ordinal) ||
             !string.Equals(plan.SelectedTarget, changeSet.SelectedTarget, StringComparison.Ordinal) ||
             plan.CreatedAt != changeSet.CreatedAt ||
-            plan.CreatedAt != changeSet.UpdatedAt ||
             !string.Equals(plan.ToolVersion, changeSet.ToolVersion, StringComparison.Ordinal) ||
             plan.Targets.Count != changeSet.Targets.Count)
         {

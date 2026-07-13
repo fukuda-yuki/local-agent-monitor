@@ -39,6 +39,38 @@ public sealed class SetupRecoveryTests
     }
 
     [Fact]
+    public void RecoverNext_Ignores_actual_apply_produced_stale_planned_attempt_after_reopen()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        var planStore = new SetupPlanStore(fixture.Platform, fixture.Paths);
+        var ledgerStore = new SetupLedgerStore(fixture.Platform, fixture.Paths, planStore);
+        var apply = new SetupApplyCoordinator(
+            fixture.Platform,
+            fixture.Paths,
+            planStore,
+            ledgerStore,
+            new SetupTransactionJournalStore(fixture.Platform, fixture.Paths),
+            new CallbackApplyRevalidator(() =>
+                fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("external"))));
+        using (var applyLock = fixture.AcquireLock())
+        {
+            var exception = Assert.Throws<SetupApplyException>(() =>
+                apply.Apply(applyLock, fixture.ChangeSetId));
+            Assert.Equal(SetupCodes.StalePlan, exception.Code);
+        }
+
+        using var recoveryLock = fixture.AcquireLock();
+        var result = fixture.ReopenCoordinator().RecoverNext(recoveryLock);
+
+        Assert.Equal(SetupRecoveryDisposition.None, result.Disposition);
+        var stale = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Planned, stale.State);
+        Assert.Equal(SetupCodes.StalePlan, stale.OutcomeCode);
+        Assert.False(fixture.Platform.FileSystem.FileExists(
+            fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)));
+    }
+
+    [Fact]
     public void RecoverNext_Reconciles_committed_apply_journal_before_stale_ledger()
     {
         var fixture = RecoveryFixture.CreateFileOnly();
@@ -6677,6 +6709,11 @@ public sealed class SetupRecoveryTests
         public void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
         {
         }
+    }
+
+    private sealed class CallbackApplyRevalidator(Action callback) : ISetupApplyRevalidator
+    {
+        public void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet) => callback();
     }
 
     private sealed class EnvironmentRecoveryFixture
