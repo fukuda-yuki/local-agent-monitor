@@ -5,11 +5,13 @@ canonical in requirements, spec, and interface documents.
 
 | Milestone | State | Scope |
 | --- | --- | --- |
-| M0 contract and orchestration | In progress | Canonical contract, plan, durable ledger |
-| M1 ownership ledger foundation | Pending | Issue #66 ledger, plan, and redaction contracts |
-| M2 transactional mutation | Pending | Issue #66 atomic file, user environment, compensation, rollback |
-| M3 shared setup command surface | Pending | Issue #66 CLI and PowerShell integration |
+| M0 contract and orchestration | Complete | Canonical contract, plan, durable ledger |
+| M1 ownership ledger foundation | Complete | Issue #66 ledger, plan, and redaction contracts |
+| M2 transactional mutation | Complete | Issue #66 atomic file, user environment, compensation, rollback |
+| M3 shared setup command surface | In progress | Issue #66 CLI and PowerShell integration; Apply dispatcher review changes remain |
 | M4 GitHub Copilot adapters | Pending | Issue #67 VS Code, CLI, and App/SDK targets |
 | M5 integration closeout | Pending | Cross-surface tests, independent reviews, full validation |
 
 See [ledger.md](ledger.md) for current execution evidence.
+The current session-resume boundary is recorded in
+[the M3 implementation handoff](milestones/M3-shared-setup-command-surface/handoff-prompt.md).

@@ -2,6 +2,17 @@
 
 Updated: 2026-07-14
 
+## Current continuation note
+
+The task table below preserves detailed historical evidence through the
+transaction and status foundation, but its coarse pending rows do not describe
+the later T2 command-surface work. The authoritative session-resume boundary at
+implementation baseline `399f441` is recorded in
+[the M3 implementation handoff](milestones/M3-shared-setup-command-surface/handoff-prompt.md).
+That handoff records the unapproved Apply preflight, remaining T2 work, all
+unstarted #67 target tasks, current test evidence, review findings, and the
+required resume order.
+
 ## Task state
 
 | Task | Issue | State | Commit range | Focused/full tests | Review | Unresolved minor |
