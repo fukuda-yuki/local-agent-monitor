@@ -1,0 +1,294 @@
+using CopilotAgentObservability.ConfigCli.Setup.Adapters;
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Platform;
+using CopilotAgentObservability.ConfigCli.Setup.Storage;
+using CopilotAgentObservability.ConfigCli.Setup.Transactions;
+
+namespace CopilotAgentObservability.ConfigCli.Setup.Cli;
+
+internal sealed class SetupCommandDispatcher
+{
+    private readonly ISetupPlatform platform;
+    private readonly SetupRuntimePaths paths;
+    private readonly SetupLedgerStore ledgerStore;
+    private readonly SetupAdapterRegistry adapterRegistry;
+    private readonly string toolVersion;
+    private readonly Func<SetupLock, SetupRecoveryResult> recover;
+
+    public SetupCommandDispatcher(
+        ISetupPlatform platform,
+        SetupRuntimePaths paths,
+        SetupPlanStore planStore,
+        SetupLedgerStore ledgerStore,
+        SetupTransactionJournalStore journalStore,
+        SetupAdapterRegistry adapterRegistry,
+        string toolVersion)
+        : this(
+            platform,
+            paths,
+            ledgerStore,
+            adapterRegistry,
+            toolVersion,
+            new SetupRecoveryCoordinator(
+                platform,
+                paths,
+                planStore,
+                ledgerStore,
+                journalStore).RecoverNext)
+    {
+    }
+
+    internal SetupCommandDispatcher(
+        ISetupPlatform platform,
+        SetupRuntimePaths paths,
+        SetupLedgerStore ledgerStore,
+        SetupAdapterRegistry adapterRegistry,
+        string toolVersion,
+        Func<SetupLock, SetupRecoveryResult> recover)
+    {
+        this.platform = platform ?? throw new ArgumentNullException(nameof(platform));
+        this.paths = paths ?? throw new ArgumentNullException(nameof(paths));
+        this.ledgerStore = ledgerStore ?? throw new ArgumentNullException(nameof(ledgerStore));
+        this.adapterRegistry = adapterRegistry ?? throw new ArgumentNullException(nameof(adapterRegistry));
+        this.toolVersion = toolVersion ?? throw new ArgumentNullException(nameof(toolVersion));
+        this.recover = recover ?? throw new ArgumentNullException(nameof(recover));
+    }
+
+    public SetupCommandResult Dispatch(SetupOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        return options.Command == SetupCommand.Plan
+            ? DispatchPlan(options)
+            : Validate(Unimplemented(options));
+    }
+
+    private SetupCommandResult DispatchPlan(SetupOptions options)
+    {
+        try
+        {
+            using var acquisition = SetupLock.TryAcquire(platform, paths);
+            if (!acquisition.Acquired)
+            {
+                return Validate(Failure(SetupCodes.SetupBusy, options.Adapter));
+            }
+
+            var recovery = recover(acquisition.Lock!);
+            if (recovery.Disposition != SetupRecoveryDisposition.None)
+            {
+                return Validate(RecoveryResult(recovery, options.Adapter));
+            }
+
+            if (recovery.Code is not null ||
+                recovery.RecoveredChangeSetId is not null ||
+                recovery.Operation is not null ||
+                recovery.EffectiveChangeSet is not null)
+            {
+                return Validate(Failure(SetupCodes.InternalError, options.Adapter));
+            }
+
+            var request = new SetupPlanRequest(
+                options.Adapter!,
+                options.Target!,
+                options.Endpoint!,
+                options.IncludeContentCapture,
+                platform.Identifiers.CreateUuidV7(),
+                platform.Clock.UtcNow,
+                toolVersion);
+            var plan = adapterRegistry.Plan(request);
+            if (plan is SetupPlanFailure<SetupPlannedChangeSet> failure)
+            {
+                return Validate(Failure(
+                    failure.Code,
+                    options.Adapter,
+                    failure.Warnings,
+                    failure.NextActions));
+            }
+
+            if (plan is not SetupPlanSuccess<SetupPlannedChangeSet> success)
+            {
+                return Validate(Failure(SetupCodes.InternalError, options.Adapter));
+            }
+
+            ledgerStore.PersistPlannedChangeSet(
+                acquisition.Lock!,
+                success.Value.PrivatePlan,
+                success.Value.PlannedChangeSet);
+            var targets = Array.AsReadOnly(success.Targets.Select(Project).ToArray());
+            var code = success.Targets.All(target =>
+                target.TargetKind == SetupTargetKind.Guidance || target.Operation == SetupOperation.NoOp)
+                ? SetupCodes.NoChanges
+                : SetupCodes.PlanReady;
+            return Validate(new SetupCommandResult(
+                SetupCommand.Plan,
+                true,
+                code,
+                request.ChangeSetId.ToString("D"),
+                null,
+                null,
+                options.Adapter,
+                targets,
+                [],
+                Snapshot(success.Warnings),
+                Snapshot(success.NextActions),
+                false));
+        }
+        catch (SetupAdapterNotRegisteredException)
+        {
+            return Validate(Failure(SetupCodes.UnsupportedAdapter, options.Adapter));
+        }
+        catch (SetupStorageException exception)
+        {
+            return Validate(Failure(MapStorageCode(exception.Code), options.Adapter));
+        }
+        catch (Exception)
+        {
+            return Validate(Failure(SetupCodes.InternalError, options.Adapter));
+        }
+    }
+
+    private static SetupCommandResult RecoveryResult(
+        SetupRecoveryResult recovery,
+        string? adapter)
+    {
+        if (recovery.Disposition == SetupRecoveryDisposition.Recovered &&
+            recovery.RecoveredChangeSetId is { } recoveredId &&
+            recovery.Operation is { } operation &&
+            recovery.Code == RecoveredCode(operation))
+        {
+            return new SetupCommandResult(
+                SetupCommand.Plan,
+                true,
+                recovery.Code,
+                null,
+                recoveredId.ToString("D"),
+                operation,
+                adapter,
+                [],
+                [],
+                [],
+                [SetupCodes.RerunRequestedSetupCommand],
+                false);
+        }
+
+        if (recovery.Disposition == SetupRecoveryDisposition.Failed &&
+            recovery.Code == SetupCodes.InterruptedRecoveryFailed &&
+            recovery.RecoveredChangeSetId is { } failedId &&
+            recovery.Operation is { } failedOperation)
+        {
+            return new SetupCommandResult(
+                SetupCommand.Plan,
+                false,
+                SetupCodes.InterruptedRecoveryFailed,
+                null,
+                failedId.ToString("D"),
+                failedOperation,
+                adapter,
+                [],
+                [],
+                [],
+                [],
+                false);
+        }
+
+        if (recovery.Disposition == SetupRecoveryDisposition.Failed &&
+            recovery.RecoveredChangeSetId is null &&
+            recovery.Operation is null &&
+            recovery.EffectiveChangeSet is null)
+        {
+            return Failure(MapRecoveryCode(recovery.Code), adapter);
+        }
+
+        return Failure(SetupCodes.InternalError, adapter);
+    }
+
+    private static SetupTargetResult Project(SetupPlanTarget target) => new(
+        target.RecordId.ToString("D"),
+        target.TargetKind,
+        target.TargetLabel,
+        target.Detected,
+        target.DetectedVersion,
+        target.Operation,
+        target.EffectiveSource,
+        null,
+        null,
+        target.RestartRequirement,
+        target.ProspectiveRollbackAvailable,
+        target.Endpoint,
+        target.ExpectedResult?.Clone(),
+        target.Guidance is { } guidance
+            ? new SetupGuidance(guidance.Kind, guidance.Language, guidance.Sample)
+            : null,
+        Array.AsReadOnly(target.Changes.Select(change => new SetupMemberChangeResult(
+            change.SettingKey,
+            change.Operation,
+            change.PreviousState,
+            change.NewState,
+            change.Conflict,
+            change.Managed)).ToArray()));
+
+    private static SetupCommandResult Failure(
+        string code,
+        string? adapter,
+        IReadOnlyList<string>? warnings = null,
+        IReadOnlyList<string>? nextActions = null) => new(
+        SetupCommand.Plan,
+        false,
+        code,
+        null,
+        null,
+        null,
+        adapter,
+        [],
+        [],
+        Snapshot(warnings ?? []),
+        Snapshot(nextActions ?? []),
+        false);
+
+    private static SetupCommandResult Unimplemented(SetupOptions options) => new(
+        options.Command,
+        false,
+        SetupCodes.InternalError,
+        options.Command is SetupCommand.Apply or SetupCommand.Rollback
+            ? options.ChangeSetId?.ToString("D")
+            : null,
+        null,
+        null,
+        options.Adapter,
+        [],
+        [],
+        [],
+        [],
+        false);
+
+    private static SetupCommandResult Validate(SetupCommandResult result)
+    {
+        SetupContractValidator.Validate(result);
+        return result;
+    }
+
+    private static IReadOnlyList<string> Snapshot(IEnumerable<string> values) =>
+        Array.AsReadOnly(values.ToArray());
+
+    private static string RecoveredCode(SetupRecoveryOperation operation) => operation switch
+    {
+        SetupRecoveryOperation.Apply => SetupCodes.InterruptedApplyRecovered,
+        SetupRecoveryOperation.Rollback => SetupCodes.InterruptedRollbackRecovered,
+        _ => SetupCodes.InternalError,
+    };
+
+    private static string MapRecoveryCode(string? code) => code switch
+    {
+        SetupCodes.RecoveryRequired => SetupCodes.RecoveryRequired,
+        SetupCodes.LedgerCorrupt => SetupCodes.LedgerCorrupt,
+        SetupCodes.LedgerVersionUnsupported => SetupCodes.LedgerVersionUnsupported,
+        _ => SetupCodes.InternalError,
+    };
+
+    private static string MapStorageCode(string? code) => code switch
+    {
+        SetupCodes.RecoveryRequired => SetupCodes.RecoveryRequired,
+        SetupCodes.LedgerCorrupt => SetupCodes.LedgerCorrupt,
+        SetupCodes.LedgerVersionUnsupported => SetupCodes.LedgerVersionUnsupported,
+        _ => SetupCodes.InternalError,
+    };
+}
