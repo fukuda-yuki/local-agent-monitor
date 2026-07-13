@@ -307,7 +307,7 @@ internal sealed class SetupRollbackCoordinator
             var member = planTarget.Members[index];
             var desiredHash = environmentStep.HashMember(
                 member.SettingKey,
-                DesiredEnvironmentValue(member));
+                SetupEnvironmentPlanValue.Desired(member));
             if (!string.Equals(current.Members[index].Hash, desiredHash, StringComparison.Ordinal))
             {
                 throw new SetupRollbackStaleException();
@@ -366,7 +366,7 @@ internal sealed class SetupRollbackCoordinator
             var member = planTarget.Members[memberIndex];
             var desiredHash = environmentStep.HashMember(
                 member.SettingKey,
-                DesiredEnvironmentValue(member));
+                SetupEnvironmentPlanValue.Desired(member));
             if (!string.Equals(current.Members[memberIndex].Hash, desiredHash, StringComparison.Ordinal))
             {
                 throw new SetupRollbackStaleException();
@@ -434,11 +434,6 @@ internal sealed class SetupRollbackCoordinator
 
     private static string GetAllowedRoot(string targetPath) =>
         Path.GetDirectoryName(targetPath) ?? throw new FormatException();
-
-    private static UserEnvironmentValue DesiredEnvironmentValue(SetupPrivatePlanMember member) =>
-        member.Operation == SetupOperation.Remove
-            ? UserEnvironmentValue.Missing
-            : UserEnvironmentValue.Present(member.DesiredValue!);
 
     private static SetupRollbackExecutionResult Result(
         Guid changeSetId,

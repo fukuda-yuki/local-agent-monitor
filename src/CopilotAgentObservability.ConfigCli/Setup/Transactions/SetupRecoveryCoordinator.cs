@@ -1224,7 +1224,9 @@ internal sealed class SetupRecoveryCoordinator
 
                 return target.Members.Where((member, index) => !string.Equals(
                         capture.Members[index].Hash,
-                        environmentStep.HashMember(member.SettingKey, DesiredEnvironmentValue(member)),
+                        environmentStep.HashMember(
+                            member.SettingKey,
+                            SetupEnvironmentPlanValue.Desired(member)),
                         StringComparison.Ordinal)).Any()
                     ? ActiveFileClassification.ThirdParty
                     : ActiveFileClassification.Desired;
@@ -1455,7 +1457,7 @@ internal sealed class SetupRecoveryCoordinator
                 for (var index = 0; index < target.Members.Count; index++)
                 {
                     var desiredHash = environmentStep.HashMember(
-                        names[index], DesiredEnvironmentValue(target.Members[index]));
+                        names[index], SetupEnvironmentPlanValue.Desired(target.Members[index]));
                     if (!string.Equals(capture.Members[index].Hash, desiredHash, StringComparison.Ordinal))
                     {
                         expectedSteps.Add(new SetupJournalStep(
@@ -1653,7 +1655,9 @@ internal sealed class SetupRecoveryCoordinator
                 for (var index = 0; index < target.Members.Count; index++)
                 {
                     var expected = desired
-                        ? environmentStep.HashMember(names[index], DesiredEnvironmentValue(target.Members[index]))
+                        ? environmentStep.HashMember(
+                            names[index],
+                            SetupEnvironmentPlanValue.Desired(target.Members[index]))
                         : previous!.Members[index].Hash;
                     RequireEqual(capture.Members[index].Hash, expected);
                 }
@@ -1711,7 +1715,7 @@ internal sealed class SetupRecoveryCoordinator
                 {
                     var member = target.Members[memberIndex];
                     var desiredHash = environmentStep.HashMember(
-                        names[memberIndex], DesiredEnvironmentValue(member));
+                        names[memberIndex], SetupEnvironmentPlanValue.Desired(member));
                     if (member.Operation == SetupOperation.NoOp)
                     {
                         RequireEqual(backup.Members[memberIndex].Hash, desiredHash);
@@ -2169,11 +2173,6 @@ internal sealed class SetupRecoveryCoordinator
         operation,
         effectiveChangeSet);
 
-    private static UserEnvironmentValue DesiredEnvironmentValue(SetupPrivatePlanMember member) =>
-        member.Operation == SetupOperation.Remove
-            ? UserEnvironmentValue.Missing
-            : UserEnvironmentValue.Present(member.DesiredValue!);
-
     private static bool HasSingleEnvironmentPhysicalTarget(SetupPrivatePlan plan)
     {
         return plan.Targets.Count(target => target.TargetKind == SetupTargetKind.Env) == 1;
@@ -2191,7 +2190,7 @@ internal sealed class SetupRecoveryCoordinator
             var member = target.Members[index];
             var value = member.Operation == SetupOperation.NoOp
                 ? backup.Members[index].Value
-                : DesiredEnvironmentValue(member);
+                : SetupEnvironmentPlanValue.Desired(member);
             AppendEnvironmentString(hash, member.SettingKey);
             hash.AppendData([value.Exists ? (byte)1 : (byte)0]);
             if (value.Exists)

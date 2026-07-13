@@ -133,6 +133,137 @@ public sealed class SetupRecoveryTests
     }
 
     [Fact]
+    public void RecoverNext_Actual_apply_produced_rollback_with_missing_noop_completes_after_ledger_interruption()
+    {
+        var fixture = new ApplyProducedRecoveryFixture(missingNoOp: true);
+        using (var applyLock = fixture.AcquireLock())
+        {
+            var applied = fixture.CreateApplyCoordinator().Apply(applyLock, fixture.ChangeSetId);
+            Assert.Equal(SetupChangeSetState.Applied, applied.State);
+        }
+        var appliedEnvironment = Assert.Single(
+            fixture.LoadChangeSet().Targets,
+            target => target.RecordId == fixture.EnvironmentRecordId);
+        var environmentStep = new UserEnvironmentSetupStep(fixture.Platform);
+        var appliedCapture = environmentStep.Capture(["ENV_A", "ENV_B"]);
+        var backup = environmentStep.ReadBackup(
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.EnvironmentRecordId),
+            ["ENV_A", "ENV_B"]);
+        Assert.Equal(backup.AggregateHash, appliedEnvironment.PreviousStateHash);
+        Assert.Equal(appliedCapture.AggregateHash, appliedEnvironment.AppliedStateHash);
+        Assert.False(backup.Members[1].Value.Exists);
+        Assert.Null(backup.Members[1].Value.Value);
+        fixture.Platform.InjectFault(
+            $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}",
+            new IOException("private-rollback-interruption"));
+        using (var rollbackLock = fixture.AcquireLock())
+        {
+            var interrupted = fixture.CreateRollbackCoordinator().Rollback(
+                rollbackLock,
+                fixture.ChangeSetId);
+            Assert.False(interrupted.Success);
+            Assert.Equal(SetupCodes.RecoveryRequired, interrupted.Code);
+            Assert.Null(interrupted.Recovery);
+        }
+        Assert.Equal(SetupChangeSetState.RollingBack, fixture.LoadChangeSet().State);
+        var prepared = fixture.LoadJournal();
+        Assert.Equal(SetupJournalOperation.Rollback, prepared.Operation);
+        Assert.Equal(SetupJournalPhase.Prepared, prepared.Phase);
+        var preparedEnvironment = prepared.Targets.Single(
+            target => target.RecordId == fixture.EnvironmentRecordId);
+        var preparedStep = Assert.Single(preparedEnvironment.Steps);
+        Assert.Equal("ENV_A", preparedStep.MemberKey);
+        Assert.Equal(backup.Members[0].Hash, preparedStep.PriorStateHash);
+        Assert.Equal(
+            environmentStep.HashMember("ENV_A", UserEnvironmentValue.Present("desired-a")),
+            preparedStep.DesiredStateHash);
+        Assert.Equal(fixture.EnvironmentRecordId.ToString("D"), preparedStep.BackupReference);
+        var baseline = fixture.Platform.Operations.Count;
+
+        using var recoveryLock = fixture.AcquireLock();
+        var recovered = fixture.CreateRecoveryCoordinator().RecoverNext(recoveryLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, recovered.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, recovered.Code);
+        Assert.Equal(fixture.ChangeSetId, recovered.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Rollback, recovered.Operation);
+        Assert.Equal(SetupChangeSetState.RolledBack, recovered.EffectiveChangeSet?.State);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_B"));
+        var recoveryOperations = fixture.Platform.Operations.Skip(baseline).ToArray();
+        Assert.Contains("environment.get:ENV_B", recoveryOperations);
+        Assert.DoesNotContain("environment.set:ENV_B", recoveryOperations);
+        Assert.Equal(1, recoveryOperations.Count(operation => operation == "environment.notify"));
+        var journal = fixture.LoadJournal();
+        Assert.Equal(SetupJournalPhase.Committed, journal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Completed, journal.EnvironmentNotification);
+        var committedStep = Assert.Single(
+            journal.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId).Steps);
+        Assert.Equal("ENV_A", committedStep.MemberKey);
+        Assert.Equal(preparedStep.PriorStateHash, committedStep.PriorStateHash);
+        Assert.Equal(preparedStep.DesiredStateHash, committedStep.DesiredStateHash);
+        Assert.Equal(preparedStep.BackupReference, committedStep.BackupReference);
+    }
+
+    [Fact]
+    public void RecoverNext_Actual_apply_produced_rollback_preserves_missing_noop_drift_then_retries()
+    {
+        var fixture = new ApplyProducedRecoveryFixture(missingNoOp: true);
+        using (var applyLock = fixture.AcquireLock())
+        {
+            _ = fixture.CreateApplyCoordinator().Apply(applyLock, fixture.ChangeSetId);
+        }
+        fixture.Platform.InjectFault(
+            $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}",
+            new IOException("private-rollback-interruption"));
+        using (var rollbackLock = fixture.AcquireLock())
+        {
+            var interrupted = fixture.CreateRollbackCoordinator().Rollback(
+                rollbackLock,
+                fixture.ChangeSetId);
+            Assert.Equal(SetupCodes.RecoveryRequired, interrupted.Code);
+        }
+        fixture.Platform.SeedUserEnvironment("ENV_B", "third-party");
+        var baseline = fixture.Platform.Operations.Count;
+        using (var recoveryLock = fixture.AcquireLock())
+        {
+            var failed = fixture.CreateRecoveryCoordinator().RecoverNext(recoveryLock);
+
+            Assert.Equal(SetupRecoveryDisposition.Failed, failed.Disposition);
+            Assert.Equal(SetupCodes.InterruptedRecoveryFailed, failed.Code);
+            Assert.Equal(fixture.ChangeSetId, failed.RecoveredChangeSetId);
+            Assert.Equal(SetupRecoveryOperation.Rollback, failed.Operation);
+            Assert.Equal(SetupChangeSetState.Partial, failed.EffectiveChangeSet?.State);
+        }
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.DoesNotContain("environment.set:ENV_B", fixture.Platform.Operations.Skip(baseline));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations.Skip(baseline));
+
+        fixture.Platform.SeedUserEnvironment("ENV_B", null);
+        using var retryLock = fixture.AcquireLock();
+        var retried = fixture.CreateRecoveryCoordinator().RecoverNext(retryLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, retried.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, retried.Code);
+        Assert.Equal(fixture.ChangeSetId, retried.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Rollback, retried.Operation);
+        Assert.Equal(SetupChangeSetState.RolledBack, retried.EffectiveChangeSet?.State);
+        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.DoesNotContain("environment.set:ENV_B", fixture.Platform.Operations.Skip(baseline));
+        Assert.Equal(1, fixture.Platform.Operations.Skip(baseline)
+            .Count(operation => operation == "environment.notify"));
+        var terminal = fixture.LoadJournal();
+        Assert.Equal(SetupJournalPhase.Committed, terminal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Completed, terminal.EnvironmentNotification);
+        Assert.Equal(["ENV_A"],
+            terminal.Targets.Single(target => target.RecordId == fixture.EnvironmentRecordId)
+                .Steps.Select(step => step.MemberKey));
+    }
+
+    [Fact]
     public void RecoverNext_Ignores_exact_dormant_prepared_apply_without_mutating_or_rewriting_artifacts()
     {
         var fixture = RecoveryFixture.CreateFileOnly();
@@ -5697,7 +5828,7 @@ public sealed class SetupRecoveryTests
 
     private sealed class ApplyProducedRecoveryFixture
     {
-        public ApplyProducedRecoveryFixture()
+        public ApplyProducedRecoveryFixture(bool missingNoOp = false)
         {
             Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 13, 4, 5, 6, TimeSpan.Zero));
             Paths = new SetupRuntimePaths(Platform);
@@ -5709,7 +5840,10 @@ public sealed class SetupRecoveryTests
             Platform.SeedDirectory(Platform.LocalApplicationData);
             Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old"));
             Platform.SeedUserEnvironment("ENV_A", "old-a");
-            Platform.SeedUserEnvironment("ENV_B", "stable-b");
+            if (!missingNoOp)
+            {
+                Platform.SeedUserEnvironment("ENV_B", "stable-b");
+            }
             Platform.SeedUserEnvironment("UNRELATED", "outside-model-a");
             var environmentCapture = new UserEnvironmentSetupStep(Platform).Capture(["ENV_A", "ENV_B"]);
             var plan = new SetupPrivatePlan(
@@ -5733,7 +5867,10 @@ public sealed class SetupRecoveryTests
                      environmentCapture.AggregateHash,
                      "environment-allowlist",
                      [new SetupPrivatePlanMember("ENV_A", SetupOperation.Replace, "desired-a"),
-                      new SetupPrivatePlanMember("ENV_B", SetupOperation.NoOp, "stable-b")])]);
+                      new SetupPrivatePlanMember(
+                          "ENV_B",
+                          SetupOperation.NoOp,
+                          missingNoOp ? null : "stable-b")])]);
             var planned = new SetupLedgerChangeSet(
                 ChangeSetId,
                 "github-copilot",
@@ -5801,6 +5938,38 @@ public sealed class SetupRecoveryTests
                 new SetupLedgerStore(Platform, Paths, planStore),
                 new SetupTransactionJournalStore(Platform, Paths),
                 new NoOpApplyRevalidator());
+        }
+
+        public SetupRollbackCoordinator CreateRollbackCoordinator()
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            return new SetupRollbackCoordinator(
+                Platform,
+                Paths,
+                planStore,
+                new SetupLedgerStore(Platform, Paths, planStore),
+                new SetupTransactionJournalStore(Platform, Paths));
+        }
+
+        public SetupRecoveryCoordinator CreateRecoveryCoordinator()
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            return new SetupRecoveryCoordinator(
+                Platform,
+                Paths,
+                planStore,
+                new SetupLedgerStore(Platform, Paths, planStore),
+                new SetupTransactionJournalStore(Platform, Paths));
+        }
+
+        public SetupTransactionJournal LoadJournal() =>
+            new SetupTransactionJournalStore(Platform, Paths).Load(ChangeSetId)!;
+
+        public SetupLedgerChangeSet LoadChangeSet()
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            return Assert.Single(
+                new SetupLedgerStore(Platform, Paths, planStore).LoadForRecovery().ChangeSets);
         }
     }
 

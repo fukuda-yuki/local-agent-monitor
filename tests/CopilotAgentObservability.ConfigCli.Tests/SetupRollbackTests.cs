@@ -9,6 +9,103 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SetupRollbackTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Rollback_File_with_unowned_all_missing_environment_uses_full_noop_guard(
+        bool driftEnvironment)
+    {
+        var fixture = RollbackFixture.Create(
+            includeEnvironment: true,
+            environmentAllNoOp: true,
+            environmentNoOpMissing: true);
+        var environment = Assert.Single(
+            fixture.LoadChangeSet().Targets,
+            target => target.TargetKind == SetupTargetKind.Env);
+        Assert.Null(environment.AppliedStateHash);
+        Assert.Null(environment.BackupReference);
+        Assert.False(fixture.Platform.FileSystem.FileExists(
+            fixture.Paths.GetBackup(fixture.ChangeSetId, environment.RecordId)));
+        if (driftEnvironment)
+        {
+            fixture.Platform.SeedUserEnvironment("ENV_NOOP", "third-party");
+        }
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Rollback();
+
+        Assert.Equal(!driftEnvironment, result.Success);
+        Assert.Equal(
+            driftEnvironment ? SetupCodes.RollbackStale : SetupCodes.RollbackSucceeded,
+            result.Code);
+        Assert.Equal(driftEnvironment ? "new-0" : "old-0", fixture.ReadText(fixture.TargetPaths[0]));
+        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal(
+            driftEnvironment ? "third-party" : null,
+            fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+        var rollbackOperations = fixture.Platform.Operations.Skip(baseline).ToArray();
+        Assert.Contains("environment.get:ENV_A", rollbackOperations);
+        Assert.Contains("environment.get:ENV_NOOP", rollbackOperations);
+        Assert.DoesNotContain(rollbackOperations, operation =>
+            operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+            operation == "environment.notify");
+        Assert.Equal(
+            driftEnvironment ? SetupJournalOperation.Apply : SetupJournalOperation.Rollback,
+            fixture.LoadJournal().Operation);
+    }
+
+    [Fact]
+    public void Rollback_Changed_environment_with_missing_noop_uses_full_aggregate_and_changed_only_journal()
+    {
+        var fixture = RollbackFixture.Create(
+            fileCount: 0,
+            includeEnvironment: true,
+            includeEnvironmentNoOp: true,
+            environmentNoOpMissing: true);
+        var applied = Assert.Single(fixture.LoadChangeSet().Targets);
+        var names = new[] { "ENV_A", "ENV_SECOND", "ENV_NOOP" };
+        var environmentStep = new UserEnvironmentSetupStep(fixture.Platform);
+        var appliedCapture = environmentStep.Capture(names);
+        var backup = environmentStep.ReadBackup(
+            fixture.Paths.GetBackup(fixture.ChangeSetId, applied.RecordId),
+            names);
+        Assert.Equal(applied.PreviousStateHash, backup.AggregateHash);
+        Assert.Equal(applied.AppliedStateHash, appliedCapture.AggregateHash);
+        Assert.Null(backup.Members[2].Value.Value);
+        Assert.False(backup.Members[2].Value.Exists);
+        Assert.Equal(
+            ["ENV_A", "ENV_SECOND"],
+            fixture.LoadJournal().Targets.Single().Steps.Select(step => step.MemberKey));
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Rollback();
+
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.RollbackSucceeded, result.Code);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-second", fixture.Platform.ReadUserEnvironment("ENV_SECOND"));
+        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+        var rollbackOperations = fixture.Platform.Operations.Skip(baseline).ToArray();
+        Assert.Equal(
+            ["environment.set:ENV_SECOND", "environment.set:ENV_A"],
+            rollbackOperations.Where(operation =>
+                operation.StartsWith("environment.set:", StringComparison.Ordinal)));
+        Assert.DoesNotContain("environment.set:ENV_NOOP", rollbackOperations);
+        Assert.Equal(1, rollbackOperations.Count(operation => operation == "environment.notify"));
+        var journal = fixture.LoadJournal();
+        Assert.Equal(SetupJournalOperation.Rollback, journal.Operation);
+        Assert.Equal(SetupJournalPhase.Committed, journal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Completed, journal.EnvironmentNotification);
+        Assert.Equal(
+            ["ENV_A", "ENV_SECOND"],
+            journal.Targets.Single().Steps.Select(step => step.MemberKey));
+        var terminal = fixture.LoadChangeSet().Targets.Single();
+        Assert.Equal(backup.AggregateHash, terminal.PreviousStateHash);
+        Assert.Null(terminal.AppliedStateHash);
+        Assert.Null(terminal.BackupReference);
+        Assert.Equal(SetupLedgerRollbackStatus.Succeeded, terminal.RollbackStatus);
+    }
+
     [Fact]
     public void Rollback_Restores_single_environment_aggregate_from_real_apply_evidence()
     {
@@ -1479,7 +1576,8 @@ public sealed class SetupRollbackTests
             bool includeEnvironment,
             bool includeEnvironmentNoOp,
             bool includeSecondEnvironment,
-            bool environmentAllNoOp)
+            bool environmentAllNoOp,
+            bool environmentNoOpMissing)
         {
             Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 13, 8, 9, 10, TimeSpan.Zero));
             Paths = new SetupRuntimePaths(Platform);
@@ -1509,22 +1607,28 @@ public sealed class SetupRollbackTests
                 [new SetupPrivatePlanMember($"setting-{index}", SetupOperation.Replace, $"new-{index}")])).ToList();
             if (includeEnvironment)
             {
-                Platform.SeedUserEnvironment("ENV_A", "old-a");
-                if (environmentAllNoOp)
+                if (!environmentAllNoOp || !environmentNoOpMissing)
+                {
+                    Platform.SeedUserEnvironment("ENV_A", "old-a");
+                }
+                if (environmentAllNoOp && !environmentNoOpMissing)
                 {
                     Platform.SeedUserEnvironment("ENV_NOOP", "");
                 }
                 else if (includeEnvironmentNoOp)
                 {
                     Platform.SeedUserEnvironment("ENV_SECOND", "old-second");
-                    Platform.SeedUserEnvironment("ENV_NOOP", "stable");
+                    if (!environmentNoOpMissing)
+                    {
+                        Platform.SeedUserEnvironment("ENV_NOOP", "stable");
+                    }
                 }
 
                 var environmentMembers = environmentAllNoOp
                     ? new List<SetupPrivatePlanMember>
                     {
-                        new("ENV_A", SetupOperation.NoOp, "old-a"),
-                        new("ENV_NOOP", SetupOperation.NoOp, ""),
+                        new("ENV_A", SetupOperation.NoOp, environmentNoOpMissing ? null : "old-a"),
+                        new("ENV_NOOP", SetupOperation.NoOp, environmentNoOpMissing ? null : ""),
                     }
                     : new List<SetupPrivatePlanMember>
                 {
@@ -1535,7 +1639,9 @@ public sealed class SetupRollbackTests
                     environmentMembers.Add(new SetupPrivatePlanMember(
                         "ENV_SECOND", SetupOperation.Replace, "desired-second"));
                     environmentMembers.Add(new SetupPrivatePlanMember(
-                        "ENV_NOOP", SetupOperation.NoOp, "stable"));
+                        "ENV_NOOP",
+                        SetupOperation.NoOp,
+                        environmentNoOpMissing ? null : "stable"));
                 }
 
                 var environmentCapture = new UserEnvironmentSetupStep(Platform).Capture(
@@ -1622,14 +1728,16 @@ public sealed class SetupRollbackTests
             bool includeEnvironment = false,
             bool includeEnvironmentNoOp = false,
             bool includeSecondEnvironment = false,
-            bool environmentAllNoOp = false) =>
+            bool environmentAllNoOp = false,
+            bool environmentNoOpMissing = false) =>
             new(
                 fileCount,
                 previousMissing,
                 includeEnvironment,
                 includeEnvironmentNoOp,
                 includeSecondEnvironment,
-                environmentAllNoOp);
+                environmentAllNoOp,
+                environmentNoOpMissing);
 
         public SetupRollbackExecutionResult Rollback()
         {
