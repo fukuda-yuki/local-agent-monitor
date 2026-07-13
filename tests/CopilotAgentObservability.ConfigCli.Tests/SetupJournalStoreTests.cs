@@ -333,6 +333,151 @@ public sealed class SetupJournalStoreTests
         Assert.DoesNotContain($"file.delete:{temporary}", context.Platform.Operations);
     }
 
+    [Theory]
+    [InlineData("eligibility-read")]
+    [InlineData("temporary-write")]
+    [InlineData("temporary-flush")]
+    [InlineData("destination-revalidation")]
+    [InlineData("replace")]
+    public async Task SupersedeWithPreparedRollback_ExternalDisposeRetainsExclusiveLockThroughEveryBoundary(
+        string boundary)
+    {
+        using var disposeRequested = new ManualResetEventSlim();
+        var context = CreateCommittedApplyContext(disposeRequested.Set);
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var temporary = Temporary(destination, 11);
+        var createdAt = context.Store.Load(ChangeSetId)!.CreatedAt;
+        SetupTestBarrier? prerequisite = null;
+        SetupTestBarrier? operationBarrier = null;
+
+        try
+        {
+            if (boundary == "destination-revalidation")
+            {
+                prerequisite = context.Platform.AddBarrier($"file.flush:{temporary}");
+            }
+            else
+            {
+                operationBarrier = context.Platform.AddBarrier(SupersessionBoundaryOperation(
+                    boundary, destination, temporary));
+            }
+
+            var supersede = Task.Run(() => context.Store.SupersedeWithPreparedRollback(
+                context.Lock, ChangeSetId, ValidTargets()));
+            if (prerequisite is not null)
+            {
+                prerequisite.WaitUntilReached(CancellationToken.None);
+                operationBarrier = context.Platform.AddBarrier($"file.metadata:{destination}");
+                prerequisite.Release();
+            }
+
+            operationBarrier!.WaitUntilReached(CancellationToken.None);
+            var dispose = Task.Run(context.Lock.Dispose);
+            try
+            {
+                Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+                using var contended = SetupLock.TryAcquire(context.Platform, context.Paths);
+                Assert.False(contended.Acquired);
+            }
+            finally
+            {
+                operationBarrier.Release();
+            }
+
+            Assert.Equal(SetupPreparedJournalOpenResult.Created, await supersede);
+            await dispose;
+            var rollback = context.Store.Load(ChangeSetId)!;
+            Assert.Equal(createdAt, rollback.CreatedAt);
+            Assert.Equal(SetupJournalOperation.Rollback, rollback.Operation);
+            Assert.Equal(SetupJournalPhase.Prepared, rollback.Phase);
+            Assert.Equivalent(ValidTargets(), rollback.Targets, strict: true);
+            using var reacquired = SetupLock.TryAcquire(context.Platform, context.Paths);
+            Assert.True(reacquired.Acquired);
+        }
+        finally
+        {
+            operationBarrier?.Release();
+            prerequisite?.Release();
+            operationBarrier?.Dispose();
+            prerequisite?.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task SupersedeWithPreparedRollback_SameLockCallersSerializeCreatedThenExactReuse()
+    {
+        var context = CreateCommittedApplyContext();
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var temporary = Temporary(destination, 11);
+        var createdAt = context.Store.Load(ChangeSetId)!.CreatedAt;
+        using var barrier = context.Platform.AddBarrier($"file.replace:{temporary}->{destination}");
+
+        var first = Task.Run(() => context.Store.SupersedeWithPreparedRollback(
+            context.Lock, ChangeSetId, ValidTargets()));
+        barrier.WaitUntilReached(CancellationToken.None);
+        using var secondStarted = new ManualResetEventSlim();
+        var second = Task.Run(() => new SetupTransactionJournalStore(context.Platform, context.Paths)
+            .SupersedeWithPreparedRollback(
+                StartedLock(secondStarted, context.Lock), ChangeSetId, ValidTargets()));
+        Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(10)));
+        Assert.False(second.IsCompleted);
+
+        barrier.Release();
+
+        Assert.Equal(SetupPreparedJournalOpenResult.Created, await first);
+        Assert.Equal(SetupPreparedJournalOpenResult.Reused, await second);
+        var exact = context.Store.Load(ChangeSetId)!;
+        Assert.Equal(createdAt, exact.CreatedAt);
+        Assert.Equal(SetupJournalOperation.Rollback, exact.Operation);
+        Assert.Equal(SetupJournalPhase.Prepared, exact.Phase);
+        Assert.Equivalent(ValidTargets(), exact.Targets, strict: true);
+        Assert.Equal(1, context.Platform.Operations.Count(operation =>
+            operation == $"file.replace:{temporary}->{destination}"));
+    }
+
+    [Fact]
+    public async Task SupersedeWithPreparedRollback_FailureReleasesOperationLeaseButKeepsCallerLockHeld()
+    {
+        var context = CreateCommittedApplyContext();
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var original = context.Platform.ReadSeededFile(destination);
+        var firstTemporary = Temporary(destination, 11);
+        context.Platform.InjectFault(
+            $"file.replace:{firstTemporary}->{destination}",
+            new IOException("PRIVATE_PATH_MARKER"));
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, ValidTargets()));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+        Assert.Equal(original, context.Platform.ReadSeededFile(destination));
+        using (var contended = SetupLock.TryAcquire(context.Platform, context.Paths))
+        {
+            Assert.False(contended.Acquired);
+        }
+
+        var retryTemporary = Temporary(destination, 12);
+        using var retryBarrier = context.Platform.AddBarrier($"file.replace:{retryTemporary}->{destination}");
+        var retry = Task.Run(() => context.Store.SupersedeWithPreparedRollback(
+            context.Lock, ChangeSetId, ValidTargets()));
+        retryBarrier.WaitUntilReached(CancellationToken.None);
+        using (var contended = SetupLock.TryAcquire(context.Platform, context.Paths))
+        {
+            Assert.False(contended.Acquired);
+        }
+
+        retryBarrier.Release();
+        Assert.Equal(SetupPreparedJournalOpenResult.Created, await retry);
+        Assert.Equal(SetupJournalOperation.Rollback, context.Store.Load(ChangeSetId)!.Operation);
+
+        context.Lock.Dispose();
+        using var reacquired = SetupLock.TryAcquire(context.Platform, context.Paths);
+        Assert.True(reacquired.Acquired);
+    }
+
     [Fact]
     public void SupersedeWithPreparedRollback_RequiresLiveSameRuntimeLock()
     {
@@ -341,15 +486,19 @@ public sealed class SetupJournalStoreTests
         var foreignPlatform = new SetupTestPlatform(CreatedAt, "D:\\foreign");
         var foreignPaths = new SetupRuntimePaths(foreignPlatform);
         using var foreignAcquire = SetupLock.TryAcquire(foreignPlatform, foreignPaths);
+        var operationCount = context.Platform.Operations.Count;
 
         Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
             context.Store.SupersedeWithPreparedRollback(
                 foreignAcquire.Lock!, ChangeSetId, ValidTargets())).Code);
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
 
         context.Lock.Dispose();
+        operationCount = context.Platform.Operations.Count;
         Assert.Equal(SetupStorageCodes.LockRequired, Assert.Throws<SetupStorageException>(() =>
             context.Store.SupersedeWithPreparedRollback(
                 context.Lock, ChangeSetId, ValidTargets())).Code);
+        Assert.DoesNotContain(context.Platform.Operations.Skip(operationCount), IsWriteOperation);
     }
 
     [Fact]
@@ -1894,6 +2043,18 @@ public sealed class SetupJournalStoreTests
         return setupLock;
     }
 
+    private static string SupersessionBoundaryOperation(
+        string boundary,
+        string destination,
+        string temporary) => boundary switch
+    {
+        "eligibility-read" => $"file.read-bounded:{destination}:{MaximumJournalBytes}",
+        "temporary-write" => $"file.write-new:{temporary}",
+        "temporary-flush" => $"file.flush:{temporary}",
+        "replace" => $"file.replace:{temporary}->{destination}",
+        _ => throw new ArgumentOutOfRangeException(nameof(boundary)),
+    };
+
     private static string ReplaceFirst(string value, string oldValue, string newValue, int startIndex)
     {
         var index = value.IndexOf(oldValue, startIndex, StringComparison.Ordinal);
@@ -1953,9 +2114,9 @@ public sealed class SetupJournalStoreTests
         return new TestContext(platform, paths, setupLock, new SetupTransactionJournalStore(platform, paths));
     }
 
-    private static TestContext CreateCommittedApplyContext()
+    private static TestContext CreateCommittedApplyContext(Action? disposeRequestedObserver = null)
     {
-        var context = CreateContext();
+        var context = CreateContext(disposeRequestedObserver);
         context.Store.CreatePrepared(context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets());
         context.Store.MarkTransactionPhase(context.Lock, ChangeSetId, SetupJournalPhase.Applying);
         CompleteAllSteps(context, mutation: true);
