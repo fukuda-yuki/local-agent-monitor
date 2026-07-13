@@ -6,9 +6,10 @@ user-scoped mutation, and no claim that static setup proves telemetry receipt.
 
 **Architecture:** Config CLI is the only result producer. Adapters produce
 internal plans, the #66 coordinator owns every mutation/recovery/rollback, the
-generic dispatcher alone constructs `SetupCommandResult`, the CLI serializes
-it, and PowerShell forwards the JSON unchanged. No HTTP, proxy, UI, database,
-AppHost resource, project, or dependency is added.
+generic dispatcher constructs plan/apply/rollback `SetupCommandResult` values
+and delegates status directly to the frozen `SetupStatusService` result, the
+CLI serializes the returned DTO, and PowerShell forwards the JSON unchanged. No
+HTTP, proxy, UI, database, AppHost resource, project, or dependency is added.
 
 **Contract:** `docs/specifications/interfaces/configuration-setup.md`, D057,
 `docs/specifications/security-data-boundaries.md`, and the paired design.
@@ -212,8 +213,9 @@ two arrays; adapter plan failure carries the fixed code and arrays without raw
 exception text. `ISetupApplyRevalidator` uses the same vocabulary for fresh
 success/failure diagnostics, and `SetupApplyCoordinator` returns or throws the
 typed safe payload needed by the later dispatcher without rerunning the
-adapter. `SetupAdapterRegistry` consumes the changed carrier and validates/
-copies bounded diagnostics directly. T2b removes its temporary
+adapter. `SetupAdapterRegistry` consumes the changed carrier and structurally
+copies its immutable typed diagnostics without interpreting or revalidating the
+closed catalog. T2b removes its temporary
 `SetupCommandResult`; neither the registry nor coordinator may construct the
 public DTO. Unexpected/framework failures keep both arrays empty. Persisted-
 adapter removal and `unsupported_target` also keep both arrays empty.
@@ -248,17 +250,19 @@ The pre-audit untracked files with those names must already be removed. This
 task creates both files fresh from its first failing test and does not copy the
 abandoned draft.
 
-**Deliver:** the sole generic constructor of `SetupCommandResult` for plan,
-apply, rollback, and status. Plan/apply each acquire one non-waiting lock and
+**Deliver:** the sole generic producer of plan/apply/rollback
+`SetupCommandResult` values. Plan/apply each acquire one non-waiting lock and
 run common recovery once; rollback delegates its one recovery pass to
-`SetupRollbackCoordinator` under the same held lock; status delegates directly
-to `SetupStatusService` with no outer lock/recovery. The dispatcher preserves
+`SetupRollbackCoordinator` under the same held lock. Status delegates directly
+to the frozen `SetupStatusService`, which constructs the status result, with no
+outer lock/recovery or DTO reconstruction. The dispatcher preserves
 requested versus recovered correlation, adapter/ledger target order, plan
 prospective versus apply actual rollback availability, typed warnings/actions,
 `no_changes` persistence, missing-row/private-plan distinctions, and the closed
-exceptional apply matrix. It is the only code that constructs any
-`SetupCommandResult`, including contract-validation instances. It never
-serializes JSON and never resolves target-specific values.
+exceptional apply matrix. Before returning any requested-command result, it
+validates the final public DTO with the frozen `SetupContractValidator`; the
+registry does not duplicate that validation. It never serializes JSON or
+resolves target-specific values.
 
 **Verify:**
 
@@ -434,10 +438,12 @@ Extension listing is exactly `code --list-extensions --show-versions` or
 setup never creates/selects a named profile. Insiders paths use the official
 Profiles rule that replaces intermediate folder `Code` with `Code - Insiders`.
 
-Consume the frozen T3a observations and T3b whole-channel/enterprise-policy
-evaluation; do not reopen their locations or precedence. A differing observed
-constraint from either system blocks the target plan. Copilot native absence
-produces `managed_policy_unverified` because server presence cannot be proved.
+Consume the frozen T3a observations, T3b whole-channel/enterprise-policy
+evaluation, T3c endpoint classifier for planning and apply revalidation, and
+T3d aggregate/partition seam; do not reopen their locations, precedence,
+transport logic, or carrier boundary. A differing observed constraint from
+either policy system blocks the target plan. Copilot native absence produces
+`managed_policy_unverified` because server presence cannot be proved.
 
 **Verify:** `VsCodeSetupAdapterTests` cover three-OS paths, both channels,
 profile no-open proof, exact warning de-duplication, managed-source precedence,

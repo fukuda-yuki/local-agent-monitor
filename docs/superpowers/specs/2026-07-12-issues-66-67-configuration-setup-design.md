@@ -157,13 +157,16 @@ All mutable operations are injected behind interfaces. Production uses the
 real current user; tests use synthetic files, environment dictionaries,
 registry views, processes, endpoint probes, barriers, and fault points.
 
-The source boundary stays single-producer: adapters return the internal
+The source boundary stays closed and producer ownership is verb-specific:
+adapters return the internal
 `SetupChangePlan`/`SetupChangeRecord` model, transaction coordinators return
 internal execution evidence, and the generic `SetupCommandDispatcher` is the
-only code that constructs any `SetupCommandResult`, including a result used for
-contract validation before emission. The adapter registry validates and copies
-typed bounded diagnostics directly; it does not construct a temporary public
-result. The CLI serializes the dispatcher result and PowerShell forwards it
+sole generic producer for plan/apply/rollback results. For status it delegates
+directly to the frozen `SetupStatusService`, which remains the status
+`SetupCommandResult` producer; the dispatcher does not reconstruct that DTO.
+The adapter registry structurally copies immutable typed diagnostics; it does
+not construct a temporary public result or duplicate closed-catalog
+validation. The CLI serializes the returned result and PowerShell forwards it
 unchanged. Apply loads the persisted private plan; it never asks an adapter to
 recreate a public DTO. If that plan's adapter is no longer registered, `apply`
 returns `unsupported_adapter` and leaves the plan/ledger byte-for-byte
@@ -174,8 +177,8 @@ The implementation ownership inside the sequential T2 gate is explicit:
 | T2 unit | Exclusive implementation boundary | Handoff |
 | --- | --- | --- |
 | T2a options reopen | only `SetupOptions` and its tests | corrects generic parsing/reachability after the already-committed catalog and registry baselines; no carrier or dispatcher work |
-| T2b diagnostics carrier | `ISetupAdapter`, `SetupAdapterRegistry`, `ISetupApplyRevalidator`, `SetupApplyCoordinator`, their two semantic test files, and compile-only signature updates in four frozen-domain test files | carries only a fixed code plus closed `warnings`/`next_actions`, removes the registry's temporary `SetupCommandResult`, and hands a public-DTO-free seam to T2c |
-| T2c command dispatcher | a fresh `SetupCommandDispatcher` and its tests only | owns the one lock/recovery policy and the sole construction of every `SetupCommandResult` for all four verbs |
+| T2b diagnostics carrier | `ISetupAdapter`, `SetupAdapterRegistry`, `ISetupApplyRevalidator`, `SetupApplyCoordinator`, their two semantic test files, and compile-only signature updates in four frozen-domain test files | carries only immutable typed fixed-code/`warnings`/`next_actions` data, removes the registry's temporary `SetupCommandResult`, and performs no duplicate catalog validation |
+| T2c command dispatcher | a fresh `SetupCommandDispatcher` and its tests only | owns the one lock/recovery policy, plan/apply/rollback result construction, final frozen-validator call, and direct delegation to the status-service-produced result |
 | T2d process/wrapper surface | `CliApplication`, help/exit/stderr mapping, their tests, and the thin PowerShell wrapper/tests | serializes/forwards the T2c result without recreating adapter or transaction behavior |
 
 These units run T2a -> T2b -> T2c -> T2d and are reviewed separately; they are
@@ -331,6 +334,11 @@ change set has rollback unavailable.
 ## GitHub Copilot target behavior
 
 ### VS Code
+
+The VS Code partition consumes the frozen T3a platform observations, T3b
+managed-policy resolver, T3c endpoint classifier for both planning and apply
+revalidation, and T3d aggregate/partition contract; it does not recreate those
+shared services.
 
 Detect Stable `code` and Insiders `code-insiders`, require version 1.128+ and
 `GitHub.copilot-chat` for every installed requested channel, and plan physical
