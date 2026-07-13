@@ -124,6 +124,12 @@ internal sealed class SetupApplyCoordinator
         catch (Exception exception)
         {
             var outcomeCode = MapApplyFailure(exception);
+            if (!compensationEligible && outcomeCode == SetupCodes.StalePlan &&
+                !TryPersistStalePlanOutcome(setupLock, changeSetId))
+            {
+                throw new SetupApplyException(SetupCodes.InternalError);
+            }
+
             if (compensationEligible)
             {
                 var compensation = Compensate(setupLock, changeSetId, outcomeCode);
@@ -139,6 +145,26 @@ internal sealed class SetupApplyCoordinator
             }
 
             throw new SetupApplyException(outcomeCode);
+        }
+    }
+
+    private bool TryPersistStalePlanOutcome(SetupLock setupLock, Guid changeSetId)
+    {
+        try
+        {
+            var ledger = ledgerStore.Load();
+            var changeSetIndex = FindPlannedChangeSet(ledger, changeSetId);
+            var stale = ledger.ChangeSets[changeSetIndex] with
+            {
+                UpdatedAt = platform.Clock.UtcNow,
+                OutcomeCode = SetupCodes.StalePlan,
+            };
+            SaveChangedSet(setupLock, ledger, changeSetIndex, stale);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 

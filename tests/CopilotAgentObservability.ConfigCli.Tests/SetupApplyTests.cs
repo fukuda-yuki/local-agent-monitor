@@ -220,18 +220,39 @@ public sealed class SetupApplyTests
     }
 
     [Fact]
-    public void Apply_RejectsChangedBaseAfterAdapterRevalidationBeforeCreatingArtifacts()
+    public void Apply_RejectsChangedBaseAndPersistsStaleAttemptWithoutTargetMutation()
     {
         var fixture = ApplyFixture.Create();
+        var originalCreatedAt = fixture.Platform.Clock.UtcNow.AddMinutes(-1);
+        fixture.RewritePlanTimestamp(originalCreatedAt);
         fixture.Revalidator.OnRevalidate = (_, _) =>
             fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("changed"));
+        var operationCount = fixture.Platform.Operations.Count;
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
         var exception = Assert.Throws<SetupApplyException>(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
 
         Assert.Equal(SetupCodes.StalePlan, exception.Code);
         AssertNoTransactionArtifacts(fixture);
-        Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
+        var stale = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Planned, stale.State);
+        Assert.Equal(SetupCodes.StalePlan, stale.OutcomeCode);
+        Assert.Equal(originalCreatedAt, stale.CreatedAt);
+        Assert.Equal(fixture.Platform.Clock.UtcNow, stale.UpdatedAt);
+        Assert.All(stale.Targets, target =>
+        {
+            Assert.Null(target.OutcomeCode);
+            Assert.Null(target.AppliedStateHash);
+            Assert.Null(target.BackupReference);
+            Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, target.RollbackStatus);
+        });
+        Assert.Equal("changed", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), operation =>
+            (IsWriteOperation(operation) && operation.Contains(fixture.TargetPath, StringComparison.Ordinal)) ||
+            operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+            operation == "environment.notify");
     }
 
     [Fact]
@@ -245,7 +266,10 @@ public sealed class SetupApplyTests
 
         Assert.Equal(SetupCodes.StalePlan, exception.Code);
         AssertNoTransactionArtifacts(fixture);
-        Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
+        var stale = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Planned, stale.State);
+        Assert.Equal(SetupCodes.StalePlan, stale.OutcomeCode);
+        Assert.Equal(fixture.Platform.Clock.UtcNow, stale.UpdatedAt);
     }
 
     [Theory]
@@ -822,8 +846,16 @@ public sealed class SetupApplyTests
         Assert.Equal(SetupCodes.StalePlan, exception.Code);
         Assert.Equal(exactBackup, fixture.Platform.ReadSeededFile(backupPath));
         Assert.False(fixture.Platform.FileSystem.FileExists(fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)));
-        Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
-        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+        var stale = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Planned, stale.State);
+        Assert.Equal(SetupCodes.StalePlan, stale.OutcomeCode);
+        Assert.Equal("third-party", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), operation =>
+            (IsWriteOperation(operation) && operation.Contains(fixture.TargetPath, StringComparison.Ordinal)) ||
+            operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+            operation == "environment.notify");
     }
 
     [Theory]
@@ -1758,6 +1790,25 @@ public sealed class SetupApplyTests
         {
             var planStore = new SetupPlanStore(Platform, Paths);
             return new SetupLedgerStore(Platform, Paths, planStore).Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
+        }
+
+        public void RewritePlanTimestamp(DateTimeOffset createdAt)
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var plan = planStore.Load(ChangeSetId)!;
+            Platform.SeedFile(
+                Paths.GetPlan(ChangeSetId),
+                SetupPlanStore.Serialize(plan with { CreatedAt = createdAt }));
+
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            var ledger = ledgerStore.Load();
+            var rewritten = ledger with
+            {
+                ChangeSets = ledger.ChangeSets.Select(changeSet => changeSet.ChangeSetId == ChangeSetId
+                    ? changeSet with { CreatedAt = createdAt, UpdatedAt = createdAt }
+                    : changeSet).ToArray(),
+            };
+            Platform.SeedFile(Paths.OwnershipLedger, SetupLedgerStore.Serialize(rewritten));
         }
     }
 
