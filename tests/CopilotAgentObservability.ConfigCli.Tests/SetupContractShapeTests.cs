@@ -246,17 +246,19 @@ public sealed class SetupContractShapeTests
 
         Assert.Equal(
             [
-                ("ApplySucceeded", "apply_succeeded"), ("ContentCaptureSensitive", "content_capture_sensitive"), ("ContractVersion", "setup.v1"),
+                ("ApplySucceeded", "apply_succeeded"), ("CliTraceProtocolOverrideNotModified", "cli_trace_protocol_override_not_modified"), ("ContentCaptureSensitive", "content_capture_sensitive"), ("ContractVersion", "setup.v1"),
+                ("EnvironmentOverrideConflict", "environment_override_conflict"),
                 ("InstallCopilotCli", "install_copilot_cli"), ("InstallGitHubCopilotChatExtension", "install_github_copilot_chat_extension"), ("InstallVsCode", "install_vscode"),
                 ("InternalError", "internal_error"), ("InterruptedApplyRecovered", "interrupted_apply_recovered"), ("InterruptedRecoveryFailed", "interrupted_recovery_failed"), ("InterruptedRollbackRecovered", "interrupted_rollback_recovered"),
                 ("InvalidArguments", "invalid_arguments"), ("LedgerCorrupt", "ledger_corrupt"), ("LedgerVersionUnsupported", "ledger_version_unsupported"), ("MalformedSettings", "malformed_settings"),
                 ("ManagedPolicyConflict", "managed_policy_conflict"), ("ManagedPolicyUnverified", "managed_policy_unverified"), ("MonitorNotRunning", "monitor_not_running"), ("NoChanges", "no_changes"),
                 ("PartialApply", "partial_apply"), ("PartialRollback", "partial_rollback"), ("PermissionDenied", "permission_denied"), ("PlanReady", "plan_ready"), ("PortOwnedByForeignProcess", "port_owned_by_foreign_process"),
                 ("RecoveryRequired", "recovery_required"), ("RerunRequestedSetupCommand", "rerun_requested_setup_command"), ("RestartTerminalSession", "restart_terminal_session"), ("RestartVsCode", "restart_vscode"),
-                ("ReviewContentCaptureWarning", "review_content_capture_warning"), ("RollbackNotAvailable", "rollback_not_available"), ("RollbackStale", "rollback_stale"), ("RollbackSucceeded", "rollback_succeeded"),
+                ("ReviewCliTraceProtocolOverride", "review_cli_trace_protocol_override"), ("ReviewContentCaptureWarning", "review_content_capture_warning"), ("RollbackNotAvailable", "rollback_not_available"), ("RollbackStale", "rollback_stale"), ("RollbackSucceeded", "rollback_succeeded"),
                 ("RunFirstTraceDoctor", "run_first_trace_doctor"), ("RunVsCodePolicyDiagnostics", "run_vscode_policy_diagnostics"), ("SetupBusy", "setup_busy"), ("SharedUserEnvironmentAffectsOtherProcesses", "shared_user_environment_affects_other_processes"),
                 ("StalePlan", "stale_plan"), ("StartLocalMonitor", "start_local_monitor"), ("StatusReady", "status_ready"), ("TargetNotInstalled", "target_not_installed"), ("UnsafePath", "unsafe_path"),
                 ("UnsupportedAdapter", "unsupported_adapter"), ("UnsupportedTarget", "unsupported_target"), ("UnsupportedVersion", "unsupported_version"), ("UpgradeCopilotCli", "upgrade_copilot_cli"), ("UpgradeVsCode", "upgrade_vscode"),
+                ("VscodeNonDefaultProfilesNotModified", "vscode_non_default_profiles_not_modified"),
             ],
             actual);
     }

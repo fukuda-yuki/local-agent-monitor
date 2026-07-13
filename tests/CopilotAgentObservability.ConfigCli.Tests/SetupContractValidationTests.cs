@@ -558,6 +558,88 @@ public sealed class SetupContractValidationTests
         Assert.Equal("setup_contract_invalid", exception.Message);
     }
 
+    [Theory]
+    [InlineData(SetupCodes.UnsupportedAdapter, "removed-adapter")]
+    [InlineData(SetupCodes.UnsupportedTarget, "github-copilot")]
+    public void Serialize_WhenApplyCannotUsePersistedPlan_PreservesTheArtifactFreeExceptionalResult(string code, string adapter)
+    {
+        var result = new SetupCommandResult(
+            SetupCommand.Apply,
+            false,
+            code,
+            "00000000-0000-7000-8000-000000000002",
+            null,
+            null,
+            adapter,
+            [],
+            [],
+            [],
+            [],
+            false);
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+        var root = document.RootElement;
+
+        Assert.Equal("apply", root.GetProperty("command").GetString());
+        Assert.False(root.GetProperty("success").GetBoolean());
+        Assert.Equal(code, root.GetProperty("code").GetString());
+        Assert.Equal("00000000-0000-7000-8000-000000000002", root.GetProperty("change_set_id").GetString());
+        Assert.Equal(adapter, root.GetProperty("adapter").GetString());
+        Assert.Empty(root.GetProperty("targets").EnumerateArray());
+        Assert.Empty(root.GetProperty("change_sets").EnumerateArray());
+        Assert.Empty(root.GetProperty("warnings").EnumerateArray());
+        Assert.Empty(root.GetProperty("next_actions").EnumerateArray());
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData(SetupCodes.UnsupportedAdapter)]
+    [InlineData(SetupCodes.UnsupportedTarget)]
+    public void Serialize_WhenApplyExceptionalResultOmitsPersistedCorrelation_Rejects(string code)
+    {
+        var result = new SetupCommandResult(SetupCommand.Apply, false, code, null, null, null, "github-copilot", [], [], [], [], false);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
+    }
+
+    [Theory]
+    [InlineData(SetupCodes.UnsupportedAdapter)]
+    [InlineData(SetupCodes.UnsupportedTarget)]
+    public void Serialize_WhenApplyExceptionalResultCarriesArtifactsOrFollowUp_Rejects(string code)
+    {
+        var result = new SetupCommandResult(
+            SetupCommand.Apply,
+            false,
+            code,
+            "00000000-0000-7000-8000-000000000002",
+            null,
+            null,
+            "github-copilot",
+            [CreateWritableTarget("00000000-0000-7000-8000-000000000001")],
+            [],
+            ["vscode_non_default_profiles_not_modified"],
+            ["review_cli_trace_protocol_override"],
+            false);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
+    }
+
+    [Theory]
+    [InlineData(SetupCodes.UnsupportedAdapter)]
+    [InlineData(SetupCodes.UnsupportedTarget)]
+    public void Serialize_WhenNonApplyUsesApplyOnlyExceptionalCode_Rejects(string code)
+    {
+        var result = new SetupCommandResult(SetupCommand.Rollback, false, code, "00000000-0000-7000-8000-000000000002", null, null, "github-copilot", [], [], [], [], false);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
+    }
+
     [Fact]
     public void Serialize_WhenStatusCurrentStateDoesNotAggregateTargets_Rejects()
     {

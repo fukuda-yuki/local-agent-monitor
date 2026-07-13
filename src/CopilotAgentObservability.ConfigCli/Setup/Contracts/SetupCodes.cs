@@ -17,6 +17,7 @@ public static class SetupCodes
     public const string TargetNotInstalled = "target_not_installed";
     public const string UnsupportedVersion = "unsupported_version";
     public const string ManagedPolicyConflict = "managed_policy_conflict";
+    public const string EnvironmentOverrideConflict = "environment_override_conflict";
     public const string MalformedSettings = "malformed_settings";
     public const string PermissionDenied = "permission_denied";
     public const string UnsafePath = "unsafe_path";
@@ -37,6 +38,8 @@ public static class SetupCodes
     public const string ManagedPolicyUnverified = "managed_policy_unverified";
     public const string MonitorNotRunning = "monitor_not_running";
     public const string SharedUserEnvironmentAffectsOtherProcesses = "shared_user_environment_affects_other_processes";
+    public const string VscodeNonDefaultProfilesNotModified = "vscode_non_default_profiles_not_modified";
+    public const string CliTraceProtocolOverrideNotModified = "cli_trace_protocol_override_not_modified";
 
     public const string InstallVsCode = "install_vscode";
     public const string InstallGitHubCopilotChatExtension = "install_github_copilot_chat_extension";
@@ -48,6 +51,7 @@ public static class SetupCodes
     public const string RestartTerminalSession = "restart_terminal_session";
     public const string StartLocalMonitor = "start_local_monitor";
     public const string ReviewContentCaptureWarning = "review_content_capture_warning";
+    public const string ReviewCliTraceProtocolOverride = "review_cli_trace_protocol_override";
     public const string RunFirstTraceDoctor = "run_first_trace_doctor";
     public const string RerunRequestedSetupCommand = "rerun_requested_setup_command";
 
@@ -66,6 +70,7 @@ public static class SetupCodes
         TargetNotInstalled,
         UnsupportedVersion,
         ManagedPolicyConflict,
+        EnvironmentOverrideConflict,
         MalformedSettings,
         PermissionDenied,
         UnsafePath,

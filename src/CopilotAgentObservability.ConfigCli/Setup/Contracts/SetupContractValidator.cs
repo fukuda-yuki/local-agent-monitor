@@ -60,6 +60,8 @@ public static class SetupContractValidator
         SetupCodes.ManagedPolicyUnverified,
         SetupCodes.MonitorNotRunning,
         SetupCodes.SharedUserEnvironmentAffectsOtherProcesses,
+        SetupCodes.VscodeNonDefaultProfilesNotModified,
+        SetupCodes.CliTraceProtocolOverrideNotModified,
     };
 
     private static readonly HashSet<string> NextActionCodes = new(StringComparer.Ordinal)
@@ -74,6 +76,7 @@ public static class SetupContractValidator
         SetupCodes.RestartTerminalSession,
         SetupCodes.StartLocalMonitor,
         SetupCodes.ReviewContentCaptureWarning,
+        SetupCodes.ReviewCliTraceProtocolOverride,
         SetupCodes.RunFirstTraceDoctor,
         SetupCodes.RerunRequestedSetupCommand,
     };
@@ -97,6 +100,7 @@ public static class SetupContractValidator
         ValidateStringList(result.NextActions, NextActionCodes);
         ValidateResultCodeForCommand(result.Command, result.Code, result.Success);
         ValidateCorrelation(result);
+        ValidateExceptionalApplyResult(result);
 
         if (result.Targets.Count > MaximumTargets || result.ChangeSets.Count > MaximumStatusEntries)
         {
@@ -214,8 +218,8 @@ public static class SetupContractValidator
             }
             : command switch
             {
-                SetupCommand.Plan => IsCommonFailure(code) || code is SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget or SetupCodes.TargetNotInstalled or SetupCodes.UnsupportedVersion or SetupCodes.ManagedPolicyConflict or SetupCodes.MalformedSettings or SetupCodes.PortOwnedByForeignProcess,
-                SetupCommand.Apply => IsCommonFailure(code) || code is SetupCodes.TargetNotInstalled or SetupCodes.UnsupportedVersion or SetupCodes.ManagedPolicyConflict or SetupCodes.MalformedSettings or SetupCodes.StalePlan or SetupCodes.PortOwnedByForeignProcess or SetupCodes.PartialApply,
+                SetupCommand.Plan => IsCommonFailure(code) || code is SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget or SetupCodes.TargetNotInstalled or SetupCodes.UnsupportedVersion or SetupCodes.ManagedPolicyConflict or SetupCodes.EnvironmentOverrideConflict or SetupCodes.MalformedSettings or SetupCodes.PortOwnedByForeignProcess,
+                SetupCommand.Apply => IsCommonFailure(code) || code is SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget or SetupCodes.TargetNotInstalled or SetupCodes.UnsupportedVersion or SetupCodes.ManagedPolicyConflict or SetupCodes.EnvironmentOverrideConflict or SetupCodes.MalformedSettings or SetupCodes.StalePlan or SetupCodes.PortOwnedByForeignProcess or SetupCodes.PartialApply,
                 SetupCommand.Rollback => IsCommonFailure(code) || code is SetupCodes.RollbackStale or SetupCodes.RollbackNotAvailable or SetupCodes.PartialRollback,
                 SetupCommand.Status => code is SetupCodes.SetupBusy or SetupCodes.RecoveryRequired or SetupCodes.InterruptedRecoveryFailed or SetupCodes.LedgerCorrupt or SetupCodes.LedgerVersionUnsupported or SetupCodes.InternalError,
                 _ => false,
@@ -237,6 +241,27 @@ public static class SetupContractValidator
         SetupCodes.LedgerCorrupt or
         SetupCodes.LedgerVersionUnsupported or
         SetupCodes.InternalError;
+
+    private static void ValidateExceptionalApplyResult(SetupCommandResult result)
+    {
+        if (result.Command != SetupCommand.Apply || result.Code is not (SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget))
+        {
+            return;
+        }
+
+        if (result.Success ||
+            result.ChangeSetId is null ||
+            result.Adapter is null ||
+            result.Targets.Count != 0 ||
+            result.ChangeSets.Count != 0 ||
+            result.Warnings.Count != 0 ||
+            result.NextActions.Count != 0 ||
+            result.Truncated ||
+            result.Code == SetupCodes.UnsupportedTarget && result.Adapter != "github-copilot")
+        {
+            Reject();
+        }
+    }
 
     private static void ValidateStatusChangeSet(SetupChangeSetStatusResult? changeSet)
     {
