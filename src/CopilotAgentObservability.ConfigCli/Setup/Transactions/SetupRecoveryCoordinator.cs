@@ -224,6 +224,11 @@ internal sealed class SetupRecoveryCoordinator
         SetupPrivatePlan plan,
         SetupTransactionJournal journal)
     {
+        if (plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env))
+        {
+            return ActiveFileRecoveryRequired(changeSet);
+        }
+
         if (!ActiveFileLifecycleMatches(changeSet.State, journal.Phase))
         {
             return Failed(SetupCodes.RecoveryRequired, changeSet.ChangeSetId,
@@ -294,9 +299,9 @@ internal sealed class SetupRecoveryCoordinator
                 SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState)));
             if (classification != ActiveFileClassification.Prior)
             {
-                failures[target.RecordId] = classification == ActiveFileClassification.Unavailable
-                    ? ActiveFileFailureKind.Unavailable
-                    : ActiveFileFailureKind.Stale;
+                failures[target.RecordId] = classification == ActiveFileClassification.ThirdParty
+                    ? ActiveFileFailureKind.Stale
+                    : ActiveFileFailureKind.Unavailable;
             }
         }
 
@@ -320,17 +325,23 @@ internal sealed class SetupRecoveryCoordinator
             var ledger = ledgerStore.LoadForRecovery();
             var current = ledger.ChangeSets.Single(item => item.ChangeSetId == changeSet.ChangeSetId);
             var journalRecordIds = journal.Targets.Select(target => target.RecordId).ToHashSet();
+            var physicalRecordIds = plan.Targets
+                .Where(target => target.TargetKind != SetupTargetKind.Guidance)
+                .Select(target => target.RecordId)
+                .ToHashSet();
             restored = current with
             {
                 UpdatedAt = platform.Clock.UtcNow,
                 OutcomeCode = SetupCodes.InterruptedApplyRecovered,
                 State = SetupChangeSetState.Restored,
-                Targets = current.Targets.Select(target => journalRecordIds.Contains(target.RecordId)
+                Targets = current.Targets.Select(target => physicalRecordIds.Contains(target.RecordId)
                     ? target with
                     {
                         AppliedStateHash = null,
                         BackupReference = null,
-                        OutcomeCode = SetupCodes.InterruptedApplyRecovered,
+                        OutcomeCode = journalRecordIds.Contains(target.RecordId)
+                            ? SetupCodes.InterruptedApplyRecovered
+                            : null,
                         RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
                     }
                     : target).ToArray(),
@@ -377,7 +388,15 @@ internal sealed class SetupRecoveryCoordinator
                     throw new FormatException();
                 }
             }
-            else if (!HasNoRollbackOwnership(target))
+            else if (!HasNoRollbackOwnership(target) &&
+                     !(changeSet.State == SetupChangeSetState.Partial &&
+                       journal.Phase == SetupJournalPhase.Partial &&
+                       target.AppliedStateHash is null &&
+                       target.BackupReference is null &&
+                       ((target.RollbackStatus == SetupLedgerRollbackStatus.Stale &&
+                         string.Equals(target.OutcomeCode, SetupCodes.RollbackStale, StringComparison.Ordinal)) ||
+                        (target.RollbackStatus == SetupLedgerRollbackStatus.Failed &&
+                         string.Equals(target.OutcomeCode, SetupCodes.InternalError, StringComparison.Ordinal)))))
             {
                 throw new FormatException();
             }
@@ -642,7 +661,9 @@ internal sealed class SetupRecoveryCoordinator
                 Targets = current.Targets.Select(target => failures.TryGetValue(target.RecordId, out var failure)
                     ? target with
                     {
-                        OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+                        OutcomeCode = failure == ActiveFileFailureKind.Stale
+                            ? SetupCodes.RollbackStale
+                            : SetupCodes.InternalError,
                         RollbackStatus = failure == ActiveFileFailureKind.Stale
                             ? SetupLedgerRollbackStatus.Stale
                             : SetupLedgerRollbackStatus.Failed,
@@ -670,9 +691,9 @@ internal sealed class SetupRecoveryCoordinator
             OverlayFailure(changeSet));
 
     private static ActiveFileStepOutcome ClassificationFailure(ActiveFileClassification classification) =>
-        classification == ActiveFileClassification.Unavailable
-            ? ActiveFileStepOutcome.Unavailable
-            : ActiveFileStepOutcome.Stale;
+        classification == ActiveFileClassification.ThirdParty
+            ? ActiveFileStepOutcome.Stale
+            : ActiveFileStepOutcome.Unavailable;
 
     private static bool IsActiveFileApply(SetupTransactionJournal journal) =>
         journal.Operation == SetupJournalOperation.Apply &&
