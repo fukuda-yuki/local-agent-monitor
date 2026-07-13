@@ -24,6 +24,28 @@ internal sealed class SetupRecoveryCoordinator
 {
     private static readonly byte[] FileBackupMagic = Encoding.ASCII.GetBytes("CAOSETUP1");
 
+    private enum ActiveFileClassification
+    {
+        Prior,
+        Desired,
+        ThirdParty,
+        Unavailable,
+    }
+
+    private enum ActiveFileStepOutcome
+    {
+        Completed,
+        Stale,
+        Unavailable,
+        JournalUnproven,
+    }
+
+    private enum ActiveFileFailureKind
+    {
+        Stale,
+        Unavailable,
+    }
+
     private readonly ISetupPlatform platform;
     private readonly SetupRuntimePaths paths;
     private readonly SetupPlanStore planStore;
@@ -170,6 +192,11 @@ internal sealed class SetupRecoveryCoordinator
                 }
             }
 
+            if (IsActiveFileApply(journal))
+            {
+                return RecoverActiveFileApply(setupLock, changeSet, plan, journal);
+            }
+
             if (journal.Operation == SetupJournalOperation.Apply &&
                 journal.Phase == SetupJournalPhase.Committed &&
                 changeSet.State != SetupChangeSetState.Applied)
@@ -190,6 +217,480 @@ internal sealed class SetupRecoveryCoordinator
 
         return new SetupRecoveryResult(SetupRecoveryDisposition.None, null, null, null, null);
     }
+
+    private SetupRecoveryResult RecoverActiveFileApply(
+        SetupLock setupLock,
+        SetupLedgerChangeSet changeSet,
+        SetupPrivatePlan plan,
+        SetupTransactionJournal journal)
+    {
+        if (!ActiveFileLifecycleMatches(changeSet.State, journal.Phase))
+        {
+            return Failed(SetupCodes.RecoveryRequired, changeSet.ChangeSetId,
+                SetupRecoveryOperation.Apply, OverlayFailure(changeSet));
+        }
+
+        try
+        {
+            ValidateActiveFileApplyEvidence(plan, changeSet, journal);
+        }
+        catch (Exception)
+        {
+            return PersistActiveFileFailure(
+                setupLock,
+                changeSet,
+                journal,
+                new Dictionary<Guid, ActiveFileFailureKind>());
+        }
+
+        if (!TryEnterActiveFileCompensation(setupLock, changeSet.ChangeSetId, journal.Phase) ||
+            !TryPersistCompensatingLedger(setupLock, changeSet.ChangeSetId))
+        {
+            return ActiveFileRecoveryRequired(changeSet);
+        }
+
+        var failures = new Dictionary<Guid, ActiveFileFailureKind>();
+        for (var targetIndex = journal.Targets.Count - 1; targetIndex >= 0; targetIndex--)
+        {
+            var journalTarget = journal.Targets[targetIndex];
+            var planTarget = plan.Targets.Single(target => target.RecordId == journalTarget.RecordId);
+            for (var stepIndex = journalTarget.Steps.Count - 1; stepIndex >= 0; stepIndex--)
+            {
+                SetupJournalStep step;
+                try
+                {
+                    step = LoadActiveFileStep(changeSet.ChangeSetId, journalTarget.RecordId);
+                }
+                catch (Exception)
+                {
+                    return ActiveFileRecoveryRequired(changeSet);
+                }
+
+                var outcome = RecoverActiveFileStep(
+                    setupLock,
+                    changeSet.ChangeSetId,
+                    planTarget,
+                    step);
+                if (outcome == ActiveFileStepOutcome.JournalUnproven)
+                {
+                    return ActiveFileRecoveryRequired(changeSet);
+                }
+
+                if (outcome == ActiveFileStepOutcome.Stale)
+                {
+                    failures[journalTarget.RecordId] = ActiveFileFailureKind.Stale;
+                }
+                else if (outcome == ActiveFileStepOutcome.Unavailable)
+                {
+                    failures[journalTarget.RecordId] = ActiveFileFailureKind.Unavailable;
+                }
+            }
+        }
+
+        foreach (var target in plan.Targets.Where(target =>
+                     target.TargetKind is not (SetupTargetKind.Guidance or SetupTargetKind.Env)))
+        {
+            var classification = ClassifyActiveFile(target, target.BaseStateHash,
+                SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState)));
+            if (classification != ActiveFileClassification.Prior)
+            {
+                failures[target.RecordId] = classification == ActiveFileClassification.Unavailable
+                    ? ActiveFileFailureKind.Unavailable
+                    : ActiveFileFailureKind.Stale;
+            }
+        }
+
+        if (failures.Count > 0)
+        {
+            return PersistActiveFileFailure(setupLock, changeSet, journal, failures);
+        }
+
+        if (!TryMarkJournalPhaseOrConfirm(
+                setupLock,
+                changeSet.ChangeSetId,
+                SetupJournalPhase.Compensating,
+                SetupJournalPhase.Restored))
+        {
+            return ActiveFileRecoveryRequired(changeSet);
+        }
+
+        SetupLedgerChangeSet restored;
+        try
+        {
+            var ledger = ledgerStore.LoadForRecovery();
+            var current = ledger.ChangeSets.Single(item => item.ChangeSetId == changeSet.ChangeSetId);
+            var journalRecordIds = journal.Targets.Select(target => target.RecordId).ToHashSet();
+            restored = current with
+            {
+                UpdatedAt = platform.Clock.UtcNow,
+                OutcomeCode = SetupCodes.InterruptedApplyRecovered,
+                State = SetupChangeSetState.Restored,
+                Targets = current.Targets.Select(target => journalRecordIds.Contains(target.RecordId)
+                    ? target with
+                    {
+                        AppliedStateHash = null,
+                        BackupReference = null,
+                        OutcomeCode = SetupCodes.InterruptedApplyRecovered,
+                        RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
+                    }
+                    : target).ToArray(),
+            };
+            SaveChangeSetOrConfirm(setupLock, ledger, restored);
+        }
+        catch (Exception)
+        {
+            return ActiveFileRecoveryRequired(changeSet);
+        }
+
+        return Recovered(restored, SetupRecoveryOperation.Apply);
+    }
+
+    private void ValidateActiveFileApplyEvidence(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet changeSet,
+        SetupTransactionJournal journal)
+    {
+        RequireImmutableIdentity(plan, changeSet);
+        if (journal.ChangeSetId != changeSet.ChangeSetId ||
+            journal.Operation != SetupJournalOperation.Apply ||
+            journal.EnvironmentNotification != SetupEnvironmentNotification.NotRequired ||
+            journal.Targets.Any(target => target.TargetKind == SetupTargetKind.Env))
+        {
+            throw new FormatException();
+        }
+
+        ValidateJournalTargets(plan, changeSet, journal);
+        var journalRecordIds = journal.Targets.Select(target => target.RecordId).ToHashSet();
+        foreach (var target in changeSet.Targets)
+        {
+            var changed = journalRecordIds.Contains(target.RecordId);
+            if (changed)
+            {
+                var rollbackStatusMatches = changeSet.State == SetupChangeSetState.Partial
+                    ? target.RollbackStatus is SetupLedgerRollbackStatus.Pending or
+                        SetupLedgerRollbackStatus.Stale or SetupLedgerRollbackStatus.Failed
+                    : target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
+                if (!string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) ||
+                    target.AppliedStateHash is not null ||
+                    !rollbackStatusMatches)
+                {
+                    throw new FormatException();
+                }
+            }
+            else if (!HasNoRollbackOwnership(target))
+            {
+                throw new FormatException();
+            }
+        }
+    }
+
+    private bool TryEnterActiveFileCompensation(
+        SetupLock setupLock,
+        Guid changeSetId,
+        SetupJournalPhase initialPhase)
+    {
+        var phase = initialPhase;
+        if (phase == SetupJournalPhase.Prepared)
+        {
+            if (!TryMarkJournalPhaseOrConfirm(
+                    setupLock, changeSetId, SetupJournalPhase.Prepared, SetupJournalPhase.Applying))
+            {
+                return false;
+            }
+
+            phase = SetupJournalPhase.Applying;
+        }
+
+        if (phase is SetupJournalPhase.Applying or SetupJournalPhase.Partial)
+        {
+            return TryMarkJournalPhaseOrConfirm(
+                setupLock, changeSetId, phase, SetupJournalPhase.Compensating);
+        }
+
+        return phase == SetupJournalPhase.Compensating;
+    }
+
+    private bool TryPersistCompensatingLedger(SetupLock setupLock, Guid changeSetId)
+    {
+        try
+        {
+            var ledger = ledgerStore.LoadForRecovery();
+            var current = ledger.ChangeSets.Single(item => item.ChangeSetId == changeSetId);
+            if (current.State == SetupChangeSetState.Compensating)
+            {
+                return true;
+            }
+
+            if (current.State is not (SetupChangeSetState.Applying or SetupChangeSetState.Partial))
+            {
+                return false;
+            }
+
+            var compensating = current with
+            {
+                UpdatedAt = platform.Clock.UtcNow,
+                State = SetupChangeSetState.Compensating,
+            };
+            SaveChangeSetOrConfirm(setupLock, ledger, compensating);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private ActiveFileStepOutcome RecoverActiveFileStep(
+        SetupLock setupLock,
+        Guid changeSetId,
+        SetupPrivatePlanTarget target,
+        SetupJournalStep step)
+    {
+        var classification = ClassifyActiveFile(target, step.PriorStateHash, step.DesiredStateHash);
+        if (step.Phase == SetupJournalStepPhase.Pending)
+        {
+            return classification == ActiveFileClassification.Prior
+                ? ActiveFileStepOutcome.Completed
+                : ClassificationFailure(classification);
+        }
+
+        if (step.Phase == SetupJournalStepPhase.RestoreCompleted)
+        {
+            return classification == ActiveFileClassification.Prior
+                ? ActiveFileStepOutcome.Completed
+                : ClassificationFailure(classification);
+        }
+
+        if (classification is ActiveFileClassification.ThirdParty or ActiveFileClassification.Unavailable)
+        {
+            return ClassificationFailure(classification);
+        }
+
+        if (step.Phase is SetupJournalStepPhase.MutationStarted or SetupJournalStepPhase.MutationCompleted)
+        {
+            if (!TryMarkStepPhaseOrConfirm(
+                    setupLock,
+                    changeSetId,
+                    target.RecordId,
+                    step.Phase,
+                    SetupJournalStepPhase.RestoreStarted))
+            {
+                return ActiveFileStepOutcome.JournalUnproven;
+            }
+        }
+
+        if (classification == ActiveFileClassification.Desired)
+        {
+            try
+            {
+                platform.Execution.Checkpoint(SetupFaultPoint.AfterRestoreIntentBeforeRestore);
+                fileStep.Restore(
+                    GetAllowedRoot(target.TargetLocation),
+                    target.TargetLocation,
+                    paths.GetBackup(changeSetId, target.RecordId),
+                    step.DesiredStateHash,
+                    step.PriorStateHash);
+                platform.Execution.Checkpoint(SetupFaultPoint.AfterRestoreBeforeCompletion);
+            }
+            catch (Exception)
+            {
+                var afterFailure = ClassifyActiveFile(target, step.PriorStateHash, step.DesiredStateHash);
+                if (afterFailure != ActiveFileClassification.Prior)
+                {
+                    return ClassificationFailure(afterFailure);
+                }
+            }
+        }
+
+        return TryMarkStepPhaseOrConfirm(
+            setupLock,
+            changeSetId,
+            target.RecordId,
+            SetupJournalStepPhase.RestoreStarted,
+            SetupJournalStepPhase.RestoreCompleted)
+                ? ActiveFileStepOutcome.Completed
+                : ActiveFileStepOutcome.JournalUnproven;
+    }
+
+    private bool TryMarkJournalPhaseOrConfirm(
+        SetupLock setupLock,
+        Guid changeSetId,
+        SetupJournalPhase expected,
+        SetupJournalPhase next)
+    {
+        try
+        {
+            var current = LoadJournalForRecovery(changeSetId);
+            if (current?.Phase == next)
+            {
+                return true;
+            }
+
+            if (current?.Phase != expected)
+            {
+                return false;
+            }
+
+            journalStore.MarkTransactionPhase(setupLock, changeSetId, next);
+            return LoadJournalForRecovery(changeSetId)?.Phase == next;
+        }
+        catch (Exception)
+        {
+            try
+            {
+                return LoadJournalForRecovery(changeSetId)?.Phase == next;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+    }
+
+    private bool TryMarkStepPhaseOrConfirm(
+        SetupLock setupLock,
+        Guid changeSetId,
+        Guid recordId,
+        SetupJournalStepPhase expected,
+        SetupJournalStepPhase next)
+    {
+        try
+        {
+            var current = LoadActiveFileStep(changeSetId, recordId);
+            if (current.Phase == next)
+            {
+                return true;
+            }
+
+            if (current.Phase != expected)
+            {
+                return false;
+            }
+
+            journalStore.MarkStepPhase(setupLock, changeSetId, recordId, null, expected, next);
+            return LoadActiveFileStep(changeSetId, recordId).Phase == next;
+        }
+        catch (Exception)
+        {
+            try
+            {
+                return LoadActiveFileStep(changeSetId, recordId).Phase == next;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+    }
+
+    private SetupJournalStep LoadActiveFileStep(Guid changeSetId, Guid recordId)
+    {
+        var journal = LoadJournalForRecovery(changeSetId) ?? throw new FormatException();
+        var target = journal.Targets.Single(item => item.RecordId == recordId);
+        return target.Steps.Single(step => step.MemberKey is null);
+    }
+
+    private ActiveFileClassification ClassifyActiveFile(
+        SetupPrivatePlanTarget target,
+        string priorHash,
+        string desiredHash)
+    {
+        try
+        {
+            var current = fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation).Hash;
+            if (string.Equals(current, priorHash, StringComparison.Ordinal))
+            {
+                return ActiveFileClassification.Prior;
+            }
+
+            return string.Equals(current, desiredHash, StringComparison.Ordinal)
+                ? ActiveFileClassification.Desired
+                : ActiveFileClassification.ThirdParty;
+        }
+        catch (Exception)
+        {
+            return ActiveFileClassification.Unavailable;
+        }
+    }
+
+    private SetupRecoveryResult PersistActiveFileFailure(
+        SetupLock setupLock,
+        SetupLedgerChangeSet original,
+        SetupTransactionJournal journal,
+        IReadOnlyDictionary<Guid, ActiveFileFailureKind> failures)
+    {
+        if (!TryEnterActiveFileCompensation(setupLock, original.ChangeSetId, journal.Phase) ||
+            !TryPersistCompensatingLedger(setupLock, original.ChangeSetId) ||
+            !TryMarkJournalPhaseOrConfirm(
+                setupLock,
+                original.ChangeSetId,
+                SetupJournalPhase.Compensating,
+                SetupJournalPhase.Partial))
+        {
+            return ActiveFileRecoveryRequired(original);
+        }
+
+        try
+        {
+            var ledger = ledgerStore.LoadForRecovery();
+            var current = ledger.ChangeSets.Single(item => item.ChangeSetId == original.ChangeSetId);
+            var partial = current with
+            {
+                UpdatedAt = platform.Clock.UtcNow,
+                OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+                State = SetupChangeSetState.Partial,
+                Targets = current.Targets.Select(target => failures.TryGetValue(target.RecordId, out var failure)
+                    ? target with
+                    {
+                        OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+                        RollbackStatus = failure == ActiveFileFailureKind.Stale
+                            ? SetupLedgerRollbackStatus.Stale
+                            : SetupLedgerRollbackStatus.Failed,
+                    }
+                    : target).ToArray(),
+            };
+            SaveChangeSetOrConfirm(setupLock, ledger, partial);
+            return Failed(
+                SetupCodes.InterruptedRecoveryFailed,
+                original.ChangeSetId,
+                SetupRecoveryOperation.Apply,
+                partial);
+        }
+        catch (Exception)
+        {
+            return ActiveFileRecoveryRequired(original);
+        }
+    }
+
+    private static SetupRecoveryResult ActiveFileRecoveryRequired(SetupLedgerChangeSet changeSet) =>
+        Failed(
+            SetupCodes.RecoveryRequired,
+            changeSet.ChangeSetId,
+            SetupRecoveryOperation.Apply,
+            OverlayFailure(changeSet));
+
+    private static ActiveFileStepOutcome ClassificationFailure(ActiveFileClassification classification) =>
+        classification == ActiveFileClassification.Unavailable
+            ? ActiveFileStepOutcome.Unavailable
+            : ActiveFileStepOutcome.Stale;
+
+    private static bool IsActiveFileApply(SetupTransactionJournal journal) =>
+        journal.Operation == SetupJournalOperation.Apply &&
+        journal.Phase is (SetupJournalPhase.Prepared or SetupJournalPhase.Applying or
+            SetupJournalPhase.Compensating or SetupJournalPhase.Partial) &&
+        journal.Targets.All(target => target.TargetKind != SetupTargetKind.Env);
+
+    private static bool ActiveFileLifecycleMatches(
+        SetupChangeSetState state,
+        SetupJournalPhase phase) => phase switch
+    {
+        SetupJournalPhase.Prepared => state == SetupChangeSetState.Applying,
+        SetupJournalPhase.Applying => state == SetupChangeSetState.Applying,
+        SetupJournalPhase.Compensating => state is SetupChangeSetState.Applying or
+            SetupChangeSetState.Compensating or SetupChangeSetState.Partial,
+        SetupJournalPhase.Partial => state is SetupChangeSetState.Compensating or SetupChangeSetState.Partial,
+        _ => false,
+    };
 
     private SetupPrivatePlan? LoadPlanForRecovery(Guid changeSetId)
     {

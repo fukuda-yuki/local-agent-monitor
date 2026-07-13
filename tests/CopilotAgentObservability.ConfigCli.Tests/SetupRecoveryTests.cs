@@ -559,30 +559,584 @@ public sealed class SetupRecoveryTests
         Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
     }
 
-    [Theory]
-    [InlineData("applying", SetupRecoveryOperation.Apply)]
-    [InlineData("partial", SetupRecoveryOperation.Apply)]
-    [InlineData("rollback", SetupRecoveryOperation.Rollback)]
-    public void RecoverNext_Active_and_rollback_handoffs_are_explicit_fixed_failures(
-        string variant,
-        SetupRecoveryOperation expectedOperation)
+    [Fact]
+    public void RecoverNext_Active_file_apply_with_pending_prior_step_recovers_without_target_write()
     {
         var fixture = RecoveryFixture.CreateFileOnly();
-        if (variant == "applying")
+        fixture.SeedApplyingJournalAndLedger();
+        var operationsBefore = fixture.Platform.Operations.Count;
+
+        using var setupLock = fixture.AcquireLock();
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedApplyRecovered, result.Code);
+        Assert.Equal(fixture.ChangeSetId, result.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Apply, result.Operation);
+        Assert.Equal(SetupChangeSetState.Restored, result.EffectiveChangeSet?.State);
+        Assert.Equal(SetupJournalPhase.Restored,
+            new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)?.Phase);
+        Assert.Equal(SetupChangeSetState.Restored, fixture.LoadChangeSet().State);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public void RecoverNext_Prepared_file_apply_paired_with_applying_ledger_advances_to_compensation()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedPreparedJournalAndApplyingLedger();
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedApplyRecovered, result.Code);
+        Assert.Equal(SetupJournalPhase.Restored, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.Restored, fixture.LoadChangeSet().State);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    public static TheoryData<string, string, bool, bool> ActiveFilePhaseStateCases
+    {
+        get
         {
-            fixture.SeedApplyingJournalAndLedger();
+            var data = new TheoryData<string, string, bool, bool>();
+            foreach (var phase in Enum.GetValues<SetupJournalStepPhase>())
+            {
+                foreach (var state in new[] { "prior", "desired", "third", "missing", "unavailable" })
+                {
+                    var recovered = phase switch
+                    {
+                        SetupJournalStepPhase.Pending => state == "prior",
+                        SetupJournalStepPhase.MutationStarted or SetupJournalStepPhase.MutationCompleted or
+                            SetupJournalStepPhase.RestoreStarted => state is "prior" or "desired",
+                        SetupJournalStepPhase.RestoreCompleted => state == "prior",
+                        _ => false,
+                    };
+                    var physicallyRestored = recovered && state == "desired" &&
+                        phase != SetupJournalStepPhase.RestoreCompleted;
+                    data.Add(phase.ToString(), state, recovered, physicallyRestored);
+                }
+            }
+
+            return data;
         }
-        else if (variant == "partial")
+    }
+
+    [Theory]
+    [MemberData(nameof(ActiveFilePhaseStateCases))]
+    public void RecoverNext_Active_file_step_phase_and_current_state_matrix_is_fail_closed(
+        string stepPhaseName,
+        string currentState,
+        bool expectedRecovered,
+        bool expectedPhysicalRestore)
+    {
+        var stepPhase = Enum.Parse<SetupJournalStepPhase>(stepPhaseName);
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(stepPhase, currentState);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(expectedRecovered ? SetupRecoveryDisposition.Recovered : SetupRecoveryDisposition.Failed,
+            result.Disposition);
+        Assert.Equal(expectedRecovered ? SetupCodes.InterruptedApplyRecovered : SetupCodes.InterruptedRecoveryFailed,
+            result.Code);
+        Assert.Equal(expectedRecovered ? SetupChangeSetState.Restored : SetupChangeSetState.Partial,
+            result.EffectiveChangeSet?.State);
+        Assert.Equal(expectedRecovered ? SetupJournalPhase.Restored : SetupJournalPhase.Partial,
+            fixture.LoadJournal().Phase);
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, fixture.LoadJournal().EnvironmentNotification);
+        var expectedStepPhase = expectedRecovered && stepPhase != SetupJournalStepPhase.Pending
+            ? SetupJournalStepPhase.RestoreCompleted
+            : stepPhase;
+        Assert.Equal(expectedStepPhase,
+            Assert.Single(Assert.Single(fixture.LoadJournal().Targets).Steps).Phase);
+        Assert.Equal(expectedRecovered ? SetupChangeSetState.Restored : SetupChangeSetState.Partial,
+            fixture.LoadChangeSet().State);
+        var targetMutation = fixture.Platform.Operations.Skip(operationsBefore).Any(operation =>
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+        Assert.Equal(expectedPhysicalRestore, targetMutation);
+        if (currentState == "prior" || expectedPhysicalRestore)
         {
-            fixture.SeedPreparedApplyJournalAndBackup();
-            fixture.Platform.FileSystem.DeleteFile(fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId));
-            using var firstLock = fixture.AcquireLock();
-            _ = fixture.ReopenCoordinator().RecoverNext(firstLock);
+            Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        }
+        else if (currentState == "desired")
+        {
+            Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        }
+        else if (currentState == "third")
+        {
+            Assert.Equal("third", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        }
+        else if (currentState == "missing")
+        {
+            Assert.False(fixture.Platform.FileSystem.GetPathMetadata(fixture.TargetPath).Exists);
         }
         else
         {
-            fixture.SeedPreparedRollbackJournalAndAppliedLedger();
+            Assert.True((fixture.Platform.FileSystem.GetPathMetadata(fixture.TargetPath).Attributes &
+                FileAttributes.ReparsePoint) != 0);
         }
+
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void RecoverNext_Active_file_targets_restore_in_strict_reverse_order(int targetCount)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly(targetCount);
+        fixture.SeedActiveFiles(Enumerable.Repeat("desired", targetCount).ToArray());
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, result.Disposition);
+        Assert.Equal(SetupJournalPhase.Restored, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, fixture.LoadJournal().EnvironmentNotification);
+        Assert.Equal(SetupChangeSetState.Restored, fixture.LoadChangeSet().State);
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        var restoreIndexes = fixture.TargetPaths.Select(targetPath => Array.FindIndex(operations, operation =>
+            operation.EndsWith($"->{targetPath}", StringComparison.Ordinal))).ToArray();
+        Assert.All(restoreIndexes, index => Assert.True(index >= 0));
+        for (var index = 1; index < restoreIndexes.Length; index++)
+        {
+            Assert.True(restoreIndexes[index - 1] > restoreIndexes[index]);
+        }
+
+        Assert.All(fixture.TargetPaths, targetPath =>
+            Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(targetPath))));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public void RecoverNext_Active_file_partial_retries_from_persisted_restore_intent_after_fault_removal()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        fixture.Platform.InjectFault(
+            $"checkpoint:{SetupFaultPoint.AfterRestoreIntentBeforeRestore}",
+            new IOException("private-restore-fault"));
+
+        using (var firstLock = fixture.AcquireLock())
+        {
+            var first = fixture.ReopenCoordinator().RecoverNext(firstLock);
+            Assert.Equal(SetupRecoveryDisposition.Failed, first.Disposition);
+            Assert.Equal(SetupCodes.InterruptedRecoveryFailed, first.Code);
+            Assert.Equal(SetupJournalPhase.Partial, fixture.LoadJournal().Phase);
+            Assert.Equal(SetupJournalStepPhase.RestoreStarted,
+                Assert.Single(Assert.Single(fixture.LoadJournal().Targets).Steps).Phase);
+            Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+            Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        }
+
+        using var retryLock = fixture.AcquireLock();
+        var retried = fixture.ReopenCoordinator().RecoverNext(retryLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, retried.Disposition);
+        Assert.Equal(SetupCodes.InterruptedApplyRecovered, retried.Code);
+        Assert.Equal(SetupJournalPhase.Restored, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted,
+            Assert.Single(Assert.Single(fixture.LoadJournal().Targets).Steps).Phase);
+        Assert.Equal(SetupChangeSetState.Restored, fixture.LoadChangeSet().State);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public void RecoverNext_Active_file_targets_restore_in_reverse_and_continue_after_third_party_state()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly(3);
+        fixture.SeedActiveFiles(["desired", "third", "desired"]);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupJournalPhase.Partial, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPaths[0])));
+        Assert.Equal("third", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPaths[1])));
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPaths[2])));
+        var phases = fixture.LoadJournal().Targets
+            .Select(target => Assert.Single(target.Steps).Phase)
+            .ToArray();
+        Assert.Equal(
+            [SetupJournalStepPhase.RestoreCompleted, SetupJournalStepPhase.MutationCompleted,
+             SetupJournalStepPhase.RestoreCompleted],
+            phases);
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        var lastTargetRestore = Array.FindIndex(operations, operation =>
+            operation.EndsWith($"->{fixture.TargetPaths[2]}", StringComparison.Ordinal));
+        var firstTargetRestore = Array.FindIndex(operations, operation =>
+            operation.EndsWith($"->{fixture.TargetPaths[0]}", StringComparison.Ordinal));
+        Assert.True(lastTargetRestore >= 0 && firstTargetRestore > lastTargetRestore);
+        Assert.DoesNotContain(operations, operation =>
+            operation.EndsWith($"->{fixture.TargetPaths[1]}", StringComparison.Ordinal));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecoverNext_Active_file_restore_intent_write_is_proven_before_physical_restore(bool afterEffect)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var barrier = fixture.Platform.AddBarrier(
+            $"file.read:{fixture.TargetPath}", cancellation.Token);
+        using var setupLock = fixture.AcquireLock();
+        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        barrier.WaitUntilReached(cancellation.Token);
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        var temporary = fixture.NextTemporaryPath(journalPath, 0);
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(
+                $"file.replace:{temporary}->{journalPath}", new IOException("private-intent-after"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault($"file.write-new:{temporary}", new IOException("private-intent-before"));
+        }
+
+        barrier.Release();
+        var result = await recovery;
+
+        Assert.Equal(afterEffect ? SetupRecoveryDisposition.Recovered : SetupRecoveryDisposition.Failed,
+            result.Disposition);
+        Assert.Equal(afterEffect ? SetupCodes.InterruptedApplyRecovered : SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(afterEffect ? SetupJournalPhase.Restored : SetupJournalPhase.Compensating,
+            fixture.LoadJournal().Phase);
+        Assert.Equal(afterEffect ? SetupChangeSetState.Restored : SetupChangeSetState.Compensating,
+            fixture.LoadChangeSet().State);
+        Assert.Equal(afterEffect ? "old" : "new",
+            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecoverNext_Active_file_restore_primitive_is_classified_before_or_after_effect(bool afterEffect)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var barrier = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterRestoreIntentBeforeRestore}", cancellation.Token);
+        using var setupLock = fixture.AcquireLock();
+        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        barrier.WaitUntilReached(cancellation.Token);
+        var temporary = fixture.NextTemporaryPath(fixture.TargetPath, 0);
+        var replace = $"file.replace:{temporary}->{fixture.TargetPath}";
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(replace, new IOException("private-restore-after"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault(replace, new IOException("private-restore-before"));
+        }
+
+        barrier.Release();
+        var result = await recovery;
+
+        Assert.Equal(afterEffect ? SetupRecoveryDisposition.Recovered : SetupRecoveryDisposition.Failed,
+            result.Disposition);
+        Assert.Equal(afterEffect ? SetupCodes.InterruptedApplyRecovered : SetupCodes.InterruptedRecoveryFailed,
+            result.Code);
+        Assert.Equal(afterEffect ? SetupJournalPhase.Restored : SetupJournalPhase.Partial,
+            fixture.LoadJournal().Phase);
+        Assert.Equal(afterEffect ? SetupChangeSetState.Restored : SetupChangeSetState.Partial,
+            fixture.LoadChangeSet().State);
+        Assert.Equal(afterEffect ? "old" : "new",
+            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecoverNext_Active_file_restore_completion_write_is_proven_before_terminal_state(bool afterEffect)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var barrier = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}", cancellation.Token);
+        using var setupLock = fixture.AcquireLock();
+        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        barrier.WaitUntilReached(cancellation.Token);
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        var temporary = fixture.NextTemporaryPath(journalPath, 0);
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(
+                $"file.replace:{temporary}->{journalPath}", new IOException("private-completion-after"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault($"file.write-new:{temporary}", new IOException("private-completion-before"));
+        }
+
+        barrier.Release();
+        var result = await recovery;
+
+        Assert.Equal(afterEffect ? SetupRecoveryDisposition.Recovered : SetupRecoveryDisposition.Failed,
+            result.Disposition);
+        Assert.Equal(afterEffect ? SetupCodes.InterruptedApplyRecovered : SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(afterEffect ? SetupJournalPhase.Restored : SetupJournalPhase.Compensating,
+            fixture.LoadJournal().Phase);
+        Assert.Equal(afterEffect ? SetupChangeSetState.Restored : SetupChangeSetState.Compensating,
+            fixture.LoadChangeSet().State);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+    }
+
+    [Fact]
+    public async Task RecoverNext_Active_file_final_verification_race_preserves_third_party_state_as_partial()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var completionBarrier = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}", cancellation.Token);
+        using var setupLock = fixture.AcquireLock();
+        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        completionBarrier.WaitUntilReached(cancellation.Token);
+        using var verificationBarrier = fixture.Platform.AddBarrier(
+            $"file.read:{fixture.TargetPath}", cancellation.Token);
+        completionBarrier.Release();
+        verificationBarrier.WaitUntilReached(cancellation.Token);
+        fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("third"));
+        verificationBarrier.Release();
+
+        var result = await recovery;
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupJournalPhase.Partial, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted,
+            Assert.Single(Assert.Single(fixture.LoadJournal().Targets).Steps).Phase);
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+        Assert.Equal("third", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecoverNext_Active_file_terminal_journal_is_durably_ahead_of_ledger(bool afterEffect)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var completionBarrier = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}", cancellation.Token);
+        using var setupLock = fixture.AcquireLock();
+        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        completionBarrier.WaitUntilReached(cancellation.Token);
+        using var verificationBarrier = fixture.Platform.AddBarrier(
+            $"file.read:{fixture.TargetPath}", cancellation.Token);
+        completionBarrier.Release();
+        verificationBarrier.WaitUntilReached(cancellation.Token);
+        var ledgerReplace = $"file.replace:{fixture.Paths.OwnershipLedger}.tmp->{fixture.Paths.OwnershipLedger}";
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(ledgerReplace, new IOException("private-ledger-after"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault(ledgerReplace, new IOException("private-ledger-before"));
+        }
+
+        verificationBarrier.Release();
+        var result = await recovery;
+
+        Assert.Equal(afterEffect ? SetupRecoveryDisposition.Recovered : SetupRecoveryDisposition.Failed,
+            result.Disposition);
+        Assert.Equal(afterEffect ? SetupCodes.InterruptedApplyRecovered : SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(SetupJournalPhase.Restored, fixture.LoadJournal().Phase);
+        Assert.Equal(afterEffect ? SetupChangeSetState.Restored : SetupChangeSetState.Compensating,
+            fixture.LoadChangeSet().State);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+
+        if (!afterEffect)
+        {
+            setupLock.Dispose();
+            using var retryLock = fixture.AcquireLock();
+            var retried = fixture.ReopenCoordinator().RecoverNext(retryLock);
+            Assert.Equal(SetupRecoveryDisposition.Recovered, retried.Disposition);
+            Assert.Equal(SetupCodes.InterruptedApplyRecovered, retried.Code);
+            Assert.Equal(SetupChangeSetState.Restored, fixture.LoadChangeSet().State);
+        }
+    }
+
+    [Theory]
+    [InlineData("missing-backup")]
+    [InlineData("corrupt-backup")]
+    [InlineData("reparse-backup")]
+    [InlineData("unsafe-target")]
+    public void RecoverNext_Active_file_rejects_untrusted_backup_or_path_without_target_write(string variant)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        var backup = fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId);
+        if (variant == "missing-backup")
+        {
+            fixture.Platform.FileSystem.DeleteFile(backup);
+        }
+        else if (variant == "corrupt-backup")
+        {
+            fixture.Platform.SeedFile(backup, Encoding.UTF8.GetBytes("private-backup-corruption"));
+        }
+        else if (variant == "reparse-backup")
+        {
+            fixture.Platform.SeedPathMetadata(
+                backup, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        }
+        else
+        {
+            fixture.Platform.SeedPathMetadata(
+                fixture.TargetPath, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        }
+
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupJournalPhase.Partial, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+        Assert.DoesNotContain("private", result.Code, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RecoverNext_Active_file_backup_rebinding_after_read_fails_closed_without_target_write()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        var backup = fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var barrier = fixture.Platform.AddBarrier($"file.read:{backup}", cancellation.Token);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        barrier.WaitUntilReached(cancellation.Token);
+        fixture.Platform.SeedPathMetadata(
+            backup, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        barrier.Release();
+
+        var result = await recovery;
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupJournalPhase.Partial, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+    }
+
+    [Theory]
+    [InlineData("plan-ledger-identity")]
+    [InlineData("ledger-backup-reference")]
+    [InlineData("journal-desired-hash")]
+    public void RecoverNext_Active_file_requires_exact_plan_ledger_journal_identity(string mismatch)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        if (mismatch == "plan-ledger-identity")
+        {
+            fixture.Platform.SeedFile(
+                fixture.Paths.GetPlan(fixture.ChangeSetId),
+                SetupPlanStore.Serialize(fixture.Plan with { SelectedTarget = "cli" }));
+        }
+        else if (mismatch == "ledger-backup-reference")
+        {
+            var planStore = new SetupPlanStore(fixture.Platform, fixture.Paths);
+            var ledgerStore = new SetupLedgerStore(fixture.Platform, fixture.Paths, planStore);
+            using var mutationLock = fixture.AcquireLock();
+            var ledger = ledgerStore.LoadForRecovery();
+            var changeSet = Assert.Single(ledger.ChangeSets);
+            ledgerStore.Save(mutationLock, ledger with
+            {
+                ChangeSets = [changeSet with
+                {
+                    Targets = [changeSet.Targets[0] with { BackupReference = "different-reference" }],
+                }],
+            });
+        }
+        else
+        {
+            var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+            var read = fixture.Platform.FileSystem.ReadAtMostBytes(
+                journalPath, SetupTransactionJournalStore.MaximumJournalBytes);
+            Assert.True(read.IsComplete);
+            var json = Encoding.UTF8.GetString(read.Bytes).Replace(
+                fixture.DesiredFileHash, new string('a', 64), StringComparison.Ordinal);
+            fixture.Platform.SeedFile(journalPath, Encoding.UTF8.GetBytes(json));
+        }
+
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupJournalPhase.Partial, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+    }
+
+    [Fact]
+    public void RecoverNext_Active_file_unproven_journal_read_leaves_ledger_behind_and_requires_recovery()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        fixture.Platform.InjectFault(
+            $"file.read-bounded:{journalPath}:{SetupTransactionJournalStore.MaximumJournalBytes}",
+            new IOException("private-journal-read"));
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(SetupJournalPhase.Applying, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet().State);
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+        Assert.DoesNotContain("private", result.Code, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RecoverNext_Rollback_handoff_remains_an_explicit_fixed_failure()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedPreparedRollbackJournalAndAppliedLedger();
 
         using var setupLock = fixture.AcquireLock();
         var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
@@ -590,7 +1144,28 @@ public sealed class SetupRecoveryTests
         Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
         Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
         Assert.Equal(fixture.ChangeSetId, result.RecoveredChangeSetId);
-        Assert.Equal(expectedOperation, result.Operation);
+        Assert.Equal(SetupRecoveryOperation.Rollback, result.Operation);
+    }
+
+    [Fact]
+    public void RecoverNext_Active_environment_apply_remains_an_explicit_fixed_handoff()
+    {
+        var fixture = new EnvironmentRecoveryFixture();
+        fixture.SeedApplyingJournalAndLedger();
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(fixture.ChangeSetId, result.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Apply, result.Operation);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("stable-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
+            operation == "environment.notify");
     }
 
     [Theory]
@@ -1157,16 +1732,25 @@ public sealed class SetupRecoveryTests
 
     private sealed class RecoveryFixture
     {
-        private RecoveryFixture()
+        private RecoveryFixture(int fileTargetCount = 1)
         {
             Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 13, 1, 2, 3, TimeSpan.Zero));
             Paths = new SetupRuntimePaths(Platform);
             ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000501");
-            FileRecordId = Guid.Parse("00000000-0000-7000-8000-000000000502");
-            TargetPath = Path.Combine(Platform.LocalApplicationData, "settings.json");
+            FileRecordIds = Enumerable.Range(0, fileTargetCount)
+                .Select(index => Guid.Parse($"00000000-0000-7000-8000-{502 + index:D12}"))
+                .ToArray();
+            TargetPaths = Enumerable.Range(0, fileTargetCount)
+                .Select(index => Path.Combine(
+                    Platform.LocalApplicationData,
+                    index == 0 ? "settings.json" : $"settings-{index}.json"))
+                .ToArray();
             Platform.SeedDirectory("C:\\");
             Platform.SeedDirectory(Platform.LocalApplicationData);
-            Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old"));
+            foreach (var targetPath in TargetPaths)
+            {
+                Platform.SeedFile(targetPath, Encoding.UTF8.GetBytes("old"));
+            }
 
             Plan = new SetupPrivatePlan(
                 1,
@@ -1175,13 +1759,13 @@ public sealed class SetupRecoveryTests
                 "vscode",
                 Platform.Clock.UtcNow,
                 "1.0.0",
-                [new SetupPrivatePlanTarget(
-                    FileRecordId,
+                FileRecordIds.Select((recordId, index) => new SetupPrivatePlanTarget(
+                    recordId,
                     SetupTargetKind.Json,
-                    TargetPath,
+                    TargetPaths[index],
                     SetupHash.File(true, Encoding.UTF8.GetBytes("old")),
                     "new",
-                    [new SetupPrivatePlanMember("setting", SetupOperation.Replace, "new")])]);
+                    [new SetupPrivatePlanMember(index == 0 ? "setting" : $"setting-{index}", SetupOperation.Replace, "new")])).ToArray());
             Planned = new SetupLedgerChangeSet(
                 ChangeSetId,
                 "github-copilot",
@@ -1191,19 +1775,19 @@ public sealed class SetupRecoveryTests
                 "1.0.0",
                 null,
                 SetupChangeSetState.Planned,
-                [new SetupLedgerTarget(
-                    FileRecordId,
+                FileRecordIds.Select((recordId, index) => new SetupLedgerTarget(
+                    recordId,
                     SetupTargetKind.Json,
-                    "settings",
+                    index == 0 ? "settings" : $"settings-{index}",
                     "github-copilot",
-                    [new SetupLedgerMember("setting", SetupOperation.Replace)],
-                    Plan.Targets[0].BaseStateHash,
+                    [new SetupLedgerMember(index == 0 ? "setting" : $"setting-{index}", SetupOperation.Replace)],
+                    Plan.Targets[index].BaseStateHash,
                     null,
                     null,
                     null,
                     SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartVsCode,
-                    "1.0.0")]);
+                    "1.0.0")).ToArray());
 
             var planStore = new SetupPlanStore(Platform, Paths);
             var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
@@ -1214,14 +1798,18 @@ public sealed class SetupRecoveryTests
         public SetupTestPlatform Platform { get; }
         public SetupRuntimePaths Paths { get; }
         public Guid ChangeSetId { get; }
-        public Guid FileRecordId { get; }
-        public string TargetPath { get; }
+        public IReadOnlyList<Guid> FileRecordIds { get; }
+        public IReadOnlyList<string> TargetPaths { get; }
+        public Guid FileRecordId => FileRecordIds[0];
+        public string TargetPath => TargetPaths[0];
         public SetupPrivatePlan Plan { get; }
         public SetupLedgerChangeSet Planned { get; }
         public string DesiredFileHash => SetupHash.File(true, Encoding.UTF8.GetBytes("new"));
         public FileChangeSetSeed PrimarySeed => new(Plan, Planned, TargetPath, FileRecordId);
 
         public static RecoveryFixture CreateFileOnly() => new();
+
+        public static RecoveryFixture CreateFileOnly(int targetCount) => new(targetCount);
 
         public SetupLock AcquireLock()
         {
@@ -1253,6 +1841,9 @@ public sealed class SetupRecoveryTests
             return new SetupLedgerStore(Platform, Paths, planStore).LoadForRecovery().ChangeSets
                 .Single(changeSet => changeSet.ChangeSetId == changeSetId);
         }
+
+        public SetupTransactionJournal LoadJournal() =>
+            new SetupTransactionJournalStore(Platform, Paths).Load(ChangeSetId)!;
 
         public void SeedCommittedApplyJournalAndApplyingLedger()
             => SeedCommittedApplyJournalAndApplyingLedger(PrimarySeed);
@@ -1329,7 +1920,7 @@ public sealed class SetupRecoveryTests
                         Plan.Targets[0].BaseStateHash,
                         DesiredFileHash,
                         FileRecordId.ToString("D"),
-                        SetupJournalStepPhase.Pending)])]);
+                    SetupJournalStepPhase.Pending)])]);
         }
 
         public FileChangeSetSeed AddFileChangeSet(
@@ -1447,6 +2038,169 @@ public sealed class SetupRecoveryTests
             journalStore.MarkTransactionPhase(setupLock.Lock!, ChangeSetId, SetupJournalPhase.Applying);
         }
 
+        public void SeedPreparedJournalAndApplyingLedger()
+        {
+            SeedPreparedApplyJournalAndBackup();
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            using var setupLock = SetupLock.TryAcquire(Platform, Paths);
+            Assert.True(setupLock.Acquired);
+            var ledger = ledgerStore.LoadForRecovery();
+            ledgerStore.Save(setupLock.Lock!, ledger with
+            {
+                ChangeSets = [Planned with
+                {
+                    State = SetupChangeSetState.Applying,
+                    Targets = [Planned.Targets[0] with
+                    {
+                        BackupReference = FileRecordId.ToString("D"),
+                        RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                    }],
+                }],
+            });
+        }
+
+        public void SeedActiveFileApply(SetupJournalStepPhase stepPhase, string currentState)
+        {
+            SeedPreparedApplyJournalAndBackup();
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            var journalStore = new SetupTransactionJournalStore(Platform, Paths);
+            using var setupLock = SetupLock.TryAcquire(Platform, Paths);
+            Assert.True(setupLock.Acquired);
+            var ledger = ledgerStore.LoadForRecovery();
+            ledgerStore.Save(setupLock.Lock!, ledger with
+            {
+                ChangeSets = [Planned with
+                {
+                    State = SetupChangeSetState.Applying,
+                    Targets = [Planned.Targets[0] with
+                    {
+                        BackupReference = FileRecordId.ToString("D"),
+                        RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                    }],
+                }],
+            });
+            journalStore.MarkTransactionPhase(setupLock.Lock!, ChangeSetId, SetupJournalPhase.Applying);
+            if (stepPhase != SetupJournalStepPhase.Pending)
+            {
+                journalStore.MarkStepPhase(setupLock.Lock!, ChangeSetId, FileRecordId, null,
+                    SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
+            }
+
+            if (stepPhase is SetupJournalStepPhase.MutationCompleted or SetupJournalStepPhase.RestoreStarted or
+                SetupJournalStepPhase.RestoreCompleted)
+            {
+                journalStore.MarkStepPhase(setupLock.Lock!, ChangeSetId, FileRecordId, null,
+                    SetupJournalStepPhase.MutationStarted, SetupJournalStepPhase.MutationCompleted);
+            }
+
+            if (stepPhase is SetupJournalStepPhase.RestoreStarted or SetupJournalStepPhase.RestoreCompleted)
+            {
+                journalStore.MarkTransactionPhase(setupLock.Lock!, ChangeSetId, SetupJournalPhase.Compensating);
+                journalStore.MarkStepPhase(setupLock.Lock!, ChangeSetId, FileRecordId, null,
+                    SetupJournalStepPhase.MutationCompleted, SetupJournalStepPhase.RestoreStarted);
+                var current = Assert.Single(ledgerStore.LoadForRecovery().ChangeSets);
+                ledgerStore.Save(setupLock.Lock!, new SetupOwnershipLedger(1,
+                    [current with { State = SetupChangeSetState.Compensating }]));
+            }
+
+            if (stepPhase == SetupJournalStepPhase.RestoreCompleted)
+            {
+                journalStore.MarkStepPhase(setupLock.Lock!, ChangeSetId, FileRecordId, null,
+                    SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+            }
+
+            if (currentState == "prior")
+            {
+                Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old"));
+            }
+            else if (currentState == "desired")
+            {
+                Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("new"));
+            }
+            else if (currentState == "third")
+            {
+                Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("third"));
+            }
+            else if (currentState == "missing")
+            {
+                Platform.FileSystem.DeleteFile(TargetPath);
+            }
+            else if (currentState == "unavailable")
+            {
+                Platform.SeedPathMetadata(
+                    TargetPath,
+                    new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+            }
+            else
+            {
+                throw new ArgumentOutOfRangeException(nameof(currentState));
+            }
+        }
+
+        public void SeedActiveFiles(IReadOnlyList<string> currentStates)
+        {
+            Assert.Equal(Plan.Targets.Count, currentStates.Count);
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            var journalStore = new SetupTransactionJournalStore(Platform, Paths);
+            var fileStep = new AtomicFileSetupStep(Platform);
+            using var setupLock = SetupLock.TryAcquire(Platform, Paths);
+            Assert.True(setupLock.Acquired);
+            Platform.SeedDirectory(Paths.Backups);
+            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            var journalTargets = new List<SetupJournalTarget>();
+            for (var index = 0; index < Plan.Targets.Count; index++)
+            {
+                var target = Plan.Targets[index];
+                fileStep.CreateBackup(
+                    Paths.GetBackup(ChangeSetId, target.RecordId),
+                    fileStep.Capture(Path.GetDirectoryName(target.TargetLocation)!, target.TargetLocation));
+                journalTargets.Add(new SetupJournalTarget(
+                    target.RecordId,
+                    target.TargetKind,
+                    [new SetupJournalStep(
+                        null,
+                        target.BaseStateHash,
+                        SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState)),
+                        target.RecordId.ToString("D"),
+                        SetupJournalStepPhase.Pending)]));
+            }
+
+            journalStore.CreatePrepared(
+                setupLock.Lock!, ChangeSetId, SetupJournalOperation.Apply, journalTargets);
+            var ledger = ledgerStore.LoadForRecovery();
+            var current = Assert.Single(ledger.ChangeSets);
+            ledgerStore.Save(setupLock.Lock!, ledger with
+            {
+                ChangeSets = [current with
+                {
+                    State = SetupChangeSetState.Applying,
+                    Targets = current.Targets.Select(target => target with
+                    {
+                        BackupReference = target.RecordId.ToString("D"),
+                        RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                    }).ToArray(),
+                }],
+            });
+            journalStore.MarkTransactionPhase(setupLock.Lock!, ChangeSetId, SetupJournalPhase.Applying);
+            foreach (var target in journalTargets)
+            {
+                journalStore.MarkStepPhase(setupLock.Lock!, ChangeSetId, target.RecordId, null,
+                    SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
+                journalStore.MarkStepPhase(setupLock.Lock!, ChangeSetId, target.RecordId, null,
+                    SetupJournalStepPhase.MutationStarted, SetupJournalStepPhase.MutationCompleted);
+            }
+
+            for (var index = 0; index < currentStates.Count; index++)
+            {
+                Platform.SeedFile(
+                    TargetPaths[index],
+                    Encoding.UTF8.GetBytes(currentStates[index] == "desired" ? "new" : currentStates[index]));
+            }
+        }
+
         public void SeedPreparedRollbackJournalAndAppliedLedger()
         {
             SeedPreparedApplyJournalAndBackup();
@@ -1476,6 +2230,19 @@ public sealed class SetupRecoveryTests
                     }],
                 }],
             });
+        }
+
+        public string NextTemporaryPath(string destination, int offset)
+        {
+            var maximum = Platform.Operations
+                .SelectMany(operation => Regex.Matches(operation,
+                    @"\.cao-00000000-0000-7000-8000-(?<value>[0-9]{12})\.tmp"))
+                .Select(match => long.Parse(match.Groups["value"].Value,
+                    System.Globalization.CultureInfo.InvariantCulture))
+                .DefaultIfEmpty(0)
+                .Max();
+            return destination + ".cao-" +
+                Guid.Parse($"00000000-0000-7000-8000-{maximum + offset + 1:D12}").ToString("D") + ".tmp";
         }
 
         public sealed record FileChangeSetSeed(
@@ -1680,6 +2447,30 @@ public sealed class SetupRecoveryTests
                         environmentStep.HashMember("ENV_A", UserEnvironmentValue.Present("desired-a")),
                         RecordId.ToString("D"),
                         SetupJournalStepPhase.Pending)])]);
+        }
+
+        public void SeedApplyingJournalAndLedger()
+        {
+            SeedPreparedApplyJournalAndBackup();
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            var journalStore = new SetupTransactionJournalStore(Platform, Paths);
+            using var setupLock = SetupLock.TryAcquire(Platform, Paths);
+            Assert.True(setupLock.Acquired);
+            var ledger = ledgerStore.LoadForRecovery();
+            ledgerStore.Save(setupLock.Lock!, ledger with
+            {
+                ChangeSets = [Planned with
+                {
+                    State = SetupChangeSetState.Applying,
+                    Targets = [Planned.Targets[0] with
+                    {
+                        BackupReference = RecordId.ToString("D"),
+                        RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                    }],
+                }],
+            });
+            journalStore.MarkTransactionPhase(setupLock.Lock!, ChangeSetId, SetupJournalPhase.Applying);
         }
 
         public void SeedRestoredApplyJournalAndCompensatingLedger()
