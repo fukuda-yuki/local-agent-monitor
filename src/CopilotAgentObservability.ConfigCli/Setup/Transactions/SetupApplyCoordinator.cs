@@ -820,7 +820,7 @@ internal sealed class SetupApplyCoordinator
             var member = target.Members[index];
             var expected = EnvironmentOperation(
                 capture.Members[index].Value,
-                DesiredEnvironmentValue(member));
+                SetupEnvironmentPlanValue.Desired(member));
             if (member.Operation != expected)
             {
                 throw new SetupApplyException(SetupCodes.RecoveryRequired);
@@ -952,7 +952,7 @@ internal sealed class SetupApplyCoordinator
                 return new SetupJournalStep(
                     member.SettingKey,
                     capture.Environment!.Members[index].Hash,
-                    environmentStep.HashMember(member.SettingKey, DesiredEnvironmentValue(member)),
+                    environmentStep.HashMember(member.SettingKey, SetupEnvironmentPlanValue.Desired(member)),
                     backupReference,
                     SetupJournalStepPhase.Pending);
             }).ToArray();
@@ -1006,7 +1006,7 @@ internal sealed class SetupApplyCoordinator
                 environmentStep.ApplyMember(
                     member.SettingKey,
                     capture.Environment!.Members[index].Hash,
-                    DesiredEnvironmentValue(member));
+                    SetupEnvironmentPlanValue.Desired(member));
                 MarkMutationCompleted(setupLock, plan.ChangeSetId, capture.Target.RecordId, member.SettingKey);
             }
         }
@@ -1030,7 +1030,9 @@ internal sealed class SetupApplyCoordinator
                     for (var index = 0; index < target.Members.Count; index++)
                     {
                         var member = target.Members[index];
-                        var desiredHash = environmentStep.HashMember(member.SettingKey, DesiredEnvironmentValue(member));
+                        var desiredHash = environmentStep.HashMember(
+                            member.SettingKey,
+                            SetupEnvironmentPlanValue.Desired(member));
                         if (!string.Equals(capture.Members[index].Hash, desiredHash, StringComparison.Ordinal))
                         {
                             throw new SetupApplyException(SetupCodes.InternalError);
@@ -1165,11 +1167,6 @@ internal sealed class SetupApplyCoordinator
 
         return true;
     }
-
-    private static UserEnvironmentValue DesiredEnvironmentValue(SetupPrivatePlanMember member) =>
-        member.Operation == SetupOperation.Remove
-            ? UserEnvironmentValue.Missing
-            : UserEnvironmentValue.Present(member.DesiredValue!);
 
     private static string GetAllowedRoot(string targetPath) =>
         Path.GetDirectoryName(targetPath) ?? throw new SetupApplyException(SetupCodes.UnsafePath);

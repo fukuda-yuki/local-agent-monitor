@@ -310,6 +310,106 @@ public sealed class SetupApplyTests
         }
     }
 
+    [Fact]
+    public void Apply_MissingToMissingNoOpEnvironmentOnlyPersistsNoChangesWithoutArtifacts()
+    {
+        var fixture = CanonicalEnvironmentApplyFixture.Create(includeChangedFile: false, includeChangedEnvironment: false);
+
+        var result = fixture.Apply();
+
+        Assert.Equal(SetupCodes.NoChanges, result.OutcomeCode);
+        Assert.Equal(SetupChangeSetState.NoChanges, result.State);
+        var environment = Assert.Single(result.Targets);
+        Assert.Equal(SetupTargetKind.Env, environment.TargetKind);
+        Assert.Equal(SetupOperation.NoOp, Assert.Single(environment.Members).Operation);
+        Assert.Null(environment.BackupReference);
+        Assert.Null(environment.AppliedStateHash);
+        Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, environment.RollbackStatus);
+        fixture.AssertNoTransactionArtifacts();
+        Assert.DoesNotContain(fixture.Platform.Operations, operation =>
+            operation.StartsWith("environment.set:", StringComparison.Ordinal));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public void Apply_ChangedFileWithMissingEnvironmentNoOpMutatesAndOwnsOnlyFile()
+    {
+        var fixture = CanonicalEnvironmentApplyFixture.Create(includeChangedFile: true, includeChangedEnvironment: false);
+
+        var result = fixture.Apply();
+
+        Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
+        Assert.Equal("new-file", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        var environment = result.Targets.Single(target => target.TargetKind == SetupTargetKind.Env);
+        Assert.Null(environment.BackupReference);
+        Assert.Null(environment.AppliedStateHash);
+        Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, environment.RollbackStatus);
+        Assert.False(fixture.Platform.FileSystem.FileExists(fixture.EnvironmentBackupPath));
+        var journal = fixture.LoadJournal();
+        Assert.Equal(SetupEnvironmentNotification.NotRequired, journal.EnvironmentNotification);
+        Assert.Equal([fixture.FileRecordId], journal.Targets.Select(target => target.RecordId));
+        Assert.DoesNotContain(fixture.Platform.Operations, operation =>
+            operation.StartsWith("environment.set:", StringComparison.Ordinal));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
+    [Fact]
+    public void Apply_ChangedEnvironmentWithMissingNoOpUsesFullAggregateAndChangedOnlyMutationEvidence()
+    {
+        var fixture = CanonicalEnvironmentApplyFixture.Create(includeChangedFile: false, includeChangedEnvironment: true);
+        var environmentStep = new UserEnvironmentSetupStep(fixture.Platform);
+        var previous = environmentStep.Capture(fixture.EnvironmentMemberNames);
+
+        var result = fixture.Apply();
+
+        Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
+        var backup = environmentStep.ReadBackup(fixture.EnvironmentBackupPath, fixture.EnvironmentMemberNames);
+        var applied = environmentStep.Capture(fixture.EnvironmentMemberNames);
+        var changedSubset = environmentStep.Capture(["ENV_CHANGED"]);
+        var environment = Assert.Single(result.Targets);
+        Assert.Equal(previous.AggregateHash, backup.AggregateHash);
+        Assert.Equal(backup.AggregateHash, environment.PreviousStateHash);
+        Assert.Equal(applied.AggregateHash, environment.AppliedStateHash);
+        Assert.NotEqual(changedSubset.AggregateHash, environment.AppliedStateHash);
+        var journal = fixture.LoadJournal();
+        Assert.Equal(["ENV_CHANGED"], Assert.Single(journal.Targets).Steps.Select(step => step.MemberKey));
+        Assert.Equal("private-desired-marker", fixture.Platform.ReadUserEnvironment("ENV_CHANGED"));
+        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_MISSING"));
+        Assert.Equal(1, fixture.Platform.Operations.Count(operation => operation == "environment.set:ENV_CHANGED"));
+        Assert.DoesNotContain("environment.set:ENV_MISSING", fixture.Platform.Operations);
+        Assert.Equal(1, fixture.Platform.Operations.Count(operation => operation == "environment.notify"));
+        var repositorySafeLedger = Encoding.UTF8.GetString(
+            fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
+        Assert.DoesNotContain("private-desired-marker", repositorySafeLedger, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Apply_MissingNoOpBecomesPresentBeforeCaptureFailsStaleWithoutArtifactsOrEcho()
+    {
+        var fixture = CanonicalEnvironmentApplyFixture.Create(includeChangedFile: false, includeChangedEnvironment: true);
+        fixture.Revalidator.OnRevalidate = (_, _) =>
+            fixture.Platform.SeedUserEnvironment("ENV_MISSING", "private-external-marker");
+
+        var exception = Assert.Throws<SetupApplyException>(() => fixture.Apply());
+
+        Assert.Equal(SetupCodes.StalePlan, exception.Code);
+        Assert.DoesNotContain("private-external-marker", exception.Message, StringComparison.Ordinal);
+        Assert.Equal("private-external-marker", fixture.Platform.ReadUserEnvironment("ENV_MISSING"));
+        Assert.Equal("old-env", fixture.Platform.ReadUserEnvironment("ENV_CHANGED"));
+        var planned = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Planned, planned.State);
+        Assert.All(planned.Targets, target =>
+        {
+            Assert.Null(target.BackupReference);
+            Assert.Null(target.AppliedStateHash);
+            Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, target.RollbackStatus);
+        });
+        fixture.AssertNoTransactionArtifacts();
+        Assert.DoesNotContain(fixture.Platform.Operations, operation =>
+            operation.StartsWith("environment.set:", StringComparison.Ordinal));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+    }
+
     [Theory]
     [InlineData(false, SetupOperation.NoOp)]
     [InlineData(true, SetupOperation.Add)]
@@ -1202,6 +1302,156 @@ public sealed class SetupApplyTests
         string? PriorValue,
         SetupOperation Operation,
         string? DesiredValue);
+
+    private sealed class CanonicalEnvironmentApplyFixture
+    {
+        private CanonicalEnvironmentApplyFixture(bool includeChangedFile, bool includeChangedEnvironment)
+        {
+            Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 14, 1, 2, 3, TimeSpan.Zero));
+            Paths = new SetupRuntimePaths(Platform);
+            ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000121");
+            FileRecordId = Guid.Parse("00000000-0000-7000-8000-000000000122");
+            EnvironmentRecordId = Guid.Parse("00000000-0000-7000-8000-000000000123");
+            TargetPath = Path.Combine(Platform.LocalApplicationData, "canonical-settings.json");
+            Platform.SeedDirectory("C:\\");
+            Platform.SeedDirectory(Platform.LocalApplicationData);
+
+            var planTargets = new List<SetupPrivatePlanTarget>();
+            var ledgerTargets = new List<SetupLedgerTarget>();
+            if (includeChangedFile)
+            {
+                Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old-file"));
+                planTargets.Add(new SetupPrivatePlanTarget(
+                    FileRecordId,
+                    SetupTargetKind.Json,
+                    TargetPath,
+                    SetupHash.File(true, Encoding.UTF8.GetBytes("old-file")),
+                    "new-file",
+                    [new SetupPrivatePlanMember("setting", SetupOperation.Replace, "new-file")]));
+                ledgerTargets.Add(new SetupLedgerTarget(
+                    FileRecordId,
+                    SetupTargetKind.Json,
+                    "settings",
+                    "github-copilot",
+                    [new SetupLedgerMember("setting", SetupOperation.Replace)],
+                    planTargets[^1].BaseStateHash,
+                    null,
+                    null,
+                    null,
+                    SetupLedgerRollbackStatus.NotAvailable,
+                    SetupRestartRequirement.RestartVsCode,
+                    "1.0.0"));
+            }
+
+            var environmentMembers = new List<SetupPrivatePlanMember>();
+            if (includeChangedEnvironment)
+            {
+                Platform.SeedUserEnvironment("ENV_CHANGED", "old-env");
+                environmentMembers.Add(new SetupPrivatePlanMember(
+                    "ENV_CHANGED", SetupOperation.Replace, "private-desired-marker"));
+            }
+
+            environmentMembers.Add(new SetupPrivatePlanMember(
+                "ENV_MISSING", SetupOperation.NoOp, null));
+            EnvironmentMemberNames = environmentMembers.Select(member => member.SettingKey).ToArray();
+            var environmentCapture = new UserEnvironmentSetupStep(Platform).Capture(EnvironmentMemberNames);
+            planTargets.Add(new SetupPrivatePlanTarget(
+                EnvironmentRecordId,
+                SetupTargetKind.Env,
+                "current-user",
+                environmentCapture.AggregateHash,
+                "environment-allowlist",
+                environmentMembers));
+            ledgerTargets.Add(new SetupLedgerTarget(
+                EnvironmentRecordId,
+                SetupTargetKind.Env,
+                "user-environment",
+                "github-copilot",
+                environmentMembers.Select(member => new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray(),
+                environmentCapture.AggregateHash,
+                null,
+                null,
+                null,
+                SetupLedgerRollbackStatus.NotAvailable,
+                SetupRestartRequirement.RestartTerminalSession,
+                "1.0.0"));
+
+            var plan = new SetupPrivatePlan(
+                1,
+                ChangeSetId,
+                "github-copilot",
+                "cli",
+                Platform.Clock.UtcNow,
+                "1.0.0",
+                planTargets);
+            var planned = new SetupLedgerChangeSet(
+                ChangeSetId,
+                "github-copilot",
+                "cli",
+                Platform.Clock.UtcNow,
+                Platform.Clock.UtcNow,
+                "1.0.0",
+                null,
+                SetupChangeSetState.Planned,
+                ledgerTargets);
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            using var setupLock = SetupLock.TryAcquire(Platform, Paths);
+            ledgerStore.PersistPlannedChangeSet(setupLock.Lock!, plan, planned);
+            Revalidator = new RecordingRevalidator();
+            Coordinator = new SetupApplyCoordinator(
+                Platform,
+                Paths,
+                planStore,
+                ledgerStore,
+                new SetupTransactionJournalStore(Platform, Paths),
+                Revalidator);
+        }
+
+        public SetupTestPlatform Platform { get; }
+
+        public SetupRuntimePaths Paths { get; }
+
+        public Guid ChangeSetId { get; }
+
+        public Guid FileRecordId { get; }
+
+        public Guid EnvironmentRecordId { get; }
+
+        public string TargetPath { get; }
+
+        public IReadOnlyList<string> EnvironmentMemberNames { get; }
+
+        public RecordingRevalidator Revalidator { get; }
+
+        public SetupApplyCoordinator Coordinator { get; }
+
+        public string EnvironmentBackupPath => Paths.GetBackup(ChangeSetId, EnvironmentRecordId);
+
+        public static CanonicalEnvironmentApplyFixture Create(
+            bool includeChangedFile,
+            bool includeChangedEnvironment) => new(includeChangedFile, includeChangedEnvironment);
+
+        public SetupLedgerChangeSet Apply()
+        {
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            return Coordinator.Apply(acquisition.Lock!, ChangeSetId);
+        }
+
+        public SetupLedgerChangeSet LoadChangeSet() =>
+            new SetupLedgerStore(Platform, Paths, new SetupPlanStore(Platform, Paths))
+                .Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
+
+        public SetupTransactionJournal LoadJournal() =>
+            new SetupTransactionJournalStore(Platform, Paths).Load(ChangeSetId)!;
+
+        public void AssertNoTransactionArtifacts()
+        {
+            Assert.False(Platform.FileSystem.FileExists(Paths.GetTransactionJournal(ChangeSetId)));
+            Assert.False(Platform.FileSystem.FileExists(Paths.GetBackup(ChangeSetId, FileRecordId)));
+            Assert.False(Platform.FileSystem.FileExists(EnvironmentBackupPath));
+        }
+    }
 
     private sealed class ApplyFixture
     {
