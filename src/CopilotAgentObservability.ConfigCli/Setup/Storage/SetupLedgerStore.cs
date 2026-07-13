@@ -452,12 +452,23 @@ internal static partial class SetupStorageValidation
                 var member = RequireNotNull(memberValue);
                 RequirePattern(member.SettingKey, SettingKeyPattern());
                 Require(Enum.IsDefined(member.Operation));
-                Require(member.DesiredValue is not null || member.Operation == SetupOperation.Remove);
+                Require(IsValidDesiredValue(target.TargetKind, member));
             }
         }
 
         Require(targets.Select(target => target.RecordId).Distinct().Count() == targets.Count);
     }
+
+    private static bool IsValidDesiredValue(SetupTargetKind targetKind, SetupPrivatePlanMember member) =>
+        targetKind == SetupTargetKind.Env
+            ? member.Operation switch
+            {
+                SetupOperation.NoOp => true,
+                SetupOperation.Remove => member.DesiredValue is null,
+                SetupOperation.Add or SetupOperation.Replace => member.DesiredValue is not null,
+                _ => member.DesiredValue is not null,
+            }
+            : member.DesiredValue is not null || member.Operation == SetupOperation.Remove;
 
     public static void ValidateLedger(SetupOwnershipLedger ledger)
     {

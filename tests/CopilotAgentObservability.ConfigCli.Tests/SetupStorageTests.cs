@@ -246,6 +246,63 @@ public sealed class SetupStorageTests
     }
 
     [Fact]
+    public void Plan_EnvNoOpWithMissingDesiredValue_WritesVersionOneAndReopens()
+    {
+        var temporaryRoot = Path.Combine(Path.GetTempPath(), $"copilot-agent-observability-{Guid.NewGuid():N}");
+        var plan = CreatePlanWithSingleMember(SetupTargetKind.Env, SetupOperation.NoOp, null);
+        try
+        {
+            var firstPlatform = new CopilotAgentObservability.ConfigCli.Setup.Platform.SystemSetupPlatform(localApplicationData: temporaryRoot);
+            var firstPaths = new SetupRuntimePaths(firstPlatform);
+            var firstPlans = new SetupPlanStore(firstPlatform, firstPaths);
+            using (var acquired = SetupLock.TryAcquire(firstPlatform, firstPaths))
+            {
+                firstPlans.Create(acquired.Lock!, plan);
+            }
+
+            var reopenedPlatform = new CopilotAgentObservability.ConfigCli.Setup.Platform.SystemSetupPlatform(localApplicationData: temporaryRoot);
+            var reopenedPlans = new SetupPlanStore(reopenedPlatform, new SetupRuntimePaths(reopenedPlatform));
+            var reopened = reopenedPlans.Load(ChangeSetId);
+
+            Assert.Equivalent(plan, reopened, strict: true);
+        }
+        finally
+        {
+            if (Directory.Exists(temporaryRoot))
+            {
+                Directory.Delete(temporaryRoot, recursive: true);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(SetupTargetKind.Env, SetupOperation.Add)]
+    [InlineData(SetupTargetKind.Env, SetupOperation.Replace)]
+    [InlineData(SetupTargetKind.File, SetupOperation.NoOp)]
+    [InlineData(SetupTargetKind.Json, SetupOperation.NoOp)]
+    public void Plan_RejectsInvalidMissingDesiredValueForTargetAndOperation(
+        SetupTargetKind targetKind,
+        SetupOperation operation)
+    {
+        var context = CreateContext();
+        var plan = CreatePlanWithSingleMember(targetKind, operation, null);
+
+        Assert.Throws<FormatException>(() => context.PlanStore.Create(context.Lock, plan));
+        Assert.DoesNotContain(context.Platform.Operations, operationName => operationName.StartsWith("file.write:", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(SetupOperation.Remove)]
+    public void Plan_EnvRemoveWithPresentDesiredValue_IsRejected(SetupOperation operation)
+    {
+        var context = CreateContext();
+        var plan = CreatePlanWithSingleMember(SetupTargetKind.Env, operation, "DESIRED_VALUE_MARKER");
+
+        Assert.Throws<FormatException>(() => context.PlanStore.Create(context.Lock, plan));
+        Assert.DoesNotContain(context.Platform.Operations, operationName => operationName.StartsWith("file.write:", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Ledger_RoundTripsOnlyRepositorySafeFieldsInDeterministicOrder()
     {
         var context = CreateContext();
@@ -767,6 +824,26 @@ public sealed class SetupStorageTests
                 HashA,
                 "{\"github.copilot.chat.otel.enabled\":\"DESIRED_VALUE_MARKER\"}",
                 [new SetupPrivatePlanMember("github.copilot.chat.otel.enabled", SetupOperation.Replace, "DESIRED_VALUE_MARKER")]),
+        ]);
+
+    private static SetupPrivatePlan CreatePlanWithSingleMember(
+        SetupTargetKind targetKind,
+        SetupOperation operation,
+        string? desiredValue) => new(
+        1,
+        ChangeSetId,
+        "github-copilot",
+        "vscode",
+        CreatedAt,
+        "1.2.3",
+        [
+            new SetupPrivatePlanTarget(
+                RecordId,
+                targetKind,
+                targetKind == SetupTargetKind.Env ? "current-user-env" : "C:\\Synthetic\\settings.json",
+                HashA,
+                "desired-state",
+                [new SetupPrivatePlanMember("github.copilot.chat.otel.enabled", operation, desiredValue)]),
         ]);
 
     private static SetupLedgerChangeSet CreatePlannedChangeSet() => new(
