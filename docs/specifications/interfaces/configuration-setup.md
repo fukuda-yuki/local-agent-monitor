@@ -341,10 +341,14 @@ transaction recovery may restore configured targets. Successful recovery uses
 the corresponding `interrupted_*_recovered` code and still returns the bounded
 status projection. Failed recovery with a readable ledger returns
 `success=false`, `code=interrupted_recovery_failed`, both recovery-correlation
-fields, and the bounded projection with the affected entry effectively shown as
-`partial` and `outcome_code=interrupted_recovery_failed`, even if persisting that
-final ledger update failed. An unreadable, corrupt, or unsupported ledger and
-lock contention return no status projection.
+fields, and the bounded projection. The failed-recovery overlay is formed before
+the optional exact adapter-ID filter. When the affected entry is eligible, it is
+effectively shown as `partial` and
+`outcome_code=interrupted_recovery_failed`, even if persisting that final ledger
+update failed. When the filter does not match the affected entry's adapter, the
+entry is omitted while the top-level failure code and recovery correlation are
+preserved. An unreadable, corrupt, or unsupported ledger and lock contention
+return no status projection.
 
 ## Fixed result and error codes
 
@@ -1125,7 +1129,8 @@ Focused validation covers:
   yields partial rather than being overwritten;
 - committed apply/rollback journal versus stale-ledger reconciliation;
 - recovery DTO correlation for plan/apply/rollback/status and readable-ledger
-  projection after failed recovery;
+  projection after failed recovery, including omission of a nonmatching
+  failed-recovery row after the exact adapter filter;
 - status hard-cap, priority, timestamp/UUID tie-break, and adapter-filter order;
 - status immutable-field reconstruction from the ledger snapshot while changed
   installation/version/policy/manifest facts are not rediscovered;

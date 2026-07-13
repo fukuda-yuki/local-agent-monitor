@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -29,17 +30,35 @@ internal sealed class SetupStatusProjector
         activeEvidenceValidator = new SetupStatusActiveEvidenceValidator(platform, paths);
     }
 
-    public SetupChangeSetStatusResult Project(SetupLedgerChangeSet changeSet)
+    public SetupChangeSetStatusResult Project(SetupLedgerChangeSet changeSet) =>
+        ProjectCore(changeSet, changeSet, failedRecovery: false);
+
+    internal SetupChangeSetStatusResult ProjectFailedRecovery(
+        SetupLedgerChangeSet evidenceChangeSet,
+        SetupLedgerChangeSet effectiveChangeSet)
     {
-        ArgumentNullException.ThrowIfNull(changeSet);
-        var terminal = IsTerminal(changeSet.State);
+        SetupFailedRecoveryOverlayValidator.Validate(
+            evidenceChangeSet,
+            effectiveChangeSet,
+            requireTerminalEvidence: true);
+        return ProjectCore(evidenceChangeSet, effectiveChangeSet, failedRecovery: true);
+    }
+
+    private SetupChangeSetStatusResult ProjectCore(
+        SetupLedgerChangeSet evidenceChangeSet,
+        SetupLedgerChangeSet projectedChangeSet,
+        bool failedRecovery)
+    {
+        ArgumentNullException.ThrowIfNull(evidenceChangeSet);
+        ArgumentNullException.ThrowIfNull(projectedChangeSet);
+        var terminal = IsTerminal(evidenceChangeSet.State);
         SetupPrivatePlan? plan;
         SetupTransactionJournal? journal;
         var journalDisposition = SetupStatusJournalDisposition.None;
         IReadOnlyDictionary<Guid, SetupReferenceState>? activeReferences = null;
         try
         {
-            plan = planStore.Load(changeSet.ChangeSetId);
+            plan = planStore.Load(evidenceChangeSet.ChangeSetId);
             if (plan is null)
             {
                 if (!terminal)
@@ -47,22 +66,23 @@ internal sealed class SetupStatusProjector
                     throw new SetupStorageException(SetupCodes.RecoveryRequired);
                 }
 
-                return Unavailable(changeSet);
+                return Unavailable(projectedChangeSet);
             }
 
-            SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
-            journal = journalStore.Load(changeSet.ChangeSetId);
-            journalDisposition = RequireJournalLifecycle(changeSet.State, journal);
+            SetupTransactionEvidence.RequireImmutableIdentity(plan, evidenceChangeSet);
+            SetupTransactionEvidence.RequireImmutableIdentity(plan, projectedChangeSet);
+            journal = journalStore.Load(evidenceChangeSet.ChangeSetId);
+            journalDisposition = RequireJournalLifecycle(evidenceChangeSet.State, journal);
             if (journal is not null &&
                 (journalDisposition is SetupStatusJournalDisposition.Active or SetupStatusJournalDisposition.Dormant ||
                     !terminal))
             {
-                activeReferences = activeEvidenceValidator.Validate(plan, changeSet, journal);
+                activeReferences = activeEvidenceValidator.Validate(plan, evidenceChangeSet, journal);
             }
         }
         catch (SetupStorageException) when (terminal)
         {
-            return Unavailable(changeSet);
+            return Unavailable(projectedChangeSet);
         }
         catch (SetupStorageException) when (!terminal)
         {
@@ -70,7 +90,7 @@ internal sealed class SetupStatusProjector
         }
         catch (Exception exception) when (terminal && exception is FormatException or InvalidOperationException or ArgumentException)
         {
-            return Unavailable(changeSet);
+            return Unavailable(projectedChangeSet);
         }
         catch (Exception exception) when (!terminal && exception is FormatException or InvalidOperationException or ArgumentException)
         {
@@ -78,25 +98,30 @@ internal sealed class SetupStatusProjector
         }
         catch (Exception exception) when (terminal && exception is SetupFileStepException or SetupEnvironmentStepException)
         {
-            return Unavailable(changeSet);
+            return Unavailable(projectedChangeSet);
         }
         catch (Exception exception) when (!terminal && exception is SetupFileStepException or SetupEnvironmentStepException)
         {
             throw new SetupStorageException(SetupCodes.RecoveryRequired);
         }
 
-        var rollback = EvaluateRollback(plan!, changeSet, journal, journalDisposition);
+        var rollback = failedRecovery
+            ? MaskRollback(
+                projectedChangeSet,
+                EvaluateRollback(plan!, evidenceChangeSet, journal, journalDisposition))
+            : EvaluateRollback(plan!, projectedChangeSet, journal, journalDisposition);
+        var observationChangeSet = failedRecovery ? evidenceChangeSet : projectedChangeSet;
         var observations = rollback.Observations is null
-            ? ObserveTargets(plan!, changeSet)
-            : ObserveTargets(plan!, changeSet, rollback.Observations);
-        var targets = new SetupTargetResult[changeSet.Targets.Count];
+            ? ObserveTargets(plan!, observationChangeSet)
+            : ObserveTargets(plan!, observationChangeSet, rollback.Observations);
+        var targets = new SetupTargetResult[projectedChangeSet.Targets.Count];
         for (var index = 0; index < targets.Length; index++)
         {
-            var ledgerTarget = changeSet.Targets[index];
+            var ledgerTarget = projectedChangeSet.Targets[index];
             targets[index] = ledgerTarget.TargetKind == SetupTargetKind.Guidance
                 ? CreateGuidanceTarget(ledgerTarget)
                 : CreateWritableTarget(
-                    changeSet.State,
+                    projectedChangeSet.State,
                     ledgerTarget,
                     observations[index],
                     activeReferences is not null && activeReferences.TryGetValue(
@@ -109,17 +134,24 @@ internal sealed class SetupStatusProjector
 
         var writableTargets = targets.Where(target => target.TargetKind != SetupTargetKind.Guidance).ToArray();
         return new SetupChangeSetStatusResult(
-            changeSet.ChangeSetId.ToString("D"),
-            changeSet.Adapter,
-            changeSet.SelectedTarget,
-            SetupStorageJson.FormatTimestamp(changeSet.CreatedAt),
-            SetupStorageJson.FormatTimestamp(changeSet.UpdatedAt),
-            changeSet.State,
-            changeSet.OutcomeCode,
+            projectedChangeSet.ChangeSetId.ToString("D"),
+            projectedChangeSet.Adapter,
+            projectedChangeSet.SelectedTarget,
+            SetupStorageJson.FormatTimestamp(projectedChangeSet.CreatedAt),
+            SetupStorageJson.FormatTimestamp(projectedChangeSet.UpdatedAt),
+            projectedChangeSet.State,
+            projectedChangeSet.OutcomeCode,
             AggregateCurrentState(writableTargets),
             rollback.ChangeSetAvailable,
             targets);
     }
+
+    private static SetupStatusRollbackResult MaskRollback(
+        SetupLedgerChangeSet changeSet,
+        SetupStatusRollbackResult observed) => new(
+        false,
+        changeSet.Targets.ToDictionary(target => target.RecordId, _ => false),
+        observed.Observations);
 
     private IReadOnlyList<SetupStatusTargetObservation> ObserveTargets(
         SetupPrivatePlan plan,
@@ -814,4 +846,73 @@ internal sealed class SetupStatusTargetObserver
             false,
             false);
     }
+}
+
+internal static class SetupFailedRecoveryOverlayValidator
+{
+    public static void Validate(
+        SetupLedgerChangeSet evidence,
+        SetupLedgerChangeSet effective,
+        bool requireTerminalEvidence)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+        ArgumentNullException.ThrowIfNull(effective);
+        if (requireTerminalEvidence && evidence.State is not SetupChangeSetState.Applied and
+                not SetupChangeSetState.Restored and
+                not SetupChangeSetState.RolledBack ||
+            effective.State != SetupChangeSetState.Partial ||
+            effective.OutcomeCode != SetupCodes.InterruptedRecoveryFailed ||
+            effective.ChangeSetId != evidence.ChangeSetId ||
+            effective.Adapter != evidence.Adapter ||
+            effective.SelectedTarget != evidence.SelectedTarget ||
+            effective.CreatedAt != evidence.CreatedAt ||
+            effective.UpdatedAt < evidence.UpdatedAt ||
+            effective.ToolVersion != evidence.ToolVersion ||
+            effective.Targets.Count != evidence.Targets.Count)
+        {
+            throw new FormatException();
+        }
+
+        for (var index = 0; index < evidence.Targets.Count; index++)
+        {
+            var durableTarget = evidence.Targets[index];
+            var effectiveTarget = effective.Targets[index];
+            if (effectiveTarget.RecordId != durableTarget.RecordId ||
+                effectiveTarget.TargetKind != durableTarget.TargetKind ||
+                effectiveTarget.TargetLabel != durableTarget.TargetLabel ||
+                effectiveTarget.OwningAdapter != durableTarget.OwningAdapter ||
+                !effectiveTarget.Members.SequenceEqual(durableTarget.Members) ||
+                effectiveTarget.PreviousStateHash != durableTarget.PreviousStateHash ||
+                effectiveTarget.AppliedStateHash != durableTarget.AppliedStateHash ||
+                effectiveTarget.BackupReference != durableTarget.BackupReference ||
+                effectiveTarget.OutcomeCode != SetupCodes.InterruptedRecoveryFailed ||
+                effectiveTarget.RollbackStatus != SetupLedgerRollbackStatus.NotAvailable ||
+                effectiveTarget.RestartRequirement != durableTarget.RestartRequirement ||
+                !StatusProjectionMatches(effectiveTarget.StatusProjection, durableTarget.StatusProjection) ||
+                effectiveTarget.ToolVersion != durableTarget.ToolVersion)
+            {
+                throw new FormatException();
+            }
+        }
+    }
+
+    private static bool StatusProjectionMatches(SetupStatusProjection left, SetupStatusProjection right) =>
+        left.Detected == right.Detected &&
+        left.DetectedVersion == right.DetectedVersion &&
+        left.Operation == right.Operation &&
+        left.EffectiveSource == right.EffectiveSource &&
+        left.Endpoint == right.Endpoint &&
+        ExpectedResultMatches(left.ExpectedResult, right.ExpectedResult) &&
+        GuidanceMatches(left.Guidance, right.Guidance) &&
+        left.Changes.SequenceEqual(right.Changes);
+
+    private static bool ExpectedResultMatches(JsonElement? left, JsonElement? right) =>
+        left.HasValue == right.HasValue &&
+        (!left.HasValue || JsonElement.DeepEquals(left.Value, right!.Value));
+
+    private static bool GuidanceMatches(SetupStatusGuidance? left, SetupStatusGuidance? right) =>
+        left is null && right is null ||
+        left is not null && right is not null &&
+        left.Kind == right.Kind &&
+        left.Language == right.Language;
 }

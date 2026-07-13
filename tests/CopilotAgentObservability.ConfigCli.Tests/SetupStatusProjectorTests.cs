@@ -689,6 +689,226 @@ public sealed class SetupStatusProjectorTests
         Assert.DoesNotContain("PRIVATE", exception.ToString(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(SetupChangeSetState.Applied, "desired", SetupReferenceState.Desired, SetupCurrentState.Current)]
+    [InlineData(SetupChangeSetState.Applied, "previous", SetupReferenceState.Previous, SetupCurrentState.Current)]
+    [InlineData(SetupChangeSetState.Applied, "third-party", SetupReferenceState.None, SetupCurrentState.Diverged)]
+    [InlineData(SetupChangeSetState.Applied, "unavailable", SetupReferenceState.None, SetupCurrentState.Unavailable)]
+    [InlineData(SetupChangeSetState.Restored, "desired", SetupReferenceState.Desired, SetupCurrentState.Current)]
+    [InlineData(SetupChangeSetState.Restored, "previous", SetupReferenceState.Previous, SetupCurrentState.Current)]
+    [InlineData(SetupChangeSetState.Restored, "third-party", SetupReferenceState.None, SetupCurrentState.Diverged)]
+    [InlineData(SetupChangeSetState.Restored, "unavailable", SetupReferenceState.None, SetupCurrentState.Unavailable)]
+    [InlineData(SetupChangeSetState.RolledBack, "desired", SetupReferenceState.Desired, SetupCurrentState.Current)]
+    [InlineData(SetupChangeSetState.RolledBack, "previous", SetupReferenceState.Previous, SetupCurrentState.Current)]
+    [InlineData(SetupChangeSetState.RolledBack, "third-party", SetupReferenceState.None, SetupCurrentState.Diverged)]
+    [InlineData(SetupChangeSetState.RolledBack, "unavailable", SetupReferenceState.None, SetupCurrentState.Unavailable)]
+    public void ProjectFailedRecovery_UsesDurableTerminalEvidenceAndEffectivePartialLifecycle(
+        SetupChangeSetState durableState,
+        string current,
+        SetupReferenceState expectedReference,
+        SetupCurrentState expectedCurrent)
+    {
+        var fixture = StatusFixture.Create();
+        fixture.ArrangeDurableTerminal(durableState);
+        fixture.ApplyCurrentVariant(current);
+        var durable = fixture.LoadChangeSet();
+        var effective = FailedRecoveryOverlay(durable);
+
+        var result = fixture.ProjectFailedRecovery(durable, effective);
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(SetupChangeSetState.Partial, result.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.OutcomeCode);
+        Assert.Equal(SetupStorageJson.FormatTimestamp(effective.UpdatedAt), result.UpdatedAt);
+        Assert.Equal(expectedReference, target.ReferenceState);
+        Assert.Equal(expectedCurrent, target.CurrentState);
+        Assert.Equal(expectedCurrent, result.CurrentState);
+        Assert.False(target.RollbackAvailable);
+        Assert.False(result.RollbackAvailable);
+    }
+
+    [Fact]
+    public void ProjectFailedRecovery_AllNoOpTargetUsesDesiredTieWithoutRollbackOwnership()
+    {
+        var fixture = StatusFixture.Create(includeAllNoOpEnvironment: true);
+        fixture.Apply();
+        var durable = fixture.LoadChangeSet();
+
+        var result = fixture.ProjectFailedRecovery(durable, FailedRecoveryOverlay(durable));
+
+        var noOp = Assert.Single(result.Targets, target => target.Operation == SetupOperation.NoOp);
+        Assert.Equal(SetupReferenceState.Desired, noOp.ReferenceState);
+        Assert.Equal(SetupCurrentState.Current, noOp.CurrentState);
+        Assert.False(noOp.RollbackAvailable);
+        Assert.False(result.RollbackAvailable);
+    }
+
+    [Theory]
+    [InlineData("state")]
+    [InlineData("outcome")]
+    [InlineData("target-outcome")]
+    [InlineData("target-rollback")]
+    [InlineData("adapter")]
+    [InlineData("snapshot")]
+    public void ProjectFailedRecovery_RejectsInvalidOrReboundEffectiveOverlay(string variant)
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Apply();
+        var durable = fixture.LoadChangeSet();
+        var effective = FailedRecoveryOverlay(durable);
+        effective = variant switch
+        {
+            "state" => effective with { State = SetupChangeSetState.Applied },
+            "outcome" => effective with { OutcomeCode = SetupCodes.ApplySucceeded },
+            "target-outcome" => effective with
+            {
+                Targets = effective.Targets.Select(target => target with { OutcomeCode = SetupCodes.ApplySucceeded }).ToArray(),
+            },
+            "target-rollback" => effective with
+            {
+                Targets = effective.Targets.Select(target => target with { RollbackStatus = SetupLedgerRollbackStatus.Pending }).ToArray(),
+            },
+            "adapter" => effective with { Adapter = "other-adapter" },
+            "snapshot" => effective with
+            {
+                Targets = effective.Targets.Select(target => target with
+                {
+                    StatusProjection = target.StatusProjection with { DetectedVersion = "9.9.9" },
+                }).ToArray(),
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(variant)),
+        };
+
+        Assert.Throws<FormatException>(() => fixture.ProjectFailedRecovery(durable, effective));
+    }
+
+    [Fact]
+    public void ProjectFailedRecovery_MissingDurableArtifactFailsClosedAsEffectivePartialUnavailable()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Apply();
+        var durable = fixture.LoadChangeSet();
+        fixture.DeletePlan();
+
+        var result = fixture.ProjectFailedRecovery(durable, FailedRecoveryOverlay(durable));
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(SetupChangeSetState.Partial, result.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.OutcomeCode);
+        Assert.Equal(SetupReferenceState.None, target.ReferenceState);
+        Assert.Equal(SetupCurrentState.Unavailable, target.CurrentState);
+        Assert.False(result.RollbackAvailable);
+    }
+
+    [Fact]
+    public void ProjectFailedRecovery_ObservesEachPhysicalTargetOnce()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Apply();
+        var durable = fixture.LoadChangeSet();
+        var readsBefore = fixture.Platform.Operations.Count(operation =>
+            operation == $"file.read:{fixture.TargetPath}");
+        var backup = fixture.Paths.GetBackup(fixture.ChangeSetId, Assert.Single(durable.Targets).RecordId);
+        var backupReadsBefore = fixture.Platform.Operations.Count(operation =>
+            operation == $"file.read:{backup}");
+
+        fixture.ProjectFailedRecovery(durable, FailedRecoveryOverlay(durable));
+
+        Assert.Equal(readsBefore + 1, fixture.Platform.Operations.Count(operation =>
+            operation == $"file.read:{fixture.TargetPath}"));
+        Assert.Equal(backupReadsBefore + 1, fixture.Platform.Operations.Count(operation =>
+            operation == $"file.read:{backup}"));
+    }
+
+    [Fact]
+    public void ProjectFailedRecovery_AcceptsSemanticallyEqualOverlayAfterLedgerRoundTrip()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Apply();
+        var durable = fixture.LoadChangeSet();
+        var effective = RoundTripLedgerRow(FailedRecoveryOverlay(durable));
+
+        var result = fixture.ProjectFailedRecovery(durable, effective);
+
+        Assert.Equal(SetupChangeSetState.Partial, result.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.OutcomeCode);
+    }
+
+    [Fact]
+    public void ProjectFailedRecovery_AcceptsExpectedResultWithReorderedObjectProperties()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Apply();
+        var durable = fixture.LoadChangeSet();
+        var effective = FailedRecoveryOverlay(durable);
+        effective = effective with
+        {
+            Targets = effective.Targets.Select(target => target with
+            {
+                StatusProjection = target.StatusProjection with
+                {
+                    ExpectedResult = ReverseObjectProperties(target.StatusProjection.ExpectedResult!.Value),
+                },
+            }).ToArray(),
+        };
+
+        var result = fixture.ProjectFailedRecovery(durable, effective);
+
+        Assert.Equal(SetupChangeSetState.Partial, result.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.OutcomeCode);
+    }
+
+    [Fact]
+    public void Project_ExistingSingleRowApiRetainsAppliedProjectionParity()
+    {
+        var fixture = StatusFixture.Create();
+        fixture.Apply();
+        var durable = fixture.LoadChangeSet();
+
+        var existing = fixture.Project();
+        var direct = new SetupStatusProjector(fixture.Platform, fixture.Paths, fixture.PlanStore, fixture.JournalStore)
+            .Project(durable);
+
+        Assert.Equivalent(existing, direct, strict: true);
+    }
+
+    private static SetupLedgerChangeSet FailedRecoveryOverlay(SetupLedgerChangeSet durable) => durable with
+    {
+        UpdatedAt = durable.UpdatedAt.AddMinutes(1),
+        State = SetupChangeSetState.Partial,
+        OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+        Targets = durable.Targets.Select(target => target with
+        {
+            OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+            RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
+        }).ToArray(),
+    };
+
+    private static SetupLedgerChangeSet RoundTripLedgerRow(SetupLedgerChangeSet row)
+    {
+        var platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 14, 1, 2, 3, TimeSpan.Zero));
+        var paths = new SetupRuntimePaths(platform);
+        platform.SeedFile(
+            paths.OwnershipLedger,
+            SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [row])));
+        return new SetupLedgerStore(platform, paths, new SetupPlanStore(platform, paths))
+            .LoadForRecovery()
+            .ChangeSets
+            .Single();
+    }
+
+    private static JsonElement ReverseObjectProperties(JsonElement element)
+    {
+        var source = JsonNode.Parse(element.GetRawText())!.AsObject();
+        var reordered = new JsonObject();
+        foreach (var property in source.Reverse())
+        {
+            reordered[property.Key] = property.Value?.DeepClone();
+        }
+
+        return JsonDocument.Parse(reordered.ToJsonString()).RootElement.Clone();
+    }
+
     private sealed class StatusFixture
     {
         private static readonly DateTimeOffset Now = new(2026, 7, 14, 1, 2, 3, TimeSpan.Zero);
@@ -719,6 +939,8 @@ public sealed class SetupStatusProjectorTests
 
         public SetupTestPlatform Platform { get; }
         public SetupRuntimePaths Paths { get; }
+        public SetupPlanStore PlanStore => planStore;
+        public SetupTransactionJournalStore JournalStore => journalStore;
         public Guid ChangeSetId { get; }
         public string TargetPath { get; }
         public string AdditionalTargetPath => "C:\\private-status\\settings-1.json";
@@ -1008,6 +1230,25 @@ public sealed class SetupStatusProjectorTests
                 .Rollback(acquisition.Lock!, ChangeSetId);
         }
 
+        public void ArrangeDurableTerminal(SetupChangeSetState state)
+        {
+            switch (state)
+            {
+                case SetupChangeSetState.Applied:
+                    Apply();
+                    break;
+                case SetupChangeSetState.Restored:
+                    ArrangeLifecycle(SetupChangeSetState.Restored, "apply", "restored");
+                    break;
+                case SetupChangeSetState.RolledBack:
+                    Apply();
+                    Rollback();
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(state));
+            }
+        }
+
         public void MakeRollbackPartial()
         {
             var row = ledgerStore.LoadForRecovery().ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
@@ -1266,6 +1507,15 @@ public sealed class SetupStatusProjectorTests
             return new SetupStatusProjector(Platform, Paths, planStore, journalStore).Project(row);
         }
 
+        public SetupChangeSetStatusResult ProjectFailedRecovery(
+            SetupLedgerChangeSet evidence,
+            SetupLedgerChangeSet effective) =>
+            new SetupStatusProjector(Platform, Paths, planStore, journalStore)
+                .ProjectFailedRecovery(evidence, effective);
+
+        public SetupLedgerChangeSet LoadChangeSet() => ledgerStore.LoadForRecovery().ChangeSets
+            .Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
+
         public SetupRollbackPreflightResult EvaluateRollbackPreflight()
         {
             var row = ledgerStore.LoadForRecovery().ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
@@ -1399,6 +1649,10 @@ public sealed class SetupStatusProjectorTests
                 case "desired":
                     SeedTarget("desired");
                     break;
+                case "previous":
+                    SeedTarget("previous");
+                    break;
+                case "third-party":
                 case "diverged":
                     SeedTarget("third-party");
                     break;

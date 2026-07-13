@@ -291,10 +291,20 @@ public static class SetupContractValidator
             return;
         }
 
-        if (result.RecoveredChangeSetId is null ||
-            result.ChangeSets.Count(changeSet => changeSet.ChangeSetId == result.RecoveredChangeSetId &&
-                changeSet.State == SetupChangeSetState.Partial &&
-                changeSet.OutcomeCode == SetupCodes.InterruptedRecoveryFailed) != 1)
+        if (result.RecoveredChangeSetId is null)
+        {
+            Reject();
+        }
+
+        var correlated = result.ChangeSets
+            .Where(changeSet => changeSet.ChangeSetId == result.RecoveredChangeSetId)
+            .ToArray();
+        if (correlated.Length > 1 ||
+            result.Adapter is null && correlated.Length != 1 ||
+            correlated.Length == 1 &&
+            (correlated[0].State != SetupChangeSetState.Partial ||
+             correlated[0].OutcomeCode != SetupCodes.InterruptedRecoveryFailed ||
+             result.Adapter is not null && correlated[0].Adapter != result.Adapter))
         {
             Reject();
         }

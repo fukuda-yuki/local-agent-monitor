@@ -421,11 +421,11 @@ public sealed class SetupContractValidationTests
     }
 
     [Fact]
-    public void Serialize_WhenInterruptedRecoveryFailureDoesNotProjectMatchingPartialEntry_Rejects()
+    public void Serialize_WhenUnfilteredInterruptedRecoveryFailureDoesNotProjectMatchingPartialEntry_Rejects()
     {
         var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { ReferenceState = SetupReferenceState.Desired, CurrentState = SetupCurrentState.Current, RollbackAvailable = false };
         var status = new SetupChangeSetStatusResult("00000000-0000-7000-8000-000000000003", "github-copilot", "all", "2026-07-12T00:00:00Z", "2026-07-12T00:01:00Z", SetupChangeSetState.Applied, null, SetupCurrentState.Current, false, [target]);
-        var result = new SetupCommandResult(SetupCommand.Status, false, SetupCodes.InterruptedRecoveryFailed, null, "00000000-0000-7000-8000-000000000002", SetupRecoveryOperation.Apply, "github-copilot", [], [status], [], [], false);
+        var result = new SetupCommandResult(SetupCommand.Status, false, SetupCodes.InterruptedRecoveryFailed, null, "00000000-0000-7000-8000-000000000002", SetupRecoveryOperation.Apply, null, [], [status], [], [], false);
 
         var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
 
@@ -442,6 +442,68 @@ public sealed class SetupContractValidationTests
         var json = SetupJson.Serialize(result);
 
         Assert.Contains("\"outcome_code\":\"interrupted_recovery_failed\"", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Serialize_WhenFilteredInterruptedRecoveryFailureOmitsNonmatchingEntry_PreservesSerialization()
+    {
+        var result = new SetupCommandResult(
+            SetupCommand.Status,
+            false,
+            SetupCodes.InterruptedRecoveryFailed,
+            null,
+            "00000000-0000-7000-8000-000000000002",
+            SetupRecoveryOperation.Apply,
+            "other-adapter",
+            [],
+            [],
+            [],
+            [],
+            false);
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal("other-adapter", document.RootElement.GetProperty("adapter").GetString());
+        Assert.Empty(document.RootElement.GetProperty("change_sets").EnumerateArray());
+    }
+
+    [Fact]
+    public void Serialize_WhenFilteredInterruptedRecoveryFailureIncludesDifferentAdapterEntry_Rejects()
+    {
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
+        {
+            ReferenceState = SetupReferenceState.None,
+            CurrentState = SetupCurrentState.Diverged,
+            RollbackAvailable = false,
+        };
+        var status = new SetupChangeSetStatusResult(
+            "00000000-0000-7000-8000-000000000002",
+            "github-copilot",
+            "all",
+            "2026-07-12T00:00:00Z",
+            "2026-07-12T00:01:00Z",
+            SetupChangeSetState.Partial,
+            SetupCodes.InterruptedRecoveryFailed,
+            SetupCurrentState.Diverged,
+            false,
+            [target]);
+        var result = new SetupCommandResult(
+            SetupCommand.Status,
+            false,
+            SetupCodes.InterruptedRecoveryFailed,
+            null,
+            "00000000-0000-7000-8000-000000000002",
+            SetupRecoveryOperation.Apply,
+            "other-adapter",
+            [],
+            [status],
+            [],
+            [],
+            false);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
     }
 
     [Fact]
