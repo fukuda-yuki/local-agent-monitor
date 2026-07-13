@@ -185,12 +185,13 @@ receives an independent review, and commits before handing off shared files.
 **Own exactly:** `Setup/Cli/SetupOptions.cs` and `SetupOptionsTests.cs`.
 
 **Deliver:** parse an adapter slug matching exactly
-`[a-z0-9]+(?:-[a-z0-9]+)*` without registry lookup; preserve the plan target
-token unchanged and delegate its validation to the selected adapter. Preserve
-exact recognized-verb grammar and loopback endpoint normalization. Do not edit
-the adapter registry, contract validator, status projection, transactions,
-dispatcher, or CLI host. The catalog already declared in `139338a` remains
-frozen.
+`[a-z0-9]+(?:-[a-z0-9]+)*` and bounded to 1..128 UTF-16 code units without
+registry lookup. `--target` consumes exactly one nonempty option value,
+preserves that value unchanged, and delegates its validation to the selected
+adapter; an empty value returns `invalid_arguments`. Preserve exact recognized-
+verb grammar and loopback endpoint normalization. Do not edit the adapter
+registry, contract validator, status projection, transactions, dispatcher, or
+CLI host. The catalog already declared in `139338a` remains frozen.
 
 **Verify:**
 
@@ -216,12 +217,13 @@ those methods freeze before T2b owns diagnostics-carrier assertions in that
 test file.
 
 **Deliver:** one adapter-only predicate matching exactly
-`[a-z0-9]+(?:-[a-z0-9]+)*`, used for public adapter fields and the exact
-historical status adapter filter, including digit-leading historical adapter
-IDs. Do not change the shared `FixedIdentifier` predicate used by non-adapter
-fields. T2a1's target token remains preserved for adapter validation. This
-reopen changes only predicate routing: no status lifecycle/order/cap behavior,
-catalog declaration, DTO shape, or registry production behavior changes.
+`[a-z0-9]+(?:-[a-z0-9]+)*` and bounded to 1..128 UTF-16 code units, used for
+public adapter fields and the exact historical status adapter filter, including
+digit-leading historical adapter IDs. Do not change the shared
+`FixedIdentifier` predicate used by non-adapter fields. T2a1's target token
+remains preserved for adapter validation. This reopen changes only predicate
+routing: no status lifecycle/order/cap behavior, catalog declaration, DTO
+shape, or registry production behavior changes.
 
 **Verify:**
 
@@ -308,7 +310,11 @@ resolves target-specific values.
 Its executable cross-surface test gate owns the frozen parser -> non-waiting
 lock/recovery -> registry -> adapter -> validated result -> `SetupJson`
 serialization path. The production dispatcher remains serializer-free; T2d
-owns only the process/wrapper exposure of that serialization.
+owns only the process/wrapper exposure of that serialization. Its exact
+regressions assert that a digit-leading unknown adapter yields serialized
+`plan`/`unsupported_adapter` only after lock/recovery, and that an arbitrary
+nonempty target reaches a known fake adapter unchanged, returns
+`unsupported_target`, and is absent as raw text from the JSON.
 
 **Verify:**
 

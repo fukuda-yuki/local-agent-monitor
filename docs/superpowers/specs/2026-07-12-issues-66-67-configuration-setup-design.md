@@ -182,6 +182,14 @@ The implementation ownership inside the sequential T2 gate is explicit:
 | T2c command dispatcher | a fresh `SetupCommandDispatcher` and its tests only | owns the one lock/recovery policy, plan/apply/rollback result construction, final frozen-validator call, direct delegation to the status-service-produced result, and the parser-to-`SetupJson` executable test gate while production dispatch stays serializer-free |
 | T2d process/wrapper surface | `CliApplication`, help/exit/stderr mapping, their tests, and the thin PowerShell wrapper/tests | serializes/forwards the T2c result without recreating adapter or transaction behavior |
 
+T2a1 and T2a2 both bound adapter identifiers to 1..128 UTF-16 code units in
+addition to the exact regex. T2a1 consumes exactly one nonempty `--target`
+option value, preserves it unchanged for the adapter, and maps an empty value to
+`invalid_arguments`. T2c regression tests prove that a digit-leading unknown
+adapter serializes `plan`/`unsupported_adapter` only after lock/recovery, while
+an arbitrary nonempty target reaches a known fake adapter unchanged and its
+`unsupported_target` JSON does not contain the raw target.
+
 These units run T2a1 -> T2a2 -> T2b -> T2c -> T2d and are reviewed separately;
 they are not parallel file owners. The currently untracked dispatcher draft
 predates this audited ownership contract and must be abandoned before T2a1
