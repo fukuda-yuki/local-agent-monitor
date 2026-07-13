@@ -1949,6 +1949,132 @@ public sealed class SetupRecoveryTests
             Assert.Single(fixture.LoadChangeSet().Targets).RollbackStatus);
     }
 
+    [Theory]
+    [InlineData("third", SetupCodes.RollbackStale, "stale", "third", false)]
+    [InlineData("unavailable", SetupCodes.InternalError, "failed", "new", true)]
+    public void RecoverNext_File_rollback_restore_completed_preserves_third_party_or_unavailable_target(
+        string currentState,
+        string targetCode,
+        string rollbackStatus,
+        string expectedContent,
+        bool expectedReparsePoint)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileRollback("rolling_back", "restore_completed", currentState);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupRecoveryOperation.Rollback, result.Operation);
+        Assert.Equal(SetupChangeSetState.Partial, result.EffectiveChangeSet?.State);
+        var journal = fixture.LoadJournal();
+        Assert.Equal(SetupJournalPhase.Partial, journal.Phase);
+        Assert.Equal(SetupJournalStepPhase.RestoreCompleted,
+            Assert.Single(Assert.Single(journal.Targets).Steps).Phase);
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Partial, durable.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, durable.OutcomeCode);
+        var target = Assert.Single(durable.Targets);
+        Assert.Equal(fixture.DesiredFileHash, target.AppliedStateHash);
+        Assert.Equal(fixture.FileRecordId.ToString("D"), target.BackupReference);
+        Assert.Equal(targetCode, target.OutcomeCode);
+        Assert.Equal(
+            rollbackStatus == "stale" ? SetupLedgerRollbackStatus.Stale : SetupLedgerRollbackStatus.Failed,
+            target.RollbackStatus);
+        Assert.Equal(expectedContent,
+            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        var metadata = fixture.Platform.FileSystem.GetPathMetadata(fixture.TargetPath);
+        Assert.Equal(expectedReparsePoint,
+            (metadata.Attributes & FileAttributes.ReparsePoint) != 0);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+    }
+
+    [Theory]
+    [InlineData("overall-outcome")]
+    [InlineData("target-outcome")]
+    [InlineData("rollback-status")]
+    public void RecoverNext_Committed_file_rollback_rejects_noncanonical_recovery_produced_partial(
+        string variant)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedActiveFileRollback("rolling_back", "restore_completed", "prior");
+        fixture.CommitRollbackJournalOnly();
+        fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("third"));
+        using (var baselineLock = fixture.AcquireLock())
+        {
+            var baselineResult = fixture.ReopenCoordinator().RecoverNext(baselineLock);
+            Assert.Equal(SetupRecoveryDisposition.Failed, baselineResult.Disposition);
+            Assert.Equal(SetupCodes.InterruptedRecoveryFailed, baselineResult.Code);
+        }
+
+        var baseline = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Partial, baseline.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, baseline.OutcomeCode);
+        var baselineTarget = Assert.Single(baseline.Targets);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, baselineTarget.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, baselineTarget.RollbackStatus);
+        fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("old"));
+        var planStore = new SetupPlanStore(fixture.Platform, fixture.Paths);
+        var ledgerStore = new SetupLedgerStore(fixture.Platform, fixture.Paths, planStore);
+        using (var mutationLock = fixture.AcquireLock())
+        {
+            var ledger = ledgerStore.LoadForRecovery();
+            var malformed = variant switch
+            {
+                "overall-outcome" => baseline with { OutcomeCode = SetupCodes.ApplySucceeded },
+                "target-outcome" => baseline with
+                {
+                    Targets = [baselineTarget with { OutcomeCode = SetupCodes.ApplySucceeded }],
+                },
+                "rollback-status" => baseline with
+                {
+                    Targets = [baselineTarget with { RollbackStatus = SetupLedgerRollbackStatus.Pending }],
+                },
+                _ => throw new ArgumentOutOfRangeException(nameof(variant)),
+            };
+            ledgerStore.Save(mutationLock, ledger with { ChangeSets = [malformed] });
+        }
+
+        var persistedMutation = fixture.LoadChangeSet();
+        var persistedMutationTarget = Assert.Single(persistedMutation.Targets);
+        Assert.Equal(
+            variant == "overall-outcome" ? SetupCodes.ApplySucceeded : SetupCodes.InterruptedRecoveryFailed,
+            persistedMutation.OutcomeCode);
+        Assert.Equal(
+            variant == "target-outcome" ? SetupCodes.ApplySucceeded : SetupCodes.InterruptedRecoveryFailed,
+            persistedMutationTarget.OutcomeCode);
+        Assert.Equal(
+            variant == "rollback-status" ? SetupLedgerRollbackStatus.Pending :
+                SetupLedgerRollbackStatus.NotAvailable,
+            persistedMutationTarget.RollbackStatus);
+
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupRecoveryOperation.Rollback, result.Operation);
+        Assert.NotEqual(SetupChangeSetState.RolledBack, result.EffectiveChangeSet?.State);
+        Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Partial, durable.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, durable.OutcomeCode);
+        var durableTarget = Assert.Single(durable.Targets);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, durableTarget.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, durableTarget.RollbackStatus);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+    }
+
     [Fact]
     public void RecoverNext_Committed_file_rollback_partial_remains_oldest_until_previous_state_is_restored()
     {
