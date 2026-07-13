@@ -2,7 +2,8 @@ namespace CopilotAgentObservability.Telemetry.Sessions;
 
 public enum SessionCompleteness { Unbound, Partial, Rich, Full }
 public enum ObservedSessionStatus { Active, Completed, Failed, Unknown }
-public enum SessionSourceSurface { CopilotSdk, CopilotCli, VisualStudioCode, HookUnknown }
+public enum SessionSourceSurface { CopilotSdk, CopilotCli, VisualStudioCode, HookUnknown, ClaudeCode }
+public enum SessionSourceAdapter { CopilotSdkStream, CopilotCompatibleHook, ClaudeCodeOtel, ClaudeCodeHook }
 public enum SessionBindingKind { Native, ExplicitResume, ExplicitHandoff, TraceContext }
 public enum SessionContentState { Available, NotCaptured, Redacted, Unsupported, ExpiredPendingDeletion }
 public enum SessionRawRetentionState { Expiring, ExpiredPendingDeletion, NotCaptured }
@@ -35,6 +36,16 @@ public static class SessionWire
         SessionSourceSurface.CopilotCli => "copilot-cli",
         SessionSourceSurface.VisualStudioCode => "vscode",
         SessionSourceSurface.HookUnknown => "hook-unknown",
+        SessionSourceSurface.ClaudeCode => "claude-code",
+        _ => throw Invalid(value),
+    };
+
+    public static string ToWire(SessionSourceAdapter value) => value switch
+    {
+        SessionSourceAdapter.CopilotSdkStream => "copilot-sdk-stream",
+        SessionSourceAdapter.CopilotCompatibleHook => "copilot-compatible-hook",
+        SessionSourceAdapter.ClaudeCodeOtel => "claude-code-otel",
+        SessionSourceAdapter.ClaudeCodeHook => "claude-code-hook",
         _ => throw Invalid(value),
     };
 
@@ -89,6 +100,16 @@ public static class SessionWire
         "copilot-cli" => SessionSourceSurface.CopilotCli,
         "vscode" => SessionSourceSurface.VisualStudioCode,
         "hook-unknown" => SessionSourceSurface.HookUnknown,
+        "claude-code" => SessionSourceSurface.ClaudeCode,
+        _ => throw Invalid(value),
+    };
+
+    public static SessionSourceAdapter ParseSourceAdapter(string value) => value switch
+    {
+        "copilot-sdk-stream" => SessionSourceAdapter.CopilotSdkStream,
+        "copilot-compatible-hook" => SessionSourceAdapter.CopilotCompatibleHook,
+        "claude-code-otel" => SessionSourceAdapter.ClaudeCodeOtel,
+        "claude-code-hook" => SessionSourceAdapter.ClaudeCodeHook,
         _ => throw Invalid(value),
     };
 
@@ -230,7 +251,11 @@ public sealed record ObservedSessionEvent(
     string SourceEventId,
     string Type,
     DateTimeOffset OccurredAt,
-    SessionContentState ContentState)
+    SessionContentState ContentState,
+    string? SourceApplicationVersion = null,
+    string? AdapterVersion = null,
+    string? SchemaFingerprint = null,
+    string? NormalizationVersion = null)
 {
     public static ObservedSessionEvent Create(
         Guid sessionId,
@@ -239,8 +264,15 @@ public sealed record ObservedSessionEvent(
         string sourceEventId,
         string type,
         DateTimeOffset occurredAt,
-        SessionContentState contentState) =>
-        new(Guid.CreateVersion7(), sessionId, runId, null, null, null, null, sourceAdapter, sourceEventId, type, occurredAt, contentState);
+        SessionContentState contentState,
+        string? sourceApplicationVersion = null,
+        string? adapterVersion = null,
+        string? schemaFingerprint = null,
+        string? normalizationVersion = null) =>
+        new(
+            Guid.CreateVersion7(), sessionId, runId, null, null, null, null,
+            sourceAdapter, sourceEventId, type, occurredAt, contentState,
+            sourceApplicationVersion, adapterVersion, schemaFingerprint, normalizationVersion);
 }
 
 public sealed record SessionEventContent(

@@ -1,0 +1,334 @@
+{
+  "component": "session",
+  "generationCommand": "dotnet run --project scripts/test/GenerateSessionSchemaFixtures/GenerateSessionSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/session",
+  "gitStatusCommand": "git status --porcelain",
+  "fixtures": [
+    {
+      "version": 1,
+      "file": "session-v1.sqlite",
+      "sourceCommit": "ab02e362f05798537e56c50a3048e0fbe3b9bf5a",
+      "sha256": "181f263af7b2939935b1c42c4b840e62728f35775691c3675a568dca8836170c",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000001",
+        "nativeSessionId": "fixture-session-v1-native",
+        "runId": "00000002-0000-7000-8000-000000000001",
+        "eventId": "00000003-0000-7000-8000-000000000001",
+        "sourceEventId": "fixture-session-v1-event",
+        "projectorKey": "fixture-session-v1-projector",
+        "proposalId": null,
+        "draftId": null,
+        "applyId": null,
+        "rootId": null
+      }
+    },
+    {
+      "version": 2,
+      "file": "session-v2.sqlite",
+      "sourceCommit": "b5e02e0f36705eb54881c288b83f875753e11de1",
+      "sha256": "248a4bbb570fb2d551f12c583b4f3c19e491d73c58d7389ab2c9f6bcc5002afe",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000002",
+        "nativeSessionId": "fixture-session-v2-native",
+        "runId": "00000002-0000-7000-8000-000000000002",
+        "eventId": "00000003-0000-7000-8000-000000000002",
+        "sourceEventId": "fixture-session-v2-event",
+        "projectorKey": "fixture-session-v2-projector",
+        "proposalId": null,
+        "draftId": null,
+        "applyId": null,
+        "rootId": null
+      }
+    },
+    {
+      "version": 3,
+      "file": "session-v3.sqlite",
+      "sourceCommit": "8d765ad07a46556b84ca32213e86fae28d5998b1",
+      "sha256": "41516ccbd10ae9dd834a0e153cd8694db2fa96ed3949249bad4fd84182c482b1",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000003",
+        "nativeSessionId": "fixture-session-v3-native",
+        "runId": "00000002-0000-7000-8000-000000000003",
+        "eventId": "00000003-0000-7000-8000-000000000003",
+        "sourceEventId": "fixture-session-v3-event",
+        "projectorKey": "fixture-session-v3-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000003",
+        "draftId": null,
+        "applyId": null,
+        "rootId": null
+      }
+    },
+    {
+      "version": 4,
+      "file": "session-v4.sqlite",
+      "sourceCommit": "601c2beb5cb528d1e87aba0fef150b65e1dbccc0",
+      "sha256": "a2013cd3ed61788ebc859dc78afcfdb66e0156d8576c257b38cf73f750fd948b",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [
+        "Commit 601c2beb5cb528d1e87aba0fef150b65e1dbccc0 exposes no public proposal-apply persistence API; parameterized INSERTs populate proposal-apply rows only after its public CreateSchema, Write, and CreateImprovementProposal APIs create the schema and parent sentinels."
+      ],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000004",
+        "nativeSessionId": "fixture-session-v4-native",
+        "runId": "00000002-0000-7000-8000-000000000004",
+        "eventId": "00000003-0000-7000-8000-000000000004",
+        "sourceEventId": "fixture-session-v4-event",
+        "projectorKey": "fixture-session-v4-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000004",
+        "draftId": "00000005-0000-7000-8000-000000000004",
+        "applyId": "00000006-0000-7000-8000-000000000004",
+        "rootId": "00000007-0000-7000-8000-000000000004"
+      }
+    },
+    {
+      "version": 5,
+      "file": "session-v5.sqlite",
+      "sourceCommit": "30d5c8600d0d2abedecdb81944797d7213ef14c9",
+      "sha256": "9d4fb5df4f0c8c2eaeedb291fdb919c07ee29643c0f217932a66911014ae6ff2",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000005",
+        "nativeSessionId": "fixture-session-v5-native",
+        "runId": "00000002-0000-7000-8000-000000000005",
+        "eventId": "00000003-0000-7000-8000-000000000005",
+        "sourceEventId": "fixture-session-v5-event",
+        "projectorKey": "fixture-session-v5-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000005",
+        "draftId": "00000005-0000-7000-8000-000000000005",
+        "applyId": "00000006-0000-7000-8000-000000000005",
+        "rootId": "00000007-0000-7000-8000-000000000005"
+      }
+    },
+    {
+      "version": 6,
+      "file": "session-v6.sqlite",
+      "sourceCommit": "6048da1a50473fdf8701fdb2b787b5e565fec82a",
+      "sha256": "ad0ff7a49b5eec5873719ab561f00207693efaed681397707a18dd1c330270b1",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000006",
+        "nativeSessionId": "fixture-session-v6-native",
+        "runId": "00000002-0000-7000-8000-000000000006",
+        "eventId": "00000003-0000-7000-8000-000000000006",
+        "sourceEventId": "fixture-session-v6-event",
+        "projectorKey": "fixture-session-v6-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000006",
+        "draftId": "00000005-0000-7000-8000-000000000006",
+        "applyId": "00000006-0000-7000-8000-000000000006",
+        "rootId": "00000007-0000-7000-8000-000000000006"
+      }
+    },
+    {
+      "version": 7,
+      "file": "session-v7.sqlite",
+      "sourceCommit": "5a28b87c05c81acecd9121ecf68f5afa2e82deae",
+      "sha256": "1587a996030c8613b07936ae6281b1ada94231a6be032daa517e8eabdb569fd4",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000007",
+        "nativeSessionId": "fixture-session-v7-native",
+        "runId": "00000002-0000-7000-8000-000000000007",
+        "eventId": "00000003-0000-7000-8000-000000000007",
+        "sourceEventId": "fixture-session-v7-event",
+        "projectorKey": "fixture-session-v7-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000007",
+        "draftId": "00000005-0000-7000-8000-000000000007",
+        "applyId": "00000006-0000-7000-8000-000000000007",
+        "rootId": "00000007-0000-7000-8000-000000000007"
+      }
+    },
+    {
+      "version": 8,
+      "file": "session-v8.sqlite",
+      "sourceCommit": "87f4a000932481ac6240b5ec1240318c319efdb5",
+      "sha256": "424e74ebd9e91c511d01754d26b7002a38459712eb8c43d7956fce2cc92eef6f",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000008",
+        "nativeSessionId": "fixture-session-v8-native",
+        "runId": "00000002-0000-7000-8000-000000000008",
+        "eventId": "00000003-0000-7000-8000-000000000008",
+        "sourceEventId": "fixture-session-v8-event",
+        "projectorKey": "fixture-session-v8-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000008",
+        "draftId": "00000005-0000-7000-8000-000000000008",
+        "applyId": "00000006-0000-7000-8000-000000000008",
+        "rootId": "00000007-0000-7000-8000-000000000008",
+        "objectiveEvaluationId": "00000008-0000-7000-8000-000000000008"
+      }
+    },
+    {
+      "version": 9,
+      "file": "session-v9.sqlite",
+      "sourceCommit": "e55e2dfb0e306963065759716474385d337b17f6",
+      "sha256": "726fac6ca0662b0508be2801cf085cca70673d90d75d7175d2945440c76d7644",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [
+        "Commit e55e2dfb0e306963065759716474385d337b17f6 exposes RecordEffectComparison but no public comparison-ID input; after that public API persists the complete comparison graph, parameterized UPDATEs replace only its generated opaque comparison ID with the deterministic fixture sentinel so SHA-256 reproduction remains exact."
+      ],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000009",
+        "nativeSessionId": "fixture-session-v9-native",
+        "runId": "00000002-0000-7000-8000-000000000009",
+        "eventId": "00000003-0000-7000-8000-000000000009",
+        "sourceEventId": "fixture-session-v9-event",
+        "projectorKey": "fixture-session-v9-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000009",
+        "draftId": "00000005-0000-7000-8000-000000000009",
+        "applyId": "00000006-0000-7000-8000-000000000009",
+        "rootId": "00000007-0000-7000-8000-000000000009",
+        "objectiveEvaluationId": "00000008-0000-7000-8000-000000000009",
+        "secondarySessionId": "00000009-0000-7000-8000-000000000009",
+        "secondaryNativeSessionId": "fixture-session-v9-secondary-native",
+        "secondaryRunId": "00000010-0000-7000-8000-000000000009",
+        "secondaryEventId": "00000011-0000-7000-8000-000000000009",
+        "secondarySourceEventId": "fixture-session-v9-secondary-event",
+        "comparisonId": "00000012-0000-7000-8000-000000000009"
+      }
+    },
+    {
+      "version": 10,
+      "file": "session-v10.sqlite",
+      "sourceCommit": "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+      "sha256": "cdcb1a87eeac8550281ab12825c2a297941c74b5574f25ba99793004d838a60d",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [
+        "Commit cf2b15f6c9b18a68aea8dc22f48fcb3177a81346 exposes RecordEffectComparison but no public comparison-ID input; after that public API persists the complete comparison graph, parameterized UPDATEs replace only its generated opaque comparison ID with the deterministic fixture sentinel so SHA-256 reproduction remains exact."
+      ],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000010",
+        "nativeSessionId": "fixture-session-v10-native",
+        "runId": "00000002-0000-7000-8000-000000000010",
+        "eventId": "00000003-0000-7000-8000-000000000010",
+        "sourceEventId": "fixture-session-v10-event",
+        "projectorKey": "fixture-session-v10-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000010",
+        "draftId": "00000005-0000-7000-8000-000000000010",
+        "applyId": "00000006-0000-7000-8000-000000000010",
+        "rootId": "00000007-0000-7000-8000-000000000010",
+        "objectiveEvaluationId": "00000008-0000-7000-8000-000000000010",
+        "secondarySessionId": "00000009-0000-7000-8000-000000000010",
+        "secondaryNativeSessionId": "fixture-session-v10-secondary-native",
+        "secondaryRunId": "00000010-0000-7000-8000-000000000010",
+        "secondaryEventId": "00000011-0000-7000-8000-000000000010",
+        "secondarySourceEventId": "fixture-session-v10-secondary-event",
+        "comparisonId": "00000012-0000-7000-8000-000000000010"
+      }
+    },
+    {
+      "version": 10,
+      "file": "session-v10-from-v4.sqlite",
+      "sourceCommit": "601c2beb5cb528d1e87aba0fef150b65e1dbccc0",
+      "sha256": "21dfe6bceb1b950fb463178b604aefffa4a0b75a10f19dfd226e7c764a33c3a2",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000004",
+        "nativeSessionId": "fixture-session-v4-native",
+        "runId": "00000002-0000-7000-8000-000000000004",
+        "eventId": "00000003-0000-7000-8000-000000000004",
+        "sourceEventId": "fixture-session-v4-event",
+        "projectorKey": "fixture-session-v4-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000004",
+        "draftId": "00000005-0000-7000-8000-000000000004",
+        "applyId": "00000006-0000-7000-8000-000000000004",
+        "rootId": "00000007-0000-7000-8000-000000000004"
+      },
+      "lineage": {
+        "sourceVersion": 4,
+        "sourceFixture": "session-v4.sqlite",
+        "sourceFixtureSha256": "a2013cd3ed61788ebc859dc78afcfdb66e0156d8576c257b38cf73f750fd948b",
+        "upgraderCommit": "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+        "commands": [
+          "git worktree add --detach {upgraderWorktree} cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+          "dotnet build {upgraderWorktree}/src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj --configuration Release --artifacts-path {upgraderArtifacts} --nologo",
+          "dotnet {generatorAssembly} --upgrade-one {upgraderAssembly} session-v4.sqlite session-v10-from-v4.sqlite"
+        ]
+      }
+    },
+    {
+      "version": 10,
+      "file": "session-v10-from-v5.sqlite",
+      "sourceCommit": "30d5c8600d0d2abedecdb81944797d7213ef14c9",
+      "sha256": "74775c914827d116eaf0721a53c44cefd27ad4b2da15f7fa2833099f1d653605",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000005",
+        "nativeSessionId": "fixture-session-v5-native",
+        "runId": "00000002-0000-7000-8000-000000000005",
+        "eventId": "00000003-0000-7000-8000-000000000005",
+        "sourceEventId": "fixture-session-v5-event",
+        "projectorKey": "fixture-session-v5-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000005",
+        "draftId": "00000005-0000-7000-8000-000000000005",
+        "applyId": "00000006-0000-7000-8000-000000000005",
+        "rootId": "00000007-0000-7000-8000-000000000005"
+      },
+      "lineage": {
+        "sourceVersion": 5,
+        "sourceFixture": "session-v5.sqlite",
+        "sourceFixtureSha256": "9d4fb5df4f0c8c2eaeedb291fdb919c07ee29643c0f217932a66911014ae6ff2",
+        "upgraderCommit": "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+        "commands": [
+          "git worktree add --detach {upgraderWorktree} cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+          "dotnet build {upgraderWorktree}/src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj --configuration Release --artifacts-path {upgraderArtifacts} --nologo",
+          "dotnet {generatorAssembly} --upgrade-one {upgraderAssembly} session-v5.sqlite session-v10-from-v5.sqlite"
+        ]
+      }
+    },
+    {
+      "version": 10,
+      "file": "session-v10-from-v6.sqlite",
+      "sourceCommit": "6048da1a50473fdf8701fdb2b787b5e565fec82a",
+      "sha256": "26c1ddd755dd61e4b4dbcb97c6d10ac4ebdb70b1ab8c5bcc541e1f0181f4e798",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "limitations": [],
+      "sentinels": {
+        "sessionId": "00000001-0000-7000-8000-000000000006",
+        "nativeSessionId": "fixture-session-v6-native",
+        "runId": "00000002-0000-7000-8000-000000000006",
+        "eventId": "00000003-0000-7000-8000-000000000006",
+        "sourceEventId": "fixture-session-v6-event",
+        "projectorKey": "fixture-session-v6-projector",
+        "proposalId": "00000004-0000-7000-8000-000000000006",
+        "draftId": "00000005-0000-7000-8000-000000000006",
+        "applyId": "00000006-0000-7000-8000-000000000006",
+        "rootId": "00000007-0000-7000-8000-000000000006"
+      },
+      "lineage": {
+        "sourceVersion": 6,
+        "sourceFixture": "session-v6.sqlite",
+        "sourceFixtureSha256": "ad0ff7a49b5eec5873719ab561f00207693efaed681397707a18dd1c330270b1",
+        "upgraderCommit": "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+        "commands": [
+          "git worktree add --detach {upgraderWorktree} cf2b15f6c9b18a68aea8dc22f48fcb3177a81346",
+          "dotnet build {upgraderWorktree}/src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj --configuration Release --artifacts-path {upgraderArtifacts} --nologo",
+          "dotnet {generatorAssembly} --upgrade-one {upgraderAssembly} session-v6.sqlite session-v10-from-v6.sqlite"
+        ]
+      }
+    }
+  ]
+}

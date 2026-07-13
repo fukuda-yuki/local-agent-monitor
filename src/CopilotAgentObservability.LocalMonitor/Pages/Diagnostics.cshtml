@@ -174,5 +174,28 @@
             </table>
         </div>
     </details>
+
+    <section class="panel" id="source-diagnostics">
+        <div class="panel-head">
+            <span class="panel-title">ソース互換性</span>
+            <span class="panel-meta">受信元の schema と adapter の診断（sanitized metadata のみ）</span>
+        </div>
+        <div class="monitor-table-wrapper">
+            <table class="monitor-table">
+                <thead>
+                    <tr>
+                        <th>観測</th>
+                        <th>ソース</th>
+                        <th>Adapter</th>
+                        <th>互換性状態</th>
+                        <th>理由</th>
+                        <th>次の対応</th>
+                        <th>未認識数（span / event / attribute）</th>
+                    </tr>
+                </thead>
+                <tbody id="source-diagnostics-rows"></tbody>
+            </table>
+        </div>
+    </section>
 </section>
 <script src="/monitor-diagnostics.js" defer></script>

@@ -30,4 +30,14 @@
     <ProjectReference Include="..\..\src\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\..\docs\specifications\contracts\source-capabilities\v1\claude-code\hook-mapping.json"
+          Link="TestData\Claude\canonical\hook-mapping.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\Claude\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\Fidelity\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\SchemaMigrations\monitor\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\SchemaMigrations\session\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

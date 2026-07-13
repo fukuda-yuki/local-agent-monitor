@@ -1,0 +1,29 @@
+{
+  "session_id": "SYNTHETIC_SESSION_0001",
+  "prompt_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "SYNTHETIC_TRANSCRIPT_PATH",
+  "cwd": "SYNTHETIC_WORKING_DIRECTORY",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "SYNTHETIC_COMMAND_MARKER",
+    "description": "SYNTHETIC_TOOL_DESCRIPTION"
+  },
+  "permission_suggestions": [
+    {
+      "type": "addRules",
+      "rules": [
+        {
+          "toolName": "Bash",
+          "ruleContent": "SYNTHETIC_RULE_MARKER"
+        }
+      ],
+      "behavior": "allow",
+      "destination": "localSettings"
+    }
+  ]
+}

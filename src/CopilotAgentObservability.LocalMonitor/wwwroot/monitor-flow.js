@@ -23,6 +23,7 @@
   const agentSummary = document.getElementById("agent-summary");
   const agentSummaryState = document.getElementById("agent-summary-state");
   const agentSummaryMeta = document.getElementById("agent-summary-meta");
+  const sourceEvidence = document.getElementById("trace-source-evidence");
 
   const state = {
     view: "flow",
@@ -79,6 +80,133 @@
       return await resp.json();
     } catch {
       return null;
+    }
+  }
+
+  async function fetchTraceFacts() {
+    const params = new URLSearchParams({ q: traceId, period: "all", sort: "time", offset: "0", limit: "50" });
+    try {
+      const resp = await fetch(`/api/monitor/trace-list?${params}`, { cache: "no-store" });
+      if (!resp.ok) return { loadError: true };
+      const page = await resp.json();
+      return (page.items ?? []).find((item) => item.trace_id === traceId) ?? null;
+    } catch {
+      return { loadError: true };
+    }
+  }
+
+  const COMPATIBILITY_LABELS = {
+    supported: "対応済み",
+    supported_with_unknown_fields: "対応済み（未知フィールドあり）",
+    unsupported_source_version: "未対応のバージョン",
+    schema_drift_detected: "スキーマ変更を検出",
+    recognized_record_drop_detected: "認識済みレコードの欠落を検出",
+    adapter_failure: "アダプターエラー",
+  };
+  const BINDING_LABELS = { hook_only: "Hook のみ", otel_only: "OTel のみ", exact_linked: "厳密リンク済み" };
+  const COMPLETENESS_LABELS = { unbound: "未接続", partial: "部分的", rich: "詳細あり", full: "完全" };
+  const CONTENT_LABELS = {
+    available: "内容を取得済み",
+    not_captured: "内容は取得されていません",
+    redacted: "内容は編集済みです",
+    unsupported: "内容取得は未対応です",
+  };
+  const NEXT_ACTION_LABELS = {
+    none: "対応は不要です",
+    review_unknown_fields: "未知フィールドを確認してください",
+    use_compatible_source_or_update_adapter: "対応するバージョンを使用するかアダプターを更新してください",
+    capture_fixture_and_review_mapping: "fixture を取得してマッピングを確認してください",
+    restore_mapping_or_update_versioned_golden: "マッピングを復元するか versioned golden を更新してください",
+    validate_payload_and_protocol: "payload と protocol を確認してください",
+    inspect_sanitized_adapter_failure: "sanitized なアダプター診断を確認してください",
+  };
+  const REASON_LABELS = {
+    missing_native_session_id: "ネイティブ Session ID がありません",
+    missing_trace_context: "trace context がありません",
+    trace_signal_disabled: "trace signal が無効です",
+    content_capture_disabled: "内容取得が無効です",
+    unsupported_source_version: "送信元バージョンは未対応です",
+    ingest_gap: "取り込みに欠落があります",
+    hook_only: "Hook のみの証拠です",
+    historical_summary_only: "履歴サマリーのみです",
+    unknown_span_kind: "未認識の span 種別があります",
+    schema_drift_detected: "スキーマ変更のため完全性を確認できません",
+    planned_source_not_enabled: "予定された送信元が有効ではありません",
+    unknown_fields_observed: "未知フィールドがあります",
+    recognized_record_drop_detected: "認識済みレコードに欠落があります",
+    adapter_parse_failure: "payload を解析できませんでした",
+    adapter_exception: "アダプター処理に失敗しました",
+  };
+
+  function claudeUnresolvedLabel(graph) {
+    const warnings = graph?.graph_warnings ?? [];
+    if (warnings.includes("cycle_detected")) return "親子関係に循環があります";
+    if (warnings.includes("duplicate_span_id")) return "親子関係を一意に決められません";
+    if (warnings.includes("unknown_parent")) return "親スパンが見つかりません";
+    if (graph?.summary?.relationship_quality === "undeterminable") return "親子関係を一意に決められません";
+    return null;
+  }
+
+  function renderSourceEvidence(traceFacts, graph) {
+    if (!sourceEvidence) return;
+    if (traceFacts?.loadError) {
+      const message = document.createElement("span");
+      message.textContent = "ソース情報を読み込めませんでした。実行フローは取得済みの情報で表示します";
+      sourceEvidence.replaceChildren(message);
+      sourceEvidence.hidden = false;
+      return;
+    }
+    const diagnostic = traceFacts?.source_diagnostic;
+    if (diagnostic?.source_surface !== "claude-code") {
+      sourceEvidence.hidden = true;
+      sourceEvidence.replaceChildren();
+      return;
+    }
+
+    const heading = document.createElement("strong");
+    heading.textContent = `Claude Code · ${diagnostic.source_application_version ?? "バージョン —"}`;
+    const facts = document.createElement("span");
+    facts.textContent = [
+      COMPATIBILITY_LABELS[diagnostic.compatibility_state] ?? "互換性不明",
+      BINDING_LABELS[traceFacts.binding_state] ?? "接続状態不明",
+      COMPLETENESS_LABELS[traceFacts.completeness] ?? "完全性不明",
+      CONTENT_LABELS[traceFacts.content_state] ?? "内容状態不明",
+    ].join(" · ");
+    const policy = document.createElement("span");
+    policy.textContent = "親子関係は送信元の親スパンだけで判定します";
+    const reasonCodes = [...new Set([
+      ...(diagnostic.reason_codes ?? []),
+      ...(traceFacts.completeness_reason_codes ?? []),
+    ])];
+    const reasons = document.createElement("span");
+    reasons.textContent = reasonCodes.length === 0
+      ? ""
+      : `不足理由: ${reasonCodes.map((reason) => REASON_LABELS[reason] ?? "詳細は診断を確認してください").join(" · ")}`;
+    const unresolved = claudeUnresolvedLabel(graph);
+    const action = document.createElement("span");
+    action.textContent = unresolved
+      ? `${unresolved} · 次の対応: ${NEXT_ACTION_LABELS[diagnostic.next_action] ?? "診断を確認してください"}`
+      : `次の対応: ${NEXT_ACTION_LABELS[diagnostic.next_action] ?? "診断を確認してください"}`;
+    sourceEvidence.replaceChildren(heading, facts, policy);
+    if (reasonCodes.length > 0) sourceEvidence.append(reasons);
+    sourceEvidence.append(action);
+    sourceEvidence.hidden = false;
+
+    const hasTokenEvidence = [
+      traceFacts.total_tokens,
+      traceFacts.input_tokens,
+      traceFacts.output_tokens,
+      traceFacts.cache_read_tokens,
+    ].some((value) => value !== null && value !== undefined);
+    const tokenCard = document.getElementById("token-total-card");
+    if (tokenCard && !hasTokenEvidence) tokenCard.hidden = true;
+
+    if (traceFacts.content_state !== "available") {
+      root.dataset.rawAvailable = "false";
+      for (const selector of ["#copilot-open", "#copilot-drawer", "#raw-section"]) {
+        const control = document.querySelector(selector);
+        if (control) control.hidden = true;
+      }
     }
   }
 
@@ -874,8 +1002,9 @@
 
   (async () => {
     try {
-      const [spans, agentGraph] = await Promise.all([fetchAllSpans(), fetchAgentGraph()]);
+      const [spans, agentGraph, traceFacts] = await Promise.all([fetchAllSpans(), fetchAgentGraph(), fetchTraceFacts()]);
       renderAgentSummary(agentGraph);
+      renderSourceEvidence(traceFacts, agentGraph);
       model = buildModel(spans, agentGraph);
       statusLine.hidden = true;
 

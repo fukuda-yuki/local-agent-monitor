@@ -13,14 +13,32 @@ internal static class RawOtlpIngestor
         using var document = JsonDocument.Parse(payloadJson);
         ValidateRawOtlpEnvelope(document.RootElement);
 
-        return new RawTelemetryRecord(
+        return CreateRecord(payloadJson, document.RootElement, receivedAt);
+    }
+
+    public static RawTelemetryRecord CreateRecordFromPayloadJson(
+        string originalPayloadJson,
+        string recognizedPayloadJson,
+        DateTimeOffset receivedAt)
+    {
+        ArgumentNullException.ThrowIfNull(originalPayloadJson);
+        using var document = JsonDocument.Parse(recognizedPayloadJson);
+        ValidateRawOtlpEnvelope(document.RootElement);
+
+        return CreateRecord(originalPayloadJson, document.RootElement, receivedAt);
+    }
+
+    private static RawTelemetryRecord CreateRecord(
+        string originalPayloadJson,
+        JsonElement recognizedRoot,
+        DateTimeOffset receivedAt) =>
+        new RawTelemetryRecord(
             Id: null,
             Source: RawTelemetrySources.RawOtlp,
-            TraceId: FindTraceId(document.RootElement),
+            TraceId: FindTraceId(recognizedRoot),
             ReceivedAt: receivedAt,
-            ResourceAttributesJson: ExtractResourceAttributesJson(document.RootElement),
-            PayloadJson: payloadJson);
-    }
+            ResourceAttributesJson: ExtractResourceAttributesJson(recognizedRoot),
+            PayloadJson: originalPayloadJson);
 
     private static void ValidateRawOtlpEnvelope(JsonElement root)
     {

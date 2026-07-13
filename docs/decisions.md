@@ -1858,6 +1858,13 @@ Issues #62-#65 implement the Issue #61 contract with the following boundaries:
   check, reason, threshold, or status transition.
 - OTLP structural inventory is captured before lossy normalization: directly
   from accepted JSON or while decoding the original protobuf wire message.
+- A focused source-compatibility store owns observations, adapter failures,
+  and diagnostic queries. A separate ingestion transaction coordinator commits
+  raw record plus batch observation atomically; `RawTelemetryStore` and
+  `IMonitorProjectionStore` do not gain source-specific diagnostic ownership.
+- The Claude manifest registry label is
+  `claude-code-otel+claude-code-hook`; actual stored provenance is only
+  `claude-code-otel` or `claude-code-hook`.
 
 The canonical field, state, storage, HTTP, UI, safety, and test contract is
 [Source Schema Drift and Claude Code](specifications/interfaces/source-schema-drift-claude-code.md).

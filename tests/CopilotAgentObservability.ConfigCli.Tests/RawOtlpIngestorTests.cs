@@ -44,6 +44,63 @@ public class RawOtlpIngestorTests
     }
 
     [Fact]
+    public void CreateRecordFromPayloadJson_MonitorOverloadPreservesOriginalAndReadsOnlyRecognizedView()
+    {
+        const string rawMarker = "raw-only-wrong-representation";
+        const string originalPayloadJson = """
+            {
+              "resourceSpans": [{
+                "resource": {"attributes": [
+                  {"key":"client.kind","value":{"stringValue":{"marker":"raw-only-wrong-representation"}}}
+                ]},
+                "scopeSpans": [{"spans": [{
+                  "traceId":{"marker":"raw-only-wrong-representation"},
+                  "spanId":"raw-span"
+                }]}]
+              }],
+              "futureRoot": "raw-only-wrong-representation"
+            }
+            """;
+        var recognizedPayloadJson = """
+            {
+              "resourceSpans": [{
+                "resource": {"attributes": [
+                  {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}}
+                ]},
+                "scopeSpans": [{"spans": [{
+                  "traceId":"11111111111111111111111111111111",
+                  "spanId":"2222222222222222"
+                }]}]
+              }]
+            }
+            """;
+        var receivedAt = new DateTimeOffset(2026, 7, 12, 1, 2, 3, TimeSpan.Zero);
+
+        var record = RawOtlpIngestor.CreateRecordFromPayloadJson(
+            originalPayloadJson,
+            recognizedPayloadJson,
+            receivedAt);
+
+        Assert.Equal(originalPayloadJson, record.PayloadJson);
+        Assert.Equal("11111111111111111111111111111111", record.TraceId);
+        Assert.Equal(receivedAt, record.ReceivedAt);
+        Assert.DoesNotContain(rawMarker, record.ResourceAttributesJson, StringComparison.Ordinal);
+        using var attributes = JsonDocument.Parse(record.ResourceAttributesJson!);
+        Assert.Equal("vscode-copilot-chat", attributes.RootElement.GetProperty("client.kind").GetString());
+    }
+
+    [Fact]
+    public void CreateRecordFromPayloadJson_StrictPathStillRejectsWrongHierarchy()
+    {
+        const string originalPayloadJson = """{"resourceSpans":{"wrong":"hierarchy"}}""";
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            RawOtlpIngestor.CreateRecordFromPayloadJson(originalPayloadJson, DateTimeOffset.UtcNow));
+
+        Assert.Contains("top-level resourceSpans array", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CreateRecord_ExtractsTraceIdAndResourceAttributes()
     {
         using var tempDirectory = new TempDirectory();

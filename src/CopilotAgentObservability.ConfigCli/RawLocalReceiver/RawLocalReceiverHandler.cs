@@ -35,9 +35,9 @@ internal static class RawLocalReceiverHandler
 
         try
         {
-            var payloadJson = OtlpTracePayloadDecoder.DecodeTracePayload(request.ContentType, request.Body);
-            OtlpTracePayloadDecoder.EnsurePayloadContainsSpan(payloadJson);
-            var record = RawOtlpIngestor.CreateRecordFromPayloadJson(payloadJson, request.ReceivedAt);
+            var decodedPayload = OtlpTracePayloadDecoder.DecodeTracePayload(request.ContentType, request.Body);
+            OtlpTracePayloadDecoder.EnsurePayloadContainsSpan(decodedPayload.PayloadJson);
+            var record = RawOtlpIngestor.CreateRecordFromPayloadJson(decodedPayload.PayloadJson, request.ReceivedAt);
             var store = new RawTelemetryStore(request.DatabasePath);
             store.CreateSchema();
             var rawRecordId = store.Insert(record);

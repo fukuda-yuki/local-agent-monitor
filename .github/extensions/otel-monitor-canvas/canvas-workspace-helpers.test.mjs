@@ -20,6 +20,8 @@ import {
     workspaceApplyDraftReview,
     workspaceApplyConfirmation,
     workspaceSessionLabel,
+    sourceDiagnosticView,
+    workspaceContentState,
     workspaceStatusPill,
 } from "./canvas-workspace-helpers.mjs";
 import { evidenceBrowserScript } from "./canvas-evidence-helpers.mjs";
@@ -144,6 +146,61 @@ test("workspace helpers render labels, pills, deterministic gates, next actions,
     }
 });
 
+test("Claude session presentation preserves the backend source diagnostic contract and degraded next action", () => {
+    const diagnostic = {
+        source_surface: "claude-code",
+        source_application_version: "3.4.5-synthetic",
+        source_adapter: "claude-code-otel",
+        adapter_version: "adapter-v1",
+        schema_fingerprint: "a".repeat(64),
+        compatibility_state: "supported_with_unknown_fields",
+        reason_codes: ["unknown_fields_observed"],
+        next_action: "review_unknown_fields",
+        unknown_field: "must-not-escape",
+    };
+    const session = {
+        ...bound,
+        source_surfaces: ["claude-code"],
+        source_diagnostic: diagnostic,
+        binding_state: "hook_only",
+        completeness: "partial",
+        completeness_reason_codes: ["hook_only", "missing_trace_context"],
+        content_state: null,
+    };
+
+    assert.equal(workspaceSessionLabel(session, { state: "available", preview: "prompt must not replace Claude" }), "Claude Code セッション");
+    assert.deepEqual(sourceDiagnosticView(diagnostic), {
+        source_surface: "claude-code",
+        source_application_version: "3.4.5-synthetic",
+        source_adapter: "claude-code-otel",
+        adapter_version: "adapter-v1",
+        schema_fingerprint: "a".repeat(64),
+        compatibility_state: "supported_with_unknown_fields",
+        reason_codes: ["unknown_fields_observed"],
+        next_action: "review_unknown_fields",
+    });
+    assert.deepEqual(workspaceContentState(session), { state: null, label: "一致するコンテンツ状態なし" });
+    assert.deepEqual(workspaceNextActions(session, false), {
+        primary: "診断を確認",
+        secondary: "Local Monitor を開く",
+        analysis: false,
+        next_action: "review_unknown_fields",
+    });
+});
+
+test("Claude content presentation distinguishes an agreed capture state from disagreement without adding fetches", () => {
+    assert.deepEqual(workspaceContentState({ content_state: "available" }), { state: "available", label: "available" });
+    assert.deepEqual(workspaceContentState({ content_state: "not_captured" }), { state: "not_captured", label: "not_captured" });
+    assert.deepEqual(workspaceContentState({ content_state: null }), { state: null, label: "一致するコンテンツ状態なし" });
+    const html = renderWorkspaceHtml({ monitorUrl: "http://127.0.0.1:4320", healthState: "ready", token: "synthetic-token" });
+    assert.match(html, /source_diagnostic/);
+    assert.match(html, /binding_state/);
+    assert.match(html, /completeness_reason_codes/);
+    assert.match(html, /content_state/);
+    assert.doesNotMatch(html, /\/api\/claude/);
+    assert.doesNotMatch(html, /\/api\/source-diagnostics/);
+});
+
 test("workspace HTML contains the sidebar groups, four-tab shell, review cards, and no selected-session guess", () => {
     const html = renderWorkspaceHtml({
         monitorUrl: "http://127.0.0.1:4320",
@@ -157,7 +214,7 @@ test("workspace HTML contains the sidebar groups, four-tab shell, review cards, 
     assert.match(html, /\/api\/session-workspace\/resolve/);
     assert.match(html, /\/api\/session-instruction\//);
     assert.match(html, /\/analysis\?t=/);
-    assert.ok(html.includes("const firstLine=instruction.preview.split(/\\r?\\n/,1)[0].trim();if(firstLine)return firstLine.slice(0,80);}const surface="));
+    assert.ok(html.includes("const surface=Array.isArray(session.source_surfaces)?session.source_surfaces[0]:null;if(surface===\"claude-code\")return \"Claude Code セッション\";if(instruction&&instruction.state===\"available\""));
     assert.match(html, /人間評価を保存できませんでした。接続を確認して再試行してください。/);
     assert.match(html, /\.catch\(showEvaluationError\)/);
     assert.doesNotMatch(html, /innerHTML/);

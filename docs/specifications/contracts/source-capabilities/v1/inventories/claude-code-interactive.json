@@ -1,0 +1,130 @@
+{
+  "inventory_version": "v1",
+  "source_surface": "claude-code",
+  "surface_mode": "interactive",
+  "execution": {
+    "status": "blocked",
+    "observed_date": "2026-07-12",
+    "operating_system": "Windows",
+    "executable": "claude",
+    "version": "2.1.207",
+    "interactive_terminal": "unavailable",
+    "authentication": "not_checked",
+    "bounded_timeout_seconds": 60,
+    "terminal_evidence": {
+      "command": "\"operating_system=Windows\"; \"stdin_redirected=$([Console]::IsInputRedirected)\"; \"stdout_redirected=$([Console]::IsOutputRedirected)\"; \"stderr_redirected=$([Console]::IsErrorRedirected)\"",
+      "stdin_redirected": true,
+      "stdout_redirected": true,
+      "stderr_redirected": true
+    }
+  },
+  "settings_labels": {
+    "telemetry_enable": "CLAUDE_CODE_ENABLE_TELEMETRY",
+    "enhanced_trace_enable": "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
+    "traces_exporter": "OTEL_TRACES_EXPORTER",
+    "logs_exporter": "OTEL_LOGS_EXPORTER",
+    "metrics_exporter": "OTEL_METRICS_EXPORTER",
+    "otlp_protocol": "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "otlp_endpoint": "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "traces_protocol": "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+    "traces_endpoint": "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "trace_content": "OTEL_LOG_TOOL_CONTENT",
+    "prompt_content": "OTEL_LOG_USER_PROMPTS",
+    "assistant_response_content": "OTEL_LOG_ASSISTANT_RESPONSES",
+    "tool_detail": "OTEL_LOG_TOOL_DETAILS",
+    "raw_api_bodies": "OTEL_LOG_RAW_API_BODIES",
+    "beta_tracing_detailed": "ENABLE_BETA_TRACING_DETAILED",
+    "beta_tracing_endpoint": "BETA_TRACING_ENDPOINT"
+  },
+  "settings_evidence_status": "documented_only_not_effective_settings",
+  "hook_configuration_evidence_status": "documented_only_not_executed",
+  "capture_safety_constraints": {
+    "raw_api_bodies_required_state": "disabled",
+    "override_condition": "Enable OTEL_LOG_RAW_API_BODIES only with separate explicit authorization and a safely bounded capture procedure."
+  },
+  "content_capture_modes": {
+    "content_disabled": {
+      "execution_status": "not_executed",
+      "otel_structure_fixture": null,
+      "hook_structure_fixture": null,
+      "verified_fingerprints": []
+    },
+    "content_enabled_with_synthetic_markers_only": {
+      "execution_status": "not_executed",
+      "otel_structure_fixture": null,
+      "hook_structure_fixture": null,
+      "verified_fingerprints": []
+    }
+  },
+  "observed_capabilities": {
+    "otel_traces": "not_observed",
+    "otel_logs": "not_observed",
+    "otel_metrics": "not_observed",
+    "hook_events": "not_observed",
+    "native_session_identity": "not_observed",
+    "trace_span_identity": "not_observed",
+    "content_capture_gate": "not_observed"
+  },
+  "missing_structural_evidence": [
+    "content-disabled OTel structure",
+    "content-enabled OTel structure",
+    "Hook event structure",
+    "OTel schema fingerprints",
+    "Hook schema fingerprints"
+  ],
+  "documentation_provenance": [
+    {
+      "source": "Claude Code monitoring documentation",
+      "url": "https://code.claude.com/docs/en/monitoring-usage",
+      "supports": [
+        "telemetry and trace configuration labels",
+        "content-capture configuration labels"
+      ]
+    },
+    {
+      "source": "Claude Code hooks reference",
+      "url": "https://code.claude.com/docs/en/hooks",
+      "supports": [
+        "Hook lifecycle and input are producer-defined",
+        "Hook configuration is settings-based"
+      ]
+    },
+    {
+      "source": "Claude Code CLI reference",
+      "url": "https://code.claude.com/docs/en/cli-usage",
+      "supports": [
+        "Claude Code starts an interactive session by default",
+        "claude -p is a distinct non-interactive mode"
+      ]
+    }
+  ],
+  "blocker": {
+    "code": "interactive_tty_unavailable",
+    "evidence": "The execution host reports redirected standard input, output, and error. Claude Code documents its default surface as an interactive session, while non-TTY output is non-interactive. No interactive session was started.",
+    "not_substituted": "claude -p or another non-interactive mode"
+  },
+  "named_follow_up": {
+    "name": "task-7-interactive-claude-code-live-inventory-in-tty-authenticated-session",
+    "required_preconditions": [
+      "a user-authorized interactive TTY session",
+      "available Claude Code authentication",
+      "the organization under test is allowlisted for interactive enhanced tracing",
+      "a disposable local telemetry and Hook settings source",
+      "a bounded local capture sink with no persisted raw content"
+    ],
+    "required_execution": [
+      "run one bounded synthetic-marker session with content disabled",
+      "run a separate bounded synthetic-marker session with content enabled",
+      "keep OTEL_LOG_RAW_API_BODIES disabled unless separately authorized and safely bounded",
+      "record only structural OTel and Hook inventories and fingerprints",
+      "remove only artifacts created by the follow-up"
+    ]
+  },
+  "repository_safety": {
+    "contains_raw_content": false,
+    "contains_attribute_values": false,
+    "contains_credentials_or_tokens": false,
+    "contains_pii": false,
+    "contains_local_paths": false
+  }
+}

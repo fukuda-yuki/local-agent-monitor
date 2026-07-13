@@ -11,7 +11,7 @@ internal sealed partial class RawTelemetryStore
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
     }
 
-    public const int MonitorSchemaVersion = 4;
+    public const int MonitorSchemaVersion = MonitorSchemaMigrator.BaseSchemaVersion;
 
     public void CreateSchema()
     {
@@ -19,7 +19,9 @@ internal sealed partial class RawTelemetryStore
 
         using var connection = OpenConnection();
         ApplyWriteAheadLog(connection);
-        EnsureRawRecordsSchema(connection);
+        using var transaction = connection.BeginTransaction();
+        MonitorSchemaMigrator.EnsureRawRecordsSchema(connection, transaction);
+        transaction.Commit();
     }
 
     /// <summary>
@@ -36,8 +38,9 @@ internal sealed partial class RawTelemetryStore
 
         using var connection = OpenConnection();
         ApplyWriteAheadLog(connection);
-        EnsureRawRecordsSchema(connection);
-        EnsureMonitorProjectionSchema(connection);
+        using var transaction = connection.BeginTransaction();
+        MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
+        transaction.Commit();
     }
 
     private void EnsureParentDirectory()
@@ -49,210 +52,10 @@ internal sealed partial class RawTelemetryStore
         }
     }
 
-    private static void EnsureRawRecordsSchema(SqliteConnection connection)
-    {
-        ExecuteNonQuery(
-            connection,
-            """
-            CREATE TABLE IF NOT EXISTS raw_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source TEXT NOT NULL CHECK (source IN ('raw-otlp', 'collector-output', 'langfuse-export')),
-                trace_id TEXT NULL,
-                received_at TEXT NOT NULL,
-                resource_attributes_json TEXT NULL,
-                payload_json TEXT NOT NULL,
-                schema_version INTEGER NOT NULL CHECK (schema_version = 1)
-            );
-            """);
-        ExecuteNonQuery(
-            connection,
-            "CREATE INDEX IF NOT EXISTS IX_raw_records_trace_id ON raw_records(trace_id);");
-        ExecuteNonQuery(
-            connection,
-            "CREATE INDEX IF NOT EXISTS IX_raw_records_received_at ON raw_records(received_at);");
-        ExecuteNonQuery(
-            connection,
-            "CREATE INDEX IF NOT EXISTS IX_raw_records_source ON raw_records(source);");
-    }
-
-    private static void EnsureMonitorProjectionSchema(SqliteConnection connection)
-    {
-        ExecuteNonQuery(
-            connection,
-            """
-            CREATE TABLE IF NOT EXISTS schema_version (
-                component TEXT PRIMARY KEY,
-                version INTEGER NOT NULL
-            );
-            """);
-        ExecuteNonQuery(
-            connection,
-            """
-            CREATE TABLE IF NOT EXISTS monitor_ingestions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                raw_record_id INTEGER NOT NULL UNIQUE,
-                received_at TEXT NOT NULL,
-                source TEXT NOT NULL,
-                trace_id TEXT NULL,
-                client_kind TEXT NULL,
-                span_count INTEGER NULL,
-                projected_at TEXT NOT NULL,
-                span_projected_at TEXT NULL
-            );
-            """);
-        ExecuteNonQuery(
-            connection,
-            """
-            CREATE TABLE IF NOT EXISTS monitor_traces (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trace_id TEXT NOT NULL UNIQUE,
-                client_kind TEXT NULL,
-                experiment_id TEXT NULL,
-                task_id TEXT NULL,
-                task_category TEXT NULL,
-                agent_variant TEXT NULL,
-                prompt_version TEXT NULL,
-                span_count INTEGER NULL,
-                tool_call_count INTEGER NULL,
-                error_count INTEGER NULL,
-                first_seen_at TEXT NULL,
-                last_seen_at TEXT NULL,
-                projected_at TEXT NOT NULL,
-                input_tokens INTEGER NULL,
-                output_tokens INTEGER NULL,
-                total_tokens INTEGER NULL,
-                turn_count INTEGER NULL,
-                agent_invocation_count INTEGER NULL,
-                duration_ms REAL NULL,
-                primary_model TEXT NULL,
-                repository_name TEXT NULL,
-                workspace_label TEXT NULL,
-                repo_snapshot TEXT NULL,
-                cache_read_tokens INTEGER NULL,
-                cache_creation_tokens INTEGER NULL,
-                trace_status TEXT NULL
-            );
-            """);
-        ExecuteNonQuery(
-            connection,
-            """
-            CREATE TABLE IF NOT EXISTS monitor_spans (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                raw_record_id INTEGER NOT NULL,
-                trace_id TEXT NOT NULL,
-                span_id TEXT NULL,
-                parent_span_id TEXT NULL,
-                span_ordinal INTEGER NOT NULL,
-                operation TEXT NULL,
-                category TEXT NULL,
-                tool_name TEXT NULL,
-                tool_type TEXT NULL,
-                mcp_tool_name TEXT NULL,
-                mcp_server_hash TEXT NULL,
-                agent_name TEXT NULL,
-                request_model TEXT NULL,
-                response_model TEXT NULL,
-                input_tokens INTEGER NULL,
-                output_tokens INTEGER NULL,
-                total_tokens INTEGER NULL,
-                reasoning_tokens INTEGER NULL,
-                cache_read_tokens INTEGER NULL,
-                cache_creation_tokens INTEGER NULL,
-                status TEXT NULL,
-                error_type TEXT NULL,
-                finish_reasons TEXT NULL,
-                conversation_id TEXT NULL,
-                duration_ms REAL NULL,
-                start_time TEXT NULL,
-                end_time TEXT NULL,
-                projected_at TEXT NOT NULL,
-                UNIQUE(raw_record_id, span_ordinal)
-            );
-            """);
-        ExecuteNonQuery(
-            connection,
-            "CREATE INDEX IF NOT EXISTS IX_monitor_spans_trace_id ON monitor_spans(trace_id);");
-        ExecuteNonQuery(
-            connection,
-            "CREATE INDEX IF NOT EXISTS IX_monitor_spans_raw_record_id ON monitor_spans(raw_record_id);");
-
-        // Upgrade existing v1 DBs: add columns that were absent in the original DDL.
-        // CREATE TABLE IF NOT EXISTS above is a no-op on existing tables, so we
-        // use PRAGMA table_info to add missing columns idempotently.
-        AddColumnIfMissing(connection, "monitor_ingestions", "span_projected_at", "TEXT NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "input_tokens", "INTEGER NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "output_tokens", "INTEGER NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "total_tokens", "INTEGER NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "turn_count", "INTEGER NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "agent_invocation_count", "INTEGER NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "duration_ms", "REAL NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "primary_model", "TEXT NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "repository_name", "TEXT NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "workspace_label", "TEXT NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "repo_snapshot", "TEXT NULL");
-        // v4 (Sprint18, D044): cache token rollup + trace_status. Additive only;
-        // existing rows keep NULL (no backfill) and read as "unknown".
-        AddColumnIfMissing(connection, "monitor_traces", "cache_read_tokens", "INTEGER NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "cache_creation_tokens", "INTEGER NULL");
-        AddColumnIfMissing(connection, "monitor_traces", "trace_status", "TEXT NULL");
-
-        ExecuteNonQuery(
-            connection,
-            $"""
-            INSERT INTO schema_version (component, version)
-            VALUES ('monitor', {MonitorSchemaVersion})
-            ON CONFLICT (component) DO UPDATE SET version = excluded.version;
-            """);
-    }
-
-    private static void AddColumnIfMissing(SqliteConnection connection, string table, string column, string columnDdl)
-    {
-        using var pragma = connection.CreateCommand();
-        pragma.CommandText = $"PRAGMA table_info({table});";
-        using var reader = pragma.ExecuteReader();
-        while (reader.Read())
-        {
-            // Column 1 in PRAGMA table_info is the column name.
-            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
-            {
-                return; // Column already exists.
-            }
-        }
-
-        ExecuteNonQuery(connection, $"ALTER TABLE {table} ADD COLUMN {column} {columnDdl};");
-    }
-
     public long Insert(RawTelemetryRecord record)
     {
         using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            INSERT INTO raw_records (
-                source,
-                trace_id,
-                received_at,
-                resource_attributes_json,
-                payload_json,
-                schema_version
-            )
-            VALUES (
-                $source,
-                $trace_id,
-                $received_at,
-                $resource_attributes_json,
-                $payload_json,
-                $schema_version
-            );
-            SELECT last_insert_rowid();
-            """;
-        AddParameter(command, "$source", record.Source);
-        AddParameter(command, "$trace_id", record.TraceId);
-        AddParameter(command, "$received_at", record.ReceivedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
-        AddParameter(command, "$resource_attributes_json", record.ResourceAttributesJson);
-        AddParameter(command, "$payload_json", record.PayloadJson);
-        AddParameter(command, "$schema_version", record.SchemaVersion);
-        return (long)command.ExecuteScalar()!;
+        return RawTelemetryRecordSql.Insert(connection, transaction: null, record);
     }
 
     public IReadOnlyList<RawTelemetryRecord> ListRecords()

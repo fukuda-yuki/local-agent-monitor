@@ -1,0 +1,241 @@
+{
+  "manifest_version": "v1",
+  "source_surface": "claude-code",
+  "producer_contract": {
+    "label": "current-unversioned-claude-code-hooks-documentation",
+    "version": null,
+    "source_document": "https://code.claude.com/docs/en/hooks",
+    "canonical_mapping": "docs/specifications/contracts/source-capabilities/v1/claude-code/hook-mapping.json",
+    "evidence_status": "documented_not_live_observed"
+  },
+  "otel_producer_contract": {
+    "label": "current-unversioned-claude-code-monitoring-documentation",
+    "version": null,
+    "source_document": "https://code.claude.com/docs/en/monitoring-usage",
+    "canonical_mapping": "docs/specifications/contracts/source-capabilities/v1/claude-code/otel-mapping.json",
+    "otlp_descriptor_release": "v1.10.0",
+    "otlp_descriptor_commit": "ca839c51f706f5d53bfb46f06c3e90c3af3a52c6",
+    "evidence_status": "documented_not_live_observed",
+    "live_capture_observed": false,
+    "conformance_basis": "documentation-derived synthetic conformance envelopes, not captured producer payloads; matching protobuf files are descriptor-generated from the JSON semantics and byte-reproduced by ClaudeProducerFixtureContractTests"
+  },
+  "installed_executable_evidence": {
+    "version": "2.1.207",
+    "meaning": "inventory_label_only_not_hook_producer_version"
+  },
+  "verified_hook_producer_version": null,
+  "verified_otel_producer_version": null,
+  "surface_evidence": {
+    "interactive": {
+      "state": "unverified",
+      "inventory": "docs/specifications/contracts/source-capabilities/v1/inventories/claude-code-interactive.json",
+      "hook_capture_observed": false
+    },
+    "print": {
+      "state": "executed_no_hook_capture",
+      "inventory": "docs/specifications/contracts/source-capabilities/v1/inventories/claude-code-print.json",
+      "hook_capture_observed": false
+    },
+    "agent-sdk": {
+      "state": "unverified",
+      "inventory": "docs/specifications/contracts/source-capabilities/v1/inventories/claude-agent-sdk.json",
+      "hook_capture_observed": false
+    }
+  },
+  "ordered_event_allowlist": [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+    "StopFailure",
+    "SessionEnd"
+  ],
+  "error_envelope_capability": {
+    "documented_event_name": "StopFailure",
+    "availability": "documented",
+    "fixture": "hooks/stop-failure.json",
+    "stop_error_alias": "unavailable_not_documented"
+  },
+  "otel_fixtures": [
+    {
+      "path": "otel/content-disabled.json",
+      "encoding": "json",
+      "source_version_label": "documented-current-unversioned",
+      "content_gate": "disabled_redacted_prompt",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "sha256": "1606e394ee0213e2a62ab668a5253adfcaac1741f933171020101d64238ed5eb"
+    },
+    {
+      "path": "otel/content-enabled.json",
+      "encoding": "json",
+      "source_version_label": "documented-current-unversioned",
+      "content_gate": "enabled_synthetic_markers",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "sha256": "2895d004d8f989fc1bf6aec415f5a5307a251e8a583d8fe09feda07923f12cc0"
+    },
+    {
+      "path": "otel/unsupported-version.json",
+      "encoding": "json",
+      "source_version_label": "synthetic-unverified-version",
+      "content_gate": "disabled_redacted_prompt",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "evidence_label": "same_schema_unverified_evidence",
+      "version_policy": "version_not_receive_allowlist",
+      "sha256": "718b59075472bf2e8be8f6a3df421d928ddc5b46e9e81a851bdfad3d5b1e5e91"
+    },
+    {
+      "path": "otel/schema-drift.json",
+      "encoding": "json",
+      "source_version_label": "documented-current-unversioned",
+      "content_gate": "disabled_redacted_prompt",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "drift_marker": "one synthetic unknown span attribute; all documented structure is unchanged",
+      "sha256": "9b08a0ce541bdab30d218ab0864dc21bef856f3e1e0530bb0b9f5ec8593f9d65"
+    },
+    {
+      "path": "otel/content-disabled.bin",
+      "encoding": "protobuf",
+      "source_version_label": "documented-current-unversioned",
+      "content_gate": "disabled_redacted_prompt",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "semantic_source": "otel/content-disabled.json",
+      "sha256": "84d1b889e76cd2256ab446b51bd6b29a978e32e98b509d3d4c1e90825eef666e"
+    },
+    {
+      "path": "otel/content-enabled.bin",
+      "encoding": "protobuf",
+      "source_version_label": "documented-current-unversioned",
+      "content_gate": "enabled_synthetic_markers",
+      "expected_empty_registry_state": "schema_drift_detected",
+      "expected_source_adapter": "claude-code-otel",
+      "provenance": "documentation_derived_conformance_fixture",
+      "semantic_source": "otel/content-enabled.json",
+      "sha256": "9aee615fa15e98d8fe8e00941fa34a9912a48d9ae8600bb9d49f31f45167b5c6"
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "hooks/session-start.json",
+      "hook_event_name": "SessionStart",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "a11c1125641357030ffd9717e6bd2150ce4c81511b05e0a0c288fe45512450f4"
+    },
+    {
+      "path": "hooks/user-prompt-submit.json",
+      "hook_event_name": "UserPromptSubmit",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "1d8ac279cf5cb868c8307a6d486966cf954b97d3c30d1554ce97166aeb31a91b"
+    },
+    {
+      "path": "hooks/pre-tool-use.json",
+      "hook_event_name": "PreToolUse",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "4d2991b45658504e5dd4ca1a5588d1d9d75197f995d3e5f8402af15707ebc895"
+    },
+    {
+      "path": "hooks/permission-request.json",
+      "hook_event_name": "PermissionRequest",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "342b6ccbeacaa36a859ac23baba0c0267477a8a3edee627c563a50fedc23a20d"
+    },
+    {
+      "path": "hooks/post-tool-use.json",
+      "hook_event_name": "PostToolUse",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "e52759ce498b2bbe0463640cb670b8ca9b2231b493b70f8882acf338d6d01242"
+    },
+    {
+      "path": "hooks/post-tool-use-failure.json",
+      "hook_event_name": "PostToolUseFailure",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "802180518710a73c959c2cd54620d84f86e79f81f31e7bde981c88250492c658"
+    },
+    {
+      "path": "hooks/subagent-start.json",
+      "hook_event_name": "SubagentStart",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "bbe95057c5244c38f55fb02d022a75f5694a551219e0684a3687831ad8a3c679"
+    },
+    {
+      "path": "hooks/subagent-stop.json",
+      "hook_event_name": "SubagentStop",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "3715561581bbd05b182436b1ef7cec4129a68168dde8f90a1ba2749048b222b1"
+    },
+    {
+      "path": "hooks/stop.json",
+      "hook_event_name": "Stop",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "f7cfe2499016009fee0c2aa54d8175ac7b895959cc534b4226998933e52518fd"
+    },
+    {
+      "path": "hooks/stop-failure.json",
+      "hook_event_name": "StopFailure",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "d2d8f962978abe586df7eac026cdead6ab1dda42f7511ed4cd69701e26bc93b4"
+    },
+    {
+      "path": "hooks/session-end.json",
+      "hook_event_name": "SessionEnd",
+      "expected_acceptance": true,
+      "expected_rejection_reason": null,
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "b8a19209fc6717a7c8c992166b3c7026e18fe5dc33014affb0feaa0e4baa266d"
+    },
+    {
+      "path": "hooks/unsupported-event.json",
+      "hook_event_name": "Notification",
+      "expected_acceptance": false,
+      "expected_rejection_reason": "event_name_not_allowlisted",
+      "expected_source_adapter": "claude-code-hook",
+      "content_gate": "synthetic_markers_only",
+      "sha256": "25b5bd90f748aa91037be23f67ef7fe9666735380c4068b718b17ae46fb1c8df"
+    }
+  ]
+}

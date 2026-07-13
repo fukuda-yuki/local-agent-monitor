@@ -1,10 +1,10 @@
 {
   "contract_version": "v1",
   "source_surface": "claude-code",
-  "source_adapter": "not-implemented",
+  "source_adapter": "claude-code-otel+claude-code-hook",
   "support_status": "planned",
   "stability": "preview",
-  "source_version_detector": { "availability": "unknown" },
+  "source_version_detector": { "availability": "available" },
   "signals": { "trace": { "availability": "unknown" }, "log": { "availability": "unknown" }, "metric": { "availability": "unknown" }, "hook": { "availability": "unknown" }, "sdk_event": { "availability": "unknown" }, "saved_raw": { "availability": "unknown" } },
   "native_session_identity": { "availability": "unknown" },
   "trace_span_identity": { "trace_id": { "availability": "unknown" }, "span_id": { "availability": "unknown" }, "parentage": { "availability": "unknown" } },

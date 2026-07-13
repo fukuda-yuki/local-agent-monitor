@@ -74,6 +74,8 @@ public class MonitorUiTests
         Assert.Contains("Loopback bind", diagnostics);
         Assert.Contains("しきい値", diagnostics);
         Assert.Contains("id=\"ingestion-history\"", diagnostics);
+        Assert.Contains("id=\"source-diagnostics\"", diagnostics);
+        Assert.Contains("ソース互換性", diagnostics);
         Assert.Contains("/monitor-diagnostics.js", diagnostics);
         Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", diagnostics);
         Assert.DoesNotContain("leak-marker@example.com", diagnostics);
@@ -160,6 +162,30 @@ public class MonitorUiTests
         Assert.Contains("/api/monitor/ingestions", script);
         Assert.Contains("/api/monitor/traces", script);
         Assert.Contains("new EventSource('/events')", script);
+    }
+
+    [Fact]
+    public async Task DiagnosticsScript_UsesSourceDiagnosticsDtoWithoutMarkupInjection()
+    {
+        using var temp = new MonitorTempDirectory();
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp);
+
+        var script = await host.Client.GetStringAsync("/monitor-diagnostics.js");
+
+        Assert.Contains("/api/monitor/source-diagnostics${query}", script);
+        Assert.Contains("sourceDiagnosticsPageSize = 50", script);
+        Assert.Contains("maximumSourceDiagnosticsPages = 200", script);
+        Assert.Contains("seenCursors", script);
+        Assert.Contains("item.compatibility_state", script);
+        Assert.Contains("item.reason_codes", script);
+        Assert.Contains("item.next_action", script);
+        Assert.Contains("item.unknown_span_count", script);
+        Assert.Contains("item.unknown_event_count", script);
+        Assert.Contains("item.unknown_attribute_count", script);
+        Assert.Contains("textContent", script);
+        Assert.DoesNotContain("innerHTML", script);
+        Assert.DoesNotContain("setTimeout", script);
     }
 
     [Fact]

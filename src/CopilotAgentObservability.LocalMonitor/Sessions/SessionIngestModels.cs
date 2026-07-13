@@ -9,7 +9,11 @@ internal sealed record SessionIngestEnvelope(
     [property: JsonPropertyName("source_surface")] string? SourceSurface,
     [property: JsonPropertyName("native_session_id")] string? NativeSessionId,
     [property: JsonPropertyName("events")] IReadOnlyList<SessionIngestEvent>? Events,
-    [property: JsonPropertyName("explicit_link")] SessionExplicitLink? ExplicitLink = null);
+    [property: JsonPropertyName("explicit_link")] SessionExplicitLink? ExplicitLink = null,
+    [property: JsonPropertyName("source_application_version")] string? SourceApplicationVersion = null,
+    [property: JsonPropertyName("adapter_version")] string? AdapterVersion = null,
+    [property: JsonPropertyName("schema_fingerprint")] string? SchemaFingerprint = null,
+    [property: JsonPropertyName("normalization_version")] string? NormalizationVersion = null);
 
 internal sealed record SessionExplicitLink(
     [property: JsonPropertyName("source_surface")] string? SourceSurface,
@@ -31,13 +35,19 @@ internal sealed record SessionIngestEvent(
 
 internal static class SessionIngestValidation
 {
+    private const string MetadataTokenPattern = "^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$";
+
     public static bool IsValid(SessionIngestEnvelope? envelope)
     {
         if (envelope is null
             || envelope.SchemaVersion != 1
-            || envelope.SourceAdapter is not ("copilot-sdk-stream" or "copilot-compatible-hook")
-            || envelope.SourceSurface is not ("copilot-sdk" or "copilot-cli" or "vscode" or "hook-unknown")
+            || envelope.SourceAdapter is not ("copilot-sdk-stream" or "copilot-compatible-hook" or "claude-code-hook")
+            || envelope.SourceSurface is not ("copilot-sdk" or "copilot-cli" or "vscode" or "hook-unknown" or "claude-code")
             || !Bounded(envelope.NativeSessionId, 256)
+            || !OptionalMetadataToken(envelope.SourceApplicationVersion)
+            || !OptionalMetadataToken(envelope.AdapterVersion)
+            || !OptionalSha256(envelope.SchemaFingerprint)
+            || !OptionalMetadataToken(envelope.NormalizationVersion)
             || envelope.Events is null
             || envelope.Events.Count is < 1 or > 100)
         {
@@ -60,16 +70,39 @@ internal static class SessionIngestValidation
             }
         }
 
-        if ((envelope.SourceAdapter == "copilot-sdk-stream") != (envelope.SourceSurface == "copilot-sdk")) return false;
+        if (!IsValidAdapterSurface(envelope.SourceAdapter, envelope.SourceSurface)
+            || envelope.SourceAdapter == "claude-code-hook" && !HasCompleteClaudeProvenance(envelope)) return false;
         if (envelope.ExplicitLink is { } link
-            && (link.SourceSurface is not ("copilot-sdk" or "copilot-cli" or "vscode" or "hook-unknown")
+            && (link.SourceSurface is not ("copilot-sdk" or "copilot-cli" or "vscode" or "hook-unknown" or "claude-code")
                 || !Bounded(link.NativeSessionId, 256)
                 || link.Kind is not ("resume" or "handoff"))) return false;
         return true;
     }
 
+    private static bool IsValidAdapterSurface(string sourceAdapter, string sourceSurface) => sourceAdapter switch
+    {
+        "copilot-sdk-stream" => sourceSurface == "copilot-sdk",
+        "copilot-compatible-hook" => sourceSurface is "copilot-cli" or "vscode" or "hook-unknown",
+        "claude-code-hook" => sourceSurface == "claude-code",
+        _ => false,
+    };
+
+    private static bool HasCompleteClaudeProvenance(SessionIngestEnvelope envelope) =>
+        MetadataToken(envelope.AdapterVersion)
+        && MetadataToken(envelope.NormalizationVersion)
+        && (MetadataToken(envelope.SourceApplicationVersion) || envelope.SchemaFingerprint is not null);
+
     private static bool Bounded(string? value, int maximum) => !string.IsNullOrWhiteSpace(value) && value.Length <= maximum;
     private static bool OptionalBounded(string? value, int maximum) => value is null || Bounded(value, maximum);
+    private static bool OptionalMetadataToken(string? value) => value is null || MetadataToken(value);
+    private static bool MetadataToken(string? value)
+    {
+        if (value is null) return false;
+        var match = Regex.Match(value, MetadataTokenPattern, RegexOptions.CultureInvariant);
+        return match.Success && match.Length == value.Length;
+    }
+    private static bool OptionalSha256(string? value) =>
+        value is null || (value.Length == 64 && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'));
     private static bool HasExplicitOffset(string? value)
     {
         if (value is null)

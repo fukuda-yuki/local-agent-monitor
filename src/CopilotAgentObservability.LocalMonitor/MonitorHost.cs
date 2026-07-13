@@ -6,7 +6,9 @@ using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.LocalMonitor.Sessions;
+using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
@@ -62,21 +64,27 @@ internal static class MonitorHost
             kestrelOptions.Limits.MaxRequestBodySize = options.MaxRequestBodyBytes;
         });
 
-        var queue = testOptions?.Queue ?? new IngestionQueue();
+        var timeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
+        var queue = testOptions?.Queue ?? new IngestionQueue(timeProvider);
         var health = testOptions?.Health ?? new MonitorHealthState();
         health.SetLoopbackBound(true);
         var commitTimeout = testOptions?.CommitTimeout ?? DefaultCommitTimeout;
+        var sourceMetadataProvider = testOptions?.SourceMetadataProvider ?? FixedOtlpTraceSourceMetadataProvider.Default;
+        var sourceFingerprintRegistry = testOptions?.SourceFingerprintRegistry
+            ?? VerifiedSourceFingerprintRegistry.Create([], [], []);
         var eventBroker = new MonitorEventBroker();
         builder.Services.AddRazorPages();
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(health);
 
+        var compatibilityStore = testOptions?.SourceCompatibilityStore
+            ?? new SqliteSourceCompatibilityStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        compatibilityStore.CreateSchema();
         if (testOptions?.StartWriter ?? true)
         {
-            var writer = testOptions?.Writer
-                ?? new RawTelemetryStoreWriter(
-                    new RawTelemetryStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
-            var worker = new IngestionWriterWorker(queue, writer, health);
+            var commitStore = testOptions?.IngestionCommitStore
+                ?? new SqliteIngestionCommitStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+            var worker = new IngestionWriterWorker(queue, commitStore, compatibilityStore, health);
             builder.Services.AddHostedService(_ => worker);
         }
 
@@ -91,7 +99,7 @@ internal static class MonitorHost
         var analysisStore = testOptions?.AnalysisStore ?? new SqliteMonitorAnalysisStore(options.DatabasePath);
         analysisStore.CreateSchema();
         builder.Services.AddSingleton(analysisStore);
-        var sessionTimeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
+        var sessionTimeProvider = timeProvider;
         ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, sessionTimeProvider);
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
@@ -115,7 +123,12 @@ internal static class MonitorHost
         {
             // Registered after the ingestion writer so its synchronous migration
             // runs first; the projection worker also guards on migration_complete.
-            var projectionWorker = new ProjectionWorker(projectionStore, health, eventBroker: eventBroker, pollInterval: testOptions?.ProjectionPollInterval);
+            var projectionWorker = new ProjectionWorker(
+                projectionStore,
+                health,
+                compatibilityStore,
+                eventBroker: eventBroker,
+                pollInterval: testOptions?.ProjectionPollInterval);
             builder.Services.AddHostedService(_ => projectionWorker);
         }
         if (testOptions?.StartSessionOtelEnrichment ?? true)
@@ -124,6 +137,17 @@ internal static class MonitorHost
         }
 
         var app = builder.Build();
+        SourceProjectionState ProjectTrace(MonitorTraceRow row)
+        {
+            var observations = projectionStore.ListRawRecordsByTraceId(row.TraceId, 200)
+                .Select(record => record.Id is { } id ? compatibilityStore.GetByRawRecordId(id) : null)
+                .Where(observation => observation is not null)
+                .Cast<SourceCompatibilityRow>()
+                .ToArray();
+            var session = FindSessionForTrace(sessionStore, row.TraceId);
+            return SourceProjectionStateBuilder.Build(observations, session);
+        }
+
         app.UseExceptionHandler(errorApp =>
         {
             errorApp.Run(async context =>
@@ -174,7 +198,9 @@ internal static class MonitorHost
             proposalApplyService,
             sessionOtelEnricher,
             testOptions?.SessionCommitTimeout ?? DefaultCommitTimeout,
-            sessionTimeProvider);
+            sessionTimeProvider,
+            projectionStore,
+            compatibilityStore);
         app.MapGet("/api/monitor/ingestions", async context =>
         {
             if (!TryParseCursorQuery(context, out var after, out var limit))
@@ -204,6 +230,45 @@ internal static class MonitorHost
                 await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
             }
         });
+        app.MapGet("/api/monitor/source-diagnostics", async context =>
+        {
+            if (!TryParseCursorQuery(context, out var after, out var limit))
+            {
+                await WriteInvalidCursorQueryAsync(context);
+                return;
+            }
+
+            try
+            {
+                var rows = compatibilityStore.List(after, limit);
+                var items = rows.Select(row => new
+                {
+                    observation_id = row.ObservationId,
+                    ingest_batch_id = row.IngestBatchId,
+                    source_surface = row.SourceSurface,
+                    source_application_version = row.SourceApplicationVersion,
+                    source_adapter = row.SourceAdapter,
+                    adapter_version = row.AdapterVersion,
+                    schema_fingerprint = row.SchemaFingerprint,
+                    inventory_hash = row.InventoryHash,
+                    compatibility_state = row.CompatibilityState,
+                    reason_codes = row.ReasonCodes,
+                    unknown_span_count = row.UnknownSpanCount,
+                    unknown_event_count = row.UnknownEventCount,
+                    unknown_attribute_count = row.UnknownAttributeCount,
+                    observed_at = row.ObservedAt,
+                    next_action = row.NextAction,
+                });
+                long? nextCursor = rows.Count == limit && compatibilityStore.List(rows[^1].Id, 1).Count > 0
+                    ? rows[^1].Id
+                    : null;
+                await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
+            }
+            catch (PersistenceBusyException)
+            {
+                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+            }
+        });
         app.MapGet("/api/monitor/traces", async context =>
         {
             if (!TryParseCursorQuery(context, out var after, out var limit))
@@ -215,7 +280,7 @@ internal static class MonitorHost
             try
             {
                 var page = projectionStore.ListMonitorTraces(after, limit);
-                var items = page.Items.Select(ToTraceDto);
+                var items = page.Items.Select(row => ToTraceDto(row, ProjectTrace(row)));
                 long? nextCursor = page.HasMore && page.Items.Count > 0 ? page.Items[^1].Id : null;
                 await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
             }
@@ -285,7 +350,18 @@ internal static class MonitorHost
                     return;
                 }
 
-                var graph = AgentExecutionGraphBuilder.Build(projectionStore.GetSpansForTrace(traceId));
+                var spans = projectionStore.GetSpansForTrace(traceId);
+                var exactClaudeRawRecordIds = projectionStore.ListRawRecordsByTraceId(traceId, 200)
+                    .Where(record => record.Id is not null)
+                    .Where(record => string.Equals(
+                        compatibilityStore.GetByRawRecordId(record.Id!.Value)?.SourceSurface,
+                        "claude-code",
+                        StringComparison.Ordinal))
+                    .Select(record => record.Id!.Value)
+                    .ToHashSet();
+                var graph = exactClaudeRawRecordIds.Count == 0
+                    ? AgentExecutionGraphBuilder.Build(spans)
+                    : AgentExecutionGraphBuilder.Build(spans, exactClaudeRawRecordIds);
                 await WriteJsonAsync(context, new
                 {
                     summary = new
@@ -348,9 +424,9 @@ internal static class MonitorHost
                 await WriteJsonAsync(context, new
                 {
                     scope = new { limit, trace_count = summary.TraceCount },
-                    latest_trace = ToTraceDto(summary.LatestTrace),
-                    top_token_trace = ToTraceDto(summary.TopTokenTrace),
-                    error_trace = ToTraceDto(summary.ErrorTrace),
+                    latest_trace = ToTraceDto(summary.LatestTrace, summary.LatestTrace is null ? null : ProjectTrace(summary.LatestTrace)),
+                    top_token_trace = ToTraceDto(summary.TopTokenTrace, summary.TopTokenTrace is null ? null : ProjectTrace(summary.TopTokenTrace)),
+                    error_trace = ToTraceDto(summary.ErrorTrace, summary.ErrorTrace is null ? null : ProjectTrace(summary.ErrorTrace)),
                     per_model_summary = summary.PerModelSummary.Select(m => new
                     {
                         model = m.Model,
@@ -448,7 +524,7 @@ internal static class MonitorHost
             try
             {
                 var page = projectionStore.ListMonitorTracesFiltered(query);
-                var items = page.Items.Select(ToTraceListDto);
+                var items = page.Items.Select(row => ToTraceListDto(row, ProjectTrace(row)));
                 await WriteJsonAsync(context, new
                 {
                     items,
@@ -793,11 +869,35 @@ internal static class MonitorHost
                 return;
             }
 
-            string payloadJson;
+            ValidatedIngestionBatch batch;
+            OtlpTraceSourceMetadata? metadata = null;
             try
             {
-                payloadJson = OtlpTracePayloadDecoder.DecodeTracePayload(context.Request.ContentType, body);
-                OtlpTracePayloadDecoder.EnsurePayloadContainsSpan(payloadJson);
+                var observedAt = timeProvider.GetUtcNow();
+                var decodedPayload = OtlpTracePayloadDecoder.DecodeTracePayload(context.Request.ContentType, body);
+                var recognizedPayloadJson = OtlpJsonRecognizedPayloadBuilder.Build(decodedPayload.PayloadJson);
+                var record = RawOtlpIngestor.CreateRecordFromPayloadJson(
+                    decodedPayload.PayloadJson,
+                    recognizedPayloadJson,
+                    observedAt);
+                metadata = sourceMetadataProvider.GetMetadata();
+                var decision = SourceCompatibilityEvaluator.Assess(
+                    metadata.SourceSurface,
+                    metadata.SourceApplicationVersion,
+                    decodedPayload.StructuralInventory,
+                    CountRecognizedSpanEnvelopes(decodedPayload.StructuralInventory),
+                    sourceFingerprintRegistry);
+                var observation = SourceObservationBatchDraft.Create(
+                    Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
+                    metadata.SourceSurface,
+                    metadata.SourceApplicationVersion,
+                    metadata.SourceAdapter,
+                    metadata.AdapterVersion,
+                    decodedPayload.StructuralInventory,
+                    decision,
+                    metadata.CaptureContentState,
+                    observedAt);
+                batch = ValidatedIngestionBatch.Create(record, observation);
             }
             catch (UnsupportedOtlpContentTypeException)
             {
@@ -806,63 +906,67 @@ internal static class MonitorHost
             }
             catch (JsonException)
             {
-                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_payload", "Trace payload is not valid OTLP JSON.");
+                await RecordAdapterFailureAsync(
+                    context,
+                    queue,
+                    health,
+                    commitTimeout,
+                    SourceAdapterFailureDraft.CreateParseFailure(
+                        Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
+                        null, null, null, null, null, null,
+                        timeProvider.GetUtcNow()),
+                    StatusCodes.Status400BadRequest,
+                    "invalid_payload",
+                    "Trace payload is not valid OTLP JSON.");
                 return;
             }
             catch (InvalidDataException)
             {
-                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_payload", "Trace payload is not valid OTLP trace data.");
+                await RecordAdapterFailureAsync(
+                    context,
+                    queue,
+                    health,
+                    commitTimeout,
+                    SourceAdapterFailureDraft.CreateParseFailure(
+                        Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
+                        null, null, null, null, null, null,
+                        timeProvider.GetUtcNow()),
+                    StatusCodes.Status400BadRequest,
+                    "invalid_payload",
+                    "Trace payload is not valid OTLP trace data.");
+                return;
+            }
+            catch (Exception)
+            {
+                await RecordAdapterFailureAsync(
+                    context,
+                    queue,
+                    health,
+                    commitTimeout,
+                    SourceAdapterFailureDraft.CreateAdapterException(
+                        Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
+                        null,
+                        metadata?.SourceSurface,
+                        metadata?.SourceApplicationVersion,
+                        metadata?.SourceAdapter,
+                        metadata?.AdapterVersion,
+                        metadata?.CaptureContentState,
+                        timeProvider.GetUtcNow()),
+                    StatusCodes.Status500InternalServerError,
+                    "internal_error",
+                    "The request could not be processed.");
                 return;
             }
 
-            RawTelemetryRecord record;
-            try
+            if (!queue.TryEnqueue(batch, out var request))
             {
-                record = RawOtlpIngestor.CreateRecordFromPayloadJson(payloadJson, DateTimeOffset.UtcNow);
-            }
-            catch (JsonException)
-            {
-                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_payload", "Trace payload is not valid OTLP JSON.");
-                return;
-            }
-            catch (InvalidDataException)
-            {
-                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_payload", "Trace payload is not valid OTLP trace data.");
+                await WriteQueueRejectedAsync(context, queue, health);
                 return;
             }
 
-            if (!queue.TryEnqueue(record, out var request))
+            var result = await AwaitCommitAsync(context, request, health, commitTimeout);
+            if (result is null)
             {
-                health.RecordBackpressure();
-                if (queue.IsClosed)
-                {
-                    await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "shutting_down", "The local monitor is shutting down.");
-                }
-                else
-                {
-                    await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "queue_full", "The local monitor ingestion queue is full.");
-                }
-
-                return;
-            }
-
-            IngestionCommitResult result;
-            try
-            {
-                result = await request.Completion.WaitAsync(commitTimeout, context.RequestAborted);
-            }
-            catch (TimeoutException)
-            {
-                // A commit that never acks is a form of "writer unable to commit":
-                // start the same stall window queue-full / persistence failures use
-                // so sustained timeouts surface as ingestion_stalled in readiness.
-                health.RecordBackpressure();
-                await WriteFailureAsync(context, StatusCodes.Status504GatewayTimeout, "commit_timeout", "Trace payload was not committed within the allowed time.");
-                return;
-            }
-            catch (OperationCanceledException)
-            {
-                await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "shutting_down", "The local monitor is shutting down.");
                 return;
             }
 
@@ -871,7 +975,8 @@ internal static class MonitorHost
                 case IngestionCommitStatus.Committed:
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     context.Response.ContentType = JsonContentType;
-                    await context.Response.WriteAsync($$"""{"accepted":true,"rawRecordId":{{result.RawRecordId}}}""");
+                    await context.Response.WriteAsync(
+                        $$"""{"accepted":true,"rawRecordId":{{result.RawRecordId}},"observationId":{{result.ObservationId}}}""");
                     break;
                 case IngestionCommitStatus.Busy:
                     await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "Trace payload could not be persisted because the raw store is busy.");
@@ -891,6 +996,119 @@ internal static class MonitorHost
         });
 
         return app;
+    }
+
+    private static int CountRecognizedSpanEnvelopes(SourceStructuralInventory inventory)
+    {
+        var count = inventory.StructuralOccurrences
+            .Where(item => item.Envelope == SourceStructuralEnvelope.Span
+                && item.Role == SourceStructuralRole.Envelope
+                && item.Unknown is null)
+            .Sum(item => (long)item.Count.Value);
+        return checked((int)Math.Min(SourceOccurrenceCount.Maximum, count));
+    }
+
+    private static async Task RecordAdapterFailureAsync(
+        HttpContext context,
+        IngestionQueue queue,
+        MonitorHealthState health,
+        TimeSpan commitTimeout,
+        SourceAdapterFailureDraft failure,
+        int failureStatusCode,
+        string failureCode,
+        string failureMessage)
+    {
+        if (!queue.TryEnqueue(failure, out var request))
+        {
+            await WriteQueueRejectedAsync(context, queue, health);
+            return;
+        }
+
+        var result = await AwaitCommitAsync(context, request, health, commitTimeout);
+        if (result is null)
+        {
+            return;
+        }
+
+        switch (result.Status)
+        {
+            case IngestionCommitStatus.Committed:
+                await WriteFailureAsync(
+                    context,
+                    failureStatusCode,
+                    failureCode,
+                    failureMessage);
+                break;
+            case IngestionCommitStatus.Busy:
+                await WriteFailureAsync(
+                    context,
+                    StatusCodes.Status503ServiceUnavailable,
+                    "persistence_busy",
+                    "Trace payload could not be persisted because the raw store is busy.");
+                break;
+            default:
+                await WriteFailureAsync(
+                    context,
+                    StatusCodes.Status500InternalServerError,
+                    "persistence_failed",
+                    "Trace payload could not be persisted.");
+                break;
+        }
+    }
+
+    private static async Task WriteQueueRejectedAsync(
+        HttpContext context,
+        IngestionQueue queue,
+        MonitorHealthState health)
+    {
+        health.RecordBackpressure();
+        if (queue.IsClosed)
+        {
+            await WriteFailureAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "shutting_down",
+                "The local monitor is shutting down.");
+        }
+        else
+        {
+            await WriteFailureAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "queue_full",
+                "The local monitor ingestion queue is full.");
+        }
+    }
+
+    private static async Task<IngestionCommitResult?> AwaitCommitAsync(
+        HttpContext context,
+        IngestionWriteRequest request,
+        MonitorHealthState health,
+        TimeSpan commitTimeout)
+    {
+        try
+        {
+            return await request.Completion.WaitAsync(commitTimeout, context.RequestAborted);
+        }
+        catch (TimeoutException)
+        {
+            health.RecordBackpressure();
+            await WriteFailureAsync(
+                context,
+                StatusCodes.Status504GatewayTimeout,
+                "commit_timeout",
+                "Trace payload was not committed within the allowed time.");
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            await WriteFailureAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "shutting_down",
+                "The local monitor is shutting down.");
+            return null;
+        }
     }
 
     public static async Task<int> RunAsync(MonitorOptions options, TextWriter output, TextWriter error, CancellationToken cancellationToken)
@@ -935,7 +1153,7 @@ internal static class MonitorHost
         string.Equals(context.Request.Headers["x-monitor-csrf"].ToString(), "local-monitor", StringComparison.Ordinal);
 
     /// <summary>The same <c>compactTrace</c>-shaped projection <c>/api/monitor/traces</c> emits per item, reused for the summary's embedded highlight traces.</summary>
-    private static object? ToTraceDto(MonitorTraceRow? row) => row is null ? null : new
+    private static object? ToTraceDto(MonitorTraceRow? row, SourceProjectionState? state = null) => row is null ? null : new
     {
         id = row.Id,
         trace_id = row.TraceId,
@@ -961,6 +1179,11 @@ internal static class MonitorHost
         repository_name = row.RepositoryName,
         workspace_label = row.WorkspaceLabel,
         repo_snapshot = row.RepoSnapshot,
+        source_diagnostic = state?.SourceDiagnostic?.ToWire(),
+        binding_state = state?.BindingState ?? "otel_only",
+        completeness = state?.Completeness ?? "unbound",
+        completeness_reason_codes = state?.CompletenessReasonCodes ?? ["missing_native_session_id"],
+        content_state = state?.ContentState,
     };
 
     /// <summary>
@@ -969,7 +1192,7 @@ internal static class MonitorHost
     /// <see cref="ToTraceDto"/> consumers (`/api/monitor/traces`, `/api/monitor/summary`)
     /// keep their pinned shape/ordering (D042 C6).
     /// </summary>
-    private static object ToTraceListDto(MonitorTraceRow row) => new
+    private static object ToTraceListDto(MonitorTraceRow row, SourceProjectionState? state = null) => new
     {
         id = row.Id,
         trace_id = row.TraceId,
@@ -998,7 +1221,27 @@ internal static class MonitorHost
         cache_read_tokens = row.CacheReadTokens,
         cache_creation_tokens = row.CacheCreationTokens,
         trace_status = row.TraceStatus,
+        source_diagnostic = state?.SourceDiagnostic?.ToWire(),
+        binding_state = state?.BindingState ?? "otel_only",
+        completeness = state?.Completeness ?? "unbound",
+        completeness_reason_codes = state?.CompletenessReasonCodes ?? ["missing_native_session_id"],
+        content_state = state?.ContentState,
     };
+
+    private static SessionDetail? FindSessionForTrace(ISessionStore store, string traceId)
+    {
+        try
+        {
+            return store.ListMostRecent(200)
+                .Select(item => store.GetDetail(item.SessionId))
+                .FirstOrDefault(detail => detail is not null
+                    && (detail.Runs.Any(run => run.TraceId == traceId) || detail.Events.Any(eventItem => eventItem.TraceId == traceId)));
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
 
     private static bool TryParseTraceListQuery(HttpContext context, MonitorOverviewService overviewService, out MonitorTraceListQuery query)
     {
@@ -1191,11 +1434,108 @@ internal static class MonitorHost
     }
 }
 
+internal interface IOtlpTraceSourceMetadataProvider
+{
+    OtlpTraceSourceMetadata GetMetadata();
+}
+
+internal sealed class OtlpTraceSourceMetadata
+{
+    private OtlpTraceSourceMetadata(
+        string sourceSurface,
+        string? sourceApplicationVersion,
+        string sourceAdapter,
+        string adapterVersion,
+        SourceCaptureContentState captureContentState)
+    {
+        SourceSurface = sourceSurface;
+        SourceApplicationVersion = sourceApplicationVersion;
+        SourceAdapter = sourceAdapter;
+        AdapterVersion = adapterVersion;
+        CaptureContentState = captureContentState;
+    }
+
+    public string SourceSurface { get; }
+    public string? SourceApplicationVersion { get; }
+    public string SourceAdapter { get; }
+    public string AdapterVersion { get; }
+    public SourceCaptureContentState CaptureContentState { get; }
+
+    public static OtlpTraceSourceMetadata Create(
+        string sourceSurface,
+        string? sourceApplicationVersion,
+        string sourceAdapter,
+        string adapterVersion,
+        SourceCaptureContentState captureContentState)
+    {
+        ValidateRequired(sourceSurface, nameof(sourceSurface));
+        ValidateOptional(sourceApplicationVersion, nameof(sourceApplicationVersion));
+        ValidateRequired(sourceAdapter, nameof(sourceAdapter));
+        ValidateRequired(adapterVersion, nameof(adapterVersion));
+        if (!Enum.IsDefined(captureContentState))
+        {
+            throw new ArgumentOutOfRangeException(nameof(captureContentState));
+        }
+
+        return new OtlpTraceSourceMetadata(
+            sourceSurface,
+            sourceApplicationVersion,
+            sourceAdapter,
+            adapterVersion,
+            captureContentState);
+    }
+
+    private static void ValidateRequired(string value, string parameterName)
+    {
+        if (!IsValid(value))
+        {
+            throw new ArgumentException("Source metadata must be non-empty, bounded, and control-character free.", parameterName);
+        }
+    }
+
+    private static void ValidateOptional(string? value, string parameterName)
+    {
+        if (value is not null && !IsValid(value))
+        {
+            throw new ArgumentException("Source metadata must be bounded and control-character free when present.", parameterName);
+        }
+    }
+
+    private static bool IsValid(string value) =>
+        value.Length is > 0 and <= 256 && value.All(character => !char.IsControl(character));
+}
+
+internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMetadataProvider
+{
+    public static FixedOtlpTraceSourceMetadataProvider Default { get; } = new(
+        OtlpTraceSourceMetadata.Create(
+            "raw-otlp",
+            sourceApplicationVersion: null,
+            "raw-otlp",
+            "1",
+            SourceCaptureContentState.Unsupported));
+
+    private readonly OtlpTraceSourceMetadata metadata;
+
+    public FixedOtlpTraceSourceMetadataProvider(OtlpTraceSourceMetadata metadata)
+    {
+        this.metadata = metadata ?? throw new ArgumentNullException(nameof(metadata));
+    }
+
+    public OtlpTraceSourceMetadata GetMetadata() => metadata;
+}
+
 internal sealed class MonitorHostTestOptions
 {
     public IngestionQueue? Queue { get; init; }
 
-    public IRawTelemetryWriter? Writer { get; init; }
+    public IIngestionCommitStore? IngestionCommitStore { get; init; }
+
+    public ISourceCompatibilityStore? SourceCompatibilityStore { get; init; }
+
+    public IOtlpTraceSourceMetadataProvider? SourceMetadataProvider { get; init; }
+
+    public VerifiedSourceFingerprintRegistry? SourceFingerprintRegistry { get; init; }
 
     public MonitorHealthState? Health { get; init; }
 

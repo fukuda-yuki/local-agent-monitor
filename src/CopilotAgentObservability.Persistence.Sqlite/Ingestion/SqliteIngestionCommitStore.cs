@@ -1,0 +1,92 @@
+namespace CopilotAgentObservability.Persistence.Sqlite.Ingestion;
+
+internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
+{
+    private readonly string databasePath;
+    private readonly RawTelemetryStoreConnectionOptions connectionOptions;
+
+    public SqliteIngestionCommitStore(
+        string databasePath,
+        RawTelemetryStoreConnectionOptions? connectionOptions = null)
+    {
+        this.databasePath = databasePath;
+        this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
+    }
+
+    public CommittedIngestionIds Commit(ValidatedIngestionBatch batch)
+    {
+        ArgumentNullException.ThrowIfNull(batch);
+        try
+        {
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction();
+            if (FindExisting(connection, transaction, batch.IngestBatchId) is { } existing)
+            {
+                transaction.Commit();
+                return existing;
+            }
+
+            var rawRecordId = RawTelemetryRecordSql.Insert(connection, transaction, batch.RawRecord);
+            var observationId = SqliteSourceCompatibilityStore.InsertBatch(
+                connection,
+                transaction,
+                rawRecordId,
+                batch.Observation);
+            transaction.Commit();
+            return new CommittedIngestionIds(rawRecordId, observationId);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            throw new IngestionCommitBusyException();
+        }
+    }
+
+    private static CommittedIngestionIds? FindExisting(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string ingestBatchId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT raw_record_id, id
+            FROM source_schema_observations
+            WHERE ingest_batch_id = $ingest_batch_id;
+            """;
+        command.Parameters.AddWithValue("$ingest_batch_id", ingestBatchId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+        if (reader.IsDBNull(0))
+        {
+            throw new InvalidOperationException("An ingest batch ID is already owned by an adapter-failure observation.");
+        }
+        return new CommittedIngestionIds(reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    private SqliteConnection OpenConnection()
+    {
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        };
+        if (connectionOptions.BusyTimeoutMilliseconds is { } configuredTimeout)
+        {
+            connectionString.DefaultTimeout = Math.Max(1, checked((configuredTimeout + 999) / 1_000));
+        }
+
+        var connection = new SqliteConnection(connectionString.ToString());
+        connection.Open();
+        if (connectionOptions.BusyTimeoutMilliseconds is { } timeout)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $"PRAGMA busy_timeout = {timeout.ToString(CultureInfo.InvariantCulture)};";
+            command.ExecuteNonQuery();
+        }
+        return connection;
+    }
+}

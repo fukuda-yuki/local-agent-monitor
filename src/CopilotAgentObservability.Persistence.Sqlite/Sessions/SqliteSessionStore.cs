@@ -3,12 +3,30 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
+public sealed class SessionIdentityConflictException : InvalidOperationException
+{
+    internal SessionIdentityConflictException()
+        : base("Session source identity is already owned by another session.")
+    {
+    }
+}
+
 public sealed class SqliteSessionStore : ISessionStore
 {
-    private const int CurrentSchemaVersion = 10;
+    private const int VersionTenSchemaVersion = 10;
+    private const int CurrentSchemaVersion = 11;
+    private const string SchemaVersionSql = """
+        CREATE TABLE IF NOT EXISTS schema_version (
+            component TEXT PRIMARY KEY,
+            version INTEGER NOT NULL
+        );
+        """;
+    private static readonly string[] VersionElevenProvenanceColumns = ["source_application_version", "adapter_version", "schema_fingerprint", "normalization_version"];
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
     private readonly Action<string>? comparisonCheckpoint;
+    private readonly Action<string>? writeCheckpoint;
+    private readonly int busyTimeoutMilliseconds = 5000;
 
     public SqliteSessionStore(string databasePath, TimeProvider? timeProvider = null)
     {
@@ -23,6 +41,25 @@ public sealed class SqliteSessionStore : ISessionStore
         this.comparisonCheckpoint = comparisonCheckpoint ?? throw new ArgumentNullException(nameof(comparisonCheckpoint));
     }
 
+    internal SqliteSessionStore(string databasePath, int busyTimeoutMilliseconds)
+        : this(databasePath)
+    {
+        if (busyTimeoutMilliseconds < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(busyTimeoutMilliseconds));
+        }
+        this.busyTimeoutMilliseconds = busyTimeoutMilliseconds;
+    }
+
+    internal SqliteSessionStore(
+        string databasePath,
+        TimeProvider timeProvider,
+        Action<string> writeCheckpoint)
+        : this(databasePath, timeProvider)
+    {
+        this.writeCheckpoint = writeCheckpoint ?? throw new ArgumentNullException(nameof(writeCheckpoint));
+    }
+
     public void CreateSchema()
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(databasePath));
@@ -31,23 +68,24 @@ public sealed class SqliteSessionStore : ISessionStore
             Directory.CreateDirectory(directory);
         }
 
-        using var connection = Open(initialize: true);
+        using var connection = Open(enforceForeignKeys: false);
+        var preflightVersion = ReadSessionSchemaVersion(connection);
+        if (preflightVersion is < 1 or > CurrentSchemaVersion)
+            throw new InvalidOperationException("Unsupported Session schema version.");
+        ValidateExistingSchemaBeforeInitialization(connection, preflightVersion);
+        Execute(connection, "PRAGMA journal_mode=WAL;");
         using var transaction = connection.BeginTransaction();
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = """
-            CREATE TABLE IF NOT EXISTS schema_version (
-                component TEXT PRIMARY KEY,
-                version INTEGER NOT NULL
-            );
-            """;
+        command.CommandText = SchemaVersionSql;
         command.ExecuteNonQuery();
 
         using var versionCommand = connection.CreateCommand();
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'session';";
         var existingVersion = versionCommand.ExecuteScalar();
-        if (existingVersion is not null && Convert.ToInt32(existingVersion) is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9 or CurrentSchemaVersion))
+        var version = existingVersion is null ? (int?)null : Convert.ToInt32(existingVersion);
+        if (version is < 1 or > CurrentSchemaVersion)
         {
             throw new InvalidOperationException("Unsupported Session schema version.");
         }
@@ -80,7 +118,7 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
-            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionTenSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 2)
         {
@@ -92,17 +130,18 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
-            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionTenSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 3)
         {
             command.CommandText = ProposalApplySchemaSql;
             command.ExecuteNonQuery();
+            AddProposalRevisionColumns(connection, transaction);
             command.CommandText = ObjectiveEvaluationSchemaSql;
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
-            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionTenSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 4)
         {
@@ -114,7 +153,7 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
-            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionTenSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 5)
         {
@@ -125,7 +164,7 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
-            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionTenSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 6)
         {
@@ -134,7 +173,7 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
-            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionTenSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 7)
         {
@@ -142,24 +181,32 @@ public sealed class SqliteSessionStore : ISessionStore
             command.ExecuteNonQuery();
             command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
-            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionTenSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 8)
         {
             command.CommandText = EffectComparisonSchemaSql;
             command.ExecuteNonQuery();
-            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionTenSchemaVersion} WHERE component='session';");
         }
         else if (Convert.ToInt32(existingVersion) == 9)
         {
             command.CommandText = "ALTER TABLE effect_comparison_sessions ADD COLUMN effective_quality TEXT NULL CHECK (effective_quality IS NULL OR effective_quality IN ('pass','fail','missing')); ALTER TABLE effect_comparison_sessions ADD COLUMN severe_failure INTEGER NOT NULL DEFAULT 0 CHECK (severe_failure IN (0,1)); ALTER TABLE effect_comparison_evidence ADD COLUMN human_verdict TEXT NULL CHECK (human_verdict IS NULL OR human_verdict IN ('expected','problem'));";
             command.ExecuteNonQuery();
-            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionTenSchemaVersion} WHERE component='session';");
         }
-        else
+        else if (version == VersionTenSchemaVersion)
         {
             RepairKnownStampedVersionTenShape(connection, transaction, command);
         }
+
+        if (version is <= VersionTenSchemaVersion)
+        {
+            MigrateToVersionEleven(connection, transaction, command);
+            Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
+        }
+
+        EnsureForeignKeysValid(connection, transaction);
         transaction.Commit();
     }
 
@@ -309,8 +356,14 @@ public sealed class SqliteSessionStore : ISessionStore
     public void Write(SessionWriteBatch batch)
     {
         ArgumentNullException.ThrowIfNull(batch);
+        writeCheckpoint?.Invoke("before-session-write");
         using var connection = Open();
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        if (IsClaudeOtelReplay(connection, transaction, batch))
+        {
+            transaction.Commit();
+            return;
+        }
         ValidateBatch(connection, transaction, batch);
         var orderedRuns = OrderRuns(batch.Detail.Runs);
         var orderedEvents = OrderEvents(batch.Detail.Events);
@@ -351,15 +404,17 @@ public sealed class SqliteSessionStore : ISessionStore
                 ? canonicalParentEventId
                 : item.ParentEventId;
             Execute(connection, transaction, """
-                INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state)
-                VALUES($event_id,$session_id,$run_id,$source_surface,$parent_event_id,$trace_id,$status,$source_adapter,$source_event_id,$type,$occurred_at,$content_state)
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version)
+                VALUES($event_id,$session_id,$run_id,$source_surface,$parent_event_id,$trace_id,$status,$source_adapter,$source_event_id,$type,$occurred_at,$content_state,$source_application_version,$adapter_version,$schema_fingerprint,$normalization_version)
                 ON CONFLICT(source_adapter,source_event_id) DO NOTHING;
                 """,
                 ("$event_id", Id(eventId)), ("$session_id", Id(item.SessionId)), ("$run_id", item.RunId is null ? null : Id(item.RunId.Value)),
                 ("$source_surface", item.SourceSurface is null ? null : SessionWire.ToWire(item.SourceSurface.Value)),
                 ("$parent_event_id", parentEventId is null ? null : Id(parentEventId.Value)), ("$trace_id", item.TraceId), ("$status", item.Status),
                 ("$source_adapter", item.SourceAdapter), ("$source_event_id", item.SourceEventId), ("$type", item.Type),
-                ("$occurred_at", Timestamp(item.OccurredAt)), ("$content_state", SessionWire.ToWire(item.ContentState)));
+                ("$occurred_at", Timestamp(item.OccurredAt)), ("$content_state", SessionWire.ToWire(item.ContentState)),
+                ("$source_application_version", item.SourceApplicationVersion), ("$adapter_version", item.AdapterVersion),
+                ("$schema_fingerprint", item.SchemaFingerprint), ("$normalization_version", item.NormalizationVersion));
         }
 
         foreach (var content in batch.Content)
@@ -375,6 +430,40 @@ public sealed class SqliteSessionStore : ISessionStore
         }
 
         transaction.Commit();
+    }
+
+    private static bool IsClaudeOtelReplay(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        SessionWriteBatch batch)
+    {
+        var events = batch.Detail.Events;
+        if (events.Count == 0 || events.Any(item => item.SourceAdapter != "claude-code-otel"))
+        {
+            return false;
+        }
+
+        var expectedOwner = Id(batch.Detail.Session.SessionId);
+        var replayableUnboundCandidate = batch.Detail.Session.Completeness == SessionCompleteness.Unbound
+            && batch.Detail.NativeIds.Count == 0;
+        foreach (var item in events)
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                "SELECT session_id FROM session_events WHERE source_adapter=$adapter AND source_event_id=$source_event_id COLLATE BINARY;";
+            Add(command, "$adapter", item.SourceAdapter);
+            Add(command, "$source_event_id", item.SourceEventId);
+            if (command.ExecuteScalar() is not string owner)
+            {
+                return false;
+            }
+            if (!string.Equals(owner, expectedOwner, StringComparison.Ordinal) && !replayableUnboundCandidate)
+            {
+                throw new SessionIdentityConflictException();
+            }
+        }
+        return true;
     }
 
     private static IReadOnlyList<ObservedSessionRun> OrderRuns(IReadOnlyList<ObservedSessionRun> runs) =>
@@ -458,7 +547,8 @@ public sealed class SqliteSessionStore : ISessionStore
                 "SELECT session_id FROM session_native_ids WHERE source_surface=$first AND native_session_id=$second COLLATE BINARY;",
                 sessionIdText,
                 ("$first", SessionWire.ToWire(nativeId.SourceSurface)),
-                ("$second", nativeId.NativeSessionId));
+                ("$second", nativeId.NativeSessionId),
+                identityConflict: nativeId.SourceSurface == SessionSourceSurface.ClaudeCode);
         }
 
         foreach (var run in batch.Detail.Runs)
@@ -468,7 +558,8 @@ public sealed class SqliteSessionStore : ISessionStore
                 transaction,
                 "SELECT session_id FROM session_runs WHERE run_id=$first;",
                 sessionIdText,
-                ("$first", Id(run.RunId)));
+                ("$first", Id(run.RunId)),
+                identityConflict: run.SourceSurface == SessionSourceSurface.ClaudeCode);
             if (run.ParentRunId is not null && !runIds.Contains(run.ParentRunId.Value))
             {
                 EnsureReferenceOwnedBySession(connection, transaction, "session_runs", "run_id", run.ParentRunId.Value, sessionIdText);
@@ -482,14 +573,16 @@ public sealed class SqliteSessionStore : ISessionStore
                 transaction,
                 "SELECT session_id FROM session_events WHERE event_id=$first;",
                 sessionIdText,
-                ("$first", Id(item.EventId)));
+                ("$first", Id(item.EventId)),
+                identityConflict: item.SourceSurface == SessionSourceSurface.ClaudeCode);
             EnsureExistingOwnerMatches(
                 connection,
                 transaction,
                 "SELECT session_id FROM session_events WHERE source_adapter=$first AND source_event_id=$second;",
                 sessionIdText,
                 ("$first", item.SourceAdapter),
-                ("$second", item.SourceEventId));
+                ("$second", item.SourceEventId),
+                identityConflict: item.SourceSurface == SessionSourceSurface.ClaudeCode);
 
             if (item.RunId is not null && !runIds.Contains(item.RunId.Value))
             {
@@ -527,7 +620,8 @@ public sealed class SqliteSessionStore : ISessionStore
         string expectedSessionId,
         (string Name, object? Value) first,
         (string Name, object? Value)? second = null,
-        bool requireExisting = false)
+        bool requireExisting = false,
+        bool identityConflict = false)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -538,7 +632,7 @@ public sealed class SqliteSessionStore : ISessionStore
         if ((requireExisting && owner is null)
             || (owner is not null && !string.Equals(owner, expectedSessionId, StringComparison.Ordinal)))
         {
-            throw OwnershipViolation();
+            throw identityConflict ? new SessionIdentityConflictException() : OwnershipViolation();
         }
     }
 
@@ -610,12 +704,13 @@ public sealed class SqliteSessionStore : ISessionStore
         var events = new List<ObservedSessionEvent>();
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "SELECT event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state FROM session_events WHERE session_id=$id ORDER BY occurred_at,event_id;";
+            command.CommandText = "SELECT event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version FROM session_events WHERE session_id=$id ORDER BY occurred_at,event_id;";
             Add(command, "$id", Id(sessionId));
             using var reader = command.ExecuteReader();
             while (reader.Read()) events.Add(new(
                 Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), NullableGuid(reader, 2), NullableSurface(reader, 3), NullableGuid(reader, 4), NullableString(reader, 5), NullableString(reader, 6),
-                reader.GetString(7), reader.GetString(8), reader.GetString(9), ParseTimestamp(reader.GetString(10)), SessionWire.ParseContentState(reader.GetString(11))));
+                reader.GetString(7), reader.GetString(8), reader.GetString(9), ParseTimestamp(reader.GetString(10)), SessionWire.ParseContentState(reader.GetString(11)),
+                NullableString(reader, 12), NullableString(reader, 13), NullableString(reader, 14), NullableString(reader, 15)));
         }
 
         return new(session, nativeIds, runs, events);
@@ -1161,8 +1256,16 @@ public sealed class SqliteSessionStore : ISessionStore
         Execute(connection, transaction, """
             INSERT INTO sessions(session_id,status,completeness,repository,workspace,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at)
             VALUES($session_id,$status,$completeness,$repository,$workspace,$started_at,$ended_at,$last_seen_at,$raw_retention_state,$created_at,$updated_at)
-            ON CONFLICT(session_id) DO UPDATE SET status=excluded.status,completeness=excluded.completeness,repository=excluded.repository,workspace=excluded.workspace,
-            started_at=excluded.started_at,ended_at=excluded.ended_at,last_seen_at=excluded.last_seen_at,raw_retention_state=excluded.raw_retention_state,updated_at=excluded.updated_at;
+            ON CONFLICT(session_id) DO UPDATE SET
+            status=CASE WHEN sessions.status IN ('completed','failed') THEN sessions.status ELSE excluded.status END,
+            completeness=CASE
+                WHEN CASE sessions.completeness WHEN 'full' THEN 4 WHEN 'rich' THEN 3 WHEN 'partial' THEN 2 ELSE 1 END
+                   >= CASE excluded.completeness WHEN 'full' THEN 4 WHEN 'rich' THEN 3 WHEN 'partial' THEN 2 ELSE 1 END
+                THEN sessions.completeness ELSE excluded.completeness END,
+            repository=COALESCE(sessions.repository,excluded.repository),workspace=COALESCE(sessions.workspace,excluded.workspace),
+            started_at=COALESCE(sessions.started_at,excluded.started_at),ended_at=COALESCE(sessions.ended_at,excluded.ended_at),
+            last_seen_at=MAX(sessions.last_seen_at,excluded.last_seen_at),raw_retention_state=excluded.raw_retention_state,
+            updated_at=MAX(sessions.updated_at,excluded.updated_at);
             """,
             ("$session_id", Id(value.SessionId)), ("$status", SessionWire.ToWire(value.Status)), ("$completeness", SessionWire.ToWire(value.Completeness)),
             ("$repository", value.Repository), ("$workspace", value.Workspace), ("$started_at", Timestamp(value.StartedAt)), ("$ended_at", Timestamp(value.EndedAt)),
@@ -1295,23 +1398,60 @@ public sealed class SqliteSessionStore : ISessionStore
 
     private static void Add(SqliteCommand command, string name, object? value) => command.Parameters.AddWithValue(name, value ?? DBNull.Value);
 
-    private SqliteConnection Open(bool initialize = false)
+    private SqliteConnection Open(bool enforceForeignKeys = true)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
             Pooling = false,
-            DefaultTimeout = 5,
+            DefaultTimeout = Math.Max(1, checked((busyTimeoutMilliseconds + 999) / 1000)),
         }.ToString());
         connection.Open();
-        Execute(connection, "PRAGMA foreign_keys=ON;");
-        Execute(connection, "PRAGMA busy_timeout=5000;");
-        if (initialize)
-        {
-            Execute(connection, "PRAGMA journal_mode=WAL;");
-        }
-
+        Execute(connection, enforceForeignKeys ? "PRAGMA foreign_keys=ON;" : "PRAGMA foreign_keys=OFF;");
+        Execute(connection, $"PRAGMA busy_timeout={busyTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)};");
         return connection;
+    }
+
+    private static int? ReadSessionSchemaVersion(SqliteConnection connection)
+    {
+        using var table = connection.CreateCommand();
+        table.CommandText = "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='schema_version';";
+        if (table.ExecuteScalar() is null) return null;
+        using var version = connection.CreateCommand();
+        version.CommandText = "SELECT version FROM schema_version WHERE component='session';";
+        var value = version.ExecuteScalar();
+        return value is null ? null : Convert.ToInt32(value);
+    }
+
+    private static void ValidateExistingSchemaBeforeInitialization(SqliteConnection connection, int? version)
+    {
+        if (version is null) return;
+        if (version <= VersionTenSchemaVersion)
+        {
+            if (HasUnexpectedVersionTenColumns(connection, null))
+                throw new InvalidOperationException("Unsupported incomplete Session schema version 10.");
+            foreach (var column in VersionElevenProvenanceColumns)
+                if (Columns(connection, null, "session_events").Contains(column)
+                    && !IsNullableTextColumn(connection, null, "session_events", column))
+                    throw new InvalidOperationException($"Invalid session_events.{column} migration column.");
+        }
+        else
+        {
+            SessionSchemaV11Validator.Validate(connection, CreateCanonicalVersionElevenSchema);
+        }
+        EnsureForeignKeysValid(connection, null);
+    }
+
+    private static void CreateCanonicalVersionElevenSchema(SqliteConnection connection)
+    {
+        Execute(connection, SchemaVersionSql);
+        Execute(connection, SchemaSql);
+        Execute(connection, HumanEvaluationSchemaSql);
+        Execute(connection, ImprovementProposalSchemaSql);
+        Execute(connection, ProposalApplySchemaSql);
+        Execute(connection, ObjectiveEvaluationSchemaSql);
+        Execute(connection, EffectComparisonSchemaSql);
+        Execute(connection, $"INSERT INTO schema_version(component,version) VALUES('session',{CurrentSchemaVersion});");
     }
 
     private static void Execute(SqliteConnection connection, string sql)
@@ -1339,8 +1479,77 @@ public sealed class SqliteSessionStore : ISessionStore
         AddColumnIfMissing(connection, transaction, "proposal_applies", "proposal_revision", "INTEGER NOT NULL DEFAULT 1");
     }
 
+    private static void MigrateToVersionEleven(SqliteConnection connection, SqliteTransaction transaction, SqliteCommand command)
+    {
+        AddNullableTextColumnForMigration(connection, transaction, "session_events", "source_application_version");
+        AddNullableTextColumnForMigration(connection, transaction, "session_events", "adapter_version");
+        AddNullableTextColumnForMigration(connection, transaction, "session_events", "schema_fingerprint");
+        AddNullableTextColumnForMigration(connection, transaction, "session_events", "normalization_version");
+        Execute(connection, transaction, """
+            CREATE TEMP TABLE session_native_ids_v10 AS SELECT session_id,source_surface,native_session_id,binding_kind,observed_at FROM session_native_ids;
+            CREATE TEMP TABLE session_runs_v10 AS SELECT run_id,session_id,source_surface,native_run_id,trace_id,parent_run_id,model,started_at,ended_at,input_tokens,output_tokens,total_tokens,status FROM session_runs;
+            CREATE TEMP TABLE session_events_v10 AS SELECT event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version FROM session_events;
+            DROP TABLE session_events;
+            DROP TABLE session_runs;
+            DROP TABLE session_native_ids;
+            """);
+        command.CommandText = SchemaSql;
+        command.ExecuteNonQuery();
+        Execute(connection, transaction, """
+            INSERT INTO session_native_ids(session_id,source_surface,native_session_id,binding_kind,observed_at) SELECT session_id,source_surface,native_session_id,binding_kind,observed_at FROM session_native_ids_v10;
+            INSERT INTO session_runs(run_id,session_id,source_surface,native_run_id,trace_id,parent_run_id,model,started_at,ended_at,input_tokens,output_tokens,total_tokens,status) SELECT run_id,session_id,source_surface,native_run_id,trace_id,parent_run_id,model,started_at,ended_at,input_tokens,output_tokens,total_tokens,status FROM session_runs_v10;
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version) SELECT event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version FROM session_events_v10;
+            DROP TABLE session_events_v10;
+            DROP TABLE session_runs_v10;
+            DROP TABLE session_native_ids_v10;
+            """);
+    }
+
+    private static void AddNullableTextColumnForMigration(SqliteConnection connection, SqliteTransaction transaction, string table, string column)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"SELECT type,\"notnull\",dflt_value FROM pragma_table_info('{table}') WHERE name=$column;";
+        Add(command, "$column", column);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            reader.Close();
+            Execute(connection, transaction, $"ALTER TABLE {table} ADD COLUMN {column} TEXT NULL;");
+            return;
+        }
+        if (!string.Equals(reader.GetString(0), "TEXT", StringComparison.OrdinalIgnoreCase)
+            || reader.GetInt32(1) != 0
+            || !reader.IsDBNull(2))
+            throw new InvalidOperationException($"Invalid {table}.{column} migration column.");
+    }
+
+    private static bool IsNullableTextColumn(SqliteConnection connection, SqliteTransaction? transaction, string table, string column)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"SELECT type,\"notnull\",dflt_value FROM pragma_table_info('{table}') WHERE name=$column;";
+        Add(command, "$column", column);
+        using var reader = command.ExecuteReader();
+        return reader.Read()
+            && string.Equals(reader.GetString(0), "TEXT", StringComparison.OrdinalIgnoreCase)
+            && reader.GetInt32(1) == 0
+            && reader.IsDBNull(2);
+    }
+
+    private static void EnsureForeignKeysValid(SqliteConnection connection, SqliteTransaction? transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "PRAGMA foreign_key_check;";
+        using var reader = command.ExecuteReader();
+        if (reader.Read()) throw new InvalidOperationException("Session schema migration produced invalid foreign keys.");
+    }
+
     private static void RepairKnownStampedVersionTenShape(SqliteConnection connection, SqliteTransaction transaction, SqliteCommand command)
     {
+        if (HasUnexpectedVersionTenColumns(connection, transaction))
+            throw new InvalidOperationException("Unsupported incomplete Session schema version 10.");
         var revisionColumns = new HashSet<(string Table, string Column)>
         {
             ("improvement_proposals", "revision"),
@@ -1371,6 +1580,19 @@ public sealed class SqliteSessionStore : ISessionStore
             throw new InvalidOperationException("Unsupported incomplete Session schema version 10.");
     }
 
+    private static bool HasUnexpectedVersionTenColumns(SqliteConnection connection, SqliteTransaction? transaction)
+    {
+        foreach (var (table, requiredColumns) in VersionTenRequiredColumns)
+        {
+            if (!TableExists(connection, transaction, table)) continue;
+            var allowed = requiredColumns.ToHashSet(StringComparer.Ordinal);
+            if (table == "session_events")
+                allowed.UnionWith(["source_application_version", "adapter_version", "schema_fingerprint", "normalization_version"]);
+            if (Columns(connection, transaction, table).Except(allowed).Any()) return true;
+        }
+        return false;
+    }
+
     private static bool MatchesVersionTenShape(SqliteConnection connection, SqliteTransaction transaction, IReadOnlySet<(string Table, string Column)> missing)
     {
         foreach (var (table, columns) in VersionTenRequiredColumns)
@@ -1388,14 +1610,14 @@ public sealed class SqliteSessionStore : ISessionStore
         return true;
     }
 
-    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string table)
+    private static bool TableExists(SqliteConnection connection, SqliteTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand(); command.Transaction = transaction;
         command.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=$table;";
         Add(command, "$table", table); return command.ExecuteScalar() is not null;
     }
 
-    private static HashSet<string> Columns(SqliteConnection connection, SqliteTransaction transaction, string table)
+    private static HashSet<string> Columns(SqliteConnection connection, SqliteTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand(); command.Transaction = transaction;
         command.CommandText = $"SELECT name FROM pragma_table_info('{table}');";
@@ -1509,7 +1731,7 @@ public sealed class SqliteSessionStore : ISessionStore
 
         CREATE TABLE IF NOT EXISTS session_native_ids (
             session_id TEXT NOT NULL,
-            source_surface TEXT NOT NULL CHECK (source_surface IN ('copilot-sdk','copilot-cli','vscode','hook-unknown')),
+            source_surface TEXT NOT NULL CHECK (source_surface IN ('copilot-sdk','copilot-cli','vscode','hook-unknown','claude-code')),
             native_session_id TEXT NOT NULL,
             binding_kind TEXT NOT NULL CHECK (binding_kind IN ('native','explicit_resume','explicit_handoff','trace_context')),
             observed_at TEXT NOT NULL,
@@ -1520,7 +1742,7 @@ public sealed class SqliteSessionStore : ISessionStore
         CREATE TABLE IF NOT EXISTS session_runs (
             run_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
-            source_surface TEXT NULL CHECK (source_surface IS NULL OR source_surface IN ('copilot-sdk','copilot-cli','vscode','hook-unknown')),
+            source_surface TEXT NULL CHECK (source_surface IS NULL OR source_surface IN ('copilot-sdk','copilot-cli','vscode','hook-unknown','claude-code')),
             native_run_id TEXT NULL,
             trace_id TEXT NULL,
             parent_run_id TEXT NULL,
@@ -1540,7 +1762,7 @@ public sealed class SqliteSessionStore : ISessionStore
             event_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
             run_id TEXT NULL,
-            source_surface TEXT NULL CHECK (source_surface IS NULL OR source_surface IN ('copilot-sdk','copilot-cli','vscode','hook-unknown')),
+            source_surface TEXT NULL CHECK (source_surface IS NULL OR source_surface IN ('copilot-sdk','copilot-cli','vscode','hook-unknown','claude-code')),
             parent_event_id TEXT NULL,
             trace_id TEXT NULL,
             status TEXT NULL,
@@ -1549,6 +1771,10 @@ public sealed class SqliteSessionStore : ISessionStore
             type TEXT NOT NULL,
             occurred_at TEXT NOT NULL,
             content_state TEXT NOT NULL CHECK (content_state IN ('available','not_captured','redacted','unsupported','expired_pending_deletion')),
+            source_application_version TEXT NULL,
+            adapter_version TEXT NULL,
+            schema_fingerprint TEXT NULL,
+            normalization_version TEXT NULL,
             UNIQUE (source_adapter, source_event_id),
             UNIQUE (session_id, event_id),
             FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,

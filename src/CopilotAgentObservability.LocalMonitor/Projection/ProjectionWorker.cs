@@ -19,6 +19,7 @@ internal sealed class ProjectionWorker : BackgroundService
     private const int BatchSize = 100;
 
     private readonly IMonitorProjectionStore store;
+    private readonly ISourceCompatibilityStore? compatibilityStore;
     private readonly MonitorHealthState health;
     private readonly TimeProvider timeProvider;
     private readonly TimeSpan pollInterval;
@@ -27,11 +28,13 @@ internal sealed class ProjectionWorker : BackgroundService
     public ProjectionWorker(
         IMonitorProjectionStore store,
         MonitorHealthState health,
+        ISourceCompatibilityStore? compatibilityStore = null,
         TimeProvider? timeProvider = null,
         TimeSpan? pollInterval = null,
         MonitorEventBroker? eventBroker = null)
     {
         this.store = store;
+        this.compatibilityStore = compatibilityStore;
         this.health = health;
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.pollInterval = pollInterval ?? TimeSpan.FromSeconds(1);
@@ -106,7 +109,8 @@ internal sealed class ProjectionWorker : BackgroundService
 
                 try
                 {
-                    var projection = MonitorProjectionBuilder.Build(record);
+                    ValidateProjectionDisposition(record.Id!.Value);
+                    var projection = MonitorProjectionBuilder.Build(CreateProjectionInput(record));
                     var projected = store.ApplyProjection(
                         record.Id!.Value,
                         record.Source,
@@ -145,7 +149,7 @@ internal sealed class ProjectionWorker : BackgroundService
 
                 try
                 {
-                    var spans = MonitorSpanProjectionBuilder.Build(record);
+                    var spans = MonitorSpanProjectionBuilder.Build(CreateProjectionInput(record));
                     var newlyProjected = store.ApplySpanProjection(
                         record.Id!.Value,
                         spans,
@@ -187,4 +191,35 @@ internal sealed class ProjectionWorker : BackgroundService
             health.RecordProjectionStatusUnavailable();
         }
     }
+
+    private void ValidateProjectionDisposition(long rawRecordId)
+    {
+        var observation = compatibilityStore?.GetByRawRecordId(rawRecordId);
+        if (observation is null)
+        {
+            // Pre-v5 raw rows have no observation. Preserve their legacy projection
+            // path without inventing source compatibility evidence.
+            return;
+        }
+
+        if (observation.RawRecordId != rawRecordId)
+        {
+            throw new InvalidOperationException("The source observation does not belong to the raw record.");
+        }
+
+        _ = observation.CompatibilityState switch
+        {
+            SourceCompatibilityState.Supported => true,
+            SourceCompatibilityState.SupportedWithUnknownFields => true,
+            SourceCompatibilityState.SchemaDriftDetected => true,
+            SourceCompatibilityState.UnsupportedSourceVersion => true,
+            SourceCompatibilityState.RecognizedRecordDropDetected => true,
+            SourceCompatibilityState.AdapterFailure => throw new InvalidOperationException(
+                "An adapter-failure observation cannot own a raw record."),
+            _ => throw new InvalidOperationException("The stored source compatibility state is invalid."),
+        };
+    }
+
+    private static RawTelemetryRecord CreateProjectionInput(RawTelemetryRecord record)
+        => record with { PayloadJson = OtlpJsonRecognizedPayloadBuilder.Build(record.PayloadJson) };
 }

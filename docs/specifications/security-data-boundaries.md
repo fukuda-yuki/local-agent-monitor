@@ -700,6 +700,16 @@ and 1..100 events, and return `204` only after commit. Fixed error responses use
 only `{ "error": "<code>" }`; responses and logs never echo payloads, raw
 exception details, PII, credentials, tokens, or local paths.
 
+Claude Hook provenance in that envelope is sanitized metadata, not content.
+`source_application_version`, `adapter_version`, and `normalization_version`
+accept only the closed metadata-token grammar in the Session ingest interface;
+`schema_fingerprint` accepts only 64 lowercase hexadecimal characters. The
+adapter constructs these values independently of Hook payload/content. The
+receiver rejects control characters, whitespace, path or URI separators, and
+free-form prompt/response/tool/error/path text rather than promoting it into
+event provenance. Provenance never changes identity, binding, ownership, or
+content authority and is not written to logs.
+
 Session metadata and content are separated. `session_events` and sanitized
 `/api/session-workspace` reads do not contain event payload/content. Raw content
 is secret-filtered before storage in `session_event_content` and receives
@@ -794,11 +804,24 @@ Issue/PR text, and docs receive no cohort or evaluation payload. Verified is
 an atomic Local Monitor state transition after explicit comparison; there is
 no automatic comparison, mutation, rollback, retry, or git operation.
 
-The installed `hook-forward --endpoint <loopback-url> --timeout-ms 250` mode is
+The installed `hook-forward --endpoint <loopback-url> --timeout-ms 250
+[--source claude-code [--source-version <metadata-token>]
+[--schema-fingerprint <64-lowercase-hex>]]` mode is
 fail-open only with respect to the agent Hook decision: invalid input, network
 failure, and timeout still exit `0`, stdout/stderr remain empty, and the
 forwarder never changes the Hook decision. This does not relax the Session
 ingest validation or raw-data boundary.
+
+Omitting `--source` selects only the existing Copilot path. Exact
+`--source claude-code` is the sole Claude selector and is evaluated before
+stdin; source is never inferred from payload shape. Claude provenance arguments
+are valid only with that selector, are metadata-only, and are never read from
+Hook payload/content, documentation labels, or inventory-only evidence. If the
+selector is missing or invalid, a provenance option appears without it, or
+neither a trusted emitting version nor an approved fingerprint is available,
+Claude forwarding is suppressed silently rather than inventing provenance.
+Any supplied invalid provenance value invalidates the command. Argument values
+and rejected payloads are never logged or echoed.
 
 ## Shared Use Preconditions
 

@@ -43,6 +43,33 @@ public class MonitorProjectionApiTests
     }
 
     [Fact]
+    public async Task Traces_ExposeAdditiveSourceProjectionBlockWithPinnedShape()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedRawAndProject(temp, "trace-contract", TraceJson("trace-contract"));
+        await using var host = await StartReadOnlyHostAsync(temp);
+
+        using var document = await GetJsonAsync(host, "/api/monitor/traces");
+        var item = Assert.Single(document.RootElement.GetProperty("items").EnumerateArray());
+
+        Assert.Equal(
+            [
+                "id", "trace_id", "client_kind", "experiment_id", "task_id", "task_category",
+                "agent_variant", "prompt_version", "span_count", "tool_call_count", "error_count",
+                "first_seen_at", "last_seen_at", "projected_at", "input_tokens", "output_tokens",
+                "total_tokens", "turn_count", "agent_invocation_count", "duration_ms", "primary_model",
+                "repository_name", "workspace_label", "repo_snapshot", "source_diagnostic", "binding_state",
+                "completeness", "completeness_reason_codes", "content_state"
+            ],
+            item.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("source_diagnostic").ValueKind);
+        Assert.Equal("otel_only", item.GetProperty("binding_state").GetString());
+        Assert.Equal("unbound", item.GetProperty("completeness").GetString());
+        Assert.Equal(["missing_native_session_id"], item.GetProperty("completeness_reason_codes").EnumerateArray().Select(reason => reason.GetString()));
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("content_state").ValueKind);
+    }
+
+    [Fact]
     public async Task Spans_PaginateByCursorWithTerminalNull()
     {
         using var temp = new MonitorTempDirectory();

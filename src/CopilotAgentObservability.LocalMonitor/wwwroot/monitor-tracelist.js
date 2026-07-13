@@ -105,6 +105,101 @@
     return Math.round((item.cache_read_tokens * 100) / item.input_tokens);
   }
 
+  const COMPATIBILITY_LABELS = {
+    supported: "対応済み",
+    supported_with_unknown_fields: "対応済み（未知フィールドあり）",
+    unsupported_source_version: "未対応のバージョン",
+    schema_drift_detected: "スキーマ変更を検出",
+    recognized_record_drop_detected: "認識済みレコードの欠落を検出",
+    adapter_failure: "アダプターエラー",
+  };
+  const BINDING_LABELS = { hook_only: "Hook のみ", otel_only: "OTel のみ", exact_linked: "厳密リンク済み" };
+  const COMPLETENESS_LABELS = { unbound: "未接続", partial: "部分的", rich: "詳細あり", full: "完全" };
+  const CONTENT_LABELS = {
+    available: "内容を取得済み",
+    not_captured: "内容は取得されていません",
+    redacted: "内容は編集済みです",
+    unsupported: "内容取得は未対応です",
+  };
+  const NEXT_ACTION_LABELS = {
+    none: "対応は不要です",
+    review_unknown_fields: "未知フィールドを確認してください",
+    use_compatible_source_or_update_adapter: "対応するバージョンを使用するかアダプターを更新してください",
+    capture_fixture_and_review_mapping: "fixture を取得してマッピングを確認してください",
+    restore_mapping_or_update_versioned_golden: "マッピングを復元するか versioned golden を更新してください",
+    validate_payload_and_protocol: "payload と protocol を確認してください",
+    inspect_sanitized_adapter_failure: "sanitized なアダプター診断を確認してください",
+  };
+  const REASON_LABELS = {
+    missing_native_session_id: "ネイティブ Session ID がありません",
+    missing_trace_context: "trace context がありません",
+    trace_signal_disabled: "trace signal が無効です",
+    content_capture_disabled: "内容取得が無効です",
+    unsupported_source_version: "送信元バージョンは未対応です",
+    ingest_gap: "取り込みに欠落があります",
+    hook_only: "Hook のみの証拠です",
+    historical_summary_only: "履歴サマリーのみです",
+    unknown_span_kind: "未認識の span 種別があります",
+    schema_drift_detected: "スキーマ変更のため完全性を確認できません",
+    planned_source_not_enabled: "予定された送信元が有効ではありません",
+    unknown_fields_observed: "未知フィールドがあります",
+    recognized_record_drop_detected: "認識済みレコードに欠落があります",
+    adapter_parse_failure: "payload を解析できませんでした",
+    adapter_exception: "アダプター処理に失敗しました",
+  };
+
+  function isClaude(item) {
+    return item?.source_diagnostic?.source_surface === "claude-code";
+  }
+
+  function allowsRaw(item) {
+    return !isClaude(item) || item.content_state === "available";
+  }
+
+  async function fetchExactTraceFacts(traceId) {
+    const params = new URLSearchParams({ q: traceId, period: "all", sort: "time", offset: "0", limit: "50" });
+    try {
+      const resp = await fetch(`/api/monitor/trace-list?${params}`, { cache: "no-store" });
+      if (!resp.ok) return null;
+      const page = await resp.json();
+      return (page.items ?? []).find((item) => item.trace_id === traceId) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function sourceEvidence(item) {
+    if (!isClaude(item)) return null;
+    const diagnostic = item.source_diagnostic;
+    const panel = document.createElement("div");
+    panel.id = "preview-source-evidence";
+    panel.className = "preview-meta";
+
+    const heading = document.createElement("strong");
+    heading.textContent = `Claude Code · ${diagnostic.source_application_version ?? "バージョン —"}`;
+    const stateLine = document.createElement("div");
+    stateLine.textContent = [
+      COMPATIBILITY_LABELS[diagnostic.compatibility_state] ?? "互換性不明",
+      BINDING_LABELS[item.binding_state] ?? "接続状態不明",
+      COMPLETENESS_LABELS[item.completeness] ?? "完全性不明",
+      CONTENT_LABELS[item.content_state] ?? "内容状態不明",
+    ].join(" · ");
+    const action = document.createElement("div");
+    action.textContent = `次の対応: ${NEXT_ACTION_LABELS[diagnostic.next_action] ?? "診断を確認してください"}`;
+    const reasonCodes = [...new Set([
+      ...(diagnostic.reason_codes ?? []),
+      ...(item.completeness_reason_codes ?? []),
+    ])];
+    const reasons = document.createElement("div");
+    reasons.textContent = reasonCodes.length === 0
+      ? ""
+      : `不足理由: ${reasonCodes.map((reason) => REASON_LABELS[reason] ?? "詳細は診断を確認してください").join(" · ")}`;
+    panel.append(heading, stateLine);
+    if (reasonCodes.length > 0) panel.append(reasons);
+    panel.append(action);
+    return panel;
+  }
+
   /* ── Items from server-rendered rows (initial page) ── */
 
   function itemFromRow(row) {
@@ -362,7 +457,9 @@
   async function selectRow(traceId) {
     selectedTraceId = traceId;
     highlightSelection();
-    const item = displayedItems.find((candidate) => candidate.trace_id === traceId);
+    const listedItem = displayedItems.find((candidate) => candidate.trace_id === traceId);
+    const exactFacts = await fetchExactTraceFacts(traceId);
+    const item = listedItem && exactFacts ? { ...listedItem, ...exactFacts } : listedItem;
     if (!item || !previewBody) return;
     if (previewEmpty) previewEmpty.hidden = true;
     previewBody.hidden = false;
@@ -438,7 +535,10 @@
     open.textContent = "詳細を開く";
     footer.append(open);
 
-    previewBody.append(status, title, meta, kpis, composition, topSpans, footer);
+    const evidence = sourceEvidence(item);
+    previewBody.append(status, title, meta, kpis, composition);
+    if (evidence) previewBody.append(evidence);
+    previewBody.append(topSpans, footer);
 
     // Sanitized spans API: top-3 token spans + the raw record id for the raw link.
     try {
@@ -467,7 +567,7 @@
           topList.append(li);
         }
 
-        if (rawAvailable && spans.length > 0 && spans[0].raw_record_id) {
+        if (rawAvailable && allowsRaw(item) && spans.length > 0 && spans[0].raw_record_id) {
           const raw = document.createElement("a");
           raw.className = "preview-raw";
           raw.href = `/traces/${spans[0].raw_record_id}/raw`;

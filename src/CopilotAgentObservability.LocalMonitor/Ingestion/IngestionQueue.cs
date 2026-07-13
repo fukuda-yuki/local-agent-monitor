@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 
 namespace CopilotAgentObservability.LocalMonitor.Ingestion;
 
@@ -31,9 +32,18 @@ internal sealed class IngestionQueue
     /// <summary>True once the queue has stopped accepting new work (shutdown).</summary>
     public bool IsClosed => closed;
 
-    public bool TryEnqueue(RawTelemetryRecord record, [NotNullWhen(true)] out IngestionWriteRequest? request)
+    public bool TryEnqueue(ValidatedIngestionBatch batch, [NotNullWhen(true)] out IngestionWriteRequest? request)
     {
-        var candidate = new IngestionWriteRequest(record, timeProvider.GetUtcNow());
+        return TryEnqueue(IngestionWriteRequest.ForBatch(batch, timeProvider.GetUtcNow()), out request);
+    }
+
+    public bool TryEnqueue(SourceAdapterFailureDraft failure, [NotNullWhen(true)] out IngestionWriteRequest? request)
+    {
+        return TryEnqueue(IngestionWriteRequest.ForAdapterFailure(failure, timeProvider.GetUtcNow()), out request);
+    }
+
+    private bool TryEnqueue(IngestionWriteRequest candidate, [NotNullWhen(true)] out IngestionWriteRequest? request)
+    {
         if (channel.Writer.TryWrite(candidate))
         {
             request = candidate;

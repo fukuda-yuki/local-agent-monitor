@@ -333,6 +333,36 @@ public class CanvasExtensionContractTests
     }
 
     [Fact]
+    public void CanvasSessionWorkspace_PresentsBackendClaudeDiagnosticWithoutParallelFetch()
+    {
+        var workspace = File.ReadAllText(Path.Combine(ExtensionDirectory(), "canvas-workspace-helpers.mjs"));
+
+        foreach (var field in new[]
+        {
+            "source_surface",
+            "source_application_version",
+            "source_adapter",
+            "adapter_version",
+            "schema_fingerprint",
+            "compatibility_state",
+            "reason_codes",
+            "next_action",
+        })
+        {
+            Assert.Contains(field, workspace);
+        }
+
+        Assert.Contains("Claude Code セッション", workspace);
+        Assert.Contains("binding_state", workspace);
+        Assert.Contains("completeness_reason_codes", workspace);
+        Assert.Contains("一致するコンテンツ状態なし", workspace);
+        Assert.Contains("診断を確認", workspace);
+        Assert.DoesNotContain("/api/claude", workspace, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/api/source-diagnostics", workspace, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("innerHTML", workspace, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Extension_SessionInstructionRouteSetsNoStoreForEveryOutcome()
     {
         var script = ReadExtension();

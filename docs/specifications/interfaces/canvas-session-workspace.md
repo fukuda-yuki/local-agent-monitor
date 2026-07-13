@@ -30,6 +30,12 @@ Sessions may merge only when at least one exact condition holds:
 3. an ingested event and OTel evidence carry the byte-for-byte identical trace
    context.
 
+For Claude v1, condition 3 is reserved but unavailable: the event envelope
+contains only optional `trace_id`, not a provenance-bearing complete trace
+context. Trace-ID-only evidence never merges Sessions and never becomes
+`trace_context` or `exact_linked`. Claude v1 exact linking is limited to
+conditions 1 and 2 until a later spec-first DTO adds the complete context.
+
 Repository and timestamp proximity must never merge sessions.
 `client_kind` never participates in Session binding or merge. An exact
 `gen_ai.conversation.id` may bind/enrich only when it is byte-for-byte equal to
@@ -113,9 +119,10 @@ identity to `missing_trace_context`, missing capture/content state to
 `content_capture_disabled`, and missing adapter/version/fingerprint/
 normalization version to `schema_drift_detected`.
 
-The contract is an adapter handoff requirement, not an Issue #61 change to this
-ingest API, its sanitized read DTOs, raw-content route, Session/Run/Event
-identity, or Issue #49 Agent ownership.
+The contract is an adapter handoff requirement. Task 15 adds only the v1 ingest
+envelope provenance fields defined below; it does not change sanitized read
+DTOs, the raw-content route, Session/Run/Event identity, or Issue #49 Agent
+ownership.
 
 ## Session Event Ingest
 
@@ -133,26 +140,45 @@ The request requirements are:
 - request body at most **1 MiB (1048576 bytes)**;
 - `events` batch length from **1 through 100**, inclusive;
 - schema version `1` only;
-- `source_adapter` is `copilot-sdk-stream` or `copilot-compatible-hook`;
-- `source_surface` is `copilot-sdk`, `copilot-cli`, `vscode`, or
-  `hook-unknown`.
+- `source_adapter` is `copilot-sdk-stream`, `copilot-compatible-hook`, or
+  `claude-code-hook`;
+- `source_surface` is `copilot-sdk`, `copilot-cli`, `vscode`,
+  `hook-unknown`, or `claude-code`.
 
 The v1 envelope has these fields:
 
 | Field | Required | Contract |
 | --- | --- | --- |
 | `schema_version` | yes | Integer exactly `1`. |
-| `source_adapter` | yes | `copilot-sdk-stream` or `copilot-compatible-hook`. |
-| `source_surface` | yes | `copilot-sdk`, `copilot-cli`, `vscode`, or `hook-unknown`. |
+| `source_adapter` | yes | `copilot-sdk-stream`, `copilot-compatible-hook`, or `claude-code-hook`. |
+| `source_surface` | yes | `copilot-sdk`, `copilot-cli`, `vscode`, `hook-unknown`, or `claude-code`. |
 | `native_session_id` | yes | Nonblank string, 1..256 characters. |
 | `events` | yes | JSON array with 1..100 entries. |
 | `explicit_link` | no | The sole v1 wire representation of explicit resume/handoff linkage; shape below. |
+| `source_application_version` | conditional | JSON null or an adapter-generated metadata token. Required for `claude-code-hook` when `schema_fingerprint` is absent; legacy Copilot envelopes may omit it. |
+| `adapter_version` | conditional | Adapter-generated metadata token. Required for `claude-code-hook`; legacy Copilot envelopes may omit it. |
+| `schema_fingerprint` | conditional | JSON null or exactly 64 lowercase hexadecimal characters. Required for `claude-code-hook` when `source_application_version` is absent; legacy Copilot envelopes may omit it. |
+| `normalization_version` | conditional | Adapter-generated metadata token. Required for `claude-code-hook`; legacy Copilot envelopes may omit it. |
+
+An adapter-generated metadata token matches
+`^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$`. The receiver never derives these fields
+from `payload`, content, a path, prompt/response text, tool input/output, or an
+exception. Control characters, whitespace, path separators, URI separators,
+and other free-form text are invalid. The four envelope values are copied
+unchanged to every accepted event in the batch. They do not participate in
+Session/Event IDs, binding, ownership, or content storage.
+
+For `claude-code-hook`, `adapter_version` and `normalization_version` are
+required and at least one of `source_application_version` or
+`schema_fingerprint` is required. `claude-code-otel` is not valid on this
+endpoint and remains an OTLP `/v1/traces` adapter. The composite registry label
+`claude-code-otel+claude-code-hook` is never a persisted adapter value.
 
 `explicit_link`, when present, is exactly:
 
 ```json
 {
-  "source_surface": "copilot-sdk|copilot-cli|vscode|hook-unknown",
+  "source_surface": "copilot-sdk|copilot-cli|vscode|hook-unknown|claude-code",
   "native_session_id": "nonblank 1..256 characters",
   "kind": "resume|handoff"
 }
@@ -165,12 +191,16 @@ The v1 envelope example is:
 ```json
 {
   "schema_version": 1,
-  "source_adapter": "copilot-sdk-stream|copilot-compatible-hook",
-  "source_surface": "copilot-sdk|copilot-cli|vscode|hook-unknown",
-  "native_session_id": "nonblank 1..256 characters",
+  "source_adapter": "claude-code-hook",
+  "source_surface": "claude-code",
+  "native_session_id": "claude-session-example",
+  "source_application_version": "2.1.207",
+  "adapter_version": "claude-hook-v1",
+  "schema_fingerprint": null,
+  "normalization_version": "session-normalization-v1",
   "explicit_link": {
-    "source_surface": "copilot-cli",
-    "native_session_id": "nonblank 1..256 characters",
+    "source_surface": "claude-code",
+    "native_session_id": "prior-claude-session",
     "kind": "resume"
   },
   "events": [
@@ -234,7 +264,10 @@ or raw exception messages.
 The installed Local Monitor provides this mode:
 
 ```text
-hook-forward --endpoint <loopback-url> --timeout-ms 250
+hook-forward --endpoint <loopback-url> --timeout-ms 250 \
+  [--source claude-code \
+    [--source-version <metadata-token>] \
+    [--schema-fingerprint <64-lowercase-hex>]]
 ```
 
 It reads exactly one JSON payload from stdin and forwards it to the Session
@@ -242,6 +275,45 @@ event ingest endpoint. It always exits `0` for invalid input, network failure,
 or timeout, writes nothing to stdout or stderr, and never influences the agent
 Hook decision. The endpoint must be loopback. No permissive alternate parser,
 retry path, or agent-decision fallback is added.
+
+Omitting `--source` selects the existing Copilot Hook mode and preserves its
+no-new-argument behavior. The only accepted selector is the exact pair
+`--source claude-code`; it selects Claude mode before stdin is interpreted.
+The forwarder never infers the source from Hook payload shape. Provenance flags
+are valid only in Claude mode. A provenance flag without the selector, a
+missing selector value, any selector value other than `claude-code`, or a
+duplicate selector is invalid input.
+The selector and provenance option pairs may each appear at most once and may
+appear in any option order; existing endpoint and timeout parsing is unchanged.
+
+Claude mode requires at least one of `--source-version` or
+`--schema-fingerprint`. Both use the exact Session provenance validation above.
+The value is supplied out-of-band from the actually emitting Claude
+installation or an approved Hook schema fingerprint. The forwarder never
+derives it from Hook payload/content, documentation/fixture labels, or
+inventory-only executable evidence. Missing or invalid Claude provenance means
+the payload is not forwarded; if both values are supplied, either invalid value
+invalidates the command rather than being ignored. Fail-open exit `0` and silent
+stdout/stderr remain unchanged. Adapter and normalization versions remain
+installed adapter constants, not CLI input.
+
+The command acceptance matrix is exact:
+
+| Mode and arguments | Result |
+| --- | --- |
+| `--source` omitted; no provenance flags; valid Copilot payload | Preserve the existing Copilot envelope and forward once. |
+| `--source claude-code` plus valid `--source-version` only | Forward one Claude envelope with the version copied unchanged and null fingerprint. |
+| `--source claude-code` plus valid `--schema-fingerprint` only | Forward one Claude envelope with null application version and the fingerprint copied unchanged. |
+| `--source claude-code` plus both valid provenance flags | Forward one Claude envelope with both values copied unchanged. |
+| Claude selector with neither provenance flag | Do not forward; exit `0` with empty stdout/stderr. |
+| Provenance flag without the Claude selector | Do not forward; exit `0` with empty stdout/stderr. |
+| Missing selector value, unknown or duplicate selector, duplicate provenance option, or any supplied invalid provenance value | Do not forward; exit `0` with empty stdout/stderr. |
+| Valid mode metadata with invalid stdin, non-loopback endpoint, invalid timeout, network failure, or timeout | Keep the existing fail-open/silent behavior; network and timeout receive no retry. |
+
+Every forwarded Claude envelope uses `source_adapter = claude-code-hook`,
+`source_surface = claude-code`, header/schema version `1`, and installed
+adapter/normalization constants. Payload fields that resemble a source,
+version, or fingerprint never select the mode or populate provenance.
 
 GitHub Copilot CLI and VS Code use the same PascalCase Hooks contract.
 Ambiguous Hook input is recorded as `hook-unknown`; its surface must not be
@@ -285,7 +357,11 @@ pagination and no additional filters. Each list item has exactly these fields:
 | `session_id` | Local UUIDv7 string. |
 | `status` | `active`, `completed`, `failed`, or `unknown`. |
 | `completeness` | `unbound`, `partial`, `rich`, or `full`. |
+| `completeness_reason_codes` | Canonically ordered Issue #61 reason-code array. |
 | `source_surfaces` | Array of source-surface enum values. |
+| `source_diagnostic` | Additive sanitized object defined by `source-schema-drift-claude-code.md`, or `null` when no observation is linked. |
+| `binding_state` | `hook_only`, `otel_only`, or `exact_linked`. |
+| `content_state` | Nullable aggregate capture state defined by `source-schema-drift-claude-code.md`; never a UI-derived fallback. |
 | `repository` | Nullable string. |
 | `workspace` | Nullable string. |
 | `started_at` | Nullable ISO-8601 timestamp. |
@@ -300,7 +376,7 @@ An invalid or out-of-range `limit` returns `400` with
 top-level fields (`human_evaluation` is the Issue #52 additive amendment; see
 `canvas-session-workspace-ui.md`):
 
-- `session`: the exact list-item shape above;
+- `session`: the exact additive list-item shape above;
 - `human_evaluation`: JSON `null`, or `{ "verdict": "expected"|"problem",
   "recorded_at": "<ISO-8601>" }` recorded through the Issue #52
   human-evaluation endpoint;

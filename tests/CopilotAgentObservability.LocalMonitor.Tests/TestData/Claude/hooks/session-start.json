@@ -1,0 +1,10 @@
+{
+  "session_id": "SYNTHETIC_SESSION_0001",
+  "transcript_path": "SYNTHETIC_TRANSCRIPT_PATH",
+  "cwd": "SYNTHETIC_WORKING_DIRECTORY",
+  "hook_event_name": "SessionStart",
+  "source": "startup",
+  "model": "SYNTHETIC_MODEL_LABEL",
+  "agent_type": "SYNTHETIC_AGENT_TYPE",
+  "session_title": "SYNTHETIC_SESSION_TITLE"
+}

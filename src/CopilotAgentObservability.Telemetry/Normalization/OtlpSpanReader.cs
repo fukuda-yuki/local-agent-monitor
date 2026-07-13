@@ -73,10 +73,10 @@ internal static class OtlpSpanReader
             SpanId: ReadString(span, "spanId"),
             ParentSpanId: ReadString(span, "parentSpanId"),
             Name: ReadString(span, "name"),
-            Kind: ReadString(span, "kind"),
+            Kind: ReadStringOrNumber(span, "kind"),
             StartTimeUnixNano: ReadUnsignedLong(span, "startTimeUnixNano"),
             EndTimeUnixNano: ReadUnsignedLong(span, "endTimeUnixNano"),
-            StatusCode: TryGetObject(span, "status", out var status) ? ReadString(status, "code") : null,
+            StatusCode: TryGetObject(span, "status", out var status) ? ReadStringOrNumber(status, "code") : null,
             Attributes: attributes,
             Events: events);
     }
@@ -165,7 +165,7 @@ internal static class OtlpSpanReader
 
         return value.GetValueKind() == JsonValueKind.String
             ? value.GetValue<string>()
-            : value.ToJsonString();
+            : null;
     }
 
     internal static int? ReadInt(JsonObject attributes, string propertyName)
@@ -268,7 +268,7 @@ internal static class OtlpSpanReader
 
         return property.ValueKind == JsonValueKind.String
             ? property.GetString()
-            : property.GetRawText();
+            : null;
     }
 
     internal static ulong? ReadUnsignedLong(JsonElement element, string propertyName)
@@ -283,6 +283,22 @@ internal static class OtlpSpanReader
         {
             JsonValueKind.Number when property.TryGetUInt64(out var value) => value,
             JsonValueKind.String when ulong.TryParse(property.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) => value,
+            _ => null,
+        };
+    }
+
+    private static string? ReadStringOrNumber(JsonElement element, string propertyName)
+    {
+        if (element.ValueKind != JsonValueKind.Object
+            || !element.TryGetProperty(propertyName, out var property))
+        {
+            return null;
+        }
+
+        return property.ValueKind switch
+        {
+            JsonValueKind.String => property.GetString(),
+            JsonValueKind.Number => property.GetRawText(),
             _ => null,
         };
     }

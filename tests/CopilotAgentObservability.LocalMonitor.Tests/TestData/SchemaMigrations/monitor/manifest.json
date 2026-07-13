@@ -1,0 +1,71 @@
+{
+  "component": "monitor",
+  "generationCommand": "dotnet run --project scripts/test/GenerateMonitorSchemaFixtures/GenerateMonitorSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/monitor",
+  "gitStatusCommand": "git status --porcelain",
+  "fixtures": [
+    {
+      "version": 1,
+      "file": "monitor-v1.sqlite",
+      "sourceCommit": "655e00243df9e07b9abb3392d6e4daf747064a77",
+      "sha256": "94fac53aac6b5d505a4f42164bff0e7a54752931ec79847b22876169f93a07c6",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "sentinels": {
+        "rawRecordId": 101,
+        "ingestionId": 102,
+        "traceRowId": 103,
+        "traceId": "fixture-monitor-v1-trace",
+        "spanRowId": null,
+        "spanId": null
+      }
+    },
+    {
+      "version": 2,
+      "file": "monitor-v2.sqlite",
+      "sourceCommit": "f91e195b549fa2bbfc51b3245dd3fb19fcc8759c",
+      "sha256": "5862d1f1b846956c63c812fc576716f9e258da8b983f8ab7780d277d4f27f818",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "sentinels": {
+        "rawRecordId": 201,
+        "ingestionId": 202,
+        "traceRowId": 203,
+        "traceId": "fixture-monitor-v2-trace",
+        "spanRowId": 204,
+        "spanId": "fixture-monitor-v2-span"
+      }
+    },
+    {
+      "version": 3,
+      "file": "monitor-v3.sqlite",
+      "sourceCommit": "9ca613a97fd0611ccff1d84b35261b7346112eab",
+      "sha256": "de16b850aef45c310d399d5b49b7a6809ef5e5e08c4f91d38f6438f871cb907d",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "sentinels": {
+        "rawRecordId": 301,
+        "ingestionId": 302,
+        "traceRowId": 303,
+        "traceId": "fixture-monitor-v3-trace",
+        "spanRowId": 304,
+        "spanId": "fixture-monitor-v3-span"
+      }
+    },
+    {
+      "version": 4,
+      "file": "monitor-v4.sqlite",
+      "sourceCommit": "65ec872eb541b2023f55c32d32edebb9cf83818b",
+      "sha256": "8c79c7ee3fe70555c2d66a4450b0bcc86245c744ce289007ff6828f9bf69d12f",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "sentinels": {
+        "rawRecordId": 401,
+        "ingestionId": 402,
+        "traceRowId": 403,
+        "traceId": "fixture-monitor-v4-trace",
+        "spanRowId": 404,
+        "spanId": "fixture-monitor-v4-span"
+      }
+    }
+  ]
+}

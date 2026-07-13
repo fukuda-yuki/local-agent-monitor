@@ -1,4 +1,5 @@
 using Microsoft.Playwright;
+using System.Text.Json;
 using static Microsoft.Playwright.Assertions;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -11,6 +12,45 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorTraceListPlaywrightTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TraceList_ClaudeSourceEvidenceUsesDtoFactsAndContentDisabledHidesRaw(bool sanitizedOnly)
+    {
+        using var temp = new MonitorTempDirectory();
+        Seed(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: new MonitorHostTestOptions
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+        });
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/monitor/trace-list?*", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = ClaudeTraceListBody(
+                compatibilityState: "supported_with_unknown_fields",
+                nextAction: "review_unknown_fields",
+                contentState: "not_captured"),
+        }));
+
+        await page.GotoAsync($"{host.Url}/traces?period=all", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        var source = page.Locator("#preview-source-evidence");
+        await Expect(source).ToBeVisibleAsync();
+        await Expect(source).ToContainTextAsync("Claude Code");
+        await Expect(source).ToContainTextAsync("未知フィールドあり");
+        await Expect(source).ToContainTextAsync("Hook のみ");
+        await Expect(source).ToContainTextAsync("部分的");
+        await Expect(source).ToContainTextAsync("内容は取得されていません");
+        await Expect(source).ToContainTextAsync("未知フィールドを確認してください");
+        await Expect(page.Locator("#preview-body .preview-raw")).ToHaveCountAsync(0);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -93,6 +133,49 @@ public class MonitorTraceListPlaywrightTests
         store.ApplyProjection(id, record.Source, record.ReceivedAt, MonitorProjectionBuilder.Build(record), receivedAt);
         store.ApplySpanProjection(id, MonitorSpanProjectionBuilder.Build(record), receivedAt);
     }
+
+    private static string ClaudeTraceListBody(string compatibilityState, string nextAction, string contentState) =>
+        JsonSerializer.Serialize(new
+        {
+            items = new[]
+            {
+                new
+                {
+                    trace_id = "trace-list-big",
+                    total_tokens = 5000,
+                    input_tokens = 4000,
+                    output_tokens = 1000,
+                    cache_read_tokens = 2000,
+                    cache_creation_tokens = (int?)null,
+                    duration_ms = (double?)null,
+                    turn_count = 1,
+                    tool_call_count = 0,
+                    trace_status = "ok",
+                    primary_model = "claude-sonnet-4-5",
+                    client_kind = (string?)null,
+                    last_seen_at = DateTimeOffset.UnixEpoch.ToString("O"),
+                    source_diagnostic = new
+                    {
+                        source_surface = "claude-code",
+                        source_application_version = (string?)null,
+                        source_adapter = "claude-code-otel",
+                        adapter_version = "1",
+                        schema_fingerprint = (string?)null,
+                        compatibility_state = compatibilityState,
+                        reason_codes = new[] { "unknown_fields_observed" },
+                        next_action = nextAction,
+                    },
+                    binding_state = "hook_only",
+                    completeness = "partial",
+                    completeness_reason_codes = new[] { "hook_only", "content_capture_disabled" },
+                    content_state = contentState,
+                },
+            },
+            total_matched = 1,
+            total_matched_tokens = 5000,
+            offset = 0,
+            limit = 50,
+        });
 
     private const string BigPayload = """
         {"resourceSpans":[{"resource":{"attributes":[

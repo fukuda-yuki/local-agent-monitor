@@ -1,67 +1,8 @@
 using CopilotAgentObservability.LocalMonitor.Health;
-using Microsoft.Data.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.Ingestion;
-
-/// <summary>
-/// Persistence seam owned by the single ingestion writer. Concrete persistence
-/// exceptions are classified here into busy vs. non-busy so the worker can map
-/// them to typed ack results without leaking raw exception text.
-/// </summary>
-internal interface IRawTelemetryWriter
-{
-    void EnsureSchema();
-
-    long Insert(RawTelemetryRecord record);
-}
-
-internal sealed class PersistenceBusyException : Exception
-{
-}
-
-internal sealed class PersistenceFailedException : Exception
-{
-}
-
-internal sealed class RawTelemetryStoreWriter : IRawTelemetryWriter
-{
-    private readonly RawTelemetryStore store;
-
-    public RawTelemetryStoreWriter(RawTelemetryStore store)
-    {
-        this.store = store;
-    }
-
-    public void EnsureSchema()
-    {
-        store.CreateMonitorSchema();
-    }
-
-    public long Insert(RawTelemetryRecord record)
-    {
-        try
-        {
-            return store.Insert(record);
-        }
-        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
-        {
-            throw new PersistenceBusyException();
-        }
-        catch (SqliteException)
-        {
-            throw new PersistenceFailedException();
-        }
-        catch (IOException)
-        {
-            throw new PersistenceFailedException();
-        }
-        catch (UnauthorizedAccessException)
-        {
-            throw new PersistenceFailedException();
-        }
-    }
-}
 
 /// <summary>
 /// The single SQLite writer. Owns all monitor writes: runs the additive
@@ -73,18 +14,21 @@ internal sealed class RawTelemetryStoreWriter : IRawTelemetryWriter
 internal sealed class IngestionWriterWorker : BackgroundService
 {
     private readonly IngestionQueue queue;
-    private readonly IRawTelemetryWriter writer;
+    private readonly IIngestionCommitStore commitStore;
+    private readonly ISourceCompatibilityStore compatibilityStore;
     private readonly MonitorHealthState health;
     private readonly TaskCompletionSource readerStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool migrated;
 
     public IngestionWriterWorker(
         IngestionQueue queue,
-        IRawTelemetryWriter writer,
+        IIngestionCommitStore commitStore,
+        ISourceCompatibilityStore compatibilityStore,
         MonitorHealthState health)
     {
         this.queue = queue;
-        this.writer = writer;
+        this.commitStore = commitStore;
+        this.compatibilityStore = compatibilityStore;
         this.health = health;
     }
 
@@ -149,7 +93,7 @@ internal sealed class IngestionWriterWorker : BackgroundService
     {
         try
         {
-            writer.EnsureSchema();
+            compatibilityStore.CreateSchema();
             return true;
         }
         catch (Exception)
@@ -162,16 +106,27 @@ internal sealed class IngestionWriterWorker : BackgroundService
     {
         try
         {
-            var rawRecordId = writer.Insert(request.Record);
+            IngestionCommitResult result;
+            if (request.Batch is { } batch)
+            {
+                var committed = commitStore.Commit(batch);
+                result = IngestionCommitResult.Committed(committed.RawRecordId, committed.ObservationId);
+            }
+            else
+            {
+                var observationId = compatibilityStore.RecordAdapterFailure(
+                    request.AdapterFailure ?? throw new InvalidOperationException("An ingestion request has no write payload."));
+                result = IngestionCommitResult.AdapterFailureRecorded(observationId);
+            }
             health.RecordCommitSuccess();
-            request.Complete(IngestionCommitResult.Committed(rawRecordId));
+            request.Complete(result);
         }
-        catch (PersistenceBusyException)
+        catch (IngestionCommitBusyException)
         {
             health.RecordBackpressure();
             request.Complete(IngestionCommitResult.Busy);
         }
-        catch (PersistenceFailedException)
+        catch (IngestionCommitFailedException)
         {
             health.RecordBackpressure();
             request.Complete(IngestionCommitResult.Failed);

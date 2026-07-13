@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public class RawLocalReceiverHandlerTests
 {
     [Fact]
-    public void Handle_PersistsJsonTraceRequest()
+    public void Handle_PersistsCanonicalJsonTracePayloadWithoutStructuralInventory()
     {
         using var tempDirectory = new ReceiverTempDirectory();
         var receivedAt = new DateTimeOffset(2026, 6, 21, 1, 2, 3, TimeSpan.Zero);
@@ -34,6 +34,7 @@ public class RawLocalReceiverHandlerTests
         Assert.Equal("11111111111111111111111111111111", record.TraceId);
         Assert.Equal(receivedAt, record.ReceivedAt);
         Assert.Equal(JsonTracePayload(), record.PayloadJson);
+        Assert.DoesNotContain("StructuralInventory", record.PayloadJson, StringComparison.Ordinal);
     }
 
     [Fact]
