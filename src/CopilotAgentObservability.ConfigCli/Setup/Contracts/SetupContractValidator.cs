@@ -313,7 +313,8 @@ public static class SetupContractValidator
 
         ValidateUuidV7(target.RecordId);
         ValidateFixedIdentifier(target.TargetLabel);
-        if (target.DetectedVersion is not null && !SemanticVersion.IsMatch(target.DetectedVersion))
+        if (target.DetectedVersion is not null &&
+            (target.DetectedVersion.Length > 128 || !SemanticVersion.IsMatch(target.DetectedVersion)))
         {
             Reject();
         }
@@ -334,7 +335,10 @@ public static class SetupContractValidator
             Reject();
         }
 
-        ValidateExpectedResult(target.ExpectedResult);
+        ValidateExpectedResult(
+            target.ExpectedResult,
+            ExpectedSurface(target.TargetKind, target.TargetLabel),
+            requireCurrentManifest: !isStatusTarget);
 
         if (target.TargetKind == SetupTargetKind.Guidance)
         {
@@ -377,8 +381,10 @@ public static class SetupContractValidator
             Reject();
         }
 
-        ValidateFixedIdentifier(target.Guidance.Kind);
-        ValidateFixedIdentifier(target.Guidance.Language);
+        if (target.Guidance.Kind != "caller_managed_sample" || target.Guidance.Language != "dotnet")
+        {
+            Reject();
+        }
         if ((!isStatusTarget || target.Guidance.Sample is not null) && target.Guidance.Sample != AppSdkGuidanceSample)
         {
             Reject();
@@ -505,10 +511,75 @@ public static class SetupContractValidator
         };
     }
 
-    private static void ValidateExpectedResult(JsonElement? expectedResult)
+    internal static bool IsValidLedgerStatusProjection(
+        SetupStatusProjection? projection,
+        SetupTargetKind targetKind,
+        string targetLabel)
+    {
+        try
+        {
+            if (projection is null ||
+                projection.Changes is null ||
+                !Enum.IsDefined(projection.Operation) ||
+                projection.EffectiveSource is { } source && !Enum.IsDefined(source) ||
+                projection.DetectedVersion is { Length: > 128 } ||
+                projection.DetectedVersion is not null && !SemanticVersion.IsMatch(projection.DetectedVersion) ||
+                projection.Endpoint is not null && !IsCredentialFreeLoopbackHttpEndpoint(projection.Endpoint))
+            {
+                return false;
+            }
+
+            ValidateExpectedResult(projection.ExpectedResult, ExpectedSurface(targetKind, targetLabel), requireCurrentManifest: false);
+            if (targetKind == SetupTargetKind.Guidance)
+            {
+                return projection.Operation == SetupOperation.NoOp &&
+                    projection.EffectiveSource is null &&
+                    projection.Endpoint is null &&
+                    projection.ExpectedResult is null &&
+                    projection.Guidance is not null &&
+                    projection.Guidance.Kind == "caller_managed_sample" &&
+                    projection.Guidance.Language == "dotnet" &&
+                    projection.Changes.Count == 0;
+            }
+
+            if (projection.Guidance is not null || projection.Changes.Count is 0 or > MaximumChangesPerTarget)
+            {
+                return false;
+            }
+
+            foreach (var change in projection.Changes)
+            {
+                ValidateMemberChange(change);
+            }
+
+            return projection.Operation == AggregateOperation(projection.Changes);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    internal static SetupGuidance RehydrateStatusGuidance(SetupStatusGuidance guidance)
+    {
+        ArgumentNullException.ThrowIfNull(guidance);
+        if (guidance.Kind != "caller_managed_sample" || guidance.Language != "dotnet")
+        {
+            Reject();
+        }
+
+        return new SetupGuidance(guidance.Kind, guidance.Language, AppSdkGuidanceSample);
+    }
+
+    private static void ValidateExpectedResult(JsonElement? expectedResult, string? expectedSurface, bool requireCurrentManifest)
     {
         if (expectedResult is not { } value || value.ValueKind == JsonValueKind.Null)
         {
+            if (expectedSurface is not null)
+            {
+                Reject();
+            }
+
             return;
         }
 
@@ -528,9 +599,17 @@ public static class SetupContractValidator
             Reject();
         }
 
+        if (expectedSurface is null)
+        {
+            Reject();
+        }
+
         try
         {
-            if (!SourceCapabilityManifestLoader.MatchesCanonical(SourceCapabilityManifestLoader.LoadForSurface(sourceSurface), value))
+            var valid = requireCurrentManifest
+                ? sourceSurface == expectedSurface && SourceCapabilityManifestLoader.MatchesCanonical(SourceCapabilityManifestLoader.LoadForSurface(sourceSurface), value)
+                : SourceCapabilityManifestLoader.IsValidLedgerManifest(value, expectedSurface);
+            if (!valid)
             {
                 Reject();
             }
@@ -540,6 +619,13 @@ public static class SetupContractValidator
             Reject();
         }
     }
+
+    private static string? ExpectedSurface(SetupTargetKind targetKind, string targetLabel) => (targetKind, targetLabel) switch
+    {
+        (SetupTargetKind.Json, "vscode-user-settings") => "github-copilot-vscode",
+        (SetupTargetKind.Env, "user-environment") => "github-copilot-cli",
+        _ => null,
+    };
 
     private static void ValidateStringList(IReadOnlyList<string> values, ISet<string> allowedValues)
     {

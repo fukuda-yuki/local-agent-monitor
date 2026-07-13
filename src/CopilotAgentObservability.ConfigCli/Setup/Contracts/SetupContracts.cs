@@ -58,6 +58,20 @@ public sealed record SetupGuidance(
     string Language,
     string Sample);
 
+internal sealed record SetupStatusProjection(
+    bool Detected,
+    string? DetectedVersion,
+    SetupOperation Operation,
+    SetupEffectiveSource? EffectiveSource,
+    string? Endpoint,
+    JsonElement? ExpectedResult,
+    SetupStatusGuidance? Guidance,
+    IReadOnlyList<SetupMemberChangeResult> Changes);
+
+internal sealed record SetupStatusGuidance(
+    string Kind,
+    string Language);
+
 public enum SetupCommand
 {
     Plan,

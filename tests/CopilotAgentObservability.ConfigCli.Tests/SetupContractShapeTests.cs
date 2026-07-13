@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.Json;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
@@ -162,7 +163,7 @@ public sealed class SetupContractShapeTests
         Assert.Equal("restart_vscode", nestedWritable.GetProperty("restart_requirement").GetString());
         Assert.True(nestedWritable.GetProperty("rollback_available").GetBoolean());
         Assert.Equal("http://127.0.0.1:4320", nestedWritable.GetProperty("endpoint").GetString());
-        Assert.Equal(JsonValueKind.Null, nestedWritable.GetProperty("expected_result").ValueKind);
+        Assert.Equal("github-copilot-vscode", nestedWritable.GetProperty("expected_result").GetProperty("source_surface").GetString());
         Assert.Equal(JsonValueKind.Null, nestedWritable.GetProperty("guidance").ValueKind);
         var nestedMember = nestedWritable.GetProperty("changes")[0];
         AssertMemberShape(nestedMember);
@@ -194,6 +195,21 @@ public sealed class SetupContractShapeTests
         Assert.Equal("caller_managed_sample", nestedGuidance.GetProperty("kind").GetString());
         Assert.Equal("dotnet", nestedGuidance.GetProperty("language").GetString());
         Assert.False(nestedGuidance.TryGetProperty("sample", out _));
+    }
+
+    [Fact]
+    public void Serialize_StatusGuidanceRehydratedFromLedgerMetadata_OmitsSample()
+    {
+        var guidance = SetupContractValidator.RehydrateStatusGuidance(
+            new SetupStatusGuidance("caller_managed_sample", "dotnet"));
+        var target = CreateStatusGuidanceTarget() with { Guidance = guidance };
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(CreateStatusResult(target, SetupChangeSetState.Planned)));
+
+        var serializedGuidance = document.RootElement.GetProperty("change_sets")[0].GetProperty("targets")[0].GetProperty("guidance");
+        Assert.Equal(["kind", "language"], serializedGuidance.EnumerateObject().Select(property => property.Name));
+        Assert.False(serializedGuidance.TryGetProperty("sample", out _));
+        Assert.Equal(AppSdkGuidanceSample, guidance.Sample);
     }
 
     [Fact]
@@ -315,7 +331,7 @@ public sealed class SetupContractShapeTests
     public static TheoryData<SetupRestartRequirement, string> RestartRequirementWireValues => new() { { SetupRestartRequirement.None, "none" }, { SetupRestartRequirement.RestartVsCode, "restart_vscode" }, { SetupRestartRequirement.RestartTerminalSession, "restart_terminal_session" } };
     public static TheoryData<SetupChangeSetState, string> ChangeSetStateWireValues => new() { { SetupChangeSetState.Planned, "planned" }, { SetupChangeSetState.Applying, "applying" }, { SetupChangeSetState.Applied, "applied" }, { SetupChangeSetState.NoChanges, "no_changes" }, { SetupChangeSetState.Compensating, "compensating" }, { SetupChangeSetState.Restored, "restored" }, { SetupChangeSetState.RollingBack, "rolling_back" }, { SetupChangeSetState.Partial, "partial" }, { SetupChangeSetState.RolledBack, "rolled_back" } };
 
-    private static SetupTargetResult CreateStatusWritableTarget(SetupReferenceState referenceState = SetupReferenceState.Desired, SetupCurrentState currentState = SetupCurrentState.Current, bool rollbackAvailable = true) => new("00000000-0000-7000-8000-000000000020", SetupTargetKind.Json, "vscode-user-settings", true, "1.128.0", SetupOperation.Replace, SetupEffectiveSource.UserSetting, referenceState, currentState, SetupRestartRequirement.RestartVsCode, rollbackAvailable, "http://127.0.0.1:4320", null, null, [new SetupMemberChangeResult("setting", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
+    private static SetupTargetResult CreateStatusWritableTarget(SetupReferenceState referenceState = SetupReferenceState.Desired, SetupCurrentState currentState = SetupCurrentState.Current, bool rollbackAvailable = true) => new("00000000-0000-7000-8000-000000000020", SetupTargetKind.Json, "vscode-user-settings", true, "1.128.0", SetupOperation.Replace, SetupEffectiveSource.UserSetting, referenceState, currentState, SetupRestartRequirement.RestartVsCode, rollbackAvailable, "http://127.0.0.1:4320", SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.VsCode)!.CanonicalJson, null, [new SetupMemberChangeResult("setting", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
 
     private static SetupTargetResult CreateStatusGuidanceTarget() => new("00000000-0000-7000-8000-000000000021", SetupTargetKind.Guidance, "app-sdk-guidance", false, null, SetupOperation.NoOp, null, SetupReferenceState.None, SetupCurrentState.NotApplicable, SetupRestartRequirement.None, false, null, null, new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), []);
 

@@ -1,5 +1,7 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -9,6 +11,18 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SetupRollbackTests
 {
+    private static SetupStatusProjection CreateStatusProjection(
+        IReadOnlyList<SetupLedgerMember> members,
+        bool includeCliManifest = false)
+    {
+        var operations = members.Select(member => member.Operation).Where(operation => operation != SetupOperation.NoOp).Distinct().ToArray();
+        var aggregate = operations.Length switch { 0 => SetupOperation.NoOp, 1 => operations[0], _ => SetupOperation.Mixed };
+        var expectedResult = includeCliManifest
+            ? SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.Cli)!.CanonicalJson
+            : (JsonElement?)null;
+        return new SetupStatusProjection(true, null, aggregate, null, null, expectedResult, null,
+            members.Select(member => new SetupMemberChangeResult(member.SettingKey, member.Operation, "present", "configured", "none", false)).ToArray());
+    }
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1443,6 +1457,7 @@ public sealed class SetupRollbackTests
                     null,
                     SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartTerminalSession,
+                    CreateStatusProjection(target.Members.Select(member => new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray()),
                     "1.0.0")).ToArray());
             var planStore = new SetupPlanStore(Platform, Paths);
             var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
@@ -1699,6 +1714,9 @@ public sealed class SetupRollbackTests
                     target.TargetKind == SetupTargetKind.Env
                         ? SetupRestartRequirement.RestartTerminalSession
                         : SetupRestartRequirement.RestartVsCode,
+                    CreateStatusProjection(
+                        target.Members.Select(member => new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray(),
+                        includeCliManifest: target.TargetKind == SetupTargetKind.Env),
                     "1.0.0")).ToArray());
             var planStore = new SetupPlanStore(Platform, Paths);
             var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);

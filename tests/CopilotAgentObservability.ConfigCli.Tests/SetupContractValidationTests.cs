@@ -24,7 +24,14 @@ public sealed class SetupContractValidationTests
     public void Serialize_WhenExpectedResultIsCanonicalGitHubCopilotManifest_PreservesIt(string manifestFileName)
     {
         using var manifest = JsonDocument.Parse(File.ReadAllText(GetManifestPath(manifestFileName)));
-        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { ExpectedResult = manifest.RootElement.Clone() };
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
+        {
+            TargetKind = manifestFileName == "github-copilot-cli.json" ? SetupTargetKind.Env : SetupTargetKind.Json,
+            TargetLabel = manifestFileName == "github-copilot-cli.json" ? "user-environment" : "vscode-user-settings",
+            EffectiveSource = manifestFileName == "github-copilot-cli.json" ? SetupEffectiveSource.Environment : SetupEffectiveSource.UserSetting,
+            RestartRequirement = manifestFileName == "github-copilot-cli.json" ? SetupRestartRequirement.RestartTerminalSession : SetupRestartRequirement.RestartVsCode,
+            ExpectedResult = manifest.RootElement.Clone(),
+        };
 
         var json = SetupJson.Serialize(CreatePlanResult([target]));
 
@@ -216,6 +223,85 @@ public sealed class SetupContractValidationTests
     }
 
     [Fact]
+    public void Serialize_WhenDetectedVersionIsExactlyOneHundredTwentyEightUtf16CodeUnits_PreservesIt()
+    {
+        var detectedVersion = "1.0.0+" + new string('a', 122);
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { DetectedVersion = detectedVersion };
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(CreatePlanResult([target])));
+
+        Assert.Equal(detectedVersion, document.RootElement.GetProperty("targets")[0].GetProperty("detected_version").GetString());
+        Assert.Equal(128, detectedVersion.Length);
+    }
+
+    [Fact]
+    public void Serialize_WhenDetectedVersionExceedsOneHundredTwentyEightUtf16CodeUnits_Rejects()
+    {
+        var detectedVersion = "1.0.0+" + new string('a', 123);
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { DetectedVersion = detectedVersion };
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(CreatePlanResult([target])));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
+        Assert.Equal(129, detectedVersion.Length);
+    }
+
+    [Fact]
+    public void Serialize_WhenCanonicalManifestSurfaceDoesNotMatchTarget_Rejects()
+    {
+        using var manifest = JsonDocument.Parse(File.ReadAllText(GetManifestPath("github-copilot-cli.json")));
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { ExpectedResult = manifest.RootElement.Clone() };
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(CreatePlanResult([target])));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
+    }
+
+    [Theory]
+    [InlineData(SetupCommand.Plan)]
+    [InlineData(SetupCommand.Apply)]
+    [InlineData(SetupCommand.Rollback)]
+    public void Serialize_WhenRecognizedWritableTargetOmitsExpectedResult_Rejects(SetupCommand command)
+    {
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
+        {
+            ExpectedResult = null,
+        };
+        var result = CreateMutationResult(command, target);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
+    }
+
+    [Fact]
+    public void Serialize_StatusTargetAcceptsStrictHistoricalManifestWithoutCurrentEquality()
+    {
+        var manifest = JsonNode.Parse(File.ReadAllText(GetManifestPath("github-copilot-vscode.json")))!.AsObject();
+        manifest["support_status"] = "planned";
+        manifest["stability"] = "preview";
+        using var historical = JsonDocument.Parse(manifest.ToJsonString());
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
+        {
+            ReferenceState = SetupReferenceState.Desired,
+            CurrentState = SetupCurrentState.Current,
+            ExpectedResult = historical.RootElement.Clone(),
+        };
+        var status = new SetupChangeSetStatusResult(
+            "00000000-0000-7000-8000-000000000003", "github-copilot", "vscode",
+            "2026-07-12T00:00:00Z", "2026-07-12T00:01:00Z", SetupChangeSetState.Applied,
+            null, SetupCurrentState.Current, true, [target]);
+        var result = new SetupCommandResult(
+            SetupCommand.Status, true, SetupCodes.StatusReady, null, null, null, "github-copilot",
+            [], [status], [], [], false);
+
+        using var serialized = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal("planned", serialized.RootElement.GetProperty("change_sets")[0].GetProperty("targets")[0]
+            .GetProperty("expected_result").GetProperty("support_status").GetString());
+    }
+
+    [Fact]
     public void Serialize_WhenWritableTargetHasGuidance_RejectsStructuralConflict()
     {
         var writable = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { Guidance = new SetupGuidance("caller_managed_sample", "dotnet", "sample") };
@@ -284,6 +370,19 @@ public sealed class SetupContractValidationTests
     public void Serialize_WhenPlanGuidanceSampleIsMissing_Rejects()
     {
         var result = CreatePlanResult([CreateGuidanceTarget() with { Guidance = new SetupGuidance("caller_managed_sample", "dotnet", null!) }]);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
+
+        Assert.Equal("setup_contract_invalid", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("other_kind", "dotnet")]
+    [InlineData("caller_managed_sample", "typescript")]
+    public void Serialize_WhenGuidanceMetadataDiffersFromFixedContract_Rejects(string kind, string language)
+    {
+        var result = CreatePlanResult(
+            [CreateGuidanceTarget() with { Guidance = new SetupGuidance(kind, language, AppSdkGuidanceSample) }]);
 
         var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
 
@@ -552,7 +651,7 @@ public sealed class SetupContractValidationTests
     private static SetupTargetResult CreateWritableTarget(string recordId) => new(
         recordId, SetupTargetKind.Json, "vscode-user-settings", true, "1.128.0", SetupOperation.Replace,
         SetupEffectiveSource.UserSetting, null, null, SetupRestartRequirement.RestartVsCode, true,
-        "http://127.0.0.1:4320", null, null,
+        "http://127.0.0.1:4320", LoadManifest("github-copilot-vscode.json"), null,
         [new SetupMemberChangeResult("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
 
     private static SetupTargetResult CreateGuidanceTarget() => new(
@@ -564,6 +663,16 @@ public sealed class SetupContractValidationTests
         "00000000-0000-7000-8000-000000000003", "github-copilot", "all", createdAt, updatedAt,
         SetupChangeSetState.Applied, null, SetupCurrentState.Current, true,
         [CreateWritableTarget("00000000-0000-7000-8000-000000000001") with { ReferenceState = SetupReferenceState.Desired, CurrentState = SetupCurrentState.Current }]);
+
+    private static SetupCommandResult CreateMutationResult(SetupCommand command, SetupTargetResult target) => command switch
+    {
+        SetupCommand.Plan => CreatePlanResult([target]),
+        SetupCommand.Apply => new SetupCommandResult(command, true, SetupCodes.ApplySucceeded,
+            "00000000-0000-7000-8000-000000000002", null, null, "github-copilot", [target], [], [], [], false),
+        SetupCommand.Rollback => new SetupCommandResult(command, true, SetupCodes.RollbackSucceeded,
+            "00000000-0000-7000-8000-000000000002", null, null, "github-copilot", [target], [], [], [], false),
+        _ => throw new ArgumentOutOfRangeException(nameof(command)),
+    };
 
     private static void AssertPartialStatusSerialization(
         SetupReferenceState referenceState,
@@ -591,4 +700,10 @@ public sealed class SetupContractValidationTests
 
     private static string GetManifestPath(string manifestFileName) => Path.Combine(
         AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "specifications", "contracts", "source-capabilities", "v1", "manifests", manifestFileName);
+
+    private static JsonElement LoadManifest(string manifestFileName)
+    {
+        using var manifest = JsonDocument.Parse(File.ReadAllText(GetManifestPath(manifestFileName)));
+        return manifest.RootElement.Clone();
+    }
 }

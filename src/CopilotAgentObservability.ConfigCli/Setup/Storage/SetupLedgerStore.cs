@@ -56,6 +56,7 @@ internal sealed record SetupLedgerTarget(
     string? OutcomeCode,
     SetupLedgerRollbackStatus RollbackStatus,
     SetupRestartRequirement RestartRequirement,
+    SetupStatusProjection StatusProjection,
     string ToolVersion);
 
 internal sealed record SetupLedgerMember(
@@ -262,6 +263,7 @@ internal sealed class SetupLedgerStore
                     SetupStorageJson.WriteNullableString(writer, "outcome_code", target.OutcomeCode);
                     writer.WriteString("rollback_status", SetupStorageJson.RollbackStatus(target.RollbackStatus));
                     writer.WriteString("restart_requirement", SetupStorageJson.RestartRequirement(target.RestartRequirement));
+                    WriteStatusProjection(writer, target.StatusProjection);
                     writer.WriteString("tool_version", target.ToolVersion);
                     writer.WriteEndObject();
                 }
@@ -274,7 +276,63 @@ internal sealed class SetupLedgerStore
             writer.WriteEndObject();
         }
 
-        return buffer.ToArray();
+        var bytes = buffer.ToArray();
+        if (bytes.Length > MaximumLedgerBytes)
+        {
+            throw new SetupStorageException(SetupStorageCodes.WriteFailed);
+        }
+
+        return bytes;
+    }
+
+    private static void WriteStatusProjection(Utf8JsonWriter writer, SetupStatusProjection projection)
+    {
+        writer.WritePropertyName("status_projection");
+        writer.WriteStartObject();
+        writer.WriteBoolean("detected", projection.Detected);
+        SetupStorageJson.WriteNullableString(writer, "detected_version", projection.DetectedVersion);
+        writer.WriteString("operation", SetupStorageJson.Operation(projection.Operation));
+        SetupStorageJson.WriteNullableEffectiveSource(writer, "effective_source", projection.EffectiveSource);
+        SetupStorageJson.WriteNullableString(writer, "endpoint", projection.Endpoint);
+        writer.WritePropertyName("expected_result");
+        if (projection.ExpectedResult is { } expectedResult)
+        {
+            expectedResult.WriteTo(writer);
+        }
+        else
+        {
+            writer.WriteNullValue();
+        }
+
+        writer.WritePropertyName("guidance");
+        if (projection.Guidance is { } guidance)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("kind", guidance.Kind);
+            writer.WriteString("language", guidance.Language);
+            writer.WriteEndObject();
+        }
+        else
+        {
+            writer.WriteNullValue();
+        }
+
+        writer.WritePropertyName("changes");
+        writer.WriteStartArray();
+        foreach (var change in projection.Changes)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("setting_key", change.SettingKey);
+            writer.WriteString("operation", SetupStorageJson.Operation(change.Operation));
+            writer.WriteString("previous_state", change.PreviousState);
+            writer.WriteString("new_state", change.NewState);
+            writer.WriteString("conflict", change.Conflict);
+            writer.WriteBoolean("managed", change.Managed);
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+        writer.WriteEndObject();
     }
 
     private static SetupOwnershipLedger Deserialize(byte[] bytes)
@@ -303,7 +361,7 @@ internal sealed class SetupLedgerStore
             var targets = new List<SetupLedgerTarget>();
             foreach (var targetElement in SetupStorageJson.GetArray(changeSetElement, "targets"))
             {
-                SetupStorageJson.RequireProperties(targetElement, "record_id", "target_kind", "target_label", "owning_adapter", "members", "previous_state_hash", "applied_state_hash", "backup_reference", "outcome_code", "rollback_status", "restart_requirement", "tool_version");
+                SetupStorageJson.RequireProperties(targetElement, "record_id", "target_kind", "target_label", "owning_adapter", "members", "previous_state_hash", "applied_state_hash", "backup_reference", "outcome_code", "rollback_status", "restart_requirement", "status_projection", "tool_version");
                 var members = new List<SetupLedgerMember>();
                 foreach (var memberElement in SetupStorageJson.GetArray(targetElement, "members"))
                 {
@@ -325,6 +383,7 @@ internal sealed class SetupLedgerStore
                     SetupStorageJson.GetNullableString(targetElement, "outcome_code"),
                     SetupStorageJson.ParseRollbackStatus(SetupStorageJson.GetString(targetElement, "rollback_status")),
                     SetupStorageJson.ParseRestartRequirement(SetupStorageJson.GetString(targetElement, "restart_requirement")),
+                    ReadStatusProjection(targetElement.GetProperty("status_projection")),
                     SetupStorageJson.GetString(targetElement, "tool_version")));
             }
 
@@ -343,6 +402,58 @@ internal sealed class SetupLedgerStore
         var ledger = new SetupOwnershipLedger(1, changeSets);
         SetupStorageValidation.ValidateLedger(ledger);
         return ledger;
+    }
+
+    private static SetupStatusProjection ReadStatusProjection(JsonElement element)
+    {
+        SetupStorageJson.RequireProperties(element, "detected", "detected_version", "operation", "effective_source", "endpoint", "expected_result", "guidance", "changes");
+        var detectedElement = element.GetProperty("detected");
+        if (detectedElement.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+        {
+            throw new FormatException();
+        }
+
+        JsonElement? expectedResult = element.GetProperty("expected_result") is { ValueKind: not JsonValueKind.Null } expected
+            ? expected.Clone()
+            : null;
+        SetupStatusGuidance? guidance = null;
+        var guidanceElement = element.GetProperty("guidance");
+        if (guidanceElement.ValueKind != JsonValueKind.Null)
+        {
+            SetupStorageJson.RequireProperties(guidanceElement, "kind", "language");
+            guidance = new SetupStatusGuidance(
+                SetupStorageJson.GetString(guidanceElement, "kind"),
+                SetupStorageJson.GetString(guidanceElement, "language"));
+        }
+
+        var changes = new List<SetupMemberChangeResult>();
+        foreach (var changeElement in SetupStorageJson.GetArray(element, "changes"))
+        {
+            SetupStorageJson.RequireProperties(changeElement, "setting_key", "operation", "previous_state", "new_state", "conflict", "managed");
+            var managedElement = changeElement.GetProperty("managed");
+            if (managedElement.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+            {
+                throw new FormatException();
+            }
+
+            changes.Add(new SetupMemberChangeResult(
+                SetupStorageJson.GetString(changeElement, "setting_key"),
+                SetupStorageJson.ParseOperation(SetupStorageJson.GetString(changeElement, "operation")),
+                SetupStorageJson.GetString(changeElement, "previous_state"),
+                SetupStorageJson.GetString(changeElement, "new_state"),
+                SetupStorageJson.GetString(changeElement, "conflict"),
+                managedElement.GetBoolean()));
+        }
+
+        return new SetupStatusProjection(
+            detectedElement.GetBoolean(),
+            SetupStorageJson.GetNullableString(element, "detected_version"),
+            SetupStorageJson.ParseOperation(SetupStorageJson.GetString(element, "operation")),
+            SetupStorageJson.GetNullableEffectiveSource(element, "effective_source"),
+            SetupStorageJson.GetNullableString(element, "endpoint"),
+            expectedResult,
+            guidance,
+            changes);
     }
 
     private static bool IsTerminal(SetupChangeSetState state) => state is
@@ -521,6 +632,32 @@ internal static partial class SetupStorageValidation
                 RequireNullableCode(target.OutcomeCode);
                 RequirePattern(target.ToolVersion, ToolVersionPattern());
                 Require(target.ToolVersion == changeSet.ToolVersion);
+                var projection = RequireNotNull(target.StatusProjection);
+                Require(SetupContractValidator.IsValidLedgerStatusProjection(projection, target.TargetKind, target.TargetLabel));
+                Require(projection.Changes.Count == members.Count);
+                for (var index = 0; index < members.Count; index++)
+                {
+                    Require(projection.Changes[index].SettingKey == members[index].SettingKey);
+                    Require(projection.Changes[index].Operation == members[index].Operation);
+                }
+
+                var allNoOp = members.Count > 0 && members.All(member => member.Operation == SetupOperation.NoOp);
+                if (target.TargetKind == SetupTargetKind.Guidance)
+                {
+                    Require(members.Count == 0);
+                }
+                else
+                {
+                    Require(members.Count > 0);
+                }
+
+                if (allNoOp || target.TargetKind == SetupTargetKind.Guidance)
+                {
+                    Require(target.AppliedStateHash is null);
+                    Require(target.BackupReference is null);
+                    Require(target.RollbackStatus == SetupLedgerRollbackStatus.NotAvailable);
+                }
+
                 if (changeSet.State == SetupChangeSetState.Planned)
                 {
                     Require(target.AppliedStateHash is null);
@@ -625,7 +762,7 @@ internal static partial class SetupStorageValidation
 
 internal static class SetupStorageJson
 {
-    public static Utf8JsonWriter CreateWriter(Stream stream) => new(stream, new JsonWriterOptions { Indented = true });
+    public static Utf8JsonWriter CreateWriter(Stream stream) => new(stream, new JsonWriterOptions { Indented = true, NewLine = "\n" });
 
     public static string FormatTimestamp(DateTimeOffset value) => value.UtcDateTime.ToString("O", CultureInfo.InvariantCulture);
 
@@ -727,6 +864,26 @@ internal static class SetupStorageJson
         }
     }
 
+    public static void WriteNullableEffectiveSource(Utf8JsonWriter writer, string propertyName, SetupEffectiveSource? value)
+    {
+        if (value is null)
+        {
+            writer.WriteNull(propertyName);
+        }
+        else
+        {
+            writer.WriteString(propertyName, EffectiveSource(value.Value));
+        }
+    }
+
+    public static SetupEffectiveSource? GetNullableEffectiveSource(JsonElement element, string propertyName)
+    {
+        var property = element.GetProperty(propertyName);
+        return property.ValueKind == JsonValueKind.Null
+            ? null
+            : ParseEffectiveSource(GetString(element, propertyName));
+    }
+
     public static string TargetKind(SetupTargetKind value) => value switch
     {
         SetupTargetKind.Env => "env",
@@ -766,6 +923,24 @@ internal static class SetupStorageJson
         "remove" => SetupOperation.Remove,
         "mixed" => SetupOperation.Mixed,
         "no-op" => SetupOperation.NoOp,
+        _ => throw new FormatException(),
+    };
+
+    public static string EffectiveSource(SetupEffectiveSource value) => value switch
+    {
+        SetupEffectiveSource.ManagedPolicy => "managed_policy",
+        SetupEffectiveSource.Environment => "environment",
+        SetupEffectiveSource.UserSetting => "user_setting",
+        SetupEffectiveSource.Default => "default",
+        _ => throw new FormatException(),
+    };
+
+    public static SetupEffectiveSource ParseEffectiveSource(string value) => value switch
+    {
+        "managed_policy" => SetupEffectiveSource.ManagedPolicy,
+        "environment" => SetupEffectiveSource.Environment,
+        "user_setting" => SetupEffectiveSource.UserSetting,
+        "default" => SetupEffectiveSource.Default,
         _ => throw new FormatException(),
     };
 

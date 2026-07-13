@@ -677,9 +677,11 @@ internal sealed class SetupRecoveryCoordinator
                         OutcomeCode = failure == ActiveFileFailureKind.Stale
                             ? SetupCodes.RollbackStale
                             : SetupCodes.InternalError,
-                        RollbackStatus = failure == ActiveFileFailureKind.Stale
-                            ? SetupLedgerRollbackStatus.Stale
-                            : SetupLedgerRollbackStatus.Failed,
+                        RollbackStatus = target.RollbackStatus == SetupLedgerRollbackStatus.NotAvailable
+                            ? SetupLedgerRollbackStatus.NotAvailable
+                            : failure == ActiveFileFailureKind.Stale
+                                ? SetupLedgerRollbackStatus.Stale
+                                : SetupLedgerRollbackStatus.Failed,
                     }
                     : target).ToArray(),
             };
@@ -1307,9 +1309,11 @@ internal sealed class SetupRecoveryCoordinator
                         OutcomeCode = failure == ActiveFileFailureKind.Stale
                             ? SetupCodes.RollbackStale
                             : SetupCodes.InternalError,
-                        RollbackStatus = failure == ActiveFileFailureKind.Stale
-                            ? SetupLedgerRollbackStatus.Stale
-                            : SetupLedgerRollbackStatus.Failed,
+                        RollbackStatus = target.RollbackStatus == SetupLedgerRollbackStatus.NotAvailable
+                            ? SetupLedgerRollbackStatus.NotAvailable
+                            : failure == ActiveFileFailureKind.Stale
+                                ? SetupLedgerRollbackStatus.Stale
+                                : SetupLedgerRollbackStatus.Failed,
                     }
                     : target).ToArray(),
             };

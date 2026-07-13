@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
 
@@ -410,6 +412,339 @@ public sealed class SetupStorageTests
         Assert.Single(document.RootElement.GetProperty("change_sets").EnumerateArray());
     }
 
+    [Fact]
+    public void LedgerSerialization_WritesRequiredRepositorySafeStatusProjection()
+    {
+        using var document = JsonDocument.Parse(SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [CreateAppliedChangeSet()])));
+
+        var projection = document.RootElement.GetProperty("change_sets")[0].GetProperty("targets")[0].GetProperty("status_projection");
+        Assert.Equal(
+            ["detected", "detected_version", "operation", "effective_source", "endpoint", "expected_result", "guidance", "changes"],
+            projection.EnumerateObject().Select(property => property.Name));
+        Assert.True(projection.GetProperty("detected").GetBoolean());
+        Assert.Equal("1.128.0", projection.GetProperty("detected_version").GetString());
+        Assert.Equal("replace", projection.GetProperty("operation").GetString());
+        Assert.Equal("user_setting", projection.GetProperty("effective_source").GetString());
+        Assert.Equal("http://127.0.0.1:4320", projection.GetProperty("endpoint").GetString());
+        Assert.Equal(JsonValueKind.Null, projection.GetProperty("guidance").ValueKind);
+        Assert.Equal("present_different", projection.GetProperty("changes")[0].GetProperty("previous_state").GetString());
+
+        var serialized = Encoding.UTF8.GetString(SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [CreateAppliedChangeSet()])));
+        Assert.DoesNotContain("target_location", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("backup-00000000", projection.GetRawText(), StringComparison.Ordinal);
+        Assert.DoesNotContain("sample", projection.GetRawText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LedgerLoad_RoundTripsExactStatusProjectionAndLifecycleUpdatesPreserveIt()
+    {
+        var context = CreateContext();
+        var planned = CreatePlannedChangeSet();
+        var expectedProjection = planned.Targets[0].StatusProjection;
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, [planned]));
+        var reopened = context.Store.LoadForRecovery();
+        Assert.Equivalent(expectedProjection, reopened.ChangeSets[0].Targets[0].StatusProjection, strict: true);
+
+        var applied = reopened.ChangeSets[0] with
+        {
+            UpdatedAt = CreatedAt.AddMinutes(1),
+            State = SetupChangeSetState.Applied,
+            OutcomeCode = SetupCodes.ApplySucceeded,
+            Targets =
+            [
+                reopened.ChangeSets[0].Targets[0] with
+                {
+                    AppliedStateHash = HashB,
+                    BackupReference = "backup-ref",
+                    OutcomeCode = SetupCodes.ApplySucceeded,
+                    RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                },
+            ],
+        };
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, [applied]));
+
+        var afterLifecycleUpdate = context.Store.LoadForRecovery();
+        Assert.Equivalent(expectedProjection, afterLifecycleUpdate.ChangeSets[0].Targets[0].StatusProjection, strict: true);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("unknown")]
+    [InlineData("member_mismatch")]
+    [InlineData("unsafe_version")]
+    [InlineData("unsafe_endpoint")]
+    [InlineData("surface_mismatch")]
+    [InlineData("contract_version")]
+    [InlineData("unknown_manifest_field")]
+    [InlineData("unknown_support")]
+    [InlineData("unknown_stability")]
+    [InlineData("provenance_order")]
+    [InlineData("completeness_status_order")]
+    [InlineData("completeness_reason_order")]
+    [InlineData("unknown_manifest_code")]
+    [InlineData("wrong_manifest_adapter")]
+    [InlineData("aggregate_operation_mismatch")]
+    [InlineData("member_operation_mismatch")]
+    [InlineData("malformed")]
+    public void LedgerLoad_InvalidStatusProjectionFailsClosed(string mutation)
+    {
+        var context = CreateContext();
+        var row = CreateAppliedChangeSetWithHistoricalManifest();
+        var root = JsonNode.Parse(SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [row])))!.AsObject();
+        var target = root["change_sets"]![0]!["targets"]![0]!.AsObject();
+        var projection = target["status_projection"]!.AsObject();
+        switch (mutation)
+        {
+            case "missing":
+                target.Remove("status_projection");
+                break;
+            case "unknown":
+                projection["unknown"] = "PREVIOUS_SECRET_MARKER";
+                break;
+            case "member_mismatch":
+                projection["changes"]![0]!["setting_key"] = "different.setting";
+                break;
+            case "unsafe_version":
+                projection["detected_version"] = "1.0.0+C:/PREVIOUS_SECRET_MARKER";
+                break;
+            case "unsafe_endpoint":
+                projection["endpoint"] = "http://token@127.0.0.1:4320";
+                break;
+            case "surface_mismatch":
+                projection["expected_result"]!["source_surface"] = "github-copilot-cli";
+                break;
+            case "contract_version":
+                projection["expected_result"]!["contract_version"] = "v2";
+                break;
+            case "unknown_manifest_field":
+                projection["expected_result"]!["unknown"] = "PREVIOUS_SECRET_MARKER";
+                break;
+            case "unknown_support":
+                projection["expected_result"]!["support_status"] = "invented";
+                break;
+            case "unknown_stability":
+                projection["expected_result"]!["stability"] = "invented";
+                break;
+            case "provenance_order":
+                SwapFirstTwo(projection["expected_result"]!["provenance"]!["required_keys"]!.AsArray());
+                break;
+            case "completeness_status_order":
+                SwapFirstTwo(projection["expected_result"]!["completeness"]!["statuses"]!.AsArray());
+                break;
+            case "completeness_reason_order":
+                SwapFirstTwo(projection["expected_result"]!["completeness"]!["reason_codes"]!.AsArray());
+                break;
+            case "unknown_manifest_code":
+                projection["expected_result"]!["errors"]!["availability"] = "invented";
+                break;
+            case "wrong_manifest_adapter":
+                projection["expected_result"]!["source_adapter"] = "otel-http";
+                break;
+            case "aggregate_operation_mismatch":
+                projection["operation"] = "add";
+                break;
+            case "member_operation_mismatch":
+                projection["changes"]![0]!["operation"] = "add";
+                break;
+            case "malformed":
+                projection["changes"] = "not-an-array";
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mutation));
+        }
+
+        context.Platform.SeedFile(context.Paths.OwnershipLedger, Encoding.UTF8.GetBytes(root.ToJsonString()));
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.LoadForRecovery());
+
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Code);
+        Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LedgerLoad_HistoricalSchemaSafeManifestNeedNotEqualCurrentEmbeddedManifest()
+    {
+        var context = CreateContext();
+        var expected = CreateAppliedChangeSetWithHistoricalManifest();
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, [expected]));
+
+        var reopened = context.Store.LoadForRecovery();
+
+        var manifest = reopened.ChangeSets[0].Targets[0].StatusProjection.ExpectedResult!.Value;
+        Assert.Equal("preview", manifest.GetProperty("stability").GetString());
+        Assert.Equal("planned", manifest.GetProperty("support_status").GetString());
+        Assert.False(SourceCapabilityManifestLoader.MatchesCanonical(manifest));
+    }
+
+    [Fact]
+    public void LedgerLoad_DuplicateHistoricalManifestPropertyFailsClosed()
+    {
+        var context = CreateContext();
+        var json = Encoding.UTF8.GetString(SetupLedgerStore.Serialize(
+            new SetupOwnershipLedger(1, [CreateAppliedChangeSetWithHistoricalManifest()])))
+            .Replace("\"contract_version\": \"v1\"", "\"contract_version\": \"v1\",\n              \"contract_version\": \"v1\"", StringComparison.Ordinal);
+        context.Platform.SeedFile(context.Paths.OwnershipLedger, Encoding.UTF8.GetBytes(json));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.Store.LoadForRecovery());
+
+        Assert.Equal(SetupCodes.LedgerCorrupt, exception.Code);
+    }
+
+    [Fact]
+    public void LedgerValidation_StatusProjectionMemberOrderMustMatchLedgerOrder()
+    {
+        var members = new[]
+        {
+            new SetupLedgerMember("setting-a", SetupOperation.Add),
+            new SetupLedgerMember("setting-b", SetupOperation.Replace),
+        };
+        var changes = members.Select(member => new SetupMemberChangeResult(
+            member.SettingKey, member.Operation, "present_different", "configured_loopback", "none", false)).ToArray();
+        var target = CreateLedgerTarget() with
+        {
+            Members = members,
+            StatusProjection = CreateStatusProjection() with
+            {
+                Operation = SetupOperation.Mixed,
+                Changes = [changes[1], changes[0]],
+            },
+        };
+
+        Assert.Throws<FormatException>(() => SetupLedgerStore.Serialize(
+            new SetupOwnershipLedger(1, [CreatePlannedChangeSet() with { Targets = [target] }])));
+    }
+
+    [Fact]
+    public void LedgerSerialization_GuidanceStoresNoSampleAndRehydratesOnlyTheFixedPublicContract()
+    {
+        var guidanceTarget = CreateLedgerTarget() with
+        {
+            TargetKind = SetupTargetKind.Guidance,
+            TargetLabel = "app-sdk-guidance",
+            Members = [],
+            RestartRequirement = SetupRestartRequirement.None,
+            StatusProjection = new SetupStatusProjection(
+                false, null, SetupOperation.NoOp, null, null, null,
+                new SetupStatusGuidance("caller_managed_sample", "dotnet"), []),
+        };
+        var changeSet = CreatePlannedChangeSet() with { SelectedTarget = "app-sdk", Targets = [guidanceTarget] };
+
+        var bytes = SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [changeSet]));
+        using var document = JsonDocument.Parse(bytes);
+        var storedGuidance = document.RootElement.GetProperty("change_sets")[0].GetProperty("targets")[0]
+            .GetProperty("status_projection").GetProperty("guidance");
+
+        Assert.Equal(["kind", "language"], storedGuidance.EnumerateObject().Select(property => property.Name));
+        Assert.False(storedGuidance.TryGetProperty("sample", out _));
+        var rehydrated = SetupContractValidator.RehydrateStatusGuidance(guidanceTarget.StatusProjection.Guidance!);
+        Assert.Contains("OtlpEndpoint", rehydrated.Sample, StringComparison.Ordinal);
+        Assert.DoesNotContain("C:\\", rehydrated.Sample, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("other_kind", "dotnet")]
+    [InlineData("caller_managed_sample", "typescript")]
+    public void LedgerValidation_GuidanceMetadataMustMatchFixedContract(string kind, string language)
+    {
+        var guidanceTarget = CreateGuidanceLedgerTarget() with
+        {
+            StatusProjection = CreateGuidanceLedgerTarget().StatusProjection with
+            {
+                Guidance = new SetupStatusGuidance(kind, language),
+            },
+        };
+        var row = CreatePlannedChangeSet() with { SelectedTarget = "app-sdk", Targets = [guidanceTarget] };
+
+        Assert.Throws<FormatException>(() => SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [row])));
+        Assert.Throws<InvalidOperationException>(() => SetupContractValidator.RehydrateStatusGuidance(
+            guidanceTarget.StatusProjection.Guidance!));
+    }
+
+    [Fact]
+    public void LedgerSerialization_LargestLegalSingleChangeSetFitsRetainedCompleteLedgerCap()
+    {
+        var largest = CreateLargestLegalChangeSet();
+
+        var bytes = SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [largest]));
+
+        Assert.True(bytes.Length < SetupLedgerStore.MaximumLedgerBytes, $"Serialized legal boundary was {bytes.Length} bytes.");
+        using var document = JsonDocument.Parse(bytes);
+        Assert.Equal(16, document.RootElement.GetProperty("change_sets")[0].GetProperty("targets").GetArrayLength());
+        Assert.Equal(32, document.RootElement.GetProperty("change_sets")[0].GetProperty("targets")[0]
+            .GetProperty("status_projection").GetProperty("changes").GetArrayLength());
+    }
+
+    [Fact]
+    public void Save_WhenCompleteLedgerWouldExceedRetainedCap_DoesNotReplaceDurableLedger()
+    {
+        var context = CreateContext();
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, []));
+        var durable = context.Platform.FileSystem.ReadAllBytes(context.Paths.OwnershipLedger);
+        var largest = CreateLargestLegalChangeSet();
+        var rows = Enumerable.Range(0, 8).Select(index => largest with
+        {
+            ChangeSetId = Guid.Parse($"00000000-0000-7000-8000-{index + 900:D12}"),
+        }).ToArray();
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.Save(context.Lock, new SetupOwnershipLedger(1, rows)));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+        Assert.Equal(durable, context.Platform.FileSystem.ReadAllBytes(context.Paths.OwnershipLedger));
+    }
+
+    [Fact]
+    public void Serialize_WhenCompleteLedgerWouldExceedRetainedCap_FailsBeforeReturningBytes()
+    {
+        var largest = CreateLargestLegalChangeSet();
+        var rows = Enumerable.Range(0, 8).Select(index => largest with
+        {
+            ChangeSetId = Guid.Parse($"00000000-0000-7000-8000-{index + 920:D12}"),
+        }).ToArray();
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, rows)));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+    }
+
+    [Fact]
+    public void PersistPlannedChangeSet_WhenAppendWouldExceedRetainedCap_PreservesLedgerAndCleansPlan()
+    {
+        var context = CreateContext();
+        var planned = CreatePlannedChangeSet();
+        var rows = new List<SetupLedgerChangeSet>();
+        for (var index = 1; ; index++)
+        {
+            var filler = CreateAppliedChangeSet() with
+            {
+                ChangeSetId = Guid.Parse($"00000000-0000-7000-8000-{index + 1000:D12}"),
+            };
+            var candidate = new SetupOwnershipLedger(1, [.. rows, filler, planned]);
+            try
+            {
+                _ = SetupLedgerStore.Serialize(candidate);
+                rows.Add(filler);
+            }
+            catch (SetupStorageException overflow) when (overflow.Code == SetupStorageCodes.WriteFailed)
+            {
+                _ = SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [.. rows, filler]));
+                rows.Add(filler);
+                break;
+            }
+        }
+
+        Assert.NotEmpty(rows);
+        context.Store.Save(context.Lock, new SetupOwnershipLedger(1, rows));
+        var durable = context.Platform.FileSystem.ReadAllBytes(context.Paths.OwnershipLedger);
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.PersistPlannedChangeSet(context.Lock, CreatePlan(), planned));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+        Assert.Equal(durable, context.Platform.FileSystem.ReadAllBytes(context.Paths.OwnershipLedger));
+        Assert.Null(context.PlanStore.Load(ChangeSetId));
+    }
+
     [Theory]
     [InlineData("adapter", "null")]
     [InlineData("adapter", "{\"marker\":\"PREVIOUS_SECRET_MARKER\"}")]
@@ -506,6 +841,83 @@ public sealed class SetupStorageTests
             Assert.DoesNotContain(context.Platform.Operations, operation => operation.StartsWith("file.write:", StringComparison.Ordinal));
         }
     }
+
+    [Fact]
+    public void LedgerValidation_AllNoOpWritableTargetOwnsNoBackupOrAppliedHash()
+    {
+        var noOpTarget = CreateLedgerTarget() with
+        {
+            Members = [new SetupLedgerMember("github.copilot.chat.otel.enabled", SetupOperation.NoOp)],
+            StatusProjection = CreateStatusProjection() with
+            {
+                Operation = SetupOperation.NoOp,
+                Changes =
+                [
+                    new SetupMemberChangeResult(
+                        "github.copilot.chat.otel.enabled", SetupOperation.NoOp,
+                        "present_same", "configured_loopback", "none", false),
+                ],
+            },
+        };
+        var valid = CreatePlannedChangeSet() with
+        {
+            State = SetupChangeSetState.NoChanges,
+            OutcomeCode = SetupCodes.NoChanges,
+            Targets = [noOpTarget],
+        };
+        Assert.NotEmpty(SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [valid])));
+
+        foreach (var invalidTarget in new[]
+        {
+            noOpTarget with { AppliedStateHash = HashB },
+            noOpTarget with { BackupReference = "backup-ref" },
+            noOpTarget with { RollbackStatus = SetupLedgerRollbackStatus.Pending },
+        })
+        {
+            Assert.Throws<FormatException>(() => SetupLedgerStore.Serialize(
+                new SetupOwnershipLedger(1, [valid with { Targets = [invalidTarget] }])));
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(NoWriteLifecycleRows))]
+    public void LedgerValidation_NoWriteTargetsNeverOwnRollbackAcrossLifecycle(
+        SetupChangeSetState state,
+        bool guidance)
+    {
+        var target = guidance ? CreateGuidanceLedgerTarget() : CreateAllNoOpLedgerTarget();
+        var valid = CreatePlannedChangeSet() with
+        {
+            State = state,
+            OutcomeCode = state == SetupChangeSetState.Planned ? null : SetupCodes.NoChanges,
+            Targets = [target],
+        };
+        Assert.NotEmpty(SetupLedgerStore.Serialize(new SetupOwnershipLedger(1, [valid])));
+
+        foreach (var invalid in new[]
+        {
+            target with { AppliedStateHash = HashB },
+            target with { BackupReference = "backup-ref" },
+            target with { RollbackStatus = SetupLedgerRollbackStatus.Pending },
+        })
+        {
+            Assert.Throws<FormatException>(() => SetupLedgerStore.Serialize(
+                new SetupOwnershipLedger(1, [valid with { Targets = [invalid] }])));
+        }
+    }
+
+    public static TheoryData<SetupChangeSetState, bool> NoWriteLifecycleRows => new()
+    {
+        { SetupChangeSetState.Planned, false }, { SetupChangeSetState.Applying, false },
+        { SetupChangeSetState.Applied, false }, { SetupChangeSetState.NoChanges, false },
+        { SetupChangeSetState.Compensating, false }, { SetupChangeSetState.Restored, false },
+        { SetupChangeSetState.RollingBack, false }, { SetupChangeSetState.Partial, false },
+        { SetupChangeSetState.RolledBack, false }, { SetupChangeSetState.Planned, true },
+        { SetupChangeSetState.Applying, true }, { SetupChangeSetState.Applied, true },
+        { SetupChangeSetState.NoChanges, true }, { SetupChangeSetState.Compensating, true },
+        { SetupChangeSetState.Restored, true }, { SetupChangeSetState.RollingBack, true },
+        { SetupChangeSetState.Partial, true }, { SetupChangeSetState.RolledBack, true },
+    };
 
     [Fact]
     public void Mutations_RequireLiveLockForTheSamePlatformAndRuntime()
@@ -873,6 +1285,85 @@ public sealed class SetupStorageTests
         ],
     };
 
+    private static SetupLedgerChangeSet CreateAppliedChangeSetWithHistoricalManifest()
+    {
+        var manifestPath = Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "specifications", "contracts",
+            "source-capabilities", "v1", "manifests", "github-copilot-vscode.json");
+        var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+        manifest["support_status"] = "planned";
+        manifest["stability"] = "preview";
+        using var historicalDocument = JsonDocument.Parse(manifest.ToJsonString());
+        return CreateAppliedChangeSet() with
+        {
+            Targets =
+            [
+                CreateAppliedChangeSet().Targets[0] with
+                {
+                    StatusProjection = CreateStatusProjection() with
+                    {
+                        ExpectedResult = historicalDocument.RootElement.Clone(),
+                    },
+                },
+            ],
+        };
+    }
+
+    private static SetupLedgerChangeSet CreateLargestLegalChangeSet()
+    {
+        var version = "1.0.0+" + new string('a', 122);
+        var fixedValue = "a" + new string('b', 127);
+        var historicalManifest = LoadHistoricalManifest();
+        var targets = Enumerable.Range(1, 16).Select(targetIndex =>
+        {
+            var members = Enumerable.Range(1, 32)
+                .Select(memberIndex => new SetupLedgerMember(
+                    $"s{memberIndex:D2}" + new string('a', 125),
+                    SetupOperation.Replace))
+                .ToArray();
+            var changes = members.Select(member => new SetupMemberChangeResult(
+                member.SettingKey,
+                member.Operation,
+                fixedValue,
+                fixedValue,
+                fixedValue,
+                true)).ToArray();
+            return new SetupLedgerTarget(
+                Guid.Parse($"00000000-0000-7000-8000-{targetIndex:D12}"),
+                SetupTargetKind.Json,
+                "vscode-user-settings",
+                "github-copilot",
+                members,
+                HashA,
+                null,
+                null,
+                null,
+                SetupLedgerRollbackStatus.NotAvailable,
+                SetupRestartRequirement.RestartVsCode,
+                new SetupStatusProjection(
+                    true,
+                    version,
+                    SetupOperation.Replace,
+                    SetupEffectiveSource.UserSetting,
+                    "http://127.0.0.1:65535",
+                    historicalManifest,
+                    null,
+                    changes),
+                "1.2.3");
+        }).ToArray();
+
+        return new SetupLedgerChangeSet(
+            ChangeSetId,
+            "github-copilot",
+            new string('a', 128),
+            CreatedAt,
+            CreatedAt,
+            "1.2.3",
+            null,
+            SetupChangeSetState.Planned,
+            targets);
+    }
+
     private static SetupLedgerTarget CreateLedgerTarget() => new(
         RecordId,
         SetupTargetKind.Json,
@@ -885,7 +1376,62 @@ public sealed class SetupStorageTests
         null,
         SetupLedgerRollbackStatus.NotAvailable,
         SetupRestartRequirement.RestartVsCode,
+        CreateStatusProjection(),
         "1.2.3");
+
+    private static SetupStatusProjection CreateStatusProjection() => new(
+        true,
+        "1.128.0",
+        SetupOperation.Replace,
+        SetupEffectiveSource.UserSetting,
+        "http://127.0.0.1:4320",
+        LoadHistoricalManifest(),
+        null,
+        [new SetupMemberChangeResult("github.copilot.chat.otel.enabled", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
+
+    private static SetupLedgerTarget CreateAllNoOpLedgerTarget()
+    {
+        var member = new SetupLedgerMember("github.copilot.chat.otel.enabled", SetupOperation.NoOp);
+        return CreateLedgerTarget() with
+        {
+            Members = [member],
+            StatusProjection = CreateStatusProjection() with
+            {
+                Operation = SetupOperation.NoOp,
+                Changes = [new SetupMemberChangeResult(member.SettingKey, member.Operation, "present_same", "configured_loopback", "none", false)],
+            },
+        };
+    }
+
+    private static SetupLedgerTarget CreateGuidanceLedgerTarget() => CreateLedgerTarget() with
+    {
+        TargetKind = SetupTargetKind.Guidance,
+        TargetLabel = "app-sdk-guidance",
+        Members = [],
+        RestartRequirement = SetupRestartRequirement.None,
+        StatusProjection = new SetupStatusProjection(
+            false, null, SetupOperation.NoOp, null, null, null,
+            new SetupStatusGuidance("caller_managed_sample", "dotnet"), []),
+    };
+
+    private static JsonElement LoadHistoricalManifest()
+    {
+        var manifestPath = Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "specifications", "contracts",
+            "source-capabilities", "v1", "manifests", "github-copilot-vscode.json");
+        var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+        manifest["support_status"] = "planned";
+        manifest["stability"] = "preview";
+        using var document = JsonDocument.Parse(manifest.ToJsonString());
+        return document.RootElement.Clone();
+    }
+
+    private static void SwapFirstTwo(JsonArray values)
+    {
+        var first = values[0]!.DeepClone();
+        values[0] = values[1]!.DeepClone();
+        values[1] = first;
+    }
 
     private static int IndexOf(IReadOnlyList<string> values, string expected) =>
         values.Select((value, index) => (value, index)).Single(pair => pair.value == expected).index;

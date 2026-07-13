@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -10,6 +11,18 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SetupRecoveryTests
 {
+    private static SetupStatusProjection CreateStatusProjection(
+        IReadOnlyList<SetupLedgerMember> members,
+        bool suppressManifest = false)
+    {
+        var operations = members.Select(member => member.Operation).Where(operation => operation != SetupOperation.NoOp).Distinct().ToArray();
+        var aggregate = operations.Length switch { 0 => SetupOperation.NoOp, 1 => operations[0], _ => SetupOperation.Mixed };
+        var expectedResult = !suppressManifest && members.All(member => member.SettingKey.StartsWith("ENV_", StringComparison.Ordinal))
+            ? SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.Cli)!.CanonicalJson
+            : (JsonElement?)null;
+        return new SetupStatusProjection(true, null, aggregate, null, null, expectedResult, null,
+            members.Select(member => new SetupMemberChangeResult(member.SettingKey, member.Operation, "present", "configured", "none", false)).ToArray());
+    }
     [Fact]
     public void RecoverNext_Ignores_normal_planned_change_set_without_journal()
     {
@@ -1120,7 +1133,7 @@ public sealed class SetupRecoveryTests
             Assert.Equal(SetupChangeSetState.Partial, partial.State);
             var noOpPartial = partial.Targets.Single(target => target.RecordId == fixture.FileRecordIds[1]);
             Assert.Equal(SetupCodes.RollbackStale, noOpPartial.OutcomeCode);
-            Assert.Equal(SetupLedgerRollbackStatus.Stale, noOpPartial.RollbackStatus);
+            Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, noOpPartial.RollbackStatus);
             Assert.Null(noOpPartial.AppliedStateHash);
             Assert.Null(noOpPartial.BackupReference);
         }
@@ -1151,18 +1164,17 @@ public sealed class SetupRecoveryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void RecoverNext_Initial_file_lifecycle_rejects_unjournaled_failure_status(bool compensating)
+    public void LedgerSave_Initial_file_lifecycle_rejects_unowned_failure_status(bool compensating)
     {
         var fixture = RecoveryFixture.CreateFileWithNoOpFile();
         fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationCompleted, "desired");
         var planStore = new SetupPlanStore(fixture.Platform, fixture.Paths);
         var ledgerStore = new SetupLedgerStore(fixture.Platform, fixture.Paths, planStore);
-        var journalStore = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths);
         using (var seedLock = fixture.AcquireLock())
         {
             var ledger = ledgerStore.LoadForRecovery();
             var current = Assert.Single(ledger.ChangeSets);
-            ledgerStore.Save(seedLock, ledger with
+            Assert.Throws<FormatException>(() => ledgerStore.Save(seedLock, ledger with
             {
                 ChangeSets = [current with
                 {
@@ -1175,21 +1187,11 @@ public sealed class SetupRecoveryTests
                         }
                         : target).ToArray(),
                 }],
-            });
-            if (compensating)
-            {
-                journalStore.MarkTransactionPhase(
-                    seedLock, fixture.ChangeSetId, SetupJournalPhase.Compensating);
-            }
+            }));
         }
 
-        using var recoveryLock = fixture.AcquireLock();
-        var result = fixture.ReopenCoordinator().RecoverNext(recoveryLock);
-
-        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
-        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
-        Assert.Equal(SetupJournalPhase.Partial, fixture.LoadJournal().Phase);
-        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+        Assert.Equal(SetupLedgerRollbackStatus.NotAvailable,
+            fixture.LoadChangeSet().Targets.Single(target => target.RecordId == fixture.FileRecordIds[1]).RollbackStatus);
         Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
         Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPaths[1])));
     }
@@ -1735,7 +1737,7 @@ public sealed class SetupRecoveryTests
         var partial = fixture.LoadChangeSet();
         Assert.Equal(SetupChangeSetState.Partial, partial.State);
         Assert.Equal(SetupCodes.RollbackStale, partial.Targets[1].OutcomeCode);
-        Assert.Equal(SetupLedgerRollbackStatus.Stale, partial.Targets[1].RollbackStatus);
+        Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, partial.Targets[1].RollbackStatus);
         Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPaths[0])));
         Assert.Equal("third", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPaths[1])));
 
@@ -2395,55 +2397,22 @@ public sealed class SetupRecoveryTests
             operation == "environment.notify");
     }
 
-    [Fact]
-    public void RecoverNext_Dormant_environment_rollback_rejects_forged_no_op_restore_step()
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void LedgerSave_AllNoOpTargetWithForgedOwnershipFailsClosedBeforeRecovery(
+        bool active,
+        bool bindAppliedToBase)
     {
         var fixture = new EnvironmentRecoveryFixture();
-        fixture.SeedForgedNoOpRollback(active: false);
         var operationsBefore = fixture.Platform.Operations.Count;
-        using var setupLock = fixture.AcquireLock();
 
-        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+        var exception = Assert.Throws<FormatException>(() =>
+            fixture.SeedForgedNoOpRollback(active, bindAppliedToBase));
 
-        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
-        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
-        Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
-        Assert.Equal("stable-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
-        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
-            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
-            operation == "environment.notify");
-    }
-
-    [Fact]
-    public void RecoverNext_Dormant_environment_rollback_rejects_forged_no_op_step_when_terminal_hash_matches()
-    {
-        var fixture = new EnvironmentRecoveryFixture();
-        fixture.SeedForgedNoOpRollback(active: false, bindAppliedToBase: false);
-        var operationsBefore = fixture.Platform.Operations.Count;
-        using var setupLock = fixture.AcquireLock();
-
-        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
-
-        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
-        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
-        Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
-        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
-            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
-            operation == "environment.notify");
-    }
-
-    [Fact]
-    public void RecoverNext_Active_environment_rollback_rejects_forged_no_op_restore_step()
-    {
-        var fixture = new EnvironmentRecoveryFixture();
-        fixture.SeedForgedNoOpRollback(active: true);
-        var operationsBefore = fixture.Platform.Operations.Count;
-        using var setupLock = fixture.AcquireLock();
-
-        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
-
-        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
-        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Null(exception.InnerException);
+        Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
         Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
         Assert.Equal("stable-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
         Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
@@ -3898,7 +3867,7 @@ public sealed class SetupRecoveryTests
             var noOpTarget = fixture.LoadChangeSet().Targets.Single(target =>
                 target.TargetKind == SetupTargetKind.Env);
             Assert.Equal(SetupCodes.RollbackStale, noOpTarget.OutcomeCode);
-            Assert.Equal(SetupLedgerRollbackStatus.Stale, noOpTarget.RollbackStatus);
+            Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, noOpTarget.RollbackStatus);
         }
 
         Assert.Equal("drifted", fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
@@ -4435,6 +4404,12 @@ public sealed class SetupRecoveryTests
                         null,
                         SetupLedgerRollbackStatus.NotAvailable,
                         SetupRestartRequirement.RestartTerminalSession,
+                        CreateStatusProjection(
+                        [
+                            new SetupLedgerMember("ENV_A", SetupOperation.Replace),
+                            new SetupLedgerMember("ENV_B", SetupOperation.Replace),
+                            new SetupLedgerMember("ENV_NOOP", SetupOperation.NoOp),
+                        ]),
                         "1.0.0"),
                     new SetupLedgerTarget(
                         fileRecordId,
@@ -4448,6 +4423,7 @@ public sealed class SetupRecoveryTests
                         null,
                         SetupLedgerRollbackStatus.NotAvailable,
                         SetupRestartRequirement.RestartVsCode,
+                        CreateStatusProjection([new SetupLedgerMember("file-setting", SetupOperation.Replace)]),
                         "1.0.0"),
                 ]);
             var planStore = new SetupPlanStore(Platform, Paths);
@@ -4879,6 +4855,7 @@ public sealed class SetupRecoveryTests
                     null,
                     SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartVsCode,
+                    CreateStatusProjection([new SetupLedgerMember("later-setting", SetupOperation.Replace)]),
                     "1.0.0")]);
             var planStore = new SetupPlanStore(Platform, Paths);
             var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
@@ -4979,6 +4956,7 @@ public sealed class SetupRecoveryTests
                             null,
                             SetupLedgerRollbackStatus.NotAvailable,
                             SetupRestartRequirement.RestartTerminalSession,
+                            CreateStatusProjection([new SetupLedgerMember("ENV_SECOND", SetupOperation.NoOp)], suppressManifest: true),
                             "1.0.0")).ToArray(),
                     }
                     : changeSet).ToArray(),
@@ -5282,6 +5260,10 @@ public sealed class SetupRecoveryTests
                     null,
                     SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartVsCode,
+                    CreateStatusProjection(
+                    [
+                        new SetupLedgerMember(index == 0 ? "setting" : $"setting-{index}", noOp ? SetupOperation.NoOp : SetupOperation.Replace),
+                    ]),
                     "1.0.0");
             }).ToList();
             if (includeEnvironmentNoOp)
@@ -5298,6 +5280,7 @@ public sealed class SetupRecoveryTests
                     null,
                     SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartTerminalSession,
+                    CreateStatusProjection([new SetupLedgerMember("ENV_NOOP", SetupOperation.NoOp)]),
                     "1.0.0"));
             }
             Planned = new SetupLedgerChangeSet(
@@ -5494,6 +5477,7 @@ public sealed class SetupRecoveryTests
                     null,
                     SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartVsCode,
+                    CreateStatusProjection([new SetupLedgerMember("setting", SetupOperation.Replace)]),
                     "1.0.0")]);
             var planStore = new SetupPlanStore(Platform, Paths);
             using var setupLock = SetupLock.TryAcquire(Platform, Paths);
@@ -6194,6 +6178,7 @@ public sealed class SetupRecoveryTests
                      null,
                      SetupLedgerRollbackStatus.NotAvailable,
                      SetupRestartRequirement.RestartTerminalSession,
+                     CreateStatusProjection([new SetupLedgerMember("setting", SetupOperation.Replace)]),
                      "1.0.0"),
                  new SetupLedgerTarget(
                      EnvironmentRecordId,
@@ -6208,6 +6193,11 @@ public sealed class SetupRecoveryTests
                      null,
                      SetupLedgerRollbackStatus.NotAvailable,
                      SetupRestartRequirement.RestartTerminalSession,
+                     CreateStatusProjection(
+                     [
+                         new SetupLedgerMember("ENV_A", SetupOperation.Replace),
+                         new SetupLedgerMember("ENV_B", SetupOperation.NoOp),
+                     ]),
                      "1.0.0")]);
             var planStore = new SetupPlanStore(Platform, Paths);
             var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
@@ -6381,6 +6371,11 @@ public sealed class SetupRecoveryTests
                     null,
                     SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartTerminalSession,
+                    CreateStatusProjection(
+                    [
+                        new SetupLedgerMember("ENV_A", desiredState == "missing" ? SetupOperation.Remove : SetupOperation.Replace),
+                        new SetupLedgerMember("ENV_B", secondMemberChanged ? SetupOperation.Replace : SetupOperation.NoOp),
+                    ]),
                     "1.0.0")]);
             var planStore = new SetupPlanStore(Platform, Paths);
             using var setupLock = SetupLock.TryAcquire(Platform, Paths);
@@ -6694,6 +6689,11 @@ public sealed class SetupRecoveryTests
                     Planned.Targets[0].Members[0] with { Operation = SetupOperation.NoOp },
                     Planned.Targets[0].Members[1],
                 ],
+                StatusProjection = CreateStatusProjection(
+                [
+                    Planned.Targets[0].Members[0] with { Operation = SetupOperation.NoOp },
+                    Planned.Targets[0].Members[1],
+                ]),
                 AppliedStateHash = bindAppliedToBase ? previous.AggregateHash : desired.AggregateHash,
                 BackupReference = RecordId.ToString("D"),
                 OutcomeCode = SetupCodes.ApplySucceeded,

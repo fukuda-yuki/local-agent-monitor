@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Json;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -8,6 +10,16 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SetupApplyTests
 {
+    private static SetupStatusProjection CreateStatusProjection(IReadOnlyList<SetupLedgerMember> members)
+    {
+        var operations = members.Select(member => member.Operation).Where(operation => operation != SetupOperation.NoOp).Distinct().ToArray();
+        var aggregate = operations.Length switch { 0 => SetupOperation.NoOp, 1 => operations[0], _ => SetupOperation.Mixed };
+        var expectedResult = members.All(member => member.SettingKey.StartsWith("ENV_", StringComparison.Ordinal))
+            ? SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.Cli)!.CanonicalJson
+            : (JsonElement?)null;
+        return new SetupStatusProjection(true, null, aggregate, null, null, expectedResult, null,
+            members.Select(member => new SetupMemberChangeResult(member.SettingKey, member.Operation, "present", "configured", "none", false)).ToArray());
+    }
     [Fact]
     public async Task Apply_SameTokenConcurrentCommandWaitsForTheActiveCommandToExit()
     {
@@ -1060,6 +1072,7 @@ public sealed class SetupApplyTests
         var changedTarget = ledger.ChangeSets[0].Targets[0] with
         {
             Members = [new SetupLedgerMember("setting", SetupOperation.Remove)],
+            StatusProjection = CreateStatusProjection([new SetupLedgerMember("setting", SetupOperation.Remove)]),
         };
         ledgerStore.Save(acquisition.Lock!, ledger with
         {
@@ -1340,6 +1353,7 @@ public sealed class SetupApplyTests
                     null,
                     SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartVsCode,
+                    CreateStatusProjection([new SetupLedgerMember("setting", SetupOperation.Replace)]),
                     "1.0.0"));
             }
 
@@ -1374,6 +1388,7 @@ public sealed class SetupApplyTests
                 null,
                 SetupLedgerRollbackStatus.NotAvailable,
                 SetupRestartRequirement.RestartTerminalSession,
+                CreateStatusProjection(environmentMembers.Select(member => new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray()),
                 "1.0.0"));
 
             var plan = new SetupPrivatePlan(
@@ -1521,14 +1536,17 @@ public sealed class SetupApplyTests
             {
                 new(FileRecordId, SetupTargetKind.Json, "settings", "github-copilot",
                     [new SetupLedgerMember("setting", fileOperation)], plan.Targets[0].BaseStateHash,
-                    null, null, null, SetupLedgerRollbackStatus.NotAvailable, SetupRestartRequirement.RestartVsCode, "1.0.0"),
+                    null, null, null, SetupLedgerRollbackStatus.NotAvailable, SetupRestartRequirement.RestartVsCode,
+                    CreateStatusProjection([new SetupLedgerMember("setting", fileOperation)]), "1.0.0"),
             };
             if (includeEnvironment)
             {
                 ledgerTargets.Add(new SetupLedgerTarget(EnvironmentRecordId, SetupTargetKind.Env, "user-environment", "github-copilot",
                     [new SetupLedgerMember("ENV_A", environmentAOperation), new SetupLedgerMember("ENV_B", environmentBOperation)],
                     plan.Targets[1].BaseStateHash, null, null, null, SetupLedgerRollbackStatus.NotAvailable,
-                    SetupRestartRequirement.RestartTerminalSession, "1.0.0"));
+                    SetupRestartRequirement.RestartTerminalSession,
+                    CreateStatusProjection([new SetupLedgerMember("ENV_A", environmentAOperation), new SetupLedgerMember("ENV_B", environmentBOperation)]),
+                    "1.0.0"));
             }
             if (reverseTargetOrder)
             {
@@ -1692,6 +1710,9 @@ public sealed class SetupApplyTests
                     Members = target.Members.Select(member => member.SettingKey == settingKey
                         ? member with { Operation = operation }
                         : member).ToArray(),
+                    StatusProjection = CreateStatusProjection(target.Members.Select(member => member.SettingKey == settingKey
+                        ? member with { Operation = operation }
+                        : member).ToArray()),
                 }).ToArray();
             ledgerStore.Save(acquisition.Lock!, ledger with
             {
@@ -1721,6 +1742,8 @@ public sealed class SetupApplyTests
                     {
                         Members = members.Select(member =>
                             new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray(),
+                        StatusProjection = CreateStatusProjection(members.Select(member =>
+                            new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray()),
                     }
                     : target).ToArray();
             ledgerStore.Save(acquisition.Lock!, ledger with

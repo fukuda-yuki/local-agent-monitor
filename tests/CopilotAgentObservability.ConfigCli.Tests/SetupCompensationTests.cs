@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Json;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -8,6 +10,16 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SetupCompensationTests
 {
+    private static SetupStatusProjection CreateStatusProjection(IReadOnlyList<SetupLedgerMember> members)
+    {
+        var operations = members.Select(member => member.Operation).Where(operation => operation != SetupOperation.NoOp).Distinct().ToArray();
+        var aggregate = operations.Length switch { 0 => SetupOperation.NoOp, 1 => operations[0], _ => SetupOperation.Mixed };
+        var expectedResult = members.All(member => member.SettingKey.StartsWith("ENV_", StringComparison.Ordinal))
+            ? SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.Cli)!.CanonicalJson
+            : (JsonElement?)null;
+        return new SetupStatusProjection(true, null, aggregate, null, null, expectedResult, null,
+            members.Select(member => new SetupMemberChangeResult(member.SettingKey, member.Operation, "present", "configured", "none", false)).ToArray());
+    }
     [Fact]
     public async Task Apply_DisposeRequestedAtEnvironmentRestoreKeepsExclusiveLockUntilRecoveryEvidenceIsReturned()
     {
@@ -1140,6 +1152,7 @@ public sealed class SetupCompensationTests
                     null,
                     SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartVsCode,
+                    CreateStatusProjection([new SetupLedgerMember("setting", fileOperation)]),
                     "1.0.0"),
             };
             if (includeEnvironment)
@@ -1162,6 +1175,12 @@ public sealed class SetupCompensationTests
                     null,
                     SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartTerminalSession,
+                    CreateStatusProjection(
+                    [
+                        new SetupLedgerMember("ENV_A", SetupOperation.Replace),
+                        new SetupLedgerMember("ENV_B", SetupOperation.Remove),
+                        new SetupLedgerMember("ENV_C", environmentCNoChange ? SetupOperation.NoOp : SetupOperation.Replace),
+                    ]),
                     "1.0.0"));
             }
 
