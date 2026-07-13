@@ -2925,6 +2925,213 @@ public sealed class SetupRecoveryTests
             operation == "environment.notify");
     }
 
+    [Fact]
+    public void RecoverNext_Committed_mixed_rollback_reconciles_rolling_back_ledger_without_target_restore()
+    {
+        var fixture = new TerminalEvidenceFixture();
+        fixture.SeedCommittedMixedRollbackJournalOnly(SetupChangeSetState.RollingBack);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, result.Code);
+        Assert.Equal(SetupRecoveryOperation.Rollback, result.Operation);
+        Assert.Equal(SetupChangeSetState.RolledBack, result.EffectiveChangeSet?.State);
+        Assert.Equal("old-file", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal("stable", fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.RolledBack, durable.State);
+        Assert.All(durable.Targets, target =>
+        {
+            Assert.Null(target.AppliedStateHash);
+            Assert.Null(target.BackupReference);
+            Assert.Equal(SetupLedgerRollbackStatus.Succeeded, target.RollbackStatus);
+            Assert.Equal(SetupCodes.InterruptedRollbackRecovered, target.OutcomeCode);
+        });
+        var journal = fixture.LoadJournal();
+        Assert.Equal(SetupJournalPhase.Committed, journal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Completed, journal.EnvironmentNotification);
+        var environmentTarget = Assert.Single(journal.Targets,
+            target => target.TargetKind == SetupTargetKind.Env);
+        Assert.Equal(["ENV_A", "ENV_B"], environmentTarget.Steps.Select(step => step.MemberKey));
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.DoesNotContain(operations, operation =>
+            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+        var ledgerWrite = Array.FindLastIndex(operations, operation =>
+            operation.EndsWith($"->{fixture.Paths.OwnershipLedger}", StringComparison.Ordinal));
+        var notification = Array.IndexOf(operations, "environment.notify");
+        var journalWrite = Array.FindLastIndex(operations, operation =>
+            operation.EndsWith($"->{fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)}", StringComparison.Ordinal));
+        Assert.True(ledgerWrite >= 0 && notification > ledgerWrite && journalWrite > notification);
+    }
+
+    [Fact]
+    public void RecoverNext_Committed_mixed_rollback_rejects_applied_ledger_as_malformed_without_target_io()
+    {
+        var fixture = new TerminalEvidenceFixture();
+        fixture.SeedCommittedMixedRollbackJournalOnly(SetupChangeSetState.Applied);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupRecoveryOperation.Rollback, result.Operation);
+        Assert.Equal(SetupChangeSetState.Applied, fixture.LoadChangeSet().State);
+        Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupEnvironmentNotification.Pending, fixture.LoadJournal().EnvironmentNotification);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.StartsWith("environment.get", StringComparison.Ordinal) ||
+            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
+            operation == $"file.read:{fixture.TargetPath}" ||
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}" ||
+            operation == "environment.notify");
+    }
+
+    [Theory]
+    [InlineData("environment")]
+    [InlineData("file")]
+    [InlineData("no-op")]
+    [InlineData("environment-unavailable")]
+    [InlineData("file-unavailable")]
+    public void RecoverNext_Committed_mixed_rollback_preserves_drift_then_retries_exact_partial(
+        string drift)
+    {
+        var fixture = new TerminalEvidenceFixture();
+        fixture.SeedCommittedMixedRollbackJournalOnly(SetupChangeSetState.RollingBack);
+        fixture.SetCommittedMixedRollbackDrift(drift);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using (var setupLock = fixture.AcquireLock())
+        {
+            var failed = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+            Assert.Equal(SetupRecoveryDisposition.Failed, failed.Disposition);
+            Assert.Equal(SetupCodes.InterruptedRecoveryFailed, failed.Code);
+            Assert.Equal(SetupRecoveryOperation.Rollback, failed.Operation);
+            Assert.Equal(SetupChangeSetState.Partial, failed.EffectiveChangeSet?.State);
+        }
+
+        var partial = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Partial, partial.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, partial.OutcomeCode);
+        Assert.All(partial.Targets, target =>
+        {
+            Assert.Equal(SetupCodes.InterruptedRecoveryFailed, target.OutcomeCode);
+            Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, target.RollbackStatus);
+        });
+        Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupEnvironmentNotification.Pending, fixture.LoadJournal().EnvironmentNotification);
+        var failedOperations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.DoesNotContain(failedOperations, operation =>
+            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}" ||
+            operation == "environment.notify");
+
+        fixture.ResolveCommittedMixedRollbackDrift(drift);
+        using var retryLock = fixture.AcquireLock();
+        var retried = fixture.ReopenCoordinator().RecoverNext(retryLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, retried.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, retried.Code);
+        Assert.Equal(SetupChangeSetState.RolledBack, fixture.LoadChangeSet().State);
+        Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}");
+    }
+
+    [Theory]
+    [InlineData("backup")]
+    [InlineData("applied")]
+    [InlineData("base")]
+    public void RecoverNext_Committed_mixed_rollback_rejects_environment_binding_mismatch_without_target_write(
+        string mismatch)
+    {
+        var fixture = new TerminalEvidenceFixture();
+        fixture.SeedCommittedMixedRollbackJournalOnly(SetupChangeSetState.RollingBack);
+        fixture.RebindMixedRollbackEnvironmentEvidence(mismatch);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupRecoveryOperation.Rollback, result.Operation);
+        Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}" ||
+            operation == "environment.notify");
+    }
+
+    [Fact]
+    public void RecoverNext_Committed_mixed_partial_blocks_later_candidate_until_external_resolution()
+    {
+        var fixture = new TerminalEvidenceFixture();
+        fixture.SeedCommittedMixedRollbackJournalOnly(SetupChangeSetState.RollingBack);
+        fixture.SetCommittedMixedRollbackDrift("environment");
+        var later = fixture.AddLaterActiveApply();
+
+        using (var setupLock = fixture.AcquireLock())
+        {
+            var failed = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+            Assert.Equal(SetupRecoveryDisposition.Failed, failed.Disposition);
+            Assert.Equal(fixture.ChangeSetId, failed.RecoveredChangeSetId);
+            Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+            Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet(later.ChangeSetId).State);
+            Assert.Equal("new-later", Encoding.UTF8.GetString(
+                fixture.Platform.ReadSeededFile(later.TargetPath)));
+        }
+
+        fixture.ResolveCommittedMixedRollbackDrift("environment");
+        using var retryLock = fixture.AcquireLock();
+        var recovered = fixture.ReopenCoordinator().RecoverNext(retryLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, recovered.Disposition);
+        Assert.Equal(fixture.ChangeSetId, recovered.RecoveredChangeSetId);
+        Assert.Equal(SetupChangeSetState.RolledBack, fixture.LoadChangeSet().State);
+        Assert.Equal(SetupChangeSetState.Applying, fixture.LoadChangeSet(later.ChangeSetId).State);
+        Assert.Equal("new-later", Encoding.UTF8.GetString(
+            fixture.Platform.ReadSeededFile(later.TargetPath)));
+    }
+
+    [Fact]
+    public void RecoverNext_Committed_mixed_rollback_rejects_multiple_environment_aggregates_without_mutation()
+    {
+        var fixture = new TerminalEvidenceFixture();
+        fixture.SeedCommittedMixedRollbackJournalOnly(SetupChangeSetState.RollingBack);
+        fixture.AddSecondEnvironmentPhysicalTarget();
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(SetupRecoveryOperation.Rollback, result.Operation);
+        Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
+        Assert.Equal(SetupChangeSetState.RollingBack, fixture.LoadChangeSet().State);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal) ||
+            operation == $"file.delete:{fixture.TargetPath}" ||
+            operation == "environment.notify");
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -3810,6 +4017,106 @@ public sealed class SetupRecoveryTests
                 }]));
         }
 
+        public void SeedCommittedMixedRollbackJournalOnly(SetupChangeSetState ledgerState)
+        {
+            SeedActiveMixedRollback();
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            var journalStore = new SetupTransactionJournalStore(Platform, Paths);
+            using var setupLock = AcquireLock();
+            journalStore.MarkStepPhase(setupLock, ChangeSetId, fileRecordId, null,
+                SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted);
+            Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old-file"));
+            journalStore.MarkStepPhase(setupLock, ChangeSetId, fileRecordId, null,
+                SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+            journalStore.MarkStepPhase(setupLock, ChangeSetId, environmentRecordId, "ENV_B",
+                SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted);
+            Platform.SeedUserEnvironment("ENV_B", "old-b");
+            journalStore.MarkStepPhase(setupLock, ChangeSetId, environmentRecordId, "ENV_B",
+                SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+            journalStore.MarkStepPhase(setupLock, ChangeSetId, environmentRecordId, "ENV_A",
+                SetupJournalStepPhase.Pending, SetupJournalStepPhase.RestoreStarted);
+            Platform.SeedUserEnvironment("ENV_A", "old-a");
+            journalStore.MarkStepPhase(setupLock, ChangeSetId, environmentRecordId, "ENV_A",
+                SetupJournalStepPhase.RestoreStarted, SetupJournalStepPhase.RestoreCompleted);
+            journalStore.MarkTransactionPhase(setupLock, ChangeSetId, SetupJournalPhase.Committed);
+            if (ledgerState == SetupChangeSetState.RollingBack)
+            {
+                return;
+            }
+
+            Assert.Equal(SetupChangeSetState.Applied, ledgerState);
+            var ledger = ledgerStore.LoadForRecovery();
+            var current = ledger.ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
+            ledgerStore.Save(setupLock, ledger with
+            {
+                ChangeSets = ledger.ChangeSets.Select(changeSet => changeSet.ChangeSetId == ChangeSetId
+                    ? current with
+                    {
+                        State = ledgerState,
+                        OutcomeCode = SetupCodes.ApplySucceeded,
+                        Targets = current.Targets.Select(target => target with
+                        {
+                            OutcomeCode = SetupCodes.ApplySucceeded,
+                            RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                        }).ToArray(),
+                    }
+                    : changeSet).ToArray(),
+            });
+        }
+
+        public void SetCommittedMixedRollbackDrift(string drift)
+        {
+            switch (drift)
+            {
+                case "environment":
+                    Platform.SeedUserEnvironment("ENV_B", "third-b");
+                    break;
+                case "file":
+                    Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("third-file"));
+                    break;
+                case "no-op":
+                    Platform.SeedUserEnvironment("ENV_NOOP", "third-noop");
+                    break;
+                case "environment-unavailable":
+                    Platform.InjectFault("environment.get:ENV_A", new IOException("private-env-unavailable"));
+                    break;
+                case "file-unavailable":
+                    Platform.SeedPathMetadata(
+                        TargetPath,
+                        new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(drift));
+            }
+        }
+
+        public void ResolveCommittedMixedRollbackDrift(string drift)
+        {
+            switch (drift)
+            {
+                case "environment":
+                    Platform.SeedUserEnvironment("ENV_B", "old-b");
+                    break;
+                case "file":
+                    Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old-file"));
+                    break;
+                case "no-op":
+                    Platform.SeedUserEnvironment("ENV_NOOP", "stable");
+                    break;
+                case "environment-unavailable":
+                    break;
+                case "file-unavailable":
+                    Platform.SeedPathMetadata(
+                        TargetPath,
+                        new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.Normal));
+                    Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old-file"));
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(drift));
+            }
+        }
+
         public void SetMixedRollbackThirdParty(string target)
         {
             if (target == "environment")
@@ -3850,10 +4157,17 @@ public sealed class SetupRecoveryTests
             {
                 var environmentStep = new UserEnvironmentSetupStep(Platform);
                 var backupPath = Paths.GetBackup(ChangeSetId, environmentRecordId);
+                var currentA = Platform.ReadUserEnvironment("ENV_A");
+                var currentB = Platform.ReadUserEnvironment("ENV_B");
+                var currentNoOp = Platform.ReadUserEnvironment("ENV_NOOP");
                 Platform.FileSystem.DeleteFile(backupPath);
+                Platform.SeedUserEnvironment("ENV_A", "rebound-a");
                 environmentStep.CreateBackup(
                     backupPath,
                     environmentStep.Capture(["ENV_A", "ENV_B", "ENV_NOOP"]));
+                Platform.SeedUserEnvironment("ENV_A", currentA);
+                Platform.SeedUserEnvironment("ENV_B", currentB);
+                Platform.SeedUserEnvironment("ENV_NOOP", currentNoOp);
                 return;
             }
 
