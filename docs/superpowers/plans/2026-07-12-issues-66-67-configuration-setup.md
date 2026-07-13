@@ -31,36 +31,57 @@ The implementation DAG starts from these completed prerequisites:
   notification replay, and their recorded fault/review evidence;
 - SetupOptions parsing through the durable-ledger entry recorded on 2026-07-14.
 
-Do not rewrite those rows as new T1-T9 work. New reports append to the durable
-ledger and identify both the current T-number and any historical task whose
-residual they close.
+Do not rewrite those rows as new T1-T9 work. T9 alone appends the final results
+to the durable ledger and identifies both the current T-number and any
+historical task whose residual it closes.
 
 ## Bounded dependency DAG
 
 ```text
-T0 current-spec alignment (this document set)
+T0 current-spec alignment
  |
- +--> T1 #66 status/terminal closure -----------------+
- +--> T2 #66 public command producer                  |
-          |                                           |
-          v                                           |
-         T3 #67 detection/policy/probe foundation     |
-          |          |          |                     |
-          v          v          v                     v
-         T4         T5         T6 -------------> T7 real #66->#67 integration
-       VS Code     CLI       App/SDK                  |
-                                                       v
-                                               T8 package/docs/evidence
-                                                       |
-                                                       v
-                                               T9 reviews/full validation
+ v
+T1 #66 status/terminal closure
+ |
+ v
+T2 #66 public command producer
+ |
+ v
+T3 #67 shared detection/policy/probe foundation
+ |          |          |
+ v          v          v
+T4         T5         T6
+VS Code    CLI       App/SDK
+ |          |          |
+ +----------+----------+
+            |
+            v
+T7 real #66->#67 integration
+ |
+ v
+T8 package/docs/evidence
+ |
+ v
+T9 reviews/full validation
 ```
 
-T1 and T2 may proceed concurrently. T3 follows T2 so the shared registry/CLI
-contract has one owner. T4, T5, and T6 may proceed concurrently after T3 and
-own only their target-specific implementation/tests; T7 owns their production
-registry join. No adapter may declare completion before T7. T8 and T9 are
-sequential closeout.
+The only permitted order is T1 -> T2 -> T3 -> {T4 || T5 || T6} -> T7 -> T8 ->
+T9. T4, T5, and T6 may proceed concurrently only after T3 freezes the shared
+contract/platform/GitHubCopilot seam. Each target task owns only its partition;
+T7 owns the composition-root join. No adapter may declare completion before T7.
+T8 and T9 are sequential closeout.
+
+Gate releases are explicit:
+
+| Gate | Release condition |
+| --- | --- |
+| T1 -> T2 | exact T1 status/rollback/recovery tests and all Setup tests pass; review and commit are complete |
+| T2 -> T3 | registry, generic CLI seam, four-command producer, and wrapper tests pass; review and commit are complete |
+| T3 -> T4/T5/T6 | shared codes, validation, platform, manifest-pairing, detection, policy, and endpoint tests pass; the shared seam is then frozen |
+| T4/T5/T6 -> T7 | all three target partitions pass focused tests and are separately reviewed and committed without editing T3-owned files |
+| T7 -> T8 | the real composition root and CLI handoff pass the cross-target producer gate and full ConfigCli tests |
+| T8 -> T9 | package, wrapper parity, links, and operator documentation checks pass; review and commit are complete |
+| T9 -> close | final reviews, required repository validation, contradiction searches, clean range/worktree inspection, and the sole ledger update pass |
 
 Every task uses test-driven changes, an independent read-only review, a focused
 RED/GREEN command, `git diff --check`, and a coherent local commit. Workers do
@@ -69,17 +90,18 @@ fix cycles in one area trigger a contract/test-design re-audit.
 
 ## T1 - Close #66 status and terminal invariants
 
-**Own:** `Setup/Status/`, the shared pure rollback-preflight evaluator and its
-narrow rollback integration, status-related contract/serializer code only when
-required, `SetupStatusTests.cs`, `SetupStatusOrderingTests.cs`, paired
-`SetupRollbackTests.cs`, and remaining terminal-evidence tests.
+**Own exactly:** `Setup/Status/SetupStatusProjector.cs`,
+`Setup/Status/SetupStatusListProjector.cs`,
+`Setup/Transactions/SetupRollbackPreflightEvaluator.cs`, the status-preflight
+integration in `Setup/Transactions/SetupRollbackCoordinator.cs`, and
+`SetupStatusProjectorTests.cs`, `SetupStatusOrderingTests.cs`,
+`SetupRollbackTests.cs`, and `SetupRecoveryTests.cs`.
 
 **Deliver:** lifecycle-relative reference/current state, immutable ledger
 snapshot reconstruction without adapter rediscovery, fresh private-plan/target/
 backup checks, all-NoOp guard-only equivalence with rollback, partial rollback
 false, filter -> priority -> deterministic order -> hard 100 cap -> truncation,
-and the remaining terminal environment hash/evidence residuals recorded in the
-durable ledger.
+and the remaining terminal environment hash/evidence residuals.
 
 **Verify:** focused `SetupStatus|SetupRollback|SetupRecovery` tests, then all
 Setup tests. Do not change #67 target behavior. Commit:
@@ -87,11 +109,12 @@ Setup tests. Do not change #67 target behavior. Commit:
 
 ## T2 - Expose the real #66 command producer
 
-**Own:** `Setup/Adapters/ISetupAdapter.cs`, adapter registry, `Setup/Cli/`,
-`Setup/Contracts/SetupContractValidator.cs`, `CliApplication.cs`,
-`CliHelpText.cs`, `SetupCliTests.cs`, and the command-composition cases in
-`SetupContractValidationTests.cs`/`SetupContractShapeTests.cs`; plus repository
-`scripts/local-monitor/setup.ps1` plus its exact wrapper tests.
+**Own exactly:** `Setup/Adapters/ISetupAdapter.cs`,
+`Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Cli/SetupOptions.cs`,
+`Cli/CliApplication.cs`, `Cli/CliHelpText.cs`, `SetupAdapterRegistryTests.cs`,
+`SetupOptionsTests.cs`, `CliApplicationTests.cs`, and the new repository
+`scripts/local-monitor/setup.ps1` plus new `SetupWrapperTests.cs`. T2 exposes a
+generic CLI/composition handoff but does not register a #67 adapter.
 
 **Deliver:** all four commands through the real coordinator, one JSON stdout
 producer, fixed stderr/exit mapping, mandatory recovery correlation, mutation
@@ -104,19 +127,24 @@ blocking, and exact wrapper forwarding. Pin the closed command matrix:
 - macOS/Linux CLI persisted plan -> `apply`/`unsupported_target`, no shell
   profile, artifact, ledger transition, notification, or target write.
 
-**Verify:** `SetupCliTests`, `SetupContractShapeTests`,
-`SetupContractValidationTests`, `LocalMonitorScriptTests`, then full ConfigCli
-tests. Commit: `Issue #66: feat(setup): expose reversible setup commands`.
+**Verify:** `SetupAdapterRegistryTests`, `SetupOptionsTests`,
+`CliApplicationTests`, `SetupWrapperTests`, then full ConfigCli tests. Commit:
+`Issue #66: feat(setup): expose reversible setup commands`.
 
 ## T3 - Build the #67 detection, policy, and endpoint foundation
 
 **Depends on:** T2.
 
-**Own:** the shared `Setup/Adapters/GitHubCopilot/` composite-adapter,
-detection, policy, endpoint-probe, and target-extension-point files; only the
-required platform interface/fake extensions; `GitHubCopilotDetectionTests.cs`;
-and `GitHubCopilotEndpointProbeTests.cs`. T3 does not register unfinished target
-implementations in the production adapter registry.
+**Own exclusively:** shared files directly under
+`Setup/Adapters/GitHubCopilot/` (target files must live in the T4/T5/T6
+subdirectories), `Setup/Contracts/SetupCodes.cs`,
+`Setup/Contracts/SetupContractValidator.cs`, `Setup/Platform/ISetupPlatform.cs`,
+`Setup/Platform/SystemSetupPlatform.cs`, `SetupTestPlatform.cs`,
+`SetupContractShapeTests.cs`, `SetupContractValidationTests.cs`,
+`SourceCapabilityRuntimeTests.cs`, `GitHubCopilotDetectionTests.cs`, and
+`GitHubCopilotEndpointProbeTests.cs`. T3 does not register unfinished target
+implementations in the production adapter registry. After this gate, no later
+task edits these shared files; a finding reopens T3.
 
 **Deliver:** the real adapter foundation and internal #66 plan DTO path;
 Stable/Insiders and CLI version detection; planning OS capture; canonical #61
@@ -141,18 +169,18 @@ creation or target-specific apply revalidation: T4 owns VS Code version/
 extension/policy/member/endpoint revalidation and T5 owns CLI OS/version/
 environment-member/endpoint revalidation.
 
-**Verify:** `GitHubCopilotDetectionTests`, `GitHubCopilotEndpointProbeTests`,
-and runtime manifest tests. Commit:
+**Verify:** `SetupContractShapeTests`, `SetupContractValidationTests`,
+`SourceCapabilityRuntimeTests`, `GitHubCopilotDetectionTests`, and
+`GitHubCopilotEndpointProbeTests`. Commit:
 `Issue #67: feat(setup): add Copilot detection foundation`.
 
 ## T4 - Implement VS Code Stable/Insiders Default Profile setup
 
 **Depends on:** T3.
 
-**Own:** VS Code adapter files, `VsCodeSetupAdapterTests.cs`, and the narrow
-`SetupCodes.cs`/`SetupContractValidator.cs`/`SetupContractShapeTests.cs`/
-`SetupContractValidationTests.cs` additions for the fixed non-default-profile
-warning. Do not edit the shared production adapter registry; T7 owns the join.
+**Own exactly:** the target partition
+`Setup/Adapters/GitHubCopilot/VsCode/` and `VsCodeSetupAdapterTests.cs`. Do not
+edit T3-owned shared files or the production composition root; T7 owns the join.
 
 **Deliver:** Stable and Insiders 1.128+; deterministic Stable-then-Insiders
 physical targets when both are eligible; per-channel Default Profile paths on
@@ -184,10 +212,10 @@ member revalidation. Commit:
 
 **Depends on:** T3.
 
-**Own:** Copilot CLI adapter files, `CopilotCliSetupAdapterTests.cs`, and the
-narrow `SetupCodes.cs`/`SetupContractValidator.cs`/shape-validation additions
-for the trace-protocol override conflict/warning/action. Do not edit the shared
-production adapter registry; T7 owns the join.
+**Own exactly:** the target partition
+`Setup/Adapters/GitHubCopilot/CopilotCli/` and
+`CopilotCliSetupAdapterTests.cs`. Do not edit T3-owned shared files or the
+production composition root; T7 owns the join.
 
 **Deliver:** CLI 1.0.4+ and the exact default allowlist:
 `COPILOT_OTEL_ENABLED`, `COPILOT_OTEL_EXPORTER_TYPE`,
@@ -218,9 +246,10 @@ capture option, and endpoint/version/member revalidation. Commit:
 
 **Depends on:** T3.
 
-**Own:** App/SDK guidance adapter files, `CopilotSdkGuidanceAdapterTests.cs`, and
-the existing LocalMonitor SDK compile contract test. Do not edit the shared
-production adapter registry and do not add/change a PackageReference.
+**Own exactly:** the target partition
+`Setup/Adapters/GitHubCopilot/AppSdk/`, `CopilotSdkGuidanceAdapterTests.cs`, and
+the new `CopilotSdkTelemetryCompileTests.cs`. Do not edit T3-owned shared files
+or the production composition root, and do not add/change a PackageReference.
 
 **Deliver:** detected package/version without path, one guidance target, null
 manifest, no mutation/rollback, and the exact .NET `TelemetryConfig` sample with
@@ -233,9 +262,11 @@ loopback endpoint and `http/protobuf`. Other languages remain caller-managed.
 
 **Depends on:** T1, T2, T4, T5, T6.
 
-**Own:** the production adapter/target registry join, narrow production
-integration points, and `ConfigurationSetupContractTests.cs`; adapter-specific
-files only for findings.
+**Own exactly:** `Program.cs`, new `Setup/SetupCompositionRoot.cs`, and new
+`ConfigurationSetupIntegrationTests.cs`. T7 registers the three target
+partitions and passes the real setup producer into the generic T2 CLI seam. It
+does not edit adapter, shared-contract, platform, or target-specific files;
+findings reopen the originating owner and downstream gates.
 
 **Deliver:** real plan/apply/rollback/status for all targets through the same
 ledger/transaction/result types, all-target `all` behavior, stale and rollback
@@ -247,9 +278,9 @@ never become mutation authorities. HTTP/proxy/UI remain N/A.
 runtime #61 manifests and production `SetupCommandResult`/target DTO types, and
 record HTTP/proxy/UI N/A. A fake adapter cannot satisfy this gate.
 
-**Verify:** all test classes matching
-`Setup|GitHubCopilot|VsCode|CopilotCli|CopilotSdk|ConfigurationSetupContract`
-and the full ConfigCli project. Commit:
+**Verify:** `ConfigurationSetupIntegrationTests`, all test classes matching
+`Setup|GitHubCopilot|VsCode|CopilotCli|CopilotSdk`, and the full ConfigCli
+project. Commit:
 `Issues #66-#67: test(setup): verify guided setup integration`.
 
 ## T8 - Package and document only verified behavior
@@ -264,15 +295,14 @@ executable and wrapper-parity cases in
 `docs/agent-guides/repository-workflow.md`;
 `docs/specifications/interfaces/config-cli.md`;
 `docs/sprints/sprint23-configuration-ownership-github-copilot/README.md`;
-`docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md`; and
-`docs/task.md`. Package the already implemented
-`scripts/local-monitor/setup.ps1` without changing its T2 command contract.
+and `docs/task.md`. Package the T2-owned `scripts/local-monitor/setup.ps1`
+without changing its command contract.
 Do not change unrelated startup/user-env scripts or the release workflow.
 
 **Deliver:** self-contained `app/config-cli/`, exact wrapper parity, no installed
 .NET runtime requirement, implemented examples that never claim first trace,
-and a requirement-to-test ledger with exact counts, remaining minors, and
-interfaces. Preserve all completed #66 evidence rows.
+and requirement-to-test evidence with exact counts, remaining minors, and
+interfaces. Preserve all completed #66 evidence rows for T9.
 
 **Verify:** `LocalMonitorScriptTests`, CLI/wrapper parsed DTO parity, link/path
 checks, `git diff --check`. Commit:
@@ -281,6 +311,12 @@ checks, `git diff --check`. Commit:
 ## T9 - Independent review, validation, and closeout
 
 **Depends on:** T8.
+
+**Own exactly:** final read-only review and validation plus
+`docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md`. T9
+does not edit implementation, tests, package files, or other documentation. A
+finding reopens its originating T1-T8 owner and every downstream gate; after the
+fix is reviewed and committed, execution returns to T9 from that gate.
 
 Run separate final reviews for:
 
@@ -298,6 +334,6 @@ dotnet test CopilotAgentObservability.slnx
 ```
 
 Finally run contradiction searches and `git diff --check`, inspect the complete
-commit range/worktree, and update the durable ledger with exact results and
-unverified scope. On failure use systematic debugging; do not substitute a
-command, guess-fix, retry blindly, push, or open a PR.
+commit range/worktree, and make the only T1-T9 durable-ledger update with exact
+results and unverified scope. On failure use systematic debugging; do not
+substitute a command, guess-fix, retry blindly, push, or open a PR.
