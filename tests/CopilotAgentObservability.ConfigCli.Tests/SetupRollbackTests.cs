@@ -44,7 +44,7 @@ public sealed class SetupRollbackTests
         var fixture = EnvironmentRollbackFixture.Create([
             new("ENV_VALUE", "old-value", SetupOperation.Replace, "desired-value"),
             new("ENV_EMPTY", "", SetupOperation.Remove, null),
-            new("ENV_MISSING", null, SetupOperation.Replace, "desired-missing"),
+            new("ENV_MISSING", null, SetupOperation.Add, "desired-missing"),
             new("ENV_NOOP", "unchanged", SetupOperation.NoOp, "unchanged"),
         ]);
         var baseline = fixture.Platform.Operations.Count;

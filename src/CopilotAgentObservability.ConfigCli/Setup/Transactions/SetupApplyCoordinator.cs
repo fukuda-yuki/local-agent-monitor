@@ -760,12 +760,10 @@ internal sealed class SetupApplyCoordinator
                         throw new SetupApplyException(SetupCodes.StalePlan);
                     }
 
+                    ValidateEnvironmentOperationCoherence(target, capture);
                     var changedMembers = target.Members
                         .Select((member, index) => (member, index))
-                        .Where(item => !string.Equals(
-                            capture.Members[item.index].Hash,
-                            environmentStep.HashMember(item.member.SettingKey, DesiredEnvironmentValue(item.member)),
-                            StringComparison.Ordinal))
+                        .Where(item => item.member.Operation != SetupOperation.NoOp)
                         .Select(item => item.index)
                         .ToArray();
                     captures.Add(new TargetCapture(target, null, capture, false, changedMembers));
@@ -791,11 +789,18 @@ internal sealed class SetupApplyCoordinator
                     }
 
                     var desiredHash = SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState));
+                    var fileChanged = !string.Equals(capture.Hash, desiredHash, StringComparison.Ordinal);
+                    var membersDeclareChange = target.Members.Any(member => member.Operation != SetupOperation.NoOp);
+                    if (fileChanged != membersDeclareChange)
+                    {
+                        throw new SetupApplyException(SetupCodes.RecoveryRequired);
+                    }
+
                     captures.Add(new TargetCapture(
                         target,
                         capture,
                         null,
-                        !string.Equals(capture.Hash, desiredHash, StringComparison.Ordinal),
+                        membersDeclareChange,
                         []));
                     break;
                 }
@@ -803,6 +808,42 @@ internal sealed class SetupApplyCoordinator
         }
 
         return captures;
+    }
+
+    private static void ValidateEnvironmentOperationCoherence(
+        SetupPrivatePlanTarget target,
+        UserEnvironmentCapture capture)
+    {
+        for (var index = 0; index < target.Members.Count; index++)
+        {
+            var member = target.Members[index];
+            var expected = EnvironmentOperation(
+                capture.Members[index].Value,
+                DesiredEnvironmentValue(member));
+            if (member.Operation != expected)
+            {
+                throw new SetupApplyException(SetupCodes.RecoveryRequired);
+            }
+        }
+    }
+
+    private static SetupOperation EnvironmentOperation(
+        UserEnvironmentValue current,
+        UserEnvironmentValue desired)
+    {
+        if (!current.Exists)
+        {
+            return desired.Exists ? SetupOperation.Add : SetupOperation.NoOp;
+        }
+
+        if (!desired.Exists)
+        {
+            return SetupOperation.Remove;
+        }
+
+        return string.Equals(current.Value, desired.Value, StringComparison.Ordinal)
+            ? SetupOperation.NoOp
+            : SetupOperation.Replace;
     }
 
     private SetupLedgerChangeSet CreateNoChangesChangeSet(SetupLedgerChangeSet planned) => planned with

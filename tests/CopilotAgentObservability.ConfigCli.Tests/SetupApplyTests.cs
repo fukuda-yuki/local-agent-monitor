@@ -217,6 +217,156 @@ public sealed class SetupApplyTests
         Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
     }
 
+    [Theory]
+    [InlineData(true, "old", SetupOperation.NoOp, "desired")]
+    [InlineData(true, "old", SetupOperation.Add, "desired")]
+    [InlineData(true, "old", SetupOperation.Add, "old")]
+    [InlineData(false, null, SetupOperation.Replace, "desired")]
+    [InlineData(true, "old", SetupOperation.Replace, "old")]
+    [InlineData(false, null, SetupOperation.Remove, null)]
+    [InlineData(true, "old", SetupOperation.Mixed, "desired")]
+    public void Apply_RejectsEnvironmentOperationThatDoesNotDescribeCapturedToDesiredTransitionBeforeArtifacts(
+        bool priorExists,
+        string? priorValue,
+        SetupOperation operation,
+        string? desiredValue)
+    {
+        var fixture = ApplyFixture.Create(environmentOperationCase:
+            new EnvironmentOperationCase(priorExists, priorValue, operation, desiredValue));
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(1, fixture.Revalidator.Calls);
+        AssertNoTransactionArtifacts(fixture);
+        var planned = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Planned, planned.State);
+        Assert.All(planned.Targets, target =>
+        {
+            Assert.Null(target.BackupReference);
+            Assert.Null(target.AppliedStateHash);
+            Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, target.RollbackStatus);
+        });
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData(true, "same", SetupOperation.NoOp, "same", SetupCodes.NoChanges)]
+    [InlineData(false, null, SetupOperation.Add, "desired", SetupCodes.ApplySucceeded)]
+    [InlineData(true, "old", SetupOperation.Replace, "desired", SetupCodes.ApplySucceeded)]
+    [InlineData(true, "old", SetupOperation.Remove, null, SetupCodes.ApplySucceeded)]
+    [InlineData(true, "", SetupOperation.NoOp, "", SetupCodes.NoChanges)]
+    [InlineData(false, null, SetupOperation.Add, "", SetupCodes.ApplySucceeded)]
+    [InlineData(true, "", SetupOperation.Replace, "desired", SetupCodes.ApplySucceeded)]
+    [InlineData(true, "", SetupOperation.Remove, null, SetupCodes.ApplySucceeded)]
+    public void Apply_AcceptsExactEnvironmentOperationTransitionIncludingMissingAndEmpty(
+        bool priorExists,
+        string? priorValue,
+        SetupOperation operation,
+        string? desiredValue,
+        string expectedCode)
+    {
+        var fixture = ApplyFixture.Create(environmentOperationCase:
+            new EnvironmentOperationCase(priorExists, priorValue, operation, desiredValue));
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(expectedCode, result.OutcomeCode);
+        if (operation == SetupOperation.NoOp)
+        {
+            AssertNoTransactionArtifacts(fixture);
+            Assert.DoesNotContain("environment.set:ENV_A", fixture.Platform.Operations);
+            Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+        }
+        else
+        {
+            var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
+            Assert.Equal(["ENV_A"], Assert.Single(journal.Targets).Steps.Select(step => step.MemberKey));
+            Assert.Equal(desiredValue, fixture.Platform.ReadUserEnvironment("ENV_A"));
+            Assert.Equal(1, fixture.Platform.Operations.Count(item => item == "environment.notify"));
+        }
+    }
+
+    [Theory]
+    [InlineData(false, SetupOperation.NoOp)]
+    [InlineData(true, SetupOperation.Add)]
+    [InlineData(true, SetupOperation.Replace)]
+    [InlineData(true, SetupOperation.Remove)]
+    [InlineData(true, SetupOperation.Mixed)]
+    public void Apply_RejectsFileAggregateWhoseChangedMembershipDisagreesWithWholeDesiredBytes(
+        bool desiredEqualsCaptured,
+        SetupOperation operation)
+    {
+        var fixture = ApplyFixture.Create(
+            fileNoChange: desiredEqualsCaptured,
+            includeEnvironment: false);
+        fixture.RewriteMemberOperation(fixture.FileRecordId, "setting", operation);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        AssertNoTransactionArtifacts(fixture);
+        Assert.Equal(SetupChangeSetState.Planned, fixture.LoadChangeSet().State);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData(SetupOperation.Add)]
+    [InlineData(SetupOperation.Replace)]
+    [InlineData(SetupOperation.Remove)]
+    [InlineData(SetupOperation.Mixed)]
+    public void Apply_OpaqueFileAggregateDoesNotInferLogicalNonNoOpMemberOperation(SetupOperation operation)
+    {
+        var fixture = ApplyFixture.Create(includeEnvironment: false);
+        fixture.RewriteMemberOperation(fixture.FileRecordId, "setting", operation);
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal(operation, Assert.Single(Assert.Single(result.Targets).Members).Operation);
+    }
+
+    [Fact]
+    public void Apply_MalformedOperationCannotProduceOwnershipForRecoveryOrRollbackConsumers()
+    {
+        var fixture = ApplyFixture.Create(environmentOperationCase:
+            new EnvironmentOperationCase(true, "old", SetupOperation.NoOp, "desired"));
+        var planStore = new SetupPlanStore(fixture.Platform, fixture.Paths);
+        var ledgerStore = new SetupLedgerStore(fixture.Platform, fixture.Paths, planStore);
+        var journalStore = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+        var recovery = new SetupRecoveryCoordinator(
+            fixture.Platform, fixture.Paths, planStore, ledgerStore, journalStore)
+            .RecoverNext(acquisition.Lock!);
+        var rollback = new SetupRollbackCoordinator(
+            fixture.Platform, fixture.Paths, planStore, ledgerStore, journalStore)
+            .Rollback(acquisition.Lock!, fixture.ChangeSetId);
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(SetupRecoveryDisposition.None, recovery.Disposition);
+        Assert.False(rollback.Success);
+        Assert.Equal(SetupChangeSetState.Planned, rollback.ChangeSet!.State);
+        AssertNoTransactionArtifacts(fixture);
+        var target = fixture.LoadChangeSet().Targets.Single(item => item.RecordId == fixture.EnvironmentRecordId);
+        Assert.Null(target.BackupReference);
+        Assert.Null(target.AppliedStateHash);
+        Assert.Equal(SetupLedgerRollbackStatus.NotAvailable, target.RollbackStatus);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
     [Fact]
     public void Apply_ReusesFirstExactOrphanBackupAndCreatesOnlyLaterMissingBackup()
     {
@@ -993,6 +1143,12 @@ public sealed class SetupApplyTests
         Assert.False(fixture.Platform.FileSystem.FileExists(fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.EnvironmentRecordId)));
     }
 
+    private sealed record EnvironmentOperationCase(
+        bool PriorExists,
+        string? PriorValue,
+        SetupOperation Operation,
+        string? DesiredValue);
+
     private sealed class ApplyFixture
     {
         private ApplyFixture(
@@ -1001,7 +1157,8 @@ public sealed class SetupApplyTests
             bool environmentANoChange,
             bool environmentNoChange,
             bool includeEnvironment,
-            bool reverseTargetOrder)
+            bool reverseTargetOrder,
+            EnvironmentOperationCase? environmentOperationCase)
         {
             Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 12, 1, 2, 3, TimeSpan.Zero));
             Paths = new SetupRuntimePaths(Platform);
@@ -1013,15 +1170,27 @@ public sealed class SetupApplyTests
             Platform.SeedDirectory("C:\\");
             Platform.SeedDirectory(Platform.LocalApplicationData);
             Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old"));
-            Platform.SeedUserEnvironment("ENV_A", "old-a");
+            if (environmentOperationCase is null || environmentOperationCase.PriorExists)
+            {
+                Platform.SeedUserEnvironment("ENV_A", environmentOperationCase?.PriorValue ?? "old-a");
+            }
             Platform.SeedUserEnvironment("ENV_B", "old-b");
             Platform.SeedUserEnvironment("UNRELATED", "untouched");
             var environmentCapture = new UserEnvironmentSetupStep(Platform).Capture(["ENV_A", "ENV_B"]);
-            var fileDesired = noChanges || fileNoChange ? "old" : "new";
-            var fileOperation = noChanges || fileNoChange ? SetupOperation.NoOp : SetupOperation.Replace;
-            var environmentAOperation = noChanges || environmentANoChange || environmentNoChange ? SetupOperation.NoOp : SetupOperation.Replace;
-            var environmentBOperation = noChanges || environmentNoChange ? SetupOperation.NoOp : SetupOperation.Remove;
-            var environmentBDesired = noChanges || environmentNoChange ? "old-b" : null;
+            var isolateEnvironmentOperation = environmentOperationCase is not null;
+            var fileDesired = noChanges || fileNoChange || isolateEnvironmentOperation ? "old" : "new";
+            var fileOperation = noChanges || fileNoChange || isolateEnvironmentOperation
+                ? SetupOperation.NoOp
+                : SetupOperation.Replace;
+            var environmentAOperation = environmentOperationCase?.Operation ??
+                (noChanges || environmentANoChange || environmentNoChange ? SetupOperation.NoOp : SetupOperation.Replace);
+            var environmentADesired = environmentOperationCase is null
+                ? (noChanges || environmentANoChange || environmentNoChange ? "old-a" : "desired-a")
+                : environmentOperationCase.DesiredValue;
+            var environmentBOperation = noChanges || environmentNoChange || isolateEnvironmentOperation
+                ? SetupOperation.NoOp
+                : SetupOperation.Remove;
+            var environmentBDesired = noChanges || environmentNoChange || isolateEnvironmentOperation ? "old-b" : null;
             var planTargets = new List<SetupPrivatePlanTarget>
             {
                 new(FileRecordId, SetupTargetKind.Json, TargetPath,
@@ -1032,7 +1201,7 @@ public sealed class SetupApplyTests
             {
                 planTargets.Add(new SetupPrivatePlanTarget(EnvironmentRecordId, SetupTargetKind.Env, "current-user",
                     environmentCapture.AggregateHash, "environment-allowlist",
-                    [new SetupPrivatePlanMember("ENV_A", environmentAOperation, noChanges || environmentANoChange || environmentNoChange ? "old-a" : "desired-a"),
+                    [new SetupPrivatePlanMember("ENV_A", environmentAOperation, environmentADesired),
                      new SetupPrivatePlanMember("ENV_B", environmentBOperation, environmentBDesired)]));
             }
 
@@ -1184,13 +1353,49 @@ public sealed class SetupApplyTests
             bool environmentANoChange = false,
             bool environmentNoChange = false,
             bool includeEnvironment = true,
-            bool reverseTargetOrder = false) => new(
+            bool reverseTargetOrder = false,
+            EnvironmentOperationCase? environmentOperationCase = null) => new(
                 noChanges,
                 fileNoChange,
                 environmentANoChange,
                 environmentNoChange,
                 includeEnvironment,
-                reverseTargetOrder);
+                reverseTargetOrder,
+                environmentOperationCase);
+
+        public void RewriteMemberOperation(Guid recordId, string settingKey, SetupOperation operation)
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var plan = planStore.Load(ChangeSetId)!;
+            var planTargets = plan.Targets.Select(target => target.RecordId != recordId
+                ? target
+                : target with
+                {
+                    Members = target.Members.Select(member => member.SettingKey == settingKey
+                        ? member with { Operation = operation }
+                        : member).ToArray(),
+                }).ToArray();
+            Platform.SeedFile(Paths.GetPlan(ChangeSetId), SetupPlanStore.Serialize(plan with { Targets = planTargets }));
+
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            var ledger = ledgerStore.Load();
+            var changeSet = ledger.ChangeSets.Single(item => item.ChangeSetId == ChangeSetId);
+            var ledgerTargets = changeSet.Targets.Select(target => target.RecordId != recordId
+                ? target
+                : target with
+                {
+                    Members = target.Members.Select(member => member.SettingKey == settingKey
+                        ? member with { Operation = operation }
+                        : member).ToArray(),
+                }).ToArray();
+            ledgerStore.Save(acquisition.Lock!, ledger with
+            {
+                ChangeSets = ledger.ChangeSets.Select(item => item.ChangeSetId == ChangeSetId
+                    ? item with { Targets = ledgerTargets }
+                    : item).ToArray(),
+            });
+        }
 
         public SetupLedgerChangeSet LoadChangeSet()
         {
