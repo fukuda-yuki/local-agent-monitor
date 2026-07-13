@@ -379,7 +379,7 @@ public static class SetupContractValidator
         ValidateExpectedResult(
             target.ExpectedResult,
             ExpectedSurface(target.TargetKind, target.TargetLabel),
-            requireCurrentManifest: !isStatusTarget);
+            requireCurrentManifest: command == SetupCommand.Plan);
 
         if (target.TargetKind == SetupTargetKind.Guidance)
         {
@@ -663,8 +663,9 @@ public static class SetupContractValidator
 
     private static string? ExpectedSurface(SetupTargetKind targetKind, string targetLabel) => (targetKind, targetLabel) switch
     {
-        (SetupTargetKind.Json, "vscode-user-settings") => "github-copilot-vscode",
-        (SetupTargetKind.Env, "user-environment") => "github-copilot-cli",
+        (SetupTargetKind.Json, "vscode-stable-default-user-settings") => "github-copilot-vscode",
+        (SetupTargetKind.Json, "vscode-insiders-default-user-settings") => "github-copilot-vscode",
+        (SetupTargetKind.Env, "copilot-cli-user-environment") => "github-copilot-cli",
         _ => null,
     };
 

@@ -1161,7 +1161,7 @@ public sealed class SetupCompensationTests
                 ledgerTargets.Add(new SetupLedgerTarget(
                     EnvironmentRecordId,
                     SetupTargetKind.Env,
-                    "user-environment",
+                    "copilot-cli-user-environment",
                     "github-copilot",
                     [
                         new SetupLedgerMember("ENV_A", SetupOperation.Replace),

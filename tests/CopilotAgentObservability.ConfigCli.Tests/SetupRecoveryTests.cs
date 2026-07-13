@@ -4613,7 +4613,7 @@ public sealed class SetupRecoveryTests
                     new SetupLedgerTarget(
                         environmentRecordId,
                         SetupTargetKind.Env,
-                        "user-environment",
+                        "copilot-cli-user-environment",
                         "github-copilot",
                         [
                             new SetupLedgerMember("ENV_A", SetupOperation.Replace),
@@ -5493,7 +5493,7 @@ public sealed class SetupRecoveryTests
                 ledgerTargets.Add(new SetupLedgerTarget(
                     environmentRecordId,
                     SetupTargetKind.Env,
-                    "user-environment",
+                    "copilot-cli-user-environment",
                     "github-copilot",
                     [new SetupLedgerMember("ENV_NOOP", SetupOperation.NoOp)],
                     environmentHash!,
@@ -6405,7 +6405,7 @@ public sealed class SetupRecoveryTests
                  new SetupLedgerTarget(
                      EnvironmentRecordId,
                      SetupTargetKind.Env,
-                     "user-environment",
+                     "copilot-cli-user-environment",
                      "github-copilot",
                      [new SetupLedgerMember("ENV_A", SetupOperation.Replace),
                       new SetupLedgerMember("ENV_B", SetupOperation.NoOp)],
@@ -6778,7 +6778,7 @@ public sealed class SetupRecoveryTests
                 [new SetupLedgerTarget(
                     RecordId,
                     SetupTargetKind.Env,
-                    "user-environment",
+                    "copilot-cli-user-environment",
                     "github-copilot",
                     [new SetupLedgerMember(
                          "ENV_A",

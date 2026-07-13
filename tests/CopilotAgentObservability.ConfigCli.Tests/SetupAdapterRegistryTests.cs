@@ -38,7 +38,7 @@ public sealed class SetupAdapterRegistryTests
         var privateTarget = Assert.Single(privatePlan.Targets);
         Assert.Equal(RecordId, privateTarget.RecordId);
         Assert.Equal(SetupTargetKind.Env, privateTarget.TargetKind);
-        Assert.Equal("private://user-environment", privateTarget.TargetLocation);
+        Assert.Equal("private://copilot-cli-user-environment", privateTarget.TargetLocation);
         Assert.Equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", privateTarget.BaseStateHash);
         Assert.Equal("configured", privateTarget.DesiredState);
         var privateMember = Assert.Single(privateTarget.Members);
@@ -50,7 +50,7 @@ public sealed class SetupAdapterRegistryTests
         Assert.Null(ledger.OutcomeCode);
         Assert.Equal(CreatedAt, ledger.UpdatedAt);
         var ledgerTarget = Assert.Single(ledger.Targets);
-        Assert.Equal("user-environment", ledgerTarget.TargetLabel);
+        Assert.Equal("copilot-cli-user-environment", ledgerTarget.TargetLabel);
         Assert.Equal("test-adapter", ledgerTarget.OwningAdapter);
         Assert.Equal(privateTarget.BaseStateHash, ledgerTarget.PreviousStateHash);
         Assert.Null(ledgerTarget.AppliedStateHash);
@@ -67,7 +67,7 @@ public sealed class SetupAdapterRegistryTests
 
         Assert.Equal(RecordId, target.RecordId);
         Assert.Equal(SetupTargetKind.Env, target.TargetKind);
-        Assert.Equal("user-environment", target.TargetLabel);
+        Assert.Equal("copilot-cli-user-environment", target.TargetLabel);
         Assert.True(target.Detected);
         Assert.Equal("1.0.4", target.DetectedVersion);
         Assert.Equal(SetupOperation.Replace, target.Operation);
@@ -122,10 +122,10 @@ public sealed class SetupAdapterRegistryTests
         };
         var records = new List<SetupChangeRecord>
         {
-            CreateRecord(RecordId, "user-environment") with
+            CreateRecord(RecordId, "copilot-cli-user-environment") with
             {
                 Members = members,
-                StatusProjection = CreateRecord(RecordId, "user-environment").StatusProjection with { Changes = changes },
+                StatusProjection = CreateRecord(RecordId, "copilot-cli-user-environment").StatusProjection with { Changes = changes },
             },
         };
         var warnings = new List<string> { SetupCodes.MonitorNotRunning };
@@ -327,7 +327,7 @@ public sealed class SetupAdapterRegistryTests
     [InlineData("tool-version")]
     public void Plan_WhenPlanIdentityDoesNotExactlyMatchRequest_FailsSafely(string field)
     {
-        var plan = CreatePlan([CreateRecord(RecordId, "user-environment")]);
+        var plan = CreatePlan([CreateRecord(RecordId, "copilot-cli-user-environment")]);
         var mismatched = field switch
         {
             "change-set" => plan with { ChangeSetId = CreateRecordId(99) },
@@ -382,8 +382,8 @@ public sealed class SetupAdapterRegistryTests
     {
         var secondRecordId = Guid.Parse("018f3b9a-0000-7000-8000-000000000003");
         var adapter = new RecordingAdapter("test-adapter", [
-            CreateRecord(secondRecordId, "user-environment"),
-            CreateRecord(RecordId, "user-environment"),
+            CreateRecord(secondRecordId, "copilot-cli-user-environment"),
+            CreateRecord(RecordId, "copilot-cli-user-environment"),
         ]);
         var registry = new SetupAdapterRegistry([adapter]);
 
@@ -527,7 +527,7 @@ public sealed class SetupAdapterRegistryTests
             "next-action" => SetupPlanResult.Revalidated([], [rawMarker]),
             "success-target" => SetupPlanResult.Success(
                 SetupRevalidation.Instance,
-                [SetupPlanTarget.FromRecord(CreateRecord(RecordId, "user-environment"))],
+                [SetupPlanTarget.FromRecord(CreateRecord(RecordId, "copilot-cli-user-environment"))],
                 [],
                 []),
             _ => throw new InvalidOperationException(),
@@ -652,7 +652,7 @@ public sealed class SetupAdapterRegistryTests
                 request.SelectedTarget,
                 request.CreatedAt,
                 request.ToolVersion,
-                records ?? [CreateRecord(RecordId, "user-environment")]),
+                records ?? [CreateRecord(RecordId, "copilot-cli-user-environment")]),
             warnings,
             nextActions);
 

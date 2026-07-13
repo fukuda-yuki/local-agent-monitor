@@ -1717,7 +1717,7 @@ public sealed class SetupApplyTests
             ledgerTargets.Add(new SetupLedgerTarget(
                 EnvironmentRecordId,
                 SetupTargetKind.Env,
-                "user-environment",
+                "copilot-cli-user-environment",
                 "github-copilot",
                 environmentMembers.Select(member => new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray(),
                 environmentCapture.AggregateHash,
@@ -1879,7 +1879,7 @@ public sealed class SetupApplyTests
             };
             if (includeEnvironment)
             {
-                ledgerTargets.Add(new SetupLedgerTarget(EnvironmentRecordId, SetupTargetKind.Env, "user-environment", "github-copilot",
+                ledgerTargets.Add(new SetupLedgerTarget(EnvironmentRecordId, SetupTargetKind.Env, "copilot-cli-user-environment", "github-copilot",
                     [new SetupLedgerMember("ENV_A", environmentAOperation), new SetupLedgerMember("ENV_B", environmentBOperation)],
                     plan.Targets[1].BaseStateHash, null, null, null, SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartTerminalSession,

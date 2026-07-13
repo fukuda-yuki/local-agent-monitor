@@ -14,7 +14,7 @@
         {
           "record_id": "00000000-0000-7000-8000-000000000201",
           "target_kind": "json",
-          "target_label": "vscode-user-settings",
+          "target_label": "vscode-stable-default-user-settings",
           "owning_adapter": "github-copilot",
           "members": [
             {

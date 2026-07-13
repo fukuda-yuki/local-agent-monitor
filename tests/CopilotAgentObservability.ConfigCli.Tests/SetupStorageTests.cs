@@ -1388,7 +1388,7 @@ public sealed class SetupStorageTests
             return new SetupLedgerTarget(
                 Guid.Parse($"00000000-0000-7000-8000-{targetIndex:D12}"),
                 SetupTargetKind.Json,
-                "vscode-user-settings",
+                "vscode-stable-default-user-settings",
                 "github-copilot",
                 members,
                 HashA,
@@ -1424,7 +1424,7 @@ public sealed class SetupStorageTests
     private static SetupLedgerTarget CreateLedgerTarget() => new(
         RecordId,
         SetupTargetKind.Json,
-        "vscode-user-settings",
+        "vscode-stable-default-user-settings",
         "github-copilot",
         [new SetupLedgerMember("github.copilot.chat.otel.enabled", SetupOperation.Replace)],
         HashA,

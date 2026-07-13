@@ -975,7 +975,7 @@ public sealed class SetupStatusProjectorTests
                 new(
                     recordId,
                     SetupTargetKind.Json,
-                    "vscode-user-settings",
+                    "vscode-stable-default-user-settings",
                     "github-copilot",
                     [new SetupLedgerMember(member.SettingKey, member.Operation)],
                     baseHash,
@@ -1014,7 +1014,7 @@ public sealed class SetupStatusProjectorTests
                 ledgerTargets.Add(new SetupLedgerTarget(
                     additionalId,
                     SetupTargetKind.Json,
-                    "vscode-user-settings",
+                    "vscode-stable-default-user-settings",
                     "github-copilot",
                     [new SetupLedgerMember(settingKey, SetupOperation.Replace)],
                     additionalBase,
@@ -1056,7 +1056,7 @@ public sealed class SetupStatusProjectorTests
                 ledgerTargets.Add(new SetupLedgerTarget(
                     envRecordId,
                     SetupTargetKind.Env,
-                    "user-environment",
+                    "copilot-cli-user-environment",
                     "github-copilot",
                     [new SetupLedgerMember("ENV_NOOP", SetupOperation.NoOp)],
                     capture.AggregateHash,
@@ -1173,7 +1173,7 @@ public sealed class SetupStatusProjectorTests
                 [new SetupLedgerTarget(
                     recordId,
                     SetupTargetKind.Env,
-                    "user-environment",
+                    "copilot-cli-user-environment",
                     "github-copilot",
                     members.Select(member => new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray(),
                     capture.AggregateHash,

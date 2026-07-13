@@ -30,17 +30,21 @@ public sealed class SetupContractValidationTests
         """;
 
     [Theory]
-    [InlineData("github-copilot-vscode.json")]
-    [InlineData("github-copilot-cli.json")]
-    public void Serialize_WhenExpectedResultIsCanonicalGitHubCopilotManifest_PreservesIt(string manifestFileName)
+    [InlineData(SetupTargetKind.Json, "vscode-stable-default-user-settings", "github-copilot-vscode.json")]
+    [InlineData(SetupTargetKind.Json, "vscode-insiders-default-user-settings", "github-copilot-vscode.json")]
+    [InlineData(SetupTargetKind.Env, "copilot-cli-user-environment", "github-copilot-cli.json")]
+    public void Serialize_PlanAcceptsExactGitHubCopilotSurfaceLabels(
+        SetupTargetKind targetKind,
+        string targetLabel,
+        string manifestFileName)
     {
         using var manifest = JsonDocument.Parse(File.ReadAllText(GetManifestPath(manifestFileName)));
         var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
         {
-            TargetKind = manifestFileName == "github-copilot-cli.json" ? SetupTargetKind.Env : SetupTargetKind.Json,
-            TargetLabel = manifestFileName == "github-copilot-cli.json" ? "user-environment" : "vscode-user-settings",
-            EffectiveSource = manifestFileName == "github-copilot-cli.json" ? SetupEffectiveSource.Environment : SetupEffectiveSource.UserSetting,
-            RestartRequirement = manifestFileName == "github-copilot-cli.json" ? SetupRestartRequirement.RestartTerminalSession : SetupRestartRequirement.RestartVsCode,
+            TargetKind = targetKind,
+            TargetLabel = targetLabel,
+            EffectiveSource = targetKind == SetupTargetKind.Env ? SetupEffectiveSource.Environment : SetupEffectiveSource.UserSetting,
+            RestartRequirement = targetKind == SetupTargetKind.Env ? SetupRestartRequirement.RestartTerminalSession : SetupRestartRequirement.RestartVsCode,
             ExpectedResult = manifest.RootElement.Clone(),
         };
 
@@ -48,6 +52,29 @@ public sealed class SetupContractValidationTests
 
         using var serialized = JsonDocument.Parse(json);
         Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(serialized.RootElement.GetProperty("targets")[0].GetProperty("expected_result")));
+    }
+
+    [Theory]
+    [InlineData(SetupTargetKind.Json, "vscode-user-settings", "github-copilot-vscode.json")]
+    [InlineData(SetupTargetKind.Env, "user-environment", "github-copilot-cli.json")]
+    public void Serialize_WhenManifestUsesObsoleteSurfaceLabel_Rejects(
+        SetupTargetKind targetKind,
+        string targetLabel,
+        string manifestFileName)
+    {
+        using var manifest = JsonDocument.Parse(File.ReadAllText(GetManifestPath(manifestFileName)));
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
+        {
+            TargetKind = targetKind,
+            TargetLabel = targetLabel,
+            EffectiveSource = targetKind == SetupTargetKind.Env ? SetupEffectiveSource.Environment : SetupEffectiveSource.UserSetting,
+            RestartRequirement = targetKind == SetupTargetKind.Env ? SetupRestartRequirement.RestartTerminalSession : SetupRestartRequirement.RestartVsCode,
+            ExpectedResult = manifest.RootElement.Clone(),
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(CreatePlanResult([target])));
+
+        Assert.Equal(SetupContractValidator.InvalidContractCode, exception.Message);
     }
 
     [Theory]
@@ -418,6 +445,62 @@ public sealed class SetupContractValidationTests
         var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(CreatePlanResult([target])));
 
         Assert.Equal("setup_contract_invalid", exception.Message);
+    }
+
+    [Theory]
+    [InlineData(SetupCommand.Apply)]
+    [InlineData(SetupCommand.Rollback)]
+    public void Serialize_ApplyAndRollbackAcceptAndPreserveStrictHistoricalManifest(SetupCommand command)
+    {
+        var historical = CreateHistoricalManifest();
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
+        {
+            ExpectedResult = historical,
+        };
+
+        using var serialized = JsonDocument.Parse(SetupJson.Serialize(CreateMutationResult(command, target)));
+        var actual = serialized.RootElement.GetProperty("targets")[0].GetProperty("expected_result");
+
+        Assert.Equal(historical.GetRawText(), actual.GetRawText());
+    }
+
+    [Fact]
+    public void Serialize_PlanRejectsStrictHistoricalManifestThatDiffersFromCurrentEmbeddedManifest()
+    {
+        var historical = CreateHistoricalManifest();
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
+        {
+            ExpectedResult = historical,
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(CreatePlanResult([target])));
+
+        Assert.Equal(SetupContractValidator.InvalidContractCode, exception.Message);
+    }
+
+    [Theory]
+    [InlineData(SetupCommand.Apply, "cross-surface")]
+    [InlineData(SetupCommand.Apply, "unknown-label")]
+    [InlineData(SetupCommand.Rollback, "cross-surface")]
+    [InlineData(SetupCommand.Rollback, "unknown-label")]
+    public void Serialize_ApplyAndRollbackRejectHistoricalManifestOutsideExactSurfaceLabel(
+        SetupCommand command,
+        string mismatch)
+    {
+        var target = CreateWritableTarget("00000000-0000-7000-8000-000000000001") with
+        {
+            TargetLabel = mismatch == "unknown-label"
+                ? "future-vscode-user-settings"
+                : "vscode-stable-default-user-settings",
+            ExpectedResult = mismatch == "cross-surface"
+                ? LoadManifest("github-copilot-cli.json")
+                : CreateHistoricalManifest(),
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SetupJson.Serialize(CreateMutationResult(command, target)));
+
+        Assert.Equal(SetupContractValidator.InvalidContractCode, exception.Message);
     }
 
     [Theory]
@@ -956,10 +1039,19 @@ public sealed class SetupContractValidationTests
         targets, [], [], [], false);
 
     private static SetupTargetResult CreateWritableTarget(string recordId) => new(
-        recordId, SetupTargetKind.Json, "vscode-user-settings", true, "1.128.0", SetupOperation.Replace,
+        recordId, SetupTargetKind.Json, "vscode-stable-default-user-settings", true, "1.128.0", SetupOperation.Replace,
         SetupEffectiveSource.UserSetting, null, null, SetupRestartRequirement.RestartVsCode, true,
         "http://127.0.0.1:4320", LoadManifest("github-copilot-vscode.json"), null,
         [new SetupMemberChangeResult("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
+
+    private static JsonElement CreateHistoricalManifest()
+    {
+        var manifest = JsonNode.Parse(File.ReadAllText(GetManifestPath("github-copilot-vscode.json")))!.AsObject();
+        manifest["support_status"] = "planned";
+        manifest["stability"] = "preview";
+        using var historical = JsonDocument.Parse(manifest.ToJsonString());
+        return historical.RootElement.Clone();
+    }
 
     private static SetupTargetResult CreateGuidanceTarget() => new(
         "00000000-0000-7000-8000-000000000001", SetupTargetKind.Guidance, "app-sdk-guidance", false, null,

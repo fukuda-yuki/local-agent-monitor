@@ -24,7 +24,7 @@ public sealed class SetupContractShapeTests
         using var expectedResultDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "specifications", "contracts", "source-capabilities", "v1", "manifests", "github-copilot-vscode.json")));
         var writableTarget = new SetupTargetResult(
-            "00000000-0000-7000-8000-000000000001", SetupTargetKind.Json, "vscode-user-settings", true, "1.128.0",
+            "00000000-0000-7000-8000-000000000001", SetupTargetKind.Json, "vscode-stable-default-user-settings", true, "1.128.0",
             SetupOperation.Replace, SetupEffectiveSource.UserSetting, null, null, SetupRestartRequirement.RestartVsCode, true,
             "http://127.0.0.1:4320", expectedResultDocument.RootElement.Clone(), null,
             [new SetupMemberChangeResult("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
@@ -58,7 +58,7 @@ public sealed class SetupContractShapeTests
         AssertTargetShape(writable);
         Assert.Equal("00000000-0000-7000-8000-000000000001", writable.GetProperty("record_id").GetString());
         Assert.Equal("json", writable.GetProperty("target_kind").GetString());
-        Assert.Equal("vscode-user-settings", writable.GetProperty("target_label").GetString());
+        Assert.Equal("vscode-stable-default-user-settings", writable.GetProperty("target_label").GetString());
         Assert.True(writable.GetProperty("detected").GetBoolean());
         Assert.Equal("1.128.0", writable.GetProperty("detected_version").GetString());
         Assert.Equal("replace", writable.GetProperty("operation").GetString());
@@ -153,7 +153,7 @@ public sealed class SetupContractShapeTests
         AssertTargetShape(nestedWritable);
         Assert.Equal("00000000-0000-7000-8000-000000000020", nestedWritable.GetProperty("record_id").GetString());
         Assert.Equal("json", nestedWritable.GetProperty("target_kind").GetString());
-        Assert.Equal("vscode-user-settings", nestedWritable.GetProperty("target_label").GetString());
+        Assert.Equal("vscode-stable-default-user-settings", nestedWritable.GetProperty("target_label").GetString());
         Assert.True(nestedWritable.GetProperty("detected").GetBoolean());
         Assert.Equal("1.128.0", nestedWritable.GetProperty("detected_version").GetString());
         Assert.Equal("replace", nestedWritable.GetProperty("operation").GetString());
@@ -333,7 +333,7 @@ public sealed class SetupContractShapeTests
     public static TheoryData<SetupRestartRequirement, string> RestartRequirementWireValues => new() { { SetupRestartRequirement.None, "none" }, { SetupRestartRequirement.RestartVsCode, "restart_vscode" }, { SetupRestartRequirement.RestartTerminalSession, "restart_terminal_session" } };
     public static TheoryData<SetupChangeSetState, string> ChangeSetStateWireValues => new() { { SetupChangeSetState.Planned, "planned" }, { SetupChangeSetState.Applying, "applying" }, { SetupChangeSetState.Applied, "applied" }, { SetupChangeSetState.NoChanges, "no_changes" }, { SetupChangeSetState.Compensating, "compensating" }, { SetupChangeSetState.Restored, "restored" }, { SetupChangeSetState.RollingBack, "rolling_back" }, { SetupChangeSetState.Partial, "partial" }, { SetupChangeSetState.RolledBack, "rolled_back" } };
 
-    private static SetupTargetResult CreateStatusWritableTarget(SetupReferenceState referenceState = SetupReferenceState.Desired, SetupCurrentState currentState = SetupCurrentState.Current, bool rollbackAvailable = true) => new("00000000-0000-7000-8000-000000000020", SetupTargetKind.Json, "vscode-user-settings", true, "1.128.0", SetupOperation.Replace, SetupEffectiveSource.UserSetting, referenceState, currentState, SetupRestartRequirement.RestartVsCode, rollbackAvailable, "http://127.0.0.1:4320", SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.VsCode)!.CanonicalJson, null, [new SetupMemberChangeResult("setting", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
+    private static SetupTargetResult CreateStatusWritableTarget(SetupReferenceState referenceState = SetupReferenceState.Desired, SetupCurrentState currentState = SetupCurrentState.Current, bool rollbackAvailable = true) => new("00000000-0000-7000-8000-000000000020", SetupTargetKind.Json, "vscode-stable-default-user-settings", true, "1.128.0", SetupOperation.Replace, SetupEffectiveSource.UserSetting, referenceState, currentState, SetupRestartRequirement.RestartVsCode, rollbackAvailable, "http://127.0.0.1:4320", SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.VsCode)!.CanonicalJson, null, [new SetupMemberChangeResult("setting", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
 
     private static SetupTargetResult CreateStatusGuidanceTarget() => new("00000000-0000-7000-8000-000000000021", SetupTargetKind.Guidance, "app-sdk-guidance", false, null, SetupOperation.NoOp, null, SetupReferenceState.None, SetupCurrentState.NotApplicable, SetupRestartRequirement.None, false, null, null, new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), []);
 

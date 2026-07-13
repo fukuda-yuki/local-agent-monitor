@@ -1767,7 +1767,7 @@ public sealed class SetupRollbackTests
                 targets.Select((target, index) => new SetupLedgerTarget(
                     target.RecordId,
                     target.TargetKind,
-                    target.TargetKind == SetupTargetKind.Env ? "user-environment" : $"settings-{index}",
+                    target.TargetKind == SetupTargetKind.Env ? "copilot-cli-user-environment" : $"settings-{index}",
                     "github-copilot",
                     target.Members.Select(member => new SetupLedgerMember(
                         member.SettingKey,
