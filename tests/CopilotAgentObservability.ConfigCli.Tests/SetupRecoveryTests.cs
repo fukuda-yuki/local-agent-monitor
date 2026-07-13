@@ -54,6 +54,85 @@ public sealed class SetupRecoveryTests
     }
 
     [Fact]
+    public void RecoverNext_Reconciles_actual_mixed_apply_producer_after_restart()
+    {
+        var fixture = new ApplyProducedRecoveryFixture();
+        fixture.Platform.InjectFault(
+            $"checkpoint:{SetupFaultPoint.AfterCommitBeforeLedger}",
+            new IOException("private-apply-interruption"));
+        using (var applyLock = fixture.AcquireLock())
+        {
+            var exception = Assert.Throws<SetupApplyException>(() =>
+                fixture.CreateApplyCoordinator().Apply(applyLock, fixture.ChangeSetId));
+            Assert.Equal(SetupCodes.InternalError, exception.Code);
+        }
+
+        var restartedPlanStore = new SetupPlanStore(fixture.Platform, fixture.Paths);
+        var restartedLedgerStore = new SetupLedgerStore(fixture.Platform, fixture.Paths, restartedPlanStore);
+        var restartedJournalStore = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths);
+        var producedPlan = Assert.IsType<SetupPrivatePlan>(restartedPlanStore.Load(fixture.ChangeSetId));
+        var producedLedger = Assert.IsType<SetupOwnershipLedger>(restartedLedgerStore.LoadForRecovery());
+        var producedJournal = Assert.IsType<SetupTransactionJournal>(
+            restartedJournalStore.Load(fixture.ChangeSetId));
+        Assert.Equal(SetupChangeSetState.Applying, Assert.Single(producedLedger.ChangeSets).State);
+        Assert.Equal(SetupJournalPhase.Committed, producedJournal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Pending, producedJournal.EnvironmentNotification);
+        Assert.Equal([fixture.FileRecordId, fixture.EnvironmentRecordId],
+            producedJournal.Targets.Select(target => target.RecordId));
+        Assert.Null(Assert.Single(producedJournal.Targets[0].Steps).MemberKey);
+        Assert.Equal(["ENV_A"], producedJournal.Targets[1].Steps.Select(step => step.MemberKey));
+        Assert.All(producedJournal.Targets.SelectMany(target => target.Steps),
+            step => Assert.Equal(SetupJournalStepPhase.MutationCompleted, step.Phase));
+        var environmentPlan = Assert.Single(producedPlan.Targets,
+            target => target.RecordId == fixture.EnvironmentRecordId);
+        Assert.Equal(["ENV_A", "ENV_B"], environmentPlan.Members.Select(member => member.SettingKey));
+        var backup = new UserEnvironmentSetupStep(fixture.Platform).ReadBackup(
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.EnvironmentRecordId),
+            ["ENV_A", "ENV_B"]);
+        Assert.Equal(environmentPlan.BaseStateHash, backup.AggregateHash);
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations);
+        var operationsBeforeRecovery = fixture.Platform.Operations.Count;
+
+        var recoveryCoordinator = new SetupRecoveryCoordinator(
+            fixture.Platform,
+            fixture.Paths,
+            restartedPlanStore,
+            restartedLedgerStore,
+            restartedJournalStore);
+        using var recoveryLock = fixture.AcquireLock();
+        var result = recoveryCoordinator.RecoverNext(recoveryLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedApplyRecovered, result.Code);
+        Assert.Equal(fixture.ChangeSetId, result.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Apply, result.Operation);
+        Assert.Equal(SetupChangeSetState.Applied, result.EffectiveChangeSet?.State);
+        var appliedFile = Assert.Single(result.EffectiveChangeSet!.Targets,
+            target => target.RecordId == fixture.FileRecordId);
+        var appliedEnvironment = Assert.Single(result.EffectiveChangeSet.Targets,
+            target => target.RecordId == fixture.EnvironmentRecordId);
+        Assert.Equal(SetupHash.File(true, Encoding.UTF8.GetBytes("new")), appliedFile.AppliedStateHash);
+        var fullEnvironmentCapture = new UserEnvironmentSetupStep(fixture.Platform)
+            .Capture(["ENV_A", "ENV_B"]);
+        Assert.Equal(fullEnvironmentCapture.AggregateHash, appliedEnvironment.AppliedStateHash);
+        Assert.NotEqual(
+            new UserEnvironmentSetupStep(fixture.Platform).Capture(["ENV_A"]).AggregateHash,
+            appliedEnvironment.AppliedStateHash);
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("stable-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal("outside-model-a", fixture.Platform.ReadUserEnvironment("UNRELATED"));
+        var recoveredJournal = restartedJournalStore.Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Committed, recoveredJournal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Completed, recoveredJournal.EnvironmentNotification);
+        var recoveryOperations = fixture.Platform.Operations.Skip(operationsBeforeRecovery).ToArray();
+        Assert.Equal(1, recoveryOperations.Count(operation => operation == "environment.notify"));
+        Assert.DoesNotContain(recoveryOperations, operation =>
+            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
+            operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void RecoverNext_Ignores_exact_dormant_prepared_apply_without_mutating_or_rewriting_artifacts()
     {
         var fixture = RecoveryFixture.CreateFileOnly();
@@ -1561,6 +1640,47 @@ public sealed class SetupRecoveryTests
     }
 
     [Fact]
+    public void RecoverNext_Active_environment_coherent_backup_from_different_base_fails_before_mutation()
+    {
+        var fixture = new EnvironmentRecoveryFixture();
+        fixture.SeedActiveApply(SetupJournalStepPhase.MutationCompleted, "desired");
+        fixture.ReplaceActiveEvidenceWithCoherentBackupFromDifferentBase();
+        var backup = new UserEnvironmentSetupStep(fixture.Platform).ReadBackup(
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.RecordId),
+            ["ENV_A", "ENV_B"]);
+        Assert.NotEqual(Assert.Single(fixture.Plan.Targets).BaseStateHash, backup.AggregateHash);
+        Assert.Collection(
+            backup.Members,
+            member => Assert.Equal("ENV_A", member.Name),
+            member => Assert.Equal("ENV_B", member.Name));
+        Assert.Equal(
+            ["ENV_A", "ENV_B"],
+            Assert.Single(fixture.LoadJournal().Targets).Steps.Select(step => step.MemberKey));
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupChangeSetState.Partial, result.EffectiveChangeSet?.State);
+        var failedJournal = fixture.LoadJournal();
+        Assert.Equal(SetupJournalPhase.Partial, failedJournal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Pending, failedJournal.EnvironmentNotification);
+        Assert.All(Assert.Single(failedJournal.Targets).Steps,
+            step => Assert.Equal(SetupJournalStepPhase.MutationCompleted, step.Phase));
+        var failedChangeSet = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Partial, failedChangeSet.State);
+        Assert.Equal(Assert.Single(fixture.Plan.Targets).BaseStateHash,
+            Assert.Single(failedChangeSet.Targets).PreviousStateHash);
+        Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("stable-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
+            operation.StartsWith("environment.set", StringComparison.Ordinal) ||
+            operation == "environment.notify");
+    }
+
+    [Fact]
     public void RecoverNext_Active_environment_notification_failure_keeps_terminal_state_and_replays_only_notification()
     {
         var fixture = new EnvironmentRecoveryFixture();
@@ -3021,6 +3141,122 @@ public sealed class SetupRecoveryTests
         }
     }
 
+    private sealed class ApplyProducedRecoveryFixture
+    {
+        public ApplyProducedRecoveryFixture()
+        {
+            Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 13, 4, 5, 6, TimeSpan.Zero));
+            Paths = new SetupRuntimePaths(Platform);
+            ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000901");
+            FileRecordId = Guid.Parse("00000000-0000-7000-8000-000000000902");
+            EnvironmentRecordId = Guid.Parse("00000000-0000-7000-8000-000000000903");
+            TargetPath = Path.Combine(Platform.LocalApplicationData, "producer-settings.json");
+            Platform.SeedDirectory("C:\\");
+            Platform.SeedDirectory(Platform.LocalApplicationData);
+            Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old"));
+            Platform.SeedUserEnvironment("ENV_A", "old-a");
+            Platform.SeedUserEnvironment("ENV_B", "stable-b");
+            Platform.SeedUserEnvironment("UNRELATED", "outside-model-a");
+            var environmentCapture = new UserEnvironmentSetupStep(Platform).Capture(["ENV_A", "ENV_B"]);
+            var plan = new SetupPrivatePlan(
+                1,
+                ChangeSetId,
+                "github-copilot",
+                "cli",
+                Platform.Clock.UtcNow,
+                "1.0.0",
+                [new SetupPrivatePlanTarget(
+                     FileRecordId,
+                     SetupTargetKind.Json,
+                     TargetPath,
+                     SetupHash.File(true, Encoding.UTF8.GetBytes("old")),
+                     "new",
+                     [new SetupPrivatePlanMember("setting", SetupOperation.Replace, "new")]),
+                 new SetupPrivatePlanTarget(
+                     EnvironmentRecordId,
+                     SetupTargetKind.Env,
+                     "current-user",
+                     environmentCapture.AggregateHash,
+                     "environment-allowlist",
+                     [new SetupPrivatePlanMember("ENV_A", SetupOperation.Replace, "desired-a"),
+                      new SetupPrivatePlanMember("ENV_B", SetupOperation.NoOp, "stable-b")])]);
+            var planned = new SetupLedgerChangeSet(
+                ChangeSetId,
+                "github-copilot",
+                "cli",
+                Platform.Clock.UtcNow,
+                Platform.Clock.UtcNow,
+                "1.0.0",
+                null,
+                SetupChangeSetState.Planned,
+                [new SetupLedgerTarget(
+                     FileRecordId,
+                     SetupTargetKind.Json,
+                     "settings",
+                     "github-copilot",
+                     [new SetupLedgerMember("setting", SetupOperation.Replace)],
+                     SetupHash.File(true, Encoding.UTF8.GetBytes("old")),
+                     null,
+                     null,
+                     null,
+                     SetupLedgerRollbackStatus.NotAvailable,
+                     SetupRestartRequirement.RestartTerminalSession,
+                     "1.0.0"),
+                 new SetupLedgerTarget(
+                     EnvironmentRecordId,
+                     SetupTargetKind.Env,
+                     "user-environment",
+                     "github-copilot",
+                     [new SetupLedgerMember("ENV_A", SetupOperation.Replace),
+                      new SetupLedgerMember("ENV_B", SetupOperation.NoOp)],
+                     environmentCapture.AggregateHash,
+                     null,
+                     null,
+                     null,
+                     SetupLedgerRollbackStatus.NotAvailable,
+                     SetupRestartRequirement.RestartTerminalSession,
+                     "1.0.0")]);
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            using var setupLock = SetupLock.TryAcquire(Platform, Paths);
+            Assert.True(setupLock.Acquired);
+            ledgerStore.PersistPlannedChangeSet(setupLock.Lock!, plan, planned);
+        }
+
+        public SetupTestPlatform Platform { get; }
+        public SetupRuntimePaths Paths { get; }
+        public Guid ChangeSetId { get; }
+        public Guid FileRecordId { get; }
+        public Guid EnvironmentRecordId { get; }
+        public string TargetPath { get; }
+
+        public SetupLock AcquireLock()
+        {
+            var result = SetupLock.TryAcquire(Platform, Paths);
+            Assert.True(result.Acquired);
+            return result.Lock!;
+        }
+
+        public SetupApplyCoordinator CreateApplyCoordinator()
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            return new SetupApplyCoordinator(
+                Platform,
+                Paths,
+                planStore,
+                new SetupLedgerStore(Platform, Paths, planStore),
+                new SetupTransactionJournalStore(Platform, Paths),
+                new NoOpApplyRevalidator());
+        }
+    }
+
+    private sealed class NoOpApplyRevalidator : ISetupApplyRevalidator
+    {
+        public void Revalidate(SetupPrivatePlan plan, SetupLedgerChangeSet plannedChangeSet)
+        {
+        }
+    }
+
     private sealed class EnvironmentRecoveryFixture
     {
         private readonly string priorState;
@@ -3302,6 +3538,61 @@ public sealed class SetupRecoveryTests
             if (currentState == "unavailable")
             {
                 Platform.InjectFault("environment.get:ENV_A", new IOException("private-env-read"));
+            }
+        }
+
+        public void ReplaceActiveEvidenceWithCoherentBackupFromDifferentBase()
+        {
+            var environmentStep = new UserEnvironmentSetupStep(Platform);
+            Platform.SeedUserEnvironment("ENV_A", "tampered-a");
+            Platform.SeedUserEnvironment("ENV_B", "tampered-b");
+            var tampered = environmentStep.Capture(["ENV_A", "ENV_B"]);
+            var backupPath = Paths.GetBackup(ChangeSetId, RecordId);
+            Platform.FileSystem.DeleteFile(backupPath);
+            environmentStep.CreateBackup(backupPath, tampered);
+            Platform.SeedUserEnvironment("ENV_A", "desired-a");
+            Platform.SeedUserEnvironment("ENV_B", "stable-b");
+
+            var journalStore = new SetupTransactionJournalStore(Platform, Paths);
+            Platform.FileSystem.DeleteFile(Paths.GetTransactionJournal(ChangeSetId));
+            using var setupLock = SetupLock.TryAcquire(Platform, Paths);
+            Assert.True(setupLock.Acquired);
+            journalStore.CreatePrepared(
+                setupLock.Lock!,
+                ChangeSetId,
+                SetupJournalOperation.Apply,
+                [new SetupJournalTarget(
+                    RecordId,
+                    SetupTargetKind.Env,
+                    [new SetupJournalStep(
+                         "ENV_A",
+                         tampered.Members[0].Hash,
+                         environmentStep.HashMember("ENV_A", UserEnvironmentValue.Present("desired-a")),
+                         RecordId.ToString("D"),
+                         SetupJournalStepPhase.Pending),
+                     new SetupJournalStep(
+                         "ENV_B",
+                         tampered.Members[1].Hash,
+                         environmentStep.HashMember("ENV_B", UserEnvironmentValue.Present("stable-b")),
+                         RecordId.ToString("D"),
+                         SetupJournalStepPhase.Pending)])]);
+            journalStore.MarkTransactionPhase(setupLock.Lock!, ChangeSetId, SetupJournalPhase.Applying);
+            foreach (var memberKey in new[] { "ENV_A", "ENV_B" })
+            {
+                journalStore.MarkStepPhase(
+                    setupLock.Lock!,
+                    ChangeSetId,
+                    RecordId,
+                    memberKey,
+                    SetupJournalStepPhase.Pending,
+                    SetupJournalStepPhase.MutationStarted);
+                journalStore.MarkStepPhase(
+                    setupLock.Lock!,
+                    ChangeSetId,
+                    RecordId,
+                    memberKey,
+                    SetupJournalStepPhase.MutationStarted,
+                    SetupJournalStepPhase.MutationCompleted);
             }
         }
 

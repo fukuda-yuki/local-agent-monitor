@@ -1126,6 +1126,7 @@ internal sealed class SetupRecoveryCoordinator
             {
                 var names = target.Members.Select(member => member.SettingKey).ToArray();
                 var backup = environmentStep.ReadBackup(backupPath, names);
+                RequireEqual(backup.AggregateHash, target.BaseStateHash);
                 var expectedSteps = new List<SetupJournalStep>();
                 for (var memberIndex = 0; memberIndex < target.Members.Count; memberIndex++)
                 {
