@@ -2746,8 +2746,15 @@ public sealed class SetupRecoveryTests
         var terminalLedger = Array.FindLastIndex(operations, operation =>
             operation.EndsWith($"->{fixture.Paths.OwnershipLedger}", StringComparison.Ordinal));
         var notification = Array.IndexOf(operations, "environment.notify");
+        var terminalJournal = Array.FindLastIndex(
+            operations,
+            notification - 1,
+            operation => operation.EndsWith(
+                $"->{fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)}",
+                StringComparison.Ordinal));
         Assert.True(fileRestore >= 0 && environmentBRestore > fileRestore &&
-            environmentARestore > environmentBRestore && terminalLedger > environmentARestore &&
+            environmentARestore > environmentBRestore && terminalJournal > environmentARestore &&
+            terminalLedger > terminalJournal &&
             notification > terminalLedger);
         Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
         Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
@@ -2757,6 +2764,186 @@ public sealed class SetupRecoveryTests
             Assert.Null(target.BackupReference);
             Assert.Equal(SetupLedgerRollbackStatus.Succeeded, target.RollbackStatus);
         });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RecoverNext_Mixed_rollback_notification_delivery_ambiguity_replays_notification_only(
+        bool afterEffect)
+    {
+        var fixture = new TerminalEvidenceFixture();
+        fixture.SeedActiveMixedRollback();
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(
+                "environment.notify", new IOException("PRIVATE_MIXED_ROLLBACK_NOTIFY_AFTER"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault(
+                "environment.notify", new IOException("PRIVATE_MIXED_ROLLBACK_NOTIFY_BEFORE"));
+        }
+
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using (var setupLock = fixture.AcquireLock())
+        {
+            var failed = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+            Assert.Equal(SetupRecoveryDisposition.Failed, failed.Disposition);
+            Assert.Equal(SetupCodes.InterruptedRecoveryFailed, failed.Code);
+            Assert.Equal(SetupRecoveryOperation.Rollback, failed.Operation);
+            Assert.Equal(SetupChangeSetState.Partial, failed.EffectiveChangeSet?.State);
+            Assert.DoesNotContain("PRIVATE", failed.ToString(), StringComparison.Ordinal);
+        }
+
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.RolledBack, durable.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, durable.OutcomeCode);
+        Assert.All(durable.Targets, target =>
+        {
+            Assert.Equal(SetupLedgerRollbackStatus.Succeeded, target.RollbackStatus);
+            Assert.Equal(SetupCodes.InterruptedRecoveryFailed, target.OutcomeCode);
+        });
+        var journal = fixture.LoadJournal();
+        Assert.Equal(SetupJournalPhase.Committed, journal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Pending, journal.EnvironmentNotification);
+        var firstOperations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        var notification = Array.IndexOf(firstOperations, "environment.notify");
+        var terminalJournal = Array.FindLastIndex(
+            firstOperations,
+            notification - 1,
+            operation => operation.EndsWith(
+                $"->{fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)}",
+                StringComparison.Ordinal));
+        var terminalLedger = Array.FindLastIndex(
+            firstOperations,
+            notification - 1,
+            operation => operation.EndsWith($"->{fixture.Paths.OwnershipLedger}", StringComparison.Ordinal));
+        Assert.True(terminalJournal >= 0 && terminalLedger > terminalJournal && notification > terminalLedger);
+
+        var operationsBeforeRetry = fixture.Platform.Operations.Count;
+        using (var retryLock = fixture.AcquireLock())
+        {
+            var retried = fixture.ReopenCoordinator().RecoverNext(retryLock);
+
+            Assert.Equal(SetupRecoveryDisposition.Recovered, retried.Disposition);
+            Assert.Equal(SetupCodes.InterruptedRollbackRecovered, retried.Code);
+            Assert.Equal(SetupRecoveryOperation.Rollback, retried.Operation);
+            Assert.Equal(SetupChangeSetState.RolledBack, retried.EffectiveChangeSet?.State);
+        }
+
+        Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
+        var retryOperations = fixture.Platform.Operations.Skip(operationsBeforeRetry).ToArray();
+        Assert.Equal(1, retryOperations.Count(operation => operation == "environment.notify"));
+        AssertNoMixedTargetIo(retryOperations, fixture.TargetPath);
+
+        var operationsBeforeTerminal = fixture.Platform.Operations.Count;
+        using var terminalLock = fixture.AcquireLock();
+        var terminal = fixture.ReopenCoordinator().RecoverNext(terminalLock);
+        Assert.Equal(SetupRecoveryDisposition.None, terminal.Disposition);
+        var terminalOperations = fixture.Platform.Operations.Skip(operationsBeforeTerminal).ToArray();
+        Assert.DoesNotContain("environment.notify", terminalOperations);
+        AssertNoMixedTargetIo(terminalOperations, fixture.TargetPath);
+    }
+
+    [Theory]
+    [InlineData("write", false)]
+    [InlineData("write", true)]
+    [InlineData("flush", false)]
+    [InlineData("flush", true)]
+    [InlineData("replace", false)]
+    [InlineData("replace", true)]
+    public async Task RecoverNext_Mixed_rollback_notification_marker_ambiguity_is_replayable(
+        string boundary,
+        bool afterEffect)
+    {
+        var fixture = new TerminalEvidenceFixture();
+        fixture.SeedActiveMixedRollback();
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var notificationBarrier = fixture.Platform.AddBarrier("environment.notify", cancellation.Token);
+        SetupRecoveryResult first;
+        string markerOperation;
+        using (var setupLock = fixture.AcquireLock())
+        {
+            var recovery = Task.Run(
+                () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+            notificationBarrier.WaitUntilReached(cancellation.Token);
+
+            Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
+            Assert.Equal(SetupEnvironmentNotification.Pending, fixture.LoadJournal().EnvironmentNotification);
+            Assert.Equal(SetupChangeSetState.RolledBack, fixture.LoadChangeSet().State);
+            var destination = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+            var temporary = fixture.NextTemporaryPath(destination, 0);
+            markerOperation = boundary switch
+            {
+                "write" => $"file.write-new:{temporary}",
+                "flush" => $"file.flush:{temporary}",
+                "replace" => $"file.replace:{temporary}->{destination}",
+                _ => throw new ArgumentOutOfRangeException(nameof(boundary)),
+            };
+            if (afterEffect)
+            {
+                fixture.Platform.InjectAfterEffectFault(
+                    markerOperation, new IOException("PRIVATE_MIXED_ROLLBACK_MARKER_AFTER"));
+            }
+            else
+            {
+                fixture.Platform.InjectFault(
+                    markerOperation, new IOException("PRIVATE_MIXED_ROLLBACK_MARKER_BEFORE"));
+            }
+
+            notificationBarrier.Release();
+            first = await recovery;
+        }
+
+        var durableMarkerCompleted = boundary == "replace" && afterEffect;
+        Assert.Contains(markerOperation, fixture.Platform.Operations);
+        Assert.Equal(
+            durableMarkerCompleted ? SetupRecoveryDisposition.Recovered : SetupRecoveryDisposition.Failed,
+            first.Disposition);
+        Assert.Equal(
+            durableMarkerCompleted ? SetupCodes.InterruptedRollbackRecovered : SetupCodes.InterruptedRecoveryFailed,
+            first.Code);
+        Assert.Equal(SetupRecoveryOperation.Rollback, first.Operation);
+        Assert.Equal(
+            durableMarkerCompleted ? SetupChangeSetState.RolledBack : SetupChangeSetState.Partial,
+            first.EffectiveChangeSet?.State);
+        Assert.DoesNotContain("PRIVATE", first.ToString(), StringComparison.Ordinal);
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.RolledBack, durable.State);
+        Assert.All(durable.Targets, target =>
+            Assert.Equal(SetupLedgerRollbackStatus.Succeeded, target.RollbackStatus));
+        Assert.Equal(SetupJournalPhase.Committed, fixture.LoadJournal().Phase);
+        Assert.Equal(
+            durableMarkerCompleted ? SetupEnvironmentNotification.Completed : SetupEnvironmentNotification.Pending,
+            fixture.LoadJournal().EnvironmentNotification);
+        var firstOperations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.Equal(1, firstOperations.Count(operation => operation == "environment.notify"));
+
+        if (!durableMarkerCompleted)
+        {
+            Assert.Equal(SetupCodes.InterruptedRecoveryFailed, durable.OutcomeCode);
+            var operationsBeforeRetry = fixture.Platform.Operations.Count;
+            using var retryLock = fixture.AcquireLock();
+            var retried = fixture.ReopenCoordinator().RecoverNext(retryLock);
+
+            Assert.Equal(SetupRecoveryDisposition.Recovered, retried.Disposition);
+            Assert.Equal(SetupCodes.InterruptedRollbackRecovered, retried.Code);
+            var retryOperations = fixture.Platform.Operations.Skip(operationsBeforeRetry).ToArray();
+            Assert.Equal(1, retryOperations.Count(operation => operation == "environment.notify"));
+            AssertNoMixedTargetIo(retryOperations, fixture.TargetPath);
+        }
+
+        Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
+        var operationsBeforeTerminal = fixture.Platform.Operations.Count;
+        using var terminalLock = fixture.AcquireLock();
+        var terminal = fixture.ReopenCoordinator().RecoverNext(terminalLock);
+        Assert.Equal(SetupRecoveryDisposition.None, terminal.Disposition);
+        var terminalOperations = fixture.Platform.Operations.Skip(operationsBeforeTerminal).ToArray();
+        Assert.DoesNotContain("environment.notify", terminalOperations);
+        AssertNoMixedTargetIo(terminalOperations, fixture.TargetPath);
     }
 
     [Theory]
@@ -3703,6 +3890,14 @@ public sealed class SetupRecoveryTests
         Assert.Equal(SetupStorageCodes.LockRequired, exception.Code);
     }
 
+    private static void AssertNoMixedTargetIo(IReadOnlyList<string> operations, string fileTargetPath)
+    {
+        Assert.DoesNotContain(operations, operation =>
+            operation.StartsWith("environment.get:", StringComparison.Ordinal) ||
+            operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+            operation.Contains(fileTargetPath, StringComparison.Ordinal));
+    }
+
     private sealed class TerminalEvidenceFixture
     {
         private readonly Guid environmentRecordId =
@@ -3865,6 +4060,19 @@ public sealed class SetupRecoveryTests
 
         public SetupTransactionJournal LoadJournal() =>
             new SetupTransactionJournalStore(Platform, Paths).Load(ChangeSetId)!;
+
+        public string NextTemporaryPath(string destination, int offset)
+        {
+            var maximum = Platform.Operations
+                .SelectMany(operation => Regex.Matches(operation,
+                    @"\.cao-00000000-0000-7000-8000-(?<value>[0-9]{12})\.tmp"))
+                .Select(match => long.Parse(match.Groups["value"].Value,
+                    System.Globalization.CultureInfo.InvariantCulture))
+                .DefaultIfEmpty(0)
+                .Max();
+            return destination + ".cao-" +
+                Guid.Parse($"00000000-0000-7000-8000-{maximum + offset + 1:D12}").ToString("D") + ".tmp";
+        }
 
         public void SeedActiveMixedApply()
         {
