@@ -70,6 +70,76 @@ public sealed class SetupRollbackTests
             fixture.LoadJournal().Targets.Single().Steps.Select(step => step.MemberKey));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Rollback_Environment_notification_delivery_ambiguity_is_recovered_without_target_io(
+        bool afterEffect)
+    {
+        var fixture = EnvironmentRollbackFixture.Create([
+            new("ENV_A", "old-a", SetupOperation.Replace, "desired-a"),
+        ]);
+        if (afterEffect)
+        {
+            fixture.Platform.InjectAfterEffectFault(
+                "environment.notify",
+                new IOException("PRIVATE_NORMAL_ROLLBACK_NOTIFY_AFTER"));
+        }
+        else
+        {
+            fixture.Platform.InjectFault(
+                "environment.notify",
+                new IOException("PRIVATE_NORMAL_ROLLBACK_NOTIFY_BEFORE"));
+        }
+        var baseline = fixture.Platform.Operations.Count;
+
+        var direct = fixture.Rollback();
+
+        AssertPendingNotificationThenRecovery(fixture, baseline, direct);
+    }
+
+    [Theory]
+    [InlineData("write", false, false)]
+    [InlineData("write", true, false)]
+    [InlineData("flush", false, false)]
+    [InlineData("flush", true, false)]
+    [InlineData("replace", false, false)]
+    [InlineData("replace", true, true)]
+    public async Task Rollback_Environment_notification_completion_ambiguity_is_proven_or_recovered(
+        string boundary,
+        bool afterEffect,
+        bool completionProven)
+    {
+        var fixture = EnvironmentRollbackFixture.Create([
+            new("ENV_A", "old-a", SetupOperation.Replace, "desired-a"),
+        ]);
+        var baseline = fixture.Platform.Operations.Count;
+        using var notification = fixture.Platform.AddBarrier("environment.notify");
+        var rollingBack = Task.Run(fixture.Rollback);
+        notification.WaitUntilReached(CancellationToken.None);
+        fixture.InjectNotificationCompletionFault(boundary, afterEffect);
+        notification.Release();
+
+        var direct = await rollingBack;
+
+        if (completionProven)
+        {
+            Assert.True(direct.Success);
+            Assert.Equal(SetupCodes.RollbackSucceeded, direct.Code);
+            Assert.Null(direct.Recovery);
+            Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
+            Assert.Equal(SetupCodes.RollbackSucceeded, fixture.LoadChangeSet().OutcomeCode);
+            AssertRollbackNotificationOrdering(fixture, baseline);
+            Assert.Equal(1, fixture.Platform.Operations.Skip(baseline)
+                .Count(operation => operation == "environment.notify"));
+
+            AssertFinalRollbackNotAvailableWithoutEnvironmentIo(fixture);
+            return;
+        }
+
+        AssertPendingNotificationThenRecovery(fixture, baseline, direct);
+    }
+
     [Fact]
     public void Rollback_Environment_dormant_supersession_is_reused_after_interruption()
     {
@@ -666,6 +736,102 @@ public sealed class SetupRollbackTests
             operation.EndsWith("->" + path, StringComparison.Ordinal) ||
             string.Equals(operation, "file.delete:" + path, StringComparison.Ordinal));
 
+    private static void AssertPendingNotificationThenRecovery(
+        EnvironmentRollbackFixture fixture,
+        int directBaseline,
+        SetupRollbackExecutionResult direct)
+    {
+        Assert.False(direct.Success);
+        Assert.Equal(SetupCodes.PartialRollback, direct.Code);
+        Assert.Null(direct.Recovery);
+        Assert.Equal(SetupChangeSetState.Partial, direct.ChangeSet?.State);
+        Assert.Equal(SetupCodes.PartialRollback, direct.ChangeSet?.OutcomeCode);
+        Assert.DoesNotContain("PRIVATE", direct.Code, StringComparison.Ordinal);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        AssertRollbackNotificationOrdering(fixture, directBaseline);
+        var directOperations = fixture.Platform.Operations.Skip(directBaseline).ToArray();
+        Assert.Equal(1, directOperations.Count(operation => operation == "environment.set:ENV_A"));
+        Assert.Equal(1, directOperations.Count(operation => operation == "environment.notify"));
+
+        var pendingJournal = fixture.LoadJournal();
+        Assert.Equal(SetupJournalOperation.Rollback, pendingJournal.Operation);
+        Assert.Equal(SetupJournalPhase.Committed, pendingJournal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Pending, pendingJournal.EnvironmentNotification);
+        var pendingLedger = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.RolledBack, pendingLedger.State);
+        Assert.Equal(SetupCodes.PartialRollback, pendingLedger.OutcomeCode);
+        var pendingTarget = Assert.Single(pendingLedger.Targets);
+        Assert.Null(pendingTarget.AppliedStateHash);
+        Assert.Null(pendingTarget.BackupReference);
+        Assert.Equal(SetupCodes.PartialRollback, pendingTarget.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.Succeeded, pendingTarget.RollbackStatus);
+
+        var recoveryBaseline = fixture.Platform.Operations.Count;
+        var recovered = fixture.Rollback(fixture.ReopenCoordinator());
+
+        Assert.True(recovered.Success);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, recovered.Code);
+        Assert.Null(recovered.ChangeSet);
+        Assert.NotNull(recovered.Recovery);
+        Assert.Equal(SetupRecoveryDisposition.Recovered, recovered.Recovery.Disposition);
+        Assert.Equal(fixture.ChangeSetId, recovered.Recovery.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Rollback, recovered.Recovery.Operation);
+        Assert.Equal(SetupChangeSetState.RolledBack, recovered.Recovery.EffectiveChangeSet?.State);
+        var recoveryOperations = fixture.Platform.Operations.Skip(recoveryBaseline).ToArray();
+        Assert.Equal(1, recoveryOperations.Count(operation => operation == "environment.notify"));
+        Assert.DoesNotContain(recoveryOperations, operation =>
+            operation.StartsWith("environment.get:", StringComparison.Ordinal) ||
+            operation.StartsWith("environment.set:", StringComparison.Ordinal));
+        Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
+        var recoveredLedger = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.RolledBack, recoveredLedger.State);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, recoveredLedger.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.Succeeded,
+            Assert.Single(recoveredLedger.Targets).RollbackStatus);
+        Assert.Equal(2, fixture.Platform.Operations.Skip(directBaseline)
+            .Count(operation => operation == "environment.notify"));
+
+        AssertFinalRollbackNotAvailableWithoutEnvironmentIo(fixture);
+    }
+
+    private static void AssertRollbackNotificationOrdering(
+        EnvironmentRollbackFixture fixture,
+        int baseline)
+    {
+        var operations = fixture.Platform.Operations.Skip(baseline).ToArray();
+        var notify = Array.IndexOf(operations, "environment.notify");
+        var restore = Array.LastIndexOf(operations, "environment.set:ENV_A");
+        var beforeNotification = operations.Take(notify).ToArray();
+        var journal = Array.FindLastIndex(
+            beforeNotification,
+            operation => operation.StartsWith("file.replace:", StringComparison.Ordinal) &&
+                operation.EndsWith(
+                    $"->{fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)}",
+                    StringComparison.Ordinal));
+        var ledger = Array.FindLastIndex(
+            beforeNotification,
+            operation => operation ==
+                $"file.replace:{fixture.Paths.OwnershipLedger}.tmp->{fixture.Paths.OwnershipLedger}");
+        Assert.True(restore >= 0 && restore < journal && journal < ledger && ledger < notify);
+        Assert.DoesNotContain(operations.Take(notify), operation => operation == "environment.notify");
+    }
+
+    private static void AssertFinalRollbackNotAvailableWithoutEnvironmentIo(
+        EnvironmentRollbackFixture fixture)
+    {
+        var baseline = fixture.Platform.Operations.Count;
+
+        var repeated = fixture.Rollback(fixture.ReopenCoordinator());
+
+        Assert.False(repeated.Success);
+        Assert.Equal(SetupCodes.RollbackNotAvailable, repeated.Code);
+        Assert.Null(repeated.Recovery);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(baseline), operation =>
+            operation.StartsWith("environment.get:", StringComparison.Ordinal) ||
+            operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+            operation == "environment.notify");
+    }
+
     private sealed record EnvironmentMemberDefinition(
         string Name,
         string? InitialValue,
@@ -790,6 +956,31 @@ public sealed class SetupRollbackTests
         public SetupTransactionJournal LoadJournal() =>
             new SetupTransactionJournalStore(Platform, Paths).Load(ChangeSetId)!;
 
+        public void InjectNotificationCompletionFault(string boundary, bool afterEffect)
+        {
+            var destination = Paths.GetTransactionJournal(ChangeSetId);
+            var temporary = NextTemporaryPath(destination);
+            var operation = boundary switch
+            {
+                "write" => $"file.write-new:{temporary}",
+                "flush" => $"file.flush:{temporary}",
+                "replace" => $"file.replace:{temporary}->{destination}",
+                _ => throw new ArgumentOutOfRangeException(nameof(boundary)),
+            };
+            if (afterEffect)
+            {
+                Platform.InjectAfterEffectFault(
+                    operation,
+                    new IOException("PRIVATE_NORMAL_ROLLBACK_MARKER_AFTER"));
+            }
+            else
+            {
+                Platform.InjectFault(
+                    operation,
+                    new IOException("PRIVATE_NORMAL_ROLLBACK_MARKER_BEFORE"));
+            }
+        }
+
         public SetupLedgerChangeSet LoadChangeSet()
         {
             var planStore = new SetupPlanStore(Platform, Paths);
@@ -820,6 +1011,19 @@ public sealed class SetupRollbackTests
             ledgerStore.Save(
                 acquisition.Lock!,
                 ledger with { ChangeSets = [changeSet with { Targets = [target] }] });
+        }
+
+        private string NextTemporaryPath(string destination)
+        {
+            var maximum = Platform.Operations
+                .SelectMany(operation => Regex.Matches(operation,
+                    @"\.cao-00000000-0000-7000-8000-(?<value>[0-9]{12})\.tmp"))
+                .Select(match => long.Parse(match.Groups["value"].Value,
+                    System.Globalization.CultureInfo.InvariantCulture))
+                .DefaultIfEmpty(0)
+                .Max();
+            return destination + ".cao-" +
+                Guid.Parse($"00000000-0000-7000-8000-{maximum + 1:D12}").ToString("D") + ".tmp";
         }
     }
 

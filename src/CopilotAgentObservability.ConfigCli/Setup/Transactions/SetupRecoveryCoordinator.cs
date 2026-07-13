@@ -760,7 +760,12 @@ internal sealed class SetupRecoveryCoordinator
             var durableJournal = LoadJournalForRecovery(original.ChangeSetId);
             if (durableJournal?.EnvironmentNotification == SetupEnvironmentNotification.Pending)
             {
-                return CompleteNotification(setupLock, ledger, recovered, durableJournal);
+                return CompleteNotification(
+                    setupLock,
+                    ledger,
+                    recovered,
+                    durableJournal,
+                    normalRollback ? SetupCodes.PartialRollback : SetupCodes.InterruptedRecoveryFailed);
             }
 
             return Recovered(recovered, SetupRecoveryOperation.Rollback);
@@ -1839,7 +1844,8 @@ internal sealed class SetupRecoveryCoordinator
         SetupLock setupLock,
         SetupOwnershipLedger ledger,
         SetupLedgerChangeSet recovered,
-        SetupTransactionJournal journal)
+        SetupTransactionJournal journal,
+        string failureCode = SetupCodes.InterruptedRecoveryFailed)
     {
         var operation = OperationFor(journal, recovered)!.Value;
         try
@@ -1862,7 +1868,13 @@ internal sealed class SetupRecoveryCoordinator
             {
             }
 
-            return PersistFailure(setupLock, ledger, recovered, operation, preserveTerminalLifecycle: true);
+            return PersistFailure(
+                setupLock,
+                ledger,
+                recovered,
+                operation,
+                preserveTerminalLifecycle: true,
+                failureCode);
         }
     }
 
@@ -1871,20 +1883,21 @@ internal sealed class SetupRecoveryCoordinator
         SetupOwnershipLedger ledger,
         SetupLedgerChangeSet changeSet,
         SetupRecoveryOperation operation,
-        bool preserveTerminalLifecycle = false)
+        bool preserveTerminalLifecycle = false,
+        string failureCode = SetupCodes.InterruptedRecoveryFailed)
     {
         var durable = preserveTerminalLifecycle
             ? changeSet with
             {
                 UpdatedAt = platform.Clock.UtcNow,
-                OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+                OutcomeCode = failureCode,
                 Targets = changeSet.Targets.Select(target => target with
                 {
-                    OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+                    OutcomeCode = failureCode,
                 }).ToArray(),
             }
-            : OverlayFailure(changeSet) with { UpdatedAt = platform.Clock.UtcNow };
-        var effective = preserveTerminalLifecycle ? OverlayFailure(durable) : durable;
+            : OverlayFailure(changeSet, failureCode) with { UpdatedAt = platform.Clock.UtcNow };
+        var effective = preserveTerminalLifecycle ? OverlayFailure(durable, failureCode) : durable;
         try
         {
             SaveChangeSet(setupLock, ledgerStore.LoadForRecovery(), durable);
@@ -1893,7 +1906,7 @@ internal sealed class SetupRecoveryCoordinator
         {
         }
 
-        return Failed(SetupCodes.InterruptedRecoveryFailed, changeSet.ChangeSetId, operation, effective);
+        return Failed(failureCode, changeSet.ChangeSetId, operation, effective);
     }
 
     private void SaveChangeSet(SetupLock setupLock, SetupOwnershipLedger ledger, SetupLedgerChangeSet changeSet)
@@ -1941,13 +1954,14 @@ internal sealed class SetupRecoveryCoordinator
 
     private static SetupLedgerChangeSet OverlayFailure(
         SetupLedgerChangeSet changeSet,
+        string failureCode = SetupCodes.InterruptedRecoveryFailed,
         bool preserveTerminalLifecycle = false) => changeSet with
     {
-        OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+        OutcomeCode = failureCode,
         State = preserveTerminalLifecycle ? changeSet.State : SetupChangeSetState.Partial,
         Targets = changeSet.Targets.Select(target => target with
         {
-            OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+            OutcomeCode = failureCode,
             RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
         }).ToArray(),
     };
