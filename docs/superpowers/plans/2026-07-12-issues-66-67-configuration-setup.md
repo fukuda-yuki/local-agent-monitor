@@ -75,13 +75,25 @@ Gate releases are explicit:
 
 | Gate | Release condition |
 | --- | --- |
-| T1 -> T2 | exact T1 status/rollback/recovery tests and all Setup tests pass; review and commit are complete |
-| T2 -> T3 | registry, generic CLI seam, four-command producer, and wrapper tests pass; review and commit are complete |
-| T3 -> T4/T5/T6 | shared codes, validation, platform, manifest-pairing, detection, policy, and endpoint tests pass; the shared seam is then frozen |
+| T1 -> T2 | exact T1 status/rollback/recovery tests, including the implemented status-lifecycle validation invariant, and all Setup tests pass; review and commit are complete |
+| T2 -> T3 | registry, generic CLI seam, four-command producer, wrapper tests, exact #66 exceptional apply combinations, and the predeclared closed #67 catalog pass; review and commit are complete |
+| T3 -> T4/T5/T6 | remaining #67 shared catalog/validation/runtime, platform, manifest-pairing, detection, policy, and endpoint tests pass; the shared seam is then frozen |
 | T4/T5/T6 -> T7 | all three target partitions pass focused tests and are separately reviewed and committed without editing T3-owned files |
 | T7 -> T8 | the real composition root and CLI handoff pass the cross-target producer gate and full ConfigCli tests |
 | T8 -> T9 | package, wrapper parity, links, and operator documentation checks pass; review and commit are complete |
 | T9 -> close | final reviews, required repository validation, contradiction searches, clean range/worktree inspection, and the sole ledger update pass |
+
+Shared contract files use sequential hunk/section ownership, never parallel
+file ownership:
+
+| Files | Active owner and bounded section |
+| --- | --- |
+| `SetupContractValidator.cs` and `SetupStatusProjectorTests.cs` | T1 through its gate owns the already-implemented `ValidateStatusChangeSet` lifecycle/aggregate invariant and its projector serialization proof; that hunk then freezes |
+| `SetupCodes.cs`, `SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs` | after T1 releases, T2 owns only the exact #66 `apply`/`unsupported_adapter` and `apply`/`unsupported_target` combinations and predeclares the closed #67 code/warning/action catalog needed by the public-command gate; those sections then freeze |
+| the same four shared contract files plus `SourceCapabilityRuntimeTests.cs` | after T2 releases, T3 receives them for only the remaining #67 catalog, validator, shape/validation, and runtime-manifest additions; T3 then freezes the complete shared seam |
+
+No two tasks edit these files concurrently. A finding reopens the task that owns
+the affected hunk/section and invalidates its downstream releases.
 
 Every task uses test-driven changes, an independent read-only review, a focused
 RED/GREEN command, `git diff --check`, and a coherent local commit. Workers do
@@ -95,7 +107,10 @@ fix cycles in one area trigger a contract/test-design re-audit.
 `Setup/Transactions/SetupRollbackPreflightEvaluator.cs`, the status-preflight
 integration in `Setup/Transactions/SetupRollbackCoordinator.cs`, and
 `SetupStatusProjectorTests.cs`, `SetupStatusOrderingTests.cs`,
-`SetupRollbackTests.cs`, and `SetupRecoveryTests.cs`.
+`SetupRollbackTests.cs`, and `SetupRecoveryTests.cs`; plus only the implemented
+`ValidateStatusChangeSet` lifecycle/aggregate hunk in
+`Setup/Contracts/SetupContractValidator.cs` and its projector serialization
+invariant in `SetupStatusProjectorTests.cs`.
 
 **Deliver:** lifecycle-relative reference/current state, immutable ledger
 snapshot reconstruction without adapter rediscovery, fresh private-plan/target/
@@ -113,8 +128,12 @@ Setup tests. Do not change #67 target behavior. Commit:
 `Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Cli/SetupOptions.cs`,
 `Cli/CliApplication.cs`, `Cli/CliHelpText.cs`, `SetupAdapterRegistryTests.cs`,
 `SetupOptionsTests.cs`, `CliApplicationTests.cs`, and the new repository
-`scripts/local-monitor/setup.ps1` plus new `SetupWrapperTests.cs`. T2 exposes a
-generic CLI/composition handoff but does not register a #67 adapter.
+`scripts/local-monitor/setup.ps1` plus new `SetupWrapperTests.cs`; after the T1
+gate, the bounded #66 exceptional-apply and closed-catalog sections of
+`Setup/Contracts/SetupCodes.cs`, `Setup/Contracts/SetupContractValidator.cs`,
+`SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`. T2 exposes
+a generic CLI/composition handoff but does not register a #67 adapter or alter
+the frozen T1 status-lifecycle hunk.
 
 **Deliver:** all four commands through the real coordinator, one JSON stdout
 producer, fixed stderr/exit mapping, mandatory recovery correlation, mutation
@@ -128,23 +147,26 @@ blocking, and exact wrapper forwarding. Pin the closed command matrix:
   profile, artifact, ledger transition, notification, or target write.
 
 **Verify:** `SetupAdapterRegistryTests`, `SetupOptionsTests`,
-`CliApplicationTests`, `SetupWrapperTests`, then full ConfigCli tests. Commit:
+`CliApplicationTests`, `SetupWrapperTests`, the exact exceptional combinations
+in `SetupContractShapeTests`/`SetupContractValidationTests`, then full ConfigCli
+tests. Commit:
 `Issue #66: feat(setup): expose reversible setup commands`.
 
 ## T3 - Build the #67 detection, policy, and endpoint foundation
 
 **Depends on:** T2.
 
-**Own exclusively:** shared files directly under
+**Own after the T2 gate:** shared files directly under
 `Setup/Adapters/GitHubCopilot/` (target files must live in the T4/T5/T6
-subdirectories), `Setup/Contracts/SetupCodes.cs`,
-`Setup/Contracts/SetupContractValidator.cs`, `Setup/Platform/ISetupPlatform.cs`,
-`Setup/Platform/SystemSetupPlatform.cs`, `SetupTestPlatform.cs`,
-`SetupContractShapeTests.cs`, `SetupContractValidationTests.cs`,
-`SourceCapabilityRuntimeTests.cs`, `GitHubCopilotDetectionTests.cs`, and
-`GitHubCopilotEndpointProbeTests.cs`. T3 does not register unfinished target
-implementations in the production adapter registry. After this gate, no later
-task edits these shared files; a finding reopens T3.
+subdirectories); only the remaining #67 sections in
+`Setup/Contracts/SetupCodes.cs`, `Setup/Contracts/SetupContractValidator.cs`,
+`SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`;
+`Setup/Platform/ISetupPlatform.cs`, `Setup/Platform/SystemSetupPlatform.cs`,
+`SetupTestPlatform.cs`, `SourceCapabilityRuntimeTests.cs`,
+`GitHubCopilotDetectionTests.cs`, and `GitHubCopilotEndpointProbeTests.cs`. T3
+preserves the frozen T1 lifecycle hunk and T2 exceptional-combination/catalog
+sections and does not register unfinished targets. After this gate, no later
+task edits the shared seam; a finding reopens its hunk owner.
 
 **Deliver:** the real adapter foundation and internal #66 plan DTO path;
 Stable/Insiders and CLI version detection; planning OS capture; canonical #61
