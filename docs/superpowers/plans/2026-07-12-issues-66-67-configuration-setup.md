@@ -36,13 +36,14 @@ The implementation DAG starts from these completed prerequisites:
 
 The T2 reopen does not reassign the already-declared closed catalog. Commit
 `139338a` remains the owner of those code/warning/action declarations and their
-closed allowlist checks. T2a reopens only SetupOptions parsing/reachability;
+closed allowlist checks. T2a1 reopens only SetupOptions target delegation;
+T2a2 reopens only adapter-predicate routing in its named contract/status files.
 T3 later adds semantic positive validation/emission tests for the already-
 declared #67 values without editing `SetupCodes.cs` or validator declarations.
 
 The current untracked `SetupCommandDispatcher.cs` and
 `SetupCommandDispatcherTests.cs` draft predates the audited carrier contract.
-It must be abandoned before T2a or T2b starts. No code or test is copied from
+It must be abandoned before T2a1 starts. No code or test is copied from
 that draft; T2c starts fresh with a RED test after T2b freezes the carrier.
 
 Do not rewrite those rows as new T1-T9 work. T9 alone appends the final results
@@ -58,7 +59,7 @@ T0 current-spec alignment
 T1 #66 status/terminal closure
  |
  v
-T2a -> T2b -> T2c -> T2d
+T2a1 -> T2a2 -> T2b -> T2c -> T2d
 #66 public command producer
  |
  v
@@ -89,7 +90,7 @@ T8 package/docs/evidence
 T9 reviews/full validation
 ```
 
-The only permitted order is T1 -> T2a -> T2b -> T2c -> T2d -> T3a ->
+The only permitted order is T1 -> T2a1 -> T2a2 -> T2b -> T2c -> T2d -> T3a ->
 {T3b || T3c} -> T3d -> {T4 || T5 || T6} -> T7 -> T8 -> T9. T3b/T3c and
 T4/T5/T6 are the only parallel groups. Target work starts only after T3d freezes
 the shared platform/GitHubCopilot aggregate seam. Each target task owns only its
@@ -101,7 +102,7 @@ Gate releases are explicit:
 | Gate | Release condition |
 | --- | --- |
 | T1 -> T2 | exact T1 status/rollback/recovery tests, including the implemented status-lifecycle validation invariant, and all Setup tests pass; review and commit are complete |
-| T2 -> T3 | sequential T2a options reopen, T2b typed diagnostics carrier, T2c fresh dispatcher, and T2d process/wrapper gates all pass; the four-command producer and exact #66 exceptional apply combinations are reviewed and committed |
+| T2 -> T3 | sequential T2a1 target delegation, T2a2 adapter-identifier integration, T2b typed diagnostics carrier, T2c fresh dispatcher, and T2d process/wrapper gates all pass; the four-command producer and exact #66 exceptional apply combinations are reviewed and committed |
 | T3 -> T4/T5/T6 | T3a platform observations, parallel T3b policy and T3c endpoint services, then T3d aggregate/partition join and positive semantic/catalog/manifest tests pass; the shared seam is frozen |
 | T4/T5/T6 -> T7 | all three target partitions pass focused tests and are separately reviewed and committed without editing T3-owned files |
 | T7 -> T8 | the real composition root and CLI handoff pass the cross-target producer gate and full ConfigCli tests |
@@ -113,10 +114,11 @@ the row explicitly says a target subdirectory.
 
 | Unit | Exclusive files/hunks |
 | --- | --- |
-| completed T1 | the already-implemented `ValidateStatusChangeSet` hunk in `Setup/Contracts/SetupContractValidator.cs` and its lifecycle/aggregate assertions in `SetupStatusProjectorTests.cs`; frozen except the T2b compile-only signature hunk named below |
-| completed catalog baseline (`139338a`) | existing #66 exceptional combinations and every already-declared #67 code/warning/action plus their closed allowlist/shape assertions in `Setup/Contracts/SetupCodes.cs`, `Setup/Contracts/SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`; declarations remain frozen |
-| T2a reopen | `Setup/Cli/SetupOptions.cs`, `SetupOptionsTests.cs` only |
-| T2b | production: `Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Transactions/ISetupApplyRevalidator.cs`, `Setup/Transactions/SetupApplyCoordinator.cs`; semantic tests: `SetupAdapterRegistryTests.cs`, `SetupApplyTests.cs`; compile-only signature hunks: `SetupCompensationTests.cs`, `SetupRollbackTests.cs`, `SetupRecoveryTests.cs`, `SetupStatusProjectorTests.cs` |
+| completed T1 | the already-implemented `ValidateStatusChangeSet` hunk in `Setup/Contracts/SetupContractValidator.cs` and its lifecycle/aggregate assertions in `SetupStatusProjectorTests.cs`; frozen except the T2a2 adapter-predicate routing and T2b compile-only signature hunk named below |
+| completed catalog baseline (`139338a`) | existing #66 exceptional combinations and every already-declared #67 code/warning/action plus their closed allowlist/shape assertions in `Setup/Contracts/SetupCodes.cs`, `Setup/Contracts/SetupContractValidator.cs`, `SetupContractShapeTests.cs`, and `SetupContractValidationTests.cs`; declarations remain frozen while T2a2 routes adapter fields through its separate predicate |
+| T2a1 | `Setup/Cli/SetupOptions.cs`, `SetupOptionsTests.cs` only |
+| T2a2 | adapter-predicate routing only in `Setup/Contracts/SetupContractValidator.cs`, `SetupContractValidationTests.cs`, `Setup/Status/SetupStatusListProjector.cs`, `SetupStatusOrderingTests.cs`; optional new adapter-predicate cross-surface assertion methods only in `SetupAdapterRegistryTests.cs`, with no registry production edit |
+| T2b | production: `Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Transactions/ISetupApplyRevalidator.cs`, `Setup/Transactions/SetupApplyCoordinator.cs`; diagnostics-carrier semantic hunks only in `SetupAdapterRegistryTests.cs` and `SetupApplyTests.cs`, excluding frozen T2a2 assertion methods; compile-only signature hunks: `SetupCompensationTests.cs`, `SetupRollbackTests.cs`, `SetupRecoveryTests.cs`, `SetupStatusProjectorTests.cs` |
 | T2c | fresh `Setup/Cli/SetupCommandDispatcher.cs`, fresh `SetupCommandDispatcherTests.cs` only |
 | T2d | `Cli/CliApplication.cs`, `Cli/CliHelpText.cs`, `CliApplicationTests.cs`, new `scripts/local-monitor/setup.ps1`, new `SetupWrapperTests.cs` only |
 | T3a | `Setup/Platform/ISetupPlatform.cs`, `Setup/Platform/SystemSetupPlatform.cs`, `SetupTestPlatform.cs`, new `Setup/Adapters/GitHubCopilot/GitHubCopilotDetection.cs`, and `GitHubCopilotDetectionTests.cs` |
@@ -131,7 +133,9 @@ the row explicitly says a target subdirectory.
 | T9 | read-only reviews/validation and `docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md` only |
 
 No two tasks edit these files concurrently. A finding reopens the task that owns
-the affected hunk/section and invalidates its downstream releases. A T2b
+the affected hunk/section and invalidates its downstream releases. Optional
+T2a2 methods in `SetupAdapterRegistryTests.cs` are frozen before T2b, whose
+diagnostics-carrier assertions cannot edit or duplicate them. A T2b
 compile-only hunk may update only construction/signature plumbing required by
 the carrier; it may not change a frozen domain assertion, fixture meaning, or
 behavior. Any semantic change in one of those four test files reopens that
@@ -153,9 +157,11 @@ integration in `Setup/Transactions/SetupRollbackCoordinator.cs`, and
 `ValidateStatusChangeSet` lifecycle/aggregate hunk in
 `Setup/Contracts/SetupContractValidator.cs` and its projector serialization
 invariant in `SetupStatusProjectorTests.cs`. This is semantic ownership: after
-the completed T1 gate, T2b may touch only the compile-only carrier-signature
-hunks explicitly listed in the matrix, without changing a T1 assertion,
-fixture meaning, or production behavior.
+the completed T1 gate, T2a2 may reopen only adapter-predicate routing in the two
+named production files and paired tests without changing status behavior or a
+catalog declaration. T2b may touch only the compile-only carrier-signature hunks
+explicitly listed in the matrix, without changing a T1 assertion, fixture
+meaning, or production behavior.
 
 **Deliver:** lifecycle-relative reference/current state, immutable ledger
 snapshot reconstruction without adapter rediscovery, fresh private-plan/target/
@@ -169,21 +175,22 @@ Setup tests. Do not change #67 target behavior. Commit:
 
 ## T2 - Expose the real #66 command producer
 
-T2 is four small sequential review units. T2a -> T2b -> T2c -> T2d is mandatory;
-none may run in parallel, and T3 starts only after the T2d gate. Each unit owns
-only the files listed below, runs its exact focused command, receives an
-independent review, and commits before handing off shared files.
+T2 is five small sequential review units. T2a1 -> T2a2 -> T2b -> T2c -> T2d is
+mandatory; none may run in parallel, and T3 starts only after the T2d gate.
+Each unit owns only the files listed below, runs its exact focused command,
+receives an independent review, and commits before handing off shared files.
 
-### T2a - Reopen options parsing only
+### T2a1 - Preserve and delegate the target token
 
 **Own exactly:** `Setup/Cli/SetupOptions.cs` and `SetupOptionsTests.cs`.
 
-**Deliver:** parse a bounded lowercase adapter slug without registry lookup;
-leave plan target validation to the adapter; make status adapter input an exact
-historical filter; preserve exact recognized-verb grammar and loopback endpoint
-normalization. Do not edit the adapter registry, catalog/validator declarations,
-transactions, dispatcher, or CLI host. The catalog already declared in
-`139338a` remains frozen.
+**Deliver:** parse an adapter slug matching exactly
+`[a-z0-9]+(?:-[a-z0-9]+)*` without registry lookup; preserve the plan target
+token unchanged and delegate its validation to the selected adapter. Preserve
+exact recognized-verb grammar and loopback endpoint normalization. Do not edit
+the adapter registry, contract validator, status projection, transactions,
+dispatcher, or CLI host. The catalog already declared in `139338a` remains
+frozen.
 
 **Verify:**
 
@@ -194,17 +201,51 @@ git diff --check
 
 Commit: `Issue #66: fix(setup): defer adapter resolution until dispatch`.
 
+### T2a2 - Route the canonical adapter identifier end to end
+
+**Depends on:** T2a1.
+
+**Own exactly:** adapter-predicate routing only in
+`Setup/Contracts/SetupContractValidator.cs` and
+`SetupContractValidationTests.cs`, plus
+`Setup/Status/SetupStatusListProjector.cs` and
+`SetupStatusOrderingTests.cs`. If needed, T2a2 may add only bounded
+adapter-predicate cross-surface assertion methods to
+`SetupAdapterRegistryTests.cs`; it does not edit `SetupAdapterRegistry.cs`, and
+those methods freeze before T2b owns diagnostics-carrier assertions in that
+test file.
+
+**Deliver:** one adapter-only predicate matching exactly
+`[a-z0-9]+(?:-[a-z0-9]+)*`, used for public adapter fields and the exact
+historical status adapter filter, including digit-leading historical adapter
+IDs. Do not change the shared `FixedIdentifier` predicate used by non-adapter
+fields. T2a1's target token remains preserved for adapter validation. This
+reopen changes only predicate routing: no status lifecycle/order/cap behavior,
+catalog declaration, DTO shape, or registry production behavior changes.
+
+**Verify:**
+
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupContractValidationTests|FullyQualifiedName~SetupStatusOrderingTests"
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~SetupAdapterRegistryTests # only when the optional assertion methods are added
+git diff --check
+```
+
+Commit: `Issue #66: fix(setup): route canonical adapter identifiers`.
+
 ### T2b - Carry sanitized adapter and revalidation diagnostics
 
-**Depends on:** T2a.
+**Depends on:** T2a2.
 
 **Own exactly:** four production files:
 `Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`,
 `Setup/Transactions/ISetupApplyRevalidator.cs`, and
 `Setup/Transactions/SetupApplyCoordinator.cs`; two semantic test files:
-`SetupAdapterRegistryTests.cs` and `SetupApplyTests.cs`; compile-only signature
-hunks in `SetupCompensationTests.cs`, `SetupRollbackTests.cs`,
-`SetupRecoveryTests.cs`, and `SetupStatusProjectorTests.cs`.
+diagnostics-carrier hunks in `SetupAdapterRegistryTests.cs` and
+`SetupApplyTests.cs`, excluding any frozen T2a2 adapter-predicate assertion
+methods; compile-only signature hunks in `SetupCompensationTests.cs`,
+`SetupRollbackTests.cs`, `SetupRecoveryTests.cs`, and
+`SetupStatusProjectorTests.cs`.
 
 **Deliver:** one immutable generic carrier vocabulary whose only public-safe
 diagnostic fields are an allowed nullable failure code plus ordered closed
@@ -264,6 +305,11 @@ validates the final public DTO with the frozen `SetupContractValidator`; the
 registry does not duplicate that validation. It never serializes JSON or
 resolves target-specific values.
 
+Its executable cross-surface test gate owns the frozen parser -> non-waiting
+lock/recovery -> registry -> adapter -> validated result -> `SetupJson`
+serialization path. The production dispatcher remains serializer-free; T2d
+owns only the process/wrapper exposure of that serialization.
+
 **Verify:**
 
 ```powershell
@@ -299,7 +345,7 @@ git diff --check
 
 Commit: `Issue #66: feat(setup): expose reversible setup commands`.
 
-The T2 gate releases only after all four commits and reviews exist. Its closed
+The T2 gate releases only after all five commits and reviews exist. Its closed
 command matrix is: unknown adapter at plan -> `plan`/`unsupported_adapter`;
 valid persisted plan whose adapter is removed ->
 `apply`/`unsupported_adapter` with retained adapter ID and zero platform/
@@ -401,7 +447,7 @@ new semantic-positive #67 methods in `SetupContractShapeTests.cs` and
 **Deliver:** one shared aggregate adapter with ID exactly `github-copilot`, a
 stable partition contract consumed by T4/T5/T6, deterministic selected-target/
 `all` aggregation, canonical #61 manifest pairing, and typed carrier emission
-using the T2a-declared catalog. The positive tests prove the already-declared
+using the baseline-declared catalog. The positive tests prove the already-declared
 warning/action/code values are accepted and emitted in their intended semantic
 combinations. T3d does not edit `SetupCodes.cs`, any validator declaration,
 the generic T2 carrier/dispatcher, or target subdirectories. It creates the

@@ -176,14 +176,16 @@ The implementation ownership inside the sequential T2 gate is explicit:
 
 | T2 unit | Exclusive implementation boundary | Handoff |
 | --- | --- | --- |
-| T2a options reopen | only `SetupOptions` and its tests | corrects generic parsing/reachability after the already-committed catalog and registry baselines; no carrier or dispatcher work |
-| T2b diagnostics carrier | `ISetupAdapter`, `SetupAdapterRegistry`, `ISetupApplyRevalidator`, `SetupApplyCoordinator`, their two semantic test files, and compile-only signature updates in four frozen-domain test files | carries only immutable typed fixed-code/`warnings`/`next_actions` data, removes the registry's temporary `SetupCommandResult`, and performs no duplicate catalog validation |
-| T2c command dispatcher | a fresh `SetupCommandDispatcher` and its tests only | owns the one lock/recovery policy, plan/apply/rollback result construction, final frozen-validator call, and direct delegation to the status-service-produced result |
+| T2a1 target delegation | only `SetupOptions` and its tests | accepts an adapter slug matching exactly `[a-z0-9]+(?:-[a-z0-9]+)*`, preserves the target token, and delegates target validation without registry lookup |
+| T2a2 adapter identifier integration | adapter-predicate routing only in `SetupContractValidator`/`SetupContractValidationTests` and `SetupStatusListProjector`/`SetupStatusOrderingTests`, plus optional bounded adapter-predicate assertions in `SetupAdapterRegistryTests` | uses the same adapter-only predicate, including digit-leading historical status filters, without changing shared `FixedIdentifier`, status behavior, or catalog declarations |
+| T2b diagnostics carrier | `ISetupAdapter`, `SetupAdapterRegistry`, `ISetupApplyRevalidator`, `SetupApplyCoordinator`, their diagnostics-carrier semantic test hunks, and compile-only signature updates in four frozen-domain test files | carries only immutable typed fixed-code/`warnings`/`next_actions` data, removes the registry's temporary `SetupCommandResult`, and performs no duplicate catalog validation |
+| T2c command dispatcher | a fresh `SetupCommandDispatcher` and its tests only | owns the one lock/recovery policy, plan/apply/rollback result construction, final frozen-validator call, direct delegation to the status-service-produced result, and the parser-to-`SetupJson` executable test gate while production dispatch stays serializer-free |
 | T2d process/wrapper surface | `CliApplication`, help/exit/stderr mapping, their tests, and the thin PowerShell wrapper/tests | serializes/forwards the T2c result without recreating adapter or transaction behavior |
 
-These units run T2a -> T2b -> T2c -> T2d and are reviewed separately; they are
-not parallel file owners. The currently untracked dispatcher draft predates
-this audited ownership contract and must be abandoned before T2a or T2b starts;
+These units run T2a1 -> T2a2 -> T2b -> T2c -> T2d and are reviewed separately;
+they are not parallel file owners. The currently untracked dispatcher draft
+predates this audited ownership contract and must be abandoned before T2a1
+starts;
 T2c begins from fresh tests after the carrier is frozen. The complete code,
 warning, and next-action catalog was already declared by `139338a`. T3 does not
 redeclare it: T3 owns semantic positive validation and
@@ -204,8 +206,9 @@ Exact active file ownership is:
 
 | Unit | Files/hunks |
 | --- | --- |
-| T2a reopen | `Setup/Cli/SetupOptions.cs`, `SetupOptionsTests.cs` |
-| T2b | `Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Transactions/ISetupApplyRevalidator.cs`, `Setup/Transactions/SetupApplyCoordinator.cs`; semantic `SetupAdapterRegistryTests.cs`/`SetupApplyTests.cs`; compile-only signature hunks in `SetupCompensationTests.cs`, `SetupRollbackTests.cs`, `SetupRecoveryTests.cs`, `SetupStatusProjectorTests.cs` |
+| T2a1 | `Setup/Cli/SetupOptions.cs`, `SetupOptionsTests.cs` |
+| T2a2 | adapter-predicate routing only in `Setup/Contracts/SetupContractValidator.cs`, `SetupContractValidationTests.cs`, `Setup/Status/SetupStatusListProjector.cs`, `SetupStatusOrderingTests.cs`; optional new adapter-predicate cross-surface assertion methods only in `SetupAdapterRegistryTests.cs`, with no registry production edit |
+| T2b | `Setup/Adapters/ISetupAdapter.cs`, `Setup/Adapters/SetupAdapterRegistry.cs`, `Setup/Transactions/ISetupApplyRevalidator.cs`, `Setup/Transactions/SetupApplyCoordinator.cs`; diagnostics-carrier semantic hunks only in `SetupAdapterRegistryTests.cs`/`SetupApplyTests.cs`, excluding frozen T2a2 assertion methods; compile-only signature hunks in `SetupCompensationTests.cs`, `SetupRollbackTests.cs`, `SetupRecoveryTests.cs`, `SetupStatusProjectorTests.cs` |
 | T2c | fresh `Setup/Cli/SetupCommandDispatcher.cs`, fresh `SetupCommandDispatcherTests.cs` |
 | T2d | `Cli/CliApplication.cs`, `Cli/CliHelpText.cs`, `CliApplicationTests.cs`, `scripts/local-monitor/setup.ps1`, `SetupWrapperTests.cs` |
 | T3a | `Setup/Platform/ISetupPlatform.cs`, `Setup/Platform/SystemSetupPlatform.cs`, `SetupTestPlatform.cs`, `Setup/Adapters/GitHubCopilot/GitHubCopilotDetection.cs`, `GitHubCopilotDetectionTests.cs` |
@@ -221,7 +224,8 @@ Exact active file ownership is:
 
 The focused verification filters are likewise fixed:
 
-- T2a: `SetupOptionsTests`;
+- T2a1: `SetupOptionsTests`;
+- T2a2: `SetupContractValidationTests|SetupStatusOrderingTests`, plus `SetupAdapterRegistryTests` only if its optional bounded cross-surface assertions are added;
 - T2b semantic: `SetupAdapterRegistryTests|SetupApplyTests`;
 - T2b compile-only: `SetupCompensationTests|SetupRollbackTests|SetupRecoveryTests|SetupStatusProjectorTests`;
 - T2c: `SetupCommandDispatcherTests` plus affected apply/rollback/recovery/status suites;
