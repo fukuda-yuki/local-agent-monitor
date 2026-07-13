@@ -6,10 +6,10 @@ behavior remains canonical in requirements, spec, and interface documents.
 | Milestone | State | Scope |
 | --- | --- | --- |
 | M0 contract and orchestration | Complete | Canonical contract, approved executable plan, durable ledger |
-| M1 schema drift foundation | Pending | Issue #62 |
-| M2 Claude inventory contract | Pending | Issue #63 |
-| M3 Claude ingestion and binding | Pending | Issue #64 |
-| M4 projection and UI | Pending | Issue #65 |
+| M1 schema drift foundation | Complete | Issue #62 |
+| M2 Claude inventory contract | Complete with live follow-ups | Issue #63 |
+| M3 Claude ingestion and binding | Complete with trace-context follow-up | Issue #64 |
+| M4 projection and UI | Complete with live producer blockers | Issue #65 |
 | M5 integration closeout | Complete with explicit live blockers | [Task 23 live-validation record](milestones/M5-integration/live-validation.md); independent live producer follow-ups remain named |
 
 See [ledger.md](ledger.md) for current execution evidence.

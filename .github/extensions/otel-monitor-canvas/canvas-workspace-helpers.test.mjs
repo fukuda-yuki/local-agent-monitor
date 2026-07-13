@@ -214,7 +214,7 @@ test("workspace HTML contains the sidebar groups, four-tab shell, review cards, 
     assert.match(html, /\/api\/session-workspace\/resolve/);
     assert.match(html, /\/api\/session-instruction\//);
     assert.match(html, /\/analysis\?t=/);
-    assert.ok(html.includes("const firstLine=instruction.preview.split(/\\r?\\n/,1)[0].trim();if(firstLine)return firstLine.slice(0,80);}const surface="));
+    assert.ok(html.includes("const surface=Array.isArray(session.source_surfaces)?session.source_surfaces[0]:null;if(surface===\"claude-code\")return \"Claude Code セッション\";if(instruction&&instruction.state===\"available\""));
     assert.match(html, /人間評価を保存できませんでした。接続を確認して再試行してください。/);
     assert.match(html, /\.catch\(showEvaluationError\)/);
     assert.doesNotMatch(html, /innerHTML/);

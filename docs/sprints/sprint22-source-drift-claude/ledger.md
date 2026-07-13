@@ -27,40 +27,40 @@ Updated: 2026-07-13
 | Session provenance envelope | #64 | Complete (Task 15A/15B) | `aacd358..aae5a1c` | 115/115; schema matrix 71/71; core 231/231; adjacent 127/127; build 0 | Spec/Migration/Security/Compatibility/Tests APPROVED | no dedicated REAL 11.4 or duplicate-version row (non-blocking) |
 | Claude Hook adapter | #64 | Complete (Task 16A/16B) | `0b6c453..67f1527` | mapper 296/296; forwarder 79/79; build 0 | Spec/Code/Security/Tests APPROVED | none |
 | Claude OTLP adapter | #64 | Complete (Task 17A/17B) | `c02be2b..cbb2128` | adapter 15/15; enrichment 10/10; related 311/311; build 0 | Spec/Code/Security/Tests APPROVED | complete trace-context positive blocked by DTO lacking traceparent/tracestate |
-| Exact binding and dedupe | #64 | In progress (Task 18) | - | deterministic concurrency matrix pending | pending independent concurrency/security review | cursor/aggregate crash boundary remains |
+| Exact binding and dedupe | #64 | Complete (Task 18) | `97bdd36` | Task18 10/10; Task18+security 13/13; combined 134/134; build 0 | Spec/Concurrency/Security APPROVED | complete trace-context positive remains deferred by DTO contract |
 | Early #62/#64 integration review | #62/#64 | Complete with explicit follow-ups (Task 19) | `67af37d..97bdd36` | ConfigCli 909/909; LocalMonitor 395/395; build 0 | Important findings resolved in canonical binding spec; Task20 gate reviewed | complete trace-context DTO remains deferred; Task20 must never exact-link trace-id-only |
-| Projection and HTTP DTO | #65 | Pending | - | - | - | - |
-| UI and Playwright | #65 | Pending | - | - | - | - |
+| Projection and HTTP DTO | #65 | Complete (Tasks 20-21) | `3bb2c9e..7bacf7e` | graph 33/33; backend/near-miss 44/44; build 0 | Independent graph/DTO review PASS | trace-id-only stays hook_only/otel_only |
+| Canvas/UI and Playwright | #65 | Complete (Task 22) | `2a2a252..cf12a2a` | Canvas contract 28/28; Node 31/31; Playwright 18/18; build 0 | Independent UI review PASS | live Claude producer evidence remains blocked |
 | User documentation and live-validation closeout | #65 | Complete with explicit live blockers (Task 23) | this docs closeout | `git diff --check` PASS; repository-safe docs review | Exact blockers and named follow-ups recorded for all three Claude surfaces | interactive TTY unavailable; print emitted no structural telemetry; Agent SDK package/runtime/credential unavailable |
-| Final integration | #62-#65 | Pending | - | - | - | - |
+| Final integration | #62-#65 | Complete pending final evidence commit | `2e4743f` + final review evidence | build PASS; Playwright bootstrap PASS; full solution 2,577/2,577 PASS; diff-check PASS | final independent spec/security/UI review required before evidence commit | live producer follow-ups and complete trace-context DTO are explicit non-blocking follow-ups |
 
 ## Requirement-to-test evidence
 
 | Requirement | Planned executable evidence | Result |
 | --- | --- | --- |
-| Additive migration and restart | Actual shipped-version DB fixtures, migrate-close-reopen assertions | Pending |
-| Bounded unknown metadata | Store/evaluator tests with overflow and raw-marker negatives | Pending |
-| Drift versus failure states | Diagnostic state-table tests | Pending |
-| Copilot fidelity | Producer fixture golden comparison | Pending |
-| Claude source identity | Producer-to-store byte-equivalent ID tests | Pending |
+| Additive migration and restart | Actual shipped-version DB fixtures, migrate-close-reopen assertions | PASS: Monitor v1-v4 and Session v1-v11 fixture suites |
+| Bounded unknown metadata | Store/evaluator tests with overflow and raw-marker negatives | PASS: diagnostics and source contract suites |
+| Drift versus failure states | Diagnostic state-table tests | PASS: ConfigCli/LocalMonitor contract and readiness suites |
+| Copilot fidelity | Producer fixture golden comparison | PASS: fidelity 82/82 |
+| Claude source identity | Producer-to-store byte-equivalent ID tests | PASS: Hook/OTLP fixtures and exact binding suites |
 | Exact binding only | Positive exact cases plus repository/cwd/time negative cases | PASS: Task17B 10/10; complete trace-context remains blocked by DTO |
-| Deterministic concurrency | Barrier-controlled duplicate/transaction tests, no sleeps | Pending Task18 |
-| Raw/sanitized boundary | API/SSE/log/golden negative matrix | Pending |
-| Claude UI states | Playwright list/detail/empty/error/degraded cases | Pending |
-| Full regression | Build, Playwright bootstrap, full solution tests | Pending |
+| Deterministic concurrency | Barrier-controlled duplicate/transaction tests, no sleeps | PASS: Task18 10/10 + security matrix 13/13 |
+| Raw/sanitized boundary | API/SSE/log/golden negative matrix | PASS: diagnostics/API/UI focused suites |
+| Claude UI states | Playwright list/detail/empty/error/degraded cases | PASS: Playwright 18/18; Canvas 28/28; Node 31/31 |
+| Full regression | Build, Playwright bootstrap, full solution tests | PASS: build 0 warnings; bootstrap PASS; solution 2,577/2,577 |
 
 ## Unverified Issue interfaces
 
 - Complete byte-equivalent trace-context binding awaits an additive Session DTO contract carrying complete context; trace_id-only remains explicitly insufficient.
 - Canonical exact-binding contract now reflects shipped Claude source values and explicitly defers the complete trace-context row.
-- Task18 cross-writer cursor/aggregate atomicity remains unverified until barrier tests complete.
 - Interactive CLI, `claude -p`, and Agent SDK live availability remains
   unverified. Task 23 records the exact blockers and named follow-ups in
   [M5 live-validation](milestones/M5-integration/live-validation.md): no
   interactive TTY, no structural telemetry from the bounded print run, and
   no available Agent SDK package/runtime/credential.
 - Source observation DTO has not yet been exercised through storage, HTTP, and
-  UI in one executable test.
+  UI in one single cross-surface test; the storage, HTTP, and UI contracts are
+  covered by adjacent executable suites.
 
 ## Baseline validation
 
@@ -68,4 +68,4 @@ Updated: 2026-07-13
 | --- | --- |
 | `dotnet build CopilotAgentObservability.slnx` | PASS, 0 warnings, 0 errors |
 | `pwsh scripts\test\install-playwright-chromium.ps1` | PASS, Chromium 1228 installed in worktree artifacts |
-| `dotnet test CopilotAgentObservability.slnx` | PASS, ConfigCli 314 + LocalMonitor 936 = 1,250 |
+| `dotnet test CopilotAgentObservability.slnx` | PASS, ConfigCli 1,198 + LocalMonitor 1,379 = 2,577 |
