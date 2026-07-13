@@ -192,6 +192,51 @@ internal sealed class SetupRecoveryCoordinator
                 }
             }
 
+            if (journal.Operation == SetupJournalOperation.Rollback &&
+                journal.Phase == SetupJournalPhase.Prepared &&
+                changeSet.State == SetupChangeSetState.Applied)
+            {
+                if (plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env))
+                {
+                    return Failed(SetupCodes.RecoveryRequired, changeSet.ChangeSetId,
+                        SetupRecoveryOperation.Rollback, OverlayFailure(changeSet));
+                }
+
+                try
+                {
+                    ValidateDormantPreparedRollback(plan, changeSet, journal);
+                    continue;
+                }
+                catch (Exception)
+                {
+                    return PersistActiveFileRollbackFailure(
+                        setupLock,
+                        changeSet,
+                        journal,
+                        new Dictionary<Guid, ActiveFileFailureKind>());
+                }
+            }
+
+            if (journal.Operation == SetupJournalOperation.Rollback)
+            {
+                if (plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env))
+                {
+                    return Failed(SetupCodes.RecoveryRequired, changeSet.ChangeSetId,
+                        SetupRecoveryOperation.Rollback, OverlayFailure(changeSet));
+                }
+
+                if (IsActiveRollback(journal))
+                {
+                    return RecoverActiveFileRollback(setupLock, changeSet, plan, journal);
+                }
+
+                if (journal.Phase == SetupJournalPhase.Committed &&
+                    changeSet.State != SetupChangeSetState.RolledBack)
+                {
+                    return ReconcileCommittedFileRollback(setupLock, changeSet, plan, journal);
+                }
+            }
+
             if (IsActiveApply(journal))
             {
                 return RecoverActiveApply(setupLock, changeSet, plan, journal);
@@ -217,6 +262,448 @@ internal sealed class SetupRecoveryCoordinator
 
         return new SetupRecoveryResult(SetupRecoveryDisposition.None, null, null, null, null);
     }
+
+    private void ValidateDormantPreparedRollback(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet changeSet,
+        SetupTransactionJournal journal)
+    {
+        RequireImmutableIdentity(plan, changeSet);
+        if (journal.ChangeSetId != changeSet.ChangeSetId ||
+            journal.Operation != SetupJournalOperation.Rollback ||
+            journal.Phase != SetupJournalPhase.Prepared ||
+            journal.EnvironmentNotification != SetupEnvironmentNotification.NotRequired ||
+            journal.Targets.SelectMany(target => target.Steps)
+                .Any(step => step.Phase != SetupJournalStepPhase.Pending))
+        {
+            throw new FormatException();
+        }
+
+        _ = VerifyTerminalState(plan, changeSet, journal, desired: true);
+        foreach (var target in changeSet.Targets)
+        {
+            var journalTarget = journal.Targets.SingleOrDefault(item => item.RecordId == target.RecordId);
+            if (journalTarget is not null)
+            {
+                var step = journalTarget.Steps.Single();
+                if (!string.Equals(target.AppliedStateHash, step.DesiredStateHash, StringComparison.Ordinal) ||
+                    !string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) ||
+                    target.RollbackStatus != SetupLedgerRollbackStatus.Pending)
+                {
+                    throw new FormatException();
+                }
+            }
+            else if (!HasNoRollbackOwnership(target))
+            {
+                throw new FormatException();
+            }
+        }
+    }
+
+    private SetupRecoveryResult RecoverActiveFileRollback(
+        SetupLock setupLock,
+        SetupLedgerChangeSet changeSet,
+        SetupPrivatePlan plan,
+        SetupTransactionJournal journal)
+    {
+        if (!ActiveFileRollbackLifecycleMatches(changeSet.State, journal.Phase))
+        {
+            return Failed(SetupCodes.RecoveryRequired, changeSet.ChangeSetId,
+                SetupRecoveryOperation.Rollback, OverlayFailure(changeSet));
+        }
+
+        try
+        {
+            ValidateActiveFileRollbackEvidence(plan, changeSet, journal);
+        }
+        catch (Exception)
+        {
+            return PersistActiveFileRollbackFailure(
+                setupLock,
+                changeSet,
+                journal,
+                new Dictionary<Guid, ActiveFileFailureKind>());
+        }
+
+        if (!TryEnterActiveFileRollback(setupLock, changeSet.ChangeSetId, journal.Phase) ||
+            !TryPersistRollingBackLedger(setupLock, changeSet.ChangeSetId))
+        {
+            return ActiveFileRollbackRecoveryRequired(changeSet);
+        }
+
+        var failures = new Dictionary<Guid, ActiveFileFailureKind>();
+        for (var targetIndex = journal.Targets.Count - 1; targetIndex >= 0; targetIndex--)
+        {
+            var journalTarget = journal.Targets[targetIndex];
+            var planTarget = plan.Targets.Single(target => target.RecordId == journalTarget.RecordId);
+            for (var stepIndex = journalTarget.Steps.Count - 1; stepIndex >= 0; stepIndex--)
+            {
+                SetupJournalStep step;
+                try
+                {
+                    step = LoadActiveStep(
+                        changeSet.ChangeSetId,
+                        journalTarget.RecordId,
+                        journalTarget.Steps[stepIndex].MemberKey);
+                }
+                catch (Exception)
+                {
+                    return ActiveFileRollbackRecoveryRequired(changeSet);
+                }
+
+                var outcome = RecoverActiveRollbackStep(
+                    setupLock,
+                    changeSet.ChangeSetId,
+                    planTarget,
+                    step);
+                if (outcome == ActiveFileStepOutcome.JournalUnproven)
+                {
+                    return ActiveFileRollbackRecoveryRequired(changeSet);
+                }
+
+                if (outcome == ActiveFileStepOutcome.Stale)
+                {
+                    failures[journalTarget.RecordId] = ActiveFileFailureKind.Stale;
+                }
+                else if (outcome == ActiveFileStepOutcome.Unavailable)
+                {
+                    failures[journalTarget.RecordId] = ActiveFileFailureKind.Unavailable;
+                }
+            }
+        }
+
+        try
+        {
+            platform.Execution.Checkpoint(SetupFaultPoint.AfterCompletionBeforeCommit);
+        }
+        catch (Exception)
+        {
+        }
+
+        foreach (var target in plan.Targets.Where(target => target.TargetKind != SetupTargetKind.Guidance))
+        {
+            var classification = ClassifyAggregatePrior(target);
+            if (classification != ActiveFileClassification.Prior)
+            {
+                failures[target.RecordId] = classification == ActiveFileClassification.ThirdParty
+                    ? ActiveFileFailureKind.Stale
+                    : ActiveFileFailureKind.Unavailable;
+            }
+        }
+
+        if (failures.Count > 0)
+        {
+            return PersistActiveFileRollbackFailure(setupLock, changeSet, journal, failures);
+        }
+
+        if (!TryMarkJournalPhaseOrConfirm(
+                setupLock,
+                changeSet.ChangeSetId,
+                SetupJournalPhase.RollingBack,
+                SetupJournalPhase.Committed))
+        {
+            return ActiveFileRollbackRecoveryRequired(changeSet);
+        }
+
+        return PersistRecoveredFileRollback(setupLock, changeSet, plan, journal);
+    }
+
+    private void ValidateActiveFileRollbackEvidence(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet changeSet,
+        SetupTransactionJournal journal)
+    {
+        RequireImmutableIdentity(plan, changeSet);
+        if (journal.ChangeSetId != changeSet.ChangeSetId ||
+            journal.Operation != SetupJournalOperation.Rollback ||
+            journal.EnvironmentNotification != SetupEnvironmentNotification.NotRequired)
+        {
+            throw new FormatException();
+        }
+
+        ValidateJournalTargets(plan, changeSet, journal);
+        var journalTargets = journal.Targets.ToDictionary(target => target.RecordId);
+        foreach (var target in changeSet.Targets)
+        {
+            if (journalTargets.TryGetValue(target.RecordId, out var journalTarget))
+            {
+                var step = journalTarget.Steps.Single();
+                var rollbackStatusMatches = changeSet.State == SetupChangeSetState.Partial
+                    ? target.RollbackStatus is SetupLedgerRollbackStatus.Pending or
+                        SetupLedgerRollbackStatus.Stale or SetupLedgerRollbackStatus.Failed
+                    : target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
+                if (!string.Equals(target.AppliedStateHash, step.DesiredStateHash, StringComparison.Ordinal) ||
+                    !string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) ||
+                    !rollbackStatusMatches)
+                {
+                    throw new FormatException();
+                }
+            }
+            else if (!HasNoRollbackOwnership(target) &&
+                     !(changeSet.State == SetupChangeSetState.Partial &&
+                       target.AppliedStateHash is null &&
+                       target.BackupReference is null &&
+                       ((target.RollbackStatus == SetupLedgerRollbackStatus.Stale &&
+                         string.Equals(target.OutcomeCode, SetupCodes.RollbackStale, StringComparison.Ordinal)) ||
+                        (target.RollbackStatus == SetupLedgerRollbackStatus.Failed &&
+                         string.Equals(target.OutcomeCode, SetupCodes.InternalError, StringComparison.Ordinal)))))
+            {
+                throw new FormatException();
+            }
+        }
+    }
+
+    private bool TryEnterActiveFileRollback(
+        SetupLock setupLock,
+        Guid changeSetId,
+        SetupJournalPhase initialPhase)
+    {
+        if (initialPhase == SetupJournalPhase.Prepared)
+        {
+            return TryMarkJournalPhaseOrConfirm(
+                setupLock, changeSetId, SetupJournalPhase.Prepared, SetupJournalPhase.RollingBack);
+        }
+
+        if (initialPhase == SetupJournalPhase.Partial)
+        {
+            return TryMarkJournalPhaseOrConfirm(
+                setupLock, changeSetId, SetupJournalPhase.Partial, SetupJournalPhase.RollingBack);
+        }
+
+        return initialPhase == SetupJournalPhase.RollingBack;
+    }
+
+    private bool TryPersistRollingBackLedger(SetupLock setupLock, Guid changeSetId)
+    {
+        try
+        {
+            var ledger = ledgerStore.LoadForRecovery();
+            var current = ledger.ChangeSets.Single(item => item.ChangeSetId == changeSetId);
+            if (current.State == SetupChangeSetState.RollingBack)
+            {
+                return true;
+            }
+
+            if (current.State is not (SetupChangeSetState.Applied or SetupChangeSetState.Partial))
+            {
+                return false;
+            }
+
+            SaveChangeSetOrConfirm(setupLock, ledger, current with
+            {
+                UpdatedAt = platform.Clock.UtcNow,
+                State = SetupChangeSetState.RollingBack,
+                Targets = current.Targets.Select(target =>
+                    target.AppliedStateHash is not null && target.BackupReference is not null
+                        ? target with
+                        {
+                            OutcomeCode = null,
+                            RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                        }
+                        : target.AppliedStateHash is null && target.BackupReference is null
+                            ? target with
+                            {
+                                OutcomeCode = null,
+                                RollbackStatus = SetupLedgerRollbackStatus.NotAvailable,
+                            }
+                            : target).ToArray(),
+            });
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private ActiveFileStepOutcome RecoverActiveRollbackStep(
+        SetupLock setupLock,
+        Guid changeSetId,
+        SetupPrivatePlanTarget target,
+        SetupJournalStep step)
+    {
+        var classification = ClassifyActiveStep(target, step);
+        if (step.Phase == SetupJournalStepPhase.RestoreCompleted)
+        {
+            return classification == ActiveFileClassification.Prior
+                ? ActiveFileStepOutcome.Completed
+                : ClassificationFailure(classification);
+        }
+
+        if (step.Phase == SetupJournalStepPhase.Pending)
+        {
+            if (classification is ActiveFileClassification.ThirdParty or ActiveFileClassification.Unavailable)
+            {
+                return ClassificationFailure(classification);
+            }
+
+            if (!TryMarkStepPhaseOrConfirm(
+                    setupLock,
+                    changeSetId,
+                    target.RecordId,
+                    step.MemberKey,
+                    SetupJournalStepPhase.Pending,
+                    SetupJournalStepPhase.RestoreStarted))
+            {
+                return ActiveFileStepOutcome.JournalUnproven;
+            }
+        }
+        else if (step.Phase != SetupJournalStepPhase.RestoreStarted)
+        {
+            return ActiveFileStepOutcome.Unavailable;
+        }
+
+        if (classification == ActiveFileClassification.Desired)
+        {
+            try
+            {
+                platform.Execution.Checkpoint(SetupFaultPoint.AfterRestoreIntentBeforeRestore);
+                RestoreActiveStep(changeSetId, target, step);
+                platform.Execution.Checkpoint(SetupFaultPoint.AfterRestoreBeforeCompletion);
+            }
+            catch (Exception)
+            {
+                var afterFailure = ClassifyActiveStep(target, step);
+                if (afterFailure != ActiveFileClassification.Prior)
+                {
+                    return ClassificationFailure(afterFailure);
+                }
+            }
+        }
+
+        return TryMarkStepPhaseOrConfirm(
+            setupLock,
+            changeSetId,
+            target.RecordId,
+            step.MemberKey,
+            SetupJournalStepPhase.RestoreStarted,
+            SetupJournalStepPhase.RestoreCompleted)
+                ? ActiveFileStepOutcome.Completed
+                : ActiveFileStepOutcome.JournalUnproven;
+    }
+
+    private SetupRecoveryResult PersistActiveFileRollbackFailure(
+        SetupLock setupLock,
+        SetupLedgerChangeSet original,
+        SetupTransactionJournal journal,
+        IReadOnlyDictionary<Guid, ActiveFileFailureKind> failures)
+    {
+        if (!TryEnterActiveFileRollback(setupLock, original.ChangeSetId, journal.Phase) ||
+            !TryPersistRollingBackLedger(setupLock, original.ChangeSetId) ||
+            !TryMarkJournalPhaseOrConfirm(
+                setupLock,
+                original.ChangeSetId,
+                SetupJournalPhase.RollingBack,
+                SetupJournalPhase.Partial))
+        {
+            return ActiveFileRollbackRecoveryRequired(original);
+        }
+
+        try
+        {
+            var ledger = ledgerStore.LoadForRecovery();
+            var current = ledger.ChangeSets.Single(item => item.ChangeSetId == original.ChangeSetId);
+            var partial = current with
+            {
+                UpdatedAt = platform.Clock.UtcNow,
+                OutcomeCode = SetupCodes.InterruptedRecoveryFailed,
+                State = SetupChangeSetState.Partial,
+                Targets = current.Targets.Select(target => failures.TryGetValue(target.RecordId, out var failure)
+                    ? target with
+                    {
+                        OutcomeCode = failure == ActiveFileFailureKind.Stale
+                            ? SetupCodes.RollbackStale
+                            : SetupCodes.InternalError,
+                        RollbackStatus = failure == ActiveFileFailureKind.Stale
+                            ? SetupLedgerRollbackStatus.Stale
+                            : SetupLedgerRollbackStatus.Failed,
+                    }
+                    : target).ToArray(),
+            };
+            SaveChangeSetOrConfirm(setupLock, ledger, partial);
+            return Failed(
+                SetupCodes.InterruptedRecoveryFailed,
+                original.ChangeSetId,
+                SetupRecoveryOperation.Rollback,
+                partial);
+        }
+        catch (Exception)
+        {
+            return ActiveFileRollbackRecoveryRequired(original);
+        }
+    }
+
+    private SetupRecoveryResult ReconcileCommittedFileRollback(
+        SetupLock setupLock,
+        SetupLedgerChangeSet changeSet,
+        SetupPrivatePlan plan,
+        SetupTransactionJournal journal)
+    {
+        try
+        {
+            ValidateActiveFileRollbackEvidence(plan, changeSet, journal);
+            _ = VerifyTerminalState(plan, changeSet, journal, desired: false);
+            return PersistRecoveredFileRollback(setupLock, changeSet, plan, journal);
+        }
+        catch (Exception)
+        {
+            return PersistFailure(
+                setupLock,
+                ledgerStore.LoadForRecovery(),
+                changeSet,
+                SetupRecoveryOperation.Rollback);
+        }
+    }
+
+    private SetupRecoveryResult PersistRecoveredFileRollback(
+        SetupLock setupLock,
+        SetupLedgerChangeSet original,
+        SetupPrivatePlan plan,
+        SetupTransactionJournal journal)
+    {
+        try
+        {
+            var ledger = ledgerStore.LoadForRecovery();
+            var current = ledger.ChangeSets.Single(item => item.ChangeSetId == original.ChangeSetId);
+            var journalRecordIds = journal.Targets.Select(target => target.RecordId).ToHashSet();
+            var physicalRecordIds = plan.Targets
+                .Where(target => target.TargetKind != SetupTargetKind.Guidance)
+                .Select(target => target.RecordId)
+                .ToHashSet();
+            var recovered = current with
+            {
+                UpdatedAt = platform.Clock.UtcNow,
+                OutcomeCode = SetupCodes.InterruptedRollbackRecovered,
+                State = SetupChangeSetState.RolledBack,
+                Targets = current.Targets.Select(target => physicalRecordIds.Contains(target.RecordId)
+                    ? target with
+                    {
+                        AppliedStateHash = null,
+                        BackupReference = null,
+                        OutcomeCode = journalRecordIds.Contains(target.RecordId)
+                            ? SetupCodes.InterruptedRollbackRecovered
+                            : null,
+                        RollbackStatus = journalRecordIds.Contains(target.RecordId)
+                            ? SetupLedgerRollbackStatus.Succeeded
+                            : SetupLedgerRollbackStatus.NotAvailable,
+                    }
+                    : target).ToArray(),
+            };
+            SaveChangeSetOrConfirm(setupLock, ledger, recovered);
+            return Recovered(recovered, SetupRecoveryOperation.Rollback);
+        }
+        catch (Exception)
+        {
+            return ActiveFileRollbackRecoveryRequired(original);
+        }
+    }
+
+    private static SetupRecoveryResult ActiveFileRollbackRecoveryRequired(SetupLedgerChangeSet changeSet) =>
+        Failed(
+            SetupCodes.RecoveryRequired,
+            changeSet.ChangeSetId,
+            SetupRecoveryOperation.Rollback,
+            OverlayFailure(changeSet));
 
     private SetupRecoveryResult RecoverActiveApply(
         SetupLock setupLock,
@@ -776,6 +1263,10 @@ internal sealed class SetupRecoveryCoordinator
         journal.Phase is (SetupJournalPhase.Prepared or SetupJournalPhase.Applying or
             SetupJournalPhase.Compensating or SetupJournalPhase.Partial);
 
+    private static bool IsActiveRollback(SetupTransactionJournal journal) =>
+        journal.Operation == SetupJournalOperation.Rollback &&
+        journal.Phase is SetupJournalPhase.Prepared or SetupJournalPhase.RollingBack or SetupJournalPhase.Partial;
+
     private static SetupEnvironmentNotification ExpectedActiveNotification(
         SetupTransactionJournal journal) => journal.Targets.Any(target =>
             target.TargetKind == SetupTargetKind.Env &&
@@ -792,6 +1283,16 @@ internal sealed class SetupRecoveryCoordinator
         SetupJournalPhase.Compensating => state is SetupChangeSetState.Applying or
             SetupChangeSetState.Compensating or SetupChangeSetState.Partial,
         SetupJournalPhase.Partial => state is SetupChangeSetState.Compensating or SetupChangeSetState.Partial,
+        _ => false,
+    };
+
+    private static bool ActiveFileRollbackLifecycleMatches(
+        SetupChangeSetState state,
+        SetupJournalPhase phase) => phase switch
+    {
+        SetupJournalPhase.Prepared => state == SetupChangeSetState.RollingBack,
+        SetupJournalPhase.RollingBack => state is SetupChangeSetState.RollingBack or SetupChangeSetState.Partial,
+        SetupJournalPhase.Partial => state is SetupChangeSetState.RollingBack or SetupChangeSetState.Partial,
         _ => false,
     };
 
@@ -1518,8 +2019,8 @@ internal sealed class SetupRecoveryCoordinator
             target.RollbackStatus == SetupLedgerRollbackStatus.Pending,
         SetupChangeSetState.RolledBack =>
             HasNoRollbackOwnership(target) ||
-            target.AppliedStateHash is not null &&
-            target.BackupReference is not null &&
+            target.AppliedStateHash is null &&
+            target.BackupReference is null &&
             target.RollbackStatus == SetupLedgerRollbackStatus.Succeeded,
         _ => false,
     };
