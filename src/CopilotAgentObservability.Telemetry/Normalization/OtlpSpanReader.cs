@@ -86,7 +86,8 @@ internal static class OtlpSpanReader
         return HasAnyStringValue(span.Attributes, GenAiOperationKeys, "chat", "generate_content", "text_completion")
             || HasStringValue(span.Attributes, "type", "generation")
             || HasStringValue(span.Attributes, "type", "chat")
-            || HasSpanName(span, "chat");
+            || HasSpanName(span, "chat")
+            || HasExactSpanName(span, "claude_code.llm_request");
     }
 
     internal static bool IsToolSpan(RawSpanInfo span)
@@ -95,7 +96,8 @@ internal static class OtlpSpanReader
             || HasStringValue(span.Attributes, "kind", "tool")
             || HasStringValue(span.Attributes, "category", "tool")
             || HasAnyStringValue(span.Attributes, GenAiToolNameKeys)
-            || HasSpanName(span, "execute_tool");
+            || HasSpanName(span, "execute_tool")
+            || HasExactSpanName(span, "claude_code.tool");
     }
 
     internal static bool IsKnownNonCountedSpan(RawSpanInfo span)
@@ -103,8 +105,15 @@ internal static class OtlpSpanReader
         return HasSpanName(span, "invoke_agent")
             || HasSpanName(span, "execute_hook")
             || HasSpanName(span, "lifecycle_event")
+            || HasExactSpanName(span, "claude_code.interaction")
+            || HasExactSpanName(span, "claude_code.tool.blocked_on_user")
+            || HasExactSpanName(span, "claude_code.tool.execution")
+            || HasExactSpanName(span, "claude_code.hook")
             || HasAnyStringValue(span.Attributes, ["type", "kind", "category"], "permission", "approval", "hook", "lifecycle");
     }
+
+    private static bool HasExactSpanName(RawSpanInfo span, string expectedName) =>
+        string.Equals(span.Name, expectedName, StringComparison.Ordinal);
 
     internal static bool IsErrorSpan(RawSpanInfo span)
     {
