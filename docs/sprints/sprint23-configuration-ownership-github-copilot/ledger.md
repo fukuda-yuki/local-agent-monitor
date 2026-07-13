@@ -27,11 +27,12 @@ Updated: 2026-07-13
 | Active Apply restart recovery (Tasks 5d2a-b) | #66 | Complete | `e083462..80004d9` | SetupRecoveryTests 168/168; Apply+Compensation+Recovery 278/278; all Setup 874/874; ConfigCli 1202/1202; build 0/0 | Spec PASS; Quality/Security/Concurrency APPROVED | rollback recovery remains Task 5d3 |
 | Interrupted file rollback restart recovery (Task 5d3a) | #66 | Complete | `3f0aaa1..4659c22` (includes `1484280`, `f9665d3`) | focused matrix 5/5; SetupRecoveryTests 212/212; Recovery+Journal 359/359; all Setup 934/934; ConfigCli 1262/1262; build 0 warnings/0 errors; `git diff --check` clean | Spec PASS; Quality/Security/Concurrency APPROVED; independent final review PASS/APPROVED; no findings | none |
 | Interrupted single-environment rollback restart recovery (Task 5d3b1) | #66 | Complete | `26ff098..b044798` | forged NoOp 3/3; single environment 33/33; SetupRecoveryTests 245/245; related transaction 487/487; all Setup 967/967; ConfigCli 1295/1295; build 0 warnings/0 errors; `git diff --check` clean | Spec PASS; Quality/Security/Concurrency APPROVED; independent final review PASS/APPROVED; no findings | mixed active/committed rollback recovery and the normal rollback producer remain |
+| Mixed active/committed rollback restart recovery (Task 5d3b2a) | #66 | Complete | `b74029b` | focused 10/10; SetupRecoveryTests 254/254; related transaction 576/576; all Setup 976/976; ConfigCli 1304/1304; build 0 warnings/0 errors; `git diff --check` clean | Spec PASS; Quality/Security/Concurrency APPROVED; independent final review PASS/APPROVED; no findings | committed lagging-ledger reconciliation and notification ambiguity remain; normal rollback producer remains Task 6a |
 | Setup lock operation lifetime (Lock A-C) | #66 | Complete | `08d716c..d06ffcc` | apply/compensation/runtime/storage/journal 286/286; all Setup 663/663; ConfigCli 991/991; build 0/0 | Spec/internal PASS; Quality/Security/Concurrency APPROVED after disposal-order re-audit | Windows cross-process executed; Linux/macOS runtime not executed |
 | Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
 | Atomic file mutation | #66 | Complete through Task 3b | `291b3bf..2ed9e8a` | typed hash, path/reparse, backup/temp/replace/restore fault matrix | PASS/APPROVED | three-OS runtime evidence gap noted above |
 | User environment mutation | #66 | Complete through Task 4 | `f4f55ec..620448a` | full 3x3 state, backup, member fault, notification boundary matrix | PASS/APPROVED | coordinator journaling/recovery remains Task 5 |
-| Transaction and rollback | #66 | In progress through Task 5d3b1 | `2d88eff..b044798` | journal/store, exact artifact reuse, terminal/active Apply recovery, file and single-environment rollback recovery, apply/compensation, and lock-lifetime evidence above | Tasks through 5d3b1 and Lock A-C PASS/APPROVED | mixed active/committed rollback recovery and normal rollback producer remain |
+| Transaction and rollback | #66 | In progress through Task 5d3b2a | `2d88eff..b74029b` | journal/store, exact artifact reuse, terminal/active Apply recovery, file, single-environment, and mixed active/committed rollback recovery, apply/compensation, and lock-lifetime evidence above | Tasks through 5d3b2a and Lock A-C PASS/APPROVED | committed lagging-ledger reconciliation and notification ambiguity remain; normal rollback producer remains |
 | Shared setup commands | #66 | Pending | - | - | - | - |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
@@ -48,10 +49,10 @@ Updated: 2026-07-13
 | Versioned ownership ledger | Schema fixtures, unknown-version rejection, close/reopen persistence | SetupStorageTests 44/44 and SetupJournalStoreTests 99/99; v1 only, bounded read, notification replay state, truthful compensation phases, atomic retry/reopen; independent review PASS/APPROVED |
 | Public setup wire contract | Canonical literal plan/status/error fixtures, every enum mapping, fixed-code catalog, sole serializer | SetupContractShapeTests 47/47; independent review PASS/APPROVED |
 | Repository-safe DTO validation | Exact/over bounds, canonical manifest membership, origin-only endpoint, fixed non-echo failures, recovery/lifecycle matrix | SetupContractValidationTests 74/74; independent review PASS/APPROVED |
-| Stale plan/apply and rollback | Barrier-controlled hash changes without sleeps | Apply preflight and post-mutation full-target verification covered by SetupApplyTests 55/55; file and single-environment rollback restart recovery covers stale/no-op/third-party/unavailable classification and retry admission in SetupRecoveryTests 245/245; mixed and normal rollback remain pending |
+| Stale plan/apply and rollback | Barrier-controlled hash changes without sleeps | Apply preflight and post-mutation full-target verification covered by SetupApplyTests 55/55; file, single-environment, and mixed rollback restart recovery covers stale/no-op/third-party/unavailable classification and retry admission in SetupRecoveryTests 254/254; normal rollback remains pending |
 | Atomic file update | Backup/temp/replace fault injection and restart-visible state | SetupFileStepTests 65/65; capture/durable-backup/write split plus fault/rebind matrix; independent review PASS/APPROVED |
 | Partial compensation | Deterministic multi-target failure at each boundary | SetupCompensationTests 24/24 cover file plus ENV_A/B/C forward/restore faults, reverse order, third-party preservation, restored/partial journal-before-ledger ordering; independent review PASS/APPROVED |
-| Crash recovery | Pre-file/per-env-member mutation and restore intents; deterministic faults before/during/after each step; close/reopen recovery classifies prior/desired/partial/foreign states | Apply terminal, notification-only, file active, environment active, mixed recovery, and interrupted file/single-environment rollback covered by SetupRecoveryTests 245/245; Recovery+Journal 487/487; actual Apply producer→reopened Recovery consumer passes; mixed active/committed rollback remains pending |
+| Crash recovery | Pre-file/per-env-member mutation and restore intents; deterministic faults before/during/after each step; close/reopen recovery classifies prior/desired/partial/foreign states | Apply terminal, notification-only, file active, environment active, mixed recovery, and interrupted file/single-environment/mixed rollback covered by SetupRecoveryTests 254/254; Recovery+Journal 576/576; actual Apply producer→reopened Recovery consumer passes; committed lagging-ledger reconciliation and notification ambiguity remain |
 | Recovery result correlation | Producer DTO tests distinguish requested/created and recovered change-set IDs for plan/apply/rollback/status, including failed-recovery status projection | Pending |
 | Status hard cap | 99/100/101 fixtures, recovery-blocking/planned/terminal priority, UUID tie-break, and filter-before-cap | Pending |
 | Apply-time revalidation | Endpoint ownership, supported version, and managed state changed after plan produce no backup/journal/ledger transition/write | Generic required revalidator boundary and fixed no-artifact matrix pass in SetupApplyTests; real GitHub Copilot implementation remains Task 8b |
@@ -69,9 +70,11 @@ Updated: 2026-07-13
 
 - The canonical physical-target/member-change DTO is defined but has not yet
   been compiled or consumed across the CLI/PowerShell boundary.
-- Mixed active/committed rollback recovery and the normal rollback producer are
-  not yet implemented or independently reviewed; file and single-environment
-  rollback recovery evidence is complete through Task 5d3b1.
+- The normal rollback producer is not yet implemented or independently
+  reviewed; file, single-environment, and mixed active/committed rollback
+  recovery evidence is complete through Task 5d3b2a. Committed lagging-ledger
+  reconciliation and notification ambiguity remain explicit follow-up review
+  items.
 - Supported keys and floors are fixed from official sources: stable VS Code
   1.128+ for apply and terminal Copilot CLI 1.0.4+.
 - HTTP, proxy, and UI DTOs are explicitly N/A; independent re-review is pending.
