@@ -427,6 +427,25 @@ it into compensation.
 
 Apply rules:
 
+Before any mutation artifact is created, the framework revalidates the
+immutable plan's operation coherence. For a current-user environment target,
+each member is framework-verifiable and its operation must exactly match the
+observed current-to-desired missing/present transition and value: `no-op` has
+the same state and value, `add` is missing-to-present, `replace` is
+present-to-present with a different desired value, and `remove` is
+present-to-missing. An immutable mismatch fails `recovery_required` before any
+backup, journal, ledger row or transition, or target write; an inconsistent
+plan creates no ownership artifact.
+
+For opaque file, JSON/JSONC, or TOML transaction content, generic framework
+revalidation is aggregate only: all member operations are `no-op` if and only
+if whole current bytes equal whole desired bytes, and at least one member
+operation is non-`no-op` if and only if those byte sequences differ. The
+framework does not infer a logical per-member `add`, `replace`, or `remove`
+from opaque bytes. The owning adapter must perform mandatory apply-time
+revalidation of the exact logical file-member operation semantics; an immutable
+mismatch has the same `recovery_required` and no-ownership-artifact outcome.
+
 1. validate all plan base hashes, target paths, non-reparse ancestry, supported
    target versions, managed states, and every distinct writable endpoint before
    any backup, journal, ledger transition, or target write;
