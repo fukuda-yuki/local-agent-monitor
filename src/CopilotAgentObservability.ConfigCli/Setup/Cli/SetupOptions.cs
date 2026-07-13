@@ -98,7 +98,7 @@ internal sealed record SetupOptions(
             return Failure(SetupCodes.InvalidArguments);
         }
 
-        if (!IsSafeSlug(adapter) || !IsSafeSlug(target))
+        if (!IsSafeSlug(adapter) || string.IsNullOrEmpty(target))
         {
             return Failure(SetupCodes.InvalidArguments);
         }

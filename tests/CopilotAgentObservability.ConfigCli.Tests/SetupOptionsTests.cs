@@ -348,11 +348,8 @@ public class SetupOptionsTests
     }
 
     [Theory]
-    [InlineData("Future-target")]
-    [InlineData("future--target")]
-    [InlineData("future_target")]
-    [InlineData("../future-target")]
-    public void Parse_ReturnsInvalidArgumentsForUnsafeTargetSyntaxWithoutEchoingTheValue(string target)
+    [MemberData(nameof(ForwardedTargets))]
+    public void Parse_Plan_ForwardsEveryNonEmptyTargetVerbatim(string target)
     {
         var result = SetupOptions.Parse(
         [
@@ -364,9 +361,26 @@ public class SetupOptionsTests
             target,
         ]);
 
+        var options = Assert.IsType<SetupOptions>(result.Options);
+        Assert.Null(result.Code);
+        Assert.Equal(target, options.Target);
+    }
+
+    [Fact]
+    public void Parse_Plan_ReturnsInvalidArgumentsForEmptyTarget()
+    {
+        var result = SetupOptions.Parse(
+        [
+            "setup",
+            "plan",
+            "--adapter",
+            "github-copilot",
+            "--target",
+            "",
+        ]);
+
         Assert.Null(result.Options);
         Assert.Equal(SetupCodes.InvalidArguments, result.Code);
-        Assert.DoesNotContain(target, result.Code, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -410,4 +424,15 @@ public class SetupOptionsTests
         Assert.Equal(SetupCodes.InvalidArguments, result.Code);
         Assert.DoesNotContain(changeSetId, result.Code, StringComparison.Ordinal);
     }
+
+    public static TheoryData<string> ForwardedTargets => new()
+    {
+        "Future-Target",
+        "future--target",
+        "future_target",
+        "../future/target.json",
+        "対象",
+        " ",
+        new string('t', 129),
+    };
 }
