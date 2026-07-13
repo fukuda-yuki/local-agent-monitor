@@ -233,9 +233,91 @@ public sealed class SetupApplyTests
         Assert.Equal(exactFileBackup, fixture.Platform.ReadSeededFile(fileBackup));
         Assert.True(fixture.Platform.FileSystem.FileExists(
             fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.EnvironmentRecordId)));
+        var environmentBackup = fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.EnvironmentRecordId);
+        Assert.Equal(2, fixture.Platform.Operations.Skip(operationCount).Count(operation =>
+            operation == $"file.read-bounded:{fileBackup}:{exactFileBackup.Length}"));
+        Assert.Equal(2, fixture.Platform.Operations.Skip(operationCount).Count(operation =>
+            operation == $"file.read-bounded:{environmentBackup}:{2 * 1024 * 1024}"));
         Assert.DoesNotContain(
             fixture.Platform.Operations.Skip(operationCount),
             operation => IsWriteOperation(operation) && operation.Contains(fileBackup, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false, "malformed")]
+    [InlineData(false, "reparse")]
+    [InlineData(true, "malformed")]
+    [InlineData(true, "reparse")]
+    public void Apply_FreshArtifactsValidateEveryExistingBackupBeforeCreatingAnyMissing(
+        bool reverseTargetOrder,
+        string invalidKind)
+    {
+        var fixture = ApplyFixture.Create(reverseTargetOrder: reverseTargetOrder);
+        var missingRecordId = reverseTargetOrder ? fixture.EnvironmentRecordId : fixture.FileRecordId;
+        var invalidRecordId = reverseTargetOrder ? fixture.FileRecordId : fixture.EnvironmentRecordId;
+        var missingPath = fixture.Paths.GetBackup(fixture.ChangeSetId, missingRecordId);
+        var invalidPath = fixture.Paths.GetBackup(fixture.ChangeSetId, invalidRecordId);
+        fixture.SeedExactBackup(invalidRecordId);
+        if (invalidKind == "malformed")
+        {
+            fixture.Platform.SeedFile(
+                invalidPath,
+                fixture.Platform.ReadSeededFile(invalidPath).Append((byte)0xff).ToArray());
+        }
+        else
+        {
+            fixture.Platform.SeedPathMetadata(
+                invalidPath,
+                new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        }
+        var invalidBytes = fixture.Platform.ReadSeededFile(invalidPath);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.False(fixture.Platform.FileSystem.FileExists(missingPath));
+        Assert.Equal(invalidBytes, fixture.Platform.ReadSeededFile(invalidPath));
+        Assert.False(fixture.Platform.FileSystem.FileExists(fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)));
+        AssertApplyInputsUnchanged(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Apply_FreshArtifactsValidateReboundExistingBackupBeforeCreatingAnyMissing(
+        bool reverseTargetOrder)
+    {
+        var fixture = ApplyFixture.Create(reverseTargetOrder: reverseTargetOrder);
+        var missingRecordId = reverseTargetOrder ? fixture.EnvironmentRecordId : fixture.FileRecordId;
+        var invalidRecordId = reverseTargetOrder ? fixture.FileRecordId : fixture.EnvironmentRecordId;
+        var missingPath = fixture.Paths.GetBackup(fixture.ChangeSetId, missingRecordId);
+        var invalidPath = fixture.Paths.GetBackup(fixture.ChangeSetId, invalidRecordId);
+        fixture.SeedExactBackup(invalidRecordId);
+        var invalidBytes = fixture.Platform.ReadSeededFile(invalidPath);
+        var maximumBytes = reverseTargetOrder ? invalidBytes.Length : 2 * 1024 * 1024;
+        using var barrier = fixture.Platform.AddBarrier($"file.read-bounded:{invalidPath}:{maximumBytes}");
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+            fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        barrier.WaitUntilReached(CancellationToken.None);
+        fixture.Platform.SeedPathMetadata(
+            invalidPath,
+            new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        barrier.Release();
+        var exception = await applying;
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.False(fixture.Platform.FileSystem.FileExists(missingPath));
+        Assert.Equal(invalidBytes, fixture.Platform.ReadSeededFile(invalidPath));
+        Assert.False(fixture.Platform.FileSystem.FileExists(fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)));
+        AssertApplyInputsUnchanged(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
     }
 
     [Fact]
@@ -918,13 +1000,15 @@ public sealed class SetupApplyTests
             bool fileNoChange,
             bool environmentANoChange,
             bool environmentNoChange,
-            bool includeEnvironment)
+            bool includeEnvironment,
+            bool reverseTargetOrder)
         {
             Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 12, 1, 2, 3, TimeSpan.Zero));
             Paths = new SetupRuntimePaths(Platform);
             ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000101");
             FileRecordId = Guid.Parse("00000000-0000-7000-8000-000000000102");
             EnvironmentRecordId = Guid.Parse("00000000-0000-7000-8000-000000000103");
+            ReverseTargetOrder = reverseTargetOrder;
             TargetPath = Path.Combine(Platform.LocalApplicationData, "settings.json");
             Platform.SeedDirectory("C:\\");
             Platform.SeedDirectory(Platform.LocalApplicationData);
@@ -973,6 +1057,11 @@ public sealed class SetupApplyTests
                     plan.Targets[1].BaseStateHash, null, null, null, SetupLedgerRollbackStatus.NotAvailable,
                     SetupRestartRequirement.RestartTerminalSession, "1.0.0"));
             }
+            if (reverseTargetOrder)
+            {
+                plan = plan with { Targets = plan.Targets.Reverse().ToArray() };
+                ledgerTargets.Reverse();
+            }
             var ledgerChangeSet = new SetupLedgerChangeSet(
                 ChangeSetId, "github-copilot", "vscode", Platform.Clock.UtcNow, Platform.Clock.UtcNow,
                 "1.0.0", null, SetupChangeSetState.Planned,
@@ -992,6 +1081,7 @@ public sealed class SetupApplyTests
         public Guid ChangeSetId { get; }
         public Guid FileRecordId { get; }
         public Guid EnvironmentRecordId { get; }
+        public bool ReverseTargetOrder { get; }
         public string TargetPath { get; }
         public RecordingRevalidator Revalidator { get; }
         public SetupApplyCoordinator Coordinator { get; }
@@ -1034,7 +1124,7 @@ public sealed class SetupApplyTests
             var fileCapture = fileStep.Capture(Path.GetDirectoryName(TargetPath)!, TargetPath);
             var environmentStep = new UserEnvironmentSetupStep(Platform);
             var environmentCapture = environmentStep.Capture(["ENV_A", "ENV_B"]);
-            return
+            IReadOnlyList<SetupJournalTarget> targets =
             [
                 new SetupJournalTarget(
                     FileRecordId,
@@ -1063,6 +1153,7 @@ public sealed class SetupApplyTests
                             SetupJournalStepPhase.Pending),
                     ])
             ];
+            return ReverseTargetOrder ? targets.Reverse().ToArray() : targets;
         }
 
         public void SeedPreparedJournal(
@@ -1092,12 +1183,14 @@ public sealed class SetupApplyTests
             bool fileNoChange = false,
             bool environmentANoChange = false,
             bool environmentNoChange = false,
-            bool includeEnvironment = true) => new(
+            bool includeEnvironment = true,
+            bool reverseTargetOrder = false) => new(
                 noChanges,
                 fileNoChange,
                 environmentANoChange,
                 environmentNoChange,
-                includeEnvironment);
+                includeEnvironment,
+                reverseTargetOrder);
 
         public SetupLedgerChangeSet LoadChangeSet()
         {

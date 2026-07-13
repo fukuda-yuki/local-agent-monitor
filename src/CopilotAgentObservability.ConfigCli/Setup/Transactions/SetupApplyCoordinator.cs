@@ -818,28 +818,73 @@ internal sealed class SetupApplyCoordinator
         IReadOnlyList<TargetCapture> captures,
         bool requireExisting)
     {
-        if (!requireExisting)
+        if (requireExisting)
+        {
+            foreach (var capture in captures)
+            {
+                var backupPath = paths.GetBackup(plan.ChangeSetId, capture.Target.RecordId);
+                if (!platform.FileSystem.GetPathMetadata(backupPath).Exists)
+                {
+                    throw new SetupApplyException(SetupCodes.RecoveryRequired);
+                }
+
+                CreateOrValidateBackup(capture, backupPath);
+            }
+
+            return;
+        }
+
+        var existing = new List<TargetCapture>();
+        var missing = new List<TargetCapture>();
+        foreach (var capture in captures)
+        {
+            var backupPath = paths.GetBackup(plan.ChangeSetId, capture.Target.RecordId);
+            if (platform.FileSystem.GetPathMetadata(backupPath).Exists)
+            {
+                existing.Add(capture);
+            }
+            else
+            {
+                missing.Add(capture);
+            }
+        }
+
+        foreach (var capture in existing)
+        {
+            CreateOrValidateBackup(
+                capture,
+                paths.GetBackup(plan.ChangeSetId, capture.Target.RecordId));
+        }
+
+        if (missing.Count > 0)
         {
             platform.FileSystem.CreateDirectory(paths.Backups);
             platform.FileSystem.CreateDirectory(Path.Combine(paths.Backups, plan.ChangeSetId.ToString("D")));
+            foreach (var capture in missing)
+            {
+                CreateOrValidateBackup(
+                    capture,
+                    paths.GetBackup(plan.ChangeSetId, capture.Target.RecordId));
+            }
         }
 
         foreach (var capture in captures)
         {
-            var backupPath = paths.GetBackup(plan.ChangeSetId, capture.Target.RecordId);
-            if (requireExisting && !platform.FileSystem.GetPathMetadata(backupPath).Exists)
-            {
-                throw new SetupApplyException(SetupCodes.RecoveryRequired);
-            }
+            CreateOrValidateBackup(
+                capture,
+                paths.GetBackup(plan.ChangeSetId, capture.Target.RecordId));
+        }
+    }
 
-            if (capture.File is not null)
-            {
-                fileStep.CreateOrValidateBackup(backupPath, capture.File);
-            }
-            else
-            {
-                environmentStep.CreateOrValidateBackup(backupPath, capture.Environment!);
-            }
+    private void CreateOrValidateBackup(TargetCapture capture, string backupPath)
+    {
+        if (capture.File is not null)
+        {
+            fileStep.CreateOrValidateBackup(backupPath, capture.File);
+        }
+        else
+        {
+            environmentStep.CreateOrValidateBackup(backupPath, capture.Environment!);
         }
     }
 
