@@ -470,7 +470,11 @@ internal sealed class SetupApplyCoordinator
 
         return TryCompleteRestore(setupLock, changeSetId, target.RecordId, step.MemberKey)
             ? null
-            : new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+            : new CompensationFailure(
+                target.RecordId,
+                SetupCodes.InternalError,
+                SetupLedgerRollbackStatus.Failed,
+                RequiresRecovery: true);
     }
 
     private CompensationFailure? ClassifyRestoreFailure(
@@ -485,7 +489,11 @@ internal sealed class SetupApplyCoordinator
         {
             return TryCompleteRestore(setupLock, changeSetId, target.RecordId, step.MemberKey)
                 ? null
-                : new CompensationFailure(target.RecordId, SetupCodes.InternalError, SetupLedgerRollbackStatus.Failed);
+                : new CompensationFailure(
+                    target.RecordId,
+                    SetupCodes.InternalError,
+                    SetupLedgerRollbackStatus.Failed,
+                    RequiresRecovery: true);
         }
 
         return afterFailure == CompensationClassification.ThirdParty
@@ -542,7 +550,15 @@ internal sealed class SetupApplyCoordinator
         }
         catch (Exception)
         {
-            return false;
+            try
+            {
+                return ReloadStep(changeSetId, recordId, memberKey).Phase ==
+                    SetupJournalStepPhase.RestoreCompleted;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
     }
 

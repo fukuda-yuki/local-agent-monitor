@@ -677,37 +677,196 @@ public sealed class SetupCompensationTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Apply_RestoreCompletionWriteFaultStopsWithoutRestoringEarlierSteps(bool afterEffect)
+    public async Task Apply_EnvironmentRestoreIntentJournalFaultRequiresDurableIntentBeforeRestore(bool afterEffect)
+    {
+        var fixture = CompensationFixture.Create();
+        var classificationReady = new TaskCompletionSource<SetupTestBarrier>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Platform.InjectAfterEffectFault(
+            "environment.set:ENV_B",
+            new IOException("FORWARD_PRIVATE"),
+            () => classificationReady.SetResult(fixture.Platform.AddBarrier("environment.get:ENV_B")));
+
+        SetupApplyException exception;
+        string journalFaultOperation;
+        using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
+        {
+            var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+                fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+            using var classification = await classificationReady.Task;
+            classification.WaitUntilReached(CancellationToken.None);
+            journalFaultOperation = InjectNextJournalWriteFault(fixture, afterEffect);
+            classification.Release();
+            exception = await applying;
+        }
+
+        if (afterEffect)
+        {
+            Assert.Equal(SetupCodes.InternalError, exception.Code);
+            AssertFullyRestored(fixture);
+            Assert.True(
+                LastIndexOf(fixture.Platform.Operations, journalFaultOperation) <
+                LastIndexOf(fixture.Platform.Operations, "environment.set:ENV_B"));
+            return;
+        }
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal(1, fixture.Platform.Operations.Count(operation => operation == "environment.set:ENV_B"));
+        AssertCompensatingStep(fixture, fixture.EnvironmentRecordId, "ENV_B", SetupJournalStepPhase.MutationStarted);
+
+        AssertRecoveredAfterReopen(fixture);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Apply_FileRestoreIntentJournalFaultRequiresDurableIntentBeforeRestore(bool afterEffect)
+    {
+        var fixture = CompensationFixture.Create(includeEnvironment: false);
+        using var forwardReady = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterMutationIntentBeforeMutation}");
+        var classificationReady = new TaskCompletionSource<SetupTestBarrier>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        SetupApplyException exception;
+        string journalFaultOperation;
+        using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
+        {
+            var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+                fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+            forwardReady.WaitUntilReached(CancellationToken.None);
+            var forwardTemporary = NextTemporaryPath(fixture.Platform.Operations, fixture.TargetPath);
+            fixture.Platform.InjectAfterEffectFault(
+                $"file.replace:{forwardTemporary}->{fixture.TargetPath}",
+                new IOException("FORWARD_PRIVATE"),
+                () => classificationReady.SetResult(
+                    fixture.Platform.AddBarrier($"file.read:{fixture.TargetPath}")));
+            forwardReady.Release();
+
+            using var classification = await classificationReady.Task;
+            classification.WaitUntilReached(CancellationToken.None);
+            journalFaultOperation = InjectNextJournalWriteFault(fixture, afterEffect);
+            classification.Release();
+            exception = await applying;
+        }
+
+        if (afterEffect)
+        {
+            Assert.Equal(SetupCodes.InternalError, exception.Code);
+            AssertFullyRestored(fixture);
+            Assert.True(
+                LastIndexOf(fixture.Platform.Operations, journalFaultOperation) <
+                LastIndexContaining(fixture.Platform.Operations, $"->{fixture.TargetPath}"));
+            return;
+        }
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal(
+            1,
+            fixture.Platform.Operations.Count(operation =>
+                operation.StartsWith("file.replace:", StringComparison.Ordinal) &&
+                operation.EndsWith($"->{fixture.TargetPath}", StringComparison.Ordinal)));
+        AssertCompensatingStep(fixture, fixture.FileRecordId, null, SetupJournalStepPhase.MutationStarted);
+
+        AssertRecoveredAfterReopen(fixture);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Apply_EnvironmentRestoreCompletionJournalFaultRequiresDurableCompletionBeforeContinuing(
+        bool afterEffect)
     {
         var fixture = CompensationFixture.Create();
         fixture.Platform.InjectAfterEffectFault("environment.set:ENV_B", new IOException("FORWARD_PRIVATE"));
-        using var barrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}");
-        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+        SetupApplyException exception;
+        string journalFaultOperation;
+        using (var barrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}"))
+        using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
+        {
+            var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+                fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+            barrier.WaitUntilReached(CancellationToken.None);
+            journalFaultOperation = InjectNextJournalWriteFault(fixture, afterEffect);
+            barrier.Release();
+            exception = await applying;
+        }
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
-            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
-        barrier.WaitUntilReached(CancellationToken.None);
-        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
-        var temporary = NextTemporaryPath(fixture.Platform.Operations, journalPath);
         if (afterEffect)
         {
-            fixture.Platform.InjectAfterEffectFault(
-                $"file.replace:{temporary}->{journalPath}",
-                new IOException("PRIVATE_JOURNAL"));
+            Assert.Equal(SetupCodes.InternalError, exception.Code);
+            AssertFullyRestored(fixture);
+            var operations = fixture.Platform.Operations;
+            Assert.True(
+                LastIndexOf(operations, "environment.set:ENV_B") <
+                LastIndexOf(operations, journalFaultOperation));
+            Assert.True(
+                LastIndexOf(operations, journalFaultOperation) <
+                LastIndexOf(operations, "environment.set:ENV_A"));
+            return;
         }
-        else
-        {
-            fixture.Platform.InjectFault($"file.write-new:{temporary}", new IOException("PRIVATE_JOURNAL"));
-        }
-        barrier.Release();
 
-        var exception = await applying;
-        Assert.Equal(SetupCodes.PartialApply, exception.Code);
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
         Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
         Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
         Assert.Equal("new", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
-        Assert.Equal(SetupJournalPhase.Partial, fixture.JournalStore.Load(fixture.ChangeSetId)!.Phase);
-        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+        AssertCompensatingStep(fixture, fixture.EnvironmentRecordId, "ENV_B", SetupJournalStepPhase.RestoreStarted);
+
+        AssertRecoveredAfterReopen(fixture);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Apply_FileRestoreCompletionJournalFaultRequiresDurableCompletionBeforeContinuing(bool afterEffect)
+    {
+        var fixture = CompensationFixture.Create(includeEnvironment: false);
+        using var forwardReady = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterMutationIntentBeforeMutation}");
+
+        SetupApplyException exception;
+        string journalFaultOperation;
+        using (var completionReady = fixture.Platform.AddBarrier(
+                   $"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}"))
+        using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
+        {
+            var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+                fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+            forwardReady.WaitUntilReached(CancellationToken.None);
+            var forwardTemporary = NextTemporaryPath(fixture.Platform.Operations, fixture.TargetPath);
+            fixture.Platform.InjectAfterEffectFault(
+                $"file.replace:{forwardTemporary}->{fixture.TargetPath}",
+                new IOException("FORWARD_PRIVATE"));
+            forwardReady.Release();
+
+            completionReady.WaitUntilReached(CancellationToken.None);
+            journalFaultOperation = InjectNextJournalWriteFault(fixture, afterEffect);
+            completionReady.Release();
+            exception = await applying;
+        }
+
+        if (afterEffect)
+        {
+            Assert.Equal(SetupCodes.InternalError, exception.Code);
+            AssertFullyRestored(fixture);
+            Assert.True(
+                LastIndexContaining(fixture.Platform.Operations, $"->{fixture.TargetPath}") <
+                LastIndexOf(fixture.Platform.Operations, journalFaultOperation));
+            Assert.True(
+                LastIndexOf(fixture.Platform.Operations, journalFaultOperation) <
+                LastIndexContaining(fixture.Platform.Operations, $"->{fixture.Paths.OwnershipLedger}"));
+            return;
+        }
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal("old", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        AssertCompensatingStep(fixture, fixture.FileRecordId, null, SetupJournalStepPhase.RestoreStarted);
+
+        AssertRecoveredAfterReopen(fixture);
     }
 
     [Fact]
@@ -824,6 +983,52 @@ public sealed class SetupCompensationTests
         Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
         Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
         Assert.Equal("old-c", fixture.Platform.ReadUserEnvironment("ENV_C"));
+    }
+
+    private static void AssertCompensatingStep(
+        CompensationFixture fixture,
+        Guid recordId,
+        string? memberKey,
+        SetupJournalStepPhase expectedPhase)
+    {
+        var journal = fixture.JournalStore.Load(fixture.ChangeSetId)!;
+        Assert.Equal(SetupJournalPhase.Compensating, journal.Phase);
+        Assert.Equal(
+            expectedPhase,
+            journal.Targets.Single(target => target.RecordId == recordId).Steps
+                .Single(step => string.Equals(step.MemberKey, memberKey, StringComparison.Ordinal)).Phase);
+        Assert.Equal(SetupChangeSetState.Compensating, fixture.LoadChangeSet().State);
+    }
+
+    private static void AssertRecoveredAfterReopen(CompensationFixture fixture)
+    {
+        var recovery = fixture.RecoverAfterReopen();
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, recovery.Disposition);
+        Assert.Equal(SetupCodes.InterruptedApplyRecovered, recovery.Code);
+        Assert.Equal(fixture.ChangeSetId, recovery.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Apply, recovery.Operation);
+        AssertFullyPriorValues(fixture);
+        Assert.Equal(SetupJournalPhase.Restored, fixture.JournalStore.Load(fixture.ChangeSetId)!.Phase);
+        Assert.Equal(SetupChangeSetState.Restored, fixture.LoadChangeSet().State);
+    }
+
+    private static string InjectNextJournalWriteFault(CompensationFixture fixture, bool afterEffect)
+    {
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        var temporary = NextTemporaryPath(fixture.Platform.Operations, journalPath);
+        if (afterEffect)
+        {
+            var operation = $"file.replace:{temporary}->{journalPath}";
+            fixture.Platform.InjectAfterEffectFault(
+                operation,
+                new IOException("PRIVATE_JOURNAL"));
+            return operation;
+        }
+
+        var beforeEffectOperation = $"file.write-new:{temporary}";
+        fixture.Platform.InjectFault(beforeEffectOperation, new IOException("PRIVATE_JOURNAL"));
+        return beforeEffectOperation;
     }
 
     private static string NextTemporaryPath(IReadOnlyList<string> operations, string destination)
@@ -1003,6 +1208,13 @@ public sealed class SetupCompensationTests
 
         public SetupLedgerChangeSet LoadChangeSet() =>
             LedgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
+
+        public SetupRecoveryResult RecoverAfterReopen()
+        {
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            return new SetupRecoveryCoordinator(Platform, Paths, PlanStore, LedgerStore, JournalStore)
+                .RecoverNext(acquisition.Lock!);
+        }
     }
 
     private sealed class NoOpRevalidator : ISetupApplyRevalidator
