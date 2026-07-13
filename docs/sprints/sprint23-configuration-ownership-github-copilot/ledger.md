@@ -39,6 +39,7 @@ Updated: 2026-07-14
 | Single-environment normal rollback notification ambiguity (Task 6a2b) | #66 | Complete | `db83d84` | focused 8/8; related transaction 321/321; implementation 689/689; all Setup 1,084/1,084; ConfigCli 1,412/1,412; build 0 warnings/0 errors; `git diff --check` clean; eight deterministic notification faults, direct `partial_rollback` provenance distinct from recovery provenance, and zero-I/O notification-only replay covered | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; no findings | mixed normal rollback remains pending; public Task 7 remains pending |
 | Mixed/all-NoOp normal rollback producer and race hardening (Task 6a3) | #66 | Complete | `dea01d9..a0b3256` | new producer 2/2; focused Rollback 62/62; related transaction 784/784; all Setup 1,099/1,099; ConfigCli 1,427/1,427; build 0 warnings/0 errors; `git diff --check` clean; mixed and all-NoOp environment targets, pre/post rollback races, crash/fault recovery, notification ambiguity/replay, and direct-versus-recovery provenance covered | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; no findings | status semantics/order and public Task 7 remain pending |
 | Compensation B1 continuation remediation (Task 6a4/B1) | #66 | Complete | `88cbbe5..3ce84b9` | RED 24/27, then 27/28, final 28/28; related transaction 420/420; all Setup 1,144/1,144; ConfigCli 1,472/1,472; build 0 warnings/0 errors; `git diff --check` clean | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; safe-classification continuation evidence resolved; no findings | primitive restore/completion and journal ambiguity B2, terminal hashes, and real producer coverage remain pending |
+| Compensation B2a restore-primitive continuation remediation (Task 6a4/B2a) | #66 | Complete | `d6ac6a2..d0271c7` | focused SetupCompensationTests 30/30; related transaction 422/422; all Setup 1,146/1,146; ConfigCli 1,474/1,474; solution build 0 warnings/0 errors; `git diff --check` clean; restore primitive faults are classified and reverse compensation continues without stranded earlier steps, including unavailable-state recapture | Spec PASS; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; no findings | B2b/journal ambiguity, finding 3, terminal environment hash binding, real producer coverage, producer matrix, and #66-to-#67 cross-surface interfaces remain open |
 | Apply operation/hash coherence remediation (integration P1) | #66 | Complete | `8b38ac1`, `f184cdb`, `708a7d5`, `78acf1a`, `7d42ffb`, `fae367c` | fresh combined integration 820/820; Storage 64/64; build 0 warnings/0 errors; `git diff --check` clean; operation identity/hash coherence, adapter rejection, missing-environment no-op canonicalization, and recovery/rollback consumers covered | Independent A1/A2/A3 reviews PASS; aggregate integration closure PASS; no findings for this P1 | B1 safe-classification continuation is recorded separately; primitive restore/completion and journal-ambiguity B2, terminal environment hash binding, and real Apply active-recovery producer coverage remain open |
 | Setup lock operation lifetime (Lock A-C) | #66 | Complete | `08d716c..d06ffcc` | apply/compensation/runtime/storage/journal 286/286; all Setup 663/663; ConfigCli 991/991; build 0/0 | Spec/internal PASS; Quality/Security/Concurrency APPROVED after disposal-order re-audit | Windows cross-process executed; Linux/macOS runtime not executed |
 | Ledger schema and redaction | #66 | Complete through Task 2c | `0daee69..dcb7191` | v1 fixture write-close-reopen; unknown/corrupt/no-v0; boundary faults | PASS/APPROVED | none |
@@ -92,7 +93,10 @@ Updated: 2026-07-14
   hash binding, and the real Apply producer to active-recovery consumer
   executable coverage gap. Migration review approves strict v1-only
   handling; no legacy migration is required. HTTP, proxy, and UI remain N/A.
-  Task-level approvals do not supersede the remaining integration gate.
+  Task-level approvals do not supersede the remaining integration gate. B2a
+  restore-primitive continuation is complete; B2b journal ambiguity and finding
+  3 remain open, as do terminal environment hash binding and the real producer
+  coverage gap.
 
 - The canonical physical-target/member-change DTO is defined but has not yet
   been compiled or consumed across the CLI/PowerShell boundary.
@@ -107,6 +111,8 @@ Updated: 2026-07-14
   1.128+ for apply and terminal Copilot CLI 1.0.4+.
 - HTTP, proxy, and UI DTOs are explicitly N/A; independent re-review is pending.
 - App/SDK guidance output has not yet consumed a real #66 plan DTO.
+- The producer matrix and executable #66-to-#67 cross-surface interfaces remain
+  unverified; this ledger does not close B2b or finding 3.
 - Re-audit corrections define per-step apply/rollback intents, recovery-result
   correlation, failed-recovery status projection, apply-time endpoint/version/
   policy revalidation, exact 100-entry ordering, and replayable notification;
