@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
@@ -23,6 +24,10 @@ internal sealed record SetupRecoveryResult(
 internal sealed class SetupRecoveryCoordinator
 {
     private static readonly byte[] FileBackupMagic = Encoding.ASCII.GetBytes("CAOSETUP1");
+    private static readonly byte[] EnvironmentAggregateHashDomain =
+        Encoding.ASCII.GetBytes("CAO-USER-ENV-AGGREGATE\0");
+    private static readonly Encoding EnvironmentCanonicalEncoding =
+        new UnicodeEncoding(bigEndian: true, byteOrderMark: false, throwOnInvalidBytes: true);
 
     private enum ActiveFileClassification
     {
@@ -196,7 +201,8 @@ internal sealed class SetupRecoveryCoordinator
                 journal.Phase == SetupJournalPhase.Prepared &&
                 changeSet.State == SetupChangeSetState.Applied)
             {
-                if (plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env))
+                if (plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env) &&
+                    !HasSingleEnvironmentPhysicalTarget(plan))
                 {
                     return Failed(SetupCodes.RecoveryRequired, changeSet.ChangeSetId,
                         SetupRecoveryOperation.Rollback, OverlayFailure(changeSet));
@@ -219,7 +225,8 @@ internal sealed class SetupRecoveryCoordinator
 
             if (journal.Operation == SetupJournalOperation.Rollback)
             {
-                if (plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env))
+                if (plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env) &&
+                    !HasSingleEnvironmentPhysicalTarget(plan))
                 {
                     return Failed(SetupCodes.RecoveryRequired, changeSet.ChangeSetId,
                         SetupRecoveryOperation.Rollback, OverlayFailure(changeSet));
@@ -279,14 +286,16 @@ internal sealed class SetupRecoveryCoordinator
             throw new FormatException();
         }
 
-        _ = VerifyTerminalState(plan, changeSet, journal, desired: true);
+        var terminalHashes = VerifyTerminalState(plan, changeSet, journal, desired: true);
         foreach (var target in changeSet.Targets)
         {
             var journalTarget = journal.Targets.SingleOrDefault(item => item.RecordId == target.RecordId);
             if (journalTarget is not null)
             {
-                var step = journalTarget.Steps.Single();
-                if (!string.Equals(target.AppliedStateHash, step.DesiredStateHash, StringComparison.Ordinal) ||
+                if (!string.Equals(
+                        target.AppliedStateHash,
+                        terminalHashes[target.RecordId],
+                        StringComparison.Ordinal) ||
                     !string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) ||
                     target.RollbackStatus != SetupLedgerRollbackStatus.Pending)
                 {
@@ -416,7 +425,7 @@ internal sealed class SetupRecoveryCoordinator
         RequireImmutableIdentity(plan, changeSet);
         if (journal.ChangeSetId != changeSet.ChangeSetId ||
             journal.Operation != SetupJournalOperation.Rollback ||
-            journal.EnvironmentNotification != SetupEnvironmentNotification.NotRequired)
+            journal.EnvironmentNotification != ExpectedActiveNotification(journal))
         {
             throw new FormatException();
         }
@@ -427,7 +436,6 @@ internal sealed class SetupRecoveryCoordinator
         {
             if (journalTargets.TryGetValue(target.RecordId, out var journalTarget))
             {
-                var step = journalTarget.Steps.Single();
                 var interruptedTerminalRetry =
                     changeSet.State == SetupChangeSetState.Partial &&
                     string.Equals(changeSet.OutcomeCode, SetupCodes.InterruptedRecoveryFailed, StringComparison.Ordinal) &&
@@ -437,7 +445,17 @@ internal sealed class SetupRecoveryCoordinator
                     ? target.RollbackStatus is SetupLedgerRollbackStatus.Pending or
                         SetupLedgerRollbackStatus.Stale or SetupLedgerRollbackStatus.Failed || interruptedTerminalRetry
                     : target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
-                if (!string.Equals(target.AppliedStateHash, step.DesiredStateHash, StringComparison.Ordinal) ||
+                var planTarget = plan.Targets.Single(item => item.RecordId == target.RecordId);
+                var appliedHashMatches = target.TargetKind == SetupTargetKind.Env
+                    ? string.Equals(
+                        target.AppliedStateHash,
+                        ExpectedEnvironmentAppliedHash(plan.ChangeSetId, planTarget),
+                        StringComparison.Ordinal)
+                    : journalTarget.Steps.Count == 1 && string.Equals(
+                        target.AppliedStateHash,
+                        journalTarget.Steps[0].DesiredStateHash,
+                        StringComparison.Ordinal);
+                if (!appliedHashMatches ||
                     !string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) ||
                     !rollbackStatusMatches)
                 {
@@ -572,6 +590,11 @@ internal sealed class SetupRecoveryCoordinator
         else if (step.Phase != SetupJournalStepPhase.RestoreStarted)
         {
             return ActiveFileStepOutcome.Unavailable;
+        }
+
+        if (classification is ActiveFileClassification.ThirdParty or ActiveFileClassification.Unavailable)
+        {
+            return ClassificationFailure(classification);
         }
 
         if (classification == ActiveFileClassification.Desired)
@@ -711,6 +734,12 @@ internal sealed class SetupRecoveryCoordinator
                     : target).ToArray(),
             };
             SaveChangeSetOrConfirm(setupLock, ledger, recovered);
+            var durableJournal = LoadJournalForRecovery(original.ChangeSetId);
+            if (durableJournal?.EnvironmentNotification == SetupEnvironmentNotification.Pending)
+            {
+                return CompleteNotification(setupLock, ledger, recovered, durableJournal);
+            }
+
             return Recovered(recovered, SetupRecoveryOperation.Rollback);
         }
         catch (Exception)
@@ -2134,6 +2163,52 @@ internal sealed class SetupRecoveryCoordinator
         member.Operation == SetupOperation.Remove
             ? UserEnvironmentValue.Missing
             : UserEnvironmentValue.Present(member.DesiredValue!);
+
+    private static bool HasSingleEnvironmentPhysicalTarget(SetupPrivatePlan plan)
+    {
+        var physicalTargets = plan.Targets
+            .Where(target => target.TargetKind != SetupTargetKind.Guidance)
+            .ToArray();
+        return physicalTargets.Length == 1 && physicalTargets[0].TargetKind == SetupTargetKind.Env;
+    }
+
+    private string ExpectedEnvironmentAppliedHash(Guid changeSetId, SetupPrivatePlanTarget target)
+    {
+        var names = target.Members.Select(member => member.SettingKey).ToArray();
+        var backup = environmentStep.ReadBackup(paths.GetBackup(changeSetId, target.RecordId), names);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(EnvironmentAggregateHashDomain);
+        AppendEnvironmentUInt32(hash, checked((uint)target.Members.Count));
+        for (var index = 0; index < target.Members.Count; index++)
+        {
+            var member = target.Members[index];
+            var value = member.Operation == SetupOperation.NoOp
+                ? backup.Members[index].Value
+                : DesiredEnvironmentValue(member);
+            AppendEnvironmentString(hash, member.SettingKey);
+            hash.AppendData([value.Exists ? (byte)1 : (byte)0]);
+            if (value.Exists)
+            {
+                AppendEnvironmentString(hash, value.Value!);
+            }
+        }
+
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
+
+    private static void AppendEnvironmentString(IncrementalHash hash, string value)
+    {
+        var bytes = EnvironmentCanonicalEncoding.GetBytes(value);
+        AppendEnvironmentUInt32(hash, checked((uint)bytes.Length));
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendEnvironmentUInt32(IncrementalHash hash, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(bytes, value);
+        hash.AppendData(bytes);
+    }
 
     private static string GetAllowedRoot(string targetPath) =>
         Path.GetDirectoryName(targetPath) ?? throw new FormatException();
