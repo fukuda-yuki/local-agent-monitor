@@ -204,6 +204,135 @@ public sealed class SetupJournalStoreTests
         Assert.DoesNotContain(destination, exception.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData("write", false)]
+    [InlineData("write", true)]
+    [InlineData("flush", false)]
+    [InlineData("flush", true)]
+    [InlineData("replace", false)]
+    [InlineData("replace", true)]
+    public void SupersedeWithPreparedRollback_FaultBoundaryReopensAsExactOldOrNewAndRetryPreservesReboundTemporary(
+        string boundary,
+        bool afterEffect)
+    {
+        var context = CreateCommittedApplyContext();
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var oldBytes = context.Platform.ReadSeededFile(destination);
+        var temporary = Temporary(destination, 11);
+        var operation = boundary switch
+        {
+            "write" => $"file.write-new:{temporary}",
+            "flush" => $"file.flush:{temporary}",
+            _ => $"file.replace:{temporary}->{destination}",
+        };
+        InjectFault(context.Platform, operation, afterEffect);
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, ValidTargets()));
+
+        Assert.Equal(SetupStorageCodes.WriteFailed, exception.Code);
+        Assert.DoesNotContain("PRIVATE_PATH_MARKER", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(destination, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths);
+        var durable = reopened.Load(ChangeSetId)!;
+        var replacementTookEffect = boundary == "replace" && afterEffect;
+        Assert.Equal(replacementTookEffect ? SetupJournalOperation.Rollback : SetupJournalOperation.Apply, durable.Operation);
+        Assert.Equal(replacementTookEffect ? SetupJournalPhase.Prepared : SetupJournalPhase.Committed, durable.Phase);
+        Assert.Equal(CreatedAt, durable.CreatedAt);
+        Assert.Equal(ChangeSetId, durable.ChangeSetId);
+        Assert.Equivalent(ValidTargets(), PendingTargets(durable.Targets), strict: true);
+        if (!replacementTookEffect)
+        {
+            Assert.Equal(oldBytes, context.Platform.ReadSeededFile(destination));
+        }
+
+        var durableBytes = context.Platform.ReadSeededFile(destination);
+        var reboundBytes = Encoding.UTF8.GetBytes("foreign-rebound-temporary");
+        context.Platform.SeedFile(temporary, reboundBytes);
+        var operationsBeforeRetry = context.Platform.Operations.Count;
+
+        var result = reopened.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, ValidTargets());
+
+        Assert.Equal(
+            replacementTookEffect ? SetupPreparedJournalOpenResult.Reused : SetupPreparedJournalOpenResult.Created,
+            result);
+        var rollbackBytes = context.Platform.ReadSeededFile(destination);
+        if (replacementTookEffect)
+        {
+            Assert.Equal(durableBytes, rollbackBytes);
+            Assert.DoesNotContain(context.Platform.Operations.Skip(operationsBeforeRetry), IsWriteOperation);
+        }
+        else
+        {
+            Assert.Contains($"file.replace:{Temporary(destination, 12)}->{destination}", context.Platform.Operations);
+        }
+
+        var rollback = new SetupTransactionJournalStore(context.Platform, context.Paths).Load(ChangeSetId)!;
+        Assert.Equal(SetupJournalOperation.Rollback, rollback.Operation);
+        Assert.Equal(SetupJournalPhase.Prepared, rollback.Phase);
+        Assert.Equal(CreatedAt, rollback.CreatedAt);
+        Assert.Equal(ChangeSetId, rollback.ChangeSetId);
+        Assert.Equivalent(ValidTargets(), rollback.Targets, strict: true);
+        Assert.Equal(reboundBytes, context.Platform.ReadSeededFile(temporary));
+        Assert.DoesNotContain($"file.delete:{temporary}", context.Platform.Operations);
+    }
+
+    [Theory]
+    [InlineData("regular-content")]
+    [InlineData("reparse")]
+    public async Task SupersedeWithPreparedRollback_DestinationReboundBeforeReplaceFailsClosedWithoutOverwrite(
+        string reboundKind)
+    {
+        var context = CreateCommittedApplyContext();
+        context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
+        var destination = context.Paths.GetTransactionJournal(ChangeSetId);
+        var oldBytes = context.Platform.ReadSeededFile(destination);
+        var temporary = Temporary(destination, 11);
+        using var barrier = context.Platform.AddBarrier($"file.flush:{temporary}");
+        var operationsBefore = context.Platform.Operations.Count;
+
+        var supersede = Task.Run(() => Assert.Throws<SetupStorageException>(() =>
+            context.Store.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, ValidTargets())));
+        barrier.WaitUntilReached(CancellationToken.None);
+        var foreignBytes = Encoding.UTF8.GetBytes("foreign-destination-content");
+        if (reboundKind == "reparse")
+        {
+            context.Platform.SeedPathMetadata(
+                destination,
+                new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+        }
+        else
+        {
+            context.Platform.SeedFile(destination, foreignBytes);
+        }
+
+        barrier.Release();
+        var exception = await supersede;
+
+        Assert.Equal(SetupJournalStorageCodes.Corrupt, exception.Code);
+        Assert.DoesNotContain(destination, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            $"file.replace:{temporary}->{destination}",
+            context.Platform.Operations.Skip(operationsBefore));
+        Assert.Equal(
+            reboundKind == "reparse" ? oldBytes : foreignBytes,
+            context.Platform.ReadSeededFile(destination));
+        Assert.True(context.Platform.FileSystem.FileExists(temporary));
+
+        var reboundTemporaryBytes = Encoding.UTF8.GetBytes("foreign-rebound-temporary");
+        context.Platform.SeedFile(temporary, reboundTemporaryBytes);
+        context.Platform.SeedFile(destination, oldBytes);
+        var reopened = new SetupTransactionJournalStore(context.Platform, context.Paths);
+
+        Assert.Equal(
+            SetupPreparedJournalOpenResult.Created,
+            reopened.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, ValidTargets()));
+        Assert.Equal(reboundTemporaryBytes, context.Platform.ReadSeededFile(temporary));
+        Assert.Contains($"file.replace:{Temporary(destination, 12)}->{destination}", context.Platform.Operations);
+        Assert.DoesNotContain($"file.delete:{temporary}", context.Platform.Operations);
+    }
+
     [Fact]
     public void SupersedeWithPreparedRollback_RequiresLiveSameRuntimeLock()
     {

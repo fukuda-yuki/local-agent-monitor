@@ -236,7 +236,7 @@ internal sealed partial class SetupTransactionJournalStore
                     throw new SetupStorageException(SetupJournalStorageCodes.AlreadyExists);
                 }
 
-                Save(existing with
+                SaveSuperseding(read.Bytes, existing with
                 {
                     Operation = SetupJournalOperation.Rollback,
                     Phase = SetupJournalPhase.Prepared,
@@ -371,6 +371,15 @@ internal sealed partial class SetupTransactionJournalStore
     {
         ValidateForWrite(journal);
         WriteReplace(paths.GetTransactionJournal(journal.ChangeSetId), Serialize(journal));
+    }
+
+    private void SaveSuperseding(byte[] expectedBytes, SetupTransactionJournal journal)
+    {
+        ValidateForWrite(journal);
+        WriteReplaceExpected(
+            paths.GetTransactionJournal(journal.ChangeSetId),
+            expectedBytes,
+            Serialize(journal));
     }
 
     private SetupTransactionJournal LoadRequired(Guid changeSetId) =>
@@ -515,6 +524,49 @@ internal sealed partial class SetupTransactionJournalStore
         catch (Exception)
         {
             throw new SetupStorageException(SetupStorageCodes.WriteFailed);
+        }
+    }
+
+    private void WriteReplaceExpected(string destination, byte[] expectedBytes, byte[] bytes)
+    {
+        var temporary = CreateTemporaryPath(destination);
+        try
+        {
+            platform.FileSystem.WriteNewAllBytes(temporary, bytes);
+            platform.FileSystem.FlushFile(temporary);
+            ValidateExpectedJournal(destination, expectedBytes);
+            platform.FileSystem.ReplaceFile(temporary, destination);
+        }
+        catch (SetupStorageException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            throw new SetupStorageException(SetupStorageCodes.WriteFailed);
+        }
+    }
+
+    private void ValidateExpectedJournal(string destination, byte[] expectedBytes)
+    {
+        try
+        {
+            ValidateJournalMetadata(platform.FileSystem.GetPathMetadata(destination));
+            var read = platform.FileSystem.ReadAtMostBytes(destination, MaximumJournalBytes);
+            if (!read.IsComplete || !read.Bytes.AsSpan().SequenceEqual(expectedBytes))
+            {
+                throw new FormatException();
+            }
+
+            ValidateJournalMetadata(platform.FileSystem.GetPathMetadata(destination));
+        }
+        catch (SetupStorageException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (SetupStorageException.ShouldMap(exception))
+        {
+            throw new SetupStorageException(SetupJournalStorageCodes.Corrupt);
         }
     }
 
