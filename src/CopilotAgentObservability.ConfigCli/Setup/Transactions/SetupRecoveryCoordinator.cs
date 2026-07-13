@@ -1825,6 +1825,20 @@ internal sealed class SetupRecoveryCoordinator
         SetupTransactionJournal journal)
     {
         var operation = OperationFor(journal, changeSet)!.Value;
+        try
+        {
+            ValidateTerminalNotificationEvidence(changeSet, journal);
+        }
+        catch (Exception)
+        {
+            return PersistFailure(
+                setupLock,
+                ledger,
+                changeSet,
+                operation,
+                preserveTerminalLifecycle: true);
+        }
+
         var code = operation == SetupRecoveryOperation.Apply
             ? SetupCodes.InterruptedApplyRecovered
             : SetupCodes.InterruptedRollbackRecovered;
@@ -1845,6 +1859,100 @@ internal sealed class SetupRecoveryCoordinator
         catch (Exception)
         {
             return PersistFailure(setupLock, ledger, recovered, operation, preserveTerminalLifecycle: true);
+        }
+    }
+
+    private void ValidateTerminalNotificationEvidence(
+        SetupLedgerChangeSet changeSet,
+        SetupTransactionJournal journal)
+    {
+        var planPath = paths.GetPlan(changeSet.ChangeSetId);
+        var planMetadata = platform.FileSystem.GetPathMetadata(planPath);
+        RequireRegular(planMetadata);
+        var plan = planStore.Load(changeSet.ChangeSetId) ?? throw new FormatException();
+        var recheckedPlanMetadata = platform.FileSystem.GetPathMetadata(planPath);
+        RequireRegular(recheckedPlanMetadata);
+        if (planMetadata != recheckedPlanMetadata)
+        {
+            throw new FormatException();
+        }
+
+        SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
+        var environmentTargetCount = 0;
+        for (var targetIndex = 0; targetIndex < plan.Targets.Count; targetIndex++)
+        {
+            var planTarget = plan.Targets[targetIndex];
+            if (planTarget.TargetKind != SetupTargetKind.Env ||
+                planTarget.Members.All(member => member.Operation == SetupOperation.NoOp))
+            {
+                continue;
+            }
+
+            environmentTargetCount++;
+            var ledgerTarget = changeSet.Targets[targetIndex];
+            var names = planTarget.Members.Select(member => member.SettingKey).ToArray();
+            var backup = environmentStep.ReadBackup(
+                paths.GetBackup(changeSet.ChangeSetId, planTarget.RecordId),
+                names);
+            RequireEqual(backup.AggregateHash, planTarget.BaseStateHash);
+            RequireEqual(backup.AggregateHash, ledgerTarget.PreviousStateHash);
+
+            var journalTarget = journal.Targets.Single(target => target.RecordId == planTarget.RecordId);
+            var expectedBackupReference = planTarget.RecordId.ToString("D");
+            var changedMemberIndex = 0;
+            for (var memberIndex = 0; memberIndex < planTarget.Members.Count; memberIndex++)
+            {
+                var member = planTarget.Members[memberIndex];
+                var priorHash = backup.Members[memberIndex].Hash;
+                var desiredHash = environmentStep.HashMember(
+                    member.SettingKey,
+                    SetupEnvironmentPlanValue.Desired(member));
+                if (member.Operation == SetupOperation.NoOp)
+                {
+                    RequireEqual(priorHash, desiredHash);
+                    continue;
+                }
+
+                if (string.Equals(priorHash, desiredHash, StringComparison.Ordinal) ||
+                    changedMemberIndex >= journalTarget.Steps.Count)
+                {
+                    throw new FormatException();
+                }
+
+                var journalStep = journalTarget.Steps[changedMemberIndex++];
+                if (!string.Equals(journalStep.MemberKey, member.SettingKey, StringComparison.Ordinal) ||
+                    !string.Equals(journalStep.PriorStateHash, priorHash, StringComparison.Ordinal) ||
+                    !string.Equals(journalStep.DesiredStateHash, desiredHash, StringComparison.Ordinal) ||
+                    !string.Equals(journalStep.BackupReference, expectedBackupReference, StringComparison.Ordinal))
+                {
+                    throw new FormatException();
+                }
+            }
+
+            if (changedMemberIndex != journalTarget.Steps.Count)
+            {
+                throw new FormatException();
+            }
+
+            if (changeSet.State == SetupChangeSetState.Applied)
+            {
+                if (!string.Equals(
+                        ledgerTarget.BackupReference,
+                        expectedBackupReference,
+                        StringComparison.Ordinal))
+                {
+                    throw new FormatException();
+                }
+
+                RequireEqual(
+                    ExpectedEnvironmentAppliedHash(planTarget, backup),
+                    ledgerTarget.AppliedStateHash ?? throw new FormatException());
+            }
+        }
+
+        if (environmentTargetCount == 0)
+        {
+            throw new FormatException();
         }
     }
 
@@ -2186,6 +2294,13 @@ internal sealed class SetupRecoveryCoordinator
     {
         var names = target.Members.Select(member => member.SettingKey).ToArray();
         var backup = environmentStep.ReadBackup(paths.GetBackup(changeSetId, target.RecordId), names);
+        return ExpectedEnvironmentAppliedHash(target, backup);
+    }
+
+    private static string ExpectedEnvironmentAppliedHash(
+        SetupPrivatePlanTarget target,
+        UserEnvironmentCapture backup)
+    {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData(EnvironmentAggregateHashDomain);
         AppendEnvironmentUInt32(hash, checked((uint)target.Members.Count));

@@ -666,6 +666,28 @@ recovery. Successful replay persists the recovered terminal ledger result,
 attempts notification, then marks notification complete last; any delivery or
 completion ambiguity remains pending and permits a duplicate replay.
 
+Before replaying any terminal `pending` environment notification, recovery must
+prove immutable notification identity from private artifacts without reading or
+writing a target. The private plan must be present, readable, and bound exactly
+to the ledger change set. For every changed environment target, its safe regular
+non-reparse backup must contain the plan's full ordered member list, including
+no-op members, and its aggregate hash must equal both the plan base hash and the
+ledger previous-state hash. The journal must contain exactly the changed
+environment members in plan order, with each step's key and prior-state hash
+derived from that backup, desired-state hash derived from the plan, and backup
+reference equal to the canonical lowercase record UUID. An `applied` terminal
+row additionally requires the full desired aggregate derived from the plan and
+backup to equal the ledger applied-state hash. `restored` and `rolled_back`
+terminal rows use the same plan/backup/journal identity gate but do not require
+an applied hash that their lifecycle has already cleared. A missing, unreadable,
+corrupt, rebound, or mismatched plan, backup, member hash, aggregate hash, or
+backup reference fails closed before notification: the marker remains
+`pending`, the terminal durable lifecycle remains truthful, and recovery returns
+fixed `interrupted_recovery_failed` / `Failed` through the terminal-lifecycle-
+preserving failure path. Drift in the current target does not fail this artifact
+gate and does not cause a target read. A notification already marked
+`completed` imposes no new plan or backup requirement.
+
 When recovery changes or reconciles state, the command returns the corresponding
 `interrupted_*_recovered` result immediately with next action
 `rerun_requested_setup_command`; it does not also execute the originally
@@ -924,7 +946,11 @@ Focused validation covers:
 - endpoint, supported-version, and managed-state changes between plan and apply
   produce no mutation artifacts or target writes;
 - environment notification faults before and after delivery, allowing recovery
-  replay but forbidding notification before a final state;
+  replay but forbidding notification before a final state; terminal pending
+  replay additionally proves plan/ledger/backup/journal identity, including
+  per-member prior/desired hashes and previous/applied aggregates, without
+  target reads or writes, while completed notification handling adds no artifact
+  requirement;
 - ownership preservation, repeated-apply no-op, all-no-op physical-target
   exclusion from ownership/backup quorum, and status/rollback preflight
   equivalence when that unowned target remains current, drifts, or is
@@ -941,7 +967,7 @@ Focused validation covers:
 - Release ZIP and repository wrapper invocation;
 - secret/header/value/path negative evidence.
 
-The status/ledger implementation must keep this requirement-to-test mapping:
+The setup implementation must keep this requirement-to-test mapping:
 
 | Requirement | Executable proof |
 | --- | --- |
@@ -953,6 +979,7 @@ The status/ledger implementation must keep this requirement-to-test mapping:
 | status and rollback use equivalent fresh preflight, including all-NoOp guard-only targets | paired `SetupStatusTests` and `SetupRollbackTests` fixtures assert the same availability/preflight outcome for valid state, owned-target drift, backup mismatch, and unowned all-NoOp target drift; no adapter detection is used |
 | lifecycle/reference/current aggregation and partial rollback false | `SetupStatusTests` cover planned/no-change/applied/restored/rolled-back/in-progress/partial plus desired, previous, mixed, third-party, missing, and unavailable member states |
 | filter, priority, deterministic tie-break, hard 100-row cap, truncation | `SetupStatusOrderingTests` cover adapter filter before 99/100/101-row ordering and cap, equal-priority states, timestamp order, and lowercase UUID ordinal ties |
+| terminal pending environment notification artifact identity and notification-only target isolation | `SetupRecoveryTests` use actual `SetupApplyCoordinator` artifacts for successful replay and valid-64-hex tampering of journal prior/desired hashes and ledger previous/applied aggregates; they also cover missing/corrupt/rebound plan or backup, canonical backup reference, applied/restored/rolled-back terminal lifecycles, current-target drift, no target reads/writes, preserved terminal durable lifecycle, fixed failed overlay, and unchanged completed-notification handling |
 
 Required repository validation remains:
 

@@ -667,7 +667,7 @@ public sealed class SetupRecoveryTests
     }
 
     [Fact]
-    public void RecoverNext_Notification_only_does_not_require_private_plan_or_target_read()
+    public void RecoverNext_Notification_only_missing_private_plan_fails_closed_without_target_read()
     {
         var fixture = new EnvironmentRecoveryFixture();
         fixture.SeedCommittedApplyJournalAndApplyingLedger();
@@ -678,10 +678,187 @@ public sealed class SetupRecoveryTests
 
         var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
 
-        Assert.Equal(SetupRecoveryDisposition.Recovered, result.Disposition);
-        Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupChangeSetState.Partial, result.EffectiveChangeSet?.State);
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Applied, durable.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, durable.OutcomeCode);
+        Assert.Equal(SetupEnvironmentNotification.Pending, fixture.LoadJournal().EnvironmentNotification);
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations.Skip(operationsBefore));
         Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), operation =>
             operation.StartsWith("environment.get", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(SetupChangeSetState.Applied)]
+    [InlineData(SetupChangeSetState.Restored)]
+    [InlineData(SetupChangeSetState.RolledBack)]
+    public void RecoverNext_Actual_apply_terminal_pending_notification_replays_from_artifacts_without_target_io(
+        SetupChangeSetState terminalState)
+    {
+        var fixture = new ApplyProducedRecoveryFixture();
+        fixture.ProduceTerminalPending(terminalState);
+        fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("post-terminal-file-drift"));
+        fixture.Platform.SeedUserEnvironment("ENV_A", "post-terminal-environment-drift");
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.CreateRecoveryCoordinator().RecoverNext(setupLock);
+
+        var expectedOperation = terminalState == SetupChangeSetState.RolledBack
+            ? SetupRecoveryOperation.Rollback
+            : SetupRecoveryOperation.Apply;
+        Assert.Equal(SetupRecoveryDisposition.Recovered, result.Disposition);
+        Assert.Equal(expectedOperation == SetupRecoveryOperation.Apply
+            ? SetupCodes.InterruptedApplyRecovered
+            : SetupCodes.InterruptedRollbackRecovered, result.Code);
+        Assert.Equal(expectedOperation, result.Operation);
+        Assert.Equal(terminalState, result.EffectiveChangeSet?.State);
+        Assert.Equal(terminalState, fixture.LoadChangeSet().State);
+        Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.Equal(1, operations.Count(operation => operation == "environment.notify"));
+        AssertNoMixedTargetIo(operations, fixture.TargetPath);
+        Assert.Equal("post-terminal-file-drift",
+            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
+        Assert.Equal("post-terminal-environment-drift", fixture.Platform.ReadUserEnvironment("ENV_A"));
+    }
+
+    public static TheoryData<string> TerminalPendingArtifactFailureCases => new()
+    {
+        "plan-missing",
+        "plan-corrupt",
+        "plan-rebound",
+        "backup-missing",
+        "backup-corrupt",
+        "backup-rebound",
+    };
+
+    [Theory]
+    [MemberData(nameof(TerminalPendingArtifactFailureCases))]
+    public void RecoverNext_Actual_apply_terminal_pending_missing_corrupt_or_rebound_artifact_fails_closed(
+        string variant)
+    {
+        var fixture = new ApplyProducedRecoveryFixture();
+        fixture.ProduceTerminalPending(SetupChangeSetState.Applied);
+        fixture.TamperNotificationArtifact(variant);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.CreateRecoveryCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupRecoveryOperation.Apply, result.Operation);
+        Assert.Equal(SetupChangeSetState.Partial, result.EffectiveChangeSet?.State);
+        AssertTerminalNotificationFailurePersistence(fixture, SetupChangeSetState.Applied);
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.DoesNotContain("environment.notify", operations);
+        AssertNoMixedTargetIo(operations, fixture.TargetPath);
+    }
+
+    public static TheoryData<string> TerminalPendingHashMismatchCases => new()
+    {
+        "journal-prior-hash",
+        "journal-desired-hash",
+        "plan-base-hash",
+        "backup-aggregate-hash",
+        "ledger-previous-hash",
+        "ledger-applied-hash",
+    };
+
+    [Theory]
+    [MemberData(nameof(TerminalPendingHashMismatchCases))]
+    public void RecoverNext_Actual_apply_terminal_pending_tampered_hash_fails_before_notification(string variant)
+    {
+        var fixture = new ApplyProducedRecoveryFixture();
+        fixture.ProduceTerminalPending(SetupChangeSetState.Applied);
+        fixture.TamperNotificationHash(variant);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.CreateRecoveryCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupChangeSetState.Partial, result.EffectiveChangeSet?.State);
+        AssertTerminalNotificationFailurePersistence(fixture, SetupChangeSetState.Applied);
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.DoesNotContain("environment.notify", operations);
+        AssertNoMixedTargetIo(operations, fixture.TargetPath);
+    }
+
+    [Theory]
+    [InlineData(SetupChangeSetState.Applied)]
+    [InlineData(SetupChangeSetState.Restored)]
+    [InlineData(SetupChangeSetState.RolledBack)]
+    public void RecoverNext_Terminal_pending_lifecycles_share_environment_hash_gate(
+        SetupChangeSetState terminalState)
+    {
+        var fixture = new ApplyProducedRecoveryFixture();
+        fixture.ProduceTerminalPending(terminalState);
+        fixture.TamperEnvironmentJournal("prior_state_hash", new string('a', 64));
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.CreateRecoveryCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        Assert.Equal(SetupChangeSetState.Partial, result.EffectiveChangeSet?.State);
+        AssertTerminalNotificationFailurePersistence(fixture, terminalState);
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.DoesNotContain("environment.notify", operations);
+        AssertNoMixedTargetIo(operations, fixture.TargetPath);
+    }
+
+    [Theory]
+    [InlineData(SetupChangeSetState.Restored)]
+    [InlineData(SetupChangeSetState.RolledBack)]
+    public void RecoverNext_Cleared_ownership_terminal_pending_requires_canonical_backup_reference(
+        SetupChangeSetState terminalState)
+    {
+        var fixture = new ApplyProducedRecoveryFixture();
+        fixture.ProduceTerminalPending(terminalState);
+        fixture.TamperEnvironmentJournal("backup_reference", "different-backup");
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.CreateRecoveryCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, result.Code);
+        AssertTerminalNotificationFailurePersistence(fixture, terminalState);
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.DoesNotContain("environment.notify", operations);
+        AssertNoMixedTargetIo(operations, fixture.TargetPath);
+    }
+
+    [Fact]
+    public void RecoverNext_Completed_notification_adds_no_plan_or_backup_requirement()
+    {
+        var fixture = new ApplyProducedRecoveryFixture();
+        using (var applyLock = fixture.AcquireLock())
+        {
+            Assert.Equal(SetupChangeSetState.Applied,
+                fixture.CreateApplyCoordinator().Apply(applyLock, fixture.ChangeSetId).State);
+        }
+        Assert.Equal(SetupEnvironmentNotification.Completed, fixture.LoadJournal().EnvironmentNotification);
+        fixture.Platform.FileSystem.DeleteFile(fixture.Paths.GetPlan(fixture.ChangeSetId));
+        fixture.Platform.FileSystem.DeleteFile(
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId));
+        fixture.Platform.FileSystem.DeleteFile(
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.EnvironmentRecordId));
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.CreateRecoveryCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.None, result.Disposition);
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.DoesNotContain("environment.notify", operations);
+        AssertNoMixedTargetIo(operations, fixture.TargetPath);
     }
 
     [Theory]
@@ -4300,6 +4477,18 @@ public sealed class SetupRecoveryTests
             operation.Contains(fileTargetPath, StringComparison.Ordinal));
     }
 
+    private static void AssertTerminalNotificationFailurePersistence(
+        ApplyProducedRecoveryFixture fixture,
+        SetupChangeSetState terminalState)
+    {
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(terminalState, durable.State);
+        Assert.Equal(SetupCodes.InterruptedRecoveryFailed, durable.OutcomeCode);
+        Assert.All(durable.Targets, target =>
+            Assert.Equal(SetupCodes.InterruptedRecoveryFailed, target.OutcomeCode));
+        Assert.Equal(SetupEnvironmentNotification.Pending, fixture.LoadJournal().EnvironmentNotification);
+    }
+
     private sealed class TerminalEvidenceFixture
     {
         private readonly Guid environmentRecordId =
@@ -6263,6 +6452,194 @@ public sealed class SetupRecoveryTests
             var planStore = new SetupPlanStore(Platform, Paths);
             return Assert.Single(
                 new SetupLedgerStore(Platform, Paths, planStore).LoadForRecovery().ChangeSets);
+        }
+
+        public void ProduceTerminalPending(SetupChangeSetState terminalState)
+        {
+            switch (terminalState)
+            {
+                case SetupChangeSetState.Applied:
+                    Platform.InjectFault(
+                        "environment.notify",
+                        new IOException("private-apply-notification"));
+                    using (var applyLock = AcquireLock())
+                    {
+                        _ = Assert.Throws<SetupApplyException>(() =>
+                            CreateApplyCoordinator().Apply(applyLock, ChangeSetId));
+                    }
+
+                    break;
+                case SetupChangeSetState.Restored:
+                    Platform.InjectFault(
+                        $"checkpoint:{SetupFaultPoint.AfterCompletionBeforeCommit}",
+                        new IOException("private-forward-failure"));
+                    Platform.InjectFault(
+                        "environment.notify",
+                        new IOException("private-restore-notification"));
+                    using (var applyLock = AcquireLock())
+                    {
+                        _ = Assert.Throws<SetupApplyException>(() =>
+                            CreateApplyCoordinator().Apply(applyLock, ChangeSetId));
+                    }
+
+                    break;
+                case SetupChangeSetState.RolledBack:
+                    using (var applyLock = AcquireLock())
+                    {
+                        Assert.Equal(SetupChangeSetState.Applied,
+                            CreateApplyCoordinator().Apply(applyLock, ChangeSetId).State);
+                    }
+
+                    Platform.InjectFault(
+                        "environment.notify",
+                        new IOException("private-rollback-notification"));
+                    using (var rollbackLock = AcquireLock())
+                    {
+                        var rollback = CreateRollbackCoordinator().Rollback(rollbackLock, ChangeSetId);
+                        Assert.False(rollback.Success);
+                    }
+
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(terminalState));
+            }
+
+            Assert.Equal(terminalState, LoadChangeSet().State);
+            Assert.Equal(SetupEnvironmentNotification.Pending, LoadJournal().EnvironmentNotification);
+            Assert.Equal(
+                terminalState == SetupChangeSetState.Restored
+                    ? SetupJournalPhase.Restored
+                    : SetupJournalPhase.Committed,
+                LoadJournal().Phase);
+        }
+
+        public void TamperNotificationArtifact(string variant)
+        {
+            var planPath = Paths.GetPlan(ChangeSetId);
+            var backupPath = Paths.GetBackup(ChangeSetId, EnvironmentRecordId);
+            switch (variant)
+            {
+                case "plan-missing":
+                    Platform.FileSystem.DeleteFile(planPath);
+                    break;
+                case "plan-corrupt":
+                    Platform.SeedFile(planPath, Encoding.UTF8.GetBytes("{not-json"));
+                    break;
+                case "plan-rebound":
+                    Platform.SeedPathMetadata(
+                        planPath,
+                        new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+                    break;
+                case "backup-missing":
+                    Platform.FileSystem.DeleteFile(backupPath);
+                    break;
+                case "backup-corrupt":
+                    Platform.SeedFile(backupPath, Encoding.UTF8.GetBytes("not-an-environment-backup"));
+                    break;
+                case "backup-rebound":
+                    Platform.SeedPathMetadata(
+                        backupPath,
+                        new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(variant));
+            }
+        }
+
+        public void TamperNotificationHash(string variant)
+        {
+            var replacementHash = variant switch
+            {
+                "journal-prior-hash" => new string('a', 64),
+                "journal-desired-hash" => new string('b', 64),
+                "plan-base-hash" => new string('c', 64),
+                "backup-aggregate-hash" => new string('d', 64),
+                "ledger-previous-hash" => new string('e', 64),
+                "ledger-applied-hash" => new string('f', 64),
+                _ => throw new ArgumentOutOfRangeException(nameof(variant)),
+            };
+
+            switch (variant)
+            {
+                case "journal-prior-hash":
+                    TamperEnvironmentJournal("prior_state_hash", replacementHash);
+                    return;
+                case "journal-desired-hash":
+                    TamperEnvironmentJournal("desired_state_hash", replacementHash);
+                    return;
+                case "plan-base-hash":
+                {
+                    var planStore = new SetupPlanStore(Platform, Paths);
+                    var plan = Assert.IsType<SetupPrivatePlan>(planStore.Load(ChangeSetId));
+                    using var setupLock = AcquireLock();
+                    planStore.Delete(setupLock, ChangeSetId);
+                    planStore.Create(setupLock, plan with
+                    {
+                        Targets = plan.Targets.Select(target => target.RecordId == EnvironmentRecordId
+                            ? target with { BaseStateHash = replacementHash }
+                            : target).ToArray(),
+                    });
+                    return;
+                }
+                case "backup-aggregate-hash":
+                {
+                    Platform.SeedUserEnvironment("ENV_A", "different-backup-state");
+                    var environmentStep = new UserEnvironmentSetupStep(Platform);
+                    var replacement = environmentStep.Capture(["ENV_A", "ENV_B"]);
+                    Platform.SeedUserEnvironment("ENV_A", "desired-a");
+                    var actualPath = Paths.GetBackup(ChangeSetId, EnvironmentRecordId);
+                    var replacementPath = actualPath + ".replacement";
+                    environmentStep.CreateBackup(replacementPath, replacement);
+                    Platform.SeedFile(actualPath, Platform.ReadSeededFile(replacementPath));
+                    Platform.FileSystem.DeleteFile(replacementPath);
+                    return;
+                }
+                case "ledger-previous-hash":
+                case "ledger-applied-hash":
+                {
+                    var planStore = new SetupPlanStore(Platform, Paths);
+                    var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+                    using var setupLock = AcquireLock();
+                    var ledger = ledgerStore.LoadForRecovery();
+                    var changeSet = Assert.Single(ledger.ChangeSets);
+                    ledgerStore.Save(setupLock, ledger with
+                    {
+                        ChangeSets = [changeSet with
+                        {
+                            Targets = changeSet.Targets.Select(target => target.RecordId == EnvironmentRecordId
+                                ? variant == "ledger-previous-hash"
+                                    ? target with { PreviousStateHash = replacementHash }
+                                    : target with { AppliedStateHash = replacementHash }
+                                : target).ToArray(),
+                        }],
+                    });
+                    return;
+                }
+            }
+        }
+
+        public void TamperEnvironmentJournal(string propertyName, string replacement)
+        {
+            var journalPath = Paths.GetTransactionJournal(ChangeSetId);
+            var environmentStep = Assert.Single(
+                LoadJournal().Targets.Single(target => target.RecordId == EnvironmentRecordId).Steps);
+            var original = propertyName switch
+            {
+                "prior_state_hash" => environmentStep.PriorStateHash,
+                "desired_state_hash" => environmentStep.DesiredStateHash,
+                "backup_reference" => environmentStep.BackupReference,
+                _ => throw new ArgumentOutOfRangeException(nameof(propertyName)),
+            };
+            var json = Encoding.UTF8.GetString(Platform.ReadSeededFile(journalPath));
+            var pattern = new Regex(
+                $"(\"{Regex.Escape(propertyName)}\"\\s*:\\s*\"){Regex.Escape(original)}(\")",
+                RegexOptions.CultureInvariant);
+            Assert.Single(pattern.Matches(json).Cast<Match>());
+            var tampered = pattern.Replace(
+                json,
+                match => match.Groups[1].Value + replacement + match.Groups[2].Value,
+                1);
+            Platform.SeedFile(journalPath, Encoding.UTF8.GetBytes(tampered));
         }
 
         public void InjectTwoJournalReadFaults()
