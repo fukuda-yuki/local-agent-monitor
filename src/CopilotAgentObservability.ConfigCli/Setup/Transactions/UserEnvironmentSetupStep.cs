@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
+using CopilotAgentObservability.ConfigCli.Setup.Storage;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Transactions;
 
@@ -83,6 +84,14 @@ internal sealed class UserEnvironmentSetupStep(ISetupPlatform platform)
         ValidateNames([name]);
         ValidateValue(value);
         return HashMemberCore(name, value);
+    }
+
+    internal static string HashPlannedMember(SetupPrivatePlanMember member)
+    {
+        var desired = SetupEnvironmentPlanValue.Desired(member);
+        ValidateNames([member.SettingKey]);
+        ValidateValue(desired);
+        return HashMemberCore(member.SettingKey, desired);
     }
 
     public void CreateBackup(string backupPath, UserEnvironmentCapture capture)

@@ -23,6 +23,71 @@ public sealed class SetupRollbackTests
         return new SetupStatusProjection(true, null, aggregate, null, null, expectedResult, null,
             members.Select(member => new SetupMemberChangeResult(member.SettingKey, member.Operation, "present", "configured", "none", false)).ToArray());
     }
+
+    [Fact]
+    public void Rollback_Preflight_evaluator_and_execution_accept_same_fresh_applied_state()
+    {
+        var fixture = RollbackFixture.Create();
+
+        var preflight = fixture.EvaluatePreflight();
+        var rollback = fixture.Rollback();
+
+        Assert.True(preflight.IsAvailable);
+        Assert.Equal(preflight.IsAvailable, rollback.Success);
+        Assert.Equal(SetupCodes.RollbackSucceeded, rollback.Code);
+    }
+
+    [Theory]
+    [InlineData(SetupChangeSetState.Applied, true)]
+    [InlineData(SetupChangeSetState.Restored, false)]
+    [InlineData(SetupChangeSetState.RolledBack, false)]
+    [InlineData(SetupChangeSetState.Partial, false)]
+    public void Rollback_Preflight_evaluator_uses_fresh_lifecycle(
+        SetupChangeSetState state,
+        bool expectedAvailable)
+    {
+        var fixture = RollbackFixture.Create();
+
+        var preflight = fixture.EvaluatePreflight(state);
+
+        Assert.Equal(expectedAvailable, preflight.IsAvailable);
+        Assert.Equal(
+            expectedAvailable
+                ? SetupRollbackPreflightClassification.Available
+                : SetupRollbackPreflightClassification.NotAvailable,
+            preflight.Classification);
+    }
+
+    [Theory]
+    [InlineData("all-noop-drift", SetupCodes.RollbackStale)]
+    [InlineData("third-party-drift", SetupCodes.RollbackStale)]
+    [InlineData("missing-plan", SetupCodes.RecoveryRequired)]
+    [InlineData("corrupt-plan", SetupCodes.RecoveryRequired)]
+    [InlineData("rebound-plan", SetupCodes.RecoveryRequired)]
+    [InlineData("missing-backup", SetupCodes.InternalError)]
+    [InlineData("corrupt-backup", SetupCodes.InternalError)]
+    [InlineData("rebound-backup", SetupCodes.InternalError)]
+    [InlineData("reparse-target", SetupCodes.UnsafePath)]
+    [InlineData("reparse-backup", SetupCodes.InternalError)]
+    public void Rollback_Preflight_evaluator_and_execution_reject_same_fresh_state(
+        string variant,
+        string expectedCode)
+    {
+        var fixture = RollbackFixture.Create(
+            fileCount: variant == "rebound-backup" ? 2 : 1,
+            includeEnvironment: variant == "all-noop-drift",
+            environmentAllNoOp: variant == "all-noop-drift");
+        fixture.ApplyPreflightVariant(variant);
+
+        var preflight = fixture.EvaluatePreflight();
+        var rollback = fixture.Rollback();
+
+        Assert.False(preflight.IsAvailable);
+        Assert.Equal(expectedCode, preflight.Code);
+        Assert.False(rollback.Success);
+        Assert.Equal(preflight.Code, rollback.Code);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1840,6 +1905,85 @@ public sealed class SetupRollbackTests
             var planStore = new SetupPlanStore(Platform, Paths);
             return new SetupLedgerStore(Platform, Paths, planStore).LoadForRecovery().ChangeSets
                 .Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
+        }
+
+        public SetupRollbackPreflightResult EvaluatePreflight(SetupChangeSetState? state = null)
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            SetupPrivatePlan? plan;
+            try
+            {
+                plan = planStore.Load(ChangeSetId);
+            }
+            catch (SetupStorageException)
+            {
+                plan = null;
+            }
+
+            var changeSet = LoadChangeSet();
+            if (state is not null)
+            {
+                changeSet = changeSet with { State = state.Value };
+            }
+
+            var preparation = SetupRollbackPreflightEvaluator.Prepare(
+                plan,
+                changeSet,
+                LoadJournal());
+            if (preparation.Result is not null)
+            {
+                return preparation.Result;
+            }
+
+            var evidence = Assert.IsType<SetupRollbackPreflightEvidence>(preparation.Evidence);
+            var observations = new SetupRollbackPreflightObserver(Platform, Paths).Capture(evidence);
+            return SetupRollbackPreflightEvaluator.Evaluate(evidence, observations);
+        }
+
+        public void ApplyPreflightVariant(string variant)
+        {
+            var backup = Paths.GetBackup(ChangeSetId, RecordIds[0]);
+            switch (variant)
+            {
+                case "all-noop-drift":
+                    Platform.SeedUserEnvironment("ENV_A", "third-party");
+                    break;
+                case "third-party-drift":
+                    Platform.SeedFile(TargetPaths[0], Encoding.UTF8.GetBytes("third-party"));
+                    break;
+                case "missing-plan":
+                    Platform.FileSystem.DeleteFile(Paths.GetPlan(ChangeSetId));
+                    break;
+                case "corrupt-plan":
+                    Platform.SeedFile(Paths.GetPlan(ChangeSetId), Encoding.UTF8.GetBytes("corrupt"));
+                    break;
+                case "rebound-plan":
+                    RebindLedgerToolVersion("2.0.0");
+                    break;
+                case "missing-backup":
+                    Platform.FileSystem.DeleteFile(backup);
+                    break;
+                case "corrupt-backup":
+                    Platform.SeedFile(backup, Encoding.UTF8.GetBytes("corrupt"));
+                    break;
+                case "rebound-backup":
+                    Platform.SeedFile(
+                        backup,
+                        Platform.ReadSeededFile(Paths.GetBackup(ChangeSetId, RecordIds[1])));
+                    break;
+                case "reparse-target":
+                    Platform.SeedPathMetadata(
+                        TargetPaths[0],
+                        new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+                    break;
+                case "reparse-backup":
+                    Platform.SeedPathMetadata(
+                        backup,
+                        new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(variant));
+            }
         }
 
         public void RebindLedgerToolVersion(string version)

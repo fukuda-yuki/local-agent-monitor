@@ -191,6 +191,12 @@ internal sealed class AtomicFileSetupStep(ISetupPlatform platform)
     public void ValidateBackup(string backupPath, string expectedPreviousHash) =>
         _ = ReadAndValidateBackup(backupPath, expectedPreviousHash);
 
+    public AtomicFileCapture ReadBackup(string backupPath, string expectedPreviousHash)
+    {
+        var backup = ReadAndValidateBackup(backupPath, expectedPreviousHash);
+        return new AtomicFileCapture(backup.Exists, backup.Bytes);
+    }
+
     private TargetState ReadTarget(string path)
     {
         try
