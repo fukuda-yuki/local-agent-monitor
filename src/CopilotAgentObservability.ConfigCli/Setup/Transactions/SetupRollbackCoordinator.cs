@@ -21,6 +21,7 @@ internal sealed class SetupRollbackCoordinator
     private readonly SetupTransactionJournalStore journalStore;
     private readonly SetupRecoveryCoordinator recoveryCoordinator;
     private readonly AtomicFileSetupStep fileStep;
+    private readonly UserEnvironmentSetupStep environmentStep;
 
     public SetupRollbackCoordinator(
         ISetupPlatform platform,
@@ -36,6 +37,7 @@ internal sealed class SetupRollbackCoordinator
         this.journalStore = journalStore;
         recoveryCoordinator = new SetupRecoveryCoordinator(platform, paths, planStore, ledgerStore, journalStore);
         fileStep = new AtomicFileSetupStep(platform);
+        environmentStep = new UserEnvironmentSetupStep(platform);
     }
 
     public SetupRollbackExecutionResult Rollback(SetupLock setupLock, Guid changeSetId)
@@ -87,7 +89,11 @@ internal sealed class SetupRollbackCoordinator
             return PersistAttemptOutcome(setupLock, ledger, changeSet, SetupCodes.RollbackNotAvailable);
         }
 
-        if (plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env))
+        var physicalTargets = plan.Targets
+            .Where(target => target.TargetKind != SetupTargetKind.Guidance)
+            .ToArray();
+        if (physicalTargets.Any(target => target.TargetKind == SetupTargetKind.Env) &&
+            (physicalTargets.Length != 1 || physicalTargets[0].TargetKind != SetupTargetKind.Env))
         {
             return PersistAttemptOutcome(
                 setupLock, ledger, changeSet, SetupCodes.RollbackNotAvailable);
@@ -107,6 +113,10 @@ internal sealed class SetupRollbackCoordinator
             return Result(changeSetId, false,
                 exception.Code == SetupCodes.UnsafePath ? SetupCodes.UnsafePath : SetupCodes.InternalError,
                 changeSet);
+        }
+        catch (SetupEnvironmentStepException)
+        {
+            return Result(changeSetId, false, SetupCodes.InternalError, changeSet);
         }
         catch (Exception)
         {
@@ -164,9 +174,7 @@ internal sealed class SetupRollbackCoordinator
         SetupTransactionJournal? journal)
     {
         SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
-        if (journal is null ||
-            journal.ChangeSetId != changeSet.ChangeSetId ||
-            journal.EnvironmentNotification != SetupEnvironmentNotification.NotRequired)
+        if (journal is null || journal.ChangeSetId != changeSet.ChangeSetId)
         {
             throw new FormatException();
         }
@@ -176,6 +184,15 @@ internal sealed class SetupRollbackCoordinator
         var dormantRollback = journal.Operation == SetupJournalOperation.Rollback &&
             journal.Phase == SetupJournalPhase.Prepared;
         if (!terminalApply && !dormantRollback)
+        {
+            throw new FormatException();
+        }
+
+        var hasEnvironmentTarget = plan.Targets.Any(target => target.TargetKind == SetupTargetKind.Env);
+        var expectedNotification = terminalApply && hasEnvironmentTarget
+            ? SetupEnvironmentNotification.Completed
+            : SetupEnvironmentNotification.NotRequired;
+        if (journal.EnvironmentNotification != expectedNotification)
         {
             throw new FormatException();
         }
@@ -208,6 +225,17 @@ internal sealed class SetupRollbackCoordinator
                     throw new FormatException();
                 }
 
+                continue;
+            }
+
+            if (planTarget.TargetKind == SetupTargetKind.Env)
+            {
+                ValidateEnvironmentPreflight(
+                    plan.ChangeSetId,
+                    planTarget,
+                    ledgerTarget,
+                    journal,
+                    terminalApply);
                 continue;
             }
 
@@ -254,6 +282,81 @@ internal sealed class SetupRollbackCoordinator
         }).ToArray();
     }
 
+    private void ValidateEnvironmentPreflight(
+        Guid changeSetId,
+        SetupPrivatePlanTarget planTarget,
+        SetupLedgerTarget ledgerTarget,
+        SetupTransactionJournal journal,
+        bool terminalApply)
+    {
+        if (ledgerTarget.AppliedStateHash is null ||
+            !string.Equals(ledgerTarget.BackupReference, planTarget.RecordId.ToString("D"), StringComparison.Ordinal) ||
+            ledgerTarget.RollbackStatus != SetupLedgerRollbackStatus.Pending)
+        {
+            throw new FormatException();
+        }
+
+        var names = planTarget.Members.Select(member => member.SettingKey).ToArray();
+        var backup = environmentStep.ReadBackup(paths.GetBackup(changeSetId, planTarget.RecordId), names);
+        if (!string.Equals(backup.AggregateHash, planTarget.BaseStateHash, StringComparison.Ordinal) ||
+            !string.Equals(backup.AggregateHash, ledgerTarget.PreviousStateHash, StringComparison.Ordinal))
+        {
+            throw new FormatException();
+        }
+
+        var current = environmentStep.Capture(names);
+        if (!string.Equals(current.AggregateHash, ledgerTarget.AppliedStateHash, StringComparison.Ordinal))
+        {
+            throw new SetupRollbackStaleException();
+        }
+
+        var journalTarget = journal.Targets.SingleOrDefault(target => target.RecordId == planTarget.RecordId);
+        var changedMembers = planTarget.Members
+            .Where(member => member.Operation != SetupOperation.NoOp)
+            .ToArray();
+        if (journalTarget is null ||
+            journalTarget.TargetKind != SetupTargetKind.Env ||
+            journalTarget.Steps.Count != changedMembers.Length)
+        {
+            throw new FormatException();
+        }
+
+        var stepIndex = 0;
+        for (var memberIndex = 0; memberIndex < planTarget.Members.Count; memberIndex++)
+        {
+            var member = planTarget.Members[memberIndex];
+            var desiredHash = environmentStep.HashMember(
+                member.SettingKey,
+                DesiredEnvironmentValue(member));
+            if (!string.Equals(current.Members[memberIndex].Hash, desiredHash, StringComparison.Ordinal))
+            {
+                throw new SetupRollbackStaleException();
+            }
+
+            if (member.Operation == SetupOperation.NoOp)
+            {
+                if (!string.Equals(backup.Members[memberIndex].Hash, desiredHash, StringComparison.Ordinal))
+                {
+                    throw new FormatException();
+                }
+
+                continue;
+            }
+
+            var step = journalTarget.Steps[stepIndex++];
+            if (!string.Equals(step.MemberKey, member.SettingKey, StringComparison.Ordinal) ||
+                !string.Equals(step.PriorStateHash, backup.Members[memberIndex].Hash, StringComparison.Ordinal) ||
+                !string.Equals(step.DesiredStateHash, desiredHash, StringComparison.Ordinal) ||
+                !string.Equals(step.BackupReference, planTarget.RecordId.ToString("D"), StringComparison.Ordinal) ||
+                step.Phase != (terminalApply
+                    ? SetupJournalStepPhase.MutationCompleted
+                    : SetupJournalStepPhase.Pending))
+            {
+                throw new FormatException();
+            }
+        }
+    }
+
     private SetupRollbackExecutionResult PersistAttemptOutcome(
         SetupLock setupLock,
         SetupOwnershipLedger ledger,
@@ -292,6 +395,11 @@ internal sealed class SetupRollbackCoordinator
 
     private static string GetAllowedRoot(string targetPath) =>
         Path.GetDirectoryName(targetPath) ?? throw new FormatException();
+
+    private static UserEnvironmentValue DesiredEnvironmentValue(SetupPrivatePlanMember member) =>
+        member.Operation == SetupOperation.Remove
+            ? UserEnvironmentValue.Missing
+            : UserEnvironmentValue.Present(member.DesiredValue!);
 
     private static SetupRollbackExecutionResult Result(
         Guid changeSetId,

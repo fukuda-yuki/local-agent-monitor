@@ -10,6 +10,285 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public sealed class SetupRollbackTests
 {
     [Fact]
+    public void Rollback_Restores_single_environment_aggregate_from_real_apply_evidence()
+    {
+        var fixture = RollbackFixture.Create(fileCount: 0, includeEnvironment: true);
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Rollback();
+
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.RollbackSucceeded, result.Code);
+        Assert.Null(result.Recovery);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal(1, fixture.Platform.Operations.Skip(baseline)
+            .Count(operation => operation == "environment.set:ENV_A"));
+        Assert.Equal(1, fixture.Platform.Operations.Skip(baseline)
+            .Count(operation => operation == "environment.notify"));
+        var journal = fixture.LoadJournal();
+        Assert.Equal(SetupJournalOperation.Rollback, journal.Operation);
+        Assert.Equal(SetupJournalPhase.Committed, journal.Phase);
+        Assert.Equal(SetupEnvironmentNotification.Completed, journal.EnvironmentNotification);
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.RolledBack, durable.State);
+        Assert.Equal(SetupCodes.RollbackSucceeded, durable.OutcomeCode);
+        var environment = Assert.Single(durable.Targets);
+        Assert.Null(environment.AppliedStateHash);
+        Assert.Null(environment.BackupReference);
+        Assert.Equal(SetupLedgerRollbackStatus.Succeeded, environment.RollbackStatus);
+    }
+
+    [Fact]
+    public void Rollback_Environment_members_restore_missing_empty_and_value_in_reverse_changed_order()
+    {
+        var fixture = EnvironmentRollbackFixture.Create([
+            new("ENV_VALUE", "old-value", SetupOperation.Replace, "desired-value"),
+            new("ENV_EMPTY", "", SetupOperation.Remove, null),
+            new("ENV_MISSING", null, SetupOperation.Replace, "desired-missing"),
+            new("ENV_NOOP", "unchanged", SetupOperation.NoOp, "unchanged"),
+        ]);
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Rollback();
+
+        Assert.True(result.Success);
+        Assert.Equal("old-value", fixture.Platform.ReadUserEnvironment("ENV_VALUE"));
+        Assert.Equal("", fixture.Platform.ReadUserEnvironment("ENV_EMPTY"));
+        Assert.Null(fixture.Platform.ReadUserEnvironment("ENV_MISSING"));
+        Assert.Equal("unchanged", fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+        var writes = fixture.Platform.Operations.Skip(baseline)
+            .Where(operation => operation.StartsWith("environment.set:", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Equal([
+            "environment.set:ENV_MISSING",
+            "environment.set:ENV_EMPTY",
+            "environment.set:ENV_VALUE",
+        ], writes);
+        Assert.DoesNotContain("environment.set:ENV_NOOP", writes);
+        Assert.Equal(
+            ["ENV_VALUE", "ENV_EMPTY", "ENV_MISSING"],
+            fixture.LoadJournal().Targets.Single().Steps.Select(step => step.MemberKey));
+    }
+
+    [Fact]
+    public void Rollback_Environment_dormant_supersession_is_reused_after_interruption()
+    {
+        var fixture = EnvironmentRollbackFixture.Create([
+            new("ENV_A", "old-a", SetupOperation.Replace, "desired-a"),
+        ]);
+        fixture.Platform.InjectFault(
+            $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}",
+            new IOException("PRIVATE_DORMANT_ENV_ROLLBACK"));
+
+        var interrupted = fixture.Rollback();
+
+        Assert.False(interrupted.Success);
+        Assert.Equal(SetupCodes.RecoveryRequired, interrupted.Code);
+        Assert.Equal(SetupChangeSetState.Applied, fixture.LoadChangeSet().State);
+        Assert.Equal(SetupJournalOperation.Rollback, fixture.LoadJournal().Operation);
+        Assert.Equal(SetupJournalPhase.Prepared, fixture.LoadJournal().Phase);
+        Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+
+        var retried = fixture.Rollback(fixture.ReopenCoordinator());
+
+        Assert.True(retried.Success);
+        Assert.Null(retried.Recovery);
+        Assert.Equal(SetupCodes.RollbackSucceeded, retried.Code);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+    }
+
+    [Fact]
+    public void Rollback_Environment_noop_drift_blocks_supersession_and_preserves_all_members()
+    {
+        var fixture = EnvironmentRollbackFixture.Create([
+            new("ENV_CHANGED", "old", SetupOperation.Replace, "desired"),
+            new("ENV_NOOP", "same", SetupOperation.NoOp, "same"),
+        ]);
+        fixture.Platform.SeedUserEnvironment("ENV_NOOP", "third-party");
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Rollback();
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.RollbackStale, result.Code);
+        Assert.Equal("desired", fixture.Platform.ReadUserEnvironment("ENV_CHANGED"));
+        Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+        Assert.Equal(SetupJournalOperation.Apply, fixture.LoadJournal().Operation);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(baseline), operation =>
+            operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+            operation == "environment.notify");
+    }
+
+    [Fact]
+    public async Task Rollback_Environment_noop_drift_after_preflight_is_caught_by_full_final_guard()
+    {
+        var fixture = EnvironmentRollbackFixture.Create([
+            new("ENV_CHANGED", "old", SetupOperation.Replace, "desired"),
+            new("ENV_NOOP", "same", SetupOperation.NoOp, "same"),
+        ]);
+        using var boundary = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
+        var rollingBack = Task.Run(fixture.Rollback);
+        boundary.WaitUntilReached(CancellationToken.None);
+        fixture.Platform.SeedUserEnvironment("ENV_NOOP", "third-party");
+        var baseline = fixture.Platform.Operations.Count;
+        boundary.Release();
+
+        var result = await rollingBack;
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.PartialRollback, result.Code);
+        Assert.Null(result.Recovery);
+        Assert.Equal("old", fixture.Platform.ReadUserEnvironment("ENV_CHANGED"));
+        Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_NOOP"));
+        Assert.DoesNotContain(
+            "environment.set:ENV_NOOP",
+            fixture.Platform.Operations.Skip(baseline));
+        var durable = fixture.LoadChangeSet();
+        Assert.Equal(SetupChangeSetState.Partial, durable.State);
+        Assert.Equal(SetupLedgerRollbackStatus.Stale, durable.Targets.Single().RollbackStatus);
+    }
+
+    [Theory]
+    [InlineData("backup")]
+    [InlineData("applied")]
+    [InlineData("base")]
+    [InlineData("private-read-fault")]
+    public void Rollback_Environment_evidence_mismatch_fails_closed_without_artifacts_or_value_echo(string variant)
+    {
+        var fixture = EnvironmentRollbackFixture.Create([
+            new("ENV_PRIVATE", "old-private", SetupOperation.Replace, "desired-private"),
+        ]);
+        switch (variant)
+        {
+            case "backup":
+                fixture.CorruptBackup(Encoding.UTF8.GetBytes("PRIVATE_BACKUP_BYTES"));
+                break;
+            case "applied":
+                fixture.RebindLedgerAppliedHash(new string('0', 64));
+                break;
+            case "base":
+                fixture.RebindLedgerPreviousHash(new string('1', 64));
+                break;
+            case "private-read-fault":
+                fixture.Platform.InjectFault(
+                    "environment.get:ENV_PRIVATE",
+                    new IOException("PRIVATE_ENVIRONMENT_VALUE"));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(variant));
+        }
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Rollback();
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Code, new[]
+        {
+            SetupCodes.InternalError,
+            SetupCodes.RollbackStale,
+            SetupCodes.RecoveryRequired,
+        });
+        Assert.DoesNotContain("PRIVATE", result.Code, StringComparison.Ordinal);
+        Assert.Equal("desired-private", fixture.Platform.ReadUserEnvironment("ENV_PRIVATE"));
+        Assert.Equal(SetupJournalOperation.Apply, fixture.LoadJournal().Operation);
+        Assert.Equal(SetupChangeSetState.Applied, fixture.LoadChangeSet().State);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(baseline), operation =>
+            operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+            operation == "environment.notify");
+    }
+
+    [Fact]
+    public async Task Rollback_Environment_edit_after_preflight_is_partial_then_external_resolution_recovers()
+    {
+        var fixture = EnvironmentRollbackFixture.Create([
+            new("ENV_A", "old-a", SetupOperation.Replace, "desired-a"),
+            new("ENV_B", "old-b", SetupOperation.Replace, "desired-b"),
+        ]);
+        using var boundary = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
+        var rollingBack = Task.Run(fixture.Rollback);
+        boundary.WaitUntilReached(CancellationToken.None);
+        fixture.Platform.SeedUserEnvironment("ENV_B", "third-party");
+        boundary.Release();
+
+        var partial = await rollingBack;
+
+        Assert.False(partial.Success);
+        Assert.Null(partial.Recovery);
+        Assert.Equal(SetupCodes.PartialRollback, partial.Code);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal(SetupChangeSetState.Partial, fixture.LoadChangeSet().State);
+
+        fixture.Platform.SeedUserEnvironment("ENV_B", "desired-b");
+        var recovered = fixture.Rollback(fixture.ReopenCoordinator());
+
+        Assert.True(recovered.Success);
+        Assert.Equal(SetupCodes.InterruptedRollbackRecovered, recovered.Code);
+        Assert.Equal(fixture.ChangeSetId, recovered.Recovery!.RecoveredChangeSetId);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal(SetupChangeSetState.RolledBack, fixture.LoadChangeSet().State);
+
+        var repeated = fixture.Rollback(fixture.ReopenCoordinator());
+        Assert.False(repeated.Success);
+        Assert.Equal(SetupCodes.RollbackNotAvailable, repeated.Code);
+        Assert.Null(repeated.Recovery);
+    }
+
+    [Fact]
+    public void Rollback_Multiple_environment_aggregates_record_not_available_without_mutation()
+    {
+        var fixture = EnvironmentRollbackFixture.CreateMultiple([
+            [new("ENV_A", "old-a", SetupOperation.Replace, "desired-a")],
+            [new("ENV_B", "old-b", SetupOperation.Replace, "desired-b")],
+        ]);
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Rollback();
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.RollbackNotAvailable, result.Code);
+        Assert.Equal("desired-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+        Assert.Equal("desired-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
+        Assert.Equal(SetupJournalOperation.Apply, fixture.LoadJournal().Operation);
+        Assert.Equal(SetupCodes.RollbackNotAvailable, fixture.LoadChangeSet().OutcomeCode);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(baseline), operation =>
+            operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+            operation == "environment.notify");
+    }
+
+    [Fact]
+    public async Task Rollback_Environment_uses_the_supplied_lock_for_the_whole_operation()
+    {
+        var fixture = EnvironmentRollbackFixture.Create([
+            new("ENV_A", "old-a", SetupOperation.Replace, "desired-a"),
+        ]);
+        using var boundary = fixture.Platform.AddBarrier(
+            $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
+        using var secondStarted = new ManualResetEventSlim();
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+        var first = Task.Run(() => fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId));
+        boundary.WaitUntilReached(CancellationToken.None);
+        var second = Task.Run(() =>
+        {
+            secondStarted.Set();
+            return fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId);
+        });
+        Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(10)));
+        Assert.False(second.IsCompleted);
+
+        boundary.Release();
+        var firstResult = await first;
+        var secondResult = await second;
+
+        Assert.True(firstResult.Success);
+        Assert.Equal(SetupCodes.RollbackNotAvailable, secondResult.Code);
+        Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
+    }
+
+    [Fact]
     public void Rollback_Restores_real_apply_artifacts_in_reverse_order_and_clears_ownership()
     {
         var fixture = RollbackFixture.Create(fileCount: 2);
@@ -389,6 +668,163 @@ public sealed class SetupRollbackTests
         targetPaths.Any(path =>
             operation.EndsWith("->" + path, StringComparison.Ordinal) ||
             string.Equals(operation, "file.delete:" + path, StringComparison.Ordinal));
+
+    private sealed record EnvironmentMemberDefinition(
+        string Name,
+        string? InitialValue,
+        SetupOperation Operation,
+        string? DesiredValue);
+
+    private sealed class EnvironmentRollbackFixture
+    {
+        private EnvironmentRollbackFixture(
+            IReadOnlyList<IReadOnlyList<EnvironmentMemberDefinition>> targetDefinitions)
+        {
+            Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 13, 8, 9, 10, TimeSpan.Zero));
+            Paths = new SetupRuntimePaths(Platform);
+            ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000661");
+            Platform.SeedDirectory("C:\\");
+            Platform.SeedDirectory(Platform.LocalApplicationData);
+            foreach (var member in targetDefinitions.SelectMany(target => target))
+            {
+                if (member.InitialValue is not null)
+                {
+                    Platform.SeedUserEnvironment(member.Name, member.InitialValue);
+                }
+            }
+
+            var environmentStep = new UserEnvironmentSetupStep(Platform);
+            var targets = targetDefinitions.Select((definitions, index) =>
+            {
+                var capture = environmentStep.Capture(definitions.Select(member => member.Name).ToArray());
+                return new SetupPrivatePlanTarget(
+                    Guid.Parse($"00000000-0000-7000-8000-{662 + index:000000000000}"),
+                    SetupTargetKind.Env,
+                    "current-user",
+                    capture.AggregateHash,
+                    "environment-allowlist",
+                    definitions.Select(member => new SetupPrivatePlanMember(
+                        member.Name,
+                        member.Operation,
+                        member.DesiredValue)).ToArray());
+            }).ToArray();
+            var plan = new SetupPrivatePlan(
+                1,
+                ChangeSetId,
+                "github-copilot",
+                "copilot-cli",
+                Platform.Clock.UtcNow,
+                "1.0.0",
+                targets);
+            var ledger = new SetupLedgerChangeSet(
+                ChangeSetId,
+                "github-copilot",
+                "copilot-cli",
+                Platform.Clock.UtcNow,
+                Platform.Clock.UtcNow,
+                "1.0.0",
+                null,
+                SetupChangeSetState.Planned,
+                targets.Select((target, index) => new SetupLedgerTarget(
+                    target.RecordId,
+                    target.TargetKind,
+                    $"user-environment-{index}",
+                    "github-copilot",
+                    target.Members.Select(member => new SetupLedgerMember(
+                        member.SettingKey,
+                        member.Operation)).ToArray(),
+                    target.BaseStateHash,
+                    null,
+                    null,
+                    null,
+                    SetupLedgerRollbackStatus.NotAvailable,
+                    SetupRestartRequirement.RestartTerminalSession,
+                    "1.0.0")).ToArray());
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            var journalStore = new SetupTransactionJournalStore(Platform, Paths);
+            using (var acquisition = SetupLock.TryAcquire(Platform, Paths))
+            {
+                ledgerStore.PersistPlannedChangeSet(acquisition.Lock!, plan, ledger);
+                var applied = new SetupApplyCoordinator(
+                        Platform, Paths, planStore, ledgerStore, journalStore, new PassRevalidator())
+                    .Apply(acquisition.Lock!, ChangeSetId);
+                if (applied.State != SetupChangeSetState.Applied)
+                {
+                    throw new InvalidOperationException("The real apply producer did not establish rollback evidence.");
+                }
+            }
+
+            Coordinator = new SetupRollbackCoordinator(Platform, Paths, planStore, ledgerStore, journalStore);
+        }
+
+        public SetupTestPlatform Platform { get; }
+        public SetupRuntimePaths Paths { get; }
+        public Guid ChangeSetId { get; }
+        public SetupRollbackCoordinator Coordinator { get; }
+
+        public static EnvironmentRollbackFixture Create(
+            IReadOnlyList<EnvironmentMemberDefinition> definitions) =>
+            new([definitions]);
+
+        public static EnvironmentRollbackFixture CreateMultiple(
+            IReadOnlyList<IReadOnlyList<EnvironmentMemberDefinition>> targets) =>
+            new(targets);
+
+        public SetupRollbackExecutionResult Rollback() => Rollback(Coordinator);
+
+        public SetupRollbackExecutionResult Rollback(SetupRollbackCoordinator coordinator)
+        {
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            return coordinator.Rollback(acquisition.Lock!, ChangeSetId);
+        }
+
+        public SetupRollbackCoordinator ReopenCoordinator()
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            return new SetupRollbackCoordinator(
+                Platform,
+                Paths,
+                planStore,
+                new SetupLedgerStore(Platform, Paths, planStore),
+                new SetupTransactionJournalStore(Platform, Paths));
+        }
+
+        public SetupTransactionJournal LoadJournal() =>
+            new SetupTransactionJournalStore(Platform, Paths).Load(ChangeSetId)!;
+
+        public SetupLedgerChangeSet LoadChangeSet()
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            return new SetupLedgerStore(Platform, Paths, planStore).LoadForRecovery().ChangeSets
+                .Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
+        }
+
+        public void CorruptBackup(byte[] bytes)
+        {
+            var recordId = LoadChangeSet().Targets.Single().RecordId;
+            Platform.SeedFile(Paths.GetBackup(ChangeSetId, recordId), bytes);
+        }
+
+        public void RebindLedgerAppliedHash(string hash) =>
+            RewriteSingleLedgerTarget(target => target with { AppliedStateHash = hash });
+
+        public void RebindLedgerPreviousHash(string hash) =>
+            RewriteSingleLedgerTarget(target => target with { PreviousStateHash = hash });
+
+        private void RewriteSingleLedgerTarget(Func<SetupLedgerTarget, SetupLedgerTarget> rewrite)
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            var ledger = ledgerStore.LoadForRecovery();
+            var changeSet = ledger.ChangeSets.Single();
+            var target = rewrite(changeSet.Targets.Single());
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            ledgerStore.Save(
+                acquisition.Lock!,
+                ledger with { ChangeSets = [changeSet with { Targets = [target] }] });
+        }
+    }
 
     private sealed class RollbackFixture
     {
