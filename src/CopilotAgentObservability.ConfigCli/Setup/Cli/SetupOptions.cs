@@ -66,7 +66,7 @@ internal sealed record SetupOptions(
                     break;
 
                 case "--endpoint":
-                    if (endpointSet || !TryReadValue(args, index, out var endpointValue) ||
+                    if (endpointSet || !TryReadValue(args, index, out var endpointValue) || endpointValue is null ||
                         !TryNormalizeEndpoint(endpointValue, out endpoint))
                     {
                         return Failure(SetupCodes.InvalidArguments);
@@ -121,7 +121,7 @@ internal sealed record SetupOptions(
         for (var index = 2; index < args.Length; index++)
         {
             if (args[index] != "--change-set" || changeSetId is not null ||
-                !TryReadValue(args, index, out var changeSetValue) ||
+                !TryReadValue(args, index, out var changeSetValue) || changeSetValue is null ||
                 !TryParseCanonicalUuidV7(changeSetValue, out var parsedChangeSetId))
             {
                 return Failure(SetupCodes.InvalidArguments);
@@ -175,7 +175,7 @@ internal sealed record SetupOptions(
     private static bool TryNormalizeEndpoint(string value, out string? endpoint)
     {
         endpoint = null;
-        if (!Regex.IsMatch(value, "\\Ahttp://(?:localhost|127\\.0\\.0\\.1|\\[::1\\]):[0-9]{1,5}/?\\z", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase) ||
+        if (!Regex.IsMatch(value, "\\Ahttp://(?:localhost|127\\.0\\.0\\.1|\\[::1\\]):[1-9][0-9]{0,4}/?\\z", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase) ||
             !Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
             !string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal) ||
             uri.UserInfo.Length != 0 || uri.AbsolutePath != "/" || uri.Query.Length != 0 || uri.Fragment.Length != 0)

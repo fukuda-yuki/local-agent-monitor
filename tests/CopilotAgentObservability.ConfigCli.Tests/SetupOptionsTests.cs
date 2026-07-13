@@ -184,6 +184,65 @@ public class SetupOptionsTests
     }
 
     [Theory]
+    [InlineData("plan", "--change-set", "018f3b9a-0000-7000-8000-000000000001")]
+    [InlineData("apply", "--adapter", "github-copilot")]
+    [InlineData("apply", "--target", "vscode")]
+    [InlineData("apply", "--endpoint", "http://127.0.0.1:4320")]
+    [InlineData("apply", "--include-content-capture", null)]
+    [InlineData("rollback", "--adapter", "github-copilot")]
+    [InlineData("rollback", "--target", "vscode")]
+    [InlineData("rollback", "--endpoint", "http://127.0.0.1:4320")]
+    [InlineData("rollback", "--include-content-capture", null)]
+    [InlineData("status", "--target", "vscode")]
+    [InlineData("status", "--endpoint", "http://127.0.0.1:4320")]
+    [InlineData("status", "--include-content-capture", null)]
+    [InlineData("status", "--change-set", "018f3b9a-0000-7000-8000-000000000001")]
+    public void Parse_ReturnsInvalidArgumentsForEveryDocumentedOptionForbiddenByTheVerb(string command, string option, string? value)
+    {
+        var args = value is null
+            ? new[] { "setup", command, option }
+            : new[] { "setup", command, option, value };
+
+        var result = SetupOptions.Parse(args);
+
+        Assert.Null(result.Options);
+        Assert.Equal(SetupCodes.InvalidArguments, result.Code);
+    }
+
+    [Theory]
+    [InlineData("Setup", "plan", "--adapter", "github-copilot", "--target", "vscode")]
+    [InlineData("setup", "PLAN", "--adapter", "github-copilot", "--target", "vscode")]
+    [InlineData("setup", "plan", "--Adapter", "github-copilot", "--target", "vscode")]
+    [InlineData("setup", "plans", "--adapter", "github-copilot", "--target", "vscode")]
+    [InlineData("setup", "apply", "--change-set-id", "018f3b9a-0000-7000-8000-000000000001", null, null)]
+    [InlineData("setup", "plan", "--content-capture", null, null, null)]
+    public void Parse_ReturnsInvalidArgumentsForCasedOrAliasedCommandTokens(
+        string root,
+        string command,
+        string option,
+        string? value,
+        string? trailingOption,
+        string? trailingValue)
+    {
+        var args = new List<string> { root, command, option };
+        if (value is not null)
+        {
+            args.Add(value);
+        }
+
+        if (trailingOption is not null)
+        {
+            args.Add(trailingOption);
+            args.Add(trailingValue!);
+        }
+
+        var result = SetupOptions.Parse([.. args]);
+
+        Assert.Null(result.Options);
+        Assert.Equal(SetupCodes.InvalidArguments, result.Code);
+    }
+
+    [Theory]
     [InlineData("plan", "--adapter", "github-copilot")]
     [InlineData("plan", "--target", "vscode")]
     [InlineData("apply")]
@@ -234,6 +293,8 @@ public class SetupOptionsTests
     [InlineData("https://localhost:4320")]
     [InlineData("http://example.test:4320")]
     [InlineData("http://localhost")]
+    [InlineData("http://[::1]")]
+    [InlineData("http://localhost:0")]
     [InlineData("http://localhost:4320/v1/traces")]
     [InlineData("http://localhost:4320?token=secret")]
     [InlineData("http://user:secret@localhost:4320")]
