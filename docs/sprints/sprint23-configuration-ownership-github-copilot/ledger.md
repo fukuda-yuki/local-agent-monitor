@@ -4,16 +4,91 @@ Updated: 2026-07-15
 
 ## Current continuation note
 
-The task table below preserves detailed historical evidence through the
-transaction and status foundation, but its coarse pending rows do not describe
-the later T2 command-surface work. The authoritative session-resume boundary at
-implementation baseline `399f441` is recorded in
-[the M3 implementation handoff](milestones/M3-shared-setup-command-surface/handoff-prompt.md).
-That handoff records the unapproved Apply preflight, remaining T2 work, all
-unstarted #67 target tasks, current test evidence, review findings, and the
-required resume order. Task 01's final approved contract-audit evidence is
-recorded below; it is docs-only bookkeeping and leaves the migration conflict,
-T3d, and T7 gates open.
+The historical M3 handoff preserves the implementation stop at `399f441`, but
+that stop is no longer the current resume boundary. Tasks 02-10 resolved all
+four findings, passed their independent reviews, and completed the generic
+dispatcher, process, and byte-faithful repository-wrapper surfaces. The
+authoritative continuation plan is now the
+[Issue #66 T2 completion plan](../../superpowers/plans/2026-07-14-issue-66-t2-completion/README.md),
+with the dated resolution appended to
+[the M3 handoff](milestones/M3-shared-setup-command-surface/handoff-prompt.md).
+
+Task 11 passes the **Issue #66 T2 gate only** at reviewed Task 10 HEAD
+`0b0885424f59ad5cdfafe0fa77b5e2fc53ed0407`. It does not declare Issue #66 or
+the combined #66/#67 work finally complete. Issue #67 T7 must still wire
+`Program.cs` to the production dispatcher and prove real direct-CLI/wrapper
+`setup status` `status_ready`/exit-0 byte parity. T8 packaging/operator docs
+and T9 final joint review remain open.
+
+## Issue #66 T2 closeout gate (2026-07-15)
+
+Validated implementation range: `df868e6..0b08854`. The starting branch and
+HEAD matched `codex/issues-66-67-guided-setup` at
+`0b0885424f59ad5cdfafe0fa77b5e2fc53ed0407`; the tracked worktree and initial
+`git diff --check` were clean.
+
+Pinned repository validation ran once, sequentially, without substitution or
+retry:
+
+- `dotnet build CopilotAgentObservability.slnx`: PASS; 7 projects, 0 warnings,
+  0 errors.
+- `pwsh scripts\test\install-playwright-chromium.ps1`: PASS; exit 0, no output.
+- `dotnet test CopilotAgentObservability.slnx`: PASS; ConfigCli 2,159/2,159 and
+  LocalMonitor 936/936, total 3,095/3,095, 0 failed, 0 skipped.
+
+The T2 gate checklist maps to reviewed evidence as follows:
+
+- The `399f441` findings are closed: findings 1 and 3 by Task 02
+  (`b1775fe..f2b6b40`), finding 4 by Task 03 (`51d79c5..2e171dd`), and finding
+  2 by Task 04 (`f7d6d12..61dde7b`) plus its Task 08 trust remediations
+  (`2d9940b`, `be1fac9`).
+- The four-command dispatcher is complete: Plan T2c1 (`e2cc532`, correction
+  `3ed6cfb`), Apply Task 04, Rollback Task 05
+  (`67d8fc6..0ea8de0`), and Status Task 06
+  (`e0cd606..b254ab5`). Task 04a (`271035f..4d03245`) supplies the trusted
+  Rollback result carrier consumed by Task 05.
+- Task 07 (`adb07d5..998aa4f`) proves strict historical-manifest preservation
+  through Apply/Rollback/Status dispatcher-to-`SetupJson` paths and exact-current
+  Plan rejection. Task 08's fresh rerun is PASS for requirements 1-7 at
+  `df868e6..b254ab5`.
+- Task 09 (`bcbd1e2`, remediation `866528d`) covers all four verbs, one-JSON
+  stdout, fixed-LF stderr, safe result-boundary fallback, and the exhaustive
+  29-code exit map. Task 10 (`804c3b0`, `6309f91`) proves byte-identical
+  repository-wrapper transport: pre-T7 parsed Status is intentionally
+  `internal_error`/5, recognized invalid Apply is `invalid_arguments`/2, and
+  bare setup has no stdout. This is transport evidence, not production
+  `status_ready` evidence.
+- The exceptional Apply matrix is closed at the generic T2 boundary: plan-time
+  unknown adapter returns `plan`/`unsupported_adapter` without artifacts; a
+  removed persisted adapter returns `apply`/`unsupported_adapter` with retained
+  adapter/change-set correlation, byte-identical plan/ledger, and zero
+  coordinator activity; and typed `apply`/`unsupported_target` preflight keeps
+  plan/ledger bytes unchanged with no transaction artifact or write. The real
+  macOS/Linux Copilot CLI producer remains #67 work and is not claimed here.
+
+Final review state for the T2 sequence:
+
+| Task | Final review verdict | Final findings |
+| --- | --- | --- |
+| Task 02 | Spec PASS; Code/Test Quality APPROVED; Security/fail-closed PASS | C0/I0/M0 |
+| Task 03 | Spec PASS; Code/Test Quality APPROVED; Security/pre-mutation PASS | C0/I0/M0 |
+| Task 04 | Spec PASS; Code/Test Quality APPROVED; Security/Trust and Transaction/Concurrency PASS after reopened remediation | C0/I0/M0 |
+| Task 04a | Spec PASS; Code/Test Quality APPROVED; Security/Transaction/Concurrency PASS | C0/I0/M0 |
+| Task 05 | Spec PASS; Code Quality APPROVED; Security and Transaction/Concurrency PASS after remediation | C0/I0/M0 |
+| Task 06 | Spec PASS; Code Quality APPROVED; Security/Data Safety and Transaction/Concurrency PASS after Minor cleanup | C0/I0/M0 |
+| Task 07 | Spec PASS; Test Quality APPROVED; Security/Data Safety and Cross-surface Contract PASS after report-accuracy Minor closure | C0/I0/M0 |
+| Task 08 | Fresh integration rerun PASS; security and lock/recovery ownership PASS | C0/I0/M0; accepted minors none |
+| Task 09 | Final fresh spec/quality/security/process review PASS after I1-I4 remediation | C0/I0/M0 |
+| Task 10 | Spec/PowerShell-byte/test/security/Issue-contract review PASS | C0/I0/M0 |
+
+No accepted Minor remains unresolved in Tasks 02-10. Migration is N/A because
+ledger v1 is the first shipped schema; Task 01a's committed-v1 fresh-store
+write/close/reopen evidence proves byte identity and no v0/v2/migration/temp
+artifact. HTTP, proxy, and UI are N/A for this interface. This Windows host did
+not execute macOS/Linux runtime branches; only their deterministic injected
+and static evidence is available here. Production #66-to-#67 composition, real
+direct-CLI/wrapper `status_ready` parity, release-layout packaging, and final
+joint review remain T7, T8, and T9 respectively.
 
 ## Pending Migration A / Plan A execution decisions (2026-07-15)
 
@@ -101,10 +176,11 @@ below; the remaining real-producer gates are still pending:
 | Status dispatcher (Task 06) | #66 | Complete; reopened and closed | `e0cd606fdd311ea06c4f4a57cd381fd390d091e2..b254ab5bb0b212efd004048c99352b60a1dddc51` (runtime `548f720`; test cleanup `b254ab5`) | Original valid-path evidence: TDD RED 1 failed/0 passed/0 skipped; GREEN Status 4/4; related Dispatcher+SetupStatus 306/306; orchestrator rerun Status 4/4. Task 08 Important 2 remediation: malformed/null/exceptional Status output now fails closed to validator-valid `internal_error` with requested adapter/filter, null correlations/recovery, empty public arrays, and no raw marker. Runtime RED 3/0, GREEN 3/3; related 327/327; orchestrator rerun 3/3; test-fixture Minor cleanup in `b254ab5`; `git diff --check` clean. | Final independent review: Task 08 Important 2 RESOLVED; Spec PASS; Quality APPROVED; Security/Data Safety PASS; Transaction/Concurrency PASS; C0/I0/M0. Valid same-instance/filter delegation and service-owned lock/recovery/projection remain preserved. | Task 08 fresh integration rerun cycle 1 passed; Task 09 is unblocked. Public serialization/CLI/wrapper Task 09/10 and Issue #67 adapter integration remain open; migration remains N/A with committed-v1 restart evidence already passed |
 | Historical-manifest cross-surface regression (Task 07) | #66-#67 | Complete | `adb07d505f24250810d8e4f9f01f7d518f960843..998aa4fa6b16a145368d84050ba67446fa79babf` | Honest pinning GREEN; historical-manifest filter 14/14, dispatcher 157/157, ConfigCli 2,080/2,080, build 0 warnings/0 errors, orchestrator historical rerun 14/14; `git diff --check` clean. Apply/Rollback/Status preserve the whole historical `expected_result` through dispatcher to `SetupJson`; Status uses the production dispatcher and real `SetupStatusService` over persisted plan/ledger facts on seeded in-memory `SetupTestPlatform` state; Plan rejects adapter historical output with zero plan/ledger artifacts. | Independent final review: Spec PASS; Test Quality APPROVED; Security/Data Safety PASS; Cross-surface Contract PASS; 0 Critical/Important/Minor; C0/I0/M0 | Task 08 early integration gate now passes on fresh cycle 1 rerun. Migration remains N/A with separate committed-v1 physical restart evidence; Playwright/full solution tests, CLI/wrapper Tasks 09/10, live runtime/network, and Issue #67 adapters remain unverified |
 | Task 08 early T2 command-surface integration gate | #66-#67 | PASS (fresh rerun cycle 1) | `df868e6..b254ab5` | Fresh rerun requirements 1–7 PASS; ConfigCli 2,098/2,098, build 0 warnings/0 errors, `git diff --check` clean; orchestrator independently reran ConfigCli 2,098/2,098, build 0/0, diff clean. Lock/recovery concurrency ownership PASS; security/repository safety PASS; accepted minors none; C0/I0/M0; no repeated same-area finding. Playwright/full solution tests not run. | Initial review history retained: Important 1 (malformed Apply-success carrier identity/projection) and Important 2 (malformed/null/exceptional Status fallback) were both resolved by their owning-task remediations and independent re-reviews; fresh rerun confirms closure. | Task 09 unblocked. Task 10/11, Issue #67, and Playwright/full solution test remain pending; migration remains N/A with committed-v1 restart evidence already passed |
-| Shared setup commands | #66 | Complete (T2 wrapper transport; production composition pending) | `3cbe822..7976ea4`; wrapper `804c3b0..6309f91` | Prerequisite RED 1 failing with `setup_contract_invalid`; GREEN focused 171/171; wrapper TDD RED 0/7 pass (missing script/exit 64), initial GREEN 7/7, cost-reduction final focused 5/5; ConfigCli 2,159/2,159; build 0/0; orchestrator matched wrapper 5/5, ConfigCli 2,159/2,159, build 0/0 | Independent review PASS C0/I0/M0 for spec/PowerShell byte/test/security/Issue contract; no unresolved issue in wrapper scope | T7 production composition and direct CLI/wrapper `status_ready`/0 parity remain pending; T8 packaging and Task11 full solution/Playwright remain pending; HTTP/proxy/UI N/A; migration N/A and v1 restart evidence unchanged |
+| Shared setup commands | #66 | T2 gate PASS (production composition pending) | `3cbe822..7976ea4`; wrapper `804c3b0..6309f91`; validated implementation range `df868e6..0b08854` | Prerequisite RED 1 failing with `setup_contract_invalid`; GREEN focused 171/171; wrapper TDD RED 0/7 pass (missing script/exit 64), initial GREEN 7/7, cost-reduction final focused 5/5; Task11 build 7 projects/0 warnings/0 errors, bootstrap exit 0, full solution 3,095/3,095 (ConfigCli 2,159 + LocalMonitor 936), 0 failed/0 skipped | Independent review PASS C0/I0/M0 for spec/PowerShell byte/test/security/Issue contract; Task11 checklist verified; no unresolved accepted Minor in Tasks 02-10 | T7 production composition and direct CLI/wrapper `status_ready`/0 parity remain pending; T8 release packaging and T9 final joint review remain pending; HTTP/proxy/UI N/A; migration N/A with committed-v1 restart/byte-identity evidence |
 | Task 09 / T2d CLI process surface | #66 | Complete (CLI surface; Task10/T7 composition still pending) | `bcbd1e2`; remediation `866528d` (prerequisite `7976ea4` recorded above) | Initial RED compile 3 then 5 CS1501; initial focused 74/74, ConfigCli 2,138/2,138, build 0/0. First independent review FAIL C0/I4/M0 (UUID correlation, unsafe null/malformed serializer boundary, CRLF stderr, request/result binding). Remediation RED 47 pass/37 fail of 84; GREEN 90/90. Final ConfigCli 2,154/2,154, build 0/0; orchestrator independently matched 90/90, 2,154/2,154, build 0/0. Exact 29-code exit map and all four verbs covered with safe one-JSON stdout and fixed-LF stderr. | Final fresh review PASS C0/I0/M0 for spec/quality/security/process; I1–I4 closed. | `Program` three-argument null-dispatcher behavior remains a fail-closed pre-T7 gap until #67 T7; Task10 transport wrapper, Playwright/full solution validation, and real `status_ready` parity remain unverified/pending. HTTP/proxy/UI N/A; migration N/A and v1 restart evidence unchanged |
-| Task 10 / T2 wrapper transport | #66 | Complete (wrapper transport; production composition pending) | `804c3b0`, `6309f91` | TDD RED 0/7 pass (missing script/exit 64); initial GREEN 7/7; cost-reduction final focused 5/5; ConfigCli 2,159/2,159; build 0/0; orchestrator matched wrapper 5/5, ConfigCli 2,159/2,159, build 0/0. Exact raw stdout/stderr bytes, LF endings, exit codes, and all four actions are covered; PowerShell is fail-visible with no sleeps/retries. | Independent review PASS C0/I0/M0 across spec/PowerShell byte/test/security/Issue contract | T7 production `status_ready`/0 direct-CLI/wrapper parity remains mandatory and unverified; T8 release packaging and Task11 full solution/Playwright remain pending; #66 final completion is forbidden until T7. HTTP/proxy/UI N/A; migration N/A and v1 restart evidence unchanged |
+| Task 10 / T2 wrapper transport | #66 | Complete (wrapper transport; production composition pending) | `804c3b0`, `6309f91` | TDD RED 0/7 pass (missing script/exit 64); initial GREEN 7/7; cost-reduction final focused 5/5; ConfigCli 2,159/2,159; build 0/0; orchestrator matched wrapper 5/5, ConfigCli 2,159/2,159, build 0/0. Exact raw stdout/stderr bytes, LF endings, exit codes, and all four actions are covered; PowerShell is fail-visible with no sleeps/retries. | Independent review PASS C0/I0/M0 across spec/PowerShell byte/test/security/Issue contract | Task11 full validation passed. T7 production `status_ready`/0 direct-CLI/wrapper parity remains mandatory and unverified; T8 release packaging and T9 final joint review remain pending; #66 final completion is forbidden until T7. HTTP/proxy/UI N/A; migration N/A and v1 restart evidence unchanged |
 | Task 10 / T7 composition dependency correction | #66-#67 | Complete (docs-only correction) | `f697e9c` (parent `ee14176`) | No tests run (docs-only); `git diff --check` PASS; git checks PASS | Independent review PASS C0/I0/M0 for plan/spec/test acceptance/Issue contract | Task10 proves only pre-T7 transport parity, including parsed `status` → `internal_error` (exit 5). Task11 may pass the T2 gate but cannot declare #66 complete. Real direct-CLI/wrapper `status_ready` (exit 0) byte parity remains mandatory and unverified until #67 T7; T8 packaging and T9 joint closeout remain pending. Migration N/A/v1 restart and HTTP/proxy/UI N/A unchanged |
+| Task 11 / T2 closeout gate | #66 | PASS (T2 only; no final Issue #66 completion) | `df868e6..0b08854` | Exact pinned sequence: build 7 projects, 0 warnings/0 errors; Playwright bootstrap exit 0; full solution 3,095/3,095 (ConfigCli 2,159 + LocalMonitor 936), 0 failed/0 skipped; initial `git diff --check` clean | Tasks 02-10 checklist and final verdicts verified; no unresolved accepted Minor in Tasks 02-10 | `Program.cs` wiring and real direct-CLI/wrapper `status_ready`/0 byte parity remain #67 T7; T8 packaging/docs and T9 final reviews remain; macOS/Linux runtime branches not executed on this Windows host |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
 | VS Code adapter | #67 | Pending | - | - | - | - |

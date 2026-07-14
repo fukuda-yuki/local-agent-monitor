@@ -8,7 +8,7 @@ canonical in requirements, spec, and interface documents.
 | M0 contract and orchestration | Complete | Canonical contract, plan, durable ledger |
 | M1 ownership ledger foundation | Complete | Issue #66 ledger, plan, and redaction contracts |
 | M2 transactional mutation | Complete | Issue #66 atomic file, user environment, compensation, rollback |
-| M3 shared setup command surface | In progress | Issue #66 CLI and PowerShell integration; Apply dispatcher review changes remain |
+| M3 shared setup command surface | T2 gate passed; final composition pending | Issue #66 generic dispatcher, CLI process surface, and byte-faithful repository wrapper passed full validation; Issue #67 T7 must still wire production composition and prove direct-CLI/wrapper `status_ready`/0 parity before final completion |
 | M4 GitHub Copilot adapters | Pending | Issue #67 VS Code, CLI, and App/SDK targets |
 | M5 integration closeout | Pending | Cross-surface tests, independent reviews, full validation |
 

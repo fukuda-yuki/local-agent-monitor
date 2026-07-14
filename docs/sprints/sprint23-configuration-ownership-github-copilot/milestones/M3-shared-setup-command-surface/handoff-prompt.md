@@ -280,3 +280,57 @@ durable ledger at each approved slice instead of reconstructing status later.
   verdicts, unresolved minors, issue-interface gaps, commit range, and worktree
   state in the durable ledger.
 ```
+
+## Resolution recorded 2026-07-15
+
+The memo above is preserved as the historical `399f441` stop condition. Its
+four blocking findings are resolved, Tasks 02-10 have passed their final
+independent reviews, and Task 11 passes the **Issue #66 T2 gate only** at
+reviewed Task 10 HEAD `0b0885424f59ad5cdfafe0fa77b5e2fc53ed0407`.
+The validated implementation range is `df868e6..0b08854`.
+
+Resolution mapping:
+
+- findings 1 and 3: Task 02, `b1775fe..f2b6b40`, final review Spec PASS,
+  Code/Test Quality APPROVED, Security/fail-closed PASS, C0/I0/M0;
+- finding 4: Task 03, `51d79c5..2e171dd`, final review Spec PASS, Code/Test
+  Quality APPROVED, Security/pre-mutation PASS, C0/I0/M0;
+- finding 2: Task 04, `f7d6d12..61dde7b`, with Task 08 trust remediations
+  `2d9940b` and `be1fac9`; final review Spec/Quality/Security/Transaction PASS,
+  C0/I0/M0;
+- Task 04a trusted Rollback carrier, Task 05 Rollback dispatcher, and Task 06
+  Status dispatcher: final reviews PASS/APPROVED, C0/I0/M0;
+- Task 07 historical-manifest regression: final Spec/Test Quality/Security/
+  Cross-surface review PASS, C0/I0/M0 after its report-accuracy Minor was
+  corrected;
+- Task 08 fresh integration rerun: PASS, C0/I0/M0, accepted minors none;
+- Task 09 CLI process surface: final fresh review PASS, C0/I0/M0 after I1-I4
+  were closed; exhaustive 29-code exit mapping and all four verbs are covered;
+- Task 10 wrapper transport: review PASS C0/I0/M0 for spec, PowerShell bytes,
+  tests, security, and Issue contract. Parsed pre-T7 Status remains intentional
+  `internal_error`/5, recognized invalid Apply is `invalid_arguments`/2, and
+  bare setup has no stdout.
+
+Pinned Task 11 validation ran once in the required order, with no substitution
+or retry:
+
+- `dotnet build CopilotAgentObservability.slnx`: PASS; 7 projects, 0 warnings,
+  0 errors;
+- `pwsh scripts\test\install-playwright-chromium.ps1`: PASS; exit 0, no output;
+- `dotnet test CopilotAgentObservability.slnx`: PASS; ConfigCli 2,159/2,159 and
+  LocalMonitor 936/936, total 3,095/3,095, 0 failed, 0 skipped.
+
+No accepted Minor remains unresolved in Tasks 02-10. Migration is N/A because
+v1 is the first shipped ledger schema; the committed-v1 fresh-store restart
+test already proves write/close/reopen byte identity and no v0/v2/migration/temp
+artifact. HTTP, proxy, and UI are N/A. This Windows run did not execute native
+macOS/Linux runtime branches; their evidence remains deterministic/injected or
+static.
+
+This resolution does **not** declare Issue #66 or Issues #66/#67 finally
+complete. Issue #67 T7 must wire `Program.cs` to the production dispatcher and
+prove the real aggregate/three-partition producer-consumer path plus direct-CLI
+and repository-wrapper `setup status` `status_ready`/exit-0 byte parity. T8
+release packaging/operator documentation and T9 final joint reviews remain
+open. Resume from the Issue #67 plan, not from the historical `399f441` repair
+sequence above.
