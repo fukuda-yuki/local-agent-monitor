@@ -57,9 +57,11 @@ git diff --check
 **Worktree/branch:** `C:\Users\mwam0\Documents\Codex\copilot-agent-observability`
 on `codex/issues-66-67-guided-setup`.
 
-**Report destination:** chat +
-`.superpowers/sdd/plan-a-corrections-report.md` for this planning correction;
-the later implementation run records its own evidence in the sprint ledger.
+**Report destination:** chat + Task 01a's own evidence row in
+`docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md`.
+The completed `.superpowers/sdd/plan-a-corrections-report.md` remains immutable
+historical evidence for this planning correction and is not the later
+implementation report.
 
 **Local commit subject:**
 `Issue #66: test(setup): prove committed v1 ledger restart compatibility`
