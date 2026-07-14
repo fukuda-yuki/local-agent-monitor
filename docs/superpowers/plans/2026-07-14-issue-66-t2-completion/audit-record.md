@@ -4,7 +4,7 @@
 - Audited baseline: `2a3bfcbc54add17e6b47b90ba4c330be094d5705`
 - Scope: read-only contract audit; no production, test, specification, task-card, or ledger edit
 - Implementer self-review: `PASS` for source traceability and owned-file scope
-- Independent read-only review: `CHANGES REQUESTED` at `3d15076b2270e26d1e10b4ff382961b6c494cb78`; `PENDING` re-review after the Q4 correction below
+- Independent read-only review: `CHANGES REQUESTED` at `ce80176240fe5daded26244d4bc4887b61be45b8`; `PENDING` re-review after the Q4 owner-task correction below
 
 ## Cross-surface contract table
 
@@ -263,31 +263,90 @@ the trustworthy row, as well as success, unavailable, stale, unsafe, and
 partial outcomes (`docs/specifications/interfaces/configuration-setup.md:161-171`,
 `:633-645`). A code alone never decides whether targets are present.
 
-**`SPEC-CONFLICT / OWNER CORRECTION REQUIRED BEFORE TASK 05`:** the current
+**`IMPLEMENTATION / INTERFACE / PLAN GAP — OWNER CORRECTION REQUIRED BEFORE
+TASK 05`:** the canonical Q4 projection decision remains `PINNED`; the
+specification is clear and needs no update. The gap is that the current
 `SetupRollbackExecutionResult` has only nullable `ChangeSet` and `Recovery`
 context (`src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackCoordinator.cs:7-12`),
-but its producers do not establish `ChangeSet != null` as trustworthy proof.
+while its producers do not establish `ChangeSet != null` as trustworthy proof.
 `Prepare` returns lifecycle/environment-count `rollback_not_available` before
-immutable identity validation, and an identity/journal/evidence failure returns
-`recovery_required` without evidence
-(`src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackPreflightEvaluator.cs:50-125`).
-The coordinator nevertheless persists/returns the supplied row for the former
-and returns it for the latter whenever only `plan is null` is false
+immutable identity validation, then collapses immutable-identity failure and
+later journal/rollback-evidence failure into the same evidence-free
+`recovery_required` preparation
+(`src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackPreflightEvaluator.cs:50-125`,
+`:362-370`). The coordinator nevertheless persists/returns the supplied row for
+the former and returns it for either collapsed failure whenever only
+`plan is null` is false
 (`src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackCoordinator.cs:79-98`,
 `:148-180`). Those paths prove that a supplied row can currently be invalid.
 
-The rollback-domain owner must therefore make the typed result distinguish a
-trustworthy normal-result source before Task 05: either enforce and test the
-nullable-carrier invariant that `ChangeSet` is non-null if and only if the
-requested row passed applicable row/private-plan validation, or add an explicit
-equivalent trust marker. The correction must still carry a valid bound row for
-the lifecycle-ineligible `rollback_not_available` case and must carry the row
-for post-validation `recovery_required`/`internal_error`, including rollback
-journal/ledger preparation and preflight-observation/persistence failures
-(`src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackCoordinator.cs:103-121`,
-`:165-180`; `src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackPreflightEvaluator.cs:128-186`).
-It must omit the row for invalid identity/evidence paths. Until that producer
-contract is corrected, the dispatcher cannot infer trust from code plus a
+The trust boundary is exact. Failed immutable row/private-plan identity is
+pre-normal and untrusted: the typed result must expose no trustworthy
+`ChangeSet`, and Task 05 must return empty targets. Once immutable identity has
+succeeded, the requested ledger row is a trustworthy normal-result projection
+source. A later journal shape, journal/rollback evidence, target observation,
+rollback journal/ledger preparation, or attempted-outcome persistence failure
+may change the code to `recovery_required` or `internal_error`, but must retain
+that trustworthy requested-row context for projection
+(`src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackPreflightEvaluator.cs:70-125`,
+`:128-186`; `src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackCoordinator.cs:103-121`,
+`:165-180`). The valid-bound-row lifecycle-ineligible case likewise performs
+identity first and returns a trustworthy `rollback_not_available` row. Trust is
+therefore a validated stage, never an inference from `Code`.
+
+Insert **Task 04a — Rollback trusted-result carrier** after Task 04 and before
+the current Task 05. Its owned scope is exactly:
+
+- `src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackCoordinator.cs`
+  for `SetupRollbackExecutionResult` and every direct-result construction;
+- `src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackPreflightEvaluator.cs`
+  for identity-first ordering and an explicit distinction between identity
+  failure and post-identity journal/evidence failure; and
+- `tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs` for
+  focused producer/carrier contract coverage.
+
+No additional contract-test file is required because this is an internal
+rollback execution carrier; public dispatcher mapping remains Task 05. Task 04a
+does not own the dispatcher/public DTO, storage or recovery semantics,
+lock/recovery ownership, the 13-code catalog, specifications, task cards,
+dependencies, or compatibility paths. It must choose one unambiguous result
+contract: either make non-null `ChangeSet` the sole proof of a trustworthy
+requested row, or add one explicit equivalent trust marker. In either shape,
+trusted means a non-null row matching `RequestedChangeSetId`; untrusted means no
+projectable row, and contradictory combinations are invalid. All direct normal
+outcomes after identity retain trust; mandatory recovery and every failure
+before identity do not.
+
+Task 04a tests must be deterministic and use the existing in-memory fault,
+checkpoint, or barrier seams without sleeps, timing polls, or retries. Pin all
+of these contexts:
+
+1. lifecycle-ineligible plus rebound identity returns untrusted
+   `recovery_required`, proving identity precedes lifecycle;
+2. an Applied row with failed immutable identity returns untrusted
+   `recovery_required` (`tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs:768-783`);
+3. identity success followed by journal/rollback-evidence failure returns
+   trusted `recovery_required` with the requested row;
+4. a valid lifecycle-ineligible row returns trusted
+   `rollback_not_available` (`tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs:478-503`);
+5. post-validation rollback-journal and ledger-preparation faults each retain a
+   trusted `recovery_required` row (`tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs:592-627`);
+6. a post-identity observation fault and an attempted-outcome persistence fault
+   after a stale/not-available classification each retain a trusted
+   `internal_error` row (`tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs:399-443`,
+   `:703-729`).
+
+Every trusted case asserts `Recovery == null`, the chosen trust signal, and a
+non-null `ChangeSet` whose ID equals `RequestedChangeSetId`; every untrusted
+direct case asserts the inverse trust signal and no projectable row. Run exactly:
+
+```powershell
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~SetupRollbackTests
+git diff --check
+```
+
+Then obtain independent read-only review `PASS` for Task 04a before dispatching
+Task 05. Until then, the dispatcher cannot infer trust from code plus today's
 non-null row. After correction, a missing required trustworthy `ChangeSet`, an
 unknown code, a success/code mismatch, or any malformed trust combination
 fails closed to `internal_error`/empty targets. `setup_busy` is dispatcher-level
@@ -327,34 +386,39 @@ malformed service-result rejection pin.
 ## Q6 — T2c2 task split
 
 **Decision: `PINNED WITH CARD CORRECTIONS`.** The sequential Task 02-07 split
-is sound, but the orchestrator must apply these smallest corrections before
-dispatching the affected card; this audit does not edit task cards:
+is sound after inserting Q4's Task 04a between Tasks 04 and 05. The orchestrator
+must apply these smallest corrections before dispatching the affected card;
+this audit does not edit task cards:
 
 | Task | Audit result |
 | --- | --- |
 | 02 Apply ordering | Correct boundary. Implement Q1 order, remove only the redundant standalone validation, and retain the valid/non-valid non-Planned pair plus one-lock/one-recovery pin (`docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-02-apply-preflight-ordering.md:1-16`, `docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-02-apply-preflight-ordering.md:143-189`). |
 | 03 diagnostic catalog | Correct functional slice, but explicitly treat it as reopened T2b ownership. Use Q2 Option A and only the three authorized files; keep `rerun_requested_setup_command` excluded and add both no-mutation tests (`docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-03-pre-mutation-diagnostic-catalog.md:1-31`, `docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-03-pre-mutation-diagnostic-catalog.md:82-128`). |
 | 04 Apply invocation | Correct dispatcher slice. Amend its outcome table to include storage-code empty-target handling, the contextual `recovery_required` distinction, and mandatory post-failure reload from Q3; never project the pre-call row (`docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-04-apply-coordinator-invocation.md:28-41`, `docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-04-apply-coordinator-invocation.md:94-138`). |
-| 05 Rollback | `BLOCKED` on Q4's rollback-domain owner correction and re-review. Replace the card's "known rows" with Q4's exhaustive 13-code catalog, add `unsafe_path`, both interrupted success codes, interrupted failure, and ledger read codes, and keep dispatcher-level `setup_busy` separate. Delete the code-only empty-target mapping: after the producer exposes trustworthy normal-result context, project its requested-row `ChangeSet` with rollback unavailable for every typed normal outcome, including post-validation `recovery_required` and `internal_error`; use empty targets for mandatory recovery, lock/storage, missing row, missing/invalid plan or identity, and malformed results. The dispatcher must not guess trust from `Code` or today's non-null `ChangeSet` (`docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-05-rollback-dispatcher.md:30-53`, `docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-05-rollback-dispatcher.md:134-169`). |
+| 04a Rollback trusted-result carrier | New preceding rollback-domain owner task pinned by Q4. Own only `SetupRollbackCoordinator.cs`, `SetupRollbackPreflightEvaluator.cs`, and `SetupRollbackTests.cs`; establish the trustworthy requested-row result invariant/marker, cover the six no-sleep contexts, run the focused Rollback suite, and obtain independent review `PASS`. It does not implement dispatcher mapping. |
+| 05 Rollback | `BLOCKED` until Task 04a validation and independent review pass. Replace the card's "known rows" with Q4's exhaustive 13-code catalog, add `unsafe_path`, both interrupted success codes, interrupted failure, and ledger read codes, and keep dispatcher-level `setup_busy` separate. Delete the code-only empty-target mapping: project Task 04a's trustworthy requested-row context with rollback unavailable for every typed normal outcome, including post-validation `recovery_required` and `internal_error`; use empty targets for mandatory recovery, lock/storage, missing row, missing/invalid plan or identity, and malformed results. The dispatcher must not guess trust from `Code` (`docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-05-rollback-dispatcher.md:30-53`, `docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-05-rollback-dispatcher.md:134-169`). |
 | 06 Status | Correct direct-delegation slice for ownership, but pure delegation still requires final validation of the same object. Change the implementation sketch from `status(options.Adapter)` to `Validate(status(options.Adapter))`; keep zero outer lock/recovery and no reconstruction (`docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-06-status-dispatcher.md:27-37`, `docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-06-status-dispatcher.md:80-102`). |
 | 07 historical manifest | Correct test-only T2c2 slice. It proves Issue #61 historical-manifest behavior across #66 ledger-origin commands and does **not** satisfy the #66-to-#67 real adapter gate (`docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-07-historical-manifest-cross-surface.md:1-25`, `docs/superpowers/plans/2026-07-14-issue-66-t2-completion/task-07-historical-manifest-cross-surface.md:100-106`). |
 
-Tasks remain sequential because 02-07 share dispatcher/test boundaries, and a
-finding reopens its originating owner. The corrected ownership model remains:
-dispatcher T2c2 owns Apply/Rollback/Status result composition, the reopened T2b
-repair owns pre-mutation carrier validation, and T7 alone owns the real #66/#67
+Tasks remain sequential as 02-04, inserted rollback-domain Task 04a, then 05-07
+because they share dispatcher/test boundaries, and a finding reopens its
+originating owner. The corrected ownership model is: rollback-domain Task 04a
+owns the trustworthy internal execution carrier; dispatcher T2c2 owns
+Apply/Rollback/Status public result composition; the reopened T2b repair owns
+pre-mutation carrier validation; and T7 alone owns the real #66/#67
 composition-root acceptance gate.
 
 ## Source audit and review notes
 
 Sources checked include the canonical configuration-setup specification,
 `docs/requirements.md`, `docs/spec.md`, the approved Issues #66/#67 design and
-sprint-wide plan, the M3 handoff findings, Tasks 02-07 and #67 T3d/T7 cards,
+sprint-wide plan, the M3 handoff findings, Tasks 02-07, the pinned Task 04a
+insertion, and #67 T3d/T7 cards,
 the dispatcher, plan/ledger stores, adapter registry/carriers, contract
 validator/catalog, Apply/Rollback/Recovery coordinators, rollback preflight,
 Status service/list projector, and their named tests.
 
 Implementer self-review found no product behavior, interface, security,
 dependency, fixture, schema, task-card, or test change in this task. Residual
-gates are the explicit migration `SPEC-CONFLICT` and the pending independent
-read-only review.
+gates are the explicit migration `SPEC-CONFLICT`, Task 04a implementation and
+review, and the pending independent re-review of this audit.
