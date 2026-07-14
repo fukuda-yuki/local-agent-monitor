@@ -61,6 +61,15 @@ HTTP/proxy/UI remain N/A.
   covered by at least one real-platform smoke case that needs no
   VS Code/CLI installed, e.g. `setup status` on an empty root).
 
+  Include the mandatory deferred wrapper-success test: invoke `setup status`
+  against an isolated empty runtime root directly through the production CLI
+  and through `pwsh scripts/local-monitor/setup.ps1 status`; assert both
+  serialize `setup.v1` with `status_ready`, have exit 0, and have
+  byte-identical stdout. Make it pass immediately after the `Program.cs`
+  production-composition wiring is added. This closes the Issue #66 T2 wrapper
+  residual only after the real #67 producer exists. It must not be backported
+  to Task 10, where the null dispatcher correctly returns `internal_error`.
+
 - [ ] **Step 2: Write the failing cross-surface matrix** (each case drives
   parser-shaped args through the real dispatcher; assert the serialized
   `setup.v1` JSON):
@@ -99,16 +108,18 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 ```
 
 - [ ] **Step 4: Early real-producer gate.** Invoke the real CLI process
-  (repository build) at least once:
+  (repository build) directly and through the existing wrapper at least once:
 
 ```powershell
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- setup status
+pwsh scripts\local-monitor\setup.ps1 status
 ```
 
-  Parse the stdout as `setup.v1`, confirm the production
-  `SetupCommandResult` shape and exit code, and record in the report that
-  HTTP/proxy/UI surfaces remain N/A. (This is operator evidence; the
-  automated equivalent lives in the CliApplication/wrapper suites.)
+  Parse each stdout as `setup.v1`, confirm both are `status_ready` with exit
+  0 and byte-identical stdout, and record in the report that HTTP/proxy/UI
+  surfaces remain N/A. The mandatory automated equivalent belongs in this
+  task's `ConfigurationSetupIntegrationTests`; it is the deferred #66
+  wrapper-success proof.
 
 - [ ] **Step 5: Run the wide filter + full ConfigCli + build.**
 
@@ -141,6 +152,10 @@ stdout + exit code).
   diff is the injection call only.
 - The 10-case matrix passes against real stores/transactions (fake platform
   observations, real persistence).
+- The deferred production `setup status` success-parity test passes directly
+  through the composed CLI and through the unchanged wrapper: both return
+  `status_ready`, exit 0, and byte-identical stdout. This closes the #66 T2
+  interface residual before T8 packaging or a final joint-completion claim.
 - Real-CLI invocation evidence captured; HTTP/proxy/UI recorded N/A.
 - Full ConfigCli suite and build pass; independent review PASS. Only after
   this gate may anyone claim #67 target behavior works end to end.

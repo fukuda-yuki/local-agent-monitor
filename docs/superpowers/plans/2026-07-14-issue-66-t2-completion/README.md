@@ -15,8 +15,12 @@ findings at `399f441`, complete the generic Apply/Rollback/Status dispatcher
 `SetupCommandDispatcher` constructs plan/apply/rollback `SetupCommandResult`
 values and delegates status directly to `SetupStatusService`. `CliApplication`
 serializes the returned DTO via `SetupJson` and maps exit codes; the
-PowerShell wrapper forwards stdout byte-for-byte. No HTTP, proxy, UI,
-database, AppHost resource, project, or dependency is added.
+PowerShell wrapper forwards stdout byte-for-byte. Before Issue #67 T7 wires
+`Program.cs` to the production dispatcher, `CliApplication` deliberately uses
+its null dispatcher, so a parsed `setup status` returns `internal_error`.
+Task 10 proves that the T2 transport result is unchanged; T7 alone proves
+production `status_ready` success parity after composition. No HTTP, proxy,
+UI, database, AppHost resource, project, or dependency is added.
 
 **Tech stack:** .NET (existing ConfigCli project), xunit, PowerShell 7 wrapper
 script. No new PackageReference.
@@ -64,6 +68,10 @@ Read before implementing any task, in this order:
   path, no catalog (code/warning/action) declaration change.
 - Adapter/warning/next-action values remain the closed catalogs declared in
   `Setup/Contracts/SetupCodes.cs` and validated by `SetupContractValidator`.
+- Task 10 must not wire `Program.cs`, replace the null dispatcher, or weaken
+  the parsed-status `internal_error` result. Those changes would conceal the
+  #66/#67 composition interface instead of proving wrapper transport parity;
+  the deferred production-success proof is owned by Issue #67 T7.
 - Deterministic tests only: fault seams/barriers, no sleeps, no retries.
 - Repository-safe evidence: no raw values, paths of user data, or exception
   text in public DTOs, test fixtures, or logs.
@@ -104,11 +112,17 @@ task-08 early T2 integration review (read-only gate)
 task-09 T2d CLI process surface
    |
    v
-task-10 T2d PowerShell wrapper
+task-10 T2d PowerShell wrapper (T2 transport gate: null-dispatcher
+`setup status` remains `internal_error`)
    |
    v
-task-11 T2 closeout validation and ledger update
+task-11 T2 closeout validation and ledger update (T2 gate only; retain the
+unverified #66/#67 production-composition interface)
 ```
+
+Issue #67 T7 then wires `Program.cs` and must add the deferred direct-CLI /
+wrapper `setup status` `status_ready` success-parity test before T8 packaging
+or any final joint completion claim.
 
 No parallel execution: Tasks 02–07 share the same two files, and Tasks 09–10
 are sequential because the wrapper tests consume the exit mapping.

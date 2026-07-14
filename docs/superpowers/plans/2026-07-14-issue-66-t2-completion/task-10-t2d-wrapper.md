@@ -2,7 +2,10 @@
 
 **Objective:** Add the repository-mode PowerShell wrapper exposing the four
 setup actions and forwarding the Config CLI's stdout byte-for-byte and its
-exit code unchanged, with executable parity tests.
+exit code unchanged, with executable T2 transport-parity tests. This task does
+not prove production setup success: before Issue #67 T7 composes `Program.cs`,
+the `CliApplication` default null dispatcher intentionally maps parsed
+`setup status` to `internal_error`.
 
 **Depends on:** Task 09 committed and reviewed.
 
@@ -52,10 +55,11 @@ layout. No change to other `scripts/local-monitor/*.ps1`. No new dependency.
     (`dotnet <ConfigCli dll or project> setup status`) and through
     `pwsh scripts/local-monitor/setup.ps1 status`; capture both stdout
     streams as raw bytes; assert byte equality and equal exit codes.
-    (Status against an empty runtime root returns a deterministic
-    `status_ready` result, making byte comparison stable; isolate the
-    runtime root per test via the environment seam the runtime-path tests
-    use.)
+    Before T7 composition, both commands use `CliApplication`'s null
+    dispatcher, so parsed status deterministically returns `internal_error`
+    and exit 5. Isolate the runtime root per test via the environment seam the
+    runtime-path tests use, but do not treat the empty root as proof of
+    `status_ready`.
   - `SetupWrapper_ForwardsFailureStderrAndExitCode` — an invalid invocation
     (`setup apply` without `--change-set`) through both paths: assert stderr
     `invalid_arguments\n`, exit 2, and byte-identical stdout JSON.
@@ -108,6 +112,13 @@ exit $LASTEXITCODE
   the native command directly, not via a pipeline into `Write-Output`,
   preserves the stream).
 
+  Do not wire `Program.cs`, inject a production dispatcher, or weaken the
+  expected `internal_error` result to make this test look like success. The
+  wrapper is a transport surface; changing composition here would bypass the
+  real #66/#67 producer/consumer gate. Issue #67 T7 owns the immediately
+  deferred direct-CLI-versus-wrapper `setup status` `status_ready`
+  success-parity test after production composition is wired.
+
 - [ ] **Step 5: Run GREEN + full ConfigCli.**
 
 ```powershell
@@ -133,11 +144,14 @@ Step 5 commands.
 
 ## Completion criteria
 
-- Byte-for-byte stdout parity and exit-code parity proven for a success, a
-  failure, and the bare-invocation case.
+- Byte-for-byte stdout parity and exit-code parity proven for the parsed
+  null-dispatcher status result (`internal_error`, exit 5), an invalid apply
+  result (`invalid_arguments`, exit 2), and the bare-invocation case. This is
+  the T2 transport gate, not production `status_ready` success proof.
 - Wrapper adds zero own output on stdout; no re-validation of CLI-owned
   arguments.
 - Wrapper is NOT added to the release layout (T8 residual, stated in the
-  ledger row); independent review PASS.
+  ledger row); the production-success interface remains unverified and is
+  explicitly deferred to Issue #67 T7; independent review PASS.
 
 **Report destination:** chat + ledger row per README policy.
