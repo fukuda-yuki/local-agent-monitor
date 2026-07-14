@@ -13,12 +13,13 @@ That handoff records the unapproved Apply preflight, remaining T2 work, all
 unstarted #67 target tasks, current test evidence, review findings, and the
 required resume order. Task 01's final approved contract-audit evidence is
 recorded below; it is docs-only bookkeeping and leaves the migration conflict,
-Task 04a, T3d, and T7 gates open.
+T3d, and T7 gates open.
 
 ## Pending Migration A / Plan A execution decisions (2026-07-15)
 
 The approved #66/#67 audit corrections are now materialized in the mission
-cards, but remain pending implementation and review:
+cards, with the bounded v1 restart and rollback dispatcher evidence now recorded
+below; the remaining real-producer gates are still pending:
 
 - Migration A is **v1 restart compatibility evidence**, not a migration.
   `ownership-ledger.v1.json` is the actual committed fixture copied to the
@@ -27,8 +28,8 @@ cards, but remain pending implementation and review:
   because v1 is first shipped and fabricated v0 is forbidden. See [Issue #66
   Task 01a](../../superpowers/plans/2026-07-14-issue-66-t2-completion/task-01a-v1-restart-evidence.md).
 - Rollback Task 04a owns the trusted-result carrier and identity-first
-  producer invariant. Task 05 is blocked until the six deterministic contexts,
-  focused `SetupRollbackTests`, and independent review PASS. See [Task
+  producer invariant; Task 05 now records the dispatcher mapping and its
+  independent re-review PASS. Task 06 is unblocked. See [Task
   04a](../../superpowers/plans/2026-07-14-issue-66-t2-completion/task-04a-rollback-trusted-result-carrier.md)
   and the amended [Task 05](../../superpowers/plans/2026-07-14-issue-66-t2-completion/task-05-rollback-dispatcher.md).
 - #67 T3d may add only the skeletal, non-gating real aggregate + scripted
@@ -92,8 +93,9 @@ cards, but remain pending implementation and review:
 | Committed v1 fixture restart compatibility (Task 01a) | #66 | Complete | `ac8d722..7e07d7d` (test-only) | focused SetupStorageTests 117/117; ConfigCli 1,991/1,991; solution build 0 warnings/0 errors; `git diff --check` clean | Spec PASS; Test Quality APPROVED; 0 Critical/Important/Minor | migration N/A (v1 first shipped); no v0/v2/migration layer; Task 02 onward pending |
 | Apply preflight identity-before-lifecycle (Task 02) | #66 | Complete | `b1775fe..f2b6b40` | dispatcher 80/80; dispatcher+apply+recovery 516/516; `git diff --check` clean | Spec PASS; Code/Test Quality APPROVED; Security/fail-closed PASS; 0 Critical/Important/Minor | mismatch regression was already GREEN after fixture correction because base already had identity-before-lifecycle; redundant validation removal and deterministic pins complete; Task 03 onward pending; full solution validation deferred to Task 11 |
 | Pre-mutation diagnostic catalog ownership (Task 03) | #66 | Complete | `51d79c5..2e171dd` | characterization 2/2 GREEN before refactor due existing duplicate enforcement; focused Apply+contract validation/shape 307/307; build 0 warnings/0 errors; `git diff --check` clean | Spec PASS; Code/Test Quality APPROVED; Security/pre-mutation PASS; 0 Critical/Important/Minor | shared validator owns catalog and recovery-owned `rerun_requested_setup_command` remains excluded pre-mutation; no product RED claimed; Task 04 onward pending; full solution validation deferred to Task 11 |
-| Real Apply dispatcher integration (Task 04) | #66 | Complete | `f7d6d12..61dde7b` (commits `4d3c583`, `61dde7b`) | RED sentinel 1/1; initial related 577/577, ConfigCli 2,018/2,018, build 0/0; review remediation RED 5/5 then GREEN 5/5; final related 582/582, ConfigCli 2,023/2,023, build 0/0; `git diff --check` clean | Initial review found 2 Important (exact normal Apply failure-code union; rebound row identity); remediation independently re-reviewed: Spec PASS; Code/Test Quality APPROVED; Security/Transaction PASS; 0 Critical, 0 Important open (2 resolved), 0 Minor. Exact 12-code union enforced (`target_not_installed`, `unsupported_version`, `managed_policy_conflict`, `environment_override_conflict`, `malformed_settings`, `permission_denied`, `unsafe_path`, `stale_plan`, `port_owned_by_foreign_process`, `partial_apply`, `recovery_required`, `internal_error`); post-failure reload requires immutable identity and never stale fallback | Task 04a next; Task 05 blocked until Task 04a PASS; full solution/Playwright deferred to Task 11 |
-| Rollback trusted-result carrier (Task 04a) | #66 | Complete | `271035f..4d03245` | Intended RED 8 failed/80 passed; focused SetupRollbackTests 88/88; `git diff --check` clean; no sleeps/retries | Spec PASS; Code/Test Quality APPROVED; Security/Transaction/Concurrency PASS; 0 Critical/Important/Minor; six contexts/eight cases pass | `ChangeSet != null` is the sole trust proof matching the requested ID and no Recovery; identity-first; no sleeps/retries. Task 05 is now unblocked but pending; full solution/build/status/recovery/public serialization deferred to Task 11/integration |
+| Real Apply dispatcher integration (Task 04) | #66 | Complete | `f7d6d12..61dde7b` (commits `4d3c583`, `61dde7b`) | RED sentinel 1/1; initial related 577/577, ConfigCli 2,018/2,018, build 0/0; review remediation RED 5/5 then GREEN 5/5; final related 582/582, ConfigCli 2,023/2,023, build 0/0; `git diff --check` clean | Initial review found 2 Important (exact normal Apply failure-code union; rebound row identity); remediation independently re-reviewed: Spec PASS; Code/Test Quality APPROVED; Security/Transaction PASS; 0 Critical, 0 Important open (2 resolved), 0 Minor. Exact 12-code union enforced (`target_not_installed`, `unsupported_version`, `managed_policy_conflict`, `environment_override_conflict`, `malformed_settings`, `permission_denied`, `unsafe_path`, `stale_plan`, `port_owned_by_foreign_process`, `partial_apply`, `recovery_required`, `internal_error`); post-failure reload requires immutable identity and never stale fallback | Task 04a and Task 05 complete; full solution/Playwright deferred to Task 11 |
+| Rollback trusted-result carrier (Task 04a) | #66 | Complete | `271035f..4d03245` | Intended RED 8 failed/80 passed; focused SetupRollbackTests 88/88; `git diff --check` clean; no sleeps/retries | Spec PASS; Code/Test Quality APPROVED; Security/Transaction/Concurrency PASS; 0 Critical/Important/Minor; six contexts/eight cases pass | `ChangeSet != null` is the sole trust proof matching the requested ID and no Recovery; identity-first; no sleeps/retries. Task 05 is complete; full solution/build/status/recovery/public serialization deferred to Task 11/integration |
+| Rollback dispatcher (Task 05) | #66 | Complete | `67d8fc6753091f168a68c9cdbece618dfc0f7f39..0ea8de0dcee59d77d9db16f8c633e52a8cef36b4` | Initial RED unimplemented 1/1, then constructor compile RED 4 CS1729; initial rollback 32/32 and related 528/528; remediation RED 12/12 expected failures; remediation GREEN malformed 12/12, rollback 44/44, related dispatcher/rollback/recovery 540/540; orchestrator rerun rollback 44/44; `git diff --check` clean | Final independent re-review: Spec PASS; Quality APPROVED; Security PASS; Transaction/Concurrency PASS; 0 Critical/Important/Minor; prior Important direct-envelope validation gap resolved | Full solution/build/Playwright not run for this task. Remaining interfaces: Status Task 06+, public serialization/CLI/wrapper Task 09/10, and Issue #67 adapter integration; Task 06 is unblocked; migration remains N/A with committed-v1 restart evidence already passed |
 | Shared setup commands | #66 | Pending | - | - | - | - |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
