@@ -186,6 +186,125 @@ public sealed class GitHubCopilotManagedPolicyTests
         Assert.DoesNotContain(marker, JsonSerializer.Serialize(result), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Resolve_NativeValidAndEnterpriseMalformed_PreservesNativeProvenance()
+    {
+        var platform = CreatePlatform();
+        platform.SeedManagedObservation(
+            SetupManagedLocation.GitHubCopilotNativeWindowsMachinePolicy,
+            Present(new Dictionary<string, object?> { ["CopilotOtelEnabled"] = true }));
+        platform.SeedManagedObservation(
+            SetupManagedLocation.VsCodeEnterpriseWindowsMachinePolicy,
+            new SetupManagedObservation(SetupManagedOutcome.Failed, [], true));
+
+        var result = GitHubCopilotManagedPolicyResolver.Resolve(platform, SetupPlanningOs.Windows, DesiredValues);
+
+        Assert.Equal(GitHubCopilotManagedChannel.Native, result.WinningChannel);
+        Assert.True(result.ServerTierVerifiable);
+        Assert.Equal(
+            [new ManagedFieldConstraint("CopilotOtelEnabled", ManagedConstraintComparison.EqualToDesired)],
+            result.CopilotConstraints);
+        Assert.Equal(GitHubCopilotManagedPolicyMalformedSystems.Enterprise, result.MalformedSystems);
+    }
+
+    [Fact]
+    public void Resolve_FileValidAndEnterpriseMalformed_PreservesFileProvenance()
+    {
+        var platform = CreatePlatform();
+        platform.SeedManagedObservation(
+            SetupManagedLocation.GitHubCopilotFileWindows,
+            Present(new Dictionary<string, object?> { ["CopilotOtelEnabled"] = true }));
+        platform.SeedManagedObservation(
+            SetupManagedLocation.VsCodeEnterpriseWindowsMachinePolicy,
+            new SetupManagedObservation(SetupManagedOutcome.Failed, [], true));
+
+        var result = GitHubCopilotManagedPolicyResolver.Resolve(platform, SetupPlanningOs.Windows, DesiredValues);
+
+        Assert.Equal(GitHubCopilotManagedChannel.File, result.WinningChannel);
+        Assert.False(result.ServerTierVerifiable);
+        Assert.Equal(GitHubCopilotManagedPolicyMalformedSystems.Enterprise, result.MalformedSystems);
+    }
+
+    [Fact]
+    public void Resolve_CopilotMalformedAndEnterpriseValid_PreservesEnterpriseConstraints()
+    {
+        var platform = CreatePlatform();
+        platform.SeedManagedObservation(
+            SetupManagedLocation.GitHubCopilotNativeWindowsMachinePolicy,
+            new SetupManagedObservation(SetupManagedOutcome.Failed, [], true));
+        platform.SeedManagedObservation(
+            SetupManagedLocation.VsCodeEnterpriseWindowsMachinePolicy,
+            Present(new Dictionary<string, object?> { ["CopilotOtelEnabled"] = true }));
+
+        var result = GitHubCopilotManagedPolicyResolver.Resolve(platform, SetupPlanningOs.Windows, DesiredValues);
+
+        Assert.Equal(GitHubCopilotManagedChannel.Malformed, result.WinningChannel);
+        Assert.False(result.ServerTierVerifiable);
+        Assert.Equal(GitHubCopilotManagedPolicyMalformedSystems.Copilot, result.MalformedSystems);
+        Assert.Equal(
+            [new ManagedFieldConstraint("CopilotOtelEnabled", ManagedConstraintComparison.EqualToDesired)],
+            result.EnterprisePolicyConstraints);
+    }
+
+    [Fact]
+    public void Resolve_BothPolicySystemsMalformed_ReportsBothMarkers()
+    {
+        var platform = CreatePlatform();
+        platform.SeedManagedObservation(
+            SetupManagedLocation.GitHubCopilotNativeWindowsMachinePolicy,
+            new SetupManagedObservation(SetupManagedOutcome.Failed, [], true));
+        platform.SeedManagedObservation(
+            SetupManagedLocation.VsCodeEnterpriseWindowsMachinePolicy,
+            new SetupManagedObservation(SetupManagedOutcome.Failed, [], true));
+
+        var result = GitHubCopilotManagedPolicyResolver.Resolve(platform, SetupPlanningOs.Windows, DesiredValues);
+
+        Assert.Equal(GitHubCopilotManagedChannel.Malformed, result.WinningChannel);
+        Assert.Equal(
+            GitHubCopilotManagedPolicyMalformedSystems.Copilot |
+            GitHubCopilotManagedPolicyMalformedSystems.Enterprise,
+            result.MalformedSystems);
+    }
+
+    [Theory]
+    [MemberData(nameof(MalformedNativeObservations))]
+    public void Resolve_MalformedNativeObservationShape_DoesNotReadLowerFileTier(
+        SetupManagedObservation nativeObservation)
+    {
+        var platform = CreatePlatform();
+        platform.SeedManagedObservation(
+            SetupManagedLocation.GitHubCopilotNativeWindowsMachinePolicy,
+            nativeObservation);
+        platform.SeedManagedObservation(
+            SetupManagedLocation.GitHubCopilotFileWindows,
+            Present(new Dictionary<string, object?> { ["CopilotOtelEnabled"] = true }));
+
+        var result = GitHubCopilotManagedPolicyResolver.Resolve(platform, SetupPlanningOs.Windows, DesiredValues);
+
+        Assert.Equal(GitHubCopilotManagedChannel.Malformed, result.WinningChannel);
+        Assert.Equal(GitHubCopilotManagedPolicyMalformedSystems.Copilot, result.MalformedSystems);
+        Assert.DoesNotContain("managed.read:GitHubCopilotFileWindows", platform.Operations);
+    }
+
+    public static IEnumerable<object[]> MalformedNativeObservations()
+    {
+        yield return [new SetupManagedObservation(SetupManagedOutcome.Failed, [], true)];
+        yield return [new SetupManagedObservation(SetupManagedOutcome.Present, "{}"u8.ToArray(), false)];
+        yield return [new SetupManagedObservation(SetupManagedOutcome.Present, "[]"u8.ToArray(), true)];
+        yield return [new SetupManagedObservation(
+            SetupManagedOutcome.Present,
+            "{\"CopilotOtelEnabled\":true,\"CopilotOtelEnabled\":false}"u8.ToArray(),
+            true)];
+        yield return [new SetupManagedObservation(
+            SetupManagedOutcome.Present,
+            "{\"CopilotOtelEnabled\":{}}"u8.ToArray(),
+            true)];
+        yield return [new SetupManagedObservation(SetupManagedOutcome.Absent, [1], true)];
+        yield return [new SetupManagedObservation(SetupManagedOutcome.Failed, [1], true)];
+        yield return [new SetupManagedObservation((SetupManagedOutcome)99, [], true)];
+        yield return [new SetupManagedObservation(SetupManagedOutcome.Present, null!, true)];
+    }
+
     private static readonly IReadOnlyDictionary<string, string> DesiredValues =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {

@@ -17,11 +17,20 @@ internal enum ManagedConstraintComparison
     DiffersFromDesired,
 }
 
+[Flags]
+internal enum GitHubCopilotManagedPolicyMalformedSystems
+{
+    None = 0,
+    Copilot = 1,
+    Enterprise = 2,
+}
+
 internal sealed record GitHubCopilotManagedPolicyResolution(
     GitHubCopilotManagedChannel WinningChannel,
     bool ServerTierVerifiable,
     IReadOnlyList<ManagedFieldConstraint> CopilotConstraints,
-    IReadOnlyList<ManagedFieldConstraint> EnterprisePolicyConstraints);
+    IReadOnlyList<ManagedFieldConstraint> EnterprisePolicyConstraints,
+    GitHubCopilotManagedPolicyMalformedSystems MalformedSystems);
 
 internal sealed record ManagedFieldConstraint(
     string SettingKey,
@@ -44,17 +53,26 @@ internal static class GitHubCopilotManagedPolicyResolver
             .ToArray();
         var copilot = ResolveCopilot(platform, planningOs, desired);
         var enterprise = ResolveEnterprise(platform, planningOs, desired);
-        var malformed = copilot.IsMalformed || enterprise.IsMalformed;
+        var malformedSystems =
+            (copilot.IsMalformed ? GitHubCopilotManagedPolicyMalformedSystems.Copilot : 0) |
+            (enterprise.IsMalformed ? GitHubCopilotManagedPolicyMalformedSystems.Enterprise : 0);
 
         return new GitHubCopilotManagedPolicyResolution(
-            malformed ? GitHubCopilotManagedChannel.Malformed : copilot.Channel,
-            !malformed && copilot.ServerTierVerifiable,
+            copilot.Channel,
+            copilot.ServerTierVerifiable,
             copilot.Constraints,
-            enterprise.Constraints);
+            enterprise.Constraints,
+            malformedSystems);
     }
 
     private static GitHubCopilotManagedPolicyResolution MalformedResolution() =>
-        new(GitHubCopilotManagedChannel.Malformed, false, [], []);
+        new(
+            GitHubCopilotManagedChannel.Malformed,
+            false,
+            [],
+            [],
+            GitHubCopilotManagedPolicyMalformedSystems.Copilot |
+            GitHubCopilotManagedPolicyMalformedSystems.Enterprise);
 
     private static PolicyEvaluation ResolveCopilot(
         ISetupPlatform platform,
@@ -172,24 +190,30 @@ internal static class GitHubCopilotManagedPolicyResolver
             return ManagedObject.Malformed;
         }
 
-        if (observation is null || observation.Outcome == SetupManagedOutcome.Failed || !observation.IsComplete)
+        if (observation is null)
         {
             return ManagedObject.Malformed;
         }
 
-        if (observation.Outcome == SetupManagedOutcome.Absent)
+        return observation.Outcome switch
         {
-            return ManagedObject.Absent;
-        }
+            SetupManagedOutcome.Absent when observation.IsComplete && observation.Bytes is { Length: 0 } =>
+                ManagedObject.Absent,
+            SetupManagedOutcome.Failed when observation.IsComplete && observation.Bytes is { Length: 0 } =>
+                ManagedObject.Malformed,
+            SetupManagedOutcome.Present when observation.IsComplete && observation.Bytes is not null =>
+                ParseManagedObject(observation.Bytes, desired),
+            _ => ManagedObject.Malformed,
+        };
+    }
 
-        if (observation.Outcome != SetupManagedOutcome.Present || observation.Bytes is null)
-        {
-            return ManagedObject.Malformed;
-        }
-
+    private static ManagedObject ParseManagedObject(
+        byte[] bytes,
+        IReadOnlyList<KeyValuePair<string, string>> desired)
+    {
         try
         {
-            using var document = JsonDocument.Parse(observation.Bytes);
+            using var document = JsonDocument.Parse(bytes);
             if (document.RootElement.ValueKind != JsonValueKind.Object)
             {
                 return ManagedObject.Malformed;
