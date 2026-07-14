@@ -186,6 +186,31 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Fact]
+    public void DispatchPlan_HistoricalManifestFromAdapterFailsExactCurrentValidationWithoutArtifacts()
+    {
+        using var historical = CreateHistoricalVsCodeManifest();
+        var adapter = new RecordingAdapter("test-adapter", request =>
+        {
+            var record = CreateManifestRecord(request);
+            return SetupPlanResult.Planned(CreatePlan(request,
+            [record with
+            {
+                StatusProjection = record.StatusProjection with
+                {
+                    ExpectedResult = historical.RootElement.Clone(),
+                },
+            }]));
+        });
+        var fixture = DispatcherFixture.Create(adapter, _ => NoRecovery());
+
+        var result = fixture.Dispatcher.Dispatch(CreatePlanOptions());
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        AssertNoPlannedArtifacts(fixture);
+    }
+
+    [Fact]
     public void DispatchPlan_WhenLockIsBusyStopsBeforeRecoveryAndAdapterResolution()
     {
         var recoveryCalls = 0;
@@ -526,6 +551,60 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Fact]
+    public void DispatchStatus_HistoricalManifestRowSurvivesRealServiceAndSetupJsonSerialization()
+    {
+        using var historical = CreateHistoricalVsCodeManifest();
+        var historicalJson = historical.RootElement.GetRawText();
+        var targetPath = "C:\\status-historical-manifest.json";
+        var adapter = new RecordingAdapter("test-adapter", request =>
+        {
+            var record = CreateManifestRecord(request);
+            return SetupPlanResult.Planned(CreatePlan(request,
+            [record with
+            {
+                TargetLocation = targetPath,
+                BaseStateHash = SetupHash.File(true, Encoding.UTF8.GetBytes("old-file")),
+                DesiredState = "new-file",
+            }]));
+        });
+        var fixture = DispatcherFixture.CreateProduction(adapter);
+        fixture.Platform.SeedDirectory("C:\\");
+        fixture.Platform.SeedFile(targetPath, Encoding.UTF8.GetBytes("old-file"));
+        var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions());
+        var changeSetId = Guid.Parse(planned.ChangeSetId!);
+        using (var setupLock = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
+        {
+            var ledger = fixture.LedgerStore.LoadForRecovery();
+            var row = Assert.Single(ledger.ChangeSets);
+            var target = Assert.Single(row.Targets);
+            fixture.LedgerStore.Save(setupLock.Lock!, ledger with
+            {
+                ChangeSets = [row with
+                {
+                    Targets = [target with
+                    {
+                        StatusProjection = target.StatusProjection with
+                        {
+                            ExpectedResult = historical.RootElement.Clone(),
+                        },
+                    }],
+                }],
+            });
+        }
+        _ = fixture.Dispatcher.Dispatch(CreateApplyOptions(changeSetId));
+
+        var result = fixture.Dispatcher.Dispatch(CreateStatusOptions("test-adapter"));
+        using var serialized = JsonDocument.Parse(SetupJson.Serialize(result));
+        var expectedResult = serialized.RootElement.GetProperty("change_sets")[0]
+            .GetProperty("targets")[0].GetProperty("expected_result");
+
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.StatusReady, result.Code);
+        AssertHistoricalManifest(expectedResult, historicalJson);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
     public void DispatchStatus_DelegatesValidatedSameInstanceWithoutOuterLockOrRecovery()
     {
         var recoveryCalls = 0;
@@ -650,6 +729,45 @@ public sealed class SetupCommandDispatcherTests
         Assert.Single(
             fixture.Platform.Operations.Skip(operationCount),
             operation => operation == $"file.lock:{fixture.Paths.Lock}");
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchRollback_TrustedHistoricalManifestRowSurvivesDispatchAndSetupJsonSerialization()
+    {
+        using var historical = CreateHistoricalVsCodeManifest();
+        var historicalJson = historical.RootElement.GetRawText();
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var target = CreateOwnedApplyTarget(RecordId) with
+        {
+            TargetKind = SetupTargetKind.Json,
+            TargetLabel = "vscode-stable-default-user-settings",
+            StatusProjection = CreateApplyStatusProjection(
+                SetupOperation.Replace,
+                expectedResult: historical.RootElement.Clone()),
+        };
+        var trusted = CreateRollbackChangeSet(
+            changeSetId,
+            SetupCodes.RollbackSucceeded,
+            [target]);
+        var dispatcher = CreateRollbackDispatcher(
+            fixture,
+            _ => NoRecovery(),
+            (_, requestedId) => new SetupRollbackExecutionResult(
+                requestedId,
+                true,
+                SetupCodes.RollbackSucceeded,
+                trusted,
+                null));
+
+        var result = dispatcher.Dispatch(CreateRollbackOptions(changeSetId));
+        using var serialized = JsonDocument.Parse(SetupJson.Serialize(result));
+        var expectedResult = serialized.RootElement.GetProperty("targets")[0].GetProperty("expected_result");
+
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.RollbackSucceeded, result.Code);
+        AssertHistoricalManifest(expectedResult, historicalJson);
         SetupContractValidator.Validate(result);
     }
 
@@ -1194,6 +1312,7 @@ public sealed class SetupCommandDispatcherTests
         var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions("persisted-adapter"));
         var changeSetId = Guid.Parse(planned.ChangeSetId!);
         using var historical = CreateHistoricalVsCodeManifest();
+        var historicalJson = historical.RootElement.GetRawText();
         using (var setupLock = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
         {
             var ledger = fixture.LedgerStore.LoadForRecovery();
@@ -1225,13 +1344,15 @@ public sealed class SetupCommandDispatcherTests
         var dispatcher = CreateApplyDispatcher(fixture, [], _ => NoRecovery(), applyCalls);
         var result = dispatcher.Dispatch(CreateApplyOptions(changeSetId));
         var json = SetupJson.Serialize(result);
+        using var serialized = JsonDocument.Parse(json);
+        var expectedResult = serialized.RootElement.GetProperty("targets")[0].GetProperty("expected_result");
 
         Assert.Equal(SetupCodes.InvalidArguments, result.Code);
         Assert.Equal("persisted-adapter", result.Adapter);
         var projected = Assert.Single(result.Targets);
         Assert.False(projected.RollbackAvailable);
-        Assert.Equal("planned", projected.ExpectedResult!.Value.GetProperty("support_status").GetString());
-        Assert.Contains("\"stability\":\"preview\"", json, StringComparison.Ordinal);
+        AssertHistoricalManifest(projected.ExpectedResult!.Value, historicalJson);
+        AssertHistoricalManifest(expectedResult, historicalJson);
         Assert.Equal(1, adapter.PlanCalls);
         Assert.Equal(0, applyCalls.Value);
         SetupContractValidator.Validate(result);
@@ -2619,6 +2740,13 @@ public sealed class SetupCommandDispatcherTests
         historical["support_status"] = "planned";
         historical["stability"] = "preview";
         return JsonDocument.Parse(historical.ToJsonString());
+    }
+
+    private static void AssertHistoricalManifest(JsonElement actual, string historicalJson)
+    {
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(historicalJson), JsonNode.Parse(actual.GetRawText())));
+        Assert.Equal("planned", actual.GetProperty("support_status").GetString());
+        Assert.Equal("preview", actual.GetProperty("stability").GetString());
     }
 
     private static SetupChangeRecord CreateRecord(
