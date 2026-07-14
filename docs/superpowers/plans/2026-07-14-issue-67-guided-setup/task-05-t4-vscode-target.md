@@ -27,7 +27,8 @@ other target subdirectory.
   profile flags) from T3a; `GitHubCopilotManagedPolicyResolver.Resolve` from
   T3b (T4 calls it with its own desired values);
   `GitHubCopilotEndpointClassification` from context;
-  `ISetupProcessRunner` for extension listing; `JsoncSettingsDocument` for
+  `ISetupProcessRunner` for extension listing and bounded running-state
+  observation; `JsoncSettingsDocument` for
   JSONC-preserving member mutation; `SetupHash` for base hashes;
   `SetupChangeRecord`/`SetupPrivatePlanMember`/`SetupStatusProjection` (T2
   types).
@@ -80,12 +81,24 @@ other target subdirectory.
 - Endpoint: `ForeignOwner` → `port_owned_by_foreign_process`, no plan;
   `MonitorNotRunning` → plan usable + `monitor_not_running` +
   `start_local_monitor`.
-- Restart: a running `Code` process → `restart_vscode`.
+- Restart observation: after all version and extension gates succeed, invoke
+  exactly one `code --status` for each eligible Stable channel and exactly one
+  `code-insiders --status` for each eligible Insiders channel, through the
+  existing five-second-bounded `ISetupProcessRunner`, in Stable-then-Insiders
+  order. The official command requires an already-running VS Code instance
+  ([performance guidance](https://github.com/microsoft/vscode/wiki/performance-issues),
+  [CLI documentation](https://code.visualstudio.com/docs/configure/command-line)).
+  Only `Completed` with exit code `0` means that channel is running; if either
+  independent channel is running, emit `restart_vscode`. `NotFound`, `Failed`,
+  `TimedOut`, nonzero exit, or any other observation means no restart guidance,
+  not plan failure. Do not retry or sleep. Discard `--status` stdout immediately;
+  it never reaches a DTO, private plan, ledger, log, or repository-safe output.
 - Revalidation (apply-time): repeat version/extension/both-policy/member/
   endpoint checks against persisted facts through the partition `Revalidate`;
   differing → the matching preflight failure code, fresh warnings/actions;
   unchanged → `Revalidated` with fresh warnings (e.g. unverified policy
-  persists).
+  persists). Do not persist, compare, or fail apply/preflight on the ephemeral
+  running-state observation.
 - JSONC: unknown keys/comments/formatting outside owned members preserved
   (use `JsoncSettingsDocument`; assert byte-preservation outside members).
 
@@ -100,8 +113,14 @@ other target subdirectory.
   from Copilot managed native; conflict from enterprise policy; equal
   managed constraint → managed flag, no rewrite; unverified-policy warning
   pair on success; environment override reporting; capture opt-in default
-  and explicit; endpoint gating both non-live outcomes; restart requirement;
-  JSONC preservation; revalidation happy/differing rows; secret-marker
+  and explicit; endpoint gating both non-live outcomes; exact per-partition
+  extension-list/status call counts and ordering after successful gates (and
+  zero `--status` calls when a gate fails); Stable/Insiders independent running
+  observations; `Completed`/zero restart guidance plus
+  non-running, failed, timed-out, and nonzero outcomes with no restart guidance
+  or plan failure; `--status` raw-output non-leakage; JSONC preservation;
+  revalidation happy/differing rows with no persisted/apply failure fact from
+  running state; secret-marker
   negative test (inject a marker as an existing settings value; assert no
   record/projection/failure carries it).
 

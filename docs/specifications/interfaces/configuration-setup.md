@@ -917,7 +917,7 @@ The adapter/backend/CLI source contract is:
 
 | Selected target | Adapter detection/plan source | Physical target DTO | Apply-time adapter source | Mutation owner |
 | --- | --- | --- | --- | --- |
-| `vscode` | Stable/Insiders executable version, per-channel Default Profile extension list and user settings, current environment, read-only Copilot managed channels plus independent VS Code enterprise policies, endpoint probe, canonical `github-copilot-vscode` manifest | one JSON target per eligible installed channel, Stable then Insiders; labels are exactly `vscode-stable-default-user-settings` and `vscode-insiders-default-user-settings`; `expected_result` is the exact manifest | persisted channel/OS/member facts revalidated against current version, Default Profile extension, both policy systems, settings members, and endpoint | generic #66 file transaction only |
+| `vscode` | Stable/Insiders executable version, per-channel Default Profile extension list and user settings, one bounded per-eligible-channel running-state observation, current environment, read-only Copilot managed channels plus independent VS Code enterprise policies, endpoint probe, canonical `github-copilot-vscode` manifest | one JSON target per eligible installed channel, Stable then Insiders; labels are exactly `vscode-stable-default-user-settings` and `vscode-insiders-default-user-settings`; `expected_result` is the exact manifest | persisted channel/OS/member facts revalidated against current version, Default Profile extension, both policy systems, settings members, and endpoint; the ephemeral running-state observation is not persisted or compared | generic #66 file transaction only |
 | `cli` | Copilot CLI version, current process environment, Windows current-user environment when available, endpoint probe, canonical `github-copilot-cli` manifest; managed sources are deliberately not opened | one `copilot-cli-user-environment` env target; `expected_result` is the exact manifest; macOS/Linux plan remains inspectable but non-applicable | persisted OS/version/member/endpoint facts; Windows is writable, macOS/Linux returns `unsupported_target` | generic #66 Windows user-environment transaction only |
 | `app-sdk` | current repository .NET package/version and canonical fixed sample | one `github-copilot-app-sdk-guidance` no-write guidance target with null `expected_result` | no target revalidation or write | none |
 
@@ -933,15 +933,31 @@ Supported VS Code channels are Stable (`code`) and Insiders
 minimum because it is the first release that enforces the required precedence
 across managed-setting delivery channels. Versions 1.119 through 1.127 are
 detected but the whole requested `vscode` plan returns `unsupported_version`
-with `upgrade_vscode`; no channel is mutated. For every installed channel the
-adapter runs exactly `code --version` and
+with `upgrade_vscode`; no channel is mutated. Channel discovery runs exactly
+one `code --version` for Stable and one `code-insiders --version` for Insiders.
+For every installed supported channel, the partition then runs exactly one
 `code --list-extensions --show-versions` for Stable, or the same arguments with
-`code-insiders` for Insiders, through a bounded process runner and requires
+`code-insiders` for Insiders, through `ISetupProcessRunner`, and requires
 `GitHub.copilot-chat`. A missing extension in any installed supported channel
 returns `target_not_installed` with
 `install_github_copilot_chat_extension`; it does not produce a partial plan.
 When both channels are eligible, the plan has two physical JSON targets in
 Stable-then-Insiders order.
+
+After all version and extension gates have succeeded, the partition observes
+each eligible installed channel exactly once, in Stable-then-Insiders order,
+through `ISetupProcessRunner`: `code --status` for Stable and
+`code-insiders --status` for Insiders. This uses the runner's existing fixed
+five-second process bound. The official VS Code `--status` command requires an
+already-running VS Code instance; it is used here only as a bounded running
+state observation ([VS Code performance guidance](https://github.com/microsoft/vscode/wiki/performance-issues),
+[VS Code CLI documentation](https://code.visualstudio.com/docs/configure/command-line)).
+Only `Completed` with exit code `0` means that the observed channel is running.
+`NotFound`, `Failed`, `TimedOut`, a nonzero exit code, or any other observation
+means it is not observed running: it adds no restart guidance and never fails
+the plan. The observation has no retry or sleep. Its standard output is
+discarded immediately and must not appear in a DTO, private plan, ledger, log,
+or repository-safe artifact.
 
 Only each channel's Default Profile user `settings.json` is a writable target:
 
@@ -1034,8 +1050,12 @@ without being rewritten. When Copilot native MDM is absent, an observed VS Code
 enterprise policy does not prove the Copilot server tier absent, so
 `managed_policy_unverified` and Policy Diagnostics guidance remain required.
 
-If a `Code` process is running, restart requirement is `restart_vscode`.
-Post-apply verification reparses the settings, rechecks the target hashes and
+If either eligible channel is observed running, restart requirement is
+`restart_vscode`; Stable and Insiders observations are independent. Revalidation
+does not persist, compare, or turn the running-state observation into an
+apply/preflight failure fact; it repeats the persisted version, extension,
+policy, member, hash, effective-source, and endpoint checks only. Post-apply
+verification reparses the settings, rechecks the target hashes and
 effective-source calculation, and does not claim that a trace arrived.
 
 ### Terminal GitHub Copilot CLI
@@ -1176,7 +1196,7 @@ The `next_actions` allowlist is also closed and exhaustive:
 | `install_copilot_cli` | Copilot CLI is not installed |
 | `upgrade_copilot_cli` | Copilot CLI is below 1.0.4 |
 | `run_vscode_policy_diagnostics` | emitted whenever `managed_policy_unverified` is returned for VS Code |
-| `restart_vscode` | a VS Code target requires reload/restart |
+| `restart_vscode` | an eligible VS Code channel's one bounded `--status` observation completed with exit code `0` |
 | `restart_terminal_session` | a Windows CLI user-environment change requires a new process |
 | `start_local_monitor` | endpoint probe proves no listener |
 | `review_content_capture_warning` | explicit sensitive content capture was requested |
