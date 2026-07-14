@@ -322,11 +322,19 @@ internal sealed class SetupCommandDispatcher
                         changeSet.Adapter));
                 }
 
+                if (!IsNormalApplyFailureCode(exception.Code))
+                {
+                    return Validate(ApplyFailure(
+                        SetupCodes.InternalError,
+                        correlationId,
+                        null));
+                }
+
                 return Validate(ApplyFailure(
                     exception.Code,
                     correlationId,
                     changeSet.Adapter,
-                    ApplyFailureTargets(changeSetId, exception.Code),
+                    ApplyFailureTargets(changeSetId, plan, exception.Code),
                     exception.Failure.Warnings,
                     exception.Failure.NextActions));
             }
@@ -526,13 +534,36 @@ internal sealed class SetupCommandDispatcher
         string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) &&
         target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
 
-    private IReadOnlyList<SetupTargetResult> ApplyFailureTargets(Guid changeSetId, string code)
+    private static bool IsNormalApplyFailureCode(string code) => code is
+        SetupCodes.TargetNotInstalled or
+        SetupCodes.UnsupportedVersion or
+        SetupCodes.ManagedPolicyConflict or
+        SetupCodes.EnvironmentOverrideConflict or
+        SetupCodes.MalformedSettings or
+        SetupCodes.PermissionDenied or
+        SetupCodes.UnsafePath or
+        SetupCodes.StalePlan or
+        SetupCodes.PortOwnedByForeignProcess or
+        SetupCodes.PartialApply or
+        SetupCodes.RecoveryRequired or
+        SetupCodes.InternalError;
+
+    private IReadOnlyList<SetupTargetResult> ApplyFailureTargets(
+        Guid changeSetId,
+        SetupPrivatePlan plan,
+        string code)
     {
         try
         {
             var changeSet = ledgerStore.LoadForRecovery().ChangeSets
                 .SingleOrDefault(candidate => candidate.ChangeSetId == changeSetId);
-            return changeSet is null ? [] : ProjectApplyTargets(changeSet, code);
+            if (changeSet is null)
+            {
+                return [];
+            }
+
+            SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
+            return ProjectApplyTargets(changeSet, code);
         }
         catch (Exception exception) when (
             exception is SetupStorageException or FormatException or ArgumentException or InvalidOperationException)

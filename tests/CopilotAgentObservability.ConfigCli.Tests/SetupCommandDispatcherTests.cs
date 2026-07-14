@@ -1035,6 +1035,42 @@ public sealed class SetupCommandDispatcherTests
         SetupContractValidator.Validate(result);
     }
 
+    [Theory]
+    [InlineData(SetupCodes.SetupBusy)]
+    [InlineData(SetupCodes.InvalidArguments)]
+    [InlineData(SetupCodes.LedgerCorrupt)]
+    [InlineData(SetupCodes.LedgerVersionUnsupported)]
+    public void DispatchApply_OutOfUnionTypedCoordinatorFailureReturnsSafeInternalError(string code)
+    {
+        var context = CreatePlannedApplyFixture();
+        var applyCalls = 0;
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (_, _) =>
+            {
+                applyCalls++;
+                throw new SetupApplyException(SetupPlanResult.Failure<SetupLedgerChangeSet>(
+                    code,
+                    [SetupCodes.ManagedPolicyUnverified],
+                    [SetupCodes.RestartVsCode]));
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Equal(context.ChangeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.RecoveredChangeSetId);
+        Assert.Null(result.RecoveryOperation);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.Equal(1, applyCalls);
+        SetupContractValidator.Validate(result);
+    }
+
     [Fact]
     public void DispatchApply_TypedFailureProjectsPersistedPostFailureRowWithoutStaleSnapshotFallback()
     {
@@ -1083,6 +1119,65 @@ public sealed class SetupCommandDispatcherTests
         var persisted = Assert.Single(context.Fixture.LedgerStore.LoadForRecovery().ChangeSets);
         Assert.Equal(SetupChangeSetState.Partial, persisted.State);
         Assert.Equal(SetupCodes.PartialApply, persisted.OutcomeCode);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_PostFailureReloadWithReboundIdentityReturnsEmptyTargets()
+    {
+        var context = CreatePlannedApplyFixture();
+        var plannedTarget = Assert.Single(context.PlannedRow.Targets);
+        var reboundRecordId = Guid.Parse("00000000-0000-7000-8000-000000000712");
+        var rebound = context.PlannedRow with
+        {
+            Adapter = "rebound-adapter",
+            SelectedTarget = "rebound-target",
+            CreatedAt = Timestamp.AddSeconds(1),
+            UpdatedAt = Timestamp.AddSeconds(2),
+            ToolVersion = "9.9.9",
+            State = SetupChangeSetState.Partial,
+            OutcomeCode = SetupCodes.PartialApply,
+            Targets = [plannedTarget with
+            {
+                RecordId = reboundRecordId,
+                TargetLabel = "rebound-target",
+                OwningAdapter = "rebound-adapter",
+                AppliedStateHash = new string('b', 64),
+                BackupReference = reboundRecordId.ToString("D"),
+                OutcomeCode = SetupCodes.PartialApply,
+                RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                ToolVersion = "9.9.9",
+                StatusProjection = plannedTarget.StatusProjection with
+                {
+                    Detected = false,
+                    DetectedVersion = null,
+                },
+            }],
+        };
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (setupLock, _) =>
+            {
+                context.Fixture.LedgerStore.Save(
+                    setupLock,
+                    new SetupOwnershipLedger(1, [rebound]));
+                throw new SetupApplyException(SetupPlanResult.Failure<SetupLedgerChangeSet>(
+                    SetupCodes.PartialApply,
+                    [SetupCodes.ManagedPolicyUnverified],
+                    [SetupCodes.RestartVsCode]));
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+        var json = SetupJson.Serialize(result);
+
+        Assert.Equal(SetupCodes.PartialApply, result.Code);
+        Assert.Equal("persisted-adapter", result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Equal([SetupCodes.ManagedPolicyUnverified], result.Warnings);
+        Assert.Equal([SetupCodes.RestartVsCode], result.NextActions);
+        Assert.DoesNotContain("rebound", json, StringComparison.Ordinal);
         SetupContractValidator.Validate(result);
     }
 
