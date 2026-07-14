@@ -1050,13 +1050,24 @@ without being rewritten. When Copilot native MDM is absent, an observed VS Code
 enterprise policy does not prove the Copilot server tier absent, so
 `managed_policy_unverified` and Policy Diagnostics guidance remain required.
 
-If either eligible channel is observed running, restart requirement is
-`restart_vscode`; Stable and Insiders observations are independent. Revalidation
-does not persist, compare, or turn the running-state observation into an
-apply/preflight failure fact; it repeats the persisted version, extension,
-policy, member, hash, effective-source, and endpoint checks only. Post-apply
-verification reparses the settings, rechecks the target hashes and
-effective-source calculation, and does not claim that a trace arrived.
+Each physical target record maps only its own channel observation: the Stable
+record has `restart_requirement=restart_vscode` iff Stable `code --status` is
+`Completed` with exit code `0`, and otherwise `restart_requirement=none`; the
+Insiders record follows the equivalent rule for `code-insiders --status`.
+Stable and Insiders observations are independent. Thus the dual-channel plan
+has four record-level cases: Stable/Insiders are restart/restart,
+restart/none, none/restart, or none/none. The top-level `next_actions` contains
+the one deduplicated `restart_vscode` action iff at least one target record has
+that requirement; it never substitutes for, changes, or infers either target
+record's field.
+
+`Revalidate` makes zero `--status` calls. It does not persist, compare,
+recompute, or alter the persisted per-target restart requirement, and it cannot
+turn the running-state observation into an apply/preflight failure fact.
+Revalidation repeats the persisted version, extension, policy, member, hash,
+effective-source, and endpoint checks only. Post-apply verification reparses
+the settings, rechecks the target hashes and effective-source calculation, and
+does not claim that a trace arrived.
 
 ### Terminal GitHub Copilot CLI
 
@@ -1196,7 +1207,7 @@ The `next_actions` allowlist is also closed and exhaustive:
 | `install_copilot_cli` | Copilot CLI is not installed |
 | `upgrade_copilot_cli` | Copilot CLI is below 1.0.4 |
 | `run_vscode_policy_diagnostics` | emitted whenever `managed_policy_unverified` is returned for VS Code |
-| `restart_vscode` | an eligible VS Code channel's one bounded `--status` observation completed with exit code `0` |
+| `restart_vscode` | one or more eligible VS Code target records have their own bounded `--status` observation completed with exit code `0`; the action is deduplicated, but each record retains its independent requirement |
 | `restart_terminal_session` | a Windows CLI user-environment change requires a new process |
 | `start_local_monitor` | endpoint probe proves no listener |
 | `review_content_capture_warning` | explicit sensitive content capture was requested |
@@ -1269,6 +1280,13 @@ Focused validation covers:
   deterministic dual-channel order, non-default-profile warning de-duplication,
   exact no-`--profile` extension-listing commands, and proof that no non-default
   profile is created, selected, opened, or included in a plan;
+- VS Code running-state observation uses exactly one `--status` call per
+  eligible channel after successful version/extension gates in Stable-then-
+  Insiders order, with zero calls on an early gate failure or during
+  `Revalidate` and unchanged persisted per-target restart requirements; its
+  four dual-channel per-target restart combinations, every representable runner
+  outcome (`Completed` with zero, null, or nonzero exit; `NotFound`; `Failed`;
+  `TimedOut`), stdout non-leakage, and no retry/sleep are proven;
 - managed source matrices for official Copilot native/server/file locations and
   independent Windows/macOS/Linux VS Code enterprise policies, whole-channel
   Copilot selection without merge, cross-system conflict/equality behavior,
@@ -1346,7 +1364,7 @@ The setup implementation must keep this requirement-to-test mapping:
 | exact lock/recovery ownership and post-recovery resolution | `SetupCommandDispatcherTests` prove plan/apply one non-waiting lock and one recovery call, plan registry and persisted-apply adapter resolution only afterward, rollback recovery only inside `SetupRollbackCoordinator` under the same lock, and status lock/recovery only inside `SetupStatusService` |
 | diagnostics carrier and non-status target projection ownership | `SetupAdapterRegistryTests` and `SetupCommandDispatcherTests` serialize production plan/revalidation success and sanitized failure carriers, prove closed warning/action preservation and exception redaction, adapter-versus-ledger target source/order, prospective plan versus actual apply rollback availability, and rollback-false results |
 | no-change persistence and missing durable artifact distinctions | `SetupCommandDispatcherTests` prove `plan`/`no_changes` persists a private plan plus `planned` ledger row and later apply reaches terminal `no_changes`; paired apply/rollback/status cases distinguish no row, orphan plan, matching row with missing/unreadable/mismatched plan, and ineligible lifecycle without target activity |
-| VS Code channel/profile and managed-source contract | `VsCodeSetupAdapterTests` cover Stable/Insiders Default Profiles on all three OS path maps, exact no-`--profile` extension commands, dual-channel order, fixed non-default warning/no-create/no-open behavior, Copilot whole-channel precedence, independent enterprise-policy equality/conflict, and apply-time version/extension/policy/member revalidation; contract shape/validation tests close the warning allowlist |
+| VS Code channel/profile, running-state, and managed-source contract | `VsCodeSetupAdapterTests` cover Stable/Insiders Default Profiles on all three OS path maps, exact no-`--profile` extension commands, dual-channel order, fixed non-default warning/no-create/no-open behavior, Copilot whole-channel precedence, independent enterprise-policy equality/conflict, and apply-time version/extension/policy/member revalidation. They also assert exactly one post-gate Stable-then-Insiders `--status` call per eligible channel, zero calls after an early gate failure and during `Revalidate`, no retry/sleep, no stdout leakage, all representable observations (`Completed` with zero, null, or nonzero exit; `NotFound`; `Failed`; `TimedOut`), and the four dual-channel per-record restart combinations with top-level action deduplication only; revalidation proves persisted record requirements are unchanged. Contract shape/validation tests close the warning/action values. |
 | Copilot CLI OS and exact environment contract | `CopilotCliSetupAdapterTests` cover the five-member explicit-capture allowlist, forbidden global identity/resource/header/credential keys, matching/conflicting detect-only trace protocol override, environment-only managed warning, Windows apply, and macOS/Linux no-write apply refusal; contract shape/validation tests close the new code/warning/action values |
 | cross-platform private setup root | `SetupRuntimeTests` cover Windows/macOS/Linux local-application-data mappings, absolute and invalid/unset `XDG_DATA_HOME`, injected platform base, and absence of a CLI/environment override |
 | Local Monitor recognition | `GitHubCopilotEndpointProbeTests` cover the 500 ms/no-redirect/4096-byte-plus-sentinel or oversized-`Content-Length`/exact-JSON matrix and fixed refused-versus-timeout/connected failure mapping |

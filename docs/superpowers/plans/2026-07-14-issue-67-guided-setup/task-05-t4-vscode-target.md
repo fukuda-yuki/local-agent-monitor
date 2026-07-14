@@ -88,17 +88,23 @@ other target subdirectory.
   order. The official command requires an already-running VS Code instance
   ([performance guidance](https://github.com/microsoft/vscode/wiki/performance-issues),
   [CLI documentation](https://code.visualstudio.com/docs/configure/command-line)).
-  Only `Completed` with exit code `0` means that channel is running; if either
-  independent channel is running, emit `restart_vscode`. `NotFound`, `Failed`,
-  `TimedOut`, nonzero exit, or any other observation means no restart guidance,
-  not plan failure. Do not retry or sleep. Discard `--status` stdout immediately;
-  it never reaches a DTO, private plan, ledger, log, or repository-safe output.
+  Only `Completed` with exit code `0` means that channel is running. The Stable
+  target record gets `restart_vscode` iff Stable's own observation meets that
+  condition; the Insiders target record does so iff Insiders' own observation
+  meets it. All other observations mean that record has `none`, not plan
+  failure. Assert the four dual-channel record combinations
+  (restart/restart, restart/none, none/restart, none/none); the top-level
+  action is deduplicated when either record requires restart and is not a
+  substitute for either record field. Do not retry or sleep. Discard `--status`
+  stdout immediately; it never reaches a DTO, private plan, ledger, log, or
+  repository-safe output.
 - Revalidation (apply-time): repeat version/extension/both-policy/member/
   endpoint checks against persisted facts through the partition `Revalidate`;
   differing → the matching preflight failure code, fresh warnings/actions;
   unchanged → `Revalidated` with fresh warnings (e.g. unverified policy
-  persists). Do not persist, compare, or fail apply/preflight on the ephemeral
-  running-state observation.
+  persists). Make zero `--status` calls during `Revalidate`; do not persist,
+  compare, recompute, alter, or fail apply/preflight on the ephemeral
+  running-state observation or the persisted per-target restart requirement.
 - JSONC: unknown keys/comments/formatting outside owned members preserved
   (use `JsoncSettingsDocument`; assert byte-preservation outside members).
 
@@ -116,11 +122,13 @@ other target subdirectory.
   and explicit; endpoint gating both non-live outcomes; exact per-partition
   extension-list/status call counts and ordering after successful gates (and
   zero `--status` calls when a gate fails); Stable/Insiders independent running
-  observations; `Completed`/zero restart guidance plus
-  non-running, failed, timed-out, and nonzero outcomes with no restart guidance
-  or plan failure; `--status` raw-output non-leakage; JSONC preservation;
-  revalidation happy/differing rows with no persisted/apply failure fact from
-  running state; secret-marker
+  observations; the four dual-channel per-target restart combinations and
+  top-level action deduplication without replacing the per-target field;
+  `Completed`/zero restart guidance plus `Completed` with null/nonzero exit,
+  `NotFound`, `Failed`, and `TimedOut` outcomes with no restart guidance or
+  plan failure; no retry/sleep; `--status` raw-output non-leakage; JSONC
+  preservation; revalidation happy/differing rows with zero `--status` calls
+  and unchanged persisted per-target restart requirements; secret-marker
   negative test (inject a marker as an existing settings value; assert no
   record/projection/failure carries it).
 
