@@ -26,6 +26,12 @@ carrier/dispatcher/coordinator, target subdirectories (`VsCode/`,
 `CopilotCli/`, `AppSdk/`), production registration (`Program.cs` /
 composition root — T7 owns that join).
 
+**Constraints:** Keep the compatibility evidence skeletal and explicitly
+non-gating. It does not prove real VS Code/CLI/App-SDK target behavior,
+mutation, production composition, or Issue #67 completion. Keep T7 unchanged
+as the first real all-partition producer/consumer integration gate; do not add
+a second public DTO producer.
+
 **Interfaces:**
 - Consumes: `ISetupAdapter` (frozen T2b contract: `AdapterId`,
   `Plan(SetupPlanRequest)`, `Revalidate(SetupPrivatePlan, SetupLedgerChangeSet)`),
@@ -93,6 +99,17 @@ internal sealed record GitHubCopilotPartitionPlan(
   `github-copilot-vscode`, CLI records pair `github-copilot-cli`, App/SDK
   records carry null.
 
+**Early compatibility evidence (skeletal, non-gating):** Add to the already
+owned `GitHubCopilotSetupAdapterTests.cs` scope one test that registers the real
+aggregate `GitHubCopilotSetupAdapter`, backed by scripted partitions, in the
+real #66 registry/dispatcher Plan path. Serialize the returned real
+`SetupCommandResult` with `SetupJson` and assert adapter/carrier/manifest/result
+serialization compatibility and that no second public DTO producer exists.
+This smoke test is type/carrier evidence only; it is not an integration
+fixture, acceptance gate, mutation proof, production composition proof, or
+Issue #67 completion evidence. Task 08/T7 remains the first real
+all-partition producer/consumer integration gate.
+
 ## Steps
 
 - [ ] **Step 1: Write the failing adapter tests** in
@@ -104,6 +121,7 @@ internal sealed record GitHubCopilotPartitionPlan(
   records), single probe per distinct endpoint, revalidation routing by
   label, and manifest pairing per record kind (assert `expected_result`
   equals the canonical manifest via `SourceCapabilityManifestLoader.MatchesCanonical`).
+  Add the explicitly non-gating early compatibility test described above.
 
 - [ ] **Step 2: Run RED.**
 
@@ -163,3 +181,9 @@ git commit -m "Issue #67: feat(setup): freeze Copilot aggregate seam"
 - Full ConfigCli suite and build pass; independent review PASS; seam frozen.
 
 **Report destination:** chat + ledger row per README policy.
+
+**Worktree/branch:** `C:\Users\mwam0\Documents\Codex\copilot-agent-observability`
+on `codex/issues-66-67-guided-setup`.
+
+**Local commit subject:**
+`Issue #67: feat(setup): freeze Copilot aggregate seam`

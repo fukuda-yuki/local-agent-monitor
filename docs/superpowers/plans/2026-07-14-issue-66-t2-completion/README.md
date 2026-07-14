@@ -47,10 +47,12 @@ Read before implementing any task, in this order:
 - Commit `399f441` (Apply preflight routing) is a safe checkpoint whose
   independent review verdict is CHANGES REQUESTED. Its findings are fixed by
   Tasks 01–04; do not treat its tests as approval.
-- File ownership: Tasks 02–07 edit only
+- File ownership: Task 01a edits only the committed-fixture restart evidence
+  test. Tasks 02–07 edit only
   `src/CopilotAgentObservability.ConfigCli/Setup/Cli/SetupCommandDispatcher.cs`
   and `tests/CopilotAgentObservability.ConfigCli.Tests/SetupCommandDispatcherTests.cs`
-  (Task 03 additionally edits the files its audit record authorizes). Tasks
+  (Task 03 additionally edits the files its audit record authorizes; Task 04a
+  owns only its three rollback-domain files). Tasks
   09–10 edit only the T2d-owned files listed in each card. Frozen T2c1 plan
   hunks in the dispatcher are not rewritten.
 - Every task is test-driven: write the failing test, run it RED, implement,
@@ -72,6 +74,9 @@ Read before implementing any task, in this order:
 task-01 contract audit (read/record only)
    |
    v
+task-01a committed v1 fixture process-equivalent restart evidence (test-only)
+   |
+   v
 task-02 apply preflight ordering fix  (findings 1 + 3)
    |
    v
@@ -79,6 +84,9 @@ task-03 pre-mutation diagnostic catalog ownership  (finding 4)
    |
    v
 task-04 apply coordinator invocation and result mapping  (finding 2)
+   |
+   v
+task-04a rollback trusted-result carrier (Q4; producer boundary)
    |
    v
 task-05 rollback dispatcher

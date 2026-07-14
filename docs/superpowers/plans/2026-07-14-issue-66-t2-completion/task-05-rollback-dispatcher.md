@@ -7,8 +7,9 @@ single mandatory recovery pass and the rollback execution to
 outcome to a validated public `SetupCommandResult`. Today Rollback falls into
 the `Unimplemented` guard.
 
-**Depends on:** Task 04 committed and reviewed; audit record Q4 `PINNED`
-(complete coordinator code enumeration).
+**Depends on:** Task 04 and the new Task 04a committed and independently
+reviewed; Task 04a focused validation and independent read-only review are
+`PASS`. Audit record Q4 is `PINNED` (complete coordinator code enumeration).
 
 **Files:**
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Cli/SetupCommandDispatcher.cs`
@@ -16,12 +17,21 @@ the `Unimplemented` guard.
   method, and generalize the failure helpers to carry the Rollback command)
 - Test: `tests/CopilotAgentObservability.ConfigCli.Tests/SetupCommandDispatcherTests.cs`
 
+**Owned scope:** The dispatcher rollback delegate seam, `DispatchRollback`,
+contextual trusted-row projection, and its focused dispatcher tests in the two
+files above.
+
+**Non-scope:** Task 04a's rollback producer/carrier and preflight files, public
+specification or DTO changes, storage/recovery implementation, catalog
+declarations, compatibility layers, or any #67 adapter work.
+
 **Interfaces:**
 - Consumes: `SetupRollbackCoordinator.Rollback(SetupLock, Guid) : SetupRollbackExecutionResult`
-  where the result carries `RequestedChangeSetId`, `Success`, `Code`,
-  `ChangeSet` (post-rollback ledger row or null), and `Recovery`
-  (non-null when the coordinator's internal mandatory recovery pass consumed
-  the command).
+  with Task 04a's explicit trust invariant. A non-null `ChangeSet` (or the
+  chosen explicit trust marker) is trustworthy only when it matches
+  `RequestedChangeSetId`; immutable-identity/pre-normal failures have no
+  projectable row. `Recovery` is non-null when the coordinator's internal
+  mandatory recovery pass consumed the command.
 - Produces: seams for Task 09 —
   - production constructor gains a `Func<SetupLock, Guid, SetupRollbackExecutionResult>`
     built from `SetupRollbackCoordinator` (mirror `CreateApply`);
@@ -35,10 +45,9 @@ the `Unimplemented` guard.
   (`SetupRollbackPreflightEvaluator`); the dispatcher never re-evaluates
   preflight or reconstructs target DTOs (spec: rollback targets are "the
   requested row's same immutable ledger projection"; `rollback_available` is
-  always false on rollback results — `ProjectApplyTargets` already yields
-  false for every non-`apply_succeeded` code, so reuse it).
-- The complete outcome mapping table comes from audit Q4. The known rows
-  (verify and complete from the audit):
+  always false on rollback results).
+- Never infer trust from the outcome code. The complete outcome mapping table
+  comes from audit Q4 and the Task 04a carrier:
 
 | Coordinator outcome | Public result |
 | --- | --- |
@@ -46,11 +55,26 @@ the `Unimplemented` guard.
 | `Recovery` non-null, recovered | recovery correlation result for `SetupCommand.Rollback` (reuse `RecoveryResult`), `rerun_requested_setup_command` next action |
 | `Recovery` non-null, failed | `interrupted_recovery_failed` / `recovery_required` per `RecoveryResult` rules |
 | `rollback_succeeded` | `success=true`, targets projected from `result.ChangeSet`, rollback_available false everywhere |
-| `rollback_not_available` | `success=false`, targets per pinned projection rule |
-| `rollback_stale` | `success=false`, targets per pinned projection rule |
-| `partial_rollback` | `success=false`, targets from the Partial row |
-| `invalid_arguments` (missing row) | `success=false`, empty targets |
-| `recovery_required`, `ledger_corrupt`, `ledger_version_unsupported`, `internal_error` | `success=false`, empty targets |
+| `rollback_not_available` | `success=false`, trustworthy requested-row targets in ledger order with rollback_available false; empty when untrusted |
+| `rollback_stale` | `success=false`, trustworthy requested-row targets in ledger order with rollback_available false; empty when untrusted |
+| `unsafe_path` | `success=false`, trustworthy requested-row targets in ledger order with rollback_available false; empty when untrusted |
+| `partial_rollback` | `success=false`, trustworthy requested-row targets in ledger order with rollback_available false; empty when untrusted |
+| `recovery_required` / `internal_error` after identity success | `success=false`, trustworthy requested-row targets in ledger order with rollback_available false |
+| `invalid_arguments` (missing row or invalid/missing identity) | `success=false`, empty targets |
+| `interrupted_apply_recovered` / `interrupted_rollback_recovered` | recovery correlation result with empty targets |
+| `interrupted_recovery_failed` | recovery correlation failure result with empty targets |
+| `ledger_corrupt` / `ledger_version_unsupported` | `success=false`, empty targets (storage failure) |
+
+The exhaustive coordinator-code union is:
+`invalid_arguments`, `rollback_succeeded`, `rollback_not_available`,
+`rollback_stale`, `unsafe_path`, `partial_rollback`, `recovery_required`,
+`internal_error`, `interrupted_apply_recovered`,
+`interrupted_rollback_recovered`, `interrupted_recovery_failed`,
+`ledger_corrupt`, and `ledger_version_unsupported`. Dispatcher-level
+`setup_busy` is separate. Mandatory recovery, lock/storage failures, missing
+row, invalid/missing plan or identity, and malformed typed results always have
+empty targets; a trustworthy normal result projects the requested row in
+ledger order, including trusted `recovery_required` and `internal_error`.
 
 ## Steps
 
@@ -131,10 +155,12 @@ private SetupCommandResult DispatchRollback(SetupOptions options)
 }
 ```
 
-  `MapRollbackExecution` implements the outcome table, projecting targets via
-  `ProjectApplyTargets(execution.ChangeSet, execution.Code)` when the pinned
-  rule projects, and validating that `execution.Success` matches the
-  success-code set before trusting it (fail closed to `internal_error`).
+  `MapRollbackExecution` implements the exhaustive outcome table, projecting
+  only Task 04a's trustworthy requested-row context via
+  `ProjectApplyTargets(execution.ChangeSet, execution.Code)` (or the explicit
+  trust marker) in ledger order, and validating that `execution.Success`
+  matches the success-code set before trusting it (fail closed to
+  `internal_error` with empty targets).
   Generalize `CommandFailure`/`ApplyFailure` so Rollback failures carry
   `SetupCommand.Rollback` — do not change Plan/Apply behavior.
 
@@ -169,3 +195,9 @@ Step 5 commands.
 - Focused suites pass; `git diff --check` clean; independent review PASS.
 
 **Report destination:** chat + ledger row per README policy.
+
+**Worktree/branch:** `C:\Users\mwam0\Documents\Codex\copilot-agent-observability`
+on `codex/issues-66-67-guided-setup`.
+
+**Local commit subject:**
+`Issue #66: feat(setup): dispatch rollback through the rollback coordinator`

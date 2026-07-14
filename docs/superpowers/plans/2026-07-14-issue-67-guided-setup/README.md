@@ -24,9 +24,17 @@ resource, new project, or dependency is added.
 **Tech stack:** .NET (existing ConfigCli project), xunit, deterministic
 platform fakes (`SetupTestPlatform`). No new PackageReference.
 
-**Prerequisite gate:** The Issue #66 T2 gate must have passed first — all 11
-tasks in `docs/superpowers/plans/2026-07-14-issue-66-t2-completion/` complete
-with review PASS. No task in this directory starts before that.
+**Prerequisite gate:** The Issue #66 T2 gate must have passed first — all 12
+ordered cards (including Task 01a's v1 restart evidence) in
+`docs/superpowers/plans/2026-07-14-issue-66-t2-completion/` complete with review
+PASS. No task in this directory starts before that.
+
+T3d may add one skeletal, explicitly non-gating compatibility smoke test using
+the real aggregate adapter, scripted partitions, the real #66 registry/
+dispatcher Plan path, and `SetupJson` serialization. This proves only
+adapter/carrier/manifest/result compatibility and does not prove target
+behavior, mutation, production composition, or Issue #67 completion. T7
+remains the first real all-partition producer/consumer integration gate.
 
 ## Source of truth
 

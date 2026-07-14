@@ -1,6 +1,6 @@
 # Sprint23 Durable Ledger
 
-Updated: 2026-07-14
+Updated: 2026-07-15
 
 ## Current continuation note
 
@@ -14,6 +14,27 @@ unstarted #67 target tasks, current test evidence, review findings, and the
 required resume order. Task 01's final approved contract-audit evidence is
 recorded below; it is docs-only bookkeeping and leaves the migration conflict,
 Task 04a, T3d, and T7 gates open.
+
+## Pending Migration A / Plan A execution decisions (2026-07-15)
+
+The approved #66/#67 audit corrections are now materialized in the mission
+cards, but remain pending implementation and review:
+
+- Migration A is **v1 restart compatibility evidence**, not a migration.
+  `ownership-ledger.v1.json` is the actual committed fixture copied to the
+  physical setup runtime root; process-equivalent close/reopen evidence must
+  prove byte identity and no v0/v2/migration/temp artifact. Migration is N/A
+  because v1 is first shipped and fabricated v0 is forbidden. See [Issue #66
+  Task 01a](../../superpowers/plans/2026-07-14-issue-66-t2-completion/task-01a-v1-restart-evidence.md).
+- Rollback Task 04a owns the trusted-result carrier and identity-first
+  producer invariant. Task 05 is blocked until the six deterministic contexts,
+  focused `SetupRollbackTests`, and independent review PASS. See [Task
+  04a](../../superpowers/plans/2026-07-14-issue-66-t2-completion/task-04a-rollback-trusted-result-carrier.md)
+  and the amended [Task 05](../../superpowers/plans/2026-07-14-issue-66-t2-completion/task-05-rollback-dispatcher.md).
+- #67 T3d may add only the skeletal, non-gating real aggregate + scripted
+  partitions + #66 Plan-path + `SetupJson` compatibility smoke test. T7 stays
+  the first real all-partition producer/consumer integration gate. See the
+  [T3d card](../../superpowers/plans/2026-07-14-issue-67-guided-setup/task-04-t3d-aggregate-adapter.md).
 
 ## Task state
 
