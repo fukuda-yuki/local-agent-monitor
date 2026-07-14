@@ -61,6 +61,21 @@ public sealed class SourceCapabilityRuntimeTests
         Assert.Null(SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.AppSdk));
     }
 
+    [Fact]
+    public void SetupAdapterTargetPairing_UsesCanonicalManifestsForWritableSurfacesAndNullForGuidance()
+    {
+        var vsCode = SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.VsCode);
+        var cli = SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.Cli);
+
+        Assert.NotNull(vsCode);
+        Assert.NotNull(cli);
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(vsCode, vsCode.CanonicalJson));
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(cli, cli.CanonicalJson));
+        Assert.Equal("github-copilot-vscode", vsCode.SourceSurface);
+        Assert.Equal("github-copilot-cli", cli.SourceSurface);
+        Assert.Null(SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.AppSdk));
+    }
+
     [Theory]
     [InlineData("github-copilot-vscode")]
     [InlineData("github-copilot-cli")]

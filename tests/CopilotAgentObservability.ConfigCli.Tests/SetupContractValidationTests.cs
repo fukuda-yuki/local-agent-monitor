@@ -829,6 +829,77 @@ public sealed class SetupContractValidationTests
         Assert.False(root.GetProperty("truncated").GetBoolean());
     }
 
+    [Fact]
+    public void Serialize_CliPlan_EnvironmentOverrideConflictAcceptsTheReviewAction()
+    {
+        var result = new SetupCommandResult(
+            SetupCommand.Plan,
+            false,
+            SetupCodes.EnvironmentOverrideConflict,
+            null,
+            null,
+            null,
+            "github-copilot",
+            [],
+            [],
+            [],
+            [SetupCodes.ReviewCliTraceProtocolOverride],
+            false);
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal("environment_override_conflict", document.RootElement.GetProperty("code").GetString());
+        Assert.Equal(["review_cli_trace_protocol_override"], document.RootElement.GetProperty("next_actions").EnumerateArray().Select(value => value.GetString()));
+    }
+
+    [Fact]
+    public void Serialize_CliPlan_AcceptsTraceOverrideEnvironmentAndMonitorWarnings()
+    {
+        var target = new SetupTargetResult(
+            "00000000-0000-7000-8000-000000000041",
+            SetupTargetKind.Env,
+            "copilot-cli-user-environment",
+            true,
+            "1.0.4",
+            SetupOperation.Replace,
+            SetupEffectiveSource.Environment,
+            null,
+            null,
+            SetupRestartRequirement.RestartTerminalSession,
+            true,
+            "http://127.0.0.1:4320",
+            LoadManifest("github-copilot-cli.json"),
+            null,
+            [new SetupMemberChangeResult("COPILOT_OTEL_EXPORTER_OTLP_ENDPOINT", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
+        var result = new SetupCommandResult(
+            SetupCommand.Plan,
+            true,
+            SetupCodes.PlanReady,
+            "00000000-0000-7000-8000-000000000042",
+            null,
+            null,
+            "github-copilot",
+            [target],
+            [],
+            [
+                SetupCodes.ManagedPolicyUnverified,
+                SetupCodes.CliTraceProtocolOverrideNotModified,
+                SetupCodes.SharedUserEnvironmentAffectsOtherProcesses,
+                SetupCodes.MonitorNotRunning,
+            ],
+            [SetupCodes.RestartTerminalSession, SetupCodes.StartLocalMonitor],
+            false);
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal(
+            ["managed_policy_unverified", "cli_trace_protocol_override_not_modified", "shared_user_environment_affects_other_processes", "monitor_not_running"],
+            document.RootElement.GetProperty("warnings").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(
+            ["restart_terminal_session", "start_local_monitor"],
+            document.RootElement.GetProperty("next_actions").EnumerateArray().Select(value => value.GetString()));
+    }
+
     [Theory]
     [InlineData(SetupCodes.UnsupportedAdapter, "removed-adapter")]
     [InlineData(SetupCodes.UnsupportedTarget, "github-copilot")]

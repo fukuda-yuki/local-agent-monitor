@@ -236,6 +236,41 @@ public sealed class SetupContractShapeTests
     }
 
     [Fact]
+    public void Serialize_VsCodePlan_AcceptsTheIntendedPolicyProfileAndMonitorDiagnosticCombination()
+    {
+        var result = new SetupCommandResult(
+            SetupCommand.Plan,
+            true,
+            SetupCodes.PlanReady,
+            "00000000-0000-7000-8000-000000000040",
+            null,
+            null,
+            "github-copilot",
+            [CreatePlanTarget()],
+            [],
+            [
+                SetupCodes.ManagedPolicyUnverified,
+                SetupCodes.VscodeNonDefaultProfilesNotModified,
+                SetupCodes.MonitorNotRunning,
+            ],
+            [
+                SetupCodes.RunVsCodePolicyDiagnostics,
+                SetupCodes.StartLocalMonitor,
+                SetupCodes.RestartVsCode,
+            ],
+            false);
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal(
+            ["managed_policy_unverified", "vscode_non_default_profiles_not_modified", "monitor_not_running"],
+            document.RootElement.GetProperty("warnings").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(
+            ["run_vscode_policy_diagnostics", "start_local_monitor", "restart_vscode"],
+            document.RootElement.GetProperty("next_actions").EnumerateArray().Select(value => value.GetString()));
+    }
+
+    [Fact]
     public void SetupCodes_MatchTheIndependentSetupV1LiteralCatalog()
     {
         var actual = typeof(SetupCodes).GetFields(BindingFlags.Public | BindingFlags.Static)
