@@ -838,7 +838,7 @@ public sealed class SetupCommandDispatcherTests
     [Theory]
     [InlineData(false, SetupCodes.UnsupportedAdapter)]
     [InlineData(true, SetupCodes.InternalError)]
-    public void DispatchApply_ValidPlannedRowPrevalidatesThenResolvesWithoutCallingApply(
+    public void DispatchApply_ValidPlannedRowPrevalidatesThenResolvesBeforeCoordinatorHandoff(
         bool registered,
         string expectedCode)
     {
@@ -880,14 +880,403 @@ public sealed class SetupCommandDispatcherTests
 
         Assert.Equal(expectedCode, result.Code);
         Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
-        Assert.Equal("persisted-adapter", result.Adapter);
+        Assert.Equal(registered ? null : "persisted-adapter", result.Adapter);
         Assert.Empty(result.Targets);
         Assert.Empty(result.ChangeSets);
         Assert.Empty(result.Warnings);
         Assert.Empty(result.NextActions);
-        Assert.Equal(0, applyCalls.Value);
+        Assert.Equal(registered ? 1 : 0, applyCalls.Value);
         Assert.Equal(planBytes, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(changeSetId)));
         Assert.Equal(ledgerBytes, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_PlannedRowInvokesCoordinatorAndMapsAppliedResult()
+    {
+        var adapter = new RecordingAdapter("persisted-adapter", request =>
+            SetupPlanResult.Planned(CreatePlan(
+                request,
+                [CreateRecord(RecordId, "first-target", SetupOperation.Replace)])));
+        var fixture = DispatcherFixture.Create(adapter, _ => NoRecovery());
+        var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions("persisted-adapter"));
+        var changeSetId = Guid.Parse(planned.ChangeSetId!);
+        var plannedRow = Assert.Single(fixture.LedgerStore.LoadForRecovery().ChangeSets);
+        var plannedTarget = Assert.Single(plannedRow.Targets);
+        var applied = plannedRow with
+        {
+            State = SetupChangeSetState.Applied,
+            OutcomeCode = SetupCodes.ApplySucceeded,
+            UpdatedAt = Timestamp.AddSeconds(1),
+            Targets = [plannedTarget with
+            {
+                AppliedStateHash = new string('b', 64),
+                BackupReference = plannedTarget.RecordId.ToString("D"),
+                OutcomeCode = SetupCodes.ApplySucceeded,
+                RollbackStatus = SetupLedgerRollbackStatus.Pending,
+            }],
+        };
+        var applyCalls = 0;
+        var dispatcher = new SetupCommandDispatcher(
+            fixture.Platform,
+            fixture.Paths,
+            fixture.PlanStore,
+            fixture.LedgerStore,
+            new SetupAdapterRegistry([adapter]),
+            "1.2.3",
+            _ => NoRecovery(),
+            (_, requestedId) =>
+            {
+                applyCalls++;
+                Assert.Equal(changeSetId, requestedId);
+                return SetupPlanResult.Success(
+                    applied,
+                    [],
+                    [SetupCodes.ManagedPolicyUnverified],
+                    [SetupCodes.RestartVsCode]);
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(changeSetId));
+
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.ApplySucceeded, result.Code);
+        Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.RecoveredChangeSetId);
+        Assert.Null(result.RecoveryOperation);
+        Assert.Equal("persisted-adapter", result.Adapter);
+        Assert.Equal([SetupCodes.ManagedPolicyUnverified], result.Warnings);
+        Assert.Equal([SetupCodes.RestartVsCode], result.NextActions);
+        Assert.True(Assert.Single(result.Targets).RollbackAvailable);
+        Assert.Equal(1, applyCalls);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_NoChangesMapsCoordinatorValueAndDiagnosticsWithoutRollback()
+    {
+        var context = CreatePlannedApplyFixture(operation: SetupOperation.NoOp);
+        var noChanges = context.PlannedRow with
+        {
+            State = SetupChangeSetState.NoChanges,
+            OutcomeCode = SetupCodes.NoChanges,
+            UpdatedAt = Timestamp.AddSeconds(1),
+        };
+        var applyCalls = 0;
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (_, requestedId) =>
+            {
+                applyCalls++;
+                Assert.Equal(context.ChangeSetId, requestedId);
+                return SetupPlanResult.Success(
+                    noChanges,
+                    [],
+                    [SetupCodes.MonitorNotRunning],
+                    [SetupCodes.StartLocalMonitor]);
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.NoChanges, result.Code);
+        Assert.Equal(context.ChangeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Equal([SetupCodes.MonitorNotRunning], result.Warnings);
+        Assert.Equal([SetupCodes.StartLocalMonitor], result.NextActions);
+        Assert.False(Assert.Single(result.Targets).RollbackAvailable);
+        Assert.Equal(1, applyCalls);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData(SetupCodes.TargetNotInstalled)]
+    [InlineData(SetupCodes.UnsupportedVersion)]
+    [InlineData(SetupCodes.ManagedPolicyConflict)]
+    [InlineData(SetupCodes.EnvironmentOverrideConflict)]
+    [InlineData(SetupCodes.MalformedSettings)]
+    [InlineData(SetupCodes.PermissionDenied)]
+    [InlineData(SetupCodes.UnsafePath)]
+    [InlineData(SetupCodes.StalePlan)]
+    [InlineData(SetupCodes.PortOwnedByForeignProcess)]
+    [InlineData(SetupCodes.PartialApply)]
+    [InlineData(SetupCodes.RecoveryRequired)]
+    [InlineData(SetupCodes.InternalError)]
+    public void DispatchApply_TypedCoordinatorFailureMapsCodeDiagnosticsAndReloadedTargets(string code)
+    {
+        var context = CreatePlannedApplyFixture();
+        var applyCalls = 0;
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (_, requestedId) =>
+            {
+                applyCalls++;
+                Assert.Equal(context.ChangeSetId, requestedId);
+                throw new SetupApplyException(SetupPlanResult.Failure<SetupLedgerChangeSet>(
+                    code,
+                    [SetupCodes.ManagedPolicyUnverified],
+                    [SetupCodes.RestartVsCode]));
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+
+        Assert.False(result.Success);
+        Assert.Equal(code, result.Code);
+        Assert.Equal(context.ChangeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.RecoveredChangeSetId);
+        Assert.Null(result.RecoveryOperation);
+        Assert.Equal("persisted-adapter", result.Adapter);
+        Assert.Equal([SetupCodes.ManagedPolicyUnverified], result.Warnings);
+        Assert.Equal([SetupCodes.RestartVsCode], result.NextActions);
+        Assert.False(Assert.Single(result.Targets).RollbackAvailable);
+        Assert.Equal(1, applyCalls);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_TypedFailureProjectsPersistedPostFailureRowWithoutStaleSnapshotFallback()
+    {
+        var context = CreatePlannedApplyFixture();
+        var plannedTarget = Assert.Single(context.PlannedRow.Targets);
+        var postFailure = context.PlannedRow with
+        {
+            State = SetupChangeSetState.Partial,
+            OutcomeCode = SetupCodes.PartialApply,
+            UpdatedAt = Timestamp.AddSeconds(1),
+            Targets = [plannedTarget with
+            {
+                AppliedStateHash = new string('b', 64),
+                BackupReference = plannedTarget.RecordId.ToString("D"),
+                OutcomeCode = SetupCodes.PartialApply,
+                RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                StatusProjection = plannedTarget.StatusProjection with
+                {
+                    Detected = false,
+                    DetectedVersion = null,
+                },
+            }],
+        };
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (setupLock, _) =>
+            {
+                context.Fixture.LedgerStore.Save(
+                    setupLock,
+                    new SetupOwnershipLedger(1, [postFailure]));
+                throw new SetupApplyException(SetupPlanResult.Failure<SetupLedgerChangeSet>(
+                    SetupCodes.PartialApply,
+                    [SetupCodes.ManagedPolicyUnverified],
+                    [SetupCodes.RestartVsCode]));
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+
+        Assert.Equal(SetupCodes.PartialApply, result.Code);
+        var target = Assert.Single(result.Targets);
+        Assert.False(target.Detected);
+        Assert.Null(target.DetectedVersion);
+        Assert.False(target.RollbackAvailable);
+        var persisted = Assert.Single(context.Fixture.LedgerStore.LoadForRecovery().ChangeSets);
+        Assert.Equal(SetupChangeSetState.Partial, persisted.State);
+        Assert.Equal(SetupCodes.PartialApply, persisted.OutcomeCode);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("unreadable")]
+    public void DispatchApply_PostFailureReloadWithoutRequestedRowReturnsEmptyTargets(string variant)
+    {
+        var context = CreatePlannedApplyFixture();
+        var applyCalls = 0;
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (setupLock, _) =>
+            {
+                applyCalls++;
+                if (variant == "missing")
+                {
+                    context.Fixture.LedgerStore.Save(setupLock, new SetupOwnershipLedger(1, []));
+                }
+                else
+                {
+                    context.Fixture.Platform.SeedFile(
+                        context.Fixture.Paths.OwnershipLedger,
+                        Encoding.UTF8.GetBytes("{PRIVATE_UNREADABLE_LEDGER"));
+                }
+
+                throw new SetupApplyException(SetupPlanResult.Failure<SetupLedgerChangeSet>(
+                    SetupCodes.PartialApply,
+                    [SetupCodes.ManagedPolicyUnverified],
+                    [SetupCodes.RestartVsCode]));
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+        var json = SetupJson.Serialize(result);
+
+        Assert.Equal(SetupCodes.PartialApply, result.Code);
+        Assert.Empty(result.Targets);
+        Assert.Equal([SetupCodes.ManagedPolicyUnverified], result.Warnings);
+        Assert.Equal([SetupCodes.RestartVsCode], result.NextActions);
+        Assert.Equal(1, applyCalls);
+        Assert.DoesNotContain("PRIVATE_UNREADABLE_LEDGER", json, StringComparison.Ordinal);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData(SetupCodes.UnsupportedAdapter)]
+    [InlineData(SetupCodes.UnsupportedTarget)]
+    public void DispatchApply_ExceptionalCoordinatorFailureRetainsAdapterWithEmptyPayloads(string code)
+    {
+        var context = CreatePlannedApplyFixture("github-copilot");
+        var applyCalls = 0;
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (_, _) =>
+            {
+                applyCalls++;
+                throw new SetupApplyException(SetupPlanResult.Failure<SetupLedgerChangeSet>(
+                    code,
+                    [SetupCodes.ManagedPolicyUnverified],
+                    [SetupCodes.RestartVsCode]));
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+
+        Assert.False(result.Success);
+        Assert.Equal(code, result.Code);
+        Assert.Equal("github-copilot", result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.Equal(1, applyCalls);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_UnexpectedCoordinatorExceptionReturnsSafeInternalError()
+    {
+        const string rawMarker = "PRIVATE_COORDINATOR_FAILURE";
+        var context = CreatePlannedApplyFixture();
+        var applyCalls = 0;
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (_, _) =>
+            {
+                applyCalls++;
+                throw new InvalidOperationException(rawMarker);
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+        var json = SetupJson.Serialize(result);
+
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.Equal(1, applyCalls);
+        Assert.DoesNotContain(rawMarker, json, StringComparison.Ordinal);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_UnexpectedCoordinatorSuccessStateReturnsSafeInternalError()
+    {
+        var context = CreatePlannedApplyFixture();
+        var applyCalls = 0;
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (_, _) =>
+            {
+                applyCalls++;
+                return SetupPlanResult.Success(
+                    context.PlannedRow with
+                    {
+                        State = SetupChangeSetState.Restored,
+                        OutcomeCode = SetupCodes.InternalError,
+                    },
+                    [],
+                    [SetupCodes.ManagedPolicyUnverified],
+                    [SetupCodes.RestartVsCode]);
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.Equal(1, applyCalls);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_MandatoryRecoveryRequiredStopsBeforeCoordinatorWithEmptyTargets()
+    {
+        var requestedId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var recoveredId = Guid.Parse("00000000-0000-7000-8000-000000000711");
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var applyCalls = new CallCounter();
+        var dispatcher = CreateApplyDispatcher(
+            fixture,
+            [],
+            _ => new SetupRecoveryResult(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.RecoveryRequired,
+                recoveredId,
+                SetupRecoveryOperation.Apply,
+                CreateRecoveryEvidence(
+                    recoveredId,
+                    SetupChangeSetState.Partial,
+                    SetupCodes.InterruptedRecoveryFailed)),
+            applyCalls);
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(requestedId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(requestedId.ToString("D"), result.ChangeSetId);
+        Assert.Empty(result.Targets);
+        Assert.Equal(0, applyCalls.Value);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchApply_UnreadableLedgerBeforeCoordinatorReturnsStorageFailureWithEmptyTargets()
+    {
+        const string rawMarker = "PRIVATE_LEDGER_FAILURE";
+        var context = CreatePlannedApplyFixture();
+        context.Fixture.Platform.SeedFile(
+            context.Fixture.Paths.OwnershipLedger,
+            Encoding.UTF8.GetBytes("{" + rawMarker));
+        var applyCalls = new CallCounter();
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            applyCalls);
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+        var json = SetupJson.Serialize(result);
+
+        Assert.Equal(SetupCodes.LedgerCorrupt, result.Code);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.Equal(0, applyCalls.Value);
+        Assert.DoesNotContain(rawMarker, json, StringComparison.Ordinal);
         SetupContractValidator.Validate(result);
     }
 
@@ -1130,29 +1519,27 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Fact]
-    public void DispatchApply_ProductionConstructorBindsCoordinatorButStopsAtB1SentinelWithoutMutation()
+    public void DispatchApply_ProductionConstructorInvokesRealCoordinatorForNoChanges()
     {
         var adapter = new RecordingAdapter("test-adapter", request =>
             SetupPlanResult.Planned(CreatePlan(
                 request,
-                [CreateRecord(RecordId, "first-target", SetupOperation.Replace)])));
+                [CreateGuidanceRecord(RecordId)])));
         var fixture = DispatcherFixture.CreateProduction(adapter);
         var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions());
         var changeSetId = Guid.Parse(planned.ChangeSetId!);
-        var planBytes = fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(changeSetId));
-        var ledgerBytes = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
-        var baseline = fixture.Platform.Operations.Count;
 
         var result = fixture.Dispatcher.Dispatch(CreateApplyOptions(changeSetId));
 
-        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.NoChanges, result.Code);
         Assert.Equal("test-adapter", result.Adapter);
-        Assert.Equal(planBytes, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(changeSetId)));
-        Assert.Equal(ledgerBytes, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
-        Assert.Single(
-            fixture.Platform.Operations.Skip(baseline),
-            operation => operation == $"file.lock:{fixture.Paths.Lock}");
-        Assert.Equal(SetupChangeSetState.Planned, Assert.Single(fixture.LedgerStore.Load().ChangeSets).State);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.False(Assert.Single(result.Targets).RollbackAvailable);
+        var persisted = Assert.Single(fixture.LedgerStore.Load().ChangeSets);
+        Assert.Equal(SetupChangeSetState.NoChanges, persisted.State);
+        Assert.Equal(SetupCodes.NoChanges, persisted.OutcomeCode);
         SetupContractValidator.Validate(result);
     }
 
@@ -1286,8 +1673,41 @@ public sealed class SetupCommandDispatcherTests
         (_, _) =>
         {
             applyCalls.Value++;
-            throw new InvalidOperationException("B1 apply seam must not run");
+            throw new InvalidOperationException("apply must not run");
         });
+
+    private static SetupCommandDispatcher CreateApplyDispatcher(
+        DispatcherFixture fixture,
+        IEnumerable<ISetupAdapter> adapters,
+        Func<SetupLock, SetupRecoveryResult> recover,
+        Func<SetupLock, Guid, SetupPlanSuccess<SetupLedgerChangeSet>> apply) => new(
+        fixture.Platform,
+        fixture.Paths,
+        fixture.PlanStore,
+        fixture.LedgerStore,
+        new SetupAdapterRegistry(adapters),
+        "1.2.3",
+        recover,
+        apply);
+
+    private static (
+        DispatcherFixture Fixture,
+        RecordingAdapter Adapter,
+        Guid ChangeSetId,
+        SetupLedgerChangeSet PlannedRow) CreatePlannedApplyFixture(
+            string adapterId = "persisted-adapter",
+            SetupOperation operation = SetupOperation.Replace)
+    {
+        var adapter = new RecordingAdapter(adapterId, request =>
+            SetupPlanResult.Planned(CreatePlan(
+                request,
+                [CreateRecord(RecordId, "first-target", operation)])));
+        var fixture = DispatcherFixture.Create(adapter, _ => NoRecovery());
+        var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions(adapterId));
+        var changeSetId = Guid.Parse(planned.ChangeSetId!);
+        var plannedRow = Assert.Single(fixture.LedgerStore.LoadForRecovery().ChangeSets);
+        return (fixture, adapter, changeSetId, plannedRow);
+    }
 
     private static SetupRecoveryResult NoRecovery() => new(
         SetupRecoveryDisposition.None,

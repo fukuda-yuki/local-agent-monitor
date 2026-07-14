@@ -307,11 +307,57 @@ internal sealed class SetupCommandDispatcher
                     changeSet.Adapter));
             }
 
-            _ = apply;
-            return Validate(ApplyFailure(
-                SetupCodes.InternalError,
+            SetupPlanSuccess<SetupLedgerChangeSet> applied;
+            try
+            {
+                applied = apply(acquisition.Lock!, changeSetId);
+            }
+            catch (SetupApplyException exception)
+            {
+                if (exception.Code is SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget)
+                {
+                    return Validate(ApplyFailure(
+                        exception.Code,
+                        correlationId,
+                        changeSet.Adapter));
+                }
+
+                return Validate(ApplyFailure(
+                    exception.Code,
+                    correlationId,
+                    changeSet.Adapter,
+                    ApplyFailureTargets(changeSetId, exception.Code),
+                    exception.Failure.Warnings,
+                    exception.Failure.NextActions));
+            }
+
+            var code = applied.Value.State switch
+            {
+                SetupChangeSetState.Applied => SetupCodes.ApplySucceeded,
+                SetupChangeSetState.NoChanges => SetupCodes.NoChanges,
+                _ => null,
+            };
+            if (code is null)
+            {
+                return Validate(ApplyFailure(
+                    SetupCodes.InternalError,
+                    correlationId,
+                    changeSet.Adapter));
+            }
+
+            return Validate(new SetupCommandResult(
+                SetupCommand.Apply,
+                true,
+                code,
                 correlationId,
-                changeSet.Adapter));
+                null,
+                null,
+                changeSet.Adapter,
+                ProjectApplyTargets(applied.Value, code),
+                [],
+                Snapshot(applied.Warnings),
+                Snapshot(applied.NextActions),
+                false));
         }
         catch (SetupStorageException exception)
         {
@@ -480,6 +526,21 @@ internal sealed class SetupCommandDispatcher
         string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) &&
         target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
 
+    private IReadOnlyList<SetupTargetResult> ApplyFailureTargets(Guid changeSetId, string code)
+    {
+        try
+        {
+            var changeSet = ledgerStore.LoadForRecovery().ChangeSets
+                .SingleOrDefault(candidate => candidate.ChangeSetId == changeSetId);
+            return changeSet is null ? [] : ProjectApplyTargets(changeSet, code);
+        }
+        catch (Exception exception) when (
+            exception is SetupStorageException or FormatException or ArgumentException or InvalidOperationException)
+        {
+            return [];
+        }
+    }
+
     private static SetupCommandResult Failure(
         string code,
         string? adapter,
@@ -502,7 +563,9 @@ internal sealed class SetupCommandDispatcher
         string code,
         string changeSetId,
         string? adapter,
-        IReadOnlyList<SetupTargetResult>? targets = null) => new(
+        IReadOnlyList<SetupTargetResult>? targets = null,
+        IReadOnlyList<string>? warnings = null,
+        IReadOnlyList<string>? nextActions = null) => new(
         SetupCommand.Apply,
         false,
         code,
@@ -512,8 +575,8 @@ internal sealed class SetupCommandDispatcher
         adapter,
         targets ?? [],
         [],
-        [],
-        [],
+        Snapshot(warnings ?? []),
+        Snapshot(nextActions ?? []),
         false);
 
     private static SetupCommandResult CommandFailure(
