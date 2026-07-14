@@ -804,6 +804,31 @@ public sealed class SetupContractValidationTests
         Assert.Equal("setup_contract_invalid", exception.Message);
     }
 
+    [Fact]
+    public void ValidateAndSerialize_StatusInvalidArguments_AcceptsRepositorySafeFailure()
+    {
+        var result = new SetupCommandResult(
+            SetupCommand.Status, false, SetupCodes.InvalidArguments, null, null, null, null,
+            [], [], [], [], false);
+
+        SetupContractValidator.Validate(result);
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+        var root = document.RootElement;
+
+        Assert.Equal("status", root.GetProperty("command").GetString());
+        Assert.Equal("invalid_arguments", root.GetProperty("code").GetString());
+        Assert.False(root.GetProperty("success").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("change_set_id").ValueKind);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("recovered_change_set_id").ValueKind);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("recovery_operation").ValueKind);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("adapter").ValueKind);
+        Assert.Empty(root.GetProperty("targets").EnumerateArray());
+        Assert.Empty(root.GetProperty("change_sets").EnumerateArray());
+        Assert.Empty(root.GetProperty("warnings").EnumerateArray());
+        Assert.Empty(root.GetProperty("next_actions").EnumerateArray());
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+    }
+
     [Theory]
     [InlineData(SetupCodes.UnsupportedAdapter, "removed-adapter")]
     [InlineData(SetupCodes.UnsupportedTarget, "github-copilot")]
