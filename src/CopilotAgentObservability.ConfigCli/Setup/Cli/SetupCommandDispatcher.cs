@@ -390,6 +390,14 @@ internal sealed class SetupCommandDispatcher
             }
 
             SetupTransactionEvidence.RequireImmutableIdentity(plan, applied.Value);
+            if (!ImmutableApplyProjectionMatches(changeSet, applied.Value))
+            {
+                return Validate(ApplyFailure(
+                    SetupCodes.InternalError,
+                    correlationId,
+                    null));
+            }
+
             var code = (applied.Value.State, applied.Value.OutcomeCode) switch
             {
                 (SetupChangeSetState.Applied, SetupCodes.ApplySucceeded) => SetupCodes.ApplySucceeded,
@@ -800,6 +808,56 @@ internal sealed class SetupCommandDispatcher
         target.AppliedStateHash is not null &&
         string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) &&
         target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
+
+    private static bool ImmutableApplyProjectionMatches(
+        SetupLedgerChangeSet expected,
+        SetupLedgerChangeSet actual)
+    {
+        if (expected.Targets.Count != actual.Targets.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < expected.Targets.Count; index++)
+        {
+            var expectedTarget = expected.Targets[index];
+            var actualTarget = actual.Targets[index];
+            if (expectedTarget.RecordId != actualTarget.RecordId ||
+                expectedTarget.TargetKind != actualTarget.TargetKind ||
+                expectedTarget.TargetLabel != actualTarget.TargetLabel ||
+                expectedTarget.OwningAdapter != actualTarget.OwningAdapter ||
+                !expectedTarget.Members.SequenceEqual(actualTarget.Members) ||
+                expectedTarget.PreviousStateHash != actualTarget.PreviousStateHash ||
+                expectedTarget.RestartRequirement != actualTarget.RestartRequirement ||
+                !StatusProjectionMatches(expectedTarget.StatusProjection, actualTarget.StatusProjection) ||
+                expectedTarget.ToolVersion != actualTarget.ToolVersion)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool StatusProjectionMatches(SetupStatusProjection expected, SetupStatusProjection actual) =>
+        expected.Detected == actual.Detected &&
+        expected.DetectedVersion == actual.DetectedVersion &&
+        expected.Operation == actual.Operation &&
+        expected.EffectiveSource == actual.EffectiveSource &&
+        expected.Endpoint == actual.Endpoint &&
+        ExpectedResultMatches(expected.ExpectedResult, actual.ExpectedResult) &&
+        GuidanceMatches(expected.Guidance, actual.Guidance) &&
+        expected.Changes.SequenceEqual(actual.Changes);
+
+    private static bool ExpectedResultMatches(JsonElement? expected, JsonElement? actual) =>
+        expected.HasValue == actual.HasValue &&
+        (!expected.HasValue || JsonElement.DeepEquals(expected.Value, actual!.Value));
+
+    private static bool GuidanceMatches(SetupStatusGuidance? expected, SetupStatusGuidance? actual) =>
+        expected is null && actual is null ||
+        expected is not null && actual is not null &&
+        expected.Kind == actual.Kind &&
+        expected.Language == actual.Language;
 
     private static bool IsNormalApplyFailureCode(string code) => code is
         SetupCodes.TargetNotInstalled or

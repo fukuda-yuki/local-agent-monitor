@@ -1514,17 +1514,79 @@ public sealed class SetupCommandDispatcherTests
         SetupContractValidator.Validate(result);
     }
 
+    [Fact]
+    public void DispatchApply_SemanticallyEquivalentExpectedResultMapsSuccessfulCoordinatorValue()
+    {
+        var context = CreatePlannedApplyFixture(recordFactory: CreateManifestRecord);
+        var plannedTarget = Assert.Single(context.PlannedRow.Targets);
+        var expectedResult = plannedTarget.StatusProjection.ExpectedResult!.Value;
+        var source = JsonNode.Parse(expectedResult.GetRawText())!.AsObject();
+        var reordered = new JsonObject();
+        foreach (var property in source.Reverse())
+        {
+            reordered.Add(property.Key, property.Value?.DeepClone());
+        }
+
+        using var reorderedDocument = JsonDocument.Parse(reordered.ToJsonString());
+        var applied = context.PlannedRow with
+        {
+            State = SetupChangeSetState.Applied,
+            OutcomeCode = SetupCodes.ApplySucceeded,
+            UpdatedAt = Timestamp.AddSeconds(1),
+            Targets = [plannedTarget with
+            {
+                AppliedStateHash = new string('b', 64),
+                BackupReference = plannedTarget.RecordId.ToString("D"),
+                OutcomeCode = SetupCodes.ApplySucceeded,
+                RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                StatusProjection = plannedTarget.StatusProjection with
+                {
+                    ExpectedResult = reorderedDocument.RootElement.Clone(),
+                },
+            }],
+        };
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (_, _) => SetupPlanResult.Success(applied, [], [], []));
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.ApplySucceeded, result.Code);
+        Assert.True(JsonElement.DeepEquals(expectedResult, Assert.Single(result.Targets).ExpectedResult!.Value));
+        SetupContractValidator.Validate(result);
+    }
+
     [Theory]
     [InlineData("foreign-change-set")]
     [InlineData("same-id-adapter-mismatch")]
     [InlineData("same-id-target-mismatch")]
+    [InlineData("same-id-target-label-mismatch")]
+    [InlineData("same-id-owning-adapter-mismatch")]
+    [InlineData("same-id-restart-requirement-mismatch")]
+    [InlineData("same-id-target-tool-version-mismatch")]
+    [InlineData("same-id-status-projection-mismatch")]
+    [InlineData("same-id-status-operation-mismatch")]
+    [InlineData("same-id-status-changes-mismatch")]
+    [InlineData("same-id-expected-result-mismatch")]
+    [InlineData("same-id-expected-result-null-mismatch")]
+    [InlineData("same-id-guidance-null-mismatch")]
     [InlineData("applied-state-outcome-mismatch")]
     [InlineData("no-changes-state-outcome-mismatch")]
     public void DispatchApply_MismatchedSuccessfulCoordinatorCarrierFailsClosed(string variant)
     {
-        var noChanges = variant == "no-changes-state-outcome-mismatch";
+        var noChanges = variant is "no-changes-state-outcome-mismatch" or "same-id-guidance-null-mismatch";
+        Func<SetupPlanRequest, SetupChangeRecord>? recordFactory = variant switch
+        {
+            "same-id-expected-result-mismatch" => CreateManifestRecord,
+            "same-id-guidance-null-mismatch" => _ => CreateGuidanceRecord(RecordId),
+            _ => null,
+        };
         var context = CreatePlannedApplyFixture(
-            operation: noChanges ? SetupOperation.NoOp : SetupOperation.Replace);
+            operation: noChanges ? SetupOperation.NoOp : SetupOperation.Replace,
+            recordFactory: recordFactory);
         var plannedTarget = Assert.Single(context.PlannedRow.Targets);
         var successful = context.PlannedRow with
         {
@@ -1542,6 +1604,8 @@ public sealed class SetupCommandDispatcherTests
                 }],
         };
         var foreignRecordId = Guid.Parse("00000000-0000-7000-8000-000000000712");
+        using var historicalManifest = CreateHistoricalVsCodeManifest();
+        using var jsonNull = JsonDocument.Parse("null");
         successful = variant switch
         {
             "foreign-change-set" => successful with
@@ -1562,11 +1626,102 @@ public sealed class SetupCommandDispatcherTests
                     BackupReference = foreignRecordId.ToString("D"),
                 }],
             },
+            "same-id-target-label-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with { TargetLabel = "foreign-target" }],
+            },
+            "same-id-owning-adapter-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with { OwningAdapter = "foreign-adapter" }],
+            },
+            "same-id-restart-requirement-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with
+                {
+                    RestartRequirement = SetupRestartRequirement.RestartVsCode,
+                }],
+            },
+            "same-id-target-tool-version-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with { ToolVersion = "9.9.9" }],
+            },
+            "same-id-status-projection-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with
+                {
+                    StatusProjection = Assert.Single(successful.Targets).StatusProjection with
+                    {
+                        DetectedVersion = "2.0.0",
+                        EffectiveSource = SetupEffectiveSource.Environment,
+                        Endpoint = "http://127.0.0.1:4318",
+                    },
+                }],
+            },
+            "same-id-status-operation-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with
+                {
+                    StatusProjection = Assert.Single(successful.Targets).StatusProjection with
+                    {
+                        Operation = SetupOperation.Add,
+                        Changes = [Assert.Single(successful.Targets[0].StatusProjection.Changes) with
+                        {
+                            Operation = SetupOperation.Add,
+                        }],
+                    },
+                }],
+            },
+            "same-id-status-changes-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with
+                {
+                    StatusProjection = Assert.Single(successful.Targets).StatusProjection with
+                    {
+                        Changes = [Assert.Single(successful.Targets[0].StatusProjection.Changes) with
+                        {
+                            PreviousState = "foreign_previous",
+                            NewState = "foreign_new",
+                            Conflict = "foreign_conflict",
+                            Managed = true,
+                        }],
+                    },
+                }],
+            },
+            "same-id-expected-result-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with
+                {
+                    StatusProjection = Assert.Single(successful.Targets).StatusProjection with
+                    {
+                        ExpectedResult = historicalManifest.RootElement.Clone(),
+                    },
+                }],
+            },
+            "same-id-expected-result-null-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with
+                {
+                    StatusProjection = Assert.Single(successful.Targets).StatusProjection with
+                    {
+                        ExpectedResult = jsonNull.RootElement.Clone(),
+                    },
+                }],
+            },
+            "same-id-guidance-null-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with
+                {
+                    StatusProjection = Assert.Single(successful.Targets).StatusProjection with { Guidance = null },
+                }],
+            },
             "applied-state-outcome-mismatch" => successful with { OutcomeCode = SetupCodes.NoChanges },
             "no-changes-state-outcome-mismatch" => successful with { OutcomeCode = SetupCodes.ApplySucceeded },
             _ => throw new ArgumentOutOfRangeException(nameof(variant), variant, null),
         };
-        if (variant is "foreign-change-set" or "same-id-adapter-mismatch" or "same-id-target-mismatch")
+        if (variant is "foreign-change-set" or "same-id-adapter-mismatch" or "same-id-target-mismatch" or
+            "same-id-target-label-mismatch" or "same-id-restart-requirement-mismatch" or
+            "same-id-status-projection-mismatch" or "same-id-status-changes-mismatch" or
+            "same-id-expected-result-mismatch" or "same-id-expected-result-null-mismatch")
         {
             SetupStorageValidation.ValidateLedger(new SetupOwnershipLedger(1, [successful]));
         }
@@ -2479,12 +2634,13 @@ public sealed class SetupCommandDispatcherTests
         Guid ChangeSetId,
         SetupLedgerChangeSet PlannedRow) CreatePlannedApplyFixture(
             string adapterId = "persisted-adapter",
-            SetupOperation operation = SetupOperation.Replace)
+            SetupOperation operation = SetupOperation.Replace,
+            Func<SetupPlanRequest, SetupChangeRecord>? recordFactory = null)
     {
         var adapter = new RecordingAdapter(adapterId, request =>
             SetupPlanResult.Planned(CreatePlan(
                 request,
-                [CreateRecord(RecordId, "first-target", operation)])));
+                [recordFactory?.Invoke(request) ?? CreateRecord(RecordId, "first-target", operation)])));
         var fixture = DispatcherFixture.Create(adapter, _ => NoRecovery());
         var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions(adapterId));
         var changeSetId = Guid.Parse(planned.ChangeSetId!);
