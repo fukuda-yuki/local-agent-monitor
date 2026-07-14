@@ -1,7 +1,12 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot;
 using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Platform;
+using CopilotAgentObservability.ConfigCli.Setup.Storage;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
@@ -62,18 +67,34 @@ public sealed class SourceCapabilityRuntimeTests
     }
 
     [Fact]
-    public void SetupAdapterTargetPairing_UsesCanonicalManifestsForWritableSurfacesAndNullForGuidance()
+    public void AggregateAdapter_AttachesCanonicalManifestsForWritableSurfacesAndNullForGuidance()
     {
-        var vsCode = SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.VsCode);
-        var cli = SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.Cli);
+        var platform = new SetupTestPlatform(DateTimeOffset.Parse("2026-07-14T00:00:00Z"));
+        var adapter = new GitHubCopilotSetupAdapter(platform,
+        [
+            new ManifestPairingPartition("vscode", CreateManifestPairingRecord("vscode", 1)),
+            new ManifestPairingPartition("cli", CreateManifestPairingRecord("cli", 2)),
+            new ManifestPairingPartition("app-sdk", CreateManifestPairingRecord("app-sdk", 3)),
+        ]);
+        var result = Assert.IsType<SetupPlanSuccess<SetupChangePlan>>(adapter.Plan(new SetupPlanRequest(
+            "github-copilot",
+            "all",
+            "http://127.0.0.1:4320",
+            false,
+            Guid.Parse("00000000-0000-7000-8000-000000000010"),
+            DateTimeOffset.Parse("2026-07-14T00:00:00Z"),
+            "1.2.3")));
+        var vsCode = result.Value.Records.Single(record => record.TargetLabel == "vscode-stable-default-user-settings");
+        var cli = result.Value.Records.Single(record => record.TargetLabel == "copilot-cli-user-environment");
+        var appSdk = result.Value.Records.Single(record => record.TargetLabel == "github-copilot-app-sdk-guidance");
 
-        Assert.NotNull(vsCode);
-        Assert.NotNull(cli);
-        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(vsCode, vsCode.CanonicalJson));
-        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(cli, cli.CanonicalJson));
-        Assert.Equal("github-copilot-vscode", vsCode.SourceSurface);
-        Assert.Equal("github-copilot-cli", cli.SourceSurface);
-        Assert.Null(SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.AppSdk));
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(
+            SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.VsCode)!,
+            vsCode.StatusProjection.ExpectedResult!.Value));
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(
+            SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.Cli)!,
+            cli.StatusProjection.ExpectedResult!.Value));
+        Assert.Null(appSdk.StatusProjection.ExpectedResult);
     }
 
     [Theory]
@@ -224,5 +245,46 @@ public sealed class SourceCapabilityRuntimeTests
             JsonValueKind.Null => true,
             _ => expected.GetRawText() == actual.GetRawText(),
         };
+    }
+
+    private static SetupChangeRecord CreateManifestPairingRecord(string target, int recordNumber)
+    {
+        var (kind, label, operation, source, restart, endpoint, guidance) = target switch
+        {
+            "vscode" => (SetupTargetKind.Json, "vscode-stable-default-user-settings", SetupOperation.Replace, (SetupEffectiveSource?)SetupEffectiveSource.UserSetting, SetupRestartRequirement.RestartVsCode, "http://127.0.0.1:4320", (SetupGuidance?)null),
+            "cli" => (SetupTargetKind.Env, "copilot-cli-user-environment", SetupOperation.Replace, (SetupEffectiveSource?)SetupEffectiveSource.Environment, SetupRestartRequirement.RestartTerminalSession, "http://127.0.0.1:4320", (SetupGuidance?)null),
+            "app-sdk" => (SetupTargetKind.Guidance, "github-copilot-app-sdk-guidance", SetupOperation.NoOp, (SetupEffectiveSource?)null, SetupRestartRequirement.None, (string?)null, new SetupGuidance("caller_managed_sample", "dotnet", string.Empty)),
+            _ => throw new ArgumentOutOfRangeException(nameof(target)),
+        };
+        var members = kind == SetupTargetKind.Guidance
+            ? (IReadOnlyList<SetupPrivatePlanMember>)[]
+            : [new SetupPrivatePlanMember("setting", SetupOperation.Replace, "desired")];
+        var changes = kind == SetupTargetKind.Guidance
+            ? (IReadOnlyList<SetupMemberChangeResult>)[]
+            : [new SetupMemberChangeResult("setting", SetupOperation.Replace, "present_different", "configured", "none", false)];
+
+        return new SetupChangeRecord(
+            Guid.Parse($"00000000-0000-7000-8000-{recordNumber:D12}"),
+            kind,
+            $"private://{label}",
+            label,
+            new string('a', 64),
+            "configured",
+            members,
+            restart,
+            new SetupStatusProjection(true, "1.0.0", operation, source, endpoint, null, guidance is null ? null : new SetupStatusGuidance(guidance.Kind, guidance.Language), changes),
+            guidance);
+    }
+
+    private sealed class ManifestPairingPartition(string targetToken, SetupChangeRecord record) : IGitHubCopilotTargetPartition
+    {
+        public string TargetToken => targetToken;
+
+        public GitHubCopilotPartitionPlan Plan(GitHubCopilotPartitionContext context) => new(null, [record], [], []);
+
+        public SetupPlanResult<SetupRevalidation> Revalidate(
+            GitHubCopilotPartitionContext context,
+            SetupPrivatePlan plan,
+            SetupLedgerChangeSet plannedChangeSet) => SetupPlanResult.Revalidated();
     }
 }

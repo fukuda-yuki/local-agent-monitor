@@ -901,6 +901,37 @@ public sealed class SetupContractValidationTests
     }
 
     [Theory]
+    [InlineData(SetupCodes.TargetNotInstalled, SetupCodes.InstallVsCode)]
+    [InlineData(SetupCodes.TargetNotInstalled, SetupCodes.InstallGitHubCopilotChatExtension)]
+    [InlineData(SetupCodes.UnsupportedVersion, SetupCodes.UpgradeVsCode)]
+    [InlineData(SetupCodes.TargetNotInstalled, SetupCodes.InstallCopilotCli)]
+    [InlineData(SetupCodes.UnsupportedVersion, SetupCodes.UpgradeCopilotCli)]
+    [InlineData(SetupCodes.ManagedPolicyConflict, null)]
+    [InlineData(SetupCodes.EnvironmentOverrideConflict, SetupCodes.ReviewCliTraceProtocolOverride)]
+    [InlineData(SetupCodes.PortOwnedByForeignProcess, null)]
+    public void Serialize_GitHubCopilotPlan_AcceptsEveryDeclaredPreflightFailureAndRecoveryAction(string code, string? nextAction)
+    {
+        var result = new SetupCommandResult(
+            SetupCommand.Plan,
+            false,
+            code,
+            null,
+            null,
+            null,
+            "github-copilot",
+            [],
+            [],
+            [],
+            nextAction is null ? [] : [nextAction],
+            false);
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal(code, document.RootElement.GetProperty("code").GetString());
+        Assert.Equal(nextAction is null ? [] : [nextAction], document.RootElement.GetProperty("next_actions").EnumerateArray().Select(value => value.GetString()));
+    }
+
+    [Theory]
     [InlineData(SetupCodes.UnsupportedAdapter, "removed-adapter")]
     [InlineData(SetupCodes.UnsupportedTarget, "github-copilot")]
     public void Serialize_WhenApplyCannotUsePersistedPlan_PreservesTheArtifactFreeExceptionalResult(string code, string adapter)

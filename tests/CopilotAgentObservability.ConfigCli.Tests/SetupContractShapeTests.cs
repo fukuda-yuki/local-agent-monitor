@@ -270,6 +270,36 @@ public sealed class SetupContractShapeTests
             document.RootElement.GetProperty("next_actions").EnumerateArray().Select(value => value.GetString()));
     }
 
+    [Theory]
+    [InlineData(SetupCodes.ContentCaptureSensitive, SetupCodes.ReviewContentCaptureWarning)]
+    [InlineData(SetupCodes.ManagedPolicyUnverified, SetupCodes.RunVsCodePolicyDiagnostics)]
+    [InlineData(SetupCodes.MonitorNotRunning, SetupCodes.StartLocalMonitor)]
+    [InlineData(SetupCodes.SharedUserEnvironmentAffectsOtherProcesses, SetupCodes.RestartTerminalSession)]
+    [InlineData(SetupCodes.VscodeNonDefaultProfilesNotModified, SetupCodes.RestartVsCode)]
+    [InlineData(SetupCodes.CliTraceProtocolOverrideNotModified, SetupCodes.RestartTerminalSession)]
+    [InlineData(null, SetupCodes.RunFirstTraceDoctor)]
+    public void Serialize_GitHubCopilotPlan_AcceptsEveryDeclaredWarningAndSuccessAction(string? warning, string nextAction)
+    {
+        var result = new SetupCommandResult(
+            SetupCommand.Plan,
+            true,
+            SetupCodes.PlanReady,
+            "00000000-0000-7000-8000-000000000043",
+            null,
+            null,
+            "github-copilot",
+            [CreatePlanTarget()],
+            [],
+            warning is null ? [] : [warning],
+            [nextAction],
+            false);
+
+        using var document = JsonDocument.Parse(SetupJson.Serialize(result));
+
+        Assert.Equal(warning is null ? [] : [warning], document.RootElement.GetProperty("warnings").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal([nextAction], document.RootElement.GetProperty("next_actions").EnumerateArray().Select(value => value.GetString()));
+    }
+
     [Fact]
     public void SetupCodes_MatchTheIndependentSetupV1LiteralCatalog()
     {

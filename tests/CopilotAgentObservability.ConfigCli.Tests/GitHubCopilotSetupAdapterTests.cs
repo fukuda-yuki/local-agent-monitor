@@ -226,6 +226,64 @@ public sealed class GitHubCopilotSetupAdapterTests
     }
 
     [Fact]
+    public void Plan_RejectsPartitionRecordsThatDoNotMatchTheOwningTargetShape()
+    {
+        var platform = CreatePlatform();
+        var adapter = CreateAdapter(
+            platform,
+            new ScriptedPartition("vscode", new GitHubCopilotPartitionPlan(null, [CreateRecord("cli", 1)], [], [])),
+            new ScriptedPartition("cli", CreatePlan("cli", 2)),
+            new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Plan(CreateRequest("vscode")));
+
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
+    public void Plan_RejectsWritableAppSdkAndEndpointMismatchesBeforePublishingThePlan()
+    {
+        var platform = CreatePlatform();
+        var writableGuidance = CreateRecord("app-sdk", 3) with
+        {
+            TargetKind = SetupTargetKind.Json,
+            StatusProjection = CreateRecord("app-sdk", 3).StatusProjection with
+            {
+                Endpoint = Endpoint,
+            },
+        };
+        var adapter = CreateAdapter(
+            platform,
+            new ScriptedPartition("vscode", CreatePlan("vscode", 1)),
+            new ScriptedPartition("cli", CreatePlan("cli", 2)),
+            new ScriptedPartition("app-sdk", new GitHubCopilotPartitionPlan(null, [writableGuidance], [], [])));
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Plan(CreateRequest("app-sdk")));
+
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
+    public void Plan_RejectsWrongWritableKindAndEndpointBeforePublishingThePlan()
+    {
+        var platform = CreatePlatform();
+        var malformed = CreateRecord("vscode", 1) with
+        {
+            TargetKind = SetupTargetKind.Env,
+            StatusProjection = CreateRecord("vscode", 1).StatusProjection with { Endpoint = "http://127.0.0.1:4318" },
+        };
+        var adapter = CreateAdapter(
+            platform,
+            new ScriptedPartition("vscode", new GitHubCopilotPartitionPlan(null, [malformed], [], [])),
+            new ScriptedPartition("cli", CreatePlan("cli", 2)),
+            new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Plan(CreateRequest("vscode")));
+
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
     public void Revalidate_RoutesNonGuidanceRecordsToTheirOwningPartitionsAndDeduplicatesDiagnostics()
     {
         var platform = CreatePlatform();
@@ -252,6 +310,183 @@ public sealed class GitHubCopilotSetupAdapterTests
         AssertNoDetectionOrProbe(platform);
     }
 
+    [Theory]
+    [InlineData("vscode")]
+    [InlineData("cli")]
+    public void Revalidate_SelectedWritableTarget_RoutesOnlyToItsOwningPartition(string selectedTarget)
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1));
+        var cli = new ScriptedPartition("cli", CreatePlan("cli", 2));
+        var appSdk = new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3));
+        var adapter = CreateAdapter(platform, vscode, cli, appSdk);
+        var (plan, changeSet) = CreatePersistedPlan(selectedTarget, selectedTarget);
+
+        _ = adapter.Revalidate(plan, changeSet);
+
+        Assert.Equal(selectedTarget == "vscode" ? 1 : 0, vscode.RevalidateCalls);
+        Assert.Equal(selectedTarget == "cli" ? 1 : 0, cli.RevalidateCalls);
+        Assert.Equal(0, appSdk.RevalidateCalls);
+    }
+
+    [Fact]
+    public void Revalidate_All_StopsAtTheFirstFailureWithoutCallingLaterPartitions()
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1));
+        var cli = new ScriptedPartition("cli", CreatePlan("cli", 2))
+        {
+            RevalidateHandler = (_, _, _) => SetupPlanResult.Failure<SetupRevalidation>(SetupCodes.UnsupportedVersion, [], [SetupCodes.UpgradeCopilotCli]),
+        };
+        var appSdk = new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3));
+        var adapter = CreateAdapter(platform, vscode, cli, appSdk);
+        var (plan, changeSet) = CreatePersistedPlan("all", "vscode", "cli", "app-sdk");
+
+        var result = Assert.IsType<SetupPlanFailure<SetupRevalidation>>(adapter.Revalidate(plan, changeSet));
+
+        Assert.Equal(SetupCodes.UnsupportedVersion, result.Code);
+        Assert.Equal([SetupCodes.UpgradeCopilotCli], result.NextActions);
+        Assert.Equal(1, vscode.RevalidateCalls);
+        Assert.Equal(1, cli.RevalidateCalls);
+        Assert.Equal(0, appSdk.RevalidateCalls);
+    }
+
+    [Fact]
+    public void Revalidate_UnexpectedPartitionException_Propagates()
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1))
+        {
+            RevalidateHandler = (_, _, _) => throw new InvalidOperationException("unexpected"),
+        };
+        var adapter = CreateAdapter(platform, vscode, new ScriptedPartition("cli", CreatePlan("cli", 2)), new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var (plan, changeSet) = CreatePersistedPlan("vscode", "vscode");
+
+        var exception = Assert.Throws<InvalidOperationException>(() => adapter.Revalidate(plan, changeSet));
+
+        Assert.Equal("unexpected", exception.Message);
+    }
+
+    [Fact]
+    public void Revalidate_RejectsSelectedTargetAndPersistedLabelDisagreementBeforeDispatch()
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1));
+        var cli = new ScriptedPartition("cli", CreatePlan("cli", 2));
+        var appSdk = new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3));
+        var adapter = CreateAdapter(platform, vscode, cli, appSdk);
+        var (plan, changeSet) = CreatePersistedPlan("vscode", "cli");
+
+        var result = Assert.IsType<SetupPlanFailure<SetupRevalidation>>(adapter.Revalidate(plan, changeSet));
+
+        Assert.Equal(SetupCodes.UnsupportedTarget, result.Code);
+        Assert.Equal(0, vscode.RevalidateCalls + cli.RevalidateCalls + appSdk.RevalidateCalls);
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
+    public void Revalidate_RejectsDuplicatePersistedPhysicalLabelsBeforeDispatch()
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1));
+        var adapter = CreateAdapter(platform, vscode, new ScriptedPartition("cli", CreatePlan("cli", 2)), new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var (plan, changeSet) = CreatePersistedPlanFromRecords("vscode", [CreateRecord("vscode", 1), CreateRecord("vscode", 2)]);
+
+        var result = Assert.IsType<SetupPlanFailure<SetupRevalidation>>(adapter.Revalidate(plan, changeSet));
+
+        Assert.Equal(SetupCodes.UnsupportedTarget, result.Code);
+        Assert.Equal(0, vscode.RevalidateCalls);
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
+    public void Revalidate_RejectsEndpointAndManifestMismatchesBeforeDispatch()
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1));
+        var adapter = CreateAdapter(platform, vscode, new ScriptedPartition("cli", CreatePlan("cli", 2)), new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var (plan, changeSet) = CreatePersistedPlan("vscode", "vscode");
+        var persisted = changeSet.Targets.Single() with
+        {
+            StatusProjection = changeSet.Targets.Single().StatusProjection with { Endpoint = "http://127.0.0.1:4318" },
+        };
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Revalidate(plan, changeSet with { Targets = [persisted] }));
+
+        Assert.Equal(0, vscode.RevalidateCalls);
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
+    public void Revalidate_DerivesCaptureFlagFromCoherentPersistedTargetMembers()
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1))
+        {
+            RevalidateHandler = (context, _, _) =>
+            {
+                Assert.True(context.Request.IncludeContentCapture);
+                return SetupPlanResult.Revalidated();
+            },
+        };
+        var cli = new ScriptedPartition("cli", CreatePlan("cli", 2))
+        {
+            RevalidateHandler = (context, _, _) =>
+            {
+                Assert.True(context.Request.IncludeContentCapture);
+                return SetupPlanResult.Revalidated();
+            },
+        };
+        var adapter = CreateAdapter(platform, vscode, cli, new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var (plan, changeSet) = CreatePersistedPlanFromRecords(
+            "all",
+            [CreateRecord("vscode", 1, true), CreateRecord("cli", 2, true), CreateRecord("app-sdk", 3)]);
+
+        _ = adapter.Revalidate(plan, changeSet);
+
+        Assert.Equal(1, vscode.RevalidateCalls);
+        Assert.Equal(1, cli.RevalidateCalls);
+    }
+
+    [Fact]
+    public void Revalidate_RejectsIncoherentCaptureMembersBeforeDispatch()
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1));
+        var cli = new ScriptedPartition("cli", CreatePlan("cli", 2));
+        var adapter = CreateAdapter(platform, vscode, cli, new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var (plan, changeSet) = CreatePersistedPlanFromRecords(
+            "all",
+            [CreateRecord("vscode", 1, true), CreateRecord("cli", 2), CreateRecord("app-sdk", 3)]);
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Revalidate(plan, changeSet));
+
+        Assert.Equal(0, vscode.RevalidateCalls + cli.RevalidateCalls);
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
+    public void Revalidate_RejectsPersistedWritableMemberValuesOutsideTheFrozenVocabulary()
+    {
+        var platform = CreatePlatform();
+        var cli = new ScriptedPartition("cli", CreatePlan("cli", 2));
+        var adapter = CreateAdapter(platform, new ScriptedPartition("vscode", CreatePlan("vscode", 1)), cli, new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var record = CreateRecord("cli", 2) with
+        {
+            Members = CreateRecord("cli", 2).Members
+                .Select(member => member.SettingKey == "OTEL_EXPORTER_OTLP_PROTOCOL"
+                    ? member with { DesiredValue = "grpc" }
+                    : member)
+                .ToArray(),
+        };
+        var (plan, changeSet) = CreatePersistedPlanFromRecords("cli", [record]);
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Revalidate(plan, changeSet));
+
+        Assert.Equal(0, cli.RevalidateCalls);
+        AssertNoDetectionOrProbe(platform);
+    }
+
     [Fact]
     public void Revalidate_SuccessfulWritablePartitions_CacheOneSharedDetectionAndProbe()
     {
@@ -266,7 +501,7 @@ public sealed class GitHubCopilotSetupAdapterTests
             RevalidateHandler = (context, _, _) => AccessSharedState(context, SetupPlanResult.Revalidated()),
         };
         var adapter = CreateAdapter(platform, vscode, cli, new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
-        var (plan, changeSet) = CreatePersistedPlan("all", "vscode", "cli");
+        var (plan, changeSet) = CreatePersistedPlan("all", "vscode", "cli", "app-sdk");
 
         _ = adapter.Revalidate(plan, changeSet);
 
@@ -349,6 +584,91 @@ public sealed class GitHubCopilotSetupAdapterTests
         Assert.Equal(SetupCodes.UnsupportedTarget, result.Code);
         Assert.Equal(0, vscode.RevalidateCalls + cli.RevalidateCalls + appSdk.RevalidateCalls);
         AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
+    public void PartitionContext_RepeatedLazyAccessReturnsCachedValues()
+    {
+        var platform = CreatePlatform();
+        ScriptLiveEndpoint(platform);
+        var context = new GitHubCopilotPartitionContext(platform, CreateRequest("vscode"));
+
+        var firstObservations = context.Observations;
+        var secondObservations = context.Observations;
+        var firstEndpoint = context.Endpoint;
+        var secondEndpoint = context.Endpoint;
+
+        Assert.Same(firstObservations, secondObservations);
+        Assert.Equal(firstEndpoint, secondEndpoint);
+        Assert.Equal(3, ProcessCallCount(platform));
+        Assert.Equal(1, ProbeCallCount(platform));
+    }
+
+    [Fact]
+    public async Task PartitionContext_ConcurrentEndpointAccessInvokesTheProbeOnce()
+    {
+        var platform = CreatePlatform();
+        ScriptLiveEndpoint(platform);
+        using var barrier = platform.AddBarrier($"http.get:{Endpoint}:/health/live:500:4096");
+        using var accessBarrier = new Barrier(2);
+        var context = new GitHubCopilotPartitionContext(platform, CreateRequest("vscode"));
+
+        var first = Task.Run(() =>
+        {
+            accessBarrier.SignalAndWait();
+            return context.Endpoint;
+        });
+        var second = Task.Run(() =>
+        {
+            accessBarrier.SignalAndWait();
+            return context.Endpoint;
+        });
+        barrier.WaitUntilReached(CancellationToken.None);
+        barrier.Release();
+        var results = await Task.WhenAll(first, second);
+
+        Assert.Equal([GitHubCopilotEndpointClassification.LocalMonitorLive, GitHubCopilotEndpointClassification.LocalMonitorLive], results);
+        Assert.Equal(1, ProbeCallCount(platform));
+    }
+
+    [Fact]
+    public async Task PartitionContext_ConcurrentObservationAccessInvokesDetectionOnce()
+    {
+        var platform = CreatePlatform();
+        using var barrier = platform.AddBarrier("process.run:code:--version");
+        using var accessBarrier = new Barrier(2);
+        var context = new GitHubCopilotPartitionContext(platform, CreateRequest("vscode"));
+
+        var first = Task.Run(() =>
+        {
+            accessBarrier.SignalAndWait();
+            return context.Observations;
+        });
+        var second = Task.Run(() =>
+        {
+            accessBarrier.SignalAndWait();
+            return context.Observations;
+        });
+        barrier.WaitUntilReached(CancellationToken.None);
+        barrier.Release();
+        var results = await Task.WhenAll(first, second);
+
+        Assert.Same(results[0], results[1]);
+        Assert.Equal(3, ProcessCallCount(platform));
+    }
+
+    [Fact]
+    public void PartitionContext_CachesEndpointProbeExceptions()
+    {
+        var platform = CreatePlatform();
+        platform.InjectFault($"http.get:{Endpoint}:/health/live:500:4096", new InvalidOperationException("probe"));
+        var context = new GitHubCopilotPartitionContext(platform, CreateRequest("vscode"));
+
+        var first = Assert.Throws<InvalidOperationException>(() => _ = context.Endpoint);
+        var second = Assert.Throws<InvalidOperationException>(() => _ = context.Endpoint);
+
+        Assert.Same(first, second);
+        Assert.Equal(1, ProbeCallCount(platform));
     }
 
     [Fact]
@@ -464,7 +784,7 @@ public sealed class GitHubCopilotSetupAdapterTests
         return result;
     }
 
-    private static SetupChangeRecord CreateRecord(string target, int recordNumber)
+    private static SetupChangeRecord CreateRecord(string target, int recordNumber, bool includeContentCapture = false)
     {
         var (targetKind, targetLabel, detected, version, operation, source, restart, endpoint, members, guidance, changes) = target switch
         {
@@ -477,9 +797,19 @@ public sealed class GitHubCopilotSetupAdapterTests
                 (SetupEffectiveSource?)SetupEffectiveSource.UserSetting,
                 SetupRestartRequirement.RestartVsCode,
                 Endpoint,
-                (IReadOnlyList<SetupPrivatePlanMember>)[new("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, Endpoint)],
+                (IReadOnlyList<SetupPrivatePlanMember>)
+                [
+                    new("github.copilot.chat.otel.enabled", SetupOperation.Replace, "true"),
+                    new("github.copilot.chat.otel.exporterType", SetupOperation.Replace, "otlp-http"),
+                    new("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, Endpoint),
+                ],
                 (SetupGuidance?)null,
-                (IReadOnlyList<SetupMemberChangeResult>)[new("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]),
+                (IReadOnlyList<SetupMemberChangeResult>)
+                [
+                    new("github.copilot.chat.otel.enabled", SetupOperation.Replace, "present_different", "configured", "none", false),
+                    new("github.copilot.chat.otel.exporterType", SetupOperation.Replace, "present_different", "configured", "none", false),
+                    new("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, "present_different", "configured_loopback", "none", false),
+                ]),
             "cli" => (
                 SetupTargetKind.Env,
                 "copilot-cli-user-environment",
@@ -489,9 +819,21 @@ public sealed class GitHubCopilotSetupAdapterTests
                 (SetupEffectiveSource?)SetupEffectiveSource.Environment,
                 SetupRestartRequirement.RestartTerminalSession,
                 Endpoint,
-                (IReadOnlyList<SetupPrivatePlanMember>)[new("COPILOT_OTEL_EXPORTER_OTLP_ENDPOINT", SetupOperation.Replace, Endpoint)],
+                (IReadOnlyList<SetupPrivatePlanMember>)
+                [
+                    new("COPILOT_OTEL_ENABLED", SetupOperation.Replace, "true"),
+                    new("COPILOT_OTEL_EXPORTER_TYPE", SetupOperation.Replace, "otlp-http"),
+                    new("OTEL_EXPORTER_OTLP_ENDPOINT", SetupOperation.Replace, Endpoint),
+                    new("OTEL_EXPORTER_OTLP_PROTOCOL", SetupOperation.Replace, "http/protobuf"),
+                ],
                 (SetupGuidance?)null,
-                (IReadOnlyList<SetupMemberChangeResult>)[new("COPILOT_OTEL_EXPORTER_OTLP_ENDPOINT", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]),
+                (IReadOnlyList<SetupMemberChangeResult>)
+                [
+                    new("COPILOT_OTEL_ENABLED", SetupOperation.Replace, "present_different", "configured", "none", false),
+                    new("COPILOT_OTEL_EXPORTER_TYPE", SetupOperation.Replace, "present_different", "configured", "none", false),
+                    new("OTEL_EXPORTER_OTLP_ENDPOINT", SetupOperation.Replace, "present_different", "configured_loopback", "none", false),
+                    new("OTEL_EXPORTER_OTLP_PROTOCOL", SetupOperation.Replace, "present_different", "configured", "none", false),
+                ]),
             "app-sdk" => (
                 SetupTargetKind.Guidance,
                 "github-copilot-app-sdk-guidance",
@@ -507,7 +849,7 @@ public sealed class GitHubCopilotSetupAdapterTests
             _ => throw new ArgumentOutOfRangeException(nameof(target)),
         };
 
-        return new SetupChangeRecord(
+        var record = new SetupChangeRecord(
             Guid.Parse($"00000000-0000-7000-8000-{recordNumber:D12}"),
             targetKind,
             $"private://{targetLabel}",
@@ -518,6 +860,38 @@ public sealed class GitHubCopilotSetupAdapterTests
             restart,
             new SetupStatusProjection(detected, version, operation, source, endpoint, null, guidance is null ? null : new SetupStatusGuidance(guidance.Kind, guidance.Language), changes),
             guidance);
+
+        var expectedResult = target switch
+        {
+            "vscode" => SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.VsCode)!.CanonicalJson,
+            "cli" => SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.Cli)!.CanonicalJson,
+            _ => (JsonElement?)null,
+        };
+        record = record with
+        {
+            StatusProjection = record.StatusProjection with { ExpectedResult = expectedResult },
+        };
+
+        return includeContentCapture ? target switch
+        {
+            "vscode" => record with
+            {
+                Members = record.Members.Concat([new SetupPrivatePlanMember("github.copilot.chat.otel.captureContent", SetupOperation.Replace, "true")]).ToArray(),
+                StatusProjection = record.StatusProjection with
+                {
+                    Changes = record.StatusProjection.Changes.Concat([new SetupMemberChangeResult("github.copilot.chat.otel.captureContent", SetupOperation.Replace, "absent", "configured", "none", false)]).ToArray(),
+                },
+            },
+            "cli" => record with
+            {
+                Members = record.Members.Concat([new SetupPrivatePlanMember("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", SetupOperation.Replace, "true")]).ToArray(),
+                StatusProjection = record.StatusProjection with
+                {
+                    Changes = record.StatusProjection.Changes.Concat([new SetupMemberChangeResult("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", SetupOperation.Replace, "absent", "configured", "none", false)]).ToArray(),
+                },
+            },
+            _ => record,
+        } : record;
     }
 
     private static (SetupPrivatePlan Plan, SetupLedgerChangeSet ChangeSet) CreatePersistedPlan(string selectedTarget, params string[] targets)
@@ -525,6 +899,13 @@ public sealed class GitHubCopilotSetupAdapterTests
         var records = targets.Select((target, index) => target == "unknown"
             ? CreateRecord("vscode", index + 1) with { TargetLabel = "unknown" }
             : CreateRecord(target, index + 1)).ToArray();
+        return CreatePersistedPlanFromRecords(selectedTarget, records);
+    }
+
+    private static (SetupPrivatePlan Plan, SetupLedgerChangeSet ChangeSet) CreatePersistedPlanFromRecords(
+        string selectedTarget,
+        IReadOnlyList<SetupChangeRecord> records)
+    {
         var plan = new SetupPrivatePlan(
             1,
             Guid.Parse("00000000-0000-7000-8000-000000000010"),
