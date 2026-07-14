@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot;
 using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
@@ -15,6 +16,8 @@ public sealed class GitHubCopilotSetupAdapterTests
 {
     private const string Endpoint = "http://127.0.0.1:4320";
     private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-14T00:00:00Z");
+    private static readonly string AppSdkGuidanceSample = SetupContractValidator.RehydrateStatusGuidance(
+        new SetupStatusGuidance("caller_managed_sample", "dotnet")).Sample;
 
     [Theory]
     [InlineData("vscode")]
@@ -226,6 +229,57 @@ public sealed class GitHubCopilotSetupAdapterTests
     }
 
     [Fact]
+    public void Plan_AppSdk_EmitsThePinnedCallerManagedGuidanceSample()
+    {
+        var platform = CreatePlatform();
+        var adapter = CreateAdapter(
+            platform,
+            new ScriptedPartition("vscode", CreatePlan("vscode", 1)),
+            new ScriptedPartition("cli", CreatePlan("cli", 2)),
+            new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+
+        var plan = Assert.IsType<SetupPlanSuccess<SetupChangePlan>>(adapter.Plan(CreateRequest("app-sdk"))).Value;
+        var guidance = Assert.IsType<SetupGuidance>(Assert.Single(plan.Records).Guidance);
+
+        Assert.Equal(AppSdkGuidanceSample, guidance.Sample);
+    }
+
+    [Fact]
+    public void Plan_RejectsAnAppSdkGuidanceSampleThatDiffersFromThePinnedContract()
+    {
+        var platform = CreatePlatform();
+        var malformed = CreateRecord("app-sdk", 3) with
+        {
+            Guidance = new SetupGuidance("caller_managed_sample", "dotnet", "not-the-pinned-sample"),
+        };
+        var adapter = CreateAdapter(
+            platform,
+            new ScriptedPartition("vscode", CreatePlan("vscode", 1)),
+            new ScriptedPartition("cli", CreatePlan("cli", 2)),
+            new ScriptedPartition("app-sdk", new GitHubCopilotPartitionPlan(null, [malformed], [], [])));
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Plan(CreateRequest("app-sdk")));
+
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
+    public void Plan_RejectsAnAppSdkRestartRequirementBeforePublishingOutput()
+    {
+        var platform = CreatePlatform();
+        var malformed = CreateRecord("app-sdk", 3) with { RestartRequirement = SetupRestartRequirement.RestartVsCode };
+        var adapter = CreateAdapter(
+            platform,
+            new ScriptedPartition("vscode", CreatePlan("vscode", 1)),
+            new ScriptedPartition("cli", CreatePlan("cli", 2)),
+            new ScriptedPartition("app-sdk", new GitHubCopilotPartitionPlan(null, [malformed], [], [])));
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Plan(CreateRequest("app-sdk")));
+
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
     public void Plan_RejectsPartitionRecordsThatDoNotMatchTheOwningTargetShape()
     {
         var platform = CreatePlatform();
@@ -418,6 +472,54 @@ public sealed class GitHubCopilotSetupAdapterTests
     }
 
     [Fact]
+    public void Revalidate_AcceptsTheTargetMatchedStrictHistoricalManifestWithoutCurrentEquality()
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1));
+        var adapter = CreateAdapter(platform, vscode, new ScriptedPartition("cli", CreatePlan("cli", 2)), new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var record = CreateRecord("vscode", 1) with
+        {
+            StatusProjection = CreateRecord("vscode", 1).StatusProjection with
+            {
+                ExpectedResult = CreateHistoricalManifest(GitHubCopilotSetupTarget.VsCode),
+            },
+        };
+        var (plan, changeSet) = CreatePersistedPlanFromRecords("vscode", [record]);
+
+        var result = Assert.IsType<SetupPlanSuccess<SetupRevalidation>>(adapter.Revalidate(plan, changeSet));
+
+        Assert.Empty(result.Warnings);
+        Assert.Equal(1, vscode.RevalidateCalls);
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Theory]
+    [InlineData("wrong-surface")]
+    [InlineData("unsafe")]
+    public void Revalidate_RejectsHistoricalManifestOutsideTheTargetMatchedSafeContract(string mismatch)
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1));
+        var adapter = CreateAdapter(platform, vscode, new ScriptedPartition("cli", CreatePlan("cli", 2)), new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var expectedResult = mismatch switch
+        {
+            "wrong-surface" => SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.Cli)!.CanonicalJson,
+            "unsafe" => CreateUnsafeHistoricalManifest(),
+            _ => throw new ArgumentOutOfRangeException(nameof(mismatch)),
+        };
+        var record = CreateRecord("vscode", 1) with
+        {
+            StatusProjection = CreateRecord("vscode", 1).StatusProjection with { ExpectedResult = expectedResult },
+        };
+        var (plan, changeSet) = CreatePersistedPlanFromRecords("vscode", [record]);
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Revalidate(plan, changeSet));
+
+        Assert.Equal(0, vscode.RevalidateCalls);
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
     public void Revalidate_DerivesCaptureFlagFromCoherentPersistedTargetMembers()
     {
         var platform = CreatePlatform();
@@ -446,6 +548,99 @@ public sealed class GitHubCopilotSetupAdapterTests
 
         Assert.Equal(1, vscode.RevalidateCalls);
         Assert.Equal(1, cli.RevalidateCalls);
+    }
+
+    [Theory]
+    [InlineData("vscode")]
+    [InlineData("cli")]
+    public void Revalidate_SelectedWritableTarget_AccessesTheSharedLazyValuesOnceAndDispatchesOnlyItsPartition(string selectedTarget)
+    {
+        var platform = CreatePlatform();
+        ScriptLiveEndpoint(platform);
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1))
+        {
+            RevalidateHandler = (context, _, _) => AccessSharedState(context, SetupPlanResult.Revalidated()),
+        };
+        var cli = new ScriptedPartition("cli", CreatePlan("cli", 2))
+        {
+            RevalidateHandler = (context, _, _) => AccessSharedState(context, SetupPlanResult.Revalidated()),
+        };
+        var appSdk = new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3));
+        var adapter = CreateAdapter(platform, vscode, cli, appSdk);
+        var (plan, changeSet) = CreatePersistedPlan(selectedTarget, selectedTarget);
+
+        _ = adapter.Revalidate(plan, changeSet);
+
+        Assert.Equal(selectedTarget == "vscode" ? 1 : 0, vscode.RevalidateCalls);
+        Assert.Equal(selectedTarget == "cli" ? 1 : 0, cli.RevalidateCalls);
+        Assert.Equal(0, appSdk.RevalidateCalls);
+        Assert.Equal(3, ProcessCallCount(platform));
+        Assert.Equal(1, ProbeCallCount(platform));
+    }
+
+    [Fact]
+    public void Revalidate_DerivesTrueCaptureFromANoOpPersistedMember()
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1))
+        {
+            RevalidateHandler = (context, _, _) =>
+            {
+                Assert.True(context.Request.IncludeContentCapture);
+                return SetupPlanResult.Revalidated();
+            },
+        };
+        var adapter = CreateAdapter(platform, vscode, new ScriptedPartition("cli", CreatePlan("cli", 2)), new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var record = WithCaptureMember(CreateRecord("vscode", 1, true), SetupOperation.NoOp, "true");
+        var (plan, changeSet) = CreatePersistedPlanFromRecords("vscode", [record]);
+
+        _ = adapter.Revalidate(plan, changeSet);
+
+        Assert.Equal(1, vscode.RevalidateCalls);
+    }
+
+    [Fact]
+    public void Revalidate_DerivesFalseCaptureWhenThePersistedMemberIsAbsent()
+    {
+        var platform = CreatePlatform();
+        var cli = new ScriptedPartition("cli", CreatePlan("cli", 2))
+        {
+            RevalidateHandler = (context, _, _) =>
+            {
+                Assert.False(context.Request.IncludeContentCapture);
+                return SetupPlanResult.Revalidated();
+            },
+        };
+        var adapter = CreateAdapter(platform, new ScriptedPartition("vscode", CreatePlan("vscode", 1)), cli, new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var (plan, changeSet) = CreatePersistedPlan("cli", "cli");
+
+        _ = adapter.Revalidate(plan, changeSet);
+
+        Assert.Equal(1, cli.RevalidateCalls);
+    }
+
+    [Theory]
+    [InlineData("extra")]
+    [InlineData("remove")]
+    [InlineData("false")]
+    public void Revalidate_RejectsInvalidPersistedCaptureShapesBeforeDispatchOrLazyAccess(string shape)
+    {
+        var platform = CreatePlatform();
+        var cli = new ScriptedPartition("cli", CreatePlan("cli", 2));
+        var adapter = CreateAdapter(platform, new ScriptedPartition("vscode", CreatePlan("vscode", 1)), cli, new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3)));
+        var record = shape switch
+        {
+            "extra" => AddUnexpectedMember(CreateRecord("cli", 2)),
+            "remove" => WithCaptureMember(CreateRecord("cli", 2, true), SetupOperation.Remove, null),
+            "false" => WithCaptureMember(CreateRecord("cli", 2, true), SetupOperation.Replace, "false"),
+            _ => throw new ArgumentOutOfRangeException(nameof(shape)),
+        };
+        var (plan, changeSet) = CreatePersistedPlanFromRecords("cli", [record]);
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Revalidate(plan, changeSet));
+
+        Assert.Equal(0, cli.RevalidateCalls);
+        AssertNoDetectionOrProbe(platform);
     }
 
     [Fact]
@@ -545,6 +740,23 @@ public sealed class GitHubCopilotSetupAdapterTests
 
         Assert.Empty(result.Warnings);
         Assert.Empty(result.NextActions);
+        Assert.Equal(0, vscode.RevalidateCalls + cli.RevalidateCalls + appSdk.RevalidateCalls);
+        AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
+    public void Revalidate_RejectsPersistedAppSdkRestartRequirementBeforeDispatchOrLazyAccess()
+    {
+        var platform = CreatePlatform();
+        var vscode = new ScriptedPartition("vscode", CreatePlan("vscode", 1));
+        var cli = new ScriptedPartition("cli", CreatePlan("cli", 2));
+        var appSdk = new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 3));
+        var adapter = CreateAdapter(platform, vscode, cli, appSdk);
+        var record = CreateRecord("app-sdk", 3) with { RestartRequirement = SetupRestartRequirement.RestartVsCode };
+        var (plan, changeSet) = CreatePersistedPlanFromRecords("app-sdk", [record]);
+
+        Assert.Throws<InvalidOperationException>(() => adapter.Revalidate(plan, changeSet));
+
         Assert.Equal(0, vscode.RevalidateCalls + cli.RevalidateCalls + appSdk.RevalidateCalls);
         AssertNoDetectionOrProbe(platform);
     }
@@ -682,7 +894,7 @@ public sealed class GitHubCopilotSetupAdapterTests
     }
 
     [Fact]
-    public void NonGatingSmoke_RealRegistryDispatcherAndSetupJsonCarryTheAggregateAdapterAndCanonicalManifest()
+    public void NonGatingSmoke_RealRegistryDispatcherAndSetupJsonCarryAllAggregateRecordsAndThePinnedGuidanceSample()
     {
         var platform = CreatePlatform();
         var adapter = CreateAdapter(
@@ -702,14 +914,20 @@ public sealed class GitHubCopilotSetupAdapterTests
             new SetupAdapterRegistry([adapter]),
             "1.2.3");
 
-        var result = dispatcher.Dispatch(new SetupOptions(SetupCommand.Plan, "github-copilot", "vscode", Endpoint, false, null));
+        var result = dispatcher.Dispatch(new SetupOptions(SetupCommand.Plan, "github-copilot", "all", Endpoint, false, null));
         using var serialized = JsonDocument.Parse(SetupJson.Serialize(result));
 
         Assert.True(result.Success);
         Assert.Equal(SetupCodes.PlanReady, result.Code);
         Assert.Equal("github-copilot", serialized.RootElement.GetProperty("adapter").GetString());
+        Assert.Equal(3, serialized.RootElement.GetProperty("targets").GetArrayLength());
         Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(
             serialized.RootElement.GetProperty("targets")[0].GetProperty("expected_result")));
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(
+            serialized.RootElement.GetProperty("targets")[1].GetProperty("expected_result")));
+        Assert.Equal(
+            AppSdkGuidanceSample,
+            serialized.RootElement.GetProperty("targets")[2].GetProperty("guidance").GetProperty("sample").GetString());
         Assert.DoesNotContain(
             typeof(GitHubCopilotSetupAdapter).GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic),
             method => method.ReturnType == typeof(SetupCommandResult));
@@ -844,7 +1062,7 @@ public sealed class GitHubCopilotSetupAdapterTests
                 SetupRestartRequirement.None,
                 (string?)null,
                 (IReadOnlyList<SetupPrivatePlanMember>)[],
-                new SetupGuidance("caller_managed_sample", "dotnet", string.Empty),
+                new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample),
                 (IReadOnlyList<SetupMemberChangeResult>)[]),
             _ => throw new ArgumentOutOfRangeException(nameof(target)),
         };
@@ -892,6 +1110,61 @@ public sealed class GitHubCopilotSetupAdapterTests
             },
             _ => record,
         } : record;
+    }
+
+    private static SetupChangeRecord WithCaptureMember(
+        SetupChangeRecord record,
+        SetupOperation operation,
+        string? desiredValue)
+    {
+        var captureMember = record.TargetLabel == "vscode-stable-default-user-settings"
+            ? "github.copilot.chat.otel.captureContent"
+            : "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT";
+        return record with
+        {
+            Members = record.Members
+                .Select(member => member.SettingKey == captureMember
+                    ? member with { Operation = operation, DesiredValue = desiredValue }
+                    : member)
+                .ToArray(),
+            StatusProjection = record.StatusProjection with
+            {
+                Operation = operation == SetupOperation.Remove
+                    ? SetupOperation.Mixed
+                    : record.StatusProjection.Operation,
+                Changes = record.StatusProjection.Changes
+                    .Select(change => change.SettingKey == captureMember
+                        ? change with { Operation = operation }
+                        : change)
+                    .ToArray(),
+            },
+        };
+    }
+
+    private static SetupChangeRecord AddUnexpectedMember(SetupChangeRecord record) => record with
+    {
+        Members = record.Members.Concat([new SetupPrivatePlanMember("UNEXPECTED_CAPTURE_MEMBER", SetupOperation.Replace, "true")]).ToArray(),
+        StatusProjection = record.StatusProjection with
+        {
+            Changes = record.StatusProjection.Changes.Concat([new SetupMemberChangeResult("UNEXPECTED_CAPTURE_MEMBER", SetupOperation.Replace, "absent", "configured", "none", false)]).ToArray(),
+        },
+    };
+
+    private static JsonElement CreateHistoricalManifest(GitHubCopilotSetupTarget target)
+    {
+        var manifest = JsonNode.Parse(SourceCapabilityManifestLoader.LoadForTarget(target)!.CanonicalJson.GetRawText())!.AsObject();
+        manifest["support_status"] = "planned";
+        manifest["stability"] = "preview";
+        using var document = JsonDocument.Parse(manifest.ToJsonString());
+        return document.RootElement.Clone();
+    }
+
+    private static JsonElement CreateUnsafeHistoricalManifest()
+    {
+        var manifest = JsonNode.Parse(CreateHistoricalManifest(GitHubCopilotSetupTarget.VsCode).GetRawText())!.AsObject();
+        manifest["unexpected_field"] = "unsafe";
+        using var document = JsonDocument.Parse(manifest.ToJsonString());
+        return document.RootElement.Clone();
     }
 
     private static (SetupPrivatePlan Plan, SetupLedgerChangeSet ChangeSet) CreatePersistedPlan(string selectedTarget, params string[] targets)

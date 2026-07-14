@@ -18,6 +18,8 @@ public sealed class SourceCapabilityRuntimeTests
 {
     private const string VsCodeResourceName = "CopilotAgentObservability.ConfigCli.Setup.Capabilities.Manifests.github-copilot-vscode.json";
     private const string CliResourceName = "CopilotAgentObservability.ConfigCli.Setup.Capabilities.Manifests.github-copilot-cli.json";
+    private static readonly string AppSdkGuidanceSample = SetupContractValidator.RehydrateStatusGuidance(
+        new SetupStatusGuidance("caller_managed_sample", "dotnet")).Sample;
 
     [Fact]
     public void EmbeddedManifestResources_ArePresentAndLoadWithoutTheRepositoryWorkingDirectory()
@@ -253,7 +255,7 @@ public sealed class SourceCapabilityRuntimeTests
         {
             "vscode" => (SetupTargetKind.Json, "vscode-stable-default-user-settings", SetupOperation.Replace, (SetupEffectiveSource?)SetupEffectiveSource.UserSetting, SetupRestartRequirement.RestartVsCode, "http://127.0.0.1:4320", (SetupGuidance?)null),
             "cli" => (SetupTargetKind.Env, "copilot-cli-user-environment", SetupOperation.Replace, (SetupEffectiveSource?)SetupEffectiveSource.Environment, SetupRestartRequirement.RestartTerminalSession, "http://127.0.0.1:4320", (SetupGuidance?)null),
-            "app-sdk" => (SetupTargetKind.Guidance, "github-copilot-app-sdk-guidance", SetupOperation.NoOp, (SetupEffectiveSource?)null, SetupRestartRequirement.None, (string?)null, new SetupGuidance("caller_managed_sample", "dotnet", string.Empty)),
+            "app-sdk" => (SetupTargetKind.Guidance, "github-copilot-app-sdk-guidance", SetupOperation.NoOp, (SetupEffectiveSource?)null, SetupRestartRequirement.None, (string?)null, new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample)),
             _ => throw new ArgumentOutOfRangeException(nameof(target)),
         };
         var members = kind == SetupTargetKind.Guidance

@@ -908,6 +908,7 @@ public sealed class SetupContractValidationTests
     [InlineData(SetupCodes.UnsupportedVersion, SetupCodes.UpgradeCopilotCli)]
     [InlineData(SetupCodes.ManagedPolicyConflict, null)]
     [InlineData(SetupCodes.EnvironmentOverrideConflict, SetupCodes.ReviewCliTraceProtocolOverride)]
+    [InlineData(SetupCodes.MalformedSettings, null)]
     [InlineData(SetupCodes.PortOwnedByForeignProcess, null)]
     public void Serialize_GitHubCopilotPlan_AcceptsEveryDeclaredPreflightFailureAndRecoveryAction(string code, string? nextAction)
     {

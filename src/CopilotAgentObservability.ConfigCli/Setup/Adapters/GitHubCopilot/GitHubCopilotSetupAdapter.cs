@@ -239,7 +239,8 @@ internal sealed class GitHubCopilotSetupAdapter : ISetupAdapter
             record.StatusProjection.Guidance is { Kind: "caller_managed_sample", Language: "dotnet" } &&
             record.StatusProjection.Changes.Count == 0 &&
             record.RestartRequirement == SetupRestartRequirement.None &&
-            record.Guidance is { Kind: "caller_managed_sample", Language: "dotnet" },
+            record.Guidance is { Kind: "caller_managed_sample", Language: "dotnet", Sample: var sample } &&
+            sample == SetupContractValidator.RehydrateStatusGuidance(record.StatusProjection.Guidance!).Sample,
         _ => false,
     };
 
@@ -381,26 +382,26 @@ internal sealed class GitHubCopilotSetupAdapter : ISetupAdapter
         {
             VsCodeTarget => ledgerTarget.TargetKind == SetupTargetKind.Json &&
                 ledgerTarget.TargetLabel is VsCodeStableLabel or VsCodeInsidersLabel &&
-                HasCanonicalManifest(GitHubCopilotSetupTarget.VsCode, ledgerTarget.StatusProjection.ExpectedResult) &&
+                ledgerTarget.StatusProjection.ExpectedResult is { } vsCodeExpectedResult &&
+                SourceCapabilityManifestLoader.IsValidLedgerManifest(vsCodeExpectedResult, "github-copilot-vscode") &&
                 TryGetWritableCaptureFlag(planTarget.Members, VsCodeMembers, VsCodeRequiredValues, "github.copilot.chat.otel.otlpEndpoint", VsCodeCaptureMember, ledgerTarget.StatusProjection.Endpoint, out includeContentCapture),
             CliTarget => ledgerTarget.TargetKind == SetupTargetKind.Env &&
                 ledgerTarget.TargetLabel == CliLabel &&
-                HasCanonicalManifest(GitHubCopilotSetupTarget.Cli, ledgerTarget.StatusProjection.ExpectedResult) &&
+                ledgerTarget.StatusProjection.ExpectedResult is { } cliExpectedResult &&
+                SourceCapabilityManifestLoader.IsValidLedgerManifest(cliExpectedResult, "github-copilot-cli") &&
                 TryGetWritableCaptureFlag(planTarget.Members, CliMembers, CliRequiredValues, "OTEL_EXPORTER_OTLP_ENDPOINT", CliCaptureMember, ledgerTarget.StatusProjection.Endpoint, out includeContentCapture),
             AppSdkTarget => ledgerTarget.TargetKind == SetupTargetKind.Guidance &&
                 ledgerTarget.TargetLabel == AppSdkLabel &&
                 planTarget.Members.Count == 0 && ledgerTarget.Members.Count == 0 &&
                 ledgerTarget.StatusProjection.Endpoint is null && ledgerTarget.StatusProjection.ExpectedResult is null &&
                 ledgerTarget.StatusProjection.Operation == SetupOperation.NoOp &&
-                ledgerTarget.StatusProjection.EffectiveSource is null && ledgerTarget.StatusProjection.Changes.Count == 0,
+                ledgerTarget.StatusProjection.EffectiveSource is null &&
+                ledgerTarget.StatusProjection.Guidance is { Kind: "caller_managed_sample", Language: "dotnet" } &&
+                ledgerTarget.StatusProjection.Changes.Count == 0 &&
+                ledgerTarget.RestartRequirement == SetupRestartRequirement.None,
             _ => false,
         };
     }
-
-    private static bool HasCanonicalManifest(GitHubCopilotSetupTarget target, System.Text.Json.JsonElement? expectedResult) =>
-        expectedResult is { } value && SourceCapabilityManifestLoader.MatchesCanonical(
-            SourceCapabilityManifestLoader.LoadForTarget(target)!,
-            value);
 
     private static bool TryGetWritableCaptureFlag(
         IReadOnlyList<SetupPrivatePlanMember> members,
