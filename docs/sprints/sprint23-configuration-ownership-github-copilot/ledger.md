@@ -97,7 +97,7 @@ below; the remaining real-producer gates are still pending:
 | Rollback trusted-result carrier (Task 04a) | #66 | Complete | `271035f..4d03245` | Intended RED 8 failed/80 passed; focused SetupRollbackTests 88/88; `git diff --check` clean; no sleeps/retries | Spec PASS; Code/Test Quality APPROVED; Security/Transaction/Concurrency PASS; 0 Critical/Important/Minor; six contexts/eight cases pass | `ChangeSet != null` is the sole trust proof matching the requested ID and no Recovery; identity-first; no sleeps/retries. Task 05 is complete; full solution/build/status/recovery/public serialization deferred to Task 11/integration |
 | Rollback dispatcher (Task 05) | #66 | Complete | `67d8fc6753091f168a68c9cdbece618dfc0f7f39..0ea8de0dcee59d77d9db16f8c633e52a8cef36b4` | Initial RED unimplemented 1/1, then constructor compile RED 4 CS1729; initial rollback 32/32 and related 528/528; remediation RED 12/12 expected failures; remediation GREEN malformed 12/12, rollback 44/44, related dispatcher/rollback/recovery 540/540; orchestrator rerun rollback 44/44; `git diff --check` clean | Final independent re-review: Spec PASS; Quality APPROVED; Security PASS; Transaction/Concurrency PASS; 0 Critical/Important/Minor; prior Important direct-envelope validation gap resolved | Full solution/build/Playwright not run for this task. Remaining interfaces: Status Task 06+, public serialization/CLI/wrapper Task 09/10, and Issue #67 adapter integration; Task 06 is unblocked; migration remains N/A with committed-v1 restart evidence already passed |
 | Status dispatcher (Task 06) | #66 | Complete | `e0cd606fdd311ea06c4f4a57cd381fd390d091e2..46296a6a9192624a9209590ef38ae2bc38db240f` | TDD RED 1 failed/0 passed/0 skipped on existing unimplemented Status response; GREEN Status 4/4; related Dispatcher+SetupStatus 306/306; orchestrator rerun Status 4/4; `git diff --check` clean | Independent re-review: Spec PASS; Quality APPROVED; Security PASS; Transaction/Concurrency PASS; 0 Critical/Important/Minor | Full solution/build/Playwright not run. Dispatcher delegates `Validate(status(options.Adapter))` with same result instance, unchanged null/non-null filter, and zero outer lock/recovery/registry/DTO reconstruction; production factory wires the real five-store service. Task 07 is unblocked; public serialization/CLI/wrapper Task 09/10 and Issue #67 adapter integration remain open; migration remains N/A with committed-v1 restart evidence already passed |
-| Historical-manifest cross-surface regression (Task 07) | #66-#67 | Unblocked | - | Pending Task 07 implementation and validation | - | Consumes the completed Status dispatcher; historical-manifest cross-surface evidence remains open |
+| Historical-manifest cross-surface regression (Task 07) | #66-#67 | Complete | `adb07d505f24250810d8e4f9f01f7d518f960843..998aa4fa6b16a145368d84050ba67446fa79babf` | Honest pinning GREEN; historical-manifest filter 14/14, dispatcher 157/157, ConfigCli 2,080/2,080, build 0 warnings/0 errors, orchestrator historical rerun 14/14; `git diff --check` clean. Apply/Rollback/Status preserve the whole historical `expected_result` through dispatcher to `SetupJson`; Status uses the production dispatcher and real `SetupStatusService` over persisted plan/ledger facts on seeded in-memory `SetupTestPlatform` state; Plan rejects adapter historical output with zero plan/ledger artifacts. | Independent final review: Spec PASS; Test Quality APPROVED; Security/Data Safety PASS; Cross-surface Contract PASS; 0 Critical/Important/Minor; C0/I0/M0 | Task 08 early integration gate is unblocked. Migration remains N/A with separate committed-v1 physical restart evidence; Playwright/full solution tests, CLI/wrapper Tasks 09/10, live runtime/network, and Issue #67 adapters remain unverified |
 | Shared setup commands | #66 | Pending | - | - | - | - |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
@@ -168,12 +168,13 @@ below; the remaining real-producer gates are still pending:
 - The #66 C1 SetupOptions parser is complete through `c048946`, but full
   ConfigCli concurrent-state evidence is not final; status/terminal/C2+ remain
   open.
-- The producer matrix and executable #66-to-#67 cross-surface interfaces remain
-  unverified; this ledger closes B2b/finding 2, finding 3 terminal environment
-  hash binding, and Gap 4 for the three audited actual-producer reopen windows.
-  Status semantics/order, rollback evaluator, C3 adapter pre-resolution, and the
-  #66-to-#67 real-producer cross-surface gate remain open. Seeded-only producer phases remain
-  Minor/unverified.
+- Task 07 closes the historical-manifest command-surface evidence and unblocks
+  Task 08, but the producer matrix and executable #66-to-#67 adapter interfaces
+  remain unverified. This ledger also closes B2b/finding 2, finding 3 terminal
+  environment hash binding, and Gap 4 for the three audited actual-producer
+  reopen windows. Status semantics/order, rollback evaluator, C3 adapter
+  pre-resolution, and the #66-to-#67 real-producer cross-surface gate remain
+  open. Seeded-only producer phases remain Minor/unverified.
 - Re-audit corrections define per-step apply/rollback intents, recovery-result
   correlation, failed-recovery status projection, apply-time endpoint/version/
   policy revalidation, exact 100-entry ordering, and replayable notification;
