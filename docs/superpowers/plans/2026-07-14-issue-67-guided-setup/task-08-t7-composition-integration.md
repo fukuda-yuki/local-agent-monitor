@@ -102,7 +102,8 @@ HTTP/proxy/UI remain N/A.
   8. Recovery correlation: seed an interrupted transaction, run `plan` →
      recovered correlation fields + `rerun_requested_setup_command`.
   9. Status: after the above lifecycle, `setup status` returns the rows with
-     immutable projections and correct current-state recomputation.
+     immutable projections and correct current-state recomputation; prove
+     this status path makes zero aggregate-adapter detection/probe calls.
   10. Mutation-authority negatives: App/SDK and non-Windows CLI paths
       produce zero platform write calls across the whole matrix.
 

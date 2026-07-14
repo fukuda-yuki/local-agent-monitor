@@ -62,11 +62,27 @@ internal interface IGitHubCopilotTargetPartition
         SetupLedgerChangeSet plannedChangeSet);
 }
 
-internal sealed record GitHubCopilotPartitionContext(
-    ISetupPlatform Platform,
-    SetupPlanRequest Request,                       // endpoint, capture flag, ids
-    GitHubCopilotObservations Observations,          // T3a
-    GitHubCopilotEndpointClassification Endpoint);   // T3c
+internal sealed class GitHubCopilotPartitionContext
+{
+    // Construct once per adapter Plan/Revalidate operation from the injected
+    // platform and request. Lazy accessors are typed and cached: first access
+    // performs the helper call; subsequent accesses return the same value. If
+    // never accessed, the helper is not called. No synthetic observation or
+    // classification is supplied to stand in for an unaccessed property.
+    internal GitHubCopilotPartitionContext(ISetupPlatform platform,
+        SetupPlanRequest request);
+
+    internal ISetupPlatform Platform { get; }
+    internal SetupPlanRequest Request { get; }       // endpoint, capture flag, ids
+    internal GitHubCopilotObservations Observations { get; } // lazy T3a
+    internal GitHubCopilotEndpointClassification Endpoint { get; } // lazy T3c
+}
+
+// The `Observations` and `Endpoint` properties use private typed `Lazy<T>`
+// backing values initialized from the injected platform/request. Their
+// factories call `GitHubCopilotDetection.Observe` and
+// `GitHubCopilotEndpointProbe.Classify`, respectively, and exceptions
+// propagate; there is no nullable or synthetic fallback value.
 // Managed-policy resolution stays partition-internal for vscode (T4 calls
 // the T3b resolver with its own desired values); cli/app-sdk never resolve
 // managed sources — keep the resolver OUT of the shared context so the seam
@@ -83,6 +99,8 @@ internal sealed record GitHubCopilotPartitionPlan(
 - Validate `request.SelectedTarget` ∈ {`vscode`, `cli`, `app-sdk`, `all`};
   anything else → `SetupPlanResult.Failure<SetupChangePlan>(SetupCodes.UnsupportedTarget)`
   with empty arrays (T2 contract: unsupported target keeps arrays empty).
+- Validation happens before constructing a context or touching either lazy
+  property, so an unsupported selected target makes zero detection/probe calls.
 - Selected single target → exactly that partition plans. `all` → the three
   partitions plan in fixed order vscode, cli, app-sdk; records concatenate in
   that order; warnings/next-actions union preserves first-occurrence order
@@ -94,10 +112,22 @@ internal sealed record GitHubCopilotPartitionPlan(
   plan" sentence and pin the multi-partition composition rule for `all` in
   the commit body; if the spec is ambiguous for `all`, STOP and raise a spec
   question before implementing).
-- Probe once per distinct endpoint, not once per partition (call-counter
-  test).
-- `Revalidate` routes each persisted record to its owning partition by
-  target label and composes fresh warnings/next-actions the same way.
+- The adapter constructs one context per Plan/Revalidate operation and passes
+  that same context to every selected partition. A first access invokes each
+  lazy helper once; repeated accesses and partition fan-out reuse the cached
+  value. Writable VS Code and Windows CLI Plan/Revalidate paths must access
+  required properties exactly once per operation; across selected/`all`
+  partitions this is one call per distinct endpoint, never one call per
+  partition. T4/T5 own access order so version/extension/policy or OS refusals
+  precede endpoint access.
+- App/SDK Plan never accesses `Observations` or `Endpoint`; endpoint state
+  never gates its guidance. During aggregate `Revalidate`, guidance records
+  are skipped entirely: no partition call, detection call, or probe call.
+- macOS/Linux CLI `Revalidate` checks the persisted planning OS and returns
+  `unsupported_target` before accessing either lazy property.
+- `Revalidate` routes each non-guidance persisted record to its owning
+  partition by target label and composes fresh warnings/next-actions the same
+  way.
 - Manifest pairing: the adapter (not partitions) attaches `expected_result`
   from `SourceCapabilityManifestLoader.LoadForTarget` — VS Code records pair
   `github-copilot-vscode`, CLI records pair `github-copilot-cli`, App/SDK
@@ -123,8 +153,12 @@ all-partition producer/consumer integration gate.
   ordering and concatenation, warning de-duplication across partitions,
   unsupported token → `unsupported_target` with empty arrays and zero
   partition calls, partition failure propagation (code + diagnostics, no
-  records), single probe per distinct endpoint, revalidation routing by
-  label, and manifest pairing per record kind (assert `expected_result`
+  records), zero detection/probe calls for unsupported targets and app-sdk
+  Plan, exact-once detection/probe counters for writable VS Code/Windows CLI
+  single-target/`all` plans and revalidations, guidance-record Revalidate skip
+  with zero partition/detection/probe calls, macOS/Linux CLI Revalidate
+  refusal before lazy-property access, revalidation routing by label, and
+  manifest pairing per record kind (assert `expected_result`
   equals the canonical manifest via `SourceCapabilityManifestLoader.MatchesCanonical`).
   Add the explicitly non-gating early compatibility test described above.
 
@@ -150,9 +184,11 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 - [ ] **Step 5: Implement `GitHubCopilotSetupAdapter`** with the frozen
   constructor, implementing `ISetupAdapter` over the injected platform and
   `IReadOnlyList<IGitHubCopilotTargetPartition>`. For each adapter operation,
-  call `GitHubCopilotDetection.Observe` exactly once and
-  `GitHubCopilotEndpointProbe.Classify` exactly once, then build one shared
-  `GitHubCopilotPartitionContext` passed to the selected partition(s).
+  validate the selected target before constructing one shared lazy
+  `GitHubCopilotPartitionContext` from the injected platform/request; partition
+  access invokes `GitHubCopilotDetection.Observe` and
+  `GitHubCopilotEndpointProbe.Classify` at most once each and only when the
+  corresponding property is needed.
   Build `SetupChangePlan` via `SetupPlanResult.Planned(...)` so snapshotting
   and target derivation reuse the frozen T2 helpers. The adapter never
   catches-and-rewrites partition exceptions into diagnostics — an unexpected
