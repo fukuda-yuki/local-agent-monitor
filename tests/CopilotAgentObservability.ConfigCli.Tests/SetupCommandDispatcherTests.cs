@@ -657,28 +657,63 @@ public sealed class SetupCommandDispatcherTests
             operation == $"file.lock:{fixture.Paths.Lock}");
     }
 
-    [Fact]
-    public void DispatchStatus_RejectsMalformedServiceResultThroughContractValidator()
+    [Theory]
+    [InlineData("malformed", "test-adapter")]
+    [InlineData("null", null)]
+    [InlineData("exception", "test-adapter")]
+    public void DispatchStatus_SafeFallbackForInvalidOrExceptionalServiceOutput(
+        string variant,
+        string? requestedFilter)
     {
+        const string rawMarker = "PRIVATE_STATUS_FAILURE";
+        var recoveryCalls = 0;
         var statusCalls = 0;
-        var malformed = CreateStatusResult("test-adapter") with
+        string? observedFilter = "not-observed";
+        var malformed = CreateStatusResult(requestedFilter) with
         {
             ChangeSets = [null!],
+            Warnings = [rawMarker],
         };
         var fixture = DispatcherFixture.Create(
             [],
-            _ => throw new InvalidOperationException("recovery must not run"),
             _ =>
             {
+                recoveryCalls++;
+                return NoRecovery();
+            },
+            filter =>
+            {
                 statusCalls++;
-                return malformed;
+                observedFilter = filter;
+                return variant switch
+                {
+                    "malformed" => malformed,
+                    "null" => null!,
+                    "exception" => throw new InvalidOperationException(rawMarker),
+                    _ => throw new ArgumentOutOfRangeException(nameof(variant), variant, null),
+                };
             });
 
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            fixture.Dispatcher.Dispatch(CreateStatusOptions("test-adapter")));
+        var result = fixture.Dispatcher.Dispatch(CreateStatusOptions(requestedFilter));
+        var json = SetupJson.Serialize(result);
 
-        Assert.Equal(SetupContractValidator.InvalidContractCode, exception.Message);
         Assert.Equal(1, statusCalls);
+        Assert.Equal(0, recoveryCalls);
+        Assert.Equal(requestedFilter, observedFilter);
+        Assert.False(result.Success);
+        Assert.Equal(SetupCommand.Status, result.Command);
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Null(result.ChangeSetId);
+        Assert.Null(result.RecoveredChangeSetId);
+        Assert.Null(result.RecoveryOperation);
+        Assert.Equal(requestedFilter, result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.ChangeSets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.False(result.Truncated);
+        SetupContractValidator.Validate(result);
+        Assert.DoesNotContain(rawMarker, json, StringComparison.Ordinal);
         Assert.DoesNotContain(fixture.Platform.Operations, operation =>
             operation == $"file.lock:{fixture.Paths.Lock}");
     }

@@ -149,8 +149,21 @@ internal sealed class SetupCommandDispatcher
         };
     }
 
-    private SetupCommandResult DispatchStatus(SetupOptions options) =>
-        Validate(status(options.Adapter));
+    private SetupCommandResult DispatchStatus(SetupOptions options)
+    {
+        try
+        {
+            return Validate(status(options.Adapter));
+        }
+        catch (Exception)
+        {
+            return Validate(CommandFailure(
+                SetupCommand.Status,
+                SetupCodes.InternalError,
+                null,
+                options.Adapter));
+        }
+    }
 
     private SetupCommandResult DispatchPlan(SetupOptions options)
     {
