@@ -1258,6 +1258,67 @@ public sealed class SetupStorageTests
         }
     }
 
+    [Fact]
+    public void CommittedV1Fixture_SurvivesProcessEquivalentRestartWithoutMigrationArtifacts()
+    {
+        var fixturePath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Setup", "v1", "ownership-ledger.v1.json");
+        var fixtureBytes = File.ReadAllBytes(fixturePath);
+        var expected = new SetupOwnershipLedger(1, [CreateAppliedChangeSet()]);
+        var temporaryRoot = Path.Combine(Path.GetTempPath(), $"cao-setup-storage-{Guid.NewGuid():N}");
+        byte[] preLoadBytes;
+
+        try
+        {
+            {
+                var firstPlatform = new SystemSetupPlatform(localApplicationData: temporaryRoot);
+                var firstPaths = new SetupRuntimePaths(firstPlatform);
+                var firstPlans = new SetupPlanStore(firstPlatform, firstPaths);
+                var firstStore = new SetupLedgerStore(firstPlatform, firstPaths, firstPlans);
+                firstPaths.EnsureRoot();
+                firstPlatform.FileSystem.WriteAllBytes(firstPaths.OwnershipLedger, fixtureBytes);
+                _ = firstStore.Load();
+                preLoadBytes = firstPlatform.FileSystem.ReadAllBytes(firstPaths.OwnershipLedger);
+            }
+
+            {
+                var reopenedPlatform = new SystemSetupPlatform(localApplicationData: temporaryRoot);
+                var reopenedPaths = new SetupRuntimePaths(reopenedPlatform);
+                var reopenedPlans = new SetupPlanStore(reopenedPlatform, reopenedPaths);
+                var reopenedStore = new SetupLedgerStore(reopenedPlatform, reopenedPaths, reopenedPlans);
+                var loaded = reopenedStore.Load();
+                var postLoadBytes = reopenedPlatform.FileSystem.ReadAllBytes(reopenedPaths.OwnershipLedger);
+
+                Assert.Equal(fixtureBytes, preLoadBytes);
+                Assert.Equivalent(expected, loaded, strict: true);
+                Assert.Equal(1, loaded.SchemaVersion);
+                var changeSet = Assert.Single(loaded.ChangeSets);
+                Assert.Equal(SetupChangeSetState.Applied, changeSet.State);
+                Assert.Equal(SetupCodes.ApplySucceeded, changeSet.OutcomeCode);
+                Assert.Equal(SetupTargetKind.Json, Assert.Single(changeSet.Targets).TargetKind);
+                Assert.Equal(fixtureBytes, postLoadBytes);
+                Assert.Equal(preLoadBytes, postLoadBytes);
+                var entries = Directory
+                    .EnumerateFileSystemEntries(reopenedPaths.Root, "*", SearchOption.AllDirectories)
+                    .Select(path => Path.GetRelativePath(reopenedPaths.Root, path))
+                    .ToArray();
+                Assert.DoesNotContain(entries, path =>
+                    path.Contains("v0", StringComparison.OrdinalIgnoreCase) ||
+                    path.Contains("v2", StringComparison.OrdinalIgnoreCase) ||
+                    path.Contains("migration", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".journal.json", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".backup", StringComparison.OrdinalIgnoreCase));
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(temporaryRoot))
+            {
+                Directory.Delete(temporaryRoot, recursive: true);
+            }
+        }
+    }
+
     private static StorageContext CreateContext(Action? disposeRequestedObserver = null)
     {
         var platform = new SetupTestPlatform(CreatedAt);
