@@ -469,9 +469,7 @@ internal sealed class SetupCommandDispatcher
                     null);
         }
 
-        if (execution.Code is SetupCodes.InterruptedApplyRecovered or
-            SetupCodes.InterruptedRollbackRecovered or
-            SetupCodes.InterruptedRecoveryFailed)
+        if (!IsValidDirectRollbackEnvelope(execution))
         {
             return CommandFailure(
                 SetupCommand.Rollback,
@@ -566,6 +564,34 @@ internal sealed class SetupCommandDispatcher
         SetupCodes.PartialRollback or
         SetupCodes.RecoveryRequired or
         SetupCodes.InternalError;
+
+    private static bool IsValidDirectRollbackEnvelope(SetupRollbackExecutionResult execution) =>
+        execution.Code switch
+        {
+            SetupCodes.RollbackSucceeded => execution.ChangeSet is
+            {
+                State: SetupChangeSetState.RolledBack,
+                OutcomeCode: SetupCodes.RollbackSucceeded,
+            },
+            SetupCodes.RollbackNotAvailable =>
+                execution.ChangeSet?.OutcomeCode == SetupCodes.RollbackNotAvailable,
+            SetupCodes.RollbackStale => execution.ChangeSet is
+            {
+                State: SetupChangeSetState.Applied,
+                OutcomeCode: SetupCodes.RollbackStale,
+            },
+            SetupCodes.UnsafePath => execution.ChangeSet?.State == SetupChangeSetState.Applied,
+            SetupCodes.PartialRollback => execution.ChangeSet is
+            {
+                State: SetupChangeSetState.Partial,
+                OutcomeCode: SetupCodes.PartialRollback,
+            },
+            SetupCodes.RecoveryRequired or SetupCodes.InternalError => true,
+            SetupCodes.InvalidArguments or
+            SetupCodes.LedgerCorrupt or
+            SetupCodes.LedgerVersionUnsupported => execution.ChangeSet is null,
+            _ => false,
+        };
 
     private static bool IsValidRollbackRecoveryEnvelope(SetupRollbackExecutionResult execution)
     {

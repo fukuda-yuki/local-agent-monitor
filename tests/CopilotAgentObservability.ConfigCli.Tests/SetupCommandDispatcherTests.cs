@@ -752,6 +752,66 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Theory]
+    [InlineData(SetupCodes.RollbackNotAvailable)]
+    [InlineData(SetupCodes.RollbackStale)]
+    [InlineData(SetupCodes.UnsafePath)]
+    [InlineData(SetupCodes.PartialRollback)]
+    public void DispatchRollback_MalformedDirectEnvelopeWithoutRequiredTrustedRowFailsClosed(string code)
+    {
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var requestedId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var dispatcher = CreateRollbackDispatcher(
+            fixture,
+            _ => throw new InvalidOperationException("dispatcher recovery must not run"),
+            (_, _) => new SetupRollbackExecutionResult(requestedId, false, code, null, null));
+
+        var result = dispatcher.Dispatch(CreateRollbackOptions(requestedId));
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Equal(requestedId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.RecoveredChangeSetId);
+        Assert.Null(result.RecoveryOperation);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData("rollback-succeeded-wrong-state")]
+    [InlineData("rollback-succeeded-wrong-outcome")]
+    [InlineData("partial-rollback-wrong-state")]
+    [InlineData("partial-rollback-wrong-outcome")]
+    [InlineData("rollback-not-available-wrong-outcome")]
+    [InlineData("rollback-stale-wrong-state")]
+    [InlineData("rollback-stale-wrong-outcome")]
+    [InlineData("unsafe-path-wrong-state")]
+    public void DispatchRollback_MalformedDirectEnvelopeWithIncompatibleTrustedRowFailsClosed(string variant)
+    {
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var requestedId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var dispatcher = CreateRollbackDispatcher(
+            fixture,
+            _ => throw new InvalidOperationException("dispatcher recovery must not run"),
+            (_, _) => CreateMalformedDirectRollbackExecution(requestedId, variant));
+
+        var result = dispatcher.Dispatch(CreateRollbackOptions(requestedId));
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Equal(requestedId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.RecoveredChangeSetId);
+        Assert.Null(result.RecoveryOperation);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
     [InlineData("unknown-code")]
     [InlineData("success-mismatch")]
     [InlineData("requested-id-mismatch")]
@@ -2150,7 +2210,7 @@ public sealed class SetupCommandDispatcherTests
         targets ?? [CreateOwnedApplyTarget(RecordId)]) with
         {
             ChangeSetId = changeSetId,
-            OutcomeCode = code,
+            OutcomeCode = code == SetupCodes.UnsafePath ? SetupCodes.ApplySucceeded : code,
             State = code switch
             {
                 SetupCodes.RollbackSucceeded => SetupChangeSetState.RolledBack,
@@ -2158,6 +2218,88 @@ public sealed class SetupCommandDispatcherTests
                 _ => SetupChangeSetState.Applied,
             },
         };
+
+    private static SetupRollbackExecutionResult CreateMalformedDirectRollbackExecution(
+        Guid requestedId,
+        string variant)
+    {
+        return variant switch
+        {
+            "rollback-succeeded-wrong-state" => new(
+                requestedId,
+                true,
+                SetupCodes.RollbackSucceeded,
+                CreateRollbackChangeSet(requestedId, SetupCodes.RollbackSucceeded) with
+                {
+                    State = SetupChangeSetState.Applied,
+                },
+                null),
+            "rollback-succeeded-wrong-outcome" => new(
+                requestedId,
+                true,
+                SetupCodes.RollbackSucceeded,
+                CreateRollbackChangeSet(requestedId, SetupCodes.RollbackSucceeded) with
+                {
+                    OutcomeCode = SetupCodes.RollbackStale,
+                },
+                null),
+            "partial-rollback-wrong-state" => new(
+                requestedId,
+                false,
+                SetupCodes.PartialRollback,
+                CreateRollbackChangeSet(requestedId, SetupCodes.PartialRollback) with
+                {
+                    State = SetupChangeSetState.Applied,
+                },
+                null),
+            "partial-rollback-wrong-outcome" => new(
+                requestedId,
+                false,
+                SetupCodes.PartialRollback,
+                CreateRollbackChangeSet(requestedId, SetupCodes.PartialRollback) with
+                {
+                    OutcomeCode = SetupCodes.InternalError,
+                },
+                null),
+            "rollback-not-available-wrong-outcome" => new(
+                requestedId,
+                false,
+                SetupCodes.RollbackNotAvailable,
+                CreateRollbackChangeSet(requestedId, SetupCodes.RollbackNotAvailable) with
+                {
+                    OutcomeCode = SetupCodes.ApplySucceeded,
+                },
+                null),
+            "rollback-stale-wrong-state" => new(
+                requestedId,
+                false,
+                SetupCodes.RollbackStale,
+                CreateRollbackChangeSet(requestedId, SetupCodes.RollbackStale) with
+                {
+                    State = SetupChangeSetState.RolledBack,
+                },
+                null),
+            "rollback-stale-wrong-outcome" => new(
+                requestedId,
+                false,
+                SetupCodes.RollbackStale,
+                CreateRollbackChangeSet(requestedId, SetupCodes.RollbackStale) with
+                {
+                    OutcomeCode = SetupCodes.ApplySucceeded,
+                },
+                null),
+            "unsafe-path-wrong-state" => new(
+                requestedId,
+                false,
+                SetupCodes.UnsafePath,
+                CreateRollbackChangeSet(requestedId, SetupCodes.UnsafePath) with
+                {
+                    State = SetupChangeSetState.Partial,
+                },
+                null),
+            _ => throw new ArgumentOutOfRangeException(nameof(variant), variant, null),
+        };
+    }
 
     private static SetupRollbackExecutionResult CreateRollbackExecutionForCode(
         Guid requestedId,
