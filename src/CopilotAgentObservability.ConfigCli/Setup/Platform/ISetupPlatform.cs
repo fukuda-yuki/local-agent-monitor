@@ -15,6 +15,14 @@ public interface ISetupPlatform
     ISetupIdentifierGenerator Identifiers { get; }
 
     ISetupExecution Execution { get; }
+
+    ISetupOperatingSystem OperatingSystem { get; }
+
+    ISetupProcessRunner ProcessRunner { get; }
+
+    ISetupManagedSettingsSource ManagedSettings { get; }
+
+    ISetupHttpProbe HttpProbe { get; }
 }
 
 public interface ISetupFileSystem
@@ -26,6 +34,8 @@ public interface ISetupFileSystem
     byte[] ReadAllBytes(string path);
 
     SetupBoundedFileRead ReadAtMostBytes(string path, int maximumBytes);
+
+    bool HasDirectories(string path);
 
     void WriteAllBytes(string path, ReadOnlySpan<byte> bytes);
 
@@ -72,6 +82,112 @@ public interface ISetupIdentifierGenerator
 public interface ISetupExecution
 {
     void Checkpoint(string operation);
+}
+
+public interface ISetupOperatingSystem
+{
+    SetupPlanningOs Current { get; }
+
+    string ApplicationData { get; }
+
+    string UserProfile { get; }
+}
+
+public interface ISetupProcessRunner
+{
+    SetupProcessObservation Run(string fileName, IReadOnlyList<string> arguments);
+}
+
+public interface ISetupManagedSettingsSource
+{
+    SetupManagedObservation Read(SetupManagedLocation location);
+}
+
+public interface ISetupHttpProbe
+{
+    SetupHttpProbeObservation Get(
+        string origin,
+        string path,
+        int totalBudgetMilliseconds,
+        int maxBodyBytes);
+}
+
+public enum SetupPlanningOs
+{
+    Windows,
+    MacOs,
+    Linux,
+}
+
+public enum SetupProcessOutcome
+{
+    Completed,
+    NotFound,
+    Failed,
+    TimedOut,
+}
+
+public sealed record SetupProcessObservation(
+    SetupProcessOutcome Outcome,
+    int? ExitCode,
+    string StandardOutput);
+
+public enum SetupManagedLocation
+{
+    GitHubCopilotNativeWindowsMachinePolicy,
+    GitHubCopilotNativeMacOsManagedPreferences,
+    GitHubCopilotFileWindows,
+    GitHubCopilotFileMacOs,
+    GitHubCopilotFileLinux,
+    VsCodeEnterpriseWindowsMachinePolicy,
+    VsCodeEnterpriseWindowsUserPolicy,
+    VsCodeEnterpriseMacOsConfigurationProfile,
+    VsCodeEnterpriseLinuxPolicyFile,
+}
+
+public enum SetupManagedOutcome
+{
+    Present,
+    Absent,
+    Failed,
+}
+
+public sealed record SetupManagedObservation(
+    SetupManagedOutcome Outcome,
+    byte[] Bytes,
+    bool IsComplete)
+{
+    public static SetupManagedObservation Absent { get; } =
+        new(SetupManagedOutcome.Absent, [], true);
+
+    public static SetupManagedObservation Failed { get; } =
+        new(SetupManagedOutcome.Failed, [], true);
+}
+
+public enum SetupHttpProbeOutcome
+{
+    Response,
+    Refused,
+    TimedOut,
+    TransportFailure,
+    RedirectBlocked,
+}
+
+public sealed record SetupHttpProbeObservation(
+    SetupHttpProbeOutcome Outcome,
+    int? StatusCode,
+    long? TrustworthyContentLength,
+    byte[] Body,
+    bool IsComplete)
+{
+    public static SetupHttpProbeObservation Refused { get; } =
+        new(SetupHttpProbeOutcome.Refused, null, null, [], true);
+
+    public static SetupHttpProbeObservation TimedOut { get; } =
+        new(SetupHttpProbeOutcome.TimedOut, null, null, [], true);
+
+    public static SetupHttpProbeObservation TransportFailure { get; } =
+        new(SetupHttpProbeOutcome.TransportFailure, null, null, [], true);
 }
 
 public enum SetupPathStyle

@@ -12,12 +12,18 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     private readonly Dictionary<string, SetupTestBarrierState> barriers = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SetupPathMetadata> pathMetadata;
     private readonly HashSet<string> exclusiveLocks;
+    private readonly Dictionary<string, Queue<SetupProcessObservation>> processObservations = new(StringComparer.Ordinal);
+    private readonly Dictionary<SetupManagedLocation, SetupManagedObservation> managedObservations = [];
+    private readonly Queue<SetupHttpProbeObservation> httpProbeObservations = [];
     private readonly List<string> operations = [];
 
     public SetupTestPlatform(
         DateTimeOffset utcNow,
         string localApplicationData = "C:\\setup-test-local-app-data",
-        SetupPathStyle pathStyle = SetupPathStyle.Windows)
+        SetupPathStyle pathStyle = SetupPathStyle.Windows,
+        SetupPlanningOs planningOs = SetupPlanningOs.Windows,
+        string applicationData = "C:\\Users\\setup-test\\AppData\\Roaming",
+        string userProfile = "C:\\Users\\setup-test")
     {
         LocalApplicationData = localApplicationData;
         PathStyle = pathStyle;
@@ -31,6 +37,10 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         FileSystem = new SetupTestFileSystem(this);
         UserEnvironment = new SetupTestUserEnvironment(this);
         Execution = new SetupTestExecution(this);
+        OperatingSystem = new SetupTestOperatingSystem(planningOs, applicationData, userProfile);
+        ProcessRunner = new SetupTestProcessRunner(this);
+        ManagedSettings = new SetupTestManagedSettingsSource(this);
+        HttpProbe = new SetupTestHttpProbe(this);
     }
 
     public string LocalApplicationData { get; }
@@ -46,6 +56,14 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     public ISetupIdentifierGenerator Identifiers { get; }
 
     public ISetupExecution Execution { get; }
+
+    public ISetupOperatingSystem OperatingSystem { get; }
+
+    public ISetupProcessRunner ProcessRunner { get; }
+
+    public ISetupManagedSettingsSource ManagedSettings { get; }
+
+    public ISetupHttpProbe HttpProbe { get; }
 
     public IReadOnlyList<string> Operations
     {
@@ -128,6 +146,29 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             return environment.TryGetValue(name, out var value) ? value : null;
         }
     }
+
+    public void ScriptProcess(
+        string fileName,
+        IReadOnlyList<string> arguments,
+        SetupProcessObservation observation)
+    {
+        var key = ProcessKey(fileName, arguments);
+        if (!processObservations.TryGetValue(key, out var observations))
+        {
+            observations = new Queue<SetupProcessObservation>();
+            processObservations.Add(key, observations);
+        }
+
+        observations.Enqueue(observation);
+    }
+
+    public void SeedManagedObservation(SetupManagedLocation location, SetupManagedObservation observation) =>
+        managedObservations[location] = observation;
+
+    public void ScriptHttpProbe(SetupHttpProbeObservation observation) => httpProbeObservations.Enqueue(observation);
+
+    private static string ProcessKey(string fileName, IReadOnlyList<string> arguments) =>
+        $"{fileName}\0{string.Join('\0', arguments)}";
 
     private void Record(string operation)
     {
@@ -315,6 +356,23 @@ internal sealed class SetupTestPlatform : ISetupPlatform
                 var bytes = platform.files[path];
                 var length = Math.Min(bytes.Length, maximumBytes + 1);
                 return new SetupBoundedFileRead(bytes.AsSpan(0, length).ToArray(), bytes.Length <= maximumBytes);
+            }
+        }
+
+        public bool HasDirectories(string path)
+        {
+            platform.Record($"directory.has-child:{path}");
+            var separator = platform.PathStyle == SetupPathStyle.Windows ? '\\' : '/';
+            var comparison = platform.PathStyle == SetupPathStyle.Windows
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+            var prefix = path.TrimEnd('\\', '/') + separator;
+            lock (platform.gate)
+            {
+                return platform.pathMetadata.Any(entry => entry.Value.Kind == SetupPathKind.Directory &&
+                        entry.Key.StartsWith(prefix, comparison) &&
+                        entry.Key[prefix.Length..].Length > 0 &&
+                        !entry.Key[prefix.Length..].Contains(separator));
             }
         }
 
@@ -516,6 +574,56 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     private sealed class SetupTestExecution(SetupTestPlatform platform) : ISetupExecution
     {
         public void Checkpoint(string operation) => platform.Record($"checkpoint:{operation}");
+    }
+
+    private sealed class SetupTestOperatingSystem(
+        SetupPlanningOs current,
+        string applicationData,
+        string userProfile) : ISetupOperatingSystem
+    {
+        public SetupPlanningOs Current => current;
+
+        public string ApplicationData => applicationData;
+
+        public string UserProfile => userProfile;
+    }
+
+    private sealed class SetupTestProcessRunner(SetupTestPlatform platform) : ISetupProcessRunner
+    {
+        public SetupProcessObservation Run(string fileName, IReadOnlyList<string> arguments)
+        {
+            platform.Record($"process.run:{fileName}:{string.Join(' ', arguments)}");
+            var key = ProcessKey(fileName, arguments);
+            return platform.processObservations.TryGetValue(key, out var observations) && observations.TryDequeue(out var observation)
+                ? observation
+                : new SetupProcessObservation(SetupProcessOutcome.NotFound, null, string.Empty);
+        }
+    }
+
+    private sealed class SetupTestManagedSettingsSource(SetupTestPlatform platform) : ISetupManagedSettingsSource
+    {
+        public SetupManagedObservation Read(SetupManagedLocation location)
+        {
+            platform.Record($"managed.read:{location}");
+            return platform.managedObservations.TryGetValue(location, out var observation)
+                ? observation
+                : SetupManagedObservation.Absent;
+        }
+    }
+
+    private sealed class SetupTestHttpProbe(SetupTestPlatform platform) : ISetupHttpProbe
+    {
+        public SetupHttpProbeObservation Get(
+            string origin,
+            string path,
+            int totalBudgetMilliseconds,
+            int maxBodyBytes)
+        {
+            platform.Record($"http.get:{origin}:{path}:{totalBudgetMilliseconds}:{maxBodyBytes}");
+            return platform.httpProbeObservations.TryDequeue(out var observation)
+                ? observation
+                : SetupHttpProbeObservation.TransportFailure;
+        }
     }
 }
 
