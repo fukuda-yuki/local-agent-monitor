@@ -7,11 +7,16 @@ Updated: 2026-07-15
 The historical M3 handoff preserves the implementation stop at `399f441`, but
 that stop is no longer the current resume boundary. Tasks 02-10 resolved all
 four findings, passed their independent reviews, and completed the generic
-dispatcher, process, and byte-faithful repository-wrapper surfaces. The
-authoritative continuation plan is now the
-[Issue #66 T2 completion plan](../../superpowers/plans/2026-07-14-issue-66-t2-completion/README.md),
-with the dated resolution appended to
-[the M3 handoff](milestones/M3-shared-setup-command-surface/handoff-prompt.md).
+dispatcher, process, and byte-faithful repository-wrapper surfaces. The closed
+[Issue #66 T2 completion plan](../../superpowers/plans/2026-07-14-issue-66-t2-completion/README.md)
+and the dated resolution appended to
+[the M3 handoff](milestones/M3-shared-setup-command-surface/handoff-prompt.md)
+are T2 evidence/history, not the current continuation. The active resume
+boundary and authoritative execution plan are defined by the
+[Issue #67 guided setup plan](../../superpowers/plans/2026-07-14-issue-67-guided-setup/README.md).
+Older coarse task and requirement rows below are retained historical snapshots;
+they must not override this current note or the newer Task 08-11/T2 rows. T9
+owns final evidence-table reconciliation.
 
 Task 11 passes the **Issue #66 T2 gate only** at reviewed Task 10 HEAD
 `0b0885424f59ad5cdfafe0fa77b5e2fc53ed0407`. It does not declare Issue #66 or
