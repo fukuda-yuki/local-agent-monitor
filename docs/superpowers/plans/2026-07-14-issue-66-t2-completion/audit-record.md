@@ -1,10 +1,10 @@
 # Issue #66 Task 01: T2c2 contract audit record
 
-- Audit status: `DONE_WITH_CONCERNS`
+- Audit status: `APPROVED` (downstream gates remain `DONE_WITH_CONCERNS`)
 - Audited baseline: `2a3bfcbc54add17e6b47b90ba4c330be094d5705`
 - Scope: read-only contract audit; no production, test, specification, task-card, or ledger edit
 - Implementer self-review: `PASS` for source traceability and owned-file scope
-- Independent read-only review: `CHANGES REQUESTED` at `ce80176240fe5daded26244d4bc4887b61be45b8`; `PENDING` re-review after the Q4 owner-task correction below
+- Independent read-only review: `APPROVED` at `3bcfac9e9e90ca35159b37e2f6b3c73c72cbc68e` (Spec APPROVED; Task Quality APPROVED; 0 Critical/Important/Minor findings)
 
 ## Cross-surface contract table
 

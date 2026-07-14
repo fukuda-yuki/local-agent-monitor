@@ -11,7 +11,9 @@ implementation baseline `399f441` is recorded in
 [the M3 implementation handoff](milestones/M3-shared-setup-command-surface/handoff-prompt.md).
 That handoff records the unapproved Apply preflight, remaining T2 work, all
 unstarted #67 target tasks, current test evidence, review findings, and the
-required resume order.
+required resume order. Task 01's final approved contract-audit evidence is
+recorded below; it is docs-only bookkeeping and leaves the migration conflict,
+Task 04a, T3d, and T7 gates open.
 
 ## Task state
 
@@ -64,6 +66,7 @@ required resume order.
 | Atomic file mutation | #66 | Complete through Task 3b | `291b3bf..2ed9e8a` | typed hash, path/reparse, backup/temp/replace/restore fault matrix | PASS/APPROVED | three-OS runtime evidence gap noted above |
 | User environment mutation | #66 | Complete through Task 4 | `f4f55ec..620448a` | full 3x3 state, backup, member fault, notification boundary matrix | PASS/APPROVED | coordinator journaling/recovery remains Task 5 |
 | Transaction and rollback | #66 | In progress through Task 6b1; integration review blocked | `2d88eff..8fcebf9`, `ba0d65e`, `dee8830`, `25afcf7` | journal/store, exact artifact reuse, terminal/active Apply recovery, file, single-environment, mixed active/committed rollback recovery, committed lagging-ledger reconciliation, notification ambiguity/replay recovery, apply/compensation, lock-lifetime evidence, rollback journal supersession primitive, fault/rebind hardening, supersession lock-lifetime evidence, file-only, single-environment, mixed/all-NoOp normal rollback producer evidence, B1 safe-classification continuation remediation, B2a restore-primitive continuation, B2b intent/completion before/after-effect characterization, strict status snapshot/historical manifest and no-write lifecycle, terminal environment hash binding (finding 3), pre/post rollback race and crash matrices, direct-versus-recovery notification provenance, zero-I/O replay evidence, and actual Apply→fresh-store recovery windows above; latest terminal-evidence validation Recovery 300/300, Apply+Recovery 416/416, ConfigCli 1,654/1,654, solution build 0/0 at HEAD `6a89048` | Tasks through terminal environment hash binding PASS/APPROVED locally; independent static and final fresh reviews PASS; requirements/security/concurrency/migration review found no findings | strict v1 requires no migration; S2 projector/order, status semantics/order, public Task 7, and #66-to-#67 real-producer cross-surface interfaces remain pending; C3 adapter pre-resolution remains open; Playwright/full solution test remains pending |
+| T2c2 contract audit (Task 01) | #66 | Complete with concerns | `3d15076..3bcfac9` | docs-only validation: `git diff --check` clean; no tests run. Session baseline (not Task 01 validation): build 0/0; Playwright install exit 0; full solution 2,926/2,926 (ConfigCli 1,990 + LocalMonitor 936) | Spec APPROVED; Task Quality APPROVED; independent final review APPROVED; 0 Critical/Important/Minor findings | migration user requirement conflicts with canonical first-shipped v1/no-fabricated-v0 contract; Task 04a trusted-result carrier must be implemented/reviewed before Task 05; T3d skeletal compatibility test and real T7 gate remain pending |
 | Shared setup commands | #66 | Pending | - | - | - | - |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
