@@ -672,7 +672,6 @@ public sealed class SetupCommandDispatcherTests
         var malformed = CreateStatusResult(requestedFilter) with
         {
             ChangeSets = [null!],
-            Warnings = [rawMarker],
         };
         var fixture = DispatcherFixture.Create(
             [],
