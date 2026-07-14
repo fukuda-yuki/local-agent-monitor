@@ -22,30 +22,6 @@ internal sealed class SetupApplyCoordinator
         SetupCodes.PortOwnedByForeignProcess,
         SetupCodes.InternalError,
     };
-    private static readonly HashSet<string> RevalidationWarningCodes = new(StringComparer.Ordinal)
-    {
-        SetupCodes.ContentCaptureSensitive,
-        SetupCodes.ManagedPolicyUnverified,
-        SetupCodes.MonitorNotRunning,
-        SetupCodes.SharedUserEnvironmentAffectsOtherProcesses,
-        SetupCodes.VscodeNonDefaultProfilesNotModified,
-        SetupCodes.CliTraceProtocolOverrideNotModified,
-    };
-    private static readonly HashSet<string> RevalidationNextActionCodes = new(StringComparer.Ordinal)
-    {
-        SetupCodes.InstallVsCode,
-        SetupCodes.InstallGitHubCopilotChatExtension,
-        SetupCodes.UpgradeVsCode,
-        SetupCodes.InstallCopilotCli,
-        SetupCodes.UpgradeCopilotCli,
-        SetupCodes.RunVsCodePolicyDiagnostics,
-        SetupCodes.RestartVsCode,
-        SetupCodes.RestartTerminalSession,
-        SetupCodes.StartLocalMonitor,
-        SetupCodes.ReviewContentCaptureWarning,
-        SetupCodes.ReviewCliTraceProtocolOverride,
-        SetupCodes.RunFirstTraceDoctor,
-    };
 
     private readonly ISetupPlatform platform;
     private readonly SetupRuntimePaths paths;
@@ -984,8 +960,7 @@ internal sealed class SetupApplyCoordinator
     }
 
     private static bool HasValidRevalidationDiagnostics(SetupPlanResult<SetupRevalidation> result) =>
-        result.Warnings.All(RevalidationWarningCodes.Contains) &&
-        result.NextActions.All(RevalidationNextActionCodes.Contains);
+        SetupContractValidator.IsAllowedRevalidationDiagnostics(result.Warnings, result.NextActions);
 
     private IReadOnlyList<TargetCapture> CaptureAndValidateBases(SetupPrivatePlan plan)
     {

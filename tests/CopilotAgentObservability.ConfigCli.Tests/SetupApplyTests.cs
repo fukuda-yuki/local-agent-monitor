@@ -1232,6 +1232,50 @@ public sealed class SetupApplyTests
             ((IList<string>)result.Warnings).Add(SetupCodes.ContentCaptureSensitive));
     }
 
+    [Fact]
+    public void Apply_RevalidationWithUnsupportedWarningFailsClosedBeforeAnyArtifact()
+    {
+        var fixture = ApplyFixture.Create();
+        var planBefore = fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId));
+        var ledgerBefore = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
+        fixture.Revalidator.Result = SetupPlanResult.Revalidated(["not_a_declared_warning"], []);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(1, fixture.Revalidator.Calls);
+        Assert.Equal(planBefore, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId)));
+        Assert.Equal(ledgerBefore, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
+        AssertApplyInputsUnchanged(fixture);
+        AssertNoTransactionArtifacts(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
+    [Fact]
+    public void Apply_RevalidationWithRecoveryOwnedNextActionFailsClosedBeforeAnyArtifact()
+    {
+        var fixture = ApplyFixture.Create();
+        var planBefore = fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId));
+        var ledgerBefore = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
+        fixture.Revalidator.Result = SetupPlanResult.Revalidated([], [SetupCodes.RerunRequestedSetupCommand]);
+        var operationCount = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.InternalError, exception.Code);
+        Assert.Equal(1, fixture.Revalidator.Calls);
+        Assert.Equal(planBefore, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId)));
+        Assert.Equal(ledgerBefore, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
+        AssertApplyInputsUnchanged(fixture);
+        AssertNoTransactionArtifacts(fixture);
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationCount), IsWriteOperation);
+    }
+
     [Theory]
     [InlineData(SetupCodes.UnsupportedVersion)]
     [InlineData(SetupCodes.ManagedPolicyConflict)]

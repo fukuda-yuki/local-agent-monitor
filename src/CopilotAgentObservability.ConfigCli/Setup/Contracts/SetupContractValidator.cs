@@ -84,6 +84,14 @@ public static class SetupContractValidator
         SetupCodes.RerunRequestedSetupCommand,
     };
 
+    internal static bool IsAllowedRevalidationDiagnostics(
+        IReadOnlyList<string> warnings,
+        IReadOnlyList<string> nextActions) =>
+        warnings.All(WarningCodes.Contains) &&
+        nextActions.All(nextAction =>
+            nextAction != SetupCodes.RerunRequestedSetupCommand &&
+            NextActionCodes.Contains(nextAction));
+
     public static void Validate(SetupCommandResult result)
     {
         if (result is null ||
