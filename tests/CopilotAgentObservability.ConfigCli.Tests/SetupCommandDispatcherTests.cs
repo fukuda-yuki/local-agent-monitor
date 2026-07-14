@@ -1515,6 +1515,94 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Theory]
+    [InlineData("foreign-change-set")]
+    [InlineData("same-id-adapter-mismatch")]
+    [InlineData("same-id-target-mismatch")]
+    [InlineData("applied-state-outcome-mismatch")]
+    [InlineData("no-changes-state-outcome-mismatch")]
+    public void DispatchApply_MismatchedSuccessfulCoordinatorCarrierFailsClosed(string variant)
+    {
+        var noChanges = variant == "no-changes-state-outcome-mismatch";
+        var context = CreatePlannedApplyFixture(
+            operation: noChanges ? SetupOperation.NoOp : SetupOperation.Replace);
+        var plannedTarget = Assert.Single(context.PlannedRow.Targets);
+        var successful = context.PlannedRow with
+        {
+            State = noChanges ? SetupChangeSetState.NoChanges : SetupChangeSetState.Applied,
+            OutcomeCode = noChanges ? SetupCodes.NoChanges : SetupCodes.ApplySucceeded,
+            UpdatedAt = Timestamp.AddSeconds(1),
+            Targets = noChanges
+                ? [plannedTarget with { OutcomeCode = SetupCodes.NoChanges }]
+                : [plannedTarget with
+                {
+                    AppliedStateHash = new string('b', 64),
+                    BackupReference = plannedTarget.RecordId.ToString("D"),
+                    OutcomeCode = SetupCodes.ApplySucceeded,
+                    RollbackStatus = SetupLedgerRollbackStatus.Pending,
+                }],
+        };
+        var foreignRecordId = Guid.Parse("00000000-0000-7000-8000-000000000712");
+        successful = variant switch
+        {
+            "foreign-change-set" => successful with
+            {
+                ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000711"),
+            },
+            "same-id-adapter-mismatch" => successful with
+            {
+                Adapter = "foreign-adapter",
+                Targets = [Assert.Single(successful.Targets) with { OwningAdapter = "foreign-adapter" }],
+            },
+            "same-id-target-mismatch" => successful with
+            {
+                Targets = [Assert.Single(successful.Targets) with
+                {
+                    RecordId = foreignRecordId,
+                    TargetLabel = "foreign-target",
+                    BackupReference = foreignRecordId.ToString("D"),
+                }],
+            },
+            "applied-state-outcome-mismatch" => successful with { OutcomeCode = SetupCodes.NoChanges },
+            "no-changes-state-outcome-mismatch" => successful with { OutcomeCode = SetupCodes.ApplySucceeded },
+            _ => throw new ArgumentOutOfRangeException(nameof(variant), variant, null),
+        };
+        if (variant is "foreign-change-set" or "same-id-adapter-mismatch" or "same-id-target-mismatch")
+        {
+            SetupStorageValidation.ValidateLedger(new SetupOwnershipLedger(1, [successful]));
+        }
+
+        var applyCalls = 0;
+        var dispatcher = CreateApplyDispatcher(
+            context.Fixture,
+            [context.Adapter],
+            _ => NoRecovery(),
+            (_, _) =>
+            {
+                applyCalls++;
+                return SetupPlanResult.Success(
+                    successful,
+                    [],
+                    [SetupCodes.ManagedPolicyUnverified],
+                    [SetupCodes.RestartVsCode]);
+            });
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(context.ChangeSetId));
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Equal(context.ChangeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.RecoveredChangeSetId);
+        Assert.Null(result.RecoveryOperation);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.ChangeSets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.Equal(1, applyCalls);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
     [InlineData(SetupCodes.TargetNotInstalled)]
     [InlineData(SetupCodes.UnsupportedVersion)]
     [InlineData(SetupCodes.ManagedPolicyConflict)]

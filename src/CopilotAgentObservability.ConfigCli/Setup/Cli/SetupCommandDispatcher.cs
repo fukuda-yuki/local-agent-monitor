@@ -389,10 +389,11 @@ internal sealed class SetupCommandDispatcher
                     exception.Failure.NextActions));
             }
 
-            var code = applied.Value.State switch
+            SetupTransactionEvidence.RequireImmutableIdentity(plan, applied.Value);
+            var code = (applied.Value.State, applied.Value.OutcomeCode) switch
             {
-                SetupChangeSetState.Applied => SetupCodes.ApplySucceeded,
-                SetupChangeSetState.NoChanges => SetupCodes.NoChanges,
+                (SetupChangeSetState.Applied, SetupCodes.ApplySucceeded) => SetupCodes.ApplySucceeded,
+                (SetupChangeSetState.NoChanges, SetupCodes.NoChanges) => SetupCodes.NoChanges,
                 _ => null,
             };
             if (code is null)
@@ -400,7 +401,7 @@ internal sealed class SetupCommandDispatcher
                 return Validate(ApplyFailure(
                     SetupCodes.InternalError,
                     correlationId,
-                    changeSet.Adapter));
+                    null));
             }
 
             return Validate(new SetupCommandResult(
