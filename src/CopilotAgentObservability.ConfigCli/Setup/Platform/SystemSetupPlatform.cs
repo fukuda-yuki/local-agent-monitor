@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
 
@@ -28,7 +29,7 @@ public sealed class SystemSetupPlatform : ISetupPlatform
         Execution = execution ?? NoOpSetupExecution.Instance;
         OperatingSystem = new SystemSetupOperatingSystem();
         ProcessRunner = new SystemSetupProcessRunner();
-        ManagedSettings = new SystemSetupManagedSettingsSource();
+        ManagedSettings = new SystemSetupManagedSettingsSource(windowsProgramFiles: null, readHook: null);
         HttpProbe = SystemSetupHttpProbe.Instance;
     }
 
@@ -53,6 +54,50 @@ public sealed class SystemSetupPlatform : ISetupPlatform
     public ISetupManagedSettingsSource ManagedSettings { get; }
 
     public ISetupHttpProbe HttpProbe { get; }
+
+    internal static SystemSetupHttpProbe CreateHttpProbe(IWebProxy proxy) =>
+        SystemSetupHttpProbe.Create(proxy);
+
+    internal static ISetupManagedSettingsSource CreateManagedSettingsSource(
+        string windowsProgramFiles,
+        Action<ManagedFileReadStage>? readHook = null) =>
+        new SystemSetupManagedSettingsSource(windowsProgramFiles, readHook);
+
+    internal static bool IsWindowsManagedRegularFile(FileAttributes attributes, uint fileType) =>
+        (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0 && fileType == 1;
+
+    internal static bool IsUnixManagedRegularFile(uint mode) => (mode & 0xf000) == 0x8000;
+
+    internal static bool TryClassifyMacOsManagedPreferenceKey(
+        bool nameWasRead,
+        string name,
+        string? prefix,
+        out bool shouldRead)
+    {
+        shouldRead = nameWasRead &&
+            (prefix is null || name.StartsWith(prefix, StringComparison.Ordinal));
+        return nameWasRead;
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static SetupManagedObservation ReadBoundedRegistryValues(
+        int valueCount,
+        Func<string[]> readNames,
+        Func<string, RegistryValueKind> readKind,
+        Func<string, RegistryValueOptions, object?> readValue,
+        string? valuePrefix) =>
+        SystemSetupManagedSettingsSource.ReadBoundedRegistryValues(
+            valueCount,
+            readNames,
+            readKind,
+            readValue,
+            valuePrefix);
+
+    internal enum ManagedFileReadStage
+    {
+        AncestorsOpened,
+        FileOpened,
+    }
 
     internal static bool IsExclusiveFileLockContention(IOException exception)
     {
@@ -636,6 +681,16 @@ public sealed class SystemSetupPlatform : ISetupPlatform
         private const int MaximumBytes = 64 * 1024;
         private const string GitHubCopilotPolicyPath = @"SOFTWARE\Policies\GitHubCopilot";
         private const string VsCodePolicyPath = @"Software\Policies\Microsoft\VSCode";
+        private readonly string? windowsProgramFiles;
+        private readonly Action<ManagedFileReadStage>? readHook;
+
+        public SystemSetupManagedSettingsSource(
+            string? windowsProgramFiles,
+            Action<ManagedFileReadStage>? readHook)
+        {
+            this.windowsProgramFiles = windowsProgramFiles;
+            this.readHook = readHook;
+        }
 
         public SetupManagedObservation Read(SetupManagedLocation location)
         {
@@ -688,114 +743,610 @@ public sealed class SystemSetupPlatform : ISetupPlatform
                 return SetupManagedObservation.Absent;
             }
 
-            var names = key.GetValueNames()
-                .Where(name => valuePrefix is null || name.StartsWith(valuePrefix, StringComparison.Ordinal))
-                .Order(StringComparer.Ordinal)
-                .Take(257)
-                .ToArray();
-            if (names.Length == 0)
-            {
-                return SetupManagedObservation.Absent;
-            }
+            return ReadWindowsRegistryCore(key, valuePrefix);
+        }
 
-            if (names.Length > 256)
-            {
-                return SetupManagedObservation.Failed;
-            }
+        [SupportedOSPlatform("windows")]
+        private static SetupManagedObservation ReadWindowsRegistryCore(
+            RegistryKey key,
+            string? valuePrefix) =>
+            ReadBoundedRegistryValues(
+                key.ValueCount,
+                key.GetValueNames,
+                key.GetValueKind,
+                (name, options) => key.GetValue(name, defaultValue: null, options),
+                valuePrefix);
 
-            var values = new SortedDictionary<string, object?>(StringComparer.Ordinal);
-            foreach (var name in names)
+        [SupportedOSPlatform("windows")]
+        internal static SetupManagedObservation ReadBoundedRegistryValues(
+            int valueCount,
+            Func<string[]> readNames,
+            Func<string, RegistryValueKind> readKind,
+            Func<string, RegistryValueOptions, object?> readValue,
+            string? valuePrefix)
+        {
+            try
             {
-                if (name.Length > 256 || !TryNormalizeRegistryValue(key.GetValue(name), out var normalized))
+                if (valueCount < 0 || valueCount > 256)
                 {
                     return SetupManagedObservation.Failed;
                 }
 
-                values.Add(name, normalized);
-            }
+                var names = readNames();
+                if (names.Length > 256)
+                {
+                    return SetupManagedObservation.Failed;
+                }
 
-            return Bound(JsonSerializer.SerializeToUtf8Bytes(values));
+                var selectedNames = names
+                    .Where(name => valuePrefix is null || name.StartsWith(valuePrefix, StringComparison.Ordinal))
+                    .Order(StringComparer.Ordinal)
+                    .ToArray();
+                if (selectedNames.Length == 0)
+                {
+                    return SetupManagedObservation.Absent;
+                }
+
+                var values = new SortedDictionary<string, object?>(StringComparer.Ordinal);
+                foreach (var name in selectedNames)
+                {
+                    if (name.Length > 256)
+                    {
+                        return SetupManagedObservation.Failed;
+                    }
+
+                    var kind = readKind(name);
+                    var value = readValue(name, RegistryValueOptions.DoNotExpandEnvironmentNames);
+                    if (!TryNormalizeRegistryValue(kind, value, out var normalized))
+                    {
+                        return SetupManagedObservation.Failed;
+                    }
+
+                    values.Add(name, normalized);
+                }
+
+                return Bound(JsonSerializer.SerializeToUtf8Bytes(values));
+            }
+            catch (Exception)
+            {
+                return SetupManagedObservation.Failed;
+            }
         }
 
-        private static bool TryNormalizeRegistryValue(object? value, out object? normalized)
+        [SupportedOSPlatform("windows")]
+        private static bool TryNormalizeRegistryValue(
+            RegistryValueKind kind,
+            object? value,
+            out object? normalized)
         {
-            normalized = value switch
+            normalized = (kind, value) switch
             {
-                null => null,
-                string text when text.Length <= 8192 => text,
-                int or long => value,
-                string[] strings when strings.Length <= 256 && strings.All(item => item.Length <= 8192) => strings,
-                byte[] bytes when bytes.Length <= MaximumBytes => Convert.ToBase64String(bytes),
+                (RegistryValueKind.String or RegistryValueKind.ExpandString, string text) when text.Length <= 8192 => text,
+                (RegistryValueKind.DWord, int number) => number,
+                (RegistryValueKind.QWord, long number) => number,
+                (RegistryValueKind.MultiString, string[] strings) when
+                    strings.Length <= 256 && strings.All(item => item.Length <= 8192) => strings,
+                (RegistryValueKind.Binary, byte[] bytes) when bytes.Length <= MaximumBytes => Convert.ToBase64String(bytes),
                 _ => null,
             };
-            return value is null || normalized is not null;
+            return normalized is not null;
         }
 
-        private static SetupManagedObservation ReadWindowsManagedFile()
+        private SetupManagedObservation ReadWindowsManagedFile()
         {
             if (!System.OperatingSystem.IsWindows())
             {
                 return SetupManagedObservation.Absent;
             }
 
-            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programFiles = windowsProgramFiles ??
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
             return string.IsNullOrWhiteSpace(programFiles)
                 ? SetupManagedObservation.Failed
                 : ReadFile(Path.Combine(programFiles, "GitHubCopilot", "managed-settings.json"));
         }
 
-        private static SetupManagedObservation ReadFileFor(SetupPlanningOs operatingSystem, string path) =>
+        private SetupManagedObservation ReadFileFor(SetupPlanningOs operatingSystem, string path) =>
             CurrentOperatingSystem() == operatingSystem
                 ? ReadFile(path)
                 : SetupManagedObservation.Absent;
 
-        private static SetupManagedObservation ReadFile(string path)
+        private SetupManagedObservation ReadFile(string path)
         {
             try
             {
-                var metadata = new FileInfo(path);
-                if (!metadata.Exists)
+                if (System.OperatingSystem.IsWindows())
                 {
-                    return SetupManagedObservation.Absent;
+                    return WindowsManagedFile.Read(path, readHook);
                 }
 
-                if (metadata.LinkTarget is not null ||
-                    (metadata.Attributes & FileAttributes.ReparsePoint) != 0)
+                if (System.OperatingSystem.IsLinux())
                 {
-                    return SetupManagedObservation.Failed;
+                    return LinuxManagedFile.Read(path);
                 }
 
-                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-                var bytes = new byte[MaximumBytes + 1];
-                var length = 0;
-                while (length < bytes.Length)
-                {
-                    var read = stream.Read(bytes, length, bytes.Length - length);
-                    if (read == 0)
-                    {
-                        break;
-                    }
-
-                    length += read;
-                }
-
-                return new SetupManagedObservation(
-                    SetupManagedOutcome.Present,
-                    bytes.AsSpan(0, length).ToArray(),
-                    length <= MaximumBytes);
-            }
-            catch (FileNotFoundException)
-            {
-                return SetupManagedObservation.Absent;
-            }
-            catch (DirectoryNotFoundException)
-            {
-                return SetupManagedObservation.Absent;
+                return System.OperatingSystem.IsMacOS()
+                    ? MacOsManagedFile.Read(path)
+                    : SetupManagedObservation.Failed;
             }
             catch (Exception)
             {
                 return SetupManagedObservation.Failed;
             }
+        }
+
+        private static SetupManagedObservation ReadOpenedFile(SafeFileHandle handle)
+        {
+            using var stream = new FileStream(handle, FileAccess.Read);
+            var bytes = new byte[MaximumBytes + 1];
+            var length = 0;
+            while (length < bytes.Length)
+            {
+                var read = stream.Read(bytes, length, bytes.Length - length);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                length += read;
+            }
+
+            return new SetupManagedObservation(
+                SetupManagedOutcome.Present,
+                bytes.AsSpan(0, length).ToArray(),
+                length <= MaximumBytes);
+        }
+
+        private static class WindowsManagedFile
+        {
+            private const uint GenericRead = 0x80000000;
+            private const uint FileReadAttributes = 0x00000080;
+            private const uint FileShareRead = 0x00000001;
+            private const uint FileShareWrite = 0x00000002;
+            private const uint OpenExisting = 3;
+            private const uint OpenReparsePoint = 0x00200000;
+            private const uint BackupSemantics = 0x02000000;
+            private const int FileAttributeTagInfoClass = 9;
+            private const int FileIdInfoClass = 18;
+            private const int ErrorFileNotFound = 2;
+            private const int ErrorPathNotFound = 3;
+
+            public static SetupManagedObservation Read(
+                string path,
+                Action<ManagedFileReadStage>? readHook)
+            {
+                var ancestors = new List<SafeFileHandle>();
+                var ancestorPaths = new List<string>();
+                try
+                {
+                    var fullPath = Path.GetFullPath(path);
+                    var root = Path.GetPathRoot(fullPath);
+                    if (string.IsNullOrEmpty(root))
+                    {
+                        return SetupManagedObservation.Failed;
+                    }
+
+                    var components = fullPath[root.Length..]
+                        .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+                    if (components.Length == 0)
+                    {
+                        return SetupManagedObservation.Failed;
+                    }
+
+                    var current = root;
+                    var rootObservation = OpenDirectory(current, out var rootHandle);
+                    if (rootObservation is not null)
+                    {
+                        return rootObservation;
+                    }
+
+                    ancestors.Add(rootHandle!);
+                    ancestorPaths.Add(current);
+                    for (var index = 0; index < components.Length - 1; index++)
+                    {
+                        current = Path.Combine(current, components[index]);
+                        var observation = OpenDirectory(current, out var directoryHandle);
+                        if (observation is not null)
+                        {
+                            return observation;
+                        }
+
+                        ancestors.Add(directoryHandle!);
+                        ancestorPaths.Add(current);
+                    }
+
+                    readHook?.Invoke(ManagedFileReadStage.AncestorsOpened);
+                    using var fileHandle = CreateFile(
+                        fullPath,
+                        GenericRead,
+                        FileShareRead,
+                        IntPtr.Zero,
+                        OpenExisting,
+                        OpenReparsePoint | BackupSemantics,
+                        IntPtr.Zero);
+                    if (fileHandle.IsInvalid)
+                    {
+                        return MissingOrFailed(Marshal.GetLastPInvokeError());
+                    }
+
+                    if (!TryGetAttributes(fileHandle, out var attributes) ||
+                        !IsWindowsManagedRegularFile(attributes, GetFileType(fileHandle)))
+                    {
+                        return SetupManagedObservation.Failed;
+                    }
+
+                    readHook?.Invoke(ManagedFileReadStage.FileOpened);
+                    if (!AncestryStillMatches(ancestorPaths, ancestors))
+                    {
+                        return SetupManagedObservation.Failed;
+                    }
+
+                    return ReadOpenedFile(fileHandle);
+                }
+                finally
+                {
+                    for (var index = ancestors.Count - 1; index >= 0; index--)
+                    {
+                        ancestors[index].Dispose();
+                    }
+                }
+            }
+
+            private static SetupManagedObservation? OpenDirectory(
+                string path,
+                out SafeFileHandle? handle)
+            {
+                handle = CreateFile(
+                    path,
+                    FileReadAttributes,
+                    FileShareRead | FileShareWrite,
+                    IntPtr.Zero,
+                    OpenExisting,
+                    OpenReparsePoint | BackupSemantics,
+                    IntPtr.Zero);
+                if (handle.IsInvalid)
+                {
+                    var observation = MissingOrFailed(Marshal.GetLastPInvokeError());
+                    handle.Dispose();
+                    handle = null;
+                    return observation;
+                }
+
+                if (!TryGetAttributes(handle, out var attributes) ||
+                    (attributes & FileAttributes.ReparsePoint) != 0 ||
+                    (attributes & FileAttributes.Directory) == 0 ||
+                    GetFileType(handle) != 1)
+                {
+                    handle.Dispose();
+                    handle = null;
+                    return SetupManagedObservation.Failed;
+                }
+
+                return null;
+            }
+
+            private static bool AncestryStillMatches(
+                IReadOnlyList<string> paths,
+                IReadOnlyList<SafeFileHandle> originalHandles)
+            {
+                var verificationHandles = new List<SafeFileHandle>();
+                try
+                {
+                    for (var index = 0; index < paths.Count; index++)
+                    {
+                        if (OpenDirectory(paths[index], out var verificationHandle) is not null)
+                        {
+                            return false;
+                        }
+
+                        verificationHandles.Add(verificationHandle!);
+                        if (!TryGetIdentity(originalHandles[index], out var originalIdentity) ||
+                            !TryGetIdentity(verificationHandle!, out var verificationIdentity) ||
+                            originalIdentity != verificationIdentity)
+                        {
+                            return false;
+                        }
+                    }
+
+                    return true;
+                }
+                finally
+                {
+                    for (var index = verificationHandles.Count - 1; index >= 0; index--)
+                    {
+                        verificationHandles[index].Dispose();
+                    }
+                }
+            }
+
+            private static bool TryGetAttributes(SafeFileHandle handle, out FileAttributes attributes)
+            {
+                var succeeded = GetFileInformationByHandleEx(
+                    handle,
+                    FileAttributeTagInfoClass,
+                    out FileAttributeTagInfo information,
+                    (uint)Marshal.SizeOf<FileAttributeTagInfo>());
+                attributes = succeeded ? (FileAttributes)information.FileAttributes : 0;
+                return succeeded;
+            }
+
+            private static bool TryGetIdentity(SafeFileHandle handle, out FileIdentity identity)
+            {
+                var succeeded = GetFileInformationByHandleEx(
+                    handle,
+                    FileIdInfoClass,
+                    out FileIdInfo information,
+                    (uint)Marshal.SizeOf<FileIdInfo>());
+                identity = succeeded
+                    ? new FileIdentity(
+                        information.VolumeSerialNumber,
+                        information.IdentifierLow,
+                        information.IdentifierHigh)
+                    : default;
+                return succeeded;
+            }
+
+            private static SetupManagedObservation MissingOrFailed(int error) =>
+                error is ErrorFileNotFound or ErrorPathNotFound
+                    ? SetupManagedObservation.Absent
+                    : SetupManagedObservation.Failed;
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct FileAttributeTagInfo
+            {
+                public uint FileAttributes;
+                public uint ReparseTag;
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct FileIdInfo
+            {
+                public ulong VolumeSerialNumber;
+                public ulong IdentifierLow;
+                public ulong IdentifierHigh;
+            }
+
+            private readonly record struct FileIdentity(
+                ulong VolumeSerialNumber,
+                ulong IdentifierLow,
+                ulong IdentifierHigh);
+
+            [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern SafeFileHandle CreateFile(
+                string fileName,
+                uint desiredAccess,
+                uint shareMode,
+                IntPtr securityAttributes,
+                uint creationDisposition,
+                uint flagsAndAttributes,
+                IntPtr templateFile);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            private static extern bool GetFileInformationByHandleEx(
+                SafeFileHandle file,
+                int fileInformationClass,
+                out FileAttributeTagInfo fileInformation,
+                uint bufferSize);
+
+            [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            private static extern bool GetFileInformationByHandleEx(
+                SafeFileHandle file,
+                int fileInformationClass,
+                out FileIdInfo fileInformation,
+                uint bufferSize);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern uint GetFileType(SafeFileHandle file);
+        }
+
+        private static class LinuxManagedFile
+        {
+            private const long OpenAt2SystemCall = 437;
+            private const int AtCurrentWorkingDirectory = -100;
+            private const int AtEmptyPath = 0x1000;
+            private const ulong OpenCloseOnExec = 0x80000;
+            private const ulong OpenNonBlocking = 0x800;
+            private const ulong OpenNoFollow = 0x20000;
+            private const ulong ResolveNoMagicLinks = 0x02;
+            private const ulong ResolveNoSymbolicLinks = 0x04;
+            private const uint StatxType = 0x00000001;
+            private const int StatxBufferSize = 256;
+            private const int StatxModeOffset = 28;
+            private const int ErrorNoEntry = 2;
+            private const int ErrorNotDirectory = 20;
+
+            public static SetupManagedObservation Read(string path)
+            {
+                var how = new OpenHow
+                {
+                    Flags = OpenCloseOnExec | OpenNonBlocking | OpenNoFollow,
+                    Resolve = ResolveNoMagicLinks | ResolveNoSymbolicLinks,
+                };
+                var descriptor = OpenAt2(
+                    OpenAt2SystemCall,
+                    AtCurrentWorkingDirectory,
+                    path,
+                    ref how,
+                    (nuint)Marshal.SizeOf<OpenHow>());
+                if (descriptor == -1)
+                {
+                    return MissingOrFailed(Marshal.GetLastPInvokeError());
+                }
+
+                using var handle = new SafeFileHandle(descriptor, ownsHandle: true);
+                var buffer = new byte[StatxBufferSize];
+                if (Statx(
+                    checked((int)descriptor),
+                    string.Empty,
+                    AtEmptyPath,
+                    StatxType,
+                    buffer) != 0 ||
+                    !IsUnixManagedRegularFile(BitConverter.ToUInt16(buffer, StatxModeOffset)))
+                {
+                    return SetupManagedObservation.Failed;
+                }
+
+                return ReadOpenedFile(handle);
+            }
+
+            private static SetupManagedObservation MissingOrFailed(int error) =>
+                error is ErrorNoEntry or ErrorNotDirectory
+                    ? SetupManagedObservation.Absent
+                    : SetupManagedObservation.Failed;
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct OpenHow
+            {
+                public ulong Flags;
+                public ulong Mode;
+                public ulong Resolve;
+            }
+
+            [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
+            private static extern nint OpenAt2(
+                long number,
+                int directoryFileDescriptor,
+                [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                ref OpenHow how,
+                nuint size);
+
+            [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+            private static extern int Statx(
+                int directoryFileDescriptor,
+                [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                int flags,
+                uint mask,
+                [Out] byte[] buffer);
+        }
+
+        private static class MacOsManagedFile
+        {
+            private const int OpenReadOnly = 0x0000;
+            private const int OpenNonBlocking = 0x0004;
+            private const int OpenNoFollow = 0x0100;
+            private const int OpenDirectory = 0x00100000;
+            private const int OpenCloseOnExec = 0x01000000;
+            private const int StatBufferSize = 256;
+            private const int StatModeOffset = 4;
+            private const int ErrorNoEntry = 2;
+            private const int ErrorNotDirectory = 20;
+
+            public static SetupManagedObservation Read(string path)
+            {
+                if (!path.StartsWith("/", StringComparison.Ordinal))
+                {
+                    return SetupManagedObservation.Failed;
+                }
+
+                var components = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                if (components.Length == 0 || components.Any(component => component is "." or ".."))
+                {
+                    return SetupManagedObservation.Failed;
+                }
+
+                var ancestors = new List<SafeFileHandle>();
+                try
+                {
+                    var root = Open("/", OpenReadOnly | OpenDirectory | OpenNoFollow | OpenCloseOnExec);
+                    var rootObservation = ValidateDirectory(root, out var rootHandle);
+                    if (rootObservation is not null)
+                    {
+                        return rootObservation;
+                    }
+
+                    ancestors.Add(rootHandle!);
+                    var parent = rootHandle!;
+                    for (var index = 0; index < components.Length - 1; index++)
+                    {
+                        var descriptor = OpenAt(
+                            checked((int)parent.DangerousGetHandle()),
+                            components[index],
+                            OpenReadOnly | OpenDirectory | OpenNoFollow | OpenCloseOnExec);
+                        var observation = ValidateDirectory(descriptor, out var directoryHandle);
+                        if (observation is not null)
+                        {
+                            return observation;
+                        }
+
+                        ancestors.Add(directoryHandle!);
+                        parent = directoryHandle!;
+                    }
+
+                    var fileDescriptor = OpenAt(
+                        checked((int)parent.DangerousGetHandle()),
+                        components[^1],
+                        OpenReadOnly | OpenNonBlocking | OpenNoFollow | OpenCloseOnExec);
+                    if (fileDescriptor == -1)
+                    {
+                        return MissingOrFailed(Marshal.GetLastPInvokeError());
+                    }
+
+                    using var fileHandle = new SafeFileHandle(fileDescriptor, ownsHandle: true);
+                    if (!TryReadMode(fileDescriptor, out var mode) || !IsUnixManagedRegularFile(mode))
+                    {
+                        return SetupManagedObservation.Failed;
+                    }
+
+                    return ReadOpenedFile(fileHandle);
+                }
+                finally
+                {
+                    for (var index = ancestors.Count - 1; index >= 0; index--)
+                    {
+                        ancestors[index].Dispose();
+                    }
+                }
+            }
+
+            private static SetupManagedObservation? ValidateDirectory(
+                int descriptor,
+                out SafeFileHandle? handle)
+            {
+                if (descriptor == -1)
+                {
+                    handle = null;
+                    return MissingOrFailed(Marshal.GetLastPInvokeError());
+                }
+
+                handle = new SafeFileHandle(descriptor, ownsHandle: true);
+                if (!TryReadMode(descriptor, out var mode) || (mode & 0xf000) != 0x4000)
+                {
+                    handle.Dispose();
+                    handle = null;
+                    return SetupManagedObservation.Failed;
+                }
+
+                return null;
+            }
+
+            private static bool TryReadMode(int descriptor, out uint mode)
+            {
+                var buffer = new byte[StatBufferSize];
+                var succeeded = FStat(descriptor, buffer) == 0;
+                mode = succeeded ? BitConverter.ToUInt16(buffer, StatModeOffset) : 0u;
+                return succeeded;
+            }
+
+            private static SetupManagedObservation MissingOrFailed(int error) =>
+                error is ErrorNoEntry or ErrorNotDirectory
+                    ? SetupManagedObservation.Absent
+                    : SetupManagedObservation.Failed;
+
+            [DllImport("libSystem.B.dylib", EntryPoint = "open", SetLastError = true)]
+            private static extern int Open(
+                [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                int flags);
+
+            [DllImport("libSystem.B.dylib", EntryPoint = "openat", SetLastError = true)]
+            private static extern int OpenAt(
+                int directoryFileDescriptor,
+                [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                int flags);
+
+            [DllImport("libSystem.B.dylib", EntryPoint = "fstat", SetLastError = true)]
+            private static extern int FStat(int fileDescriptor, [Out] byte[] buffer);
         }
 
         private static SetupManagedObservation ReadMacOsPreferences(string domain, string? keyPrefix)
@@ -867,8 +1418,17 @@ public sealed class SystemSetupPlatform : ISetupPlatform
                             continue;
                         }
 
-                        if (!TryReadString(key, 256, out var name) ||
-                            keyPrefix is not null && !name.StartsWith(keyPrefix, StringComparison.Ordinal))
+                        var nameWasRead = TryReadString(key, 256, out var name);
+                        if (!TryClassifyMacOsManagedPreferenceKey(
+                            nameWasRead,
+                            name,
+                            keyPrefix,
+                            out var shouldRead))
+                        {
+                            return SetupManagedObservation.Failed;
+                        }
+
+                        if (!shouldRead)
                         {
                             continue;
                         }
@@ -1042,11 +1602,22 @@ public sealed class SystemSetupPlatform : ISetupPlatform
         }
     }
 
-    private sealed class SystemSetupHttpProbe : ISetupHttpProbe
+    internal sealed class SystemSetupHttpProbe : ISetupHttpProbe, IDisposable
     {
-        private static readonly HttpClient Client = CreateClient();
+        private static readonly HttpClient Client = CreateClient(proxy: null);
+        private readonly HttpClient client;
+        private readonly bool ownsClient;
 
-        public static SystemSetupHttpProbe Instance { get; } = new();
+        private SystemSetupHttpProbe(HttpClient client, bool ownsClient)
+        {
+            this.client = client;
+            this.ownsClient = ownsClient;
+        }
+
+        public static SystemSetupHttpProbe Instance { get; } = new(Client, ownsClient: false);
+
+        internal static SystemSetupHttpProbe Create(IWebProxy proxy) =>
+            new(CreateClient(proxy), ownsClient: true);
 
         public SetupHttpProbeObservation Get(
             string origin,
@@ -1080,14 +1651,14 @@ public sealed class SystemSetupPlatform : ISetupPlatform
             }
         }
 
-        private static async Task<SetupHttpProbeObservation> GetCoreAsync(
+        private async Task<SetupHttpProbeObservation> GetCoreAsync(
             Uri requestUri,
             int totalBudgetMilliseconds,
             int maxBodyBytes)
         {
             using var budget = new CancellationTokenSource(totalBudgetMilliseconds);
             using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
-            using var response = await Client.SendAsync(
+            using var response = await client.SendAsync(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
                 budget.Token);
@@ -1169,18 +1740,28 @@ public sealed class SystemSetupPlatform : ISetupPlatform
             return false;
         }
 
-        private static HttpClient CreateClient()
+        private static HttpClient CreateClient(IWebProxy? proxy)
         {
             var handler = new SocketsHttpHandler
             {
                 AllowAutoRedirect = false,
                 ConnectTimeout = Timeout.InfiniteTimeSpan,
+                Proxy = proxy,
                 UseCookies = false,
+                UseProxy = false,
             };
             return new HttpClient(handler, disposeHandler: true)
             {
                 Timeout = Timeout.InfiniteTimeSpan,
             };
+        }
+
+        public void Dispose()
+        {
+            if (ownsClient)
+            {
+                client.Dispose();
+            }
         }
     }
 

@@ -1,3 +1,9 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Runtime.Versioning;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Win32;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 
@@ -185,6 +191,318 @@ public sealed class GitHubCopilotDetectionTests
         Assert.Equal(expected, path);
     }
 
+    [Fact]
+    public async Task SystemHttpProbe_ConfiguredProxy_IsNeverConsultedForLoopbackTarget()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var endpoint = (IPEndPoint)listener.LocalEndpoint;
+        var origin = $"http://127.0.0.1:{endpoint.Port}";
+        var responseTask = RespondOnceAsync(listener);
+        var proxy = new RecordingProxy(new Uri(origin));
+        using var probe = SystemSetupPlatform.CreateHttpProbe(proxy);
+
+        var observation = await Task.Run(() => probe.Get(origin, "/health/live", 5000, 16));
+        await responseTask;
+
+        Assert.Equal(SetupHttpProbeOutcome.Response, observation.Outcome);
+        Assert.Equal(200, observation.StatusCode);
+        Assert.Equal("ok", Encoding.ASCII.GetString(observation.Body));
+        Assert.Equal(0, proxy.ConsultationCount);
+    }
+
+    [Fact]
+    public void SystemManagedFile_WindowsChangedAncestry_FailsClosed()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), $"setup-managed-{Guid.NewGuid():N}");
+        var managedDirectory = Path.Combine(root, "GitHubCopilot");
+        var managedFile = Path.Combine(managedDirectory, "managed-settings.json");
+        var movedDirectory = Path.Combine(root, "moved");
+        var ancestryChanged = false;
+        var ancestryChangeBlocked = false;
+        try
+        {
+            Directory.CreateDirectory(managedDirectory);
+            File.WriteAllBytes(managedFile, [0x41]);
+            var source = SystemSetupPlatform.CreateManagedSettingsSource(
+                root,
+                stage =>
+                {
+                    if (stage == SystemSetupPlatform.ManagedFileReadStage.AncestorsOpened)
+                    {
+                        ancestryChangeBlocked = ReplacementWasBlocked(
+                            () => Directory.Move(managedDirectory, movedDirectory));
+                        if (!ancestryChangeBlocked)
+                        {
+                            Directory.CreateDirectory(managedDirectory);
+                            File.WriteAllBytes(managedFile, [0x42]);
+                            ancestryChanged = true;
+                        }
+                    }
+                });
+
+            var observation = source.Read(SetupManagedLocation.GitHubCopilotFileWindows);
+
+            Assert.True(ancestryChanged || ancestryChangeBlocked);
+            if (ancestryChanged)
+            {
+                Assert.Equal(SetupManagedObservation.Failed, observation);
+            }
+            else
+            {
+                Assert.Equal(SetupManagedOutcome.Present, observation.Outcome);
+                Assert.Equal([0x41], observation.Bytes);
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SystemManagedFile_WindowsReadsOpenedIdentityWithMaxPlusSentinel()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), $"setup-managed-{Guid.NewGuid():N}");
+        var managedDirectory = Path.Combine(root, "GitHubCopilot");
+        var managedFile = Path.Combine(managedDirectory, "managed-settings.json");
+        var replacement = Path.Combine(root, "replacement.json");
+        var replacementAttempted = false;
+        try
+        {
+            Directory.CreateDirectory(managedDirectory);
+            File.WriteAllBytes(managedFile, Enumerable.Repeat((byte)0x41, (64 * 1024) + 2).ToArray());
+            File.WriteAllBytes(replacement, [0x42]);
+            var source = SystemSetupPlatform.CreateManagedSettingsSource(
+                root,
+                stage =>
+                {
+                    if (stage == SystemSetupPlatform.ManagedFileReadStage.FileOpened)
+                    {
+                        replacementAttempted = true;
+                        _ = ReplacementWasBlocked(() => File.Move(replacement, managedFile, overwrite: true));
+                    }
+                });
+
+            var observation = source.Read(SetupManagedLocation.GitHubCopilotFileWindows);
+
+            Assert.True(replacementAttempted);
+            Assert.Equal(SetupManagedOutcome.Present, observation.Outcome);
+            Assert.False(observation.IsComplete);
+            Assert.Equal((64 * 1024) + 1, observation.Bytes.Length);
+            Assert.All(observation.Bytes, value => Assert.Equal(0x41, value));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData((int)FileAttributes.Normal, 1u, true)]
+    [InlineData((int)FileAttributes.ReparsePoint, 1u, false)]
+    [InlineData((int)FileAttributes.Directory, 1u, false)]
+    [InlineData((int)FileAttributes.Normal, 2u, false)]
+    public void SystemManagedFile_WindowsHandleClassification_RequiresNonReparseDiskRegularFile(
+        int attributes,
+        uint fileType,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            SystemSetupPlatform.IsWindowsManagedRegularFile((FileAttributes)attributes, fileType));
+    }
+
+    [Theory]
+    [InlineData(0x8000u, true)]
+    [InlineData(0x1000u, false)]
+    [InlineData(0x2000u, false)]
+    [InlineData(0x4000u, false)]
+    [InlineData(0x6000u, false)]
+    [InlineData(0xA000u, false)]
+    [InlineData(0xC000u, false)]
+    public void SystemManagedFile_UnixHandleClassification_RequiresRegularFile(uint mode, bool expected)
+    {
+        Assert.Equal(expected, SystemSetupPlatform.IsUnixManagedRegularFile(mode));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void SystemRegistry_ValueCountAboveBound_FailsBeforeReadingNames()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var namesRead = false;
+
+        var observation = SystemSetupPlatform.ReadBoundedRegistryValues(
+            257,
+            () =>
+            {
+                namesRead = true;
+                return [];
+            },
+            _ => RegistryValueKind.DWord,
+            (_, _) => 1,
+            valuePrefix: null);
+
+        Assert.Equal(SetupManagedObservation.Failed, observation);
+        Assert.False(namesRead);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void SystemRegistry_MaximumValueCount_IsReadWithDoNotExpandOption()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var names = Enumerable.Range(0, 256).Select(index => $"value-{index:D3}").ToArray();
+        var observedOptions = new List<RegistryValueOptions>();
+
+        var observation = SystemSetupPlatform.ReadBoundedRegistryValues(
+            names.Length,
+            () => names,
+            _ => RegistryValueKind.DWord,
+            (_, options) =>
+            {
+                observedOptions.Add(options);
+                return 1;
+            },
+            valuePrefix: null);
+
+        Assert.Equal(SetupManagedOutcome.Present, observation.Outcome);
+        Assert.True(observation.IsComplete);
+        Assert.Equal(256, observedOptions.Count);
+        Assert.All(observedOptions, option => Assert.Equal(RegistryValueOptions.DoNotExpandEnvironmentNames, option));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void SystemRegistry_SupportedKinds_RetainTypesAndExpandStringText()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var values = new Dictionary<string, (RegistryValueKind Kind, object Value)>(StringComparer.Ordinal)
+        {
+            ["binary"] = (RegistryValueKind.Binary, new byte[] { 1, 2, 3 }),
+            ["dword"] = (RegistryValueKind.DWord, 7),
+            ["expand"] = (RegistryValueKind.ExpandString, "%UNEXPANDED%"),
+            ["multi"] = (RegistryValueKind.MultiString, new[] { "a", "b" }),
+            ["qword"] = (RegistryValueKind.QWord, 9L),
+            ["string"] = (RegistryValueKind.String, "text"),
+        };
+
+        var observation = SystemSetupPlatform.ReadBoundedRegistryValues(
+            values.Count,
+            () => values.Keys.ToArray(),
+            name => values[name].Kind,
+            (name, options) =>
+            {
+                Assert.Equal(RegistryValueOptions.DoNotExpandEnvironmentNames, options);
+                return values[name].Value;
+            },
+            valuePrefix: null);
+
+        Assert.Equal(SetupManagedOutcome.Present, observation.Outcome);
+        using var json = JsonDocument.Parse(observation.Bytes);
+        Assert.Equal("AQID", json.RootElement.GetProperty("binary").GetString());
+        Assert.Equal(7, json.RootElement.GetProperty("dword").GetInt32());
+        Assert.Equal("%UNEXPANDED%", json.RootElement.GetProperty("expand").GetString());
+        Assert.Equal(["a", "b"], json.RootElement.GetProperty("multi").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(9, json.RootElement.GetProperty("qword").GetInt64());
+        Assert.Equal("text", json.RootElement.GetProperty("string").GetString());
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void SystemRegistry_UnsupportedValueKind_FailsClosed()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var observation = SystemSetupPlatform.ReadBoundedRegistryValues(
+            1,
+            () => ["unsupported"],
+            _ => RegistryValueKind.None,
+            (_, _) => new byte[] { 1 },
+            valuePrefix: null);
+
+        Assert.Equal(SetupManagedObservation.Failed, observation);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void SystemRegistry_OverlongName_FailsBeforeReadingKindOrValue()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var kindRead = false;
+        var valueRead = false;
+        var observation = SystemSetupPlatform.ReadBoundedRegistryValues(
+            1,
+            () => [new string('a', 257)],
+            _ =>
+            {
+                kindRead = true;
+                return RegistryValueKind.String;
+            },
+            (_, _) =>
+            {
+                valueRead = true;
+                return "value";
+            },
+            valuePrefix: null);
+
+        Assert.Equal(SetupManagedObservation.Failed, observation);
+        Assert.False(kindRead);
+        Assert.False(valueRead);
+    }
+
+    [Theory]
+    [InlineData(false, "", "CopilotOtel", false, false)]
+    [InlineData(true, "Unrelated", "CopilotOtel", true, false)]
+    [InlineData(true, "CopilotOtelEndpoint", "CopilotOtel", true, true)]
+    [InlineData(true, "AnyManagedKey", null, true, true)]
+    public void SystemMacOsManagedPreferenceKey_ForcedNameDisposition_FailsSkipsOrReads(
+        bool nameWasRead,
+        string name,
+        string? prefix,
+        bool expectedSuccess,
+        bool expectedShouldRead)
+    {
+        var success = SystemSetupPlatform.TryClassifyMacOsManagedPreferenceKey(
+            nameWasRead,
+            name,
+            prefix,
+            out var shouldRead);
+
+        Assert.Equal(expectedSuccess, success);
+        Assert.Equal(expectedShouldRead, shouldRead);
+    }
+
     private static SetupTestPlatform CreatePlatform(SetupPlanningOs planningOs) => planningOs switch
     {
         SetupPlanningOs.Windows => new SetupTestPlatform(
@@ -219,4 +537,61 @@ public sealed class GitHubCopilotDetectionTests
             fileName,
             arguments,
             new SetupProcessObservation(SetupProcessOutcome.Completed, 0, output));
+
+    private static async Task RespondOnceAsync(TcpListener listener)
+    {
+        using var client = await listener.AcceptTcpClientAsync();
+        await using var stream = client.GetStream();
+        var request = new byte[4096];
+        var length = 0;
+        while (length < request.Length && !HasHeaderTerminator(request.AsSpan(0, length)))
+        {
+            var read = await stream.ReadAsync(request.AsMemory(length, request.Length - length));
+            if (read == 0)
+            {
+                break;
+            }
+
+            length += read;
+        }
+
+        var response = Encoding.ASCII.GetBytes(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        await stream.WriteAsync(response);
+    }
+
+    private static bool HasHeaderTerminator(ReadOnlySpan<byte> bytes) =>
+        bytes.IndexOf("\r\n\r\n"u8) >= 0;
+
+    private static bool ReplacementWasBlocked(Action replacement)
+    {
+        try
+        {
+            replacement();
+            return false;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
+    private sealed class RecordingProxy(Uri destination) : IWebProxy
+    {
+        public int ConsultationCount { get; private set; }
+
+        public ICredentials? Credentials { get; set; }
+
+        public Uri GetProxy(Uri destinationUri)
+        {
+            ConsultationCount++;
+            return destination;
+        }
+
+        public bool IsBypassed(Uri host)
+        {
+            ConsultationCount++;
+            return false;
+        }
+    }
 }
