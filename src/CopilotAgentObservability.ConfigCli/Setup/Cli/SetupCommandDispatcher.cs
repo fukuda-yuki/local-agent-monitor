@@ -228,15 +228,26 @@ internal sealed class SetupCommandDispatcher
             try
             {
                 plan = planStore.Load(changeSetId);
-                if (plan is null)
-                {
-                    return Validate(ApplyFailure(
-                        SetupCodes.RecoveryRequired,
-                        correlationId,
-                        changeSet.Adapter));
-                }
+            }
+            catch (Exception exception) when (
+                exception is SetupStorageException or FormatException or ArgumentException or InvalidOperationException)
+            {
+                return Validate(ApplyFailure(
+                    SetupCodes.RecoveryRequired,
+                    correlationId,
+                    changeSet.Adapter));
+            }
 
-                SetupStorageValidation.ValidatePlan(plan);
+            if (plan is null)
+            {
+                return Validate(ApplyFailure(
+                    SetupCodes.RecoveryRequired,
+                    correlationId,
+                    changeSet.Adapter));
+            }
+
+            try
+            {
                 SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
             }
             catch (Exception exception) when (
