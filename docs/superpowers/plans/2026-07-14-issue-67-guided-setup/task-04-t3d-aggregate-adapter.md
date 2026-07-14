@@ -33,9 +33,13 @@ as the first real all-partition producer/consumer integration gate; do not add
 a second public DTO producer.
 
 **Interfaces:**
+- Frozen constructor (internal):
+  `GitHubCopilotSetupAdapter(ISetupPlatform platform,
+  IReadOnlyList<IGitHubCopilotTargetPartition> partitions)`.
 - Consumes: `ISetupAdapter` (frozen T2b contract: `AdapterId`,
   `Plan(SetupPlanRequest)`, `Revalidate(SetupPrivatePlan, SetupLedgerChangeSet)`),
-  `GitHubCopilotDetection.Observe`, `GitHubCopilotManagedPolicyResolver.Resolve`,
+  the injected `ISetupPlatform`, `GitHubCopilotDetection.Observe`,
+  `GitHubCopilotManagedPolicyResolver.Resolve`,
   `GitHubCopilotEndpointProbe.Classify`,
   `SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget)`.
 - Produces (FROZEN partition seam — T4/T5/T6 implement this and nothing
@@ -101,8 +105,9 @@ internal sealed record GitHubCopilotPartitionPlan(
 
 **Early compatibility evidence (skeletal, non-gating):** Add to the already
 owned `GitHubCopilotSetupAdapterTests.cs` scope one test that registers the real
-aggregate `GitHubCopilotSetupAdapter`, backed by scripted partitions, in the
-real #66 registry/dispatcher Plan path. Serialize the returned real
+aggregate `GitHubCopilotSetupAdapter`, constructed with an injected
+`SetupTestPlatform` and backed by scripted partitions, in the real #66
+registry/dispatcher Plan path. Serialize the returned real
 `SetupCommandResult` with `SetupJson` and assert adapter/carrier/manifest/result
 serialization compatibility and that no second public DTO producer exists.
 This smoke test is type/carrier evidence only; it is not an integration
@@ -142,8 +147,12 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
   assertions (adapter-attached manifest equals the loader's canonical
   manifest for both surfaces; App/SDK null).
 
-- [ ] **Step 5: Implement `GitHubCopilotSetupAdapter`** implementing
-  `ISetupAdapter` over an injected `IReadOnlyList<IGitHubCopilotTargetPartition>`.
+- [ ] **Step 5: Implement `GitHubCopilotSetupAdapter`** with the frozen
+  constructor, implementing `ISetupAdapter` over the injected platform and
+  `IReadOnlyList<IGitHubCopilotTargetPartition>`. For each adapter operation,
+  call `GitHubCopilotDetection.Observe` exactly once and
+  `GitHubCopilotEndpointProbe.Classify` exactly once, then build one shared
+  `GitHubCopilotPartitionContext` passed to the selected partition(s).
   Build `SetupChangePlan` via `SetupPlanResult.Planned(...)` so snapshotting
   and target derivation reuse the frozen T2 helpers. The adapter never
   catches-and-rewrites partition exceptions into diagnostics — an unexpected

@@ -21,19 +21,24 @@ originating owner (T2–T6 task) and its downstream gates; T7 does not patch
 around it.
 
 **Interfaces:**
-- Consumes: `GitHubCopilotSetupAdapter(IReadOnlyList<IGitHubCopilotTargetPartition>)`,
-  the three partitions, `SetupAdapterRegistry`, the production
+- Consumes: the frozen internal constructor
+  `GitHubCopilotSetupAdapter(ISetupPlatform platform,
+  IReadOnlyList<IGitHubCopilotTargetPartition> partitions)`, the three
+  partitions, `SetupAdapterRegistry`, the production
   `SetupCommandDispatcher` constructor (platform, paths, stores, registry,
   tool version), and the T2d `CliApplication.Run(args, output, error, setupDispatcher)`
-  injection seam.
+  injection seam. `SetupCompositionRoot` constructs one `ISetupPlatform`
+  instance and passes that exact same instance to both the aggregate adapter
+  and the production dispatcher/runtime wiring; it must not construct a second
+  platform.
 - Produces:
 
 ```csharp
 internal static class SetupCompositionRoot
 {
-    // The one production wiring: SystemSetupPlatform -> runtime paths ->
-    // stores -> three partitions -> one aggregate adapter -> registry ->
-    // production dispatcher -> dispatch delegate for CliApplication.
+    // The one production wiring: one shared SystemSetupPlatform instance ->
+    // runtime paths -> stores -> three partitions -> one aggregate adapter ->
+    // registry -> production dispatcher -> dispatch delegate for CliApplication.
     public static Func<SetupOptions, SetupCommandResult> CreateSetupDispatch();
 }
 ```
@@ -53,12 +58,13 @@ HTTP/proxy/UI remain N/A.
 
 - [ ] **Step 1: Write the failing composition tests** in
   `ConfigurationSetupIntegrationTests` — integration style: real
-  `SetupCompositionRoot` wiring over an isolated runtime root and a
-  deterministic test platform seam for OS-specific observation (decide the
-  seam: either an internal `CreateSetupDispatch(ISetupPlatform)` overload
-  used by tests with the public parameterless one delegating to
-  `SystemSetupPlatform`, and record the choice — the PUBLIC path must be
-  covered by at least one real-platform smoke case that needs no
+  `SetupCompositionRoot` wiring over an isolated runtime root and an injected
+  `SetupTestPlatform` seam for OS-specific observation (decide the seam:
+  either an internal `CreateSetupDispatch(ISetupPlatform)` overload used by
+  tests with the public parameterless one delegating to
+  `SystemSetupPlatform`, and record the choice; the overload must pass that
+  injected platform instance to both the aggregate adapter and dispatcher).
+  The PUBLIC path must be covered by at least one real-platform smoke case that needs no
   VS Code/CLI installed, e.g. `setup status` on an empty root).
 
   Include the mandatory deferred wrapper-success test: invoke `setup status`
