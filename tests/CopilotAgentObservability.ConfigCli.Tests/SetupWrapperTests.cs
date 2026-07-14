@@ -50,8 +50,8 @@ public sealed class SetupWrapperTests
     }
 
     [Theory]
-    [MemberData(nameof(RecognizedActionArguments))]
-    public async Task SetupWrapper_ForwardsEveryRecognizedActionName(string[] actionArguments)
+    [MemberData(nameof(AdditionalRecognizedActionArguments))]
+    public async Task SetupWrapper_ForwardsPlanAndRollbackActionNames(string[] actionArguments)
     {
         using var runtime = new TemporaryRuntimeRoot();
 
@@ -63,12 +63,10 @@ public sealed class SetupWrapperTests
         Assert.Equal(direct.ExitCode, wrapper.ExitCode);
     }
 
-    public static TheoryData<string[]> RecognizedActionArguments => new()
+    public static TheoryData<string[]> AdditionalRecognizedActionArguments => new()
     {
         { ["plan", "--adapter", "github-copilot", "--target", "vscode"] },
-        { ["apply", "--change-set", "00000000-0000-7000-8000-000000000001"] },
         { ["rollback", "--change-set", "00000000-0000-7000-8000-000000000001"] },
-        { ["status"] },
     };
 
     private static async Task<ProcessResult> RunConfigCliAsync(string runtimeRoot, params string[] actionArguments)
