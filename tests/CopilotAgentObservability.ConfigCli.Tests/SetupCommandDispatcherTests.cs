@@ -505,27 +505,287 @@ public sealed class SetupCommandDispatcherTests
         Assert.DoesNotContain("future_", json, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData(SetupCommand.Rollback)]
-    [InlineData(SetupCommand.Status)]
-    public void Dispatch_UnimplementedRollbackOrStatusUsesValidatorValidFixedGuardWithoutLocking(SetupCommand command)
+    [Fact]
+    public void Dispatch_UnimplementedStatusUsesValidatorValidFixedGuardWithoutLocking()
     {
         var adapter = new RecordingAdapter("test-adapter", _ => throw new InvalidOperationException("adapter must not run"));
         var fixture = DispatcherFixture.Create(adapter, _ => throw new InvalidOperationException("recovery must not run"));
-        var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000701");
-        var options = command switch
-        {
-            SetupCommand.Apply or SetupCommand.Rollback => new SetupOptions(command, null, null, null, false, changeSetId),
-            _ => new SetupOptions(command, "test-adapter", null, null, false, null),
-        };
+        var options = new SetupOptions(SetupCommand.Status, "test-adapter", null, null, false, null);
 
         var result = fixture.Dispatcher.Dispatch(options);
 
         Assert.False(result.Success);
         Assert.Equal(SetupCodes.InternalError, result.Code);
-        Assert.Equal(command, result.Command);
+        Assert.Equal(SetupCommand.Status, result.Command);
         Assert.DoesNotContain(fixture.Platform.Operations, operation =>
             operation == $"file.lock:{fixture.Paths.Lock}");
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchRollback_AppliedRowDelegatesToCoordinatorAndMapsSuccess()
+    {
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var secondRecordId = Guid.Parse("00000000-0000-7000-8000-000000000102");
+        var trusted = CreateRollbackChangeSet(
+            changeSetId,
+            SetupCodes.RollbackSucceeded,
+            [CreateOwnedApplyTarget(secondRecordId), CreateOwnedApplyTarget(RecordId)]);
+        var recoveryCalls = 0;
+        var rollbackCalls = 0;
+        var dispatcher = CreateRollbackDispatcher(
+            fixture,
+            _ =>
+            {
+                recoveryCalls++;
+                return NoRecovery();
+            },
+            (_, requestedId) =>
+            {
+                rollbackCalls++;
+                Assert.Equal(changeSetId, requestedId);
+                return new SetupRollbackExecutionResult(
+                    requestedId,
+                    true,
+                    SetupCodes.RollbackSucceeded,
+                    trusted,
+                    null);
+            });
+        var operationCount = fixture.Platform.Operations.Count;
+
+        var result = dispatcher.Dispatch(CreateRollbackOptions(changeSetId));
+
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.RollbackSucceeded, result.Code);
+        Assert.Equal(SetupCommand.Rollback, result.Command);
+        Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Equal("test-adapter", result.Adapter);
+        Assert.Equal([secondRecordId.ToString("D"), RecordId.ToString("D")], result.Targets.Select(target => target.RecordId));
+        Assert.All(result.Targets, target => Assert.False(target.RollbackAvailable));
+        Assert.Equal(1, rollbackCalls);
+        Assert.Equal(0, recoveryCalls);
+        Assert.Single(
+            fixture.Platform.Operations.Skip(operationCount),
+            operation => operation == $"file.lock:{fixture.Paths.Lock}");
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchRollback_WhenBusyKeepsRequestedCorrelationAndStopsBeforeDelegates()
+    {
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var recoveryCalls = 0;
+        var rollbackCalls = 0;
+        var dispatcher = CreateRollbackDispatcher(
+            fixture,
+            _ =>
+            {
+                recoveryCalls++;
+                return NoRecovery();
+            },
+            (_, _) =>
+            {
+                rollbackCalls++;
+                throw new InvalidOperationException("rollback must not run");
+            });
+        using var held = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = dispatcher.Dispatch(CreateRollbackOptions(changeSetId));
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.SetupBusy, result.Code);
+        Assert.Equal(SetupCommand.Rollback, result.Command);
+        Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Equal(0, rollbackCalls);
+        Assert.Equal(0, recoveryCalls);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData(SetupCodes.InvalidArguments, false, false)]
+    [InlineData(SetupCodes.RollbackSucceeded, true, true)]
+    [InlineData(SetupCodes.RollbackNotAvailable, false, true)]
+    [InlineData(SetupCodes.RollbackStale, false, true)]
+    [InlineData(SetupCodes.UnsafePath, false, true)]
+    [InlineData(SetupCodes.PartialRollback, false, true)]
+    [InlineData(SetupCodes.RecoveryRequired, false, true)]
+    [InlineData(SetupCodes.InternalError, false, true)]
+    [InlineData(SetupCodes.InterruptedApplyRecovered, true, false)]
+    [InlineData(SetupCodes.InterruptedRollbackRecovered, true, false)]
+    [InlineData(SetupCodes.InterruptedRecoveryFailed, false, false)]
+    [InlineData(SetupCodes.LedgerCorrupt, false, false)]
+    [InlineData(SetupCodes.LedgerVersionUnsupported, false, false)]
+    public void DispatchRollback_EveryCoordinatorCodeUsesItsClosedMapping(
+        string code,
+        bool success,
+        bool projectsTrustedRow)
+    {
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var rollbackCalls = 0;
+        var dispatcher = CreateRollbackDispatcher(
+            fixture,
+            _ => throw new InvalidOperationException("dispatcher recovery must not run"),
+            (_, requestedId) =>
+            {
+                rollbackCalls++;
+                return CreateRollbackExecutionForCode(requestedId, code, projectsTrustedRow);
+            });
+
+        var result = dispatcher.Dispatch(CreateRollbackOptions(changeSetId));
+
+        Assert.Equal(success, result.Success);
+        Assert.Equal(code, result.Code);
+        Assert.Equal(SetupCommand.Rollback, result.Command);
+        Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Equal(projectsTrustedRow ? "test-adapter" : null, result.Adapter);
+        Assert.Equal(projectsTrustedRow ? 1 : 0, result.Targets.Count);
+        Assert.All(result.Targets, target => Assert.False(target.RollbackAvailable));
+        Assert.Equal(1, rollbackCalls);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData(SetupCodes.RecoveryRequired)]
+    [InlineData(SetupCodes.InternalError)]
+    public void DispatchRollback_UntrustedIdentityFailureKeepsCodeAndReturnsEmptyProjection(string code)
+    {
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var dispatcher = CreateRollbackDispatcher(
+            fixture,
+            _ => throw new InvalidOperationException("dispatcher recovery must not run"),
+            (_, requestedId) => new SetupRollbackExecutionResult(requestedId, false, code, null, null));
+
+        var result = dispatcher.Dispatch(CreateRollbackOptions(changeSetId));
+
+        Assert.False(result.Success);
+        Assert.Equal(code, result.Code);
+        Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.Targets);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData(SetupRecoveryOperation.Apply, SetupCodes.InterruptedApplyRecovered, SetupChangeSetState.Applied)]
+    [InlineData(SetupRecoveryOperation.Rollback, SetupCodes.InterruptedRollbackRecovered, SetupChangeSetState.RolledBack)]
+    public void DispatchRollback_ConsumedRecoveryKeepsRequestedAndRecoveredCorrelationWithRerunAction(
+        SetupRecoveryOperation operation,
+        string code,
+        SetupChangeSetState recoveredState)
+    {
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var requestedId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var recoveredId = Guid.Parse("00000000-0000-7000-8000-000000000711");
+        var dispatcher = CreateRollbackDispatcher(
+            fixture,
+            _ => throw new InvalidOperationException("dispatcher recovery must not run"),
+            (_, _) => new SetupRollbackExecutionResult(
+                requestedId,
+                true,
+                code,
+                null,
+                new SetupRecoveryResult(
+                    SetupRecoveryDisposition.Recovered,
+                    code,
+                    recoveredId,
+                    operation,
+                    CreateRecoveryEvidence(recoveredId, recoveredState, code))));
+
+        var result = dispatcher.Dispatch(CreateRollbackOptions(requestedId));
+
+        Assert.True(result.Success);
+        Assert.Equal(code, result.Code);
+        Assert.Equal(requestedId.ToString("D"), result.ChangeSetId);
+        Assert.Equal(recoveredId.ToString("D"), result.RecoveredChangeSetId);
+        Assert.Equal(operation, result.RecoveryOperation);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Equal([SetupCodes.RerunRequestedSetupCommand], result.NextActions);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData(SetupCodes.InterruptedRecoveryFailed, true)]
+    [InlineData(SetupCodes.RecoveryRequired, false)]
+    public void DispatchRollback_ConsumedFailedRecoveryUsesCanonicalCorrelationRules(
+        string code,
+        bool keepsRecoveredCorrelation)
+    {
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var requestedId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var recoveredId = Guid.Parse("00000000-0000-7000-8000-000000000711");
+        var dispatcher = CreateRollbackDispatcher(
+            fixture,
+            _ => throw new InvalidOperationException("dispatcher recovery must not run"),
+            (_, _) => new SetupRollbackExecutionResult(
+                requestedId,
+                false,
+                code,
+                null,
+                new SetupRecoveryResult(
+                    SetupRecoveryDisposition.Failed,
+                    code,
+                    recoveredId,
+                    SetupRecoveryOperation.Rollback,
+                    CreateRecoveryEvidence(
+                        recoveredId,
+                        SetupChangeSetState.Partial,
+                        SetupCodes.InterruptedRecoveryFailed))));
+
+        var result = dispatcher.Dispatch(CreateRollbackOptions(requestedId));
+
+        Assert.False(result.Success);
+        Assert.Equal(code, result.Code);
+        Assert.Equal(requestedId.ToString("D"), result.ChangeSetId);
+        Assert.Equal(keepsRecoveredCorrelation ? recoveredId.ToString("D") : null, result.RecoveredChangeSetId);
+        Assert.Equal(keepsRecoveredCorrelation ? SetupRecoveryOperation.Rollback : null, result.RecoveryOperation);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.NextActions);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Theory]
+    [InlineData("unknown-code")]
+    [InlineData("success-mismatch")]
+    [InlineData("requested-id-mismatch")]
+    [InlineData("direct-interrupted-code")]
+    [InlineData("success-without-trusted-row")]
+    [InlineData("invalid-arguments-with-trusted-row")]
+    [InlineData("ledger-code-with-trusted-row")]
+    [InlineData("recovery-code-mismatch")]
+    [InlineData("recovery-success-mismatch")]
+    [InlineData("malformed-recovery-evidence")]
+    public void DispatchRollback_MalformedCoordinatorEnvelopeFailsClosedWithoutRawText(string variant)
+    {
+        const string rawMarker = "PRIVATE_ROLLBACK_CODE";
+        var fixture = DispatcherFixture.Create([], _ => NoRecovery());
+        var requestedId = Guid.Parse("00000000-0000-7000-8000-000000000710");
+        var dispatcher = CreateRollbackDispatcher(
+            fixture,
+            _ => throw new InvalidOperationException("dispatcher recovery must not run"),
+            (_, _) => CreateMalformedRollbackExecution(requestedId, variant, rawMarker));
+
+        var result = dispatcher.Dispatch(CreateRollbackOptions(requestedId));
+        var json = SetupJson.Serialize(result);
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.Equal(SetupCommand.Rollback, result.Command);
+        Assert.Equal(requestedId.ToString("D"), result.ChangeSetId);
+        Assert.Null(result.RecoveredChangeSetId);
+        Assert.Null(result.RecoveryOperation);
+        Assert.Null(result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(result.NextActions);
+        Assert.DoesNotContain(rawMarker, json, StringComparison.Ordinal);
         SetupContractValidator.Validate(result);
     }
 
@@ -934,7 +1194,8 @@ public sealed class SetupCommandDispatcherTests
                     [],
                     [SetupCodes.ManagedPolicyUnverified],
                     [SetupCodes.RestartVsCode]);
-            });
+            },
+            (_, _) => throw new InvalidOperationException("rollback must not run"));
 
         var result = dispatcher.Dispatch(CreateApplyOptions(changeSetId));
 
@@ -1639,6 +1900,32 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Fact]
+    public void DispatchRollback_ProductionConstructorInvokesRealCoordinatorForNoChangesRow()
+    {
+        var adapter = new RecordingAdapter("test-adapter", request =>
+            SetupPlanResult.Planned(CreatePlan(
+                request,
+                [CreateGuidanceRecord(RecordId)])));
+        var fixture = DispatcherFixture.CreateProduction(adapter);
+        var planned = fixture.Dispatcher.Dispatch(CreatePlanOptions());
+        var changeSetId = Guid.Parse(planned.ChangeSetId!);
+        var applied = fixture.Dispatcher.Dispatch(CreateApplyOptions(changeSetId));
+
+        var result = fixture.Dispatcher.Dispatch(CreateRollbackOptions(changeSetId));
+
+        Assert.Equal(SetupCodes.NoChanges, applied.Code);
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.RollbackNotAvailable, result.Code);
+        Assert.Equal(SetupCommand.Rollback, result.Command);
+        Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Equal("test-adapter", result.Adapter);
+        Assert.False(Assert.Single(result.Targets).RollbackAvailable);
+        var persisted = Assert.Single(fixture.LedgerStore.Load().ChangeSets);
+        Assert.Equal(SetupCodes.RollbackNotAvailable, persisted.OutcomeCode);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
     public void DispatchPlan_ProductionConstructorReturnsActualInterruptedApplyRecoveryEvidence()
     {
         var platform = new SetupTestPlatform(Timestamp);
@@ -1753,6 +2040,14 @@ public sealed class SetupCommandDispatcherTests
         false,
         changeSetId);
 
+    private static SetupOptions CreateRollbackOptions(Guid changeSetId) => new(
+        SetupCommand.Rollback,
+        null,
+        null,
+        null,
+        false,
+        changeSetId);
+
     private static SetupCommandDispatcher CreateApplyDispatcher(
         DispatcherFixture fixture,
         IEnumerable<ISetupAdapter> adapters,
@@ -1769,7 +2064,8 @@ public sealed class SetupCommandDispatcherTests
         {
             applyCalls.Value++;
             throw new InvalidOperationException("apply must not run");
-        });
+        },
+        (_, _) => throw new InvalidOperationException("rollback must not run"));
 
     private static SetupCommandDispatcher CreateApplyDispatcher(
         DispatcherFixture fixture,
@@ -1783,7 +2079,22 @@ public sealed class SetupCommandDispatcherTests
         new SetupAdapterRegistry(adapters),
         "1.2.3",
         recover,
-        apply);
+        apply,
+        (_, _) => throw new InvalidOperationException("rollback must not run"));
+
+    private static SetupCommandDispatcher CreateRollbackDispatcher(
+        DispatcherFixture fixture,
+        Func<SetupLock, SetupRecoveryResult> recover,
+        Func<SetupLock, Guid, SetupRollbackExecutionResult> rollback) => new(
+        fixture.Platform,
+        fixture.Paths,
+        fixture.PlanStore,
+        fixture.LedgerStore,
+        new SetupAdapterRegistry([]),
+        "1.2.3",
+        recover,
+        (_, _) => throw new InvalidOperationException("apply must not run"),
+        rollback);
 
     private static (
         DispatcherFixture Fixture,
@@ -1831,6 +2142,153 @@ public sealed class SetupCommandDispatcherTests
         SetupCodes.ApplySucceeded,
         SetupChangeSetState.Applied,
         targets);
+
+    private static SetupLedgerChangeSet CreateRollbackChangeSet(
+        Guid changeSetId,
+        string code,
+        IReadOnlyList<SetupLedgerTarget>? targets = null) => CreateApplyChangeSet(
+        targets ?? [CreateOwnedApplyTarget(RecordId)]) with
+        {
+            ChangeSetId = changeSetId,
+            OutcomeCode = code,
+            State = code switch
+            {
+                SetupCodes.RollbackSucceeded => SetupChangeSetState.RolledBack,
+                SetupCodes.PartialRollback => SetupChangeSetState.Partial,
+                _ => SetupChangeSetState.Applied,
+            },
+        };
+
+    private static SetupRollbackExecutionResult CreateRollbackExecutionForCode(
+        Guid requestedId,
+        string code,
+        bool trusted)
+    {
+        var recoveredId = Guid.Parse("00000000-0000-7000-8000-000000000711");
+        if (code is SetupCodes.InterruptedApplyRecovered or SetupCodes.InterruptedRollbackRecovered)
+        {
+            var operation = code == SetupCodes.InterruptedApplyRecovered
+                ? SetupRecoveryOperation.Apply
+                : SetupRecoveryOperation.Rollback;
+            var state = operation == SetupRecoveryOperation.Apply
+                ? SetupChangeSetState.Applied
+                : SetupChangeSetState.RolledBack;
+            return new SetupRollbackExecutionResult(
+                requestedId,
+                true,
+                code,
+                null,
+                new SetupRecoveryResult(
+                    SetupRecoveryDisposition.Recovered,
+                    code,
+                    recoveredId,
+                    operation,
+                    CreateRecoveryEvidence(recoveredId, state, code)));
+        }
+
+        if (code == SetupCodes.InterruptedRecoveryFailed)
+        {
+            return new SetupRollbackExecutionResult(
+                requestedId,
+                false,
+                code,
+                null,
+                new SetupRecoveryResult(
+                    SetupRecoveryDisposition.Failed,
+                    code,
+                    recoveredId,
+                    SetupRecoveryOperation.Rollback,
+                    CreateRecoveryEvidence(
+                        recoveredId,
+                        SetupChangeSetState.Partial,
+                        SetupCodes.InterruptedRecoveryFailed)));
+        }
+
+        return new SetupRollbackExecutionResult(
+            requestedId,
+            code == SetupCodes.RollbackSucceeded,
+            code,
+            trusted ? CreateRollbackChangeSet(requestedId, code) : null,
+            null);
+    }
+
+    private static SetupRollbackExecutionResult CreateMalformedRollbackExecution(
+        Guid requestedId,
+        string variant,
+        string rawMarker)
+    {
+        var otherId = Guid.Parse("00000000-0000-7000-8000-000000000712");
+        var trusted = CreateRollbackChangeSet(requestedId, SetupCodes.RollbackSucceeded);
+        var recoveredId = Guid.Parse("00000000-0000-7000-8000-000000000711");
+        var recovered = new SetupRecoveryResult(
+            SetupRecoveryDisposition.Recovered,
+            SetupCodes.InterruptedApplyRecovered,
+            recoveredId,
+            SetupRecoveryOperation.Apply,
+            CreateRecoveryEvidence(
+                recoveredId,
+                SetupChangeSetState.Applied,
+                SetupCodes.InterruptedApplyRecovered));
+        return variant switch
+        {
+            "unknown-code" => new(requestedId, false, rawMarker, null, null),
+            "success-mismatch" => new(
+                requestedId,
+                false,
+                SetupCodes.RollbackSucceeded,
+                trusted,
+                null),
+            "requested-id-mismatch" => new(
+                otherId,
+                true,
+                SetupCodes.RollbackSucceeded,
+                CreateRollbackChangeSet(otherId, SetupCodes.RollbackSucceeded),
+                null),
+            "direct-interrupted-code" => new(
+                requestedId,
+                true,
+                SetupCodes.InterruptedApplyRecovered,
+                null,
+                null),
+            "success-without-trusted-row" => new(
+                requestedId,
+                true,
+                SetupCodes.RollbackSucceeded,
+                null,
+                null),
+            "invalid-arguments-with-trusted-row" => new(
+                requestedId,
+                false,
+                SetupCodes.InvalidArguments,
+                trusted,
+                null),
+            "ledger-code-with-trusted-row" => new(
+                requestedId,
+                false,
+                SetupCodes.LedgerCorrupt,
+                trusted,
+                null),
+            "recovery-code-mismatch" => new(
+                requestedId,
+                true,
+                SetupCodes.InterruptedRollbackRecovered,
+                null,
+                recovered),
+            "recovery-success-mismatch" => new(
+                requestedId,
+                false,
+                SetupCodes.InterruptedApplyRecovered,
+                null,
+                recovered),
+            "malformed-recovery-evidence" => new(
+                requestedId,
+                true,
+                SetupCodes.InterruptedApplyRecovered,
+                null,
+                recovered with { EffectiveChangeSet = null }),
+            _ => throw new ArgumentOutOfRangeException(nameof(variant), variant, null),
+        };
+    }
 
     private static SetupLedgerTarget CreateOwnedApplyTarget(Guid recordId) => new(
         recordId,
@@ -2212,7 +2670,8 @@ public sealed class SetupCommandDispatcherTests
                 new SetupAdapterRegistry(adapters),
                 "1.2.3",
                 recover,
-                (_, _) => throw new InvalidOperationException("apply must not run"));
+                (_, _) => throw new InvalidOperationException("apply must not run"),
+                (_, _) => throw new InvalidOperationException("rollback must not run"));
             return new DispatcherFixture(platform, paths, planStore, ledgerStore, dispatcher);
         }
 

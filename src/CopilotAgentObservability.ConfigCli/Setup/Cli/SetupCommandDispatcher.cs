@@ -16,6 +16,7 @@ internal sealed class SetupCommandDispatcher
     private readonly string toolVersion;
     private readonly Func<SetupLock, SetupRecoveryResult> recover;
     private readonly Func<SetupLock, Guid, SetupPlanSuccess<SetupLedgerChangeSet>> apply;
+    private readonly Func<SetupLock, Guid, SetupRollbackExecutionResult> rollback;
 
     public SetupCommandDispatcher(
         ISetupPlatform platform,
@@ -44,7 +45,13 @@ internal sealed class SetupCommandDispatcher
                 planStore,
                 ledgerStore,
                 journalStore,
-                adapterRegistry))
+                adapterRegistry),
+            CreateRollback(
+                platform,
+                paths,
+                planStore,
+                ledgerStore,
+                journalStore))
     {
     }
 
@@ -56,7 +63,8 @@ internal sealed class SetupCommandDispatcher
         SetupAdapterRegistry adapterRegistry,
         string toolVersion,
         Func<SetupLock, SetupRecoveryResult> recover,
-        Func<SetupLock, Guid, SetupPlanSuccess<SetupLedgerChangeSet>> apply)
+        Func<SetupLock, Guid, SetupPlanSuccess<SetupLedgerChangeSet>> apply,
+        Func<SetupLock, Guid, SetupRollbackExecutionResult> rollback)
     {
         this.platform = platform ?? throw new ArgumentNullException(nameof(platform));
         this.paths = paths ?? throw new ArgumentNullException(nameof(paths));
@@ -66,6 +74,7 @@ internal sealed class SetupCommandDispatcher
         this.toolVersion = toolVersion ?? throw new ArgumentNullException(nameof(toolVersion));
         this.recover = recover ?? throw new ArgumentNullException(nameof(recover));
         this.apply = apply ?? throw new ArgumentNullException(nameof(apply));
+        this.rollback = rollback ?? throw new ArgumentNullException(nameof(rollback));
     }
 
     private static Func<SetupLock, SetupRecoveryResult> CreateRecovery(
@@ -91,6 +100,19 @@ internal sealed class SetupCommandDispatcher
             journalStore,
             adapterRegistry).Apply;
 
+    private static Func<SetupLock, Guid, SetupRollbackExecutionResult> CreateRollback(
+        ISetupPlatform platform,
+        SetupRuntimePaths paths,
+        SetupPlanStore planStore,
+        SetupLedgerStore ledgerStore,
+        SetupTransactionJournalStore journalStore) =>
+        new SetupRollbackCoordinator(
+            platform,
+            paths,
+            planStore,
+            ledgerStore,
+            journalStore).Rollback;
+
     public SetupCommandResult Dispatch(SetupOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -98,6 +120,7 @@ internal sealed class SetupCommandDispatcher
         {
             SetupCommand.Plan => DispatchPlan(options),
             SetupCommand.Apply => DispatchApply(options),
+            SetupCommand.Rollback => DispatchRollback(options),
             _ => Validate(Unimplemented(options)),
         };
     }
@@ -377,6 +400,196 @@ internal sealed class SetupCommandDispatcher
         }
     }
 
+    private SetupCommandResult DispatchRollback(SetupOptions options)
+    {
+        var changeSetId = options.ChangeSetId!.Value;
+        var correlationId = changeSetId.ToString("D");
+        try
+        {
+            using var acquisition = SetupLock.TryAcquire(platform, paths);
+            if (!acquisition.Acquired)
+            {
+                return Validate(CommandFailure(
+                    SetupCommand.Rollback,
+                    SetupCodes.SetupBusy,
+                    correlationId,
+                    null));
+            }
+
+            var execution = rollback(acquisition.Lock!, changeSetId);
+            return Validate(MapRollbackExecution(execution, changeSetId, correlationId));
+        }
+        catch (SetupStorageException exception)
+        {
+            return Validate(CommandFailure(
+                SetupCommand.Rollback,
+                MapStorageCode(exception.Code),
+                correlationId,
+                null));
+        }
+        catch (Exception)
+        {
+            return Validate(CommandFailure(
+                SetupCommand.Rollback,
+                SetupCodes.InternalError,
+                correlationId,
+                null));
+        }
+    }
+
+    private static SetupCommandResult MapRollbackExecution(
+        SetupRollbackExecutionResult? execution,
+        Guid requestedChangeSetId,
+        string correlationId)
+    {
+        if (execution is null ||
+            execution.RequestedChangeSetId != requestedChangeSetId ||
+            !IsRollbackExecutionCode(execution.Code) ||
+            execution.Success != IsRollbackSuccessCode(execution.Code))
+        {
+            return CommandFailure(
+                SetupCommand.Rollback,
+                SetupCodes.InternalError,
+                correlationId,
+                null);
+        }
+
+        if (execution.Recovery is not null)
+        {
+            return IsValidRollbackRecoveryEnvelope(execution)
+                ? RecoveryResult(
+                    execution.Recovery,
+                    SetupCommand.Rollback,
+                    correlationId,
+                    null)
+                : CommandFailure(
+                    SetupCommand.Rollback,
+                    SetupCodes.InternalError,
+                    correlationId,
+                    null);
+        }
+
+        if (execution.Code is SetupCodes.InterruptedApplyRecovered or
+            SetupCodes.InterruptedRollbackRecovered or
+            SetupCodes.InterruptedRecoveryFailed)
+        {
+            return CommandFailure(
+                SetupCommand.Rollback,
+                SetupCodes.InternalError,
+                correlationId,
+                null);
+        }
+
+        if (execution.Code == SetupCodes.RollbackSucceeded)
+        {
+            return execution.ChangeSet is { } succeeded
+                ? new SetupCommandResult(
+                    SetupCommand.Rollback,
+                    true,
+                    SetupCodes.RollbackSucceeded,
+                    correlationId,
+                    null,
+                    null,
+                    succeeded.Adapter,
+                    ProjectApplyTargets(succeeded, SetupCodes.RollbackSucceeded),
+                    [],
+                    [],
+                    [],
+                    false)
+                : CommandFailure(
+                    SetupCommand.Rollback,
+                    SetupCodes.InternalError,
+                    correlationId,
+                    null);
+        }
+
+        if (execution.Code is SetupCodes.InvalidArguments or
+            SetupCodes.LedgerCorrupt or
+            SetupCodes.LedgerVersionUnsupported)
+        {
+            return execution.ChangeSet is null
+                ? CommandFailure(
+                    SetupCommand.Rollback,
+                    execution.Code,
+                    correlationId,
+                    null)
+                : CommandFailure(
+                    SetupCommand.Rollback,
+                    SetupCodes.InternalError,
+                    correlationId,
+                    null);
+        }
+
+        if (IsNormalRollbackFailureCode(execution.Code))
+        {
+            return CommandFailure(
+                SetupCommand.Rollback,
+                execution.Code,
+                correlationId,
+                execution.ChangeSet?.Adapter,
+                execution.ChangeSet is { } trusted
+                    ? ProjectApplyTargets(trusted, execution.Code)
+                    : []);
+        }
+
+        return CommandFailure(
+            SetupCommand.Rollback,
+            SetupCodes.InternalError,
+            correlationId,
+            null);
+    }
+
+    private static bool IsRollbackExecutionCode(string code) => code is
+        SetupCodes.InvalidArguments or
+        SetupCodes.RollbackSucceeded or
+        SetupCodes.RollbackNotAvailable or
+        SetupCodes.RollbackStale or
+        SetupCodes.UnsafePath or
+        SetupCodes.PartialRollback or
+        SetupCodes.RecoveryRequired or
+        SetupCodes.InternalError or
+        SetupCodes.InterruptedApplyRecovered or
+        SetupCodes.InterruptedRollbackRecovered or
+        SetupCodes.InterruptedRecoveryFailed or
+        SetupCodes.LedgerCorrupt or
+        SetupCodes.LedgerVersionUnsupported;
+
+    private static bool IsRollbackSuccessCode(string code) => code is
+        SetupCodes.RollbackSucceeded or
+        SetupCodes.InterruptedApplyRecovered or
+        SetupCodes.InterruptedRollbackRecovered;
+
+    private static bool IsNormalRollbackFailureCode(string code) => code is
+        SetupCodes.RollbackNotAvailable or
+        SetupCodes.RollbackStale or
+        SetupCodes.UnsafePath or
+        SetupCodes.PartialRollback or
+        SetupCodes.RecoveryRequired or
+        SetupCodes.InternalError;
+
+    private static bool IsValidRollbackRecoveryEnvelope(SetupRollbackExecutionResult execution)
+    {
+        var recovery = execution.Recovery!;
+        if (execution.ChangeSet is not null ||
+            !string.Equals(execution.Code, recovery.Code, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return recovery.Disposition switch
+        {
+            SetupRecoveryDisposition.Recovered => execution.Code is
+                SetupCodes.InterruptedApplyRecovered or
+                SetupCodes.InterruptedRollbackRecovered,
+            SetupRecoveryDisposition.Failed => execution.Code is
+                SetupCodes.InterruptedRecoveryFailed or
+                SetupCodes.RecoveryRequired or
+                SetupCodes.LedgerCorrupt or
+                SetupCodes.LedgerVersionUnsupported,
+            _ => false,
+        };
+    }
+
     private static SetupCommandResult RecoveryResult(
         SetupRecoveryResult recovery,
         SetupCommand command,
@@ -596,27 +809,37 @@ internal sealed class SetupCommandDispatcher
         string? adapter,
         IReadOnlyList<SetupTargetResult>? targets = null,
         IReadOnlyList<string>? warnings = null,
-        IReadOnlyList<string>? nextActions = null) => new(
+        IReadOnlyList<string>? nextActions = null) => CommandFailure(
         SetupCommand.Apply,
-        false,
         code,
         changeSetId,
-        null,
-        null,
         adapter,
-        targets ?? [],
-        [],
-        Snapshot(warnings ?? []),
-        Snapshot(nextActions ?? []),
-        false);
+        targets,
+        warnings,
+        nextActions);
 
     private static SetupCommandResult CommandFailure(
         SetupCommand command,
         string code,
         string? changeSetId,
-        string? adapter) => command == SetupCommand.Plan
-        ? Failure(code, adapter)
-        : ApplyFailure(code, changeSetId!, adapter);
+        string? adapter,
+        IReadOnlyList<SetupTargetResult>? targets = null,
+        IReadOnlyList<string>? warnings = null,
+        IReadOnlyList<string>? nextActions = null) => command == SetupCommand.Plan
+        ? Failure(code, adapter, warnings, nextActions)
+        : new SetupCommandResult(
+            command,
+            false,
+            code,
+            changeSetId,
+            null,
+            null,
+            adapter,
+            targets ?? [],
+            [],
+            Snapshot(warnings ?? []),
+            Snapshot(nextActions ?? []),
+            false);
 
     private static SetupCommandResult Unimplemented(SetupOptions options) => new(
         options.Command,
