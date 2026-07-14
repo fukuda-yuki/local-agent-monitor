@@ -1,4 +1,6 @@
 using System.Net;
+using CopilotAgentObservability.ConfigCli.Setup.Cli;
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 
 namespace CopilotAgentObservability.ConfigCli;
 
@@ -6,10 +8,24 @@ internal static class CliApplication
 {
     public static int Run(string[] args, TextWriter output, TextWriter error)
     {
+        return Run(args, output, error, null);
+    }
+
+    public static int Run(
+        string[] args,
+        TextWriter output,
+        TextWriter error,
+        Func<SetupOptions, SetupCommandResult>? setupDispatcher)
+    {
         if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
         {
             output.WriteLine(CliHelpText.Text);
             return args.Length == 0 ? 1 : 0;
+        }
+
+        if (args[0] == "setup")
+        {
+            return RunSetupCommand(args, output, error, setupDispatcher);
         }
 
         switch (args[0])
@@ -158,6 +174,121 @@ internal static class CliApplication
                 return 1;
         }
     }
+
+    private static int RunSetupCommand(
+        string[] args,
+        TextWriter output,
+        TextWriter error,
+        Func<SetupOptions, SetupCommandResult>? setupDispatcher)
+    {
+        if (!TryGetSetupCommand(args, out var command))
+        {
+            error.WriteLine(SetupCodes.InvalidArguments);
+            return 2;
+        }
+
+        var parseResult = SetupOptions.Parse(args);
+        if (parseResult.Options is null)
+        {
+            return WriteSetupResult(
+                CreateSetupFailure(command, SetupCodes.InvalidArguments, null),
+                output,
+                error);
+        }
+
+        SetupCommandResult result;
+        try
+        {
+            result = setupDispatcher is null
+                ? CreateSetupFailure(command, SetupCodes.InternalError, parseResult.Options.Adapter)
+                : setupDispatcher(parseResult.Options);
+        }
+        catch (Exception)
+        {
+            result = CreateSetupFailure(command, SetupCodes.InternalError, parseResult.Options.Adapter);
+        }
+
+        return WriteSetupResult(result, output, error);
+    }
+
+    private static bool TryGetSetupCommand(string[] args, out SetupCommand command)
+    {
+        command = default;
+        if (args.Length < 2)
+        {
+            return false;
+        }
+
+        command = args[1] switch
+        {
+            "plan" => SetupCommand.Plan,
+            "apply" => SetupCommand.Apply,
+            "rollback" => SetupCommand.Rollback,
+            "status" => SetupCommand.Status,
+            _ => default,
+        };
+
+        return args[1] is "plan" or "apply" or "rollback" or "status";
+    }
+
+    private static SetupCommandResult CreateSetupFailure(SetupCommand command, string code, string? adapter) => new(
+        command,
+        false,
+        code,
+        null,
+        null,
+        null,
+        adapter,
+        [],
+        [],
+        [],
+        [],
+        false);
+
+    private static int WriteSetupResult(SetupCommandResult result, TextWriter output, TextWriter error)
+    {
+        output.WriteLine(SetupJson.Serialize(result));
+        if (!result.Success)
+        {
+            error.WriteLine(result.Code);
+        }
+
+        return MapExitCode(result.Code);
+    }
+
+    private static int MapExitCode(string code) => code switch
+    {
+        SetupCodes.PlanReady or
+        SetupCodes.NoChanges or
+        SetupCodes.ApplySucceeded or
+        SetupCodes.RollbackSucceeded or
+        SetupCodes.StatusReady or
+        SetupCodes.InterruptedApplyRecovered or
+        SetupCodes.InterruptedRollbackRecovered => 0,
+        SetupCodes.InvalidArguments => 2,
+        SetupCodes.ManagedPolicyConflict or
+        SetupCodes.EnvironmentOverrideConflict or
+        SetupCodes.StalePlan or
+        SetupCodes.RollbackStale => 3,
+        SetupCodes.UnsupportedAdapter or
+        SetupCodes.UnsupportedTarget or
+        SetupCodes.TargetNotInstalled or
+        SetupCodes.UnsupportedVersion or
+        SetupCodes.RollbackNotAvailable or
+        SetupCodes.PortOwnedByForeignProcess => 4,
+        SetupCodes.PartialRollback => 6,
+        SetupCodes.MalformedSettings or
+        SetupCodes.PermissionDenied or
+        SetupCodes.UnsafePath or
+        SetupCodes.PartialApply or
+        SetupCodes.SetupBusy or
+        SetupCodes.RecoveryRequired or
+        SetupCodes.InterruptedRecoveryFailed or
+        SetupCodes.LedgerCorrupt or
+        SetupCodes.LedgerVersionUnsupported or
+        SetupCodes.InternalError => 5,
+        _ => 5,
+    };
 
     private static int RunProfileCommand(string[] args, TextWriter output, TextWriter error, Func<string, string> createOutput)
     {

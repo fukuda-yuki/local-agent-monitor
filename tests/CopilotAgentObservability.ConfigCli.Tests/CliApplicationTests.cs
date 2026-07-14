@@ -1,4 +1,6 @@
 using CopilotAgentObservability.ConfigCli;
+using CopilotAgentObservability.ConfigCli.Setup.Cli;
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
@@ -521,6 +523,272 @@ public class CliApplicationTests
         Assert.Equal(1, exitCode);
         Assert.Contains("failed to write raw store", error.ToString());
     }
+
+    [Fact]
+    public void Run_RecognizedSetupPlan_DelegatesOnceAndWritesOnlySetupJson()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        SetupOptions? dispatched = null;
+        var result = CreatePlanResult();
+
+        var exitCode = CliApplication.Run(
+            ["setup", "plan", "--adapter", "github-copilot", "--target", "vscode"],
+            output,
+            error,
+            options =>
+            {
+                Assert.Null(dispatched);
+                dispatched = options;
+                return result;
+            });
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(dispatched);
+        Assert.Equal(SetupCommand.Plan, dispatched.Command);
+        Assert.Equal("github-copilot", dispatched.Adapter);
+        Assert.Equal("vscode", dispatched.Target);
+        Assert.Equal("http://127.0.0.1:4320", dispatched.Endpoint);
+        Assert.False(dispatched.IncludeContentCapture);
+        Assert.Null(dispatched.ChangeSetId);
+        Assert.Equal(SetupJson.Serialize(result) + Environment.NewLine, output.ToString());
+        Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Theory]
+    [InlineData("plan", "--adapter", "github-copilot")]
+    [InlineData("apply", "--change-set", "not-a-uuid")]
+    [InlineData("rollback", "--change-set", "not-a-uuid")]
+    [InlineData("status", "--adapter", "INVALID")]
+    public void Run_RecognizedSetupParseFailure_WritesCommandSpecificInvalidArgumentsJson(
+        string command,
+        string option,
+        string value)
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var expected = CreateInvalidArgumentsResult(command);
+
+        var exitCode = CliApplication.Run(
+            ["setup", command, option, value],
+            output,
+            error,
+            _ => throw new InvalidOperationException("The dispatcher must not run for invalid setup arguments."));
+
+        Assert.Equal(2, exitCode);
+        Assert.Equal(SetupJson.Serialize(expected) + Environment.NewLine, output.ToString());
+        Assert.Equal(SetupCodes.InvalidArguments + Environment.NewLine, error.ToString());
+    }
+
+    [Theory]
+    [InlineData()]
+    [InlineData("unknown")]
+    public void Run_BareOrUnknownSetupVerb_WritesOnlyFixedInvalidArgumentsError(params string[] suffix)
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var args = new[] { "setup" }.Concat(suffix).ToArray();
+
+        var exitCode = CliApplication.Run(
+            args,
+            output,
+            error,
+            _ => throw new InvalidOperationException("The dispatcher must not run for an unrecognized setup verb."));
+
+        Assert.Equal(2, exitCode);
+        Assert.Equal(string.Empty, output.ToString());
+        Assert.Equal(SetupCodes.InvalidArguments + Environment.NewLine, error.ToString());
+    }
+
+    [Fact]
+    public void Run_UnknownNonSetupTopLevelCommand_PreservesLegacyHelpBehavior()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = CliApplication.Run(["unknown-command"], output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(string.Empty, output.ToString());
+        Assert.Equal($"error: unknown command 'unknown-command'.{Environment.NewLine}{CliHelpText.Text}{Environment.NewLine}", error.ToString());
+    }
+
+    [Theory]
+    [MemberData(nameof(ProcessResults))]
+    public void Run_DispatchedSetupResult_MapsEveryResultCodeToExactProcessOutput(
+        SetupCommandResult result,
+        int expectedExitCode)
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var calls = 0;
+
+        var exitCode = CliApplication.Run(
+            ArgumentsFor(result.Command),
+            output,
+            error,
+            options =>
+            {
+                calls++;
+                Assert.Equal(result.Command, options.Command);
+                return result;
+            });
+
+        Assert.Equal(expectedExitCode, exitCode);
+        Assert.Equal(1, calls);
+        Assert.Equal(SetupJson.Serialize(result) + Environment.NewLine, output.ToString());
+        Assert.Equal(
+            result.Success ? string.Empty : result.Code + Environment.NewLine,
+            error.ToString());
+    }
+
+    [Fact]
+    public void Run_RecognizedSetupWithNoDispatcher_FailsClosedAsInternalError()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var expected = new SetupCommandResult(
+            SetupCommand.Plan, false, SetupCodes.InternalError, null, null, null, "github-copilot",
+            [], [], [], [], false);
+
+        var exitCode = CliApplication.Run(
+            ["setup", "plan", "--adapter", "github-copilot", "--target", "vscode"],
+            output,
+            error,
+            null);
+
+        Assert.Equal(5, exitCode);
+        Assert.Equal(SetupJson.Serialize(expected) + Environment.NewLine, output.ToString());
+        Assert.Equal(SetupCodes.InternalError + Environment.NewLine, error.ToString());
+    }
+
+    [Fact]
+    public void HelpText_ListsAllFourSetupCommandsExactly()
+    {
+        Assert.Contains("  config-cli setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture]", CliHelpText.Text);
+        Assert.Contains("  config-cli setup apply --change-set <uuid-v7>", CliHelpText.Text);
+        Assert.Contains("  config-cli setup rollback --change-set <uuid-v7>", CliHelpText.Text);
+        Assert.Contains("  config-cli setup status [--adapter github-copilot]", CliHelpText.Text);
+    }
+
+    public static TheoryData<SetupCommandResult, int> ProcessResults => new()
+    {
+        { CreateResult(SetupCommand.Plan, true, SetupCodes.PlanReady), 0 },
+        { CreateResult(SetupCommand.Plan, true, SetupCodes.NoChanges), 0 },
+        { CreateResult(SetupCommand.Apply, true, SetupCodes.ApplySucceeded), 0 },
+        { CreateResult(SetupCommand.Rollback, true, SetupCodes.RollbackSucceeded), 0 },
+        { CreateResult(SetupCommand.Status, true, SetupCodes.StatusReady), 0 },
+        { CreateRecoveredResult(SetupCodes.InterruptedApplyRecovered, SetupRecoveryOperation.Apply), 0 },
+        { CreateRecoveredResult(SetupCodes.InterruptedRollbackRecovered, SetupRecoveryOperation.Rollback), 0 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.InvalidArguments), 2 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.UnsupportedAdapter), 4 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.UnsupportedTarget), 4 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.TargetNotInstalled), 4 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.UnsupportedVersion), 4 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.ManagedPolicyConflict), 3 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.EnvironmentOverrideConflict), 3 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.MalformedSettings), 5 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.PermissionDenied), 5 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.UnsafePath), 5 },
+        { CreateResult(SetupCommand.Apply, false, SetupCodes.StalePlan), 3 },
+        { CreateResult(SetupCommand.Rollback, false, SetupCodes.RollbackStale), 3 },
+        { CreateResult(SetupCommand.Rollback, false, SetupCodes.RollbackNotAvailable), 4 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.PortOwnedByForeignProcess), 4 },
+        { CreateResult(SetupCommand.Apply, false, SetupCodes.PartialApply), 5 },
+        { CreateResult(SetupCommand.Rollback, false, SetupCodes.PartialRollback), 6 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.SetupBusy), 5 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.RecoveryRequired), 5 },
+        { CreateInterruptedRecoveryFailureResult(), 5 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.LedgerCorrupt), 5 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.LedgerVersionUnsupported), 5 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.InternalError), 5 },
+    };
+
+    private static SetupCommandResult CreatePlanResult() => new(
+        SetupCommand.Plan,
+        true,
+        SetupCodes.PlanReady,
+        "00000000-0000-7000-8000-000000000001",
+        null,
+        null,
+        "github-copilot",
+        [],
+        [],
+        [],
+        [],
+        false);
+
+    private static SetupCommandResult CreateResult(SetupCommand command, bool success, string code) => new(
+        command,
+        success,
+        code,
+        command is SetupCommand.Apply or SetupCommand.Rollback ? "00000000-0000-7000-8000-000000000001" : success && command == SetupCommand.Plan ? "00000000-0000-7000-8000-000000000001" : null,
+        null,
+        null,
+        command == SetupCommand.Status ? null : "github-copilot",
+        [],
+        [],
+        [],
+        [],
+        false);
+
+    private static SetupCommandResult CreateRecoveredResult(string code, SetupRecoveryOperation operation) => new(
+        SetupCommand.Status,
+        true,
+        code,
+        null,
+        "00000000-0000-7000-8000-000000000001",
+        operation,
+        null,
+        [],
+        [],
+        [],
+        [SetupCodes.RerunRequestedSetupCommand],
+        false);
+
+    private static SetupCommandResult CreateInterruptedRecoveryFailureResult() => new(
+        SetupCommand.Plan,
+        false,
+        SetupCodes.InterruptedRecoveryFailed,
+        null,
+        "00000000-0000-7000-8000-000000000001",
+        SetupRecoveryOperation.Apply,
+        "github-copilot",
+        [],
+        [],
+        [],
+        [],
+        false);
+
+    private static string[] ArgumentsFor(SetupCommand command) => command switch
+    {
+        SetupCommand.Plan => ["setup", "plan", "--adapter", "github-copilot", "--target", "vscode"],
+        SetupCommand.Apply => ["setup", "apply", "--change-set", "00000000-0000-7000-8000-000000000001"],
+        SetupCommand.Rollback => ["setup", "rollback", "--change-set", "00000000-0000-7000-8000-000000000001"],
+        SetupCommand.Status => ["setup", "status"],
+        _ => throw new ArgumentOutOfRangeException(nameof(command)),
+    };
+
+    private static SetupCommandResult CreateInvalidArgumentsResult(string command) => new(
+        command switch
+        {
+            "plan" => SetupCommand.Plan,
+            "apply" => SetupCommand.Apply,
+            "rollback" => SetupCommand.Rollback,
+            "status" => SetupCommand.Status,
+            _ => throw new ArgumentOutOfRangeException(nameof(command)),
+        },
+        false,
+        SetupCodes.InvalidArguments,
+        null,
+        null,
+        null,
+        null,
+        [],
+        [],
+        [],
+        [],
+        false);
 
     private static string FixturePath()
     {
