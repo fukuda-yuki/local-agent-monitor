@@ -119,6 +119,33 @@ below; the remaining real-producer gates are still pending:
   the first real all-partition producer/consumer integration gate. See the
   [T3d card](../../superpowers/plans/2026-07-14-issue-67-guided-setup/task-04-t3d-aggregate-adapter.md).
 
+## T3d/T7 internal plan seam correction (2026-07-15)
+
+The internal aggregate-seam plan was corrected across commits
+`b236e8388856370077ce1bf523be2db457974e6e`,
+`2f17ef0fdf02c54e2e34a6fd545a7cd9befff1d2`, and
+`3e599cc6bf4583e5b8b5cccd60b55e9c3a4b2aa7`. The initial review found a
+platform-dependency contradiction; the first review then failed C0/I1 for
+eager probe access, App/SDK probe access, and non-Windows refusal ordering. A
+second review failed C0/I1 because success-versus-early-failure probe
+semantics remained ambiguous. The final decision, recorded after that
+correction, is:
+
+- The aggregate constructor injects the same `ISetupPlatform` instance shared
+  with the dispatcher.
+- Each Plan/Revalidate operation creates typed, lazy-cached `Observations` and
+  `Endpoint` values. Unsupported targets, App/SDK guidance, and guidance
+  revalidation/status paths make zero helper calls; non-Windows CLI refusal is
+  returned before lazy access; early validation failures make zero probes.
+- Successful writable operations access each required helper exactly once and
+  share the cached value across partitions. Aggregate composition stops at the
+  first failure and returns no partial output.
+
+This is a docs-only plan correction: no tests ran, `git diff --check` and
+self-review passed, and only this ledger entry is in scope. T3d implementation
+is still pending. The public DTO is unchanged; migration and HTTP/public
+proxy/UI surfaces remain N/A.
+
 ## Task state
 
 | Task | Issue | State | Commit range | Focused/full tests | Review | Unresolved minor |
@@ -189,6 +216,7 @@ below; the remaining real-producer gates are still pending:
 | Issue #67 Task 01 / T3a platform observations and common detection | #67 | Complete (T3a only; no final Issue #67 completion) | `6c5275716826d53f334ebeabba55a9a6e8807064`; remediation `5f50bd0222af19fa608a1fc5e4ee29c3c1ec80ab` | Original implementer RED/GREEN focused 19/19 and combined 79/79; review FAIL C0/I4/M0. Remediation RED covered proxy, no-follow, registry, and macOS forced-key cases; final focused 42/42, combined 102/102, build 0 warnings/0 errors, `git diff --check` clean. Frozen contracts include exact `code --version`, `code-insiders --version`, and official `copilot version` detection; bounded process/HTTP/managed observations with `UseProxy=false`; Windows no-follow handle traversal/type/identity/max+1; bounded registry pre-allocation with `DoNotExpand` and typed kinds; macOS unreadable forced-key fail-closed; Linux `openat2` and macOS `openat`/`fstat` paths. | Fresh final review PASS C0/I0/M0; observation-only boundary and closed managed-location vocabulary approved | Windows runtime evidence executed. macOS/Linux native branches are static/fake only (not executed); live Windows policy-registry/reparse cases were not exercised. T3b/T3c/T3d+ remain pending; no public DTO yet; HTTP transport is observed here but classification belongs to T3c; HTTP/proxy/UI public surfaces remain N/A |
 | Issue #67 Task 02 / T3b managed-policy resolver | #67 | Complete (T3b only; no final Issue #67 completion) | `74e644bb15a8ef6de6b8b282acf5641720ac2398`; remediation `1a031e6d8c267ccaa9cdad7d8d50d4d064b2f27f` | Initial GREEN 9/9 and build 0/0. The initial RED execution was polluted by a transient shared T3c missing type and is not valid T3b RED; later isolated baseline replay was diagnostic only and failed solely on missing resolver types. Fresh review initially FAIL C0/I2 (global malformed collapse lost independent Copilot provenance and contradictory Absent shape fell through); remediation supplied valid compile RED for new provenance symbols, then GREEN 22/22 and build 0/0. Contracts freeze whole-channel native&gt;server&gt;file with no merge, native-only verifiability, independent computer-over-user enterprise policy, independent Copilot/Enterprise/both malformed flags, strict observation shapes, and no raw values. | Final independent re-review PASS C0/I0/M0 | T3d aggregate/early cross-surface, T4/T5 mapping, production composition T7, and full validation T9 remain unresolved. T3a owns physical transport/sentinel/read; HTTP/public proxy/UI remain N/A; no migration change |
 | Issue #67 Task 03 / T3c Local Monitor endpoint ownership probe | #67 | Complete (T3c only; no final Issue #67 completion) | `15c424bf219f0c24c5eca734de0765ddfbba1886` | Valid test-first compile RED was solely missing the task's classification; GREEN 18/18 and build 0/0. Orchestrator combined T3b+T3c evidence was 27/27 and build 0/0 at the pre-remediation boundary; this is not full-suite evidence. Frozen contract is one `GET /health/live` with 500 ms total budget and 4096-byte cap plus sentinel; strict single-property `{"status":"live"}` yields live, `Refused` alone yields `monitor_not_running`, and every other observation fails closed to foreign owner; no retries or real sockets. | Independent review PASS C0/I0/M0 | T3d aggregate/early cross-surface, T4/T5 mapping, production composition T7, and full validation T9 remain unresolved. T3a owns physical transport; HTTP/public proxy/UI remain N/A; no migration change |
+| Issue #67 T3d/T7 internal plan seam correction | #67 | Complete (docs-only correction; implementation pending) | `b236e8388856370077ce1bf523be2db457974e6e`, `2f17ef0fdf02c54e2e34a6fd545a7cd9befff1d2`, `3e599cc6bf4583e5b8b5cccd60b55e9c3a4b2aa7` | No tests run; docs-only `git diff --check` and self-review PASS. Constructor/platform sharing, typed lazy caching, zero-call refusals, exact-once successful access, and first-failure/no-partial aggregation are recorded above. | Review history: initial platform-dependency contradiction; first FAIL C0/I1 (eager probe/App-SDK/non-Windows); second FAIL C0/I1 (success-vs-early-failure ambiguity); final PASS C0/I0/M0 | T3d implementation and T7 real producer/consumer gate remain pending; public DTO unchanged; migration and HTTP/public proxy/UI remain N/A |
 | Issue interface executable test | #66-#67 | Pending | - | - | - | - |
 | Copilot detection and precedence | #67 | Pending | - | - | - | - |
 | VS Code adapter | #67 | Pending | - | - | - | - |
