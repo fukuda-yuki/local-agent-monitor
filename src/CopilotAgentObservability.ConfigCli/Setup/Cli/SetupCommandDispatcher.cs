@@ -1,6 +1,7 @@
 using CopilotAgentObservability.ConfigCli.Setup.Adapters;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
+using CopilotAgentObservability.ConfigCli.Setup.Status;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
 using CopilotAgentObservability.ConfigCli.Setup.Transactions;
 
@@ -17,6 +18,7 @@ internal sealed class SetupCommandDispatcher
     private readonly Func<SetupLock, SetupRecoveryResult> recover;
     private readonly Func<SetupLock, Guid, SetupPlanSuccess<SetupLedgerChangeSet>> apply;
     private readonly Func<SetupLock, Guid, SetupRollbackExecutionResult> rollback;
+    private readonly Func<string?, SetupCommandResult> status;
 
     public SetupCommandDispatcher(
         ISetupPlatform platform,
@@ -51,6 +53,12 @@ internal sealed class SetupCommandDispatcher
                 paths,
                 planStore,
                 ledgerStore,
+                journalStore),
+            CreateStatus(
+                platform,
+                paths,
+                planStore,
+                ledgerStore,
                 journalStore))
     {
     }
@@ -64,7 +72,8 @@ internal sealed class SetupCommandDispatcher
         string toolVersion,
         Func<SetupLock, SetupRecoveryResult> recover,
         Func<SetupLock, Guid, SetupPlanSuccess<SetupLedgerChangeSet>> apply,
-        Func<SetupLock, Guid, SetupRollbackExecutionResult> rollback)
+        Func<SetupLock, Guid, SetupRollbackExecutionResult> rollback,
+        Func<string?, SetupCommandResult> status)
     {
         this.platform = platform ?? throw new ArgumentNullException(nameof(platform));
         this.paths = paths ?? throw new ArgumentNullException(nameof(paths));
@@ -75,6 +84,7 @@ internal sealed class SetupCommandDispatcher
         this.recover = recover ?? throw new ArgumentNullException(nameof(recover));
         this.apply = apply ?? throw new ArgumentNullException(nameof(apply));
         this.rollback = rollback ?? throw new ArgumentNullException(nameof(rollback));
+        this.status = status ?? throw new ArgumentNullException(nameof(status));
     }
 
     private static Func<SetupLock, SetupRecoveryResult> CreateRecovery(
@@ -113,6 +123,19 @@ internal sealed class SetupCommandDispatcher
             ledgerStore,
             journalStore).Rollback;
 
+    private static Func<string?, SetupCommandResult> CreateStatus(
+        ISetupPlatform platform,
+        SetupRuntimePaths paths,
+        SetupPlanStore planStore,
+        SetupLedgerStore ledgerStore,
+        SetupTransactionJournalStore journalStore) =>
+        new SetupStatusService(
+            platform,
+            paths,
+            planStore,
+            ledgerStore,
+            journalStore).Status;
+
     public SetupCommandResult Dispatch(SetupOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -121,9 +144,13 @@ internal sealed class SetupCommandDispatcher
             SetupCommand.Plan => DispatchPlan(options),
             SetupCommand.Apply => DispatchApply(options),
             SetupCommand.Rollback => DispatchRollback(options),
-            _ => Validate(Unimplemented(options)),
+            SetupCommand.Status => DispatchStatus(options),
+            _ => throw new InvalidOperationException(SetupContractValidator.InvalidContractCode),
         };
     }
+
+    private SetupCommandResult DispatchStatus(SetupOptions options) =>
+        Validate(status(options.Adapter));
 
     private SetupCommandResult DispatchPlan(SetupOptions options)
     {
@@ -866,22 +893,6 @@ internal sealed class SetupCommandDispatcher
             Snapshot(warnings ?? []),
             Snapshot(nextActions ?? []),
             false);
-
-    private static SetupCommandResult Unimplemented(SetupOptions options) => new(
-        options.Command,
-        false,
-        SetupCodes.InternalError,
-        options.Command is SetupCommand.Apply or SetupCommand.Rollback
-            ? options.ChangeSetId?.ToString("D")
-            : null,
-        null,
-        null,
-        options.Adapter,
-        [],
-        [],
-        [],
-        [],
-        false);
 
     private static SetupCommandResult Validate(SetupCommandResult result)
     {

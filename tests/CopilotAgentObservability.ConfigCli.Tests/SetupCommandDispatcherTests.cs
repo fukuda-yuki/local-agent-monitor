@@ -506,20 +506,102 @@ public sealed class SetupCommandDispatcherTests
     }
 
     [Fact]
-    public void Dispatch_UnimplementedStatusUsesValidatorValidFixedGuardWithoutLocking()
+    public void DispatchStatus_ProductionConstructorUsesRealServiceAndReturnsValidatorValidStatus()
     {
-        var adapter = new RecordingAdapter("test-adapter", _ => throw new InvalidOperationException("adapter must not run"));
-        var fixture = DispatcherFixture.Create(adapter, _ => throw new InvalidOperationException("recovery must not run"));
-        var options = new SetupOptions(SetupCommand.Status, "test-adapter", null, null, false, null);
+        var adapter = new RecordingAdapter("test-adapter", request =>
+            SetupPlanResult.Planned(CreatePlan(
+                request,
+                [CreateGuidanceRecord(RecordId)])));
+        var fixture = DispatcherFixture.CreateProduction(adapter);
+        _ = fixture.Dispatcher.Dispatch(CreatePlanOptions());
 
-        var result = fixture.Dispatcher.Dispatch(options);
+        var result = fixture.Dispatcher.Dispatch(CreateStatusOptions("test-adapter"));
 
-        Assert.False(result.Success);
-        Assert.Equal(SetupCodes.InternalError, result.Code);
+        Assert.True(result.Success);
+        Assert.Equal(SetupCodes.StatusReady, result.Code);
         Assert.Equal(SetupCommand.Status, result.Command);
+        Assert.Equal("test-adapter", result.Adapter);
+        Assert.Single(result.ChangeSets);
+        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchStatus_DelegatesValidatedSameInstanceWithoutOuterLockOrRecovery()
+    {
+        var recoveryCalls = 0;
+        var statusCalls = 0;
+        string? observedFilter = null;
+        var expected = CreateStatusResult("missing-adapter");
+        var fixture = DispatcherFixture.Create(
+            [],
+            _ =>
+            {
+                recoveryCalls++;
+                return NoRecovery();
+            },
+            adapter =>
+            {
+                statusCalls++;
+                observedFilter = adapter;
+                return expected;
+            });
+
+        var result = fixture.Dispatcher.Dispatch(CreateStatusOptions("missing-adapter"));
+
+        Assert.Same(expected, result);
+        Assert.Equal("missing-adapter", observedFilter);
+        Assert.Equal(1, statusCalls);
+        Assert.Equal(0, recoveryCalls);
         Assert.DoesNotContain(fixture.Platform.Operations, operation =>
             operation == $"file.lock:{fixture.Paths.Lock}");
-        SetupContractValidator.Validate(result);
+    }
+
+    [Fact]
+    public void DispatchStatus_PassesNullFilterUnchanged()
+    {
+        string? observedFilter = "not-null";
+        var expected = CreateStatusResult(null);
+        var fixture = DispatcherFixture.Create(
+            [],
+            _ => throw new InvalidOperationException("recovery must not run"),
+            adapter =>
+            {
+                observedFilter = adapter;
+                return expected;
+            });
+
+        var result = fixture.Dispatcher.Dispatch(CreateStatusOptions(null));
+
+        Assert.Same(expected, result);
+        Assert.Null(observedFilter);
+        Assert.DoesNotContain(fixture.Platform.Operations, operation =>
+            operation == $"file.lock:{fixture.Paths.Lock}");
+    }
+
+    [Fact]
+    public void DispatchStatus_RejectsMalformedServiceResultThroughContractValidator()
+    {
+        var statusCalls = 0;
+        var malformed = CreateStatusResult("test-adapter") with
+        {
+            ChangeSets = [null!],
+        };
+        var fixture = DispatcherFixture.Create(
+            [],
+            _ => throw new InvalidOperationException("recovery must not run"),
+            _ =>
+            {
+                statusCalls++;
+                return malformed;
+            });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            fixture.Dispatcher.Dispatch(CreateStatusOptions("test-adapter")));
+
+        Assert.Equal(SetupContractValidator.InvalidContractCode, exception.Message);
+        Assert.Equal(1, statusCalls);
+        Assert.DoesNotContain(fixture.Platform.Operations, operation =>
+            operation == $"file.lock:{fixture.Paths.Lock}");
     }
 
     [Fact]
@@ -1255,7 +1337,8 @@ public sealed class SetupCommandDispatcherTests
                     [SetupCodes.ManagedPolicyUnverified],
                     [SetupCodes.RestartVsCode]);
             },
-            (_, _) => throw new InvalidOperationException("rollback must not run"));
+            (_, _) => throw new InvalidOperationException("rollback must not run"),
+            _ => throw new InvalidOperationException("status must not run"));
 
         var result = dispatcher.Dispatch(CreateApplyOptions(changeSetId));
 
@@ -2108,6 +2191,28 @@ public sealed class SetupCommandDispatcherTests
         false,
         changeSetId);
 
+    private static SetupOptions CreateStatusOptions(string? adapter) => new(
+        SetupCommand.Status,
+        adapter,
+        null,
+        null,
+        false,
+        null);
+
+    private static SetupCommandResult CreateStatusResult(string? adapter) => new(
+        SetupCommand.Status,
+        true,
+        SetupCodes.StatusReady,
+        null,
+        null,
+        null,
+        adapter,
+        [],
+        [],
+        [],
+        [],
+        false);
+
     private static SetupCommandDispatcher CreateApplyDispatcher(
         DispatcherFixture fixture,
         IEnumerable<ISetupAdapter> adapters,
@@ -2125,7 +2230,8 @@ public sealed class SetupCommandDispatcherTests
             applyCalls.Value++;
             throw new InvalidOperationException("apply must not run");
         },
-        (_, _) => throw new InvalidOperationException("rollback must not run"));
+        (_, _) => throw new InvalidOperationException("rollback must not run"),
+        _ => throw new InvalidOperationException("status must not run"));
 
     private static SetupCommandDispatcher CreateApplyDispatcher(
         DispatcherFixture fixture,
@@ -2140,7 +2246,8 @@ public sealed class SetupCommandDispatcherTests
         "1.2.3",
         recover,
         apply,
-        (_, _) => throw new InvalidOperationException("rollback must not run"));
+        (_, _) => throw new InvalidOperationException("rollback must not run"),
+        _ => throw new InvalidOperationException("status must not run"));
 
     private static SetupCommandDispatcher CreateRollbackDispatcher(
         DispatcherFixture fixture,
@@ -2154,7 +2261,8 @@ public sealed class SetupCommandDispatcherTests
         "1.2.3",
         recover,
         (_, _) => throw new InvalidOperationException("apply must not run"),
-        rollback);
+        rollback,
+        _ => throw new InvalidOperationException("status must not run"));
 
     private static (
         DispatcherFixture Fixture,
@@ -2798,7 +2906,8 @@ public sealed class SetupCommandDispatcherTests
 
         public static DispatcherFixture Create(
             IEnumerable<ISetupAdapter> adapters,
-            Func<SetupLock, SetupRecoveryResult> recover)
+            Func<SetupLock, SetupRecoveryResult> recover,
+            Func<string?, SetupCommandResult>? status = null)
         {
             var platform = new SetupTestPlatform(Timestamp);
             var paths = new SetupRuntimePaths(platform);
@@ -2813,7 +2922,8 @@ public sealed class SetupCommandDispatcherTests
                 "1.2.3",
                 recover,
                 (_, _) => throw new InvalidOperationException("apply must not run"),
-                (_, _) => throw new InvalidOperationException("rollback must not run"));
+                (_, _) => throw new InvalidOperationException("rollback must not run"),
+                status ?? CreateStatusResult);
             return new DispatcherFixture(platform, paths, planStore, ledgerStore, dispatcher);
         }
 
