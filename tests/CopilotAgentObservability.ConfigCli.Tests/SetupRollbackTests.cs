@@ -12,6 +12,38 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class SetupRollbackTests
 {
+    private static void AssertTrustedRequestedRow(SetupRollbackExecutionResult result)
+    {
+        Assert.Null(result.Recovery);
+        var changeSet = Assert.IsType<SetupLedgerChangeSet>(result.ChangeSet);
+        Assert.Equal(result.RequestedChangeSetId, changeSet.ChangeSetId);
+
+        var otherRequestedId = Guid.Parse("00000000-0000-7000-8000-000000000999");
+        Assert.Throws<ArgumentException>(() => new SetupRollbackExecutionResult(
+            otherRequestedId,
+            result.Success,
+            result.Code,
+            changeSet,
+            null));
+        Assert.Throws<ArgumentException>(() => new SetupRollbackExecutionResult(
+            result.RequestedChangeSetId,
+            result.Success,
+            result.Code,
+            changeSet,
+            new SetupRecoveryResult(
+                SetupRecoveryDisposition.Failed,
+                SetupCodes.RecoveryRequired,
+                result.RequestedChangeSetId,
+                SetupRecoveryOperation.Rollback,
+                changeSet)));
+    }
+
+    private static void AssertUntrustedDirectResult(SetupRollbackExecutionResult result)
+    {
+        Assert.Null(result.Recovery);
+        Assert.Null(result.ChangeSet);
+    }
+
     private static SetupStatusProjection CreateStatusProjection(
         IReadOnlyList<SetupLedgerMember> members,
         bool includeCliManifest = false)
@@ -23,6 +55,105 @@ public sealed class SetupRollbackTests
             : (JsonElement?)null;
         return new SetupStatusProjection(true, null, aggregate, null, null, expectedResult, null,
             members.Select(member => new SetupMemberChangeResult(member.SettingKey, member.Operation, "present", "configured", "none", false)).ToArray());
+    }
+
+    [Fact]
+    public void Rollback_Lifecycle_ineligible_rebound_identity_is_untrusted_recovery_required()
+    {
+        var fixture = RollbackFixture.Create();
+        Assert.True(fixture.Rollback().Success);
+        fixture.RebindLedgerToolVersion("2.0.0");
+
+        var result = fixture.Rollback();
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        AssertUntrustedDirectResult(result);
+    }
+
+    [Fact]
+    public void Rollback_Applied_rebound_identity_is_untrusted_recovery_required()
+    {
+        var fixture = RollbackFixture.Create();
+        fixture.RebindLedgerToolVersion("2.0.0");
+
+        var result = fixture.Rollback();
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        AssertUntrustedDirectResult(result);
+    }
+
+    [Fact]
+    public void Rollback_Identity_success_then_journal_evidence_mismatch_is_trusted_recovery_required()
+    {
+        var fixture = RollbackFixture.Create();
+        fixture.RebindJournalAndLedgerAppliedHash(new string('0', 64));
+
+        var result = fixture.Rollback();
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        AssertTrustedRequestedRow(result);
+    }
+
+    [Fact]
+    public void Rollback_Valid_lifecycle_ineligible_row_is_trusted_not_available()
+    {
+        var fixture = RollbackFixture.Create();
+        Assert.True(fixture.Rollback().Success);
+
+        var result = fixture.Rollback();
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.RollbackNotAvailable, result.Code);
+        AssertTrustedRequestedRow(result);
+    }
+
+    [Theory]
+    [InlineData(SetupFaultPoint.AfterJournalPreparedBeforeLedger)]
+    [InlineData(SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent)]
+    public void Rollback_Post_validation_preparation_fault_is_trusted_recovery_required(
+        string faultPoint)
+    {
+        var fixture = RollbackFixture.Create();
+        fixture.Platform.InjectFault($"checkpoint:{faultPoint}", new IOException("private-preparation-boundary"));
+
+        var result = fixture.Rollback();
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        AssertTrustedRequestedRow(result);
+    }
+
+    [Theory]
+    [InlineData("observation")]
+    [InlineData("attempt-persistence")]
+    public void Rollback_Post_identity_internal_fault_is_trusted_internal_error(string variant)
+    {
+        var fixture = RollbackFixture.Create();
+        switch (variant)
+        {
+            case "observation":
+                fixture.Platform.InjectFault(
+                    $"file.read:{fixture.TargetPaths[0]}",
+                    new IOException("private-observation"));
+                break;
+            case "attempt-persistence":
+                fixture.Platform.SeedFile(fixture.TargetPaths[0], Encoding.UTF8.GetBytes("third-party"));
+                fixture.Platform.InjectFault(
+                    $"file.replace:{fixture.Paths.OwnershipLedger}.tmp->{fixture.Paths.OwnershipLedger}",
+                    new IOException("private-attempt-persistence"));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(variant));
+        }
+
+        var result = fixture.Rollback();
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.InternalError, result.Code);
+        AssertTrustedRequestedRow(result);
     }
 
     [Fact]
@@ -2001,6 +2132,28 @@ public sealed class SetupRollbackTests
             };
             using var acquisition = SetupLock.TryAcquire(Platform, Paths);
             ledgerStore.Save(acquisition.Lock!, ledger with { ChangeSets = [rebound] });
+        }
+
+        public void RebindJournalAndLedgerAppliedHash(string hash)
+        {
+            var journalPath = Paths.GetTransactionJournal(ChangeSetId);
+            var journal = LoadJournal();
+            var desiredHash = journal.Targets[0].Steps[0].DesiredStateHash;
+            var journalJson = Encoding.UTF8.GetString(Platform.ReadSeededFile(journalPath));
+            Platform.SeedFile(
+                journalPath,
+                Encoding.UTF8.GetBytes(journalJson.Replace(desiredHash, hash, StringComparison.Ordinal)));
+
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            var ledger = ledgerStore.LoadForRecovery();
+            var changeSet = ledger.ChangeSets[0];
+            var targets = changeSet.Targets.ToArray();
+            targets[0] = targets[0] with { AppliedStateHash = hash };
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            ledgerStore.Save(
+                acquisition.Lock!,
+                ledger with { ChangeSets = [changeSet with { Targets = targets }] });
         }
     }
 

@@ -25,7 +25,8 @@ internal sealed record SetupRollbackPreflightResult(
 
 internal sealed record SetupRollbackPreflightPreparation(
     SetupRollbackPreflightEvidence? Evidence,
-    SetupRollbackPreflightResult? Result);
+    SetupRollbackPreflightResult? Result,
+    SetupLedgerChangeSet? TrustedChangeSet);
 
 internal sealed record SetupRollbackPreflightEvidence(
     SetupPrivatePlan Plan,
@@ -57,19 +58,33 @@ internal static class SetupRollbackPreflightEvaluator
             return Failure(SetupRollbackPreflightClassification.RecoveryRequired, SetupCodes.RecoveryRequired);
         }
 
+        try
+        {
+            SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
+        }
+        catch (Exception)
+        {
+            return Failure(SetupRollbackPreflightClassification.RecoveryRequired, SetupCodes.RecoveryRequired);
+        }
+
         if (changeSet.State != SetupChangeSetState.Applied)
         {
-            return Failure(SetupRollbackPreflightClassification.NotAvailable, SetupCodes.RollbackNotAvailable);
+            return Failure(
+                SetupRollbackPreflightClassification.NotAvailable,
+                SetupCodes.RollbackNotAvailable,
+                changeSet);
         }
 
         if (plan.Targets.Count(target => target.TargetKind == SetupTargetKind.Env) > 1)
         {
-            return Failure(SetupRollbackPreflightClassification.NotAvailable, SetupCodes.RollbackNotAvailable);
+            return Failure(
+                SetupRollbackPreflightClassification.NotAvailable,
+                SetupCodes.RollbackNotAvailable,
+                changeSet);
         }
 
         try
         {
-            SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
             if (journal is null || journal.ChangeSetId != changeSet.ChangeSetId)
             {
                 throw new FormatException();
@@ -117,11 +132,15 @@ internal static class SetupRollbackPreflightEvaluator
             }).ToArray();
             return new SetupRollbackPreflightPreparation(
                 new SetupRollbackPreflightEvidence(plan, changeSet, journal, terminalApply, rollbackTargets),
-                null);
+                null,
+                changeSet);
         }
         catch (Exception)
         {
-            return Failure(SetupRollbackPreflightClassification.RecoveryRequired, SetupCodes.RecoveryRequired);
+            return Failure(
+                SetupRollbackPreflightClassification.RecoveryRequired,
+                SetupCodes.RecoveryRequired,
+                changeSet);
         }
     }
 
@@ -361,8 +380,9 @@ internal static class SetupRollbackPreflightEvaluator
 
     private static SetupRollbackPreflightPreparation Failure(
         SetupRollbackPreflightClassification classification,
-        string code) =>
-        new(null, Result(classification, code));
+        string code,
+        SetupLedgerChangeSet? trustedChangeSet = null) =>
+        new(null, Result(classification, code), trustedChangeSet);
 
     private static SetupRollbackPreflightResult Result(
         SetupRollbackPreflightClassification classification,

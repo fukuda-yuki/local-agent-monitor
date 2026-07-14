@@ -4,12 +4,46 @@ using CopilotAgentObservability.ConfigCli.Setup.Storage;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Transactions;
 
-internal sealed record SetupRollbackExecutionResult(
-    Guid RequestedChangeSetId,
-    bool Success,
-    string Code,
-    SetupLedgerChangeSet? ChangeSet,
-    SetupRecoveryResult? Recovery);
+internal sealed record SetupRollbackExecutionResult
+{
+    public SetupRollbackExecutionResult(
+        Guid requestedChangeSetId,
+        bool success,
+        string code,
+        SetupLedgerChangeSet? changeSet,
+        SetupRecoveryResult? recovery)
+    {
+        if (changeSet is not null && changeSet.ChangeSetId != requestedChangeSetId)
+        {
+            throw new ArgumentException(
+                "The trusted change set must match the requested change set.",
+                nameof(changeSet));
+        }
+
+        if (changeSet is not null && recovery is not null)
+        {
+            throw new ArgumentException(
+                "A recovery result cannot expose a trusted requested change set.",
+                nameof(recovery));
+        }
+
+        RequestedChangeSetId = requestedChangeSetId;
+        Success = success;
+        Code = code;
+        ChangeSet = changeSet;
+        Recovery = recovery;
+    }
+
+    public Guid RequestedChangeSetId { get; }
+
+    public bool Success { get; }
+
+    public string Code { get; }
+
+    public SetupLedgerChangeSet? ChangeSet { get; }
+
+    public SetupRecoveryResult? Recovery { get; }
+}
 
 internal sealed class SetupRollbackCoordinator
 {
@@ -95,21 +129,23 @@ internal sealed class SetupRollbackCoordinator
                     SetupRollbackPreflightClassification.RecoveryRequired,
                     SetupCodes.RecoveryRequired,
                     []),
-                plan is null);
+                preparation.TrustedChangeSet);
         }
 
+        var trustedChangeSet = preparation.TrustedChangeSet
+            ?? throw new InvalidOperationException();
         var rollbackTargets = preflight.RollbackTargets;
 
         try
         {
             journalStore.SupersedeWithPreparedRollback(setupLock, changeSetId, rollbackTargets);
             platform.Execution.Checkpoint(SetupFaultPoint.AfterJournalPreparedBeforeLedger);
-            var rollingBack = changeSet with
+            var rollingBack = trustedChangeSet with
             {
                 UpdatedAt = platform.Clock.UtcNow,
                 OutcomeCode = null,
                 State = SetupChangeSetState.RollingBack,
-                Targets = changeSet.Targets.Select(target => target.AppliedStateHash is not null
+                Targets = trustedChangeSet.Targets.Select(target => target.AppliedStateHash is not null
                     ? target with { OutcomeCode = null, RollbackStatus = SetupLedgerRollbackStatus.Pending }
                     : target with { OutcomeCode = null, RollbackStatus = SetupLedgerRollbackStatus.NotAvailable }).ToArray(),
             };
@@ -118,7 +154,7 @@ internal sealed class SetupRollbackCoordinator
         }
         catch (Exception)
         {
-            return Result(changeSetId, false, SetupCodes.RecoveryRequired, changeSet);
+            return Result(changeSetId, false, SetupCodes.RecoveryRequired, trustedChangeSet);
         }
 
         var execution = recoveryCoordinator.CompleteRequestedRollback(setupLock, changeSetId);
@@ -142,7 +178,7 @@ internal sealed class SetupRollbackCoordinator
             changeSetId,
             false,
             execution.Code ?? SetupCodes.RecoveryRequired,
-            execution.EffectiveChangeSet);
+            execution.EffectiveChangeSet ?? trustedChangeSet);
     }
 
     private SetupRollbackExecutionResult HandlePreflightFailure(
@@ -150,16 +186,21 @@ internal sealed class SetupRollbackCoordinator
         SetupOwnershipLedger ledger,
         SetupLedgerChangeSet changeSet,
         SetupRollbackPreflightResult preflight,
-        bool planMissing)
+        SetupLedgerChangeSet? trustedChangeSet)
     {
         var code = preflight.Code ?? SetupCodes.RecoveryRequired;
         if (preflight.Classification is SetupRollbackPreflightClassification.NotAvailable or
             SetupRollbackPreflightClassification.Stale)
         {
-            return PersistAttemptOutcome(setupLock, ledger, changeSet, code);
+            if (trustedChangeSet is null)
+            {
+                return Result(changeSet.ChangeSetId, false, code);
+            }
+
+            return PersistAttemptOutcome(setupLock, ledger, trustedChangeSet, code);
         }
 
-        return Result(changeSet.ChangeSetId, false, code, planMissing ? null : changeSet);
+        return Result(changeSet.ChangeSetId, false, code, trustedChangeSet);
     }
 
     private SetupRollbackExecutionResult PersistAttemptOutcome(
