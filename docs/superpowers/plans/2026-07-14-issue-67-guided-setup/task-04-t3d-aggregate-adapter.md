@@ -106,6 +106,9 @@ internal sealed record GitHubCopilotPartitionPlan(
   that order; warnings/next-actions union preserves first-occurrence order
   and de-duplicates exact codes (e.g. `vscode_non_default_profiles_not_modified`
   exactly once per command).
+- For `all`, execute partitions in that fixed order and stop immediately on
+  the first failure: later partitions are not called and no new lazy property
+  is accessed. Return the failure with no partial records (empty arrays).
 - Any partition failure fails the whole plan with that partition's code and
   its warnings/next-actions (no partial plan — verify this all-or-nothing
   rule against the spec's `target_not_installed` "does not produce a partial
@@ -115,11 +118,14 @@ internal sealed record GitHubCopilotPartitionPlan(
 - The adapter constructs one context per Plan/Revalidate operation and passes
   that same context to every selected partition. A first access invokes each
   lazy helper once; repeated accesses and partition fan-out reuse the cached
-  value. Writable VS Code and Windows CLI Plan/Revalidate paths must access
-  required properties exactly once per operation; across selected/`all`
-  partitions this is one call per distinct endpoint, never one call per
-  partition. T4/T5 own access order so version/extension/policy or OS refusals
-  precede endpoint access.
+  value. Only successful writable VS Code and Windows CLI Plan/Revalidate
+  operations, after earlier target validation and target-specific preflight,
+  must access required properties exactly once per operation; across
+  selected/`all` partitions this is one call per distinct endpoint, never one
+  call per partition. On early version/extension/policy or
+  environment-override failures, observations occur only as required and the
+  lazy `Endpoint` property is never accessed, so probe calls are zero. T4/T5
+  own access order so those refusals precede endpoint access.
 - App/SDK Plan never accesses `Observations` or `Endpoint`; endpoint state
   never gates its guidance. During aggregate `Revalidate`, guidance records
   are skipped entirely: no partition call, detection call, or probe call.
@@ -154,11 +160,14 @@ all-partition producer/consumer integration gate.
   unsupported token → `unsupported_target` with empty arrays and zero
   partition calls, partition failure propagation (code + diagnostics, no
   records), zero detection/probe calls for unsupported targets and app-sdk
-  Plan, exact-once detection/probe counters for writable VS Code/Windows CLI
-  single-target/`all` plans and revalidations, guidance-record Revalidate skip
-  with zero partition/detection/probe calls, macOS/Linux CLI Revalidate
-  refusal before lazy-property access, revalidation routing by label, and
-  manifest pairing per record kind (assert `expected_result`
+  Plan, exact-once detection/probe counters for successful writable VS
+  Code/Windows CLI single-target/`all` plans and revalidations, call-counter
+  negatives for at least one early Plan failure and one early Revalidate
+  failure (required observations only, zero probes), guidance-record
+  Revalidate skip with zero partition/detection/probe calls, macOS/Linux CLI
+  Revalidate refusal before lazy-property access, `all` immediate-stop/no-
+  partial-plan behavior, revalidation routing by label, and manifest pairing
+  per record kind (assert `expected_result`
   equals the canonical manifest via `SourceCapabilityManifestLoader.MatchesCanonical`).
   Add the explicitly non-gating early compatibility test described above.
 
