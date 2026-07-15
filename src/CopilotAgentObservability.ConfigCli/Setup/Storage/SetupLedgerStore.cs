@@ -560,7 +560,6 @@ internal static partial class SetupStorageValidation
             Require(!string.IsNullOrWhiteSpace(target.TargetLocation));
             Require(Enum.IsDefined(target.TargetKind));
             RequirePattern(target.BaseStateHash, HashPattern());
-            Require(target.DesiredState is not null);
             var members = RequireNotNull(target.Members);
             Require(members.Count <= 32);
             Require(members.Select(member => member?.SettingKey).Distinct(StringComparer.Ordinal).Count() == members.Count);
@@ -571,6 +570,8 @@ internal static partial class SetupStorageValidation
                 Require(Enum.IsDefined(member.Operation));
                 Require(IsValidDesiredValue(target.TargetKind, member));
             }
+
+            ValidateDesiredState(plan.Adapter, target, members);
         }
 
         Require(targets.Select(target => target.RecordId).Distinct().Count() == targets.Count);
@@ -586,6 +587,45 @@ internal static partial class SetupStorageValidation
                 _ => member.DesiredValue is not null,
             }
             : member.DesiredValue is not null || member.Operation == SetupOperation.Remove;
+
+    private static void ValidateDesiredState(
+        string adapter,
+        SetupPrivatePlanTarget target,
+        IReadOnlyList<SetupPrivatePlanMember> members)
+    {
+        if ((object)target.DesiredState is SetupInlineDesiredState inline)
+        {
+            Require(inline.Value is not null);
+            return;
+        }
+
+        if ((object)target.DesiredState is not SetupJsoncOwnedValuesDesiredState tagged)
+        {
+            throw new FormatException();
+        }
+
+        Require(adapter == "github-copilot" && target.TargetKind == SetupTargetKind.Json);
+        RequirePattern(tagged.ExpectedStateHash, HashPattern());
+        var ownedValues = RequireNotNull(tagged.OwnedValues);
+        Require(ownedValues.Count is >= 1 and <= 32 && ownedValues.Count == members.Count);
+        for (var index = 0; index < ownedValues.Count; index++)
+        {
+            var ownedValue = RequireNotNull(ownedValues[index]);
+            RequirePattern(ownedValue.SettingKey, SettingKeyPattern());
+            Require(ownedValue.SettingKey == members[index].SettingKey);
+            Require(ownedValue.ValueKind switch
+            {
+                "boolean" => ownedValue.Value is bool,
+                "string" => ownedValue.Value is string { Length: >= 1 and <= 2048 },
+                _ => false,
+            });
+        }
+
+        Require(ownedValues
+            .Select(ownedValue => ownedValue.SettingKey)
+            .Distinct(StringComparer.Ordinal)
+            .Count() == ownedValues.Count);
+    }
 
     public static void ValidateLedger(SetupOwnershipLedger ledger)
     {

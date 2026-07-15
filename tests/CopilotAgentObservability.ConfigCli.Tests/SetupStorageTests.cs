@@ -231,7 +231,7 @@ public sealed class SetupStorageTests
     }
 
     [Fact]
-    public void Plan_RoundTripsExactPrivateLocationsAndDesiredStateWithoutPreviousValueField()
+    public void Plan_RoundTripsTaggedDesiredStateInCanonicalPropertyOrderWithoutPreviousValueField()
     {
         var context = CreateContext();
         var plan = CreatePlan();
@@ -239,12 +239,193 @@ public sealed class SetupStorageTests
         context.PlanStore.Create(context.Lock, plan);
         var reopened = new SetupPlanStore(context.Platform, context.Paths).Load(ChangeSetId);
         var json = Encoding.UTF8.GetString(context.Platform.ReadSeededFile(context.Paths.GetPlan(ChangeSetId)));
+        using var document = JsonDocument.Parse(json);
+        var desiredState = document.RootElement.GetProperty("targets")[0].GetProperty("desired_state");
+        var ownedValue = desiredState.GetProperty("owned_values")[0];
 
         Assert.Equivalent(plan, reopened, strict: true);
         Assert.Contains("C:\\\\Synthetic\\\\settings.json", json, StringComparison.Ordinal);
         Assert.Contains("DESIRED_VALUE_MARKER", json, StringComparison.Ordinal);
+        Assert.Equal(
+            ["kind", "expected_state_hash", "owned_values"],
+            desiredState.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(
+            ["setting_key", "value_kind", "value"],
+            ownedValue.EnumerateObject().Select(property => property.Name));
+        Assert.Equal("jsonc_owned_values_v1", desiredState.GetProperty("kind").GetString());
+        Assert.Equal(HashB, desiredState.GetProperty("expected_state_hash").GetString());
+        Assert.Equal(JsonValueKind.String, ownedValue.GetProperty("value").ValueKind);
         Assert.DoesNotContain("previous", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Plan_RoundTripsTaggedBooleanAndStringValuesWithExactJsonTypes()
+    {
+        var context = CreateContext();
+        var plan = CreateTaggedBooleanAndStringPlan("x");
+
+        context.PlanStore.Create(context.Lock, plan);
+        var reopened = context.PlanStore.Load(ChangeSetId);
+        using var document = JsonDocument.Parse(context.Platform.ReadSeededFile(context.Paths.GetPlan(ChangeSetId)));
+        var values = document.RootElement.GetProperty("targets")[0].GetProperty("desired_state").GetProperty("owned_values");
+
+        Assert.Equivalent(plan, reopened, strict: true);
+        Assert.Equal("boolean", values[0].GetProperty("value_kind").GetString());
+        Assert.True(values[0].GetProperty("value").GetBoolean());
+        Assert.Equal(JsonValueKind.True, values[0].GetProperty("value").ValueKind);
+        Assert.Equal("string", values[1].GetProperty("value_kind").GetString());
+        Assert.Equal("x", values[1].GetProperty("value").GetString());
+        Assert.Equal(JsonValueKind.String, values[1].GetProperty("value").ValueKind);
+    }
+
+    [Theory]
+    [InlineData(SetupTargetKind.File)]
+    [InlineData(SetupTargetKind.Toml)]
+    [InlineData(SetupTargetKind.StartupTask)]
+    public void Plan_RoundTripsCanonicalInlineArmForGenericTargets(SetupTargetKind targetKind)
+    {
+        var context = CreateContext();
+        var plan = CreatePlanWithSingleMember(targetKind, SetupOperation.Replace, "DESIRED_VALUE_MARKER");
+
+        context.PlanStore.Create(context.Lock, plan);
+        var reopened = Assert.IsType<SetupPrivatePlan>(context.PlanStore.Load(ChangeSetId));
+        using var document = JsonDocument.Parse(context.Platform.ReadSeededFile(context.Paths.GetPlan(ChangeSetId)));
+
+        Assert.IsType<SetupInlineDesiredState>(Assert.Single(reopened.Targets).DesiredState);
+        Assert.Equal(JsonValueKind.String, document.RootElement.GetProperty("targets")[0].GetProperty("desired_state").ValueKind);
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(2048, true)]
+    [InlineData(2049, false)]
+    public void Plan_TaggedStringValueEnforcesExactUtf16Boundary(int length, bool valid)
+    {
+        var plan = CreateTaggedBooleanAndStringPlan(new string('x', length));
+
+        if (!valid)
+        {
+            Assert.Throws<FormatException>(() => SetupPlanStore.Serialize(plan));
+            return;
+        }
+
+        var bytes = SetupPlanStore.Serialize(plan);
+        using var document = JsonDocument.Parse(bytes);
+        Assert.Equal(
+            length,
+            document.RootElement.GetProperty("targets")[0]
+                .GetProperty("desired_state")
+                .GetProperty("owned_values")[1]
+                .GetProperty("value")
+                .GetString()!
+                .Length);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(32)]
+    public void Plan_TaggedOwnedValuesAcceptsExactEntryCountBoundaries(int count)
+    {
+        var members = Enumerable.Range(1, count)
+            .Select(index => new SetupPrivatePlanMember($"setting_{index}", SetupOperation.Replace, "configured"))
+            .ToArray();
+        var plan = CreatePlan() with
+        {
+            Targets =
+            [
+                CreatePlan().Targets[0] with
+                {
+                    Members = members,
+                    DesiredState = new SetupJsoncOwnedValuesDesiredState(
+                        HashB,
+                        members.Select(member =>
+                            new SetupJsoncOwnedValue(member.SettingKey, "string", "configured")).ToArray()),
+                },
+            ],
+        };
+
+        using var document = JsonDocument.Parse(SetupPlanStore.Serialize(plan));
+
+        Assert.Equal(
+            count,
+            document.RootElement.GetProperty("targets")[0]
+                .GetProperty("desired_state")
+                .GetProperty("owned_values")
+                .GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")]
+    [InlineData("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    public void Plan_TaggedExpectedHashRejectsNonLowercaseSha256(string expectedHash)
+    {
+        var plan = CreatePlan() with
+        {
+            Targets =
+            [
+                CreatePlan().Targets[0] with
+                {
+                    DesiredState = new SetupJsoncOwnedValuesDesiredState(
+                        expectedHash,
+                        [new SetupJsoncOwnedValue("github.copilot.chat.otel.enabled", "string", "DESIRED_VALUE_MARKER")]),
+                },
+            ],
+        };
+
+        Assert.Throws<FormatException>(() => SetupPlanStore.Serialize(plan));
+    }
+
+    [Theory]
+    [InlineData("desired_unknown")]
+    [InlineData("desired_missing_kind")]
+    [InlineData("desired_missing_hash")]
+    [InlineData("desired_missing_values")]
+    [InlineData("desired_duplicate")]
+    [InlineData("desired_null")]
+    [InlineData("desired_array")]
+    [InlineData("desired_boolean")]
+    [InlineData("desired_number")]
+    [InlineData("wrong_tag")]
+    [InlineData("uppercase_hash")]
+    [InlineData("nonhex_hash")]
+    [InlineData("kind_wrong_type")]
+    [InlineData("hash_wrong_type")]
+    [InlineData("owned_values_wrong_type")]
+    [InlineData("owned_values_empty")]
+    [InlineData("owned_values_33")]
+    [InlineData("entry_unknown")]
+    [InlineData("entry_missing_key")]
+    [InlineData("entry_missing_kind")]
+    [InlineData("entry_missing_value")]
+    [InlineData("entry_duplicate")]
+    [InlineData("setting_key_wrong_type")]
+    [InlineData("value_kind_wrong_type")]
+    [InlineData("wrong_value_kind")]
+    [InlineData("boolean_value_string")]
+    [InlineData("string_value_boolean")]
+    [InlineData("string_value_null")]
+    [InlineData("string_value_empty")]
+    [InlineData("string_value_over_bound")]
+    [InlineData("duplicate_key")]
+    [InlineData("reordered_key")]
+    [InlineData("missing_key")]
+    [InlineData("extra_key")]
+    public void PlanLoad_MalformedTaggedDesiredStateFailsRecoveryRequiredWithoutEcho(string mutation)
+    {
+        var context = CreateContext();
+        var serialized = Encoding.UTF8.GetString(SetupPlanStore.Serialize(CreateTaggedBooleanAndStringPlan("DESIRED_VALUE_MARKER")));
+        var json = MutateTaggedDesiredState(serialized, mutation);
+        context.Platform.SeedFile(context.Paths.GetPlan(ChangeSetId), Encoding.UTF8.GetBytes(json));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.PlanStore.Load(ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Message);
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", exception.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -899,6 +1080,32 @@ public sealed class SetupStorageTests
             SetupStorageValidation.ValidatePlanAndLedger(CreatePlan(), pristineWithLaterTimestamp));
     }
 
+    [Theory]
+    [InlineData("adapter", "other-adapter")]
+    [InlineData("target_kind", "file")]
+    [InlineData("target_kind", "toml")]
+    public void PlanLoad_TaggedArmForInvalidAdapterOrTargetKindRequiresRecovery(string property, string value)
+    {
+        var context = CreateContext();
+        var root = JsonNode.Parse(SetupPlanStore.Serialize(CreatePlan()))!.AsObject();
+        if (property == "adapter")
+        {
+            root["adapter"] = value;
+        }
+        else
+        {
+            root["targets"]![0]![property] = value;
+        }
+
+        context.Platform.SeedFile(
+            context.Paths.GetPlan(ChangeSetId),
+            Encoding.UTF8.GetBytes(root.ToJsonString()));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.PlanStore.Load(ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+    }
+
     [Fact]
     public void LedgerValidation_AllNoOpWritableTargetOwnsNoBackupOrAppliedHash()
     {
@@ -1319,6 +1526,48 @@ public sealed class SetupStorageTests
         }
     }
 
+    [Fact]
+    public void CommittedPrivatePlanV1Fixture_IsProductionSerializerOutputAndSurvivesRestartByteIdentical()
+    {
+        var fixturePath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Setup", "v1", "private-plan.v1.json");
+        var fixtureBytes = File.ReadAllBytes(fixturePath);
+        var ownershipFixtureBytes = File.ReadAllBytes(Path.Combine(
+            AppContext.BaseDirectory,
+            "Fixtures", "Setup", "v1", "ownership-ledger.v1.json"));
+        var expected = CreateLegacyInlineFixturePlan();
+        var temporaryRoot = Path.Combine(Path.GetTempPath(), $"cao-setup-plan-fixture-{Guid.NewGuid():N}");
+        try
+        {
+            var firstPlatform = new SystemSetupPlatform(localApplicationData: temporaryRoot);
+            var firstPaths = new SetupRuntimePaths(firstPlatform);
+            var firstStore = new SetupPlanStore(firstPlatform, firstPaths);
+            using (var acquired = SetupLock.TryAcquire(firstPlatform, firstPaths))
+            {
+                firstStore.Create(acquired.Lock!, expected);
+            }
+
+            var writtenBytes = firstPlatform.FileSystem.ReadAllBytes(firstPaths.GetPlan(ChangeSetId));
+            var reopenedPlatform = new SystemSetupPlatform(localApplicationData: temporaryRoot);
+            var reopenedPaths = new SetupRuntimePaths(reopenedPlatform);
+            var reopened = new SetupPlanStore(reopenedPlatform, reopenedPaths).Load(ChangeSetId);
+            var reopenedBytes = reopenedPlatform.FileSystem.ReadAllBytes(reopenedPaths.GetPlan(ChangeSetId));
+
+            Assert.Equivalent(expected, reopened, strict: true);
+            Assert.Equal(fixtureBytes, writtenBytes);
+            Assert.Equal(fixtureBytes, reopenedBytes);
+            Assert.NotEqual(ownershipFixtureBytes, fixtureBytes);
+            Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", Encoding.UTF8.GetString(fixtureBytes), StringComparison.Ordinal);
+            Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", Encoding.UTF8.GetString(ownershipFixtureBytes), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(temporaryRoot))
+            {
+                Directory.Delete(temporaryRoot, recursive: true);
+            }
+        }
+    }
+
     private static StorageContext CreateContext(Action? disposeRequestedObserver = null)
     {
         var platform = new SetupTestPlatform(CreatedAt);
@@ -1352,8 +1601,52 @@ public sealed class SetupStorageTests
                 SetupTargetKind.Json,
                 "C:\\Synthetic\\settings.json",
                 HashA,
-                "{\"github.copilot.chat.otel.enabled\":\"DESIRED_VALUE_MARKER\"}",
+                new SetupJsoncOwnedValuesDesiredState(
+                    HashB,
+                    [new SetupJsoncOwnedValue("github.copilot.chat.otel.enabled", "string", "DESIRED_VALUE_MARKER")]),
                 [new SetupPrivatePlanMember("github.copilot.chat.otel.enabled", SetupOperation.Replace, "DESIRED_VALUE_MARKER")]),
+        ]);
+
+    private static SetupPrivatePlan CreateLegacyInlineFixturePlan() => new(
+        1,
+        ChangeSetId,
+        "github-copilot",
+        "vscode",
+        CreatedAt,
+        "1.2.3",
+        [
+            new SetupPrivatePlanTarget(
+                RecordId,
+                SetupTargetKind.Json,
+                "C:\\Synthetic\\settings.json",
+                HashA,
+                new SetupInlineDesiredState("{\"github.copilot.chat.otel.enabled\":\"DESIRED_VALUE_MARKER\"}"),
+                [new SetupPrivatePlanMember("github.copilot.chat.otel.enabled", SetupOperation.Replace, "DESIRED_VALUE_MARKER")]),
+        ]);
+
+    private static SetupPrivatePlan CreateTaggedBooleanAndStringPlan(string stringValue) => new(
+        1,
+        ChangeSetId,
+        "github-copilot",
+        "vscode",
+        CreatedAt,
+        "1.2.3",
+        [
+            new SetupPrivatePlanTarget(
+                RecordId,
+                SetupTargetKind.Json,
+                "C:\\Synthetic\\settings.json",
+                HashA,
+                new SetupJsoncOwnedValuesDesiredState(
+                    HashB,
+                    [
+                        new SetupJsoncOwnedValue("github.copilot.chat.otel.enabled", "boolean", true),
+                        new SetupJsoncOwnedValue("github.copilot.chat.otel.otlpEndpoint", "string", stringValue),
+                    ]),
+                [
+                    new SetupPrivatePlanMember("github.copilot.chat.otel.enabled", SetupOperation.Replace, "true"),
+                    new SetupPrivatePlanMember("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, stringValue),
+                ]),
         ]);
 
     private static SetupPrivatePlan CreatePlanWithSingleMember(
@@ -1372,7 +1665,7 @@ public sealed class SetupStorageTests
                 targetKind,
                 targetKind == SetupTargetKind.Env ? "current-user-env" : "C:\\Synthetic\\settings.json",
                 HashA,
-                "desired-state",
+                new SetupInlineDesiredState("desired-state"),
                 [new SetupPrivatePlanMember("github.copilot.chat.otel.enabled", operation, desiredValue)]),
         ]);
 
@@ -1549,6 +1842,148 @@ public sealed class SetupStorageTests
         var first = values[0]!.DeepClone();
         values[0] = values[1]!.DeepClone();
         values[1] = first;
+    }
+
+    private static string MutateTaggedDesiredState(string serialized, string mutation)
+    {
+        if (mutation == "desired_duplicate")
+        {
+            return serialized.Replace(
+                "\"kind\": \"jsonc_owned_values_v1\"",
+                "\"kind\": \"jsonc_owned_values_v1\", \"kind\": \"jsonc_owned_values_v1\"",
+                StringComparison.Ordinal);
+        }
+
+        if (mutation == "entry_duplicate")
+        {
+            return serialized.Replace(
+                "\"setting_key\": \"github.copilot.chat.otel.enabled\"",
+                "\"setting_key\": \"github.copilot.chat.otel.enabled\", \"setting_key\": \"github.copilot.chat.otel.enabled\"",
+                StringComparison.Ordinal);
+        }
+
+        var root = JsonNode.Parse(serialized)!.AsObject();
+        var target = root["targets"]![0]!.AsObject();
+        var desired = target["desired_state"]!.AsObject();
+        var values = desired["owned_values"]!.AsArray();
+        var first = values[0]!.AsObject();
+        switch (mutation)
+        {
+            case "desired_unknown":
+                desired["unknown"] = "PREVIOUS_SECRET_MARKER";
+                break;
+            case "desired_missing_kind":
+                desired.Remove("kind");
+                break;
+            case "desired_missing_hash":
+                desired.Remove("expected_state_hash");
+                break;
+            case "desired_missing_values":
+                desired.Remove("owned_values");
+                break;
+            case "desired_null":
+                target["desired_state"] = null;
+                break;
+            case "desired_array":
+                target["desired_state"] = new JsonArray();
+                break;
+            case "desired_boolean":
+                target["desired_state"] = true;
+                break;
+            case "desired_number":
+                target["desired_state"] = 1;
+                break;
+            case "wrong_tag":
+                desired["kind"] = "jsonc_owned_values_v2";
+                break;
+            case "uppercase_hash":
+                desired["expected_state_hash"] = HashB.ToUpperInvariant();
+                break;
+            case "nonhex_hash":
+                desired["expected_state_hash"] = new string('g', 64);
+                break;
+            case "kind_wrong_type":
+                desired["kind"] = 1;
+                break;
+            case "hash_wrong_type":
+                desired["expected_state_hash"] = true;
+                break;
+            case "owned_values_wrong_type":
+                desired["owned_values"] = "not-an-array";
+                break;
+            case "owned_values_empty":
+                values.Clear();
+                break;
+            case "owned_values_33":
+                values.Clear();
+                for (var index = 0; index < 33; index++)
+                {
+                    values.Add(new JsonObject
+                    {
+                        ["setting_key"] = $"setting_{index}",
+                        ["value_kind"] = "boolean",
+                        ["value"] = true,
+                    });
+                }
+                break;
+            case "entry_unknown":
+                first["unknown"] = "PREVIOUS_SECRET_MARKER";
+                break;
+            case "entry_missing_key":
+                first.Remove("setting_key");
+                break;
+            case "entry_missing_kind":
+                first.Remove("value_kind");
+                break;
+            case "entry_missing_value":
+                first.Remove("value");
+                break;
+            case "setting_key_wrong_type":
+                first["setting_key"] = true;
+                break;
+            case "value_kind_wrong_type":
+                first["value_kind"] = true;
+                break;
+            case "wrong_value_kind":
+                first["value_kind"] = "number";
+                break;
+            case "boolean_value_string":
+                first["value"] = "true";
+                break;
+            case "string_value_boolean":
+                values[1]!["value"] = true;
+                break;
+            case "string_value_null":
+                values[1]!["value"] = null;
+                break;
+            case "string_value_empty":
+                values[1]!["value"] = string.Empty;
+                break;
+            case "string_value_over_bound":
+                values[1]!["value"] = new string('x', 2049);
+                break;
+            case "duplicate_key":
+                values[1]!["setting_key"] = first["setting_key"]!.GetValue<string>();
+                break;
+            case "reordered_key":
+                SwapFirstTwo(values);
+                break;
+            case "missing_key":
+                values.RemoveAt(1);
+                break;
+            case "extra_key":
+                values.Add(new JsonObject
+                {
+                    ["setting_key"] = "extra.setting",
+                    ["value_kind"] = "string",
+                    ["value"] = "extra",
+                });
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mutation));
+        }
+
+        return root.ToJsonString();
     }
 
     private static int IndexOf(IReadOnlyList<string> values, string expected) =>

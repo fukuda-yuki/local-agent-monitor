@@ -1721,7 +1721,7 @@ public sealed class SetupApplyTests
                     SetupTargetKind.Json,
                     TargetPath,
                     SetupHash.File(true, Encoding.UTF8.GetBytes("old-file")),
-                    "new-file",
+                    new SetupInlineDesiredState("new-file"),
                     [new SetupPrivatePlanMember("setting", SetupOperation.Replace, "new-file")]));
                 ledgerTargets.Add(new SetupLedgerTarget(
                     FileRecordId,
@@ -1756,7 +1756,7 @@ public sealed class SetupApplyTests
                 SetupTargetKind.Env,
                 "current-user",
                 environmentCapture.AggregateHash,
-                "environment-allowlist",
+                new SetupInlineDesiredState("environment-allowlist"),
                 environmentMembers));
             ledgerTargets.Add(new SetupLedgerTarget(
                 EnvironmentRecordId,
@@ -1895,13 +1895,13 @@ public sealed class SetupApplyTests
             var planTargets = new List<SetupPrivatePlanTarget>
             {
                 new(FileRecordId, SetupTargetKind.Json, TargetPath,
-                    SetupHash.File(true, Encoding.UTF8.GetBytes("old")), fileDesired,
+                    SetupHash.File(true, Encoding.UTF8.GetBytes("old")), new SetupInlineDesiredState(fileDesired),
                     [new SetupPrivatePlanMember("setting", fileOperation, fileDesired)]),
             };
             if (includeEnvironment)
             {
                 planTargets.Add(new SetupPrivatePlanTarget(EnvironmentRecordId, SetupTargetKind.Env, "current-user",
-                    environmentCapture.AggregateHash, "environment-allowlist",
+                    environmentCapture.AggregateHash, new SetupInlineDesiredState("environment-allowlist"),
                     [new SetupPrivatePlanMember("ENV_A", environmentAOperation, environmentADesired),
                      new SetupPrivatePlanMember("ENV_B", environmentBOperation, environmentBDesired)]));
             }

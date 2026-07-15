@@ -37,7 +37,7 @@ internal sealed record SetupChangeRecord(
     string TargetLocation,
     string TargetLabel,
     string BaseStateHash,
-    string DesiredState,
+    SetupPrivateDesiredState DesiredState,
     IReadOnlyList<SetupPrivatePlanMember> Members,
     SetupRestartRequirement RestartRequirement,
     SetupStatusProjection StatusProjection,
@@ -178,6 +178,7 @@ internal static class SetupPlanResult
         var projection = record.StatusProjection;
         return record with
         {
+            DesiredState = SnapshotDesiredState(record.DesiredState),
             Members = Array.AsReadOnly(record.Members
                 .Select(member => member is null
                     ? throw InvalidOutput()
@@ -208,6 +209,18 @@ internal static class SetupPlanResult
                 ? new SetupGuidance(guidance.Kind, guidance.Language, guidance.Sample)
                 : null,
         };
+    }
+
+    private static SetupPrivateDesiredState SnapshotDesiredState(SetupPrivateDesiredState? desiredState)
+    {
+        try
+        {
+            return desiredState?.Snapshot() ?? throw InvalidOutput();
+        }
+        catch (FormatException)
+        {
+            throw InvalidOutput();
+        }
     }
 }
 

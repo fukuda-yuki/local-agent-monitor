@@ -4586,7 +4586,7 @@ public sealed class SetupRecoveryTests
                         SetupTargetKind.Env,
                         "current-user",
                         environmentPreviousHash,
-                        "environment-allowlist",
+                        new SetupInlineDesiredState("environment-allowlist"),
                         [
                             new SetupPrivatePlanMember("ENV_A", SetupOperation.Replace, "desired-a"),
                             new SetupPrivatePlanMember("ENV_B", SetupOperation.Replace, "desired-b"),
@@ -4597,7 +4597,7 @@ public sealed class SetupRecoveryTests
                         SetupTargetKind.Json,
                         TargetPath,
                         filePreviousHash,
-                        "new-file",
+                        new SetupInlineDesiredState("new-file"),
                         [new SetupPrivatePlanMember("file-setting", SetupOperation.Replace, "new-file")]),
                 ]);
             planned = new SetupLedgerChangeSet(
@@ -5054,7 +5054,7 @@ public sealed class SetupRecoveryTests
                     SetupTargetKind.Json,
                     targetPath,
                     previousHash,
-                    "new-later",
+                    new SetupInlineDesiredState("new-later"),
                     [new SetupPrivatePlanMember("later-setting", SetupOperation.Replace, "new-later")])]);
             var plannedLater = new SetupLedgerChangeSet(
                 changeSetId,
@@ -5155,7 +5155,7 @@ public sealed class SetupRecoveryTests
                     SetupTargetKind.Env,
                     "current-user-second",
                     environmentHash,
-                    "environment-allowlist-second",
+                    new SetupInlineDesiredState("environment-allowlist-second"),
                     [new SetupPrivatePlanMember(
                         "ENV_SECOND", SetupOperation.NoOp, "stable-second")])).ToArray(),
             });
@@ -5436,7 +5436,7 @@ public sealed class SetupRecoveryTests
                     SetupTargetKind.Json,
                     TargetPaths[index],
                     SetupHash.File(initialFileExists, initialFileExists ? Encoding.UTF8.GetBytes("old") : []),
-                    noOp ? "old" : "new",
+                    new SetupInlineDesiredState(noOp ? "old" : "new"),
                     [new SetupPrivatePlanMember(
                         index == 0 ? "setting" : $"setting-{index}",
                         noOp ? SetupOperation.NoOp : SetupOperation.Replace,
@@ -5453,7 +5453,7 @@ public sealed class SetupRecoveryTests
                     SetupTargetKind.Env,
                     "environment-allowlist",
                     environmentHash!,
-                    "environment-allowlist",
+                    new SetupInlineDesiredState("environment-allowlist"),
                     [new SetupPrivatePlanMember("ENV_NOOP", SetupOperation.NoOp, "stable")]));
             }
 
@@ -5676,7 +5676,7 @@ public sealed class SetupRecoveryTests
                     SetupTargetKind.Json,
                     targetPath,
                     SetupHash.File(true, Encoding.UTF8.GetBytes("old")),
-                    "new",
+                    new SetupInlineDesiredState("new"),
                     [new SetupPrivatePlanMember("setting", SetupOperation.Replace, "new")])]);
             var planned = new SetupLedgerChangeSet(
                 changeSetId,
@@ -6366,14 +6366,14 @@ public sealed class SetupRecoveryTests
                      SetupTargetKind.Json,
                      TargetPath,
                      SetupHash.File(true, Encoding.UTF8.GetBytes("old")),
-                     "new",
+                     new SetupInlineDesiredState("new"),
                      [new SetupPrivatePlanMember("setting", SetupOperation.Replace, "new")]),
                  new SetupPrivatePlanTarget(
                      EnvironmentRecordId,
                      SetupTargetKind.Env,
                      "current-user",
                      environmentCapture.AggregateHash,
-                     "environment-allowlist",
+                     new SetupInlineDesiredState("environment-allowlist"),
                      [new SetupPrivatePlanMember("ENV_A", SetupOperation.Replace, "desired-a"),
                       new SetupPrivatePlanMember(
                           "ENV_B",
@@ -6757,7 +6757,7 @@ public sealed class SetupRecoveryTests
                     SetupTargetKind.Env,
                     "current-user",
                     capture.AggregateHash,
-                    "environment-allowlist",
+                    new SetupInlineDesiredState("environment-allowlist"),
                     [new SetupPrivatePlanMember(
                          "ENV_A",
                          desiredState == "missing" ? SetupOperation.Remove : SetupOperation.Replace,

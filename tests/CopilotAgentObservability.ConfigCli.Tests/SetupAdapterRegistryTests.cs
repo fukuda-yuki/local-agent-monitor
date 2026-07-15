@@ -319,6 +319,195 @@ public sealed class SetupAdapterRegistryTests
         Assert.Equal("Setup adapter returned invalid output.", exception.Message);
     }
 
+    [Fact]
+    public void Plan_WhenVsCodeJsonRecordUsesLegacyInlineDesiredState_FailsClosed()
+    {
+        var record = CreatePhysicalRecord(
+            CreateRecordId(1),
+            "vscode-stable-default-user-settings",
+            1,
+            SetupOperation.Replace) with
+        {
+            TargetKind = SetupTargetKind.Json,
+            StatusProjection = CreatePhysicalRecord(
+                CreateRecordId(1),
+                "vscode-stable-default-user-settings",
+                1,
+                SetupOperation.Replace).StatusProjection with
+            {
+                ExpectedResult = SourceCapabilityManifestLoader
+                    .LoadForSurface("github-copilot-vscode")
+                    .CanonicalJson,
+            },
+        };
+        var plan = new SetupChangePlan(
+            ChangeSetId,
+            "github-copilot",
+            "sample",
+            CreatedAt,
+            "1.2.3",
+            [record]);
+        var registry = new SetupAdapterRegistry(
+            [new FixedResultAdapter("github-copilot", SetupPlanResult.Planned(plan))]);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            registry.Plan(CreateRequest("github-copilot")));
+
+        Assert.Equal("Setup adapter returned invalid output.", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("vscode-stable-default-user-settings")]
+    [InlineData("vscode-insiders-default-user-settings")]
+    public void Plan_AcceptsTaggedDesiredStateForExactGithubCopilotVsCodeJsonLabels(string label)
+    {
+        var record = CreateCarrierRecord(
+            SetupTargetKind.Json,
+            label,
+            new SetupJsoncOwnedValuesDesiredState(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                [new SetupJsoncOwnedValue("setting_1", "boolean", true)]));
+        var registry = CreateRegistryForPlan("github-copilot", [record]);
+
+        var result = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            registry.Plan(CreateRequest("github-copilot")));
+
+        Assert.IsType<SetupJsoncOwnedValuesDesiredState>(Assert.Single(result.Value.PrivatePlan.Targets).DesiredState);
+    }
+
+    [Theory]
+    [InlineData(SetupTargetKind.File)]
+    [InlineData(SetupTargetKind.Toml)]
+    public void Plan_AcceptsInlineDesiredStateForGenericNonTaggedTargets(SetupTargetKind targetKind)
+    {
+        var record = CreateCarrierRecord(
+            targetKind,
+            "generic-target",
+            new SetupInlineDesiredState("legacy-inline"));
+        var registry = CreateRegistryForPlan("github-copilot", [record]);
+
+        var result = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            registry.Plan(CreateRequest("github-copilot")));
+
+        Assert.IsType<SetupInlineDesiredState>(Assert.Single(result.Value.PrivatePlan.Targets).DesiredState);
+    }
+
+    [Theory]
+    [InlineData("tagged_file")]
+    [InlineData("tagged_toml")]
+    [InlineData("tagged_other_adapter")]
+    [InlineData("tagged_other_label")]
+    [InlineData("inline_stable")]
+    [InlineData("inline_insiders")]
+    public void Plan_RejectsDesiredStateArmOutsideItsExactAdapterTargetAndLabelRelation(string variant)
+    {
+        var tagged = new SetupJsoncOwnedValuesDesiredState(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            [new SetupJsoncOwnedValue("setting_1", "boolean", true)]);
+        var (adapter, record) = variant switch
+        {
+            "tagged_file" => ("github-copilot", CreateCarrierRecord(SetupTargetKind.File, "generic-target", tagged)),
+            "tagged_toml" => ("github-copilot", CreateCarrierRecord(SetupTargetKind.Toml, "generic-target", tagged)),
+            "tagged_other_adapter" => ("other-adapter", CreateCarrierRecord(
+                SetupTargetKind.Json, "vscode-stable-default-user-settings", tagged)),
+            "tagged_other_label" => ("github-copilot", CreateCarrierRecord(
+                SetupTargetKind.Json, "other-json-target", tagged)),
+            "inline_stable" => ("github-copilot", CreateCarrierRecord(
+                SetupTargetKind.Json,
+                "vscode-stable-default-user-settings",
+                new SetupInlineDesiredState("legacy-inline"))),
+            "inline_insiders" => ("github-copilot", CreateCarrierRecord(
+                SetupTargetKind.Json,
+                "vscode-insiders-default-user-settings",
+                new SetupInlineDesiredState("legacy-inline"))),
+            _ => throw new ArgumentOutOfRangeException(nameof(variant)),
+        };
+        var registry = CreateRegistryForPlan(adapter, [record]);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => registry.Plan(CreateRequest(adapter)));
+
+        Assert.Equal("Setup adapter returned invalid output.", exception.Message);
+    }
+
+    [Fact]
+    public void Planned_SnapshotsTaggedOwnedValuesBeforeTheRegistryBridge()
+    {
+        var values = new List<SetupJsoncOwnedValue>
+        {
+            new("setting_1", "boolean", true),
+        };
+        var record = CreateCarrierRecord(
+            SetupTargetKind.Json,
+            "vscode-stable-default-user-settings",
+            new SetupJsoncOwnedValuesDesiredState(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                values));
+        var carrier = SetupPlanResult.Planned(CreateAdapterPlan("github-copilot", [record]));
+        values.Clear();
+        var registry = new SetupAdapterRegistry([new FixedResultAdapter("github-copilot", carrier)]);
+
+        var result = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            registry.Plan(CreateRequest("github-copilot")));
+        var desiredState = Assert.IsType<SetupJsoncOwnedValuesDesiredState>(
+            Assert.Single(result.Value.PrivatePlan.Targets).DesiredState);
+
+        Assert.Single(desiredState.OwnedValues);
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<SetupJsoncOwnedValue>)desiredState.OwnedValues)[0] = new("changed", "boolean", false));
+    }
+
+    [Theory]
+    [InlineData("inline_exact_label")]
+    [InlineData("tagged_other_label")]
+    public void Revalidate_PersistedDesiredStateArmMismatchRequiresRecoveryBeforeAdapterCall(string variant)
+    {
+        var record = CreateCarrierRecord(
+            SetupTargetKind.Json,
+            "vscode-stable-default-user-settings",
+            new SetupJsoncOwnedValuesDesiredState(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                [new SetupJsoncOwnedValue("setting_1", "boolean", true)]));
+        var adapter = new RecordingAdapter("github-copilot", [record]);
+        var registry = new SetupAdapterRegistry([adapter]);
+        var planned = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            registry.Plan(CreateRequest("github-copilot"))).Value;
+        var plan = planned.PrivatePlan;
+        var changeSet = planned.PlannedChangeSet;
+        if (variant == "inline_exact_label")
+        {
+            plan = plan with
+            {
+                Targets =
+                [
+                    plan.Targets[0] with
+                    {
+                        DesiredState = new SetupInlineDesiredState("legacy-inline"),
+                    },
+                ],
+            };
+        }
+        else
+        {
+            changeSet = changeSet with
+            {
+                Targets =
+                [
+                    changeSet.Targets[0] with
+                    {
+                        TargetLabel = "other-json-target",
+                        StatusProjection = changeSet.Targets[0].StatusProjection with { ExpectedResult = null },
+                    },
+                ],
+            };
+        }
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            ((ISetupApplyRevalidator)registry).Revalidate(plan, changeSet));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(0, adapter.RevalidationCalls);
+    }
+
     [Theory]
     [InlineData("change-set")]
     [InlineData("adapter")]
@@ -542,6 +731,21 @@ public sealed class SetupAdapterRegistryTests
         CreatedAt,
         "1.2.3");
 
+    private static SetupAdapterRegistry CreateRegistryForPlan(
+        string adapter,
+        IReadOnlyList<SetupChangeRecord> records) =>
+        new([new FixedResultAdapter(adapter, SetupPlanResult.Planned(CreateAdapterPlan(adapter, records)))]);
+
+    private static SetupChangePlan CreateAdapterPlan(
+        string adapter,
+        IReadOnlyList<SetupChangeRecord> records) => new(
+        ChangeSetId,
+        adapter,
+        "sample",
+        CreatedAt,
+        "1.2.3",
+        records);
+
     private static SetupChangePlan CreatePlan(IReadOnlyList<SetupChangeRecord> records) => new(
         ChangeSetId,
         "test-adapter",
@@ -552,6 +756,24 @@ public sealed class SetupAdapterRegistryTests
 
     private static Guid CreateRecordId(int value) =>
         Guid.Parse($"018f3b9a-0000-7000-8000-{value:x12}");
+
+    private static SetupChangeRecord CreateCarrierRecord(
+        SetupTargetKind targetKind,
+        string targetLabel,
+        SetupPrivateDesiredState desiredState)
+    {
+        var record = CreatePhysicalRecord(CreateRecordId(1), targetLabel, 1, SetupOperation.Replace);
+        System.Text.Json.JsonElement? expectedResult = targetKind == SetupTargetKind.Json &&
+            targetLabel is "vscode-stable-default-user-settings" or "vscode-insiders-default-user-settings"
+                ? SourceCapabilityManifestLoader.LoadForSurface("github-copilot-vscode").CanonicalJson
+                : null;
+        return record with
+        {
+            TargetKind = targetKind,
+            DesiredState = desiredState,
+            StatusProjection = record.StatusProjection with { ExpectedResult = expectedResult },
+        };
+    }
 
     private static SetupChangeRecord CreatePhysicalRecord(
         Guid recordId,
@@ -577,7 +799,7 @@ public sealed class SetupAdapterRegistryTests
             "private://" + targetLabel,
             targetLabel,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "configured",
+            new SetupInlineDesiredState("configured"),
             members,
             SetupRestartRequirement.None,
             new SetupStatusProjection(
@@ -597,7 +819,7 @@ public sealed class SetupAdapterRegistryTests
         "private://" + targetLabel,
         targetLabel,
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "configured",
+        new SetupInlineDesiredState("configured"),
         [new SetupPrivatePlanMember("COPILOT_OTEL_ENABLED", SetupOperation.Replace, "true")],
         SetupRestartRequirement.RestartTerminalSession,
         new SetupStatusProjection(

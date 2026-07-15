@@ -3045,7 +3045,7 @@ public sealed class SetupCommandDispatcherTests
             "private://" + targetLabel,
             targetLabel,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "configured",
+            new SetupInlineDesiredState("configured"),
             [new SetupPrivatePlanMember(change.SettingKey, change.Operation, "configured")],
             SetupRestartRequirement.None,
             new SetupStatusProjection(
@@ -3071,7 +3071,7 @@ public sealed class SetupCommandDispatcherTests
             "private://vscode-stable-default-user-settings",
             "vscode-stable-default-user-settings",
             new string('a', 64),
-            "configured",
+            new SetupInlineDesiredState("configured"),
             [new SetupPrivatePlanMember(change.SettingKey, change.Operation, "configured")],
             SetupRestartRequirement.RestartVsCode,
             new SetupStatusProjection(
@@ -3100,7 +3100,7 @@ public sealed class SetupCommandDispatcherTests
             targetPath,
             "dispatcher-settings",
             SetupHash.File(true, Encoding.UTF8.GetBytes("old-file")),
-            "new-file",
+            new SetupInlineDesiredState("new-file"),
             [new SetupPrivatePlanMember(change.SettingKey, change.Operation, "new-file")],
             SetupRestartRequirement.None,
             new SetupStatusProjection(
@@ -3123,7 +3123,7 @@ public sealed class SetupCommandDispatcherTests
             "private://app-sdk-guidance",
             "app-sdk-guidance",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "configured",
+            new SetupInlineDesiredState("configured"),
             [],
             SetupRestartRequirement.None,
             new SetupStatusProjection(

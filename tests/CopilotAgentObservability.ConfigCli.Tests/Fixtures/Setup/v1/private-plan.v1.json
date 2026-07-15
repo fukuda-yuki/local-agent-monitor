@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "change_set_id": "00000000-0000-7000-8000-000000000101",
+  "adapter": "github-copilot",
+  "selected_target": "vscode",
+  "created_at": "2026-07-12T01:02:03.0000000Z",
+  "tool_version": "1.2.3",
+  "targets": [
+    {
+      "record_id": "00000000-0000-7000-8000-000000000201",
+      "target_kind": "json",
+      "target_location": "C:\\Synthetic\\settings.json",
+      "base_state_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "desired_state": "{\u0022github.copilot.chat.otel.enabled\u0022:\u0022DESIRED_VALUE_MARKER\u0022}",
+      "members": [
+        {
+          "setting_key": "github.copilot.chat.otel.enabled",
+          "operation": "replace",
+          "desired_value": "DESIRED_VALUE_MARKER"
+        }
+      ]
+    }
+  ]
+}

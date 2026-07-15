@@ -968,7 +968,7 @@ public sealed class SetupStatusProjectorTests
                 operation == SetupOperation.Remove ? null : "safe-state");
             var planTargets = new List<SetupPrivatePlanTarget>
             {
-                new(recordId, SetupTargetKind.Json, targetPath, baseHash, desired, [member]),
+                new(recordId, SetupTargetKind.Json, targetPath, baseHash, new SetupInlineDesiredState(desired), [member]),
             };
             var ledgerTargets = new List<SetupLedgerTarget>
             {
@@ -1009,7 +1009,7 @@ public sealed class SetupStatusProjectorTests
                     SetupTargetKind.Json,
                     additionalPath,
                     additionalBase,
-                    additionalDesired,
+                    new SetupInlineDesiredState(additionalDesired),
                     [new SetupPrivatePlanMember(settingKey, SetupOperation.Replace, "safe-state")]));
                 ledgerTargets.Add(new SetupLedgerTarget(
                     additionalId,
@@ -1051,7 +1051,7 @@ public sealed class SetupStatusProjectorTests
                     SetupTargetKind.Env,
                     "current-user",
                     capture.AggregateHash,
-                    "environment-allowlist",
+                    new SetupInlineDesiredState("environment-allowlist"),
                     [new SetupPrivatePlanMember("ENV_NOOP", SetupOperation.NoOp, "same")]));
                 ledgerTargets.Add(new SetupLedgerTarget(
                     envRecordId,
@@ -1106,7 +1106,7 @@ public sealed class SetupStatusProjectorTests
             var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000665");
             var recordId = Guid.Parse("00000000-0000-7000-8000-000000000666");
             var plan = new SetupPrivatePlan(1, changeSetId, "github-copilot", "app-sdk", Now, "1.2.3",
-                [new SetupPrivatePlanTarget(recordId, SetupTargetKind.Guidance, "caller-managed", SetupHash.File(false, []), string.Empty, [])]);
+                [new SetupPrivatePlanTarget(recordId, SetupTargetKind.Guidance, "caller-managed", SetupHash.File(false, []), new SetupInlineDesiredState(string.Empty), [])]);
             var ledger = new SetupLedgerChangeSet(
                 changeSetId, "github-copilot", "app-sdk", Now, Now, "1.2.3", null, SetupChangeSetState.Planned,
                 [new SetupLedgerTarget(
@@ -1152,7 +1152,7 @@ public sealed class SetupStatusProjectorTests
                     SetupTargetKind.Env,
                     "current-user",
                     capture.AggregateHash,
-                    "environment-allowlist",
+                    new SetupInlineDesiredState("environment-allowlist"),
                     members)]);
             var changes = members.Select(member => new SetupMemberChangeResult(
                 member.SettingKey,

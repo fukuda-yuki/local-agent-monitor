@@ -1617,7 +1617,7 @@ public sealed class SetupRollbackTests
                     SetupTargetKind.Env,
                     "current-user",
                     capture.AggregateHash,
-                    "environment-allowlist",
+                    new SetupInlineDesiredState("environment-allowlist"),
                     definitions.Select(member => new SetupPrivatePlanMember(
                         member.Name,
                         member.Operation,
@@ -1815,7 +1815,7 @@ public sealed class SetupRollbackTests
                 SetupTargetKind.Json,
                 TargetPaths[index],
                 SetupHash.File(!previousMissing, previousMissing ? [] : Encoding.UTF8.GetBytes($"old-{index}")),
-                $"new-{index}",
+                new SetupInlineDesiredState($"new-{index}"),
                 [new SetupPrivatePlanMember($"setting-{index}", SetupOperation.Replace, $"new-{index}")])).ToList();
             if (includeEnvironment)
             {
@@ -1863,7 +1863,7 @@ public sealed class SetupRollbackTests
                     SetupTargetKind.Env,
                     "current-user",
                     environmentCapture.AggregateHash,
-                    "environment-allowlist",
+                    new SetupInlineDesiredState("environment-allowlist"),
                     environmentMembers));
             }
             if (includeSecondEnvironment)
@@ -1875,7 +1875,7 @@ public sealed class SetupRollbackTests
                     SetupTargetKind.Env,
                     "current-user",
                     environmentCapture.AggregateHash,
-                    "environment-allowlist",
+                    new SetupInlineDesiredState("environment-allowlist"),
                     [new SetupPrivatePlanMember("ENV_B", SetupOperation.Replace, "desired-b")]));
             }
             var plan = new SetupPrivatePlan(

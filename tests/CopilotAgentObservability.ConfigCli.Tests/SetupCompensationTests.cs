@@ -1110,7 +1110,7 @@ public sealed class SetupCompensationTests
                     SetupTargetKind.Json,
                     TargetPath,
                     SetupHash.File(true, Encoding.UTF8.GetBytes("old")),
-                    fileDesired,
+                    new SetupInlineDesiredState(fileDesired),
                     [new SetupPrivatePlanMember("setting", fileOperation, fileDesired)]),
             };
             if (includeEnvironment)
@@ -1120,7 +1120,7 @@ public sealed class SetupCompensationTests
                     SetupTargetKind.Env,
                     "current-user",
                     environmentCapture.AggregateHash,
-                    "environment-allowlist",
+                    new SetupInlineDesiredState("environment-allowlist"),
                     [
                         new SetupPrivatePlanMember("ENV_A", SetupOperation.Replace, "desired-a"),
                         new SetupPrivatePlanMember("ENV_B", SetupOperation.Remove, null),
