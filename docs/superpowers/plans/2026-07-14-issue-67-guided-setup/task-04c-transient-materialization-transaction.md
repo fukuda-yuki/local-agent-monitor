@@ -162,15 +162,17 @@ closed with zero writes and remain unchanged.
   private plan, ledger, journal, result, logs, exception/error text, and both
   committed fixtures. The backup is the only persisted artifact allowed to
   contain the previous bytes.
-- Deterministic barriers/fault points cover before intent, after intent, after
-  replace, after completion, compensation, and rollback. For the four crash
-  windows (before intent, after intent, after replace, and after completion),
-  the seam preserves the corresponding durable artifacts for close/reopen
-  instead of synchronously compensating them away. Public `RecoverNext` is
-  then called after reopen; it proves zero revalidator/materializer calls,
-  keeps the marker out of journal/ledger/result/log/error/fixture evidence, and
-  uses expected hash plus the marker-bearing backup to classify prior, desired,
-  and third-party state without overwrite.
+- Deterministic barriers/fault points cover all five producer evidence
+  boundaries in the mandatory matrix (`AfterJournalPreparedBeforeLedger`,
+  `AfterLedgerTransitionBeforeMutationIntent`,
+  `AfterMutationIntentBeforeMutation`, `AfterMutationBeforeCompletion`, and
+  `AfterCompletionBeforeCommit`), plus compensation and rollback. The seam
+  preserves each boundary's durable artifacts for close/reopen instead of
+  synchronously compensating them away. Public `RecoverNext` is then called
+  after reopen; it proves zero revalidator/materializer calls, keeps the marker
+  out of journal/ledger/result/log/error/fixture evidence, and uses expected
+  hash plus the marker-bearing backup to classify prior, desired, and
+  third-party state without overwrite.
 - `SetupCompensationTests` replaces or corrects the old synchronous-compensation
   assertion so RED proves the coordinator-owned crash-only seam actually exits
   `Apply` before its compensation catch. It must cover all five evidence rows,
