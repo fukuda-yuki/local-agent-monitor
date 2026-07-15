@@ -63,6 +63,16 @@ and status projection must not call the adapter or JSONC materializer: tagged
 file desired-state classification uses the persisted expected hash; prior state
 uses the flushed backup; journal hashes remain the exact crash evidence.
 
+`SetupRecoveryCoordinator.RecoverNextCore` owns the real recovery result
+mapping. Immediately after any non-null private-plan load, it calls task-04b's
+shared desired-state arm/adapter/kind/label binding validation before dispatch
+on journal operation/phase or ledger lifecycle. The matching-terminal pending-
+notification path is not a shortcut around this gate: it loads and validates
+the non-null plan before `RecoverNotificationOnly`. An inline desired state on
+either VS Code JSON record or a tagged desired state with any other label
+returns `recovery_required` with zero journal or ledger mutation, zero target
+observation, and zero notification attempt.
+
 **Required tests:**
 
 - Valid tagged changed records are applied only after exact ID/order/cardinality
@@ -70,6 +80,14 @@ uses the flushed backup; journal hashes remain the exact crash evidence.
   fails stale base checks when it drifts.
 - Each malformed carrier shape above returns `recovery_required` with zero
   artifacts/writes/notifications and no raw byte value in diagnostics.
+- `SetupRecoveryTests` call the public `RecoverNext` coordinator path, not the
+  evidence helper alone, for both an inline VS Code JSON arm and a tagged
+  other-label arm. Pin prepared apply and rollback, active apply and rollback,
+  committed apply and rollback reconciliation, restored apply reconciliation,
+  and matching terminal applied/restored/rolled-back rows with a pending
+  environment notification. Every case returns `recovery_required` before its
+  lifecycle/journal branch, leaves journal and ledger bytes identical, performs
+  zero target observation, and does not attempt the pending notification.
 - Exercise the production generic plan/storage/apply path with a bounded
   source-like existing JSONC buffer containing a marker in an unrelated member:
   positively assert the seed buffer contains the marker; create the tagged Plan
@@ -93,6 +111,8 @@ uses the flushed backup; journal hashes remain the exact crash evidence.
 
 - [ ] Write failing apply/recovery/rollback/status tests for the exact transient
   carrier contract, all invalid-carrier no-artifact cases, no-op aggregation,
+  coordinator-level desired-state binding before every prepared/active/
+  committed/restored/pending-terminal-notification recovery branch,
   the non-vacuous production-path marker proof (positive source and backup,
   negative record/private-plan/ledger/journal/result/log/error/fixtures), and
   every deterministic crash boundary.
@@ -103,8 +123,11 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 ```
 
 - [ ] Implement only the owned carrier/coordinator/recovery/status changes.
-  Preserve journal/ledger hash shapes and make recovery consume persisted
-  expected hashes rather than desired bytes or adapter work.
+  In `RecoverNextCore`, validate every non-null plan's desired-state binding
+  immediately after load and before journal/lifecycle dispatch, including the
+  pending terminal-notification shortcut. Preserve journal/ledger hash shapes
+  and make recovery consume persisted expected hashes rather than desired bytes
+  or adapter work.
 - [ ] Run GREEN:
 
 ```powershell
@@ -135,6 +158,10 @@ turning private plans, recovery, or repository-safe evidence into raw storage.
   source and backup but nowhere in record/private-plan/ledger/journal/result/
   log/error/fixture evidence; crash recovery reuses the backup without
   rematerializing.
+- `RecoverNext` rejects invalid inline-VS-Code and tagged-other-label bindings
+  before every prepared, active, committed/restored, and pending terminal-
+  notification branch, with byte-identical journal/ledger state, zero target
+  observation, and zero notification attempt.
 - Recovery passes its fresh end-to-end security, concurrency, and crash-window
   reviews; only this PASS closes the reopened #66 correction gate.
 - Focused suites, build, and `git diff --check` pass before T4/T5/T6 unblocks.

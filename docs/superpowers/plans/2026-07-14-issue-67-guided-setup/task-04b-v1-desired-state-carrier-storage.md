@@ -72,13 +72,15 @@ either of those VS Code JSON records fails `recovery_required`. New VS Code
 emission is owned by task-05, not this task.
 
 `SetupTransactionEvidence` calls this shared desired-state
-arm/adapter/kind/label relation validation rather than duplicating it. Recovery
-and rollback immutable-evidence consumers return `recovery_required` for the
-same invalid tagged tuple or invalid inline VS Code JSON arm. Status preserves
-the canonical lifecycle distinction: a non-terminal row returns
+arm/adapter/kind/label relation validation rather than duplicating it. This task
+proves that direct evidence validation rejects the same invalid tagged tuple or
+invalid inline VS Code JSON arm. Rollback returns `recovery_required`; status
+preserves the canonical lifecycle distinction: a non-terminal row returns
 `recovery_required` and prevents projection, while a terminal row projects the
 affected target as `unavailable` with reference `none` and
-`rollback_available=false` rather than failing the whole status command.
+`rollback_available=false` rather than failing the whole status command. The
+actual `SetupRecoveryCoordinator.RecoverNext` result mapping is deferred to
+task-04c, which owns `SetupRecoveryCoordinator` and the transaction gate.
 
 **Required tests:**
 
@@ -100,7 +102,9 @@ affected target as `unavailable` with reference `none` and
   non-hex hash as `recovery_required`.
 - Prove `SetupRecoveryTests`, `SetupRollbackTests`, and
   `SetupStatusProjectorTests` exercise the shared relation validator through
-  `SetupTransactionEvidence`: recovery and rollback reject invalid
+  `SetupTransactionEvidence`: `SetupRecoveryTests` invokes the evidence helper
+  directly and proves only structural rejection, without claiming a
+  `RecoverNext` result; `SetupRollbackTests` rejects invalid
   arm/adapter/kind/label combinations with `recovery_required`.
   `SetupStatusProjectorTests` pins both lifecycle branches: non-terminal status
   returns `recovery_required` without projection; terminal status projects the
@@ -139,9 +143,10 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 - [ ] Implement the internal union and deterministic `desired_state` reader/
   writer/validator in the owned generic carrier and storage files. Make
   `SetupTransactionEvidence` call the same relation validator and add the owned
-  recovery/rollback/status behavioral assertions. Update only necessary fixture
-  constructors in the listed compile-only apply/compensation/dispatcher files;
-  do not alter their behavioral assertions.
+  direct-evidence/rollback/status assertions. Do not add or change
+  `RecoverNext` result mapping here; task-04c owns that coordinator behavior.
+  Update only necessary fixture constructors in the listed compile-only apply/
+  compensation/dispatcher files; do not alter their behavioral assertions.
 - [ ] Run GREEN:
 
 ```powershell
@@ -177,11 +182,12 @@ JSONC documents or treating a private representation change as a migration.
   for `SetupTargetKind.File`/`SetupTargetKind.Toml`/other-adapter/other-label/
   inline-VS-Code-JSON and at
   0/1/2048/2049 string boundaries.
-- Recovery, rollback, and status immutable-evidence consumers share that exact
-  relation validator through `SetupTransactionEvidence`: recovery/rollback and
+- Direct immutable-evidence validation, rollback, and status share that exact
+  relation validator through `SetupTransactionEvidence`: rollback and
   non-terminal status fail `recovery_required`, while terminal status preserves
   canonical projection as target `unavailable`, reference `none`, and
-  `rollback_available=false`.
+  `rollback_available=false`. Task-04b makes no claim about the real
+  `SetupRecoveryCoordinator.RecoverNext` mapping; task-04c must prove it.
 - Focused suites, build, `git diff --check`, and a fresh structural
   data-safety/security review PASS are recorded before task-04c starts. This
   PASS covers only the carrier/storage boundary and does not satisfy the
