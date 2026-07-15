@@ -26,6 +26,16 @@ Claude Code's shipped v1 resolver uses the exact native-session-ID and explicit
 resume/handoff rows above. `SessionSourceSurface.ClaudeCode`, the
 `source_surface = claude-code` envelope validation, and the
 `claude-code-otel`/`claude-code-hook` adapters are current shipped contracts.
+
+The exact native-session-ID resolver is gated only by its own evidence: a
+single unambiguous `session.id` attribute on the OTel span whose UTF-8 bytes
+equal exactly one persisted `claude-code` Hook native session ID with binding
+kind `Native`, `ExplicitResume`, or `ExplicitHandoff`. It does not require
+`claude-code-otel` adapter promotion; a span still labeled `raw-otlp` binds on
+this evidence. Binding never rewrites provenance: evidence stored from a
+non-promoted span keeps its actual source labels, and the raw `session.id` is
+still not persisted as a new native ID.
+
 The complete trace-context row remains a named future interface because the
 Session envelope still exposes only `trace_id`; trace-id-only evidence remains
 `otel_only`/`hook_only` and can never become `exact_linked`. The official Hook
