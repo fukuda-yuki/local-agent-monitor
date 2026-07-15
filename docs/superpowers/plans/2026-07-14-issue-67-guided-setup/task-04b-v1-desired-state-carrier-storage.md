@@ -7,8 +7,10 @@ the serializer capture a separate production-serializer private-plan v1 fixture
 with legacy inline `desired_state` for byte-identity/write-close-reopen proof.
 
 **Depends on:** task-04a committed and independently reviewed. This task
-reopens the generic #66 storage/carrier boundary; task-04c and all T4/T5/T6
-target work wait for its fresh security review PASS.
+reopens the generic #66 storage/carrier boundary. A fresh structural
+data-safety/security review PASS is required before task-04c starts, but it does
+not close the reopened #66 gate or unblock T4/T5/T6; task-04c must later earn
+the end-to-end security, concurrency, and recovery PASS verdicts.
 
 **Worktree / branch:** Run only from
 `C:\Users\mwam0\Documents\Codex\copilot-agent-observability` on
@@ -82,12 +84,14 @@ emission is owned by task-05, not this task.
   duplicate/reordered/missing/extra owned key, invalid member relation,
   wrong value type, empty/33-entry array, over-bound string, and uppercase or
   non-hex hash as `recovery_required`.
-- Inject a previous-state secret marker in a JSONC-like existing value and
-  prove it is absent from serialized private plans, ledger, journal, result,
-  log, exception mapping, and both committed ownership-ledger/private-plan
-  fixtures; only a private backup may
-  contain the prior state. Do not serialize the source target to make this
-  assertion pass.
+- Build a bounded source-like JSONC byte buffer with a previous-state marker in
+  an unrelated member and positively assert the marker is present in that
+  source buffer. Derive a tagged carrier from the owned members, then prove the
+  marker is absent from the carrier, production private-plan serialization,
+  both committed ownership-ledger/private-plan fixtures, and every validation/
+  load error or exception text produced by this task. This is a structural,
+  non-vacuous storage-boundary proof only: task-04b must not claim apply,
+  journal, ledger-lifecycle, recovery, or backup evidence.
 - Existing constructor fixtures compile with an explicit union arm and retain
   their assertion meaning. No sleep/retry test is introduced.
 
@@ -103,7 +107,7 @@ emission is owned by task-05, not this task.
   rejections, exact 0/1/2048/2049 boundaries, acceptance of the two JSON
   records, rejection of `SetupTargetKind.File`/`SetupTargetKind.Toml`/
   other-adapter/other-label tagged records and inline VS Code JSON records, and
-  marker non-leakage.
+  the positive-source/negative-carrier-and-storage marker proof.
 - [ ] Run RED:
 
 ```powershell
@@ -149,8 +153,10 @@ JSONC documents or treating a private representation change as a migration.
   for `SetupTargetKind.File`/`SetupTargetKind.Toml`/other-adapter/other-label/
   inline-VS-Code-JSON and at
   0/1/2048/2049 string boundaries.
-- Focused suites, build, `git diff --check`, and a fresh security review PASS
-  are recorded before task-04c starts.
+- Focused suites, build, `git diff --check`, and a fresh structural
+  data-safety/security review PASS are recorded before task-04c starts. This
+  PASS covers only the carrier/storage boundary and does not satisfy the
+  reopened #66 end-to-end gate.
 - Root/branch and status/diff scope gates pass before staging.
 
 **Report destination:** chat only. Do not update the ledger in this task.

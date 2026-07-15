@@ -163,12 +163,17 @@ other target subdirectory.
   `NotFound`, `Failed`, and `TimedOut` outcomes with no restart guidance or
   plan failure; no retry/sleep; `--status` raw-output non-leakage; JSONC
   preservation; revalidation happy/differing rows with zero `--status` calls
-  and unchanged persisted per-target restart requirements; secret-marker
-  negative test (inject a marker as an existing unrelated settings value;
-  assert it is absent from records, tagged private plan, revalidation carrier
-  diagnostics, ledger/journal/log evidence, and both committed
-  ownership-ledger/private-plan fixtures, while the
-  private prior-state backup alone is permitted to contain it). Add exact
+  and unchanged persisted per-target restart requirements. Add a production-
+  path secret-marker integration test: seed the deterministic file-system fake
+  with a real bounded existing `settings.json` byte sequence containing the
+  marker in an unrelated member and positively assert the source bytes contain
+  it; use the real VS Code partition to Plan the tagged carrier; persist, close,
+  and reopen the private plan; apply through the generic coordinator so
+  revalidation materializes the document; and positively assert the private
+  prior-state backup contains the marker. Assert the marker is
+  absent from the record/tagged carrier, serialized private plan, ledger,
+  journal, result, log, exception/error text, and both committed ownership-
+  ledger/private-plan fixtures. Add exact
   tagged-union tests: accept only the two exact `SetupTargetKind.Json`
   `github-copilot` VS Code labels; reject tagged `SetupTargetKind.File`/
   `SetupTargetKind.Toml`/other-adapter/other-label records and an inline arm for
@@ -181,12 +186,13 @@ other target subdirectory.
   unbounded read/retry/artifact/write. Add transient-materialization tests for
   changed/no-op cardinality, exact record IDs/order/hash, comment/unowned-byte
   preservation, hash mismatch → `recovery_required`, and a still-supported
-  version change → `recovery_required` with zero artifacts/writes. Add a
-  plan-time marker test proving bounded rendering can calculate the hash while
-  the marker is absent from the private plan, ledger, journal, log, result,
-  both committed ownership-ledger/private-plan fixtures, and diagnostics before
-  apply; only the private backup may later
-  contain prior bytes.
+  version change → `recovery_required` with zero artifacts/writes. Extend the
+  production-path marker test through a deterministic crash boundary and
+  close/reopen recovery: recovery must make zero partition revalidation/
+  materialization calls, use the expected hashes plus marker-bearing backup,
+  and keep the marker absent from private plan/ledger/journal/result/log/error/
+  fixture evidence. Task-04c owns exhaustive generic crash windows; this task
+  supplies the real VS Code partition integration proof.
 
 - [ ] **Step 2: Run RED.**
 
@@ -230,7 +236,9 @@ git diff --check
 
 - Every contract bullet above has at least one executable case, including
   the profile no-open, 1 MiB-plus-sentinel, tagged-union, transient
-  materialization, supported-version-drift, and secret-marker negative proofs.
+  materialization, supported-version-drift, and non-vacuous production-path
+  secret-marker proof with positive source/backup and negative durable evidence
+  assertions plus representative crash recovery.
 - Root/branch and status/diff scope gates show only the two exact owned files;
   no T3-owned or shared file is edited.
 - Full ConfigCli suite and build pass; independent review PASS. This task

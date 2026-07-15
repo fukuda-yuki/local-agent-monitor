@@ -30,9 +30,13 @@ dependency order remains a prerequisite (including Task 01a's v1 restart
 evidence and Task 04a's rollback carrier), but the Task 05 review findings I1,
 I4, and I5 reopen the shared generic boundary. No target task T4/T5/T6 and no
 T7 composition starts until `task-04a`, `task-04b`, and `task-04c` are
-committed, independently reviewed, and receive fresh security, concurrency,
-and recovery review PASS verdicts. This is a gate correction, not a change to
-the historical Issue #66 cards or their ledger.
+committed and independently reviewed. Task-04b may receive a structural
+data-safety/security PASS for its carrier/storage boundary; that PASS permits
+task-04c to start but does not close the reopened #66 gate. The gate closes only
+after task-04c receives fresh end-to-end security, concurrency, and recovery
+PASS verdicts across production plan persistence, apply materialization,
+backup, and crash recovery. This is a gate correction, not a change to the
+historical Issue #66 cards or their ledger.
 
 T3d may add one skeletal, explicitly non-gating compatibility smoke test using
 the real aggregate adapter, scripted partitions, the real #66 registry/
@@ -146,6 +150,9 @@ task-04a T0a current-process environment observation
 task-04b T0b v1 desired-state union/carrier/storage
    |
    v
+task-04b structural data-safety/security review PASS
+   |
+   v
 task-04c T0c transient JSONC materialization transaction
    |
    v
@@ -186,7 +193,9 @@ fresh read-only Codex run for each independent review. Do not accept "DONE" or
 pass counts alone; map each requirement to the exact executable test and
 inspect the diff and command output. The correction gate requires separate
 fresh PASS findings for data safety/security, lock/concurrency, and
-apply/rollback/recovery crash windows.
+apply/rollback/recovery crash windows. Task-04b's structural PASS is an input
+to task-04c, not a substitute for task-04c's mandatory end-to-end security
+PASS.
 
 ## Validation commands
 

@@ -5,9 +5,11 @@
 coordinator owning identity/hash validation and every recovery path using only
 expected hashes plus backups.
 
-**Depends on:** task-04b committed and independently reviewed. A fresh
-security, concurrency, and recovery review must all PASS after this task before
-T4/T5/T6 begins; T7 remains blocked until those downstream tasks then pass.
+**Depends on:** task-04b committed, independently reviewed, and structurally
+approved for data safety/security. That structural PASS is necessary but not
+sufficient for the reopened #66 gate. Fresh end-to-end security, concurrency,
+and recovery reviews must all PASS after this task before T4/T5/T6 begins; T7
+remains blocked until those downstream tasks then pass.
 
 **Worktree / branch:** Run only from
 `C:\Users\mwam0\Documents\Codex\copilot-agent-observability` on
@@ -68,12 +70,20 @@ uses the flushed backup; journal hashes remain the exact crash evidence.
   fails stale base checks when it drifts.
 - Each malformed carrier shape above returns `recovery_required` with zero
   artifacts/writes/notifications and no raw byte value in diagnostics.
-- A marker in an unrelated JSONC member is absent from plan, revalidation
-  carrier diagnostics, ledger, journal, logs, result, and fixture; the private
-  backup is the only persisted artifact allowed to contain previous bytes.
+- Exercise the production generic plan/storage/apply path with a bounded
+  source-like existing JSONC buffer containing a marker in an unrelated member:
+  positively assert the seed buffer contains the marker; create the tagged Plan
+  carrier; persist, close, and reopen the private plan; materialize under the
+  apply lock; and positively assert the owned private backup contains the prior
+  marker. Assert the marker is absent from the record/tagged carrier, serialized
+  private plan, ledger, journal, result, logs, exception/error text, and both
+  committed fixtures. The backup is the only persisted artifact allowed to
+  contain the previous bytes.
 - Deterministic barriers/fault points cover before intent, after intent, after
   replace, after completion, compensation, and rollback. Close/reopen recovery
-  proves zero revalidator/materializer calls and uses expected hash + backup to
+  reuses that marker-bearing production-path setup, proves zero revalidator/
+  materializer calls, keeps the marker out of journal/ledger/result/log/error/
+  fixture evidence, and uses expected hash + the marker-bearing backup to
   restore/classify prior, desired, and third-party state without overwrite.
 - Existing legacy-inline and environment recovery tests retain their behavior;
   the existing ownership-ledger fixture and task-04b private-plan fixture
@@ -83,7 +93,9 @@ uses the flushed backup; journal hashes remain the exact crash evidence.
 
 - [ ] Write failing apply/recovery/rollback/status tests for the exact transient
   carrier contract, all invalid-carrier no-artifact cases, no-op aggregation,
-  marker non-leakage, and every deterministic crash boundary.
+  the non-vacuous production-path marker proof (positive source and backup,
+  negative record/private-plan/ledger/journal/result/log/error/fixtures), and
+  every deterministic crash boundary.
 - [ ] Run RED:
 
 ```powershell
@@ -119,8 +131,12 @@ turning private plans, recovery, or repository-safe evidence into raw storage.
 
 - Apply owns transient bytes only after exact validation; all durable state is
   hashes/backup evidence only.
-- Recovery never materializes and passes its fresh security, concurrency, and
-  crash-window recovery reviews.
+- The production plan-persist-reopen-apply path proves the marker exists in the
+  source and backup but nowhere in record/private-plan/ledger/journal/result/
+  log/error/fixture evidence; crash recovery reuses the backup without
+  rematerializing.
+- Recovery passes its fresh end-to-end security, concurrency, and crash-window
+  reviews; only this PASS closes the reopened #66 correction gate.
 - Focused suites, build, and `git diff --check` pass before T4/T5/T6 unblocks.
 - Root/branch and status/diff scope gates pass before staging.
 
