@@ -154,6 +154,18 @@ public sealed class SetupStatusProjectorTests
             operation => operation == $"file.read:{fixture.TargetPath}");
     }
 
+    [Fact]
+    public void Project_ValidTaggedDesiredStateUsesPersistedExpectedHash()
+    {
+        var fixture = CreateDesiredStateBindingStatusFixture("tagged_exact_label", terminal: false);
+
+        var result = fixture.Projector.Project(fixture.ChangeSet);
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(SetupReferenceState.Base, target.ReferenceState);
+        Assert.Equal(SetupCurrentState.Current, target.CurrentState);
+    }
+
     [Theory]
     [InlineData("desired", SetupReferenceState.Desired, SetupCurrentState.Current)]
     [InlineData("previous", SetupReferenceState.Previous, SetupCurrentState.Current)]
@@ -944,9 +956,12 @@ public sealed class SetupStatusProjectorTests
             "tagged_other_label" => new SetupJsoncOwnedValuesDesiredState(
                 new string('b', 64),
                 [new SetupJsoncOwnedValue("setting", "string", terminal ? "previous" : "desired")]),
+            "tagged_exact_label" => new SetupJsoncOwnedValuesDesiredState(
+                SetupHash.File(true, Encoding.UTF8.GetBytes(terminal ? "previous" : "desired")),
+                [new SetupJsoncOwnedValue("setting", "string", terminal ? "previous" : "desired")]),
             _ => throw new ArgumentOutOfRangeException(nameof(variant)),
         };
-        var label = variant == "inline_exact_label"
+        var label = variant is "inline_exact_label" or "tagged_exact_label"
             ? "vscode-stable-default-user-settings"
             : "other-json-target";
         var baseHash = SetupHash.File(true, Encoding.UTF8.GetBytes("previous"));
@@ -964,7 +979,7 @@ public sealed class SetupStatusProjectorTests
                 baseHash,
                 desiredState,
                 [member])]);
-        var expectedResult = variant == "inline_exact_label"
+        var expectedResult = variant is "inline_exact_label" or "tagged_exact_label"
             ? SourceCapabilityManifestLoader.LoadForSurface("github-copilot-vscode").CanonicalJson
             : (JsonElement?)null;
         var changeSet = new SetupLedgerChangeSet(

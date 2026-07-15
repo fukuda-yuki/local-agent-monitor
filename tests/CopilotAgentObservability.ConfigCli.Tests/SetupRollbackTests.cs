@@ -132,6 +132,52 @@ public sealed class SetupRollbackTests
     }
 
     [Fact]
+    public void RollbackPreflight_ValidTaggedDesiredStateUsesPersistedExpectedHash()
+    {
+        var fixture = RollbackFixture.Create();
+        var plan = new SetupPlanStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
+        var target = Assert.Single(plan.Targets);
+        plan = plan with
+        {
+            Targets =
+            [
+                target with
+                {
+                    DesiredState = new SetupJsoncOwnedValuesDesiredState(
+                        SetupHash.File(true, Encoding.UTF8.GetBytes("new-0")),
+                        [new SetupJsoncOwnedValue("setting-0", "string", "new-0")]),
+                },
+            ],
+        };
+        var changeSet = fixture.LoadChangeSet();
+        changeSet = changeSet with
+        {
+            Targets =
+            [
+                changeSet.Targets[0] with
+                {
+                    TargetLabel = "vscode-stable-default-user-settings",
+                    StatusProjection = changeSet.Targets[0].StatusProjection with
+                    {
+                        ExpectedResult = SourceCapabilityManifestLoader
+                            .LoadForSurface("github-copilot-vscode")
+                            .CanonicalJson,
+                    },
+                },
+            ],
+        };
+
+        var preparation = SetupRollbackPreflightEvaluator.Prepare(plan, changeSet, fixture.LoadJournal());
+
+        Assert.Null(preparation.Result);
+        var evidence = Assert.IsType<SetupRollbackPreflightEvidence>(preparation.Evidence);
+        var result = SetupRollbackPreflightEvaluator.Evaluate(
+            evidence,
+            new SetupRollbackPreflightObserver(fixture.Platform, fixture.Paths).Capture(evidence));
+        Assert.True(result.IsAvailable);
+    }
+
+    [Fact]
     public void Rollback_Identity_success_then_journal_evidence_mismatch_is_trusted_recovery_required()
     {
         var fixture = RollbackFixture.Create();

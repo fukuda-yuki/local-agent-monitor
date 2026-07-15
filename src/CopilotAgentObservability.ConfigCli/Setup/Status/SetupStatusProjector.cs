@@ -610,7 +610,7 @@ internal sealed class SetupStatusActiveEvidenceValidator
         var fileBackup = fileStep.ReadBackup(
             paths.GetBackup(changeSetId, planTarget.RecordId),
             planTarget.BaseStateHash);
-        var expectedDesired = SetupHash.File(true, Encoding.UTF8.GetBytes(planTarget.DesiredState));
+        var expectedDesired = SetupDesiredStateHash.File(planTarget.DesiredState);
         if (!string.Equals(fileBackup.Hash, ledgerTarget.PreviousStateHash, StringComparison.Ordinal) ||
             journalTarget.Steps.Count != 1 ||
             journalTarget.Steps[0].MemberKey is not null ||
@@ -791,7 +791,7 @@ internal sealed class SetupStatusTargetObserver
         }
 
         var current = capture.Hash;
-        var desired = SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState));
+        var desired = SetupDesiredStateHash.File(target.DesiredState);
         var matchesPrevious = string.Equals(current, target.BaseStateHash, StringComparison.Ordinal);
         var matchesDesired = string.Equals(current, desired, StringComparison.Ordinal);
         return new SetupStatusTargetObservation(

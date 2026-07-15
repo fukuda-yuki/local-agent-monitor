@@ -140,6 +140,32 @@ internal sealed class SetupRecoveryCoordinator
             {
                 if (journal.EnvironmentNotification == SetupEnvironmentNotification.Pending)
                 {
+                    SetupPrivatePlan? terminalPlan;
+                    try
+                    {
+                        terminalPlan = LoadPlanForRecovery(changeSet.ChangeSetId);
+                    }
+                    catch (SetupStorageException)
+                    {
+                        return RecoverNotificationOnly(setupLock, ledger, changeSet, journal);
+                    }
+
+                    if (terminalPlan is not null)
+                    {
+                        try
+                        {
+                            SetupStorageValidation.ValidateDesiredStateBindings(terminalPlan, changeSet);
+                        }
+                        catch (SetupStorageException)
+                        {
+                            return Failed(
+                                SetupCodes.RecoveryRequired,
+                                changeSet.ChangeSetId,
+                                OperationFor(journal, changeSet),
+                                OverlayFailure(changeSet));
+                        }
+                    }
+
                     return RecoverNotificationOnly(setupLock, ledger, changeSet, journal);
                 }
 
@@ -165,6 +191,22 @@ internal sealed class SetupRecoveryCoordinator
 
                 return Failed(exception.Code, changeSet.ChangeSetId, OperationFor(journal, changeSet),
                     OverlayFailure(changeSet));
+            }
+
+            if (plan is not null)
+            {
+                try
+                {
+                    SetupStorageValidation.ValidateDesiredStateBindings(plan, changeSet);
+                }
+                catch (SetupStorageException)
+                {
+                    return Failed(
+                        SetupCodes.RecoveryRequired,
+                        changeSet.ChangeSetId,
+                        OperationFor(journal, changeSet),
+                        OverlayFailure(changeSet));
+                }
             }
 
             if (changeSet.State == SetupChangeSetState.Planned && journal is null && plan is not null)
@@ -1242,7 +1284,7 @@ internal sealed class SetupRecoveryCoordinator
 
             return string.Equals(
                 current,
-                SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState)),
+                SetupDesiredStateHash.File(target.DesiredState),
                 StringComparison.Ordinal)
                     ? ActiveFileClassification.Desired
                     : ActiveFileClassification.ThirdParty;
@@ -1484,7 +1526,7 @@ internal sealed class SetupRecoveryCoordinator
 
             var fileCapture = fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation);
             RequireEqual(fileCapture.Hash, target.BaseStateHash);
-            var desiredFileHash = SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState));
+            var desiredFileHash = SetupDesiredStateHash.File(target.DesiredState);
             if (!string.Equals(fileCapture.Hash, desiredFileHash, StringComparison.Ordinal))
             {
                 ValidateFileBackup(paths.GetBackup(plan.ChangeSetId, target.RecordId), fileCapture.Hash);
@@ -1672,7 +1714,7 @@ internal sealed class SetupRecoveryCoordinator
 
             var captureFile = fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation);
             var expectedHash = desired
-                ? SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState))
+                ? SetupDesiredStateHash.File(target.DesiredState)
                 : ledgerTarget.PreviousStateHash;
             RequireEqual(captureFile.Hash, expectedHash);
             hashes[target.RecordId] = captureFile.Hash;
@@ -1753,7 +1795,7 @@ internal sealed class SetupRecoveryCoordinator
                 [new SetupJournalStep(
                     null,
                     target.BaseStateHash,
-                    SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState)),
+                    SetupDesiredStateHash.File(target.DesiredState),
                     expectedBackupReference,
                     SetupJournalStepPhase.Pending)]));
         }

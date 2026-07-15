@@ -72,7 +72,8 @@ internal sealed class SetupApplyCoordinator
             }
 
             var revalidation = RunRevalidation(plan, planned);
-            var captures = CaptureAndValidateBases(plan);
+            var materializedBytes = ValidateAndOwnMaterializedBytes(plan, revalidation.Value);
+            var captures = CaptureAndValidateBases(plan, materializedBytes);
             var changedCaptures = captures.Where(capture => capture.HasChanges).ToArray();
             if (changedCaptures.Length == 0)
             {
@@ -935,7 +936,7 @@ internal sealed class SetupApplyCoordinator
                 throw new SetupApplyException(SetupCodes.InternalError);
             }
 
-            return SetupPlanResult.Revalidated(success.Warnings, success.NextActions);
+            return success;
         }
 
         if (result is not SetupPlanFailure<SetupRevalidation> failure)
@@ -962,7 +963,46 @@ internal sealed class SetupApplyCoordinator
     private static bool HasValidRevalidationDiagnostics(SetupPlanResult<SetupRevalidation> result) =>
         SetupContractValidator.IsAllowedRevalidationDiagnostics(result.Warnings, result.NextActions);
 
-    private IReadOnlyList<TargetCapture> CaptureAndValidateBases(SetupPrivatePlan plan)
+    private static IReadOnlyDictionary<Guid, byte[]> ValidateAndOwnMaterializedBytes(
+        SetupPrivatePlan plan,
+        SetupRevalidation revalidation)
+    {
+        var expected = plan.Targets
+            .Where(target => target.DesiredState is SetupJsoncOwnedValuesDesiredState &&
+                target.Members.Any(member => member.Operation != SetupOperation.NoOp))
+            .ToArray();
+        var actual = revalidation.MaterializedTargets;
+        if (actual.Count != expected.Length ||
+            actual.Select(target => target.RecordId).Distinct().Count() != actual.Count)
+        {
+            throw new SetupApplyException(SetupCodes.RecoveryRequired);
+        }
+
+        var owned = new Dictionary<Guid, byte[]>(expected.Length);
+        for (var index = 0; index < expected.Length; index++)
+        {
+            var expectedTarget = expected[index];
+            var expectedState = (SetupJsoncOwnedValuesDesiredState)expectedTarget.DesiredState;
+            var materialized = actual[index];
+            var bytes = materialized.DesiredBytes.ToArray();
+            var actualHash = SetupHash.File(true, bytes);
+            if (materialized.RecordId != expectedTarget.RecordId ||
+                !string.Equals(materialized.ExpectedStateHash, expectedState.ExpectedStateHash, StringComparison.Ordinal) ||
+                !string.Equals(actualHash, expectedState.ExpectedStateHash, StringComparison.Ordinal) ||
+                !string.Equals(actualHash, materialized.ExpectedStateHash, StringComparison.Ordinal))
+            {
+                throw new SetupApplyException(SetupCodes.RecoveryRequired);
+            }
+
+            owned.Add(materialized.RecordId, bytes);
+        }
+
+        return owned;
+    }
+
+    private IReadOnlyList<TargetCapture> CaptureAndValidateBases(
+        SetupPrivatePlan plan,
+        IReadOnlyDictionary<Guid, byte[]> materializedBytes)
     {
         var captures = new List<TargetCapture>();
         foreach (var target in plan.Targets)
@@ -983,7 +1023,7 @@ internal sealed class SetupApplyCoordinator
                         .Where(item => item.member.Operation != SetupOperation.NoOp)
                         .Select(item => item.index)
                         .ToArray();
-                    captures.Add(new TargetCapture(target, null, capture, false, changedMembers));
+                    captures.Add(new TargetCapture(target, null, capture, false, changedMembers, null, null));
                     break;
                 }
                 case SetupTargetKind.Guidance:
@@ -1005,7 +1045,7 @@ internal sealed class SetupApplyCoordinator
                         throw new SetupApplyException(SetupCodes.StalePlan);
                     }
 
-                    var desiredHash = SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState));
+                    var desiredHash = SetupDesiredStateHash.File(target.DesiredState);
                     var fileChanged = !string.Equals(capture.Hash, desiredHash, StringComparison.Ordinal);
                     var membersDeclareChange = target.Members.Any(member => member.Operation != SetupOperation.NoOp);
                     if (fileChanged != membersDeclareChange)
@@ -1018,7 +1058,15 @@ internal sealed class SetupApplyCoordinator
                         capture,
                         null,
                         membersDeclareChange,
-                        []));
+                        [],
+                        target.DesiredState switch
+                        {
+                            SetupInlineDesiredState inline => Encoding.UTF8.GetBytes(inline.Value),
+                            SetupJsoncOwnedValuesDesiredState when materializedBytes.TryGetValue(
+                                target.RecordId, out var bytes) => bytes,
+                            _ => null,
+                        },
+                        desiredHash));
                     break;
                 }
             }
@@ -1156,7 +1204,7 @@ internal sealed class SetupApplyCoordinator
             steps = [new SetupJournalStep(
                 null,
                 capture.File.Hash,
-                SetupHash.File(true, Encoding.UTF8.GetBytes(capture.Target.DesiredState)),
+                capture.DesiredStateHash!,
                 backupReference,
                 SetupJournalStepPhase.Pending)];
         }
@@ -1211,7 +1259,7 @@ internal sealed class SetupApplyCoordinator
                     GetAllowedRoot(capture.Target.TargetLocation),
                     capture.Target.TargetLocation,
                     capture.File.Hash,
-                    Encoding.UTF8.GetBytes(capture.Target.DesiredState));
+                    capture.DesiredBytes?.ToArray() ?? throw new SetupApplyException(SetupCodes.InternalError));
                 MarkMutationCompleted(setupLock, plan.ChangeSetId, capture.Target.RecordId, null);
                 continue;
             }
@@ -1265,7 +1313,7 @@ internal sealed class SetupApplyCoordinator
                 default:
                 {
                     var capture = fileStep.Capture(GetAllowedRoot(target.TargetLocation), target.TargetLocation);
-                    var desiredHash = SetupHash.File(true, Encoding.UTF8.GetBytes(target.DesiredState));
+                    var desiredHash = SetupDesiredStateHash.File(target.DesiredState);
                     if (!string.Equals(capture.Hash, desiredHash, StringComparison.Ordinal))
                     {
                         throw new SetupApplyException(SetupCodes.InternalError);
@@ -1410,7 +1458,9 @@ internal sealed class SetupApplyCoordinator
         AtomicFileCapture? File,
         UserEnvironmentCapture? Environment,
         bool FileChanged,
-        IReadOnlyList<int> ChangedMemberIndices)
+        IReadOnlyList<int> ChangedMemberIndices,
+        ReadOnlyMemory<byte>? DesiredBytes,
+        string? DesiredStateHash)
     {
         public bool HasChanges => File is not null ? FileChanged : ChangedMemberIndices.Count > 0;
     }

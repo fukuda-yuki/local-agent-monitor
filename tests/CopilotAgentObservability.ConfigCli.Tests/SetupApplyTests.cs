@@ -1480,6 +1480,165 @@ public sealed class SetupApplyTests
     }
 
     [Fact]
+    public void Revalidated_MaterializedTargetsSnapshotOrderAndBytes()
+    {
+        var firstId = Guid.Parse("00000000-0000-7000-8000-000000000151");
+        var secondId = Guid.Parse("00000000-0000-7000-8000-000000000152");
+        var firstBytes = Encoding.UTF8.GetBytes("first");
+        var secondBytes = Encoding.UTF8.GetBytes("second");
+
+        var result = SetupPlanResult.Revalidated(
+        [
+            new SetupMaterializedTarget(firstId, firstBytes, SetupHash.File(true, firstBytes)),
+            new SetupMaterializedTarget(secondId, secondBytes, SetupHash.File(true, secondBytes)),
+        ]);
+        firstBytes[0] = (byte)'x';
+        secondBytes[0] = (byte)'y';
+
+        Assert.Equal([firstId, secondId], result.Value.MaterializedTargets.Select(target => target.RecordId));
+        Assert.Equal("first", Encoding.UTF8.GetString(result.Value.MaterializedTargets[0].DesiredBytes.Span));
+        Assert.Equal("second", Encoding.UTF8.GetString(result.Value.MaterializedTargets[1].DesiredBytes.Span));
+    }
+
+    public static TheoryData<string> InvalidTaggedMaterializationCases => new()
+    {
+        "missing",
+        "extra",
+        "duplicate",
+        "reordered",
+        "wrong-record",
+        "wrong-entry-hash",
+        "wrong-bytes",
+    };
+
+    [Theory]
+    [MemberData(nameof(InvalidTaggedMaterializationCases))]
+    public void Apply_TaggedMaterializationMismatchRequiresRecoveryBeforeArtifactsOrWrites(string variant)
+    {
+        var fixture = TaggedApplyFixture.CreateChanged();
+        var materialized = fixture.ValidMaterializations.ToList();
+        switch (variant)
+        {
+            case "missing":
+                materialized.RemoveAt(materialized.Count - 1);
+                break;
+            case "extra":
+                materialized.Add(new SetupMaterializedTarget(
+                    Guid.Parse("00000000-0000-7000-8000-000000000159"),
+                    Encoding.UTF8.GetBytes("private-materialized-marker"),
+                    SetupHash.File(true, Encoding.UTF8.GetBytes("private-materialized-marker"))));
+                break;
+            case "duplicate":
+                materialized[1] = materialized[0];
+                break;
+            case "reordered":
+                materialized.Reverse();
+                break;
+            case "wrong-record":
+                materialized[0] = materialized[0] with
+                {
+                    RecordId = Guid.Parse("00000000-0000-7000-8000-000000000159"),
+                };
+                break;
+            case "wrong-entry-hash":
+                materialized[0] = materialized[0] with { ExpectedStateHash = new string('a', 64) };
+                break;
+            case "wrong-bytes":
+                materialized[0] = materialized[0] with
+                {
+                    DesiredBytes = Encoding.UTF8.GetBytes("private-materialized-marker"),
+                };
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(variant));
+        }
+
+        fixture.Revalidator.Result = SetupPlanResult.Revalidated(materialized);
+        var planBefore = fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId));
+        var ledgerBefore = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
+        var targetBefore = fixture.TargetPaths.Select(fixture.Platform.ReadSeededFile).ToArray();
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.DoesNotContain("private-materialized-marker", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(planBefore, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId)));
+        Assert.Equal(ledgerBefore, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
+        Assert.Equal(targetBefore, fixture.TargetPaths.Select(fixture.Platform.ReadSeededFile).ToArray());
+        fixture.AssertNoTransactionArtifacts();
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations.Skip(operationsBefore));
+        Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationsBefore), IsWriteOperation);
+    }
+
+    [Fact]
+    public void Apply_TaggedMaterializationUnderLockPersistsPriorMarkerOnlyInBackupEvidence()
+    {
+        var fixture = TaggedApplyFixture.CreateChanged();
+        Assert.Contains(
+            TaggedApplyFixture.PreviousMarker,
+            Encoding.UTF8.GetString(fixture.PriorBytes[0]),
+            StringComparison.Ordinal);
+        fixture.Revalidator.Result = SetupPlanResult.Revalidated(fixture.ValidMaterializations);
+        fixture.Revalidator.OnRevalidate = (_, _) =>
+        {
+            using var contender = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+            Assert.False(contender.Acquired);
+        };
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var result = fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId).Value;
+
+        Assert.Equal(SetupChangeSetState.Applied, result.State);
+        Assert.Equal(fixture.DesiredBytes[0], fixture.Platform.ReadSeededFile(fixture.TargetPaths[0]));
+        Assert.Equal(fixture.DesiredBytes[1], fixture.Platform.ReadSeededFile(fixture.TargetPaths[1]));
+        var backupText = Encoding.UTF8.GetString(
+            fixture.Platform.ReadSeededFile(fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.RecordIds[0])));
+        Assert.Contains(TaggedApplyFixture.PreviousMarker, backupText, StringComparison.Ordinal);
+
+        var forbiddenEvidence = new[]
+        {
+            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId))),
+            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger)),
+            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.Paths.GetTransactionJournal(fixture.ChangeSetId))),
+            JsonSerializer.Serialize(result),
+            string.Join("\n", fixture.Platform.Operations),
+            string.Join("\n", result.Targets.Select(target => target.OutcomeCode)),
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Setup", "v1", "private-plan.v1.json")),
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Setup", "v1", "ownership-ledger.v1.json")),
+        };
+        Assert.All(forbiddenEvidence, evidence =>
+            Assert.DoesNotContain(TaggedApplyFixture.PreviousMarker, evidence, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Apply_AllNoOpTaggedTargetNeedsNoMaterializationButRetainsBaseGuard()
+    {
+        var unchanged = TaggedApplyFixture.CreateNoOp();
+        unchanged.Revalidator.Result = SetupPlanResult.Revalidated(materializedTargets: []);
+        using (var acquisition = SetupLock.TryAcquire(unchanged.Platform, unchanged.Paths))
+        {
+            var result = unchanged.Coordinator.Apply(acquisition.Lock!, unchanged.ChangeSetId).Value;
+            Assert.Equal(SetupChangeSetState.NoChanges, result.State);
+        }
+        unchanged.AssertNoTransactionArtifacts();
+
+        var drifted = TaggedApplyFixture.CreateNoOp();
+        drifted.Revalidator.Result = SetupPlanResult.Revalidated(materializedTargets: []);
+        drifted.Revalidator.OnRevalidate = (_, _) =>
+            drifted.Platform.SeedFile(drifted.TargetPaths[0], Encoding.UTF8.GetBytes("third-party"));
+        using var driftAcquisition = SetupLock.TryAcquire(drifted.Platform, drifted.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            drifted.Coordinator.Apply(driftAcquisition.Lock!, drifted.ChangeSetId));
+
+        Assert.Equal(SetupCodes.StalePlan, exception.Code);
+        drifted.AssertNoTransactionArtifacts();
+    }
+
+    [Fact]
     public void Apply_AllDesiredTargetsAlreadyCurrentPersistsNoChangesWithoutTransactionArtifacts()
     {
         var fixture = ApplyFixture.Create(noChanges: true);
@@ -2229,6 +2388,164 @@ public sealed class SetupApplyTests
                     : changeSet).ToArray(),
             };
             Platform.SeedFile(Paths.OwnershipLedger, SetupLedgerStore.Serialize(rewritten));
+        }
+    }
+
+    private sealed class TaggedApplyFixture
+    {
+        public const string PreviousMarker = "PRIVATE_PREVIOUS_JSONC_MARKER";
+
+        private TaggedApplyFixture(bool noOp)
+        {
+            Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 14, 1, 2, 3, TimeSpan.Zero));
+            Paths = new SetupRuntimePaths(Platform);
+            ChangeSetId = noOp
+                ? Guid.Parse("00000000-0000-7000-8000-000000000161")
+                : Guid.Parse("00000000-0000-7000-8000-000000000151");
+            RecordIds = noOp
+                ? [Guid.Parse("00000000-0000-7000-8000-000000000162")]
+                :
+                [
+                    Guid.Parse("00000000-0000-7000-8000-000000000152"),
+                    Guid.Parse("00000000-0000-7000-8000-000000000153"),
+                ];
+            TargetPaths = RecordIds.Select((_, index) => Path.Combine(
+                Platform.LocalApplicationData,
+                index == 0 ? "tagged-settings.json" : "tagged-settings-insiders.json")).ToArray();
+            var firstPrior = Encoding.UTF8.GetBytes(
+                "{\n  // " + PreviousMarker + "\n  \"unrelated\": 1,\n  \"github.copilot.chat.otel.enabled\": false,\n}\n");
+            var firstDesired = noOp
+                ? firstPrior.ToArray()
+                : Encoding.UTF8.GetBytes(
+                    "{\n  // " + PreviousMarker + "\n  \"unrelated\": 1,\n  \"github.copilot.chat.otel.enabled\": true,\n}\n");
+            var secondPrior = Encoding.UTF8.GetBytes(
+                "{\n  \"unrelated\": 2,\n  \"github.copilot.chat.otel.enabled\": false,\n}\n");
+            var secondDesired = Encoding.UTF8.GetBytes(
+                "{\n  \"unrelated\": 2,\n  \"github.copilot.chat.otel.enabled\": true,\n}\n");
+            PriorBytes = noOp ? [firstPrior] : [firstPrior, secondPrior];
+            DesiredBytes = noOp ? [firstDesired] : [firstDesired, secondDesired];
+            Platform.SeedDirectory("C:\\");
+            Platform.SeedDirectory(Platform.LocalApplicationData);
+            for (var index = 0; index < TargetPaths.Count; index++)
+            {
+                Platform.SeedFile(TargetPaths[index], PriorBytes[index]);
+            }
+
+            var expectedResult = SourceCapabilityManifestLoader
+                .LoadForSurface("github-copilot-vscode")
+                .CanonicalJson;
+            var planTargets = RecordIds.Select((recordId, index) =>
+            {
+                var operation = noOp ? SetupOperation.NoOp : SetupOperation.Replace;
+                var expectedHash = SetupHash.File(true, DesiredBytes[index]);
+                return new SetupPrivatePlanTarget(
+                    recordId,
+                    SetupTargetKind.Json,
+                    TargetPaths[index],
+                    SetupHash.File(true, PriorBytes[index]),
+                    new SetupJsoncOwnedValuesDesiredState(
+                        expectedHash,
+                        [new SetupJsoncOwnedValue("github.copilot.chat.otel.enabled", "boolean", !noOp)]),
+                    [new SetupPrivatePlanMember("github.copilot.chat.otel.enabled", operation, (!noOp).ToString().ToLowerInvariant())]);
+            }).ToArray();
+            var plan = new SetupPrivatePlan(
+                1,
+                ChangeSetId,
+                "github-copilot",
+                "vscode",
+                Platform.Clock.UtcNow,
+                "1.0.0",
+                planTargets);
+            var ledgerTargets = planTargets.Select((target, index) =>
+            {
+                var operation = noOp ? SetupOperation.NoOp : SetupOperation.Replace;
+                var member = new SetupLedgerMember("github.copilot.chat.otel.enabled", operation);
+                return new SetupLedgerTarget(
+                    target.RecordId,
+                    SetupTargetKind.Json,
+                    index == 0
+                        ? "vscode-stable-default-user-settings"
+                        : "vscode-insiders-default-user-settings",
+                    "github-copilot",
+                    [member],
+                    target.BaseStateHash,
+                    null,
+                    null,
+                    null,
+                    SetupLedgerRollbackStatus.NotAvailable,
+                    SetupRestartRequirement.RestartVsCode,
+                    new SetupStatusProjection(
+                        true,
+                        "1.128.0",
+                        operation,
+                        SetupEffectiveSource.UserSetting,
+                        "http://127.0.0.1:4318",
+                        expectedResult,
+                        null,
+                        [new SetupMemberChangeResult(
+                            member.SettingKey,
+                            operation,
+                            "present",
+                            "configured",
+                            "none",
+                            false)]),
+                    "1.0.0");
+            }).ToArray();
+            var planned = new SetupLedgerChangeSet(
+                ChangeSetId,
+                "github-copilot",
+                "vscode",
+                Platform.Clock.UtcNow,
+                Platform.Clock.UtcNow,
+                "1.0.0",
+                null,
+                SetupChangeSetState.Planned,
+                ledgerTargets);
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            using (var acquisition = SetupLock.TryAcquire(Platform, Paths))
+            {
+                ledgerStore.PersistPlannedChangeSet(acquisition.Lock!, plan, planned);
+            }
+
+            var reopenedPlanStore = new SetupPlanStore(Platform, Paths);
+            Assert.NotNull(reopenedPlanStore.Load(ChangeSetId));
+            Revalidator = new RecordingRevalidator();
+            Coordinator = new SetupApplyCoordinator(
+                Platform,
+                Paths,
+                reopenedPlanStore,
+                new SetupLedgerStore(Platform, Paths, reopenedPlanStore),
+                new SetupTransactionJournalStore(Platform, Paths),
+                Revalidator);
+            ValidMaterializations = noOp
+                ? []
+                : RecordIds.Select((recordId, index) => new SetupMaterializedTarget(
+                    recordId,
+                    DesiredBytes[index],
+                    SetupHash.File(true, DesiredBytes[index]))).ToArray();
+        }
+
+        public SetupTestPlatform Platform { get; }
+        public SetupRuntimePaths Paths { get; }
+        public Guid ChangeSetId { get; }
+        public IReadOnlyList<Guid> RecordIds { get; }
+        public IReadOnlyList<string> TargetPaths { get; }
+        public IReadOnlyList<byte[]> PriorBytes { get; }
+        public IReadOnlyList<byte[]> DesiredBytes { get; }
+        public RecordingRevalidator Revalidator { get; }
+        public SetupApplyCoordinator Coordinator { get; }
+        public IReadOnlyList<SetupMaterializedTarget> ValidMaterializations { get; }
+
+        public static TaggedApplyFixture CreateChanged() => new(noOp: false);
+
+        public static TaggedApplyFixture CreateNoOp() => new(noOp: true);
+
+        public void AssertNoTransactionArtifacts()
+        {
+            Assert.False(Platform.FileSystem.FileExists(Paths.GetTransactionJournal(ChangeSetId)));
+            Assert.All(RecordIds, recordId =>
+                Assert.False(Platform.FileSystem.FileExists(Paths.GetBackup(ChangeSetId, recordId))));
         }
     }
 

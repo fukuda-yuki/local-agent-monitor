@@ -1,4 +1,3 @@
-using System.Text;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -269,7 +268,7 @@ internal static class SetupRollbackPreflightEvaluator
             !string.Equals(journalTarget.Steps[0].PriorStateHash, planTarget.BaseStateHash, StringComparison.Ordinal) ||
             !string.Equals(journalTarget.Steps[0].DesiredStateHash, ledgerTarget.AppliedStateHash, StringComparison.Ordinal) ||
             !string.Equals(journalTarget.Steps[0].DesiredStateHash,
-                SetupHash.File(true, Encoding.UTF8.GetBytes(planTarget.DesiredState)), StringComparison.Ordinal) ||
+                SetupDesiredStateHash.File(planTarget.DesiredState), StringComparison.Ordinal) ||
             !string.Equals(journalTarget.Steps[0].BackupReference, planTarget.RecordId.ToString("D"), StringComparison.Ordinal) ||
             !string.Equals(ledgerTarget.BackupReference, planTarget.RecordId.ToString("D"), StringComparison.Ordinal) ||
             ledgerTarget.RollbackStatus != SetupLedgerRollbackStatus.Pending ||

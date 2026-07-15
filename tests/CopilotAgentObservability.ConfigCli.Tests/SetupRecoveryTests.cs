@@ -69,6 +69,155 @@ public sealed class SetupRecoveryTests
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
     }
 
+    public static TheoryData<string, string> RecoveryDesiredStateBindingBranches
+    {
+        get
+        {
+            var data = new TheoryData<string, string>();
+            foreach (var branch in new[]
+                     {
+                         "prepared-apply",
+                         "prepared-rollback",
+                         "active-apply",
+                         "active-rollback",
+                         "committed-apply",
+                         "committed-rollback",
+                         "restored-apply",
+                     })
+            {
+                data.Add(branch, "inline_exact_label");
+                data.Add(branch, "tagged_other_label");
+            }
+
+            return data;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(RecoveryDesiredStateBindingBranches))]
+    public void RecoverNext_DesiredStateBindingMismatchPrecedesEveryLifecycleBranch(
+        string branch,
+        string variant)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        switch (branch)
+        {
+            case "prepared-apply":
+                fixture.SeedPreparedApplyJournalAndBackup();
+                break;
+            case "prepared-rollback":
+                fixture.SeedPreparedRollbackJournalAndAppliedLedger();
+                break;
+            case "active-apply":
+                fixture.SeedActiveFileApply(SetupJournalStepPhase.MutationStarted, "prior");
+                break;
+            case "active-rollback":
+                fixture.SeedActiveFileRollback("rolling_back", "pending", "applied");
+                break;
+            case "committed-apply":
+                fixture.SeedCommittedApplyJournalAndApplyingLedger();
+                break;
+            case "committed-rollback":
+                fixture.SeedActiveFileRollback("rolling_back", "restore_completed", "prior");
+                fixture.CommitRollbackJournalOnly();
+                break;
+            case "restored-apply":
+                fixture.SeedRestoredApplyJournalAndCompensatingLedger();
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(branch));
+        }
+
+        fixture.RebindDesiredStateBinding(variant);
+        var ledgerBefore = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
+        var journalBefore = fixture.Platform.ReadSeededFile(
+            fixture.Paths.GetTransactionJournal(fixture.ChangeSetId));
+        var targetBefore = fixture.Platform.ReadSeededFile(fixture.TargetPath);
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(ledgerBefore, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
+        Assert.Equal(journalBefore, fixture.Platform.ReadSeededFile(
+            fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)));
+        Assert.Equal(targetBefore, fixture.Platform.ReadSeededFile(fixture.TargetPath));
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.DoesNotContain("environment.notify", operations);
+        Assert.DoesNotContain(operations, operation => operation.Contains(fixture.TargetPath, StringComparison.Ordinal));
+    }
+
+    public static TheoryData<SetupChangeSetState, string> TerminalPendingDesiredStateBindingCases
+    {
+        get
+        {
+            var data = new TheoryData<SetupChangeSetState, string>();
+            foreach (var state in new[]
+                     {
+                         SetupChangeSetState.Applied,
+                         SetupChangeSetState.Restored,
+                         SetupChangeSetState.RolledBack,
+                     })
+            {
+                data.Add(state, "inline_exact_label");
+                data.Add(state, "tagged_other_label");
+            }
+
+            return data;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(TerminalPendingDesiredStateBindingCases))]
+    public void RecoverNext_TerminalPendingNotificationValidatesDesiredStateBindingBeforeReplay(
+        SetupChangeSetState terminalState,
+        string variant)
+    {
+        var fixture = new ApplyProducedRecoveryFixture();
+        fixture.ProduceTerminalPending(terminalState);
+        fixture.RebindDesiredStateBinding(variant);
+        var ledgerBefore = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
+        var journalBefore = fixture.Platform.ReadSeededFile(
+            fixture.Paths.GetTransactionJournal(fixture.ChangeSetId));
+        var targetBefore = fixture.Platform.ReadSeededFile(fixture.TargetPath);
+        var environmentBefore = fixture.Platform.ReadUserEnvironment("ENV_A");
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.CreateRecoveryCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Failed, result.Disposition);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(ledgerBefore, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
+        Assert.Equal(journalBefore, fixture.Platform.ReadSeededFile(
+            fixture.Paths.GetTransactionJournal(fixture.ChangeSetId)));
+        Assert.Equal(targetBefore, fixture.Platform.ReadSeededFile(fixture.TargetPath));
+        Assert.Equal(environmentBefore, fixture.Platform.ReadUserEnvironment("ENV_A"));
+        var operations = fixture.Platform.Operations.Skip(operationsBefore).ToArray();
+        Assert.DoesNotContain("environment.notify", operations);
+        AssertNoMixedTargetIo(operations, fixture.TargetPath);
+    }
+
+    [Fact]
+    public void RecoverNext_ValidTaggedCommittedApplyUsesPersistedExpectedHashWithoutMaterialization()
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        fixture.SeedCommittedApplyJournalAndApplyingLedger();
+        fixture.RebindDesiredStateBinding("tagged_exact_label");
+        var planBefore = fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId));
+        var operationsBefore = fixture.Platform.Operations.Count;
+        using var setupLock = fixture.AcquireLock();
+
+        var result = fixture.ReopenCoordinator().RecoverNext(setupLock);
+
+        Assert.Equal(SetupRecoveryDisposition.Recovered, result.Disposition);
+        Assert.Equal(SetupCodes.InterruptedApplyRecovered, result.Code);
+        Assert.Equal(planBefore, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId)));
+        Assert.DoesNotContain("environment.notify", fixture.Platform.Operations.Skip(operationsBefore));
+    }
+
     [Fact]
     public void RecoverNext_Ignores_normal_planned_change_set_without_journal()
     {
@@ -4555,6 +4704,77 @@ public sealed class SetupRecoveryTests
             operation.Contains(fileTargetPath, StringComparison.Ordinal));
     }
 
+    private static void RebindDesiredStateBinding(
+        SetupTestPlatform platform,
+        SetupRuntimePaths paths,
+        Guid changeSetId,
+        string variant)
+    {
+        var planStore = new SetupPlanStore(platform, paths);
+        var ledgerStore = new SetupLedgerStore(platform, paths, planStore);
+        var plan = planStore.Load(changeSetId)!;
+        var ledger = ledgerStore.LoadForRecovery();
+        var changeSet = ledger.ChangeSets.Single(item => item.ChangeSetId == changeSetId);
+        var fileTargetIndex = plan.Targets
+            .Select((target, index) => (target, index))
+            .Single(item => item.target.TargetKind == SetupTargetKind.Json)
+            .index;
+        switch (variant)
+        {
+            case "inline_exact_label":
+                var ledgerTargets = changeSet.Targets.ToArray();
+                ledgerTargets[fileTargetIndex] = ledgerTargets[fileTargetIndex] with
+                {
+                    TargetLabel = "vscode-stable-default-user-settings",
+                    StatusProjection = ledgerTargets[fileTargetIndex].StatusProjection with
+                    {
+                        ExpectedResult = SourceCapabilityManifestLoader
+                            .LoadForSurface("github-copilot-vscode")
+                            .CanonicalJson,
+                    },
+                };
+                changeSet = changeSet with { Targets = ledgerTargets };
+                break;
+            case "tagged_other_label":
+            case "tagged_exact_label":
+                var planTargets = plan.Targets.ToArray();
+                var planTarget = planTargets[fileTargetIndex];
+                planTargets[fileTargetIndex] = planTarget with
+                {
+                    DesiredState = new SetupJsoncOwnedValuesDesiredState(
+                        SetupHash.File(true, Encoding.UTF8.GetBytes("new")),
+                        [new SetupJsoncOwnedValue("setting", "string", "new")]),
+                };
+                plan = plan with { Targets = planTargets };
+                if (variant == "tagged_exact_label")
+                {
+                    var validLedgerTargets = changeSet.Targets.ToArray();
+                    validLedgerTargets[fileTargetIndex] = validLedgerTargets[fileTargetIndex] with
+                    {
+                        TargetLabel = "vscode-stable-default-user-settings",
+                        StatusProjection = validLedgerTargets[fileTargetIndex].StatusProjection with
+                        {
+                            ExpectedResult = SourceCapabilityManifestLoader
+                                .LoadForSurface("github-copilot-vscode")
+                                .CanonicalJson,
+                        },
+                    };
+                    changeSet = changeSet with { Targets = validLedgerTargets };
+                }
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(variant));
+        }
+
+        platform.SeedFile(paths.GetPlan(changeSetId), SetupPlanStore.Serialize(plan));
+        using var acquisition = SetupLock.TryAcquire(platform, paths);
+        Assert.True(acquisition.Acquired);
+        ledgerStore.Save(acquisition.Lock!, ledger with
+        {
+            ChangeSets = ledger.ChangeSets.Select(item => item.ChangeSetId == changeSetId ? changeSet : item).ToArray(),
+        });
+    }
+
     private static void AssertTerminalNotificationFailurePersistence(
         ApplyProducedRecoveryFixture fixture,
         SetupChangeSetState terminalState)
@@ -5623,6 +5843,9 @@ public sealed class SetupRecoveryTests
         public SetupTransactionJournal LoadJournal() =>
             new SetupTransactionJournalStore(Platform, Paths).Load(ChangeSetId)!;
 
+        public void RebindDesiredStateBinding(string variant) =>
+            SetupRecoveryTests.RebindDesiredStateBinding(Platform, Paths, ChangeSetId, variant);
+
         public void SeedCommittedApplyJournalAndApplyingLedger()
             => SeedCommittedApplyJournalAndApplyingLedger(PrimarySeed);
 
@@ -6531,6 +6754,9 @@ public sealed class SetupRecoveryTests
             return Assert.Single(
                 new SetupLedgerStore(Platform, Paths, planStore).LoadForRecovery().ChangeSets);
         }
+
+        public void RebindDesiredStateBinding(string variant) =>
+            SetupRecoveryTests.RebindDesiredStateBinding(Platform, Paths, ChangeSetId, variant);
 
         public void ProduceTerminalPending(SetupChangeSetState terminalState)
         {

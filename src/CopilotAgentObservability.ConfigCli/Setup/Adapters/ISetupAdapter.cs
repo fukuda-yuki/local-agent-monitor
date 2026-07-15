@@ -47,13 +47,32 @@ internal sealed record SetupPlannedChangeSet(
     SetupPrivatePlan PrivatePlan,
     SetupLedgerChangeSet PlannedChangeSet);
 
+internal sealed record SetupMaterializedTarget(
+    Guid RecordId,
+    ReadOnlyMemory<byte> DesiredBytes,
+    string ExpectedStateHash);
+
 internal sealed class SetupRevalidation
 {
-    private SetupRevalidation()
+    internal SetupRevalidation(IEnumerable<SetupMaterializedTarget> materializedTargets)
     {
+        if (materializedTargets is null)
+        {
+            throw SetupPlanResult.InvalidOutput();
+        }
+
+        MaterializedTargets = Array.AsReadOnly(materializedTargets
+            .Select(target => target is null
+                ? throw SetupPlanResult.InvalidOutput()
+                : target with { DesiredBytes = target.DesiredBytes.ToArray() })
+            .ToArray());
     }
 
-    public static SetupRevalidation Instance { get; } = new();
+    public IReadOnlyList<SetupMaterializedTarget> MaterializedTargets { get; }
+
+    public static SetupRevalidation Empty { get; } = new([]);
+
+    public static SetupRevalidation Instance => Empty;
 }
 
 internal abstract class SetupPlanResult<T>
@@ -151,7 +170,13 @@ internal static class SetupPlanResult
     public static SetupPlanSuccess<SetupRevalidation> Revalidated(
         IEnumerable<string>? warnings = null,
         IEnumerable<string>? nextActions = null) =>
-        Success(SetupRevalidation.Instance, [], warnings ?? [], nextActions ?? []);
+        Success(SetupRevalidation.Empty, [], warnings ?? [], nextActions ?? []);
+
+    public static SetupPlanSuccess<SetupRevalidation> Revalidated(
+        IEnumerable<SetupMaterializedTarget> materializedTargets,
+        IEnumerable<string>? warnings = null,
+        IEnumerable<string>? nextActions = null) =>
+        Success(new SetupRevalidation(materializedTargets), [], warnings ?? [], nextActions ?? []);
 
     internal static InvalidOperationException InvalidOutput() => new(InvalidOutputMessage);
 
