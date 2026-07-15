@@ -1,9 +1,9 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[Collection(nameof(SetupPhysicalProcessCollection))]
 public sealed class SetupWrapperTests
 {
     [Fact]
@@ -70,7 +70,7 @@ public sealed class SetupWrapperTests
         { ["rollback", "--change-set", "00000000-0000-7000-8000-000000000001"] },
     };
 
-    private static async Task<ProcessResult> RunConfigCliAsync(string runtimeRoot, params string[] actionArguments)
+    private static Task<SetupPhysicalProcessResult> RunConfigCliAsync(string runtimeRoot, params string[] actionArguments)
     {
         var arguments = new List<string>
         {
@@ -83,10 +83,10 @@ public sealed class SetupWrapperTests
             "setup",
         };
         arguments.AddRange(actionArguments);
-        return await RunProcessAsync("dotnet", runtimeRoot, arguments);
+        return SetupPhysicalProcessRunner.RunAsync("dotnet", RepositoryRoot, runtimeRoot, arguments);
     }
 
-    private static Task<ProcessResult> RunWrapperAsync(string runtimeRoot, params string[] actionArguments)
+    private static Task<SetupPhysicalProcessResult> RunWrapperAsync(string runtimeRoot, params string[] actionArguments)
     {
         var arguments = new List<string>
         {
@@ -95,39 +95,7 @@ public sealed class SetupWrapperTests
             SetupScriptPath,
         };
         arguments.AddRange(actionArguments);
-        return RunProcessAsync("pwsh", runtimeRoot, arguments);
-    }
-
-    private static async Task<ProcessResult> RunProcessAsync(string fileName, string runtimeRoot, IEnumerable<string> arguments)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = fileName,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        startInfo.Environment["LOCALAPPDATA"] = runtimeRoot;
-        startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
-        startInfo.Environment["DOTNET_NOLOGO"] = "1";
-        startInfo.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
-        foreach (var argument in arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Failed to start {fileName}.");
-        var outputTask = ReadBytesAsync(process.StandardOutput.BaseStream);
-        var errorTask = ReadBytesAsync(process.StandardError.BaseStream);
-        await Task.WhenAll(outputTask, errorTask, process.WaitForExitAsync());
-        return new ProcessResult(process.ExitCode, await outputTask, await errorTask);
-    }
-
-    private static async Task<byte[]> ReadBytesAsync(Stream stream)
-    {
-        using var output = new MemoryStream();
-        await stream.CopyToAsync(output);
-        return output.ToArray();
+        return SetupPhysicalProcessRunner.RunAsync("pwsh", RepositoryRoot, runtimeRoot, arguments);
     }
 
     private static string ReadResultCode(byte[] output)
@@ -151,8 +119,6 @@ public sealed class SetupWrapperTests
         "scripts",
         "local-monitor",
         "setup.ps1");
-
-    private sealed record ProcessResult(int ExitCode, byte[] StandardOutput, byte[] StandardError);
 
     private sealed class TemporaryRuntimeRoot : IDisposable
     {

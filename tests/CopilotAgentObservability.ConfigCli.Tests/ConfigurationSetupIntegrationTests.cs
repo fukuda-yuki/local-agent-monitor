@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters;
@@ -15,6 +16,10 @@ using CopilotAgentObservability.ConfigCli.Setup.Transactions;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[CollectionDefinition(nameof(SetupPhysicalProcessCollection), DisableParallelization = true)]
+public sealed class SetupPhysicalProcessCollection;
+
+[Collection(nameof(SetupPhysicalProcessCollection))]
 public sealed class ConfigurationSetupIntegrationTests
 {
     private const string Endpoint = "http://127.0.0.1:4320";
@@ -54,9 +59,14 @@ public sealed class ConfigurationSetupIntegrationTests
                 "github-copilot-app-sdk-guidance",
             ],
             result.Targets.Select(target => target.TargetLabel));
-        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(result.Targets[0].ExpectedResult!.Value));
-        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(result.Targets[1].ExpectedResult!.Value));
-        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(result.Targets[2].ExpectedResult!.Value));
+        var vsCodeManifest = SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.VsCode)!;
+        var cliManifest = SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.Cli)!;
+        Assert.Equal(vsCodeManifest.SourceSurface, result.Targets[0].ExpectedResult!.Value.GetProperty("source_surface").GetString());
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(vsCodeManifest, result.Targets[0].ExpectedResult!.Value));
+        Assert.Equal(vsCodeManifest.SourceSurface, result.Targets[1].ExpectedResult!.Value.GetProperty("source_surface").GetString());
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(vsCodeManifest, result.Targets[1].ExpectedResult!.Value));
+        Assert.Equal(cliManifest.SourceSurface, result.Targets[2].ExpectedResult!.Value.GetProperty("source_surface").GetString());
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(cliManifest, result.Targets[2].ExpectedResult!.Value));
         Assert.Null(result.Targets[3].ExpectedResult);
         Assert.True(result.Targets[3].Detected);
 
@@ -237,23 +247,32 @@ public sealed class ConfigurationSetupIntegrationTests
         ScriptLiveEndpoint(platform);
         var harness = new IntegrationHarness(platform);
         var changeSetId = ParseChangeSetId(harness.Plan("cli"));
-        var planBytes = platform.ReadSeededFile(harness.Paths.GetPlan(changeSetId));
+        var planPath = harness.Paths.GetPlan(changeSetId);
+        var planBytes = platform.ReadSeededFile(planPath);
         var ledgerBytes = platform.ReadSeededFile(harness.Paths.OwnershipLedger);
+        var recordId = Assert.Single(harness.PlanStore.Load(changeSetId)!.Targets).RecordId;
+        var backupPath = harness.Paths.GetBackup(changeSetId, recordId);
         var operationStart = platform.Operations.Count;
 
         var result = harness.Apply(changeSetId);
 
         Assert.Equal(SetupCodes.UnsupportedTarget, result.Code);
         Assert.Empty(result.Targets);
-        Assert.Equal(planBytes, platform.ReadSeededFile(harness.Paths.GetPlan(changeSetId)));
+        Assert.Equal(planBytes, platform.ReadSeededFile(planPath));
         Assert.Equal(ledgerBytes, platform.ReadSeededFile(harness.Paths.OwnershipLedger));
         var operations = platform.Operations.Skip(operationStart).ToArray();
         AssertNoTargetActivity(operations);
+        AssertNoPrivateMutationActivity(
+            operations,
+            harness.Paths.Root,
+            planPath,
+            harness.Paths.OwnershipLedger);
         Assert.DoesNotContain(operations, operation =>
             operation.Contains(".zshrc", StringComparison.OrdinalIgnoreCase) ||
             operation.Contains(".bashrc", StringComparison.OrdinalIgnoreCase) ||
             operation.Contains(".profile", StringComparison.OrdinalIgnoreCase));
         Assert.False(platform.FileSystem.FileExists(harness.Paths.GetTransactionJournal(changeSetId)));
+        Assert.False(platform.FileSystem.FileExists(backupPath));
     }
 
     [Fact]
@@ -347,15 +366,29 @@ public sealed class ConfigurationSetupIntegrationTests
         ScriptLiveEndpoint(linuxPlatform);
         var linuxHarness = new IntegrationHarness(linuxPlatform);
         var linuxChangeSetId = ParseChangeSetId(linuxHarness.Plan("cli"));
+        var linuxPlanPath = linuxHarness.Paths.GetPlan(linuxChangeSetId);
+        var linuxPlanBytes = linuxPlatform.ReadSeededFile(linuxPlanPath);
+        var linuxLedgerBytes = linuxPlatform.ReadSeededFile(linuxHarness.Paths.OwnershipLedger);
+        var linuxRecordId = Assert.Single(linuxHarness.PlanStore.Load(linuxChangeSetId)!.Targets).RecordId;
         var linuxOperationStart = linuxPlatform.Operations.Count;
         var linuxApply = linuxHarness.Apply(linuxChangeSetId);
 
         Assert.Equal(SetupCodes.UnsupportedTarget, linuxApply.Code);
-        AssertNoTargetActivity(linuxPlatform.Operations.Skip(linuxOperationStart));
-        Assert.DoesNotContain(linuxPlatform.Operations, operation =>
+        Assert.Equal(linuxPlanBytes, linuxPlatform.ReadSeededFile(linuxPlanPath));
+        Assert.Equal(linuxLedgerBytes, linuxPlatform.ReadSeededFile(linuxHarness.Paths.OwnershipLedger));
+        var linuxOperations = linuxPlatform.Operations.Skip(linuxOperationStart).ToArray();
+        AssertNoTargetActivity(linuxOperations);
+        AssertNoPrivateMutationActivity(
+            linuxOperations,
+            linuxHarness.Paths.Root,
+            linuxPlanPath,
+            linuxHarness.Paths.OwnershipLedger);
+        Assert.DoesNotContain(linuxOperations, operation =>
             operation.Contains(".bashrc", StringComparison.OrdinalIgnoreCase) ||
             operation.Contains(".profile", StringComparison.OrdinalIgnoreCase) ||
             operation.Contains("/etc/", StringComparison.OrdinalIgnoreCase));
+        Assert.False(linuxPlatform.FileSystem.FileExists(linuxHarness.Paths.GetTransactionJournal(linuxChangeSetId)));
+        Assert.False(linuxPlatform.FileSystem.FileExists(linuxHarness.Paths.GetBackup(linuxChangeSetId, linuxRecordId)));
     }
 
     [Fact]
@@ -376,6 +409,56 @@ public sealed class ConfigurationSetupIntegrationTests
         Assert.Equal("status", directJson.RootElement.GetProperty("command").GetString());
         Assert.Equal(SetupCodes.StatusReady, directJson.RootElement.GetProperty("code").GetString());
         Assert.True(directJson.RootElement.GetProperty("success").GetBoolean());
+    }
+
+    [Fact]
+    public void PhysicalProcessTests_ShareOneDisabledParallelCollection()
+    {
+        var integrationCollection = Assert.Single(
+            typeof(ConfigurationSetupIntegrationTests).CustomAttributes,
+            attribute => attribute.AttributeType == typeof(CollectionAttribute));
+        var wrapperCollection = Assert.Single(
+            typeof(SetupWrapperTests).CustomAttributes,
+            attribute => attribute.AttributeType == typeof(CollectionAttribute));
+        var integrationName = Assert.IsType<string>(Assert.Single(integrationCollection.ConstructorArguments).Value);
+        var wrapperName = Assert.IsType<string>(Assert.Single(wrapperCollection.ConstructorArguments).Value);
+
+        Assert.Equal(integrationName, wrapperName);
+        var definitionType = Assert.Single(
+            typeof(ConfigurationSetupIntegrationTests).Assembly.GetTypes(),
+            type => type.CustomAttributes.Any(attribute =>
+                attribute.AttributeType == typeof(CollectionDefinitionAttribute) &&
+                Assert.IsType<string>(Assert.Single(attribute.ConstructorArguments).Value) == integrationName));
+        var definition = Assert.IsType<CollectionDefinitionAttribute>(
+            definitionType.GetCustomAttribute(typeof(CollectionDefinitionAttribute)));
+        Assert.True(definition.DisableParallelization);
+    }
+
+    [Fact]
+    public async Task PhysicalProcessRunner_TimeoutKillsOwnedProcessAndReturnsRepositorySafeEvidence()
+    {
+        string runtimePath;
+        var processId = 0;
+        using (var runtime = new TemporaryRuntimeRoot())
+        {
+            runtimePath = runtime.Path;
+            var exception = await Assert.ThrowsAsync<TimeoutException>(() =>
+                SetupPhysicalProcessRunner.RunWithDeadlineAsync(
+                    "pwsh",
+                    RepositoryRoot,
+                    runtime.Path,
+                    ["-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null"],
+                    TimeSpan.FromMilliseconds(100),
+                    id => processId = id));
+
+            Assert.Equal(SetupPhysicalProcessRunner.TimeoutEvidence, exception.Message);
+            Assert.DoesNotContain(runtime.Path, exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(RepositoryRoot, exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.True(processId > 0);
+            Assert.Throws<ArgumentException>(() => Process.GetProcessById(processId));
+        }
+
+        Assert.False(Directory.Exists(runtimePath));
     }
 
     private static Guid ParseChangeSetId(SetupCommandResult result) =>
@@ -503,24 +586,54 @@ public sealed class ConfigurationSetupIntegrationTests
     private static void AssertNoWritesOutsideRuntimeRoot(IEnumerable<string> operations, string runtimeRoot)
     {
         var snapshot = operations.ToArray();
-        var mutations = snapshot.Where(operation =>
-            operation.StartsWith("file.write:", StringComparison.Ordinal) ||
-            operation.StartsWith("file.write-new:", StringComparison.Ordinal) ||
-            operation.StartsWith("file.try-write-new-flushed:", StringComparison.Ordinal) ||
-            operation.StartsWith("file.replace:", StringComparison.Ordinal) ||
-            operation.StartsWith("file.move:", StringComparison.Ordinal) ||
-            operation.StartsWith("file.delete:", StringComparison.Ordinal)).ToArray();
+        var mutations = snapshot.Where(IsFileMutationActivity).ToArray();
+        var directoryMutations = snapshot.Where(operation =>
+            operation.StartsWith("directory.create:", StringComparison.Ordinal)).ToArray();
+        Assert.NotEmpty(mutations);
+        Assert.NotEmpty(directoryMutations);
         Assert.All(mutations, operation =>
         {
             var operands = operation[(operation.IndexOf(':') + 1)..]
                 .Split("->", StringSplitOptions.None);
             Assert.All(operands, operand => Assert.StartsWith(runtimeRoot, operand, StringComparison.OrdinalIgnoreCase));
         });
+        Assert.All(directoryMutations, operation =>
+            Assert.StartsWith(
+                runtimeRoot,
+                operation["directory.create:".Length..],
+                StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(snapshot, operation => operation.StartsWith("environment.set:", StringComparison.Ordinal));
         Assert.DoesNotContain("environment.notify", snapshot);
     }
 
-    private static async Task<ProcessResult> RunConfigCliAsync(string runtimeRoot, params string[] actionArguments)
+    private static void AssertNoPrivateMutationActivity(
+        IReadOnlyCollection<string> operations,
+        string runtimeRoot,
+        string planPath,
+        string ledgerPath)
+    {
+        Assert.Contains($"directory.create:{runtimeRoot}", operations);
+        Assert.Contains($"file.read:{planPath}", operations);
+        Assert.Contains(operations, operation =>
+            operation.StartsWith($"file.read-bounded:{ledgerPath}:", StringComparison.Ordinal));
+        Assert.DoesNotContain(operations, IsFileMutationActivity);
+        Assert.DoesNotContain(operations, operation =>
+            operation.StartsWith("directory.create:", StringComparison.Ordinal) &&
+            !string.Equals(operation, $"directory.create:{runtimeRoot}", StringComparison.Ordinal));
+        Assert.DoesNotContain(operations, operation => operation.StartsWith("environment.set:", StringComparison.Ordinal));
+        Assert.DoesNotContain("environment.notify", operations);
+    }
+
+    private static bool IsFileMutationActivity(string operation) =>
+        operation.StartsWith("file.write:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.write-new:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.try-write-new-flushed:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.flush:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.replace:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.move:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.delete:", StringComparison.Ordinal);
+
+    private static Task<SetupPhysicalProcessResult> RunConfigCliAsync(string runtimeRoot, params string[] actionArguments)
     {
         var arguments = new List<string>
         {
@@ -533,10 +646,10 @@ public sealed class ConfigurationSetupIntegrationTests
             "setup",
         };
         arguments.AddRange(actionArguments);
-        return await RunProcessAsync("dotnet", runtimeRoot, arguments);
+        return SetupPhysicalProcessRunner.RunAsync("dotnet", RepositoryRoot, runtimeRoot, arguments);
     }
 
-    private static Task<ProcessResult> RunWrapperAsync(string runtimeRoot, params string[] actionArguments)
+    private static Task<SetupPhysicalProcessResult> RunWrapperAsync(string runtimeRoot, params string[] actionArguments)
     {
         var arguments = new List<string>
         {
@@ -545,43 +658,7 @@ public sealed class ConfigurationSetupIntegrationTests
             SetupScriptPath,
         };
         arguments.AddRange(actionArguments);
-        return RunProcessAsync("pwsh", runtimeRoot, arguments);
-    }
-
-    private static async Task<ProcessResult> RunProcessAsync(
-        string fileName,
-        string runtimeRoot,
-        IEnumerable<string> arguments)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = fileName,
-            WorkingDirectory = RepositoryRoot,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        startInfo.Environment["LOCALAPPDATA"] = runtimeRoot;
-        startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
-        startInfo.Environment["DOTNET_NOLOGO"] = "1";
-        startInfo.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
-        foreach (var argument in arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Failed to start {fileName}.");
-        var outputTask = ReadBytesAsync(process.StandardOutput.BaseStream);
-        var errorTask = ReadBytesAsync(process.StandardError.BaseStream);
-        await Task.WhenAll(outputTask, errorTask, process.WaitForExitAsync());
-        return new ProcessResult(process.ExitCode, await outputTask, await errorTask);
-    }
-
-    private static async Task<byte[]> ReadBytesAsync(Stream stream)
-    {
-        using var output = new MemoryStream();
-        await stream.CopyToAsync(output);
-        return output.ToArray();
+        return SetupPhysicalProcessRunner.RunAsync("pwsh", RepositoryRoot, runtimeRoot, arguments);
     }
 
     private static string RepositoryRoot => Path.GetFullPath(Path.Combine(
@@ -599,8 +676,6 @@ public sealed class ConfigurationSetupIntegrationTests
         "scripts",
         "local-monitor",
         "setup.ps1");
-
-    private sealed record ProcessResult(int ExitCode, byte[] StandardOutput, byte[] StandardError);
 
     private sealed class TemporaryRuntimeRoot : IDisposable
     {
@@ -654,5 +729,112 @@ public sealed class ConfigurationSetupIntegrationTests
         public SetupCommandResult Status() => DispatchSerialized(
             Dispatch,
             new SetupOptions(SetupCommand.Status, null, null, null, false, null));
+    }
+}
+
+internal sealed record SetupPhysicalProcessResult(
+    int ExitCode,
+    byte[] StandardOutput,
+    byte[] StandardError);
+
+internal static class SetupPhysicalProcessRunner
+{
+    internal const string TimeoutEvidence = "Setup physical process exceeded its fixed execution deadline.";
+    private static readonly TimeSpan ExecutionDeadline = TimeSpan.FromMinutes(2);
+
+    public static Task<SetupPhysicalProcessResult> RunAsync(
+        string fileName,
+        string workingDirectory,
+        string runtimeRoot,
+        IEnumerable<string> arguments) =>
+        RunWithDeadlineAsync(
+            fileName,
+            workingDirectory,
+            runtimeRoot,
+            arguments,
+            ExecutionDeadline,
+            processStarted: null);
+
+    internal static async Task<SetupPhysicalProcessResult> RunWithDeadlineAsync(
+        string fileName,
+        string workingDirectory,
+        string runtimeRoot,
+        IEnumerable<string> arguments,
+        TimeSpan executionDeadline,
+        Action<int>? processStarted)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = fileName,
+            WorkingDirectory = workingDirectory,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.Environment["LOCALAPPDATA"] = runtimeRoot;
+        startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+        startInfo.Environment["DOTNET_NOLOGO"] = "1";
+        startInfo.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo) ??
+            throw new InvalidOperationException("Failed to start setup physical process.");
+        processStarted?.Invoke(process.Id);
+        var outputTask = ReadBytesAsync(process.StandardOutput.BaseStream);
+        var errorTask = ReadBytesAsync(process.StandardError.BaseStream);
+        using var deadline = new CancellationTokenSource(executionDeadline);
+
+        try
+        {
+            await process.WaitForExitAsync(deadline.Token);
+            await Task.WhenAll(outputTask, errorTask).WaitAsync(deadline.Token);
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+        {
+            await TerminateOwnedProcessTreeAsync(process, outputTask, errorTask);
+            throw new TimeoutException(TimeoutEvidence);
+        }
+        catch
+        {
+            await TerminateOwnedProcessTreeAsync(process, outputTask, errorTask);
+            throw;
+        }
+
+        return new SetupPhysicalProcessResult(
+            process.ExitCode,
+            await outputTask,
+            await errorTask);
+    }
+
+    private static async Task TerminateOwnedProcessTreeAsync(
+        Process process,
+        Task<byte[]> outputTask,
+        Task<byte[]> errorTask)
+    {
+        if (!process.HasExited)
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException) when (process.HasExited)
+            {
+            }
+        }
+
+        await process.WaitForExitAsync();
+        Task drains = Task.WhenAll(outputTask, errorTask);
+        await drains.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+    }
+
+    private static async Task<byte[]> ReadBytesAsync(Stream stream)
+    {
+        using var output = new MemoryStream();
+        await stream.CopyToAsync(output);
+        return output.ToArray();
     }
 }
