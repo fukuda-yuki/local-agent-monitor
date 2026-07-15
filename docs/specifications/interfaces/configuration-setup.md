@@ -525,10 +525,15 @@ schema-v2 change, a migration, a compatibility layer, or a parse fallback:
 the JSON token type selects exactly one of the two v1 representations, and no
 other representation is accepted.
 
-- A JSON string is the legacy inline representation. It is retained exactly
-  and only so the already committed real v1 fixture remains byte-identical and
-  restart-readable. No conversion, rewrite, or synthetic migration of that
-  fixture is permitted.
+- A JSON string is the canonical v1 inline representation for historical
+  private-plan bytes and generic non-tagged file, TOML, and opaque targets. It
+  is not a fallback. The existing committed real ownership-ledger v1 fixture
+  (`Fixtures/Setup/v1/ownership-ledger.v1.json`) remains unchanged and
+  restart-readable as ledger evidence. Before changing the plan serializer,
+  task-04b must add a separate committed production-serializer private-plan v1
+  fixture containing this legacy string `desired_state`; production
+  `SetupPlanStore` must write, close, reopen, and byte-compare it exactly. No
+  conversion, rewrite, or synthetic migration of either fixture is permitted.
 - A JSON object is a new JSONC-owned-values representation. It has exactly the
   properties `kind`, `expected_state_hash`, and `owned_values`, in that
   canonical write order. `kind` is exactly `jsonc_owned_values_v1` and
@@ -537,18 +542,24 @@ other representation is accepted.
   `setting_key`, `value_kind`, and `value` in that write order. Keys are unique,
   are ordered exactly as the target's ordered members, and correspond 1:1 to
   those members. `value_kind` is exactly `boolean` (a JSON boolean `value`) or
-  `string` (a JSON string `value` of at most 2,048 UTF-16 code units). No
+  `string` (a JSON string `value` of exactly 1 through 2,048 UTF-16 code
+  units). No
   unknown property, duplicate key, wrong JSON value type, empty/over-bound
   array or value, member mismatch, noncanonical hash, or malformed JSON is
   tolerated.
 
-New JSONC targets use only the tagged object; the VS Code partition never
-emits the legacy string. The tagged object preserves only the owned desired
-values and their expected complete-file hash, not a rendered settings document
-or unowned input. A malformed or unknown private-plan desired-state union is
-`recovery_required`, before registry/platform/target work. The loaded v1
-fixture remains an acceptance input, not evidence that new targets may choose
-the legacy representation.
+The tagged arm is valid only for a `file` target that is a new GitHub Copilot
+VS Code Default Profile JSONC record; its two permitted labels are
+`vscode-stable-default-user-settings` and
+`vscode-insiders-default-user-settings`. That target-kind/adapter/label arm
+relation is validated when an adapter record becomes the bound private plan and
+ledger record. New VS Code JSONC targets use only the tagged object; all other
+generic non-tagged file/TOML/opaque targets retain the canonical inline-string
+arm. This is required v1 selection, not a fallback or migration path. The
+tagged object preserves only the owned desired values and expected complete-file
+hash, not a persisted rendered settings document or unowned input. A malformed,
+unknown, or invalid target-kind/arm private-plan union is
+`recovery_required`, before registry/platform/target work.
 
 ## Ownership ledger v1
 
@@ -686,7 +697,10 @@ shape.
 VS Code reads `settings.json` through a 1 MiB payload bound plus one sentinel
 byte. A trustworthy length over 1 MiB, a sentinel byte after 1 MiB, malformed
 JSONC, or a JSONC value outside the owned-value contract is
-`malformed_settings` during both planning and revalidation. No bounded-read
+`malformed_settings` during both planning and revalidation. During planning
+only, the partition may render complete JSONC bytes in bounded memory solely to
+calculate the exact owned-member operations and `expected_state_hash`; it
+discards those bytes before private-plan/ledger creation. No bounded-read
 failure may cause an unbounded retry, a best-effort rewrite, a persisted plan,
 or a mutation artifact.
 
@@ -1309,15 +1323,19 @@ must not contain:
 
 Negative tests inject markers into every input boundary and assert that no
 serialized command result, ledger, journal, log, exception mapping, tagged
-private plan, transient-carrier diagnostic, or committed fixture contains a
-previous-state secret/value marker. Complete materialized JSONC bytes may exist
-only in the in-memory apply carrier and target write path; they are never
-serialized or surfaced as evidence. A flushed local backup is allowed to
+private plan, planning/revalidation materialization diagnostic, or committed
+fixture contains a previous-state secret/value marker. Complete materialized
+JSONC bytes may exist only in bounded in-memory planning, the in-memory apply
+carrier, and the target write path; they are discarded and never serialized or
+surfaced as evidence. A flushed local backup is allowed to
 contain exact previous state because it is the rollback source; tests instead
-prove that backup content is never serialized or logged. Tests also prove the
-committed real v1 fixture is byte-identical before and after the union work and
-is restart-readable through the production loader. Fixtures are synthetic and
-use the production DTO serializer.
+prove that backup content is never serialized or logged. Tests keep the
+committed ownership-ledger v1 fixture byte-identical/restart-readable and,
+before serializer changes, add a separate production-serializer private-plan
+v1 fixture with legacy inline `desired_state` whose `SetupPlanStore`
+write-close-reopen bytes are identical. Fixtures are synthetic and use the
+production DTO serializer for public results and the production `SetupPlanStore`
+serializer for private-plan bytes.
 
 ## Validation
 
@@ -1328,11 +1346,15 @@ Focused validation covers:
   128-code-unit detected-version boundary, missing-snapshot/unknown-version
   rejection, and largest-legal-change-set size below the retained 1 MiB cap;
 - private-plan v1 `desired_state` union serialization/load validation: the
-  committed real v1 fixture remains byte-identical and restart-readable; legacy
-  inline strings are accepted only as that v1 representation; tagged JSONC
-  values reject unknown/missing properties, wrong kind/value type, duplicate or
-  reordered keys, non-1:1 members, over-bound values, and non-lowercase hashes
-  as `recovery_required`;
+  existing committed ownership-ledger fixture remains byte-identical and
+  restart-readable; task-04b first adds a separate production-serializer
+  private-plan fixture containing legacy inline `desired_state`, then
+  byte-compares its `SetupPlanStore` write-close-reopen output; inline is the
+  canonical arm for generic non-tagged file/TOML/opaque records, tagged is
+  valid only for VS Code file records, and unknown/missing properties, wrong
+  kind/value type, 0/1/2048/2049 string boundaries, duplicate/reordered keys,
+  non-1:1 members, invalid target-kind/arm relation, and non-lowercase hashes
+  fail `recovery_required`;
 - JSONC/TOML malformed fail-closed behavior;
 - file backup/temp/atomic replace and non-reparse path policy;
 - deterministic stale apply/rollback and lock contention;
@@ -1417,9 +1439,10 @@ Focused validation covers:
   lock; no-op records produce no materialization while retaining their generic
   base-state guard; malformed carrier results produce `recovery_required`
   before artifacts or writes;
-- materialized settings bytes appear only transiently during apply and are
-  absent from plans, ledger, journals, logs, and repository-safe evidence;
-  deterministic crashes before/after intent, replacement, completion,
+- materialized settings bytes appear only transiently during bounded planning
+  and apply and are absent from plans, ledger, journals, logs, and repository-
+  safe evidence; plan-time marker tests prove discard before private-plan/ledger
+  creation; deterministic crashes before/after intent, replacement, completion,
   compensation, and rollback prove recovery uses expected hashes plus backups
   and never calls the adapter or rematerializes JSONC;
 - non-status targets use adapter order for plan and immutable ledger order for
@@ -1458,8 +1481,8 @@ The setup implementation must keep this requirement-to-test mapping:
 
 | Requirement | Executable proof |
 | --- | --- |
-| strict unshipped v1 snapshot, constructor/fixture coverage, immutable lifecycle updates, no migration/fallback | `SetupStorageTests` round-trip the production serializer and committed `Fixtures/Setup/v1/ownership-ledger.v1.json`; all ledger-target constructor fixtures in apply, compensation, rollback, and recovery tests compile with the required snapshot |
-| closed v1 private-plan desired-state union and secret-free JSONC plan representation | `SetupStorageTests` byte-compare and restart-load the committed real v1 fixture, accept the exact legacy string representation and the exact tagged object, and reject every malformed/unknown/noncanonical union shape; `SetupApplyTests` and `SetupRecoveryTests` prove a previous-state marker is absent from plan/ledger/journal/log evidence except the private backup |
+| strict unshipped v1 ledger snapshot, constructor/fixture coverage, immutable lifecycle updates, no migration/fallback | `SetupStorageTests` round-trip the production serializer and committed `Fixtures/Setup/v1/ownership-ledger.v1.json`; all ledger-target constructor fixtures in apply, compensation, rollback, and recovery tests compile with the required snapshot |
+| closed v1 private-plan desired-state union and secret-free JSONC plan representation | Before changing `SetupPlanStore` serialization, `SetupStorageTests` capture and commit `Fixtures/Setup/v1/private-plan.v1.json` from the production serializer with a legacy inline-string `desired_state`, then byte-compare production write-close-reopen output; they accept canonical inline generic file/TOML/opaque records and tagged VS Code file records only, reject every malformed/unknown/noncanonical/arm-mismatched union shape and 0/1/2048/2049 string boundary, and prove plan-time/revalidation markers are absent from plan/ledger/journal/log evidence except the private backup |
 | new-plan exact-current manifest matching versus ledger-origin historical v1 validation | `SetupContractValidationTests` reject a non-current plan manifest; `SetupStorageTests` accept a schema-safe target-matched historical snapshot and reject unknown shape/code, unsafe data, surface mismatch, and cross-field mismatch |
 | finite legal snapshot under the retained ledger cap | `SetupStorageTests` construct the largest accepted 16-target/32-change shape with 128-code-unit versions and largest safe fields, prove it serializes below 1 MiB, and prove an over-cap complete ledger is rejected before replacement |
 | immutable status DTO fields, adapter not rerun, and guidance sample omission/rehydration | `SetupStatusTests` project from the ledger after current installation/policy/manifest facts change and use an adapter fake that fails if invoked; `SetupContractShapeTests` prove the fixed in-memory guidance sample validates while status JSON omits `sample` |

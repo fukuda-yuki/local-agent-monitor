@@ -8,6 +8,12 @@ current-user persistent environment mutation surface.
 independent review before task-04b starts and before any T4/T5/T6 target task
 starts.
 
+**Worktree / branch:** Run only from
+`C:\Users\mwam0\Documents\Codex\copilot-agent-observability` on
+`codex/issues-66-67-guided-setup`. Before editing and before committing, verify
+the root/branch plus `git status --short` and `git diff --name-only`; only the
+four owned paths below may appear.
+
 **Files (ownership):**
 
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Platform/ISetupPlatform.cs`
@@ -59,10 +65,14 @@ dotnet build CopilotAgentObservability.slnx
 git diff --check
 ```
 
+- [ ] Verify scope before staging. `git status --short` and
+  `git diff --name-only` must list only the four owned paths; otherwise stop
+  rather than staging another worker's change.
+
 - [ ] Commit:
 
 ```powershell
-git add src/CopilotAgentObservability.ConfigCli/Setup/Platform tests/CopilotAgentObservability.ConfigCli.Tests/SetupTestPlatform.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupPlatformTests.cs
+git add -- src/CopilotAgentObservability.ConfigCli/Setup/Platform/ISetupPlatform.cs src/CopilotAgentObservability.ConfigCli/Setup/Platform/SystemSetupPlatform.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupTestPlatform.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupPlatformTests.cs
 git commit -m "Issues #66-#67: fix(setup): separate process environment observation"
 ```
 
@@ -76,5 +86,6 @@ observation the authority to mutate the current user's persistent environment.
 - `UserEnvironment` remains the only current-user persistent writer.
 - Focused suites, build, and `git diff --check` pass; fresh security review
   PASS confirms no raw process value becomes an output surface.
+- Root/branch and status/diff scope gates pass before staging.
 
 **Report destination:** chat only. Do not update the ledger in this task.

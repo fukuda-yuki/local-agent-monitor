@@ -14,11 +14,15 @@ by the README. The former #66 gate is reopened for these corrections. This task
 may run in parallel with tasks 06/07 only after that gate; the file sets remain
 disjoint.
 
+**Worktree / branch:** Run only from
+`C:\Users\mwam0\Documents\Codex\copilot-agent-observability` on
+`codex/issues-66-67-guided-setup`. Before editing and before committing, verify
+the root/branch plus `git status --short` and `git diff --name-only`; only
+`VsCodeTargetPartition.cs` and `VsCodeSetupAdapterTests.cs` may appear.
+
 **Files (T4 ownership):**
-- Create: everything under
-  `src/CopilotAgentObservability.ConfigCli/Setup/Adapters/GitHubCopilot/VsCode/`
-  (suggested: `VsCodeTargetPartition.cs` plus focused helpers in the same
-  directory — keep files single-responsibility)
+- Create/Modify:
+  `src/CopilotAgentObservability.ConfigCli/Setup/Adapters/GitHubCopilot/VsCode/VsCodeTargetPartition.cs`
 - Create: `tests/CopilotAgentObservability.ConfigCli.Tests/VsCodeSetupAdapterTests.cs`
 
 **Non-scope:** T3-owned shared files (detection, resolver, probe, aggregate,
@@ -41,8 +45,8 @@ other target subdirectory.
   `TargetToken == "vscode"` — consumed by T7's composition only.
 - Emits: only the schema-v1 tagged `desired_state` object
   `{"kind":"jsonc_owned_values_v1","expected_state_hash":...,"owned_values":[...]}`
-  for new VS Code records. It never emits the legacy inline string retained for
-  the committed v1 fixture. `Revalidate` returns the matching transient
+  for new VS Code records. It never emits the canonical inline string retained
+  for historical/generic non-tagged targets. `Revalidate` returns the matching transient
   materialized bytes only for changed records; no-op records have no carrier
   entry and retain the generic base-state guard.
 
@@ -78,10 +82,12 @@ other target subdirectory.
 - JSONC read/materialization: plan and revalidation read each Default Profile
   settings file through exactly a 1 MiB payload bound plus one sentinel byte.
   Oversize or malformed JSONC returns `malformed_settings` with no private
-  plan, artifact, target write, retry, or unbounded read. Planning preserves
-  unrelated bytes in the transient desired document only, stores the exact
-  tagged owned values in member order and the lowercase hash of that complete
-  desired document, and stores no complete JSONC bytes. Revalidation parses
+  plan, artifact, target write, retry, or unbounded read. Planning may render
+  the complete JSONC document only in bounded memory to calculate exact
+  operations and the lowercase hash, then must discard it before private-plan/
+  ledger creation; it preserves unrelated bytes only in that transient render,
+  stores the exact tagged owned values in member order, and stores no complete
+  JSONC bytes. Revalidation parses
   and re-derives the owned member facts, preserves comments/formatting and
   unrelated keys in its transient materialization, then requires its bytes to
   hash exactly to the persisted `expected_state_hash`; a mismatch is
@@ -156,17 +162,24 @@ other target subdirectory.
   and unchanged persisted per-target restart requirements; secret-marker
   negative test (inject a marker as an existing unrelated settings value;
   assert it is absent from records, tagged private plan, revalidation carrier
-  diagnostics, ledger/journal/log evidence, and committed fixture, while the
+  diagnostics, ledger/journal/log evidence, and both committed
+  ownership-ledger/private-plan fixtures, while the
   private prior-state backup alone is permitted to contain it). Add exact
   tagged-union tests: no legacy string for VS Code; exact property sets and
   canonical order; 1:1 ordered unique owned values/members; boolean/string
-  value types and bounds; lowercase expected hash; unknown/malformed/noncanonical
+  value types and exact string boundaries 0/1/2048/2049 UTF-16 units; lowercase
+  expected hash; unknown/malformed/noncanonical
   union rejection as `recovery_required`. Add 1 MiB/1 MiB+sentinel settings
   boundaries for plan and `Revalidate`, both `malformed_settings` with no
   unbounded read/retry/artifact/write. Add transient-materialization tests for
   changed/no-op cardinality, exact record IDs/order/hash, comment/unowned-byte
   preservation, hash mismatch → `recovery_required`, and a still-supported
-  version change → `recovery_required` with zero artifacts/writes.
+  version change → `recovery_required` with zero artifacts/writes. Add a
+  plan-time marker test proving bounded rendering can calculate the hash while
+  the marker is absent from the private plan, ledger, journal, log, result,
+  both committed ownership-ledger/private-plan fixtures, and diagnostics before
+  apply; only the private backup may later
+  contain prior bytes.
 
 - [ ] **Step 2: Run RED.**
 
@@ -180,10 +193,16 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 
 - [ ] **Step 4: Run GREEN + full ConfigCli + build + `git diff --check`.**
 
+- [ ] **Step 4a: Verify scope before staging.** The worktree/branch field,
+  `git status --short`, and `git diff --name-only` must show only
+  `src/CopilotAgentObservability.ConfigCli/Setup/Adapters/GitHubCopilot/VsCode/VsCodeTargetPartition.cs`
+  and `tests/CopilotAgentObservability.ConfigCli.Tests/VsCodeSetupAdapterTests.cs`.
+  Otherwise stop rather than staging another worker's change.
+
 - [ ] **Step 5: Commit.**
 
 ```powershell
-git add src/CopilotAgentObservability.ConfigCli/Setup/Adapters/GitHubCopilot/VsCode tests/CopilotAgentObservability.ConfigCli.Tests/VsCodeSetupAdapterTests.cs
+git add -- src/CopilotAgentObservability.ConfigCli/Setup/Adapters/GitHubCopilot/VsCode/VsCodeTargetPartition.cs tests/CopilotAgentObservability.ConfigCli.Tests/VsCodeSetupAdapterTests.cs
 git commit -m "Issue #67: feat(setup): guide VS Code Copilot telemetry"
 ```
 
@@ -205,8 +224,8 @@ git diff --check
 - Every contract bullet above has at least one executable case, including
   the profile no-open, 1 MiB-plus-sentinel, tagged-union, transient
   materialization, supported-version-drift, and secret-marker negative proofs.
-- No T3-owned or shared file edited (`git diff --stat` shows only the two
-  owned locations).
+- Root/branch and status/diff scope gates show only the two exact owned files;
+  no T3-owned or shared file is edited.
 - Full ConfigCli suite and build pass; independent review PASS. This task
   does NOT claim end-to-end #67 behavior — that is task-08's gate.
 

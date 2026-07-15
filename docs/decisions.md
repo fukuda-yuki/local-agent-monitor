@@ -1854,11 +1854,17 @@ a thin argument/result wrapper.
   fail closed and no synthetic v0 migration is invented. The complete ledger
   retains its 1 MiB cap; bounded snapshots add no second cap or automatic
   pruning, so finite history capacity is accepted. Private-plan
-  `desired_state` is a closed v1 union, not a migration or fallback: the legacy
-  inline JSON string remains exactly for the committed real v1 fixture, which
-  stays byte-identical and restart-readable; new JSONC targets use only tagged
-  `jsonc_owned_values_v1` with bounded owned values and a lowercase expected
-  state hash. Unknown or malformed union values fail `recovery_required`.
+  `desired_state` is a closed v1 union, not a migration or fallback. The
+  existing committed real ownership-ledger v1 fixture remains byte-identical
+  and restart-readable as ledger evidence. Before serializer changes, task-04b
+  captures a separate production-serializer private-plan v1 fixture containing
+  the canonical legacy inline string and proves `SetupPlanStore`
+  write-close-reopen byte identity. Inline remains canonical for historical
+  bytes and generic non-tagged file/TOML/opaque targets; tagged
+  `jsonc_owned_values_v1` is valid only for the two VS Code Default Profile
+  file records. Tagged string values are exactly 1..2048 UTF-16 units and its
+  expected state hash is lowercase. Unknown, malformed, or arm-mismatched
+  union values fail `recovery_required`.
 - One physical file or current-user environment allowlist is one ledger target
   with one base/applied hash and backup; setting changes are bounded members.
   Apply preflights every base hash and path before writing, flushes backups and
@@ -1869,13 +1875,15 @@ a thin argument/result wrapper.
   only. Rollback is all-target hash guarded,
   one change set at a time, and has no force mode. Concurrency uses an exclusive
   non-waiting lock; tests use barriers/fault points rather than sleeps. A
-  tagged JSONC target persists no full rendered document: `SetupRevalidation`
-  carries its complete desired bytes only under that lock, and the coordinator
-  validates exact record identity/cardinality/hash before it creates artifacts
-  or writes. Ledger and journal retain hashes only. Recovery never calls the
-  adapter or rematerializes JSONC; it uses expected/journal hashes and backups
-  through every interruption window. No-op records add no materialization but
-  retain their generic base-state guard.
+  tagged JSONC target persists no full rendered document: bounded Plan-time
+  rendering may hold complete bytes solely to derive operations/expected hash,
+  then discards them before persistence; `SetupRevalidation` carries its
+  complete desired bytes only under that lock. The coordinator validates exact
+  record identity/cardinality/hash before it creates artifacts or writes.
+  Ledger and journal retain hashes only. Recovery never calls the adapter or
+  rematerializes JSONC; it uses expected/journal hashes and backups through
+  every interruption window. No-op records add no materialization but retain
+  their generic base-state guard.
 - Apply verifies all desired file/member states again before commit. Every
   compensation or rollback restore reclassifies current state immediately
   before writing; a third-party state is preserved and makes the change set

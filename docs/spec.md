@@ -84,19 +84,26 @@ ownership quorum, but their fresh base-state guard still participates in the
 same change-set-wide rollback preflight used by rollback itself. The complete
 ledger retains its 1 MiB cap; finitely bounded snapshot fields must permit the
 largest legal single change set to fit without adding a second cap or pruning.
-Private-plan `desired_state` remains schema v1 and is a closed union: the
-existing committed real fixture's legacy inline string is retained byte-for-byte
-and restart-readable, while new JSONC targets use only a tagged
-`jsonc_owned_values_v1` object containing bounded owned values and an expected
-lowercase SHA-256 state hash. This is a v1 union, not a migration, fallback, or
-schema-v2 path. It deliberately does not persist the complete JSONC document.
-Apply-time adapter revalidation materializes complete desired bytes only under
-the existing lock; the coordinator verifies record identity/cardinality/hash,
-keeps bytes transient, and persists hashes only. Recovery never rematerializes:
-it classifies every crash window from the expected/journal hashes and flushed
-backup. Malformed union/carrier data fails `recovery_required` before an
-artifact or target write. No-op records produce no materialization but retain
-their generic base-state guard.
+Private-plan `desired_state` remains schema v1 and is a closed union. The
+existing committed real ownership-ledger fixture remains unchanged and
+restart-readable as ledger evidence. Before changing `SetupPlanStore`, task-04b
+captures a separate committed production-serializer private-plan v1 fixture
+with legacy inline-string `desired_state` and proves byte-identical
+write-close-reopen behavior. Inline is the canonical v1 arm for historical
+bytes and generic non-tagged file/TOML/opaque targets; a tagged
+`jsonc_owned_values_v1` object is valid only for the two GitHub Copilot VS Code
+Default Profile file labels. Tagged owned string values are exactly 1..2048
+UTF-16 units and the expected SHA-256 hash is lowercase. This is a required v1
+union, not a migration, fallback, or schema-v2 path. It deliberately does not
+persist the complete JSONC document. Bounded Plan-time rendering may hold the
+complete document solely to calculate operations/hash and must discard it
+before persistence; apply-time adapter revalidation materializes complete
+desired bytes only under the existing lock. The coordinator verifies record
+identity/cardinality/hash, keeps bytes transient, and persists hashes only.
+Recovery never rematerializes: it classifies every crash window from the
+expected/journal hashes and flushed backup. Malformed union/carrier data fails
+`recovery_required` before an artifact or target write. No-op records produce
+no materialization but retain their generic base-state guard.
 Results distinguish requested/created and recovered change-set IDs. No HTTP,
 proxy, Canvas, or Local Monitor UI DTO is added.
 

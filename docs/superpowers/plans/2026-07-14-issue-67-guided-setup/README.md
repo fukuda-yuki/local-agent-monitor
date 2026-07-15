@@ -80,16 +80,23 @@ Read before implementing any task, in this order:
   surface. `ISetupPlatform.UserEnvironment` remains the separate current-user
   persistent environment surface and the only environment mutation target.
 - Private-plan `desired_state` remains schema v1. It is the closed union of the
-  byte-identical/restart-readable legacy inline string required for the
-  committed real v1 fixture and the new tagged
-  `jsonc_owned_values_v1` object. The two shapes are v1 representations, not
-  migration, fallback, compatibility, or schema-v2 paths. New VS Code records
-  emit the tagged shape only. It has exactly `kind`, `expected_state_hash`, and
-  1..32 ordered unique `owned_values`; each value is 1:1 with a member, typed,
-  bounded, and the expected hash is lowercase 64-hex.
+  canonical inline-string arm for historical bytes and generic non-tagged
+  file/TOML/opaque targets, and the tagged `jsonc_owned_values_v1` arm for new
+  VS Code Default Profile JSONC file records only. The existing committed
+  ownership-ledger v1 fixture remains unchanged/restart-readable; task-04b
+  captures a separate production-serializer private-plan fixture with the
+  inline string before serializer changes. The two shapes are required v1
+  representations, not migration, fallback, compatibility, or schema-v2
+  paths. Tagged state has exactly `kind`, `expected_state_hash`, and 1..32
+  ordered unique `owned_values`; each value is 1:1 with a member, typed, its
+  string form is 1..2048 UTF-16 units, and the expected hash is lowercase
+  64-hex.
 - JSONC reads during VS Code plan/revalidation are bounded to 1 MiB plus one
   sentinel byte; malformed/oversize maps to `malformed_settings`. A different
-  but still-supported persisted version is `recovery_required`.
+  but still-supported persisted version is `recovery_required`. Bounded
+  Plan-time JSONC rendering is permitted solely to derive operations/hash and
+  is discarded before persistence; apply revalidation uses the same private
+  data boundary for its transient carrier.
 - `SetupRevalidation` carries complete JSONC bytes only transiently under the
   existing apply lock. The coordinator validates exact changed-record IDs,
   order/cardinality, and expected hashes, then owns/discards the bytes. No-op
@@ -168,7 +175,11 @@ concurrent edits.
 
 For every Codex run state explicitly: objective, owned scope, non-scope,
 constraints, completion criteria, validation commands, report destination,
-and the upstream gate it consumes — all in the task card. Use a different,
+upstream gate, **worktree** `C:\Users\mwam0\Documents\Codex\copilot-agent-observability`,
+and **branch** `codex/issues-66-67-guided-setup` — all in the task card. Before
+editing and before committing, the run verifies that root/branch, `git status
+--short`, and `git diff --name-only` contain only the card's owned paths, and
+uses exact-path `git add --` rather than a directory-wide add. Use a different,
 fresh read-only Codex run for each independent review. Do not accept "DONE" or
 pass counts alone; map each requirement to the exact executable test and
 inspect the diff and command output. The correction gate requires separate

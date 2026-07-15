@@ -9,6 +9,12 @@ expected hashes plus backups.
 security, concurrency, and recovery review must all PASS after this task before
 T4/T5/T6 begins; T7 remains blocked until those downstream tasks then pass.
 
+**Worktree / branch:** Run only from
+`C:\Users\mwam0\Documents\Codex\copilot-agent-observability` on
+`codex/issues-66-67-guided-setup`. Before editing and before committing, verify
+the root/branch plus `git status --short` and `git diff --name-only`; only the
+owned paths below may appear.
+
 **Files (ownership):**
 
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Adapters/ISetupAdapter.cs`
@@ -70,7 +76,8 @@ uses the flushed backup; journal hashes remain the exact crash evidence.
   proves zero revalidator/materializer calls and uses expected hash + backup to
   restore/classify prior, desired, and third-party state without overwrite.
 - Existing legacy-inline and environment recovery tests retain their behavior;
-  the accepted v1 fixture remains byte-identical. No sleep/retry is introduced.
+  the existing ownership-ledger fixture and task-04b private-plan fixture
+  retain their distinct byte-identity guarantees. No sleep/retry is introduced.
 
 ## Steps
 
@@ -94,10 +101,14 @@ dotnet build CopilotAgentObservability.slnx
 git diff --check
 ```
 
+- [ ] Verify scope before staging. `git status --short` and
+  `git diff --name-only` must list only this card's enumerated paths; otherwise
+  stop rather than staging another worker's change.
+
 - [ ] Commit:
 
 ```powershell
-git add src/CopilotAgentObservability.ConfigCli/Setup/Adapters/ISetupAdapter.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions src/CopilotAgentObservability.ConfigCli/Setup/Status tests/CopilotAgentObservability.ConfigCli.Tests
+git add -- src/CopilotAgentObservability.ConfigCli/Setup/Adapters/ISetupAdapter.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/ISetupApplyRevalidator.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupApplyCoordinator.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRecoveryCoordinator.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackPreflightEvaluator.cs src/CopilotAgentObservability.ConfigCli/Setup/Status/SetupStatusProjector.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupApplyTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupCompensationTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupRecoveryTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupStatusProjectorTests.cs
 git commit -m "Issues #66-#67: fix(setup): materialize JSONC only during apply"
 ```
 
@@ -111,5 +122,6 @@ turning private plans, recovery, or repository-safe evidence into raw storage.
 - Recovery never materializes and passes its fresh security, concurrency, and
   crash-window recovery reviews.
 - Focused suites, build, and `git diff --check` pass before T4/T5/T6 unblocks.
+- Root/branch and status/diff scope gates pass before staging.
 
 **Report destination:** chat only. Do not update the ledger in this task.
