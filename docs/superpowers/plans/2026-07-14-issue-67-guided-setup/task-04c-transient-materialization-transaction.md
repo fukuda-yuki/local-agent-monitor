@@ -20,12 +20,16 @@ owned paths below may appear.
 **Files (ownership):**
 
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Adapters/ISetupAdapter.cs`
+- Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Adapters/SetupAdapterRegistry.cs`
+- Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Adapters/GitHubCopilot/GitHubCopilotSetupAdapter.cs`
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Transactions/ISetupApplyRevalidator.cs`
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupApplyCoordinator.cs`
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRecoveryCoordinator.cs`
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackPreflightEvaluator.cs`
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Status/SetupStatusProjector.cs`
 - Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/SetupApplyTests.cs`
+- Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/SetupAdapterRegistryTests.cs`
+- Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/GitHubCopilotSetupAdapterTests.cs`
 - Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/SetupCompensationTests.cs`
 - Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/SetupRecoveryTests.cs`
 - Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs`
@@ -34,7 +38,10 @@ owned paths below may appear.
 **Non-scope:** partition JSONC parsing/emission (task-05), private-plan union
 serialization (task-04b), platform interfaces, journal schema/version,
 public DTOs/catalogs, the ledger, schema v2, migrations, and Issue #66
-historical cards.
+historical cards. Task 05 remains restricted to its two files,
+`VsCodeTargetPartition.cs` and `VsCodeSetupAdapterTests.cs`; it consumes the
+aggregate and registry forwarding contract frozen after this task and does not
+edit either shared forwarding layer.
 
 **Transaction contract:** Extend `SetupRevalidation` with an immutable ordered
 collection of `SetupMaterializedTarget(record_id, desired_bytes,
@@ -43,6 +50,18 @@ projection. For a tagged JSONC target with one or more non-`no-op` members,
 the adapter returns exactly one entry. There is no entry for legacy inline
 targets, current-user environment targets, guidance targets, or all-no-op
 JSONC targets.
+
+The forwarding invariant is part of this transaction contract: each partition's
+ordered materialized entries must pass from partition to the real
+`GitHubCopilotSetupAdapter` aggregate, then through `SetupAdapterRegistry`, and
+into the generic apply coordinator unchanged by record ID, order, expected
+hash, and bytes. Both forwarding layers must preserve the carrier rather than
+reconstructing or replacing it with `SetupRevalidation.Empty`. Warnings and
+next-actions remain canonical and stably de-duplicated while being aggregated;
+diagnostic merging must never alter carrier ordering or contents. These two
+owned data-loss boundaries are (1) partition-to-aggregate forwarding inside
+`GitHubCopilotSetupAdapter` and (2) aggregate-to-coordinator forwarding inside
+`SetupAdapterRegistry`.
 
 After registry/plan/ledger identity validation and while holding `setup.lock`,
 the coordinator validates that materialized IDs are unique and ordered exactly
@@ -88,6 +107,16 @@ observation, and zero notification attempt.
   environment notification. Every case returns `recovery_required` before its
   lifecycle/journal branch, leaves journal and ledger bytes identical, performs
   zero target observation, and does not attempt the pending notification.
+- `GitHubCopilotSetupAdapterTests` contains an executable RED/GREEN
+  production-path forwarding test that uses a real aggregate adapter and real
+  `SetupAdapterRegistry` as the generic apply coordinator's revalidator. It
+  plans a marker-bearing tagged JSONC target, persists/closes/reopens the plan,
+  applies it through the coordinator, and proves the exact materialized record
+  ID, order, lowercase hash, and bytes survive partition -> aggregate ->
+  registry -> coordinator. The same test proves canonical diagnostics remain
+  de-duplicated and the raw marker is absent from the record, private plan,
+  ledger, journal, result, log/error text, and committed fixtures; it must fail
+  before both forwarding fixes.
 - Exercise the production generic plan/storage/apply path with a bounded
   source-like existing JSONC buffer containing a marker in an unrelated member:
   positively assert the seed buffer contains the marker; create the tagged Plan
@@ -98,11 +127,14 @@ observation, and zero notification attempt.
   committed fixtures. The backup is the only persisted artifact allowed to
   contain the previous bytes.
 - Deterministic barriers/fault points cover before intent, after intent, after
-  replace, after completion, compensation, and rollback. Close/reopen recovery
-  reuses that marker-bearing production-path setup, proves zero revalidator/
-  materializer calls, keeps the marker out of journal/ledger/result/log/error/
-  fixture evidence, and uses expected hash + the marker-bearing backup to
-  restore/classify prior, desired, and third-party state without overwrite.
+  replace, after completion, compensation, and rollback. For the four crash
+  windows (before intent, after intent, after replace, and after completion),
+  the seam preserves the corresponding durable artifacts for close/reopen
+  instead of synchronously compensating them away. Public `RecoverNext` is
+  then called after reopen; it proves zero revalidator/materializer calls,
+  keeps the marker out of journal/ledger/result/log/error/fixture evidence, and
+  uses expected hash plus the marker-bearing backup to classify prior, desired,
+  and third-party state without overwrite.
 - Existing legacy-inline and environment recovery tests retain their behavior;
   the existing ownership-ledger fixture and task-04b private-plan fixture
   retain their distinct byte-identity guarantees. No sleep/retry is introduced.
@@ -111,6 +143,8 @@ observation, and zero notification attempt.
 
 - [ ] Write failing apply/recovery/rollback/status tests for the exact transient
   carrier contract, all invalid-carrier no-artifact cases, no-op aggregation,
+  the real aggregate -> registry -> generic-coordinator forwarding RED test
+  with exact ID/order/hash/bytes and canonical diagnostics,
   coordinator-level desired-state binding before every prepared/active/
   committed/restored/pending-terminal-notification recovery branch,
   the non-vacuous production-path marker proof (positive source and backup,
@@ -120,9 +154,13 @@ observation, and zero notification attempt.
 
 ```powershell
 dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupApplyTests|FullyQualifiedName~SetupRecoveryTests|FullyQualifiedName~SetupRollbackTests|FullyQualifiedName~SetupStatusProjectorTests"
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupAdapterRegistryTests|FullyQualifiedName~GitHubCopilotSetupAdapterTests"
 ```
 
-- [ ] Implement only the owned carrier/coordinator/recovery/status changes.
+- [ ] Implement only the owned carrier/coordinator/recovery/status changes and
+  the aggregate/registry forwarding correction. Preserve the frozen aggregate
+  contract and Task 05's two-file ownership; do not move target partition work
+  into this task.
   In `RecoverNextCore`, validate every non-null plan's desired-state binding
   immediately after load and before journal/lifecycle dispatch, including the
   pending terminal-notification shortcut. Preserve journal/ledger hash shapes
@@ -132,6 +170,7 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 
 ```powershell
 dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupApplyTests|FullyQualifiedName~SetupCompensationTests|FullyQualifiedName~SetupRecoveryTests|FullyQualifiedName~SetupRollbackTests|FullyQualifiedName~SetupStatusProjectorTests|FullyQualifiedName~SetupStorageTests"
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupAdapterRegistryTests|FullyQualifiedName~GitHubCopilotSetupAdapterTests"
 dotnet build CopilotAgentObservability.slnx
 git diff --check
 ```
@@ -142,8 +181,12 @@ git diff --check
 
 - [ ] Commit:
 
+  Preserve the existing Task 04c implementation commit; this forwarding and
+  recovery correction is an additive remediation commit and must not amend or
+  rewrite history.
+
 ```powershell
-git add -- src/CopilotAgentObservability.ConfigCli/Setup/Adapters/ISetupAdapter.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/ISetupApplyRevalidator.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupApplyCoordinator.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRecoveryCoordinator.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackPreflightEvaluator.cs src/CopilotAgentObservability.ConfigCli/Setup/Status/SetupStatusProjector.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupApplyTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupCompensationTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupRecoveryTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupStatusProjectorTests.cs
+git add -- src/CopilotAgentObservability.ConfigCli/Setup/Adapters/ISetupAdapter.cs src/CopilotAgentObservability.ConfigCli/Setup/Adapters/SetupAdapterRegistry.cs src/CopilotAgentObservability.ConfigCli/Setup/Adapters/GitHubCopilot/GitHubCopilotSetupAdapter.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/ISetupApplyRevalidator.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupApplyCoordinator.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRecoveryCoordinator.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupRollbackPreflightEvaluator.cs src/CopilotAgentObservability.ConfigCli/Setup/Status/SetupStatusProjector.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupApplyTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupAdapterRegistryTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/GitHubCopilotSetupAdapterTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupCompensationTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupRecoveryTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupStatusProjectorTests.cs
 git commit -m "Issues #66-#67: fix(setup): materialize JSONC only during apply"
 ```
 
@@ -154,6 +197,10 @@ turning private plans, recovery, or repository-safe evidence into raw storage.
 
 - Apply owns transient bytes only after exact validation; all durable state is
   hashes/backup evidence only.
+- The real aggregate -> registry -> generic-coordinator forwarding test proves
+  ordered materialized record IDs, hashes, and bytes are unchanged, while
+  warnings/next-actions remain canonical and deduplicated; no raw marker is
+  persisted outside the permitted backup.
 - The production plan-persist-reopen-apply path proves the marker exists in the
   source and backup but nowhere in record/private-plan/ledger/journal/result/
   log/error/fixture evidence; crash recovery reuses the backup without
