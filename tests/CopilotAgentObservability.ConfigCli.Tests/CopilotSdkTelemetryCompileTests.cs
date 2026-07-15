@@ -7,58 +7,98 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public sealed class CopilotSdkTelemetryCompileTests
 {
     [Fact]
-    public void PinnedGuidanceSample_CompilesAgainstTheRepositorySdkPackage()
+    public async Task PinnedGuidanceSample_RestoresAndCompilesAgainstTheRepositorySdkProjectReference()
     {
         var repositoryRoot = FindRepositoryRoot();
-        var packageVersion = ReadRepositorySdkPackageVersion(repositoryRoot);
-        var sdkAssembly = Path.Combine(
-            GetNuGetPackagesRoot(),
-            "github.copilot.sdk",
-            packageVersion.ToLowerInvariant(),
-            "lib",
-            "net10.0",
-            "GitHub.Copilot.SDK.dll");
-        Assert.True(File.Exists(sdkAssembly), "The restored repository SDK assembly was not found.");
-
-        var temporaryDirectory = Path.Combine(Path.GetTempPath(), $"cao-sdk-guidance-{Guid.NewGuid():N}");
+        var localMonitorProject = Path.Combine(
+            repositoryRoot,
+            "src",
+            "CopilotAgentObservability.LocalMonitor",
+            "CopilotAgentObservability.LocalMonitor.csproj");
+        var targetFramework = ReadTargetFramework(localMonitorProject);
+        var temporaryDirectory = Path.Combine(
+            repositoryRoot,
+            "artifacts",
+            $"sdk-guidance-compile-{Guid.NewGuid():N}");
         Directory.CreateDirectory(temporaryDirectory);
         try
         {
-            var sourcePath = Path.Combine(temporaryDirectory, "PinnedTelemetrySample.cs");
-            File.WriteAllText(sourcePath, CreateCompileProbeSource());
+            var projectPath = Path.Combine(temporaryDirectory, "PinnedTelemetrySample.csproj");
+            var packageCache = Path.Combine(temporaryDirectory, "packages");
+            File.WriteAllText(projectPath, CreateProbeProject(targetFramework, localMonitorProject));
+            File.WriteAllText(Path.Combine(temporaryDirectory, "PinnedTelemetrySample.cs"), CreateCompileProbeSource());
 
-            var compiler = FindCSharpCompiler();
-            var startInfo = new ProcessStartInfo(FindDotNetHost())
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            startInfo.ArgumentList.Add(compiler);
-            startInfo.ArgumentList.Add("/noconfig");
-            startInfo.ArgumentList.Add("/target:library");
-            startInfo.ArgumentList.Add("/langversion:latest");
-            startInfo.ArgumentList.Add($"/out:{Path.Combine(temporaryDirectory, "PinnedTelemetrySample.dll")}");
-            foreach (var assembly in TrustedPlatformAssemblies())
-            {
-                startInfo.ArgumentList.Add($"/r:{assembly}");
-            }
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            var result = await BuildWithFreshPackageCacheAsync(
+                repositoryRoot,
+                projectPath,
+                packageCache,
+                timeout.Token);
 
-            startInfo.ArgumentList.Add($"/r:{sdkAssembly}");
-            startInfo.ArgumentList.Add(sourcePath);
-            using var process = Process.Start(startInfo);
-            Assert.NotNull(process);
-            process.WaitForExit();
-            var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
-
-            Assert.True(process.ExitCode == 0, output);
+            Assert.Equal(0, result.ExitCode);
+            Assert.True(Directory.Exists(Path.Combine(packageCache, "github.copilot.sdk")));
         }
         finally
         {
             Directory.Delete(temporaryDirectory, recursive: true);
         }
     }
+
+    private static async Task<DotNetBuildResult> BuildWithFreshPackageCacheAsync(
+        string repositoryRoot,
+        string projectPath,
+        string packageCache,
+        CancellationToken cancellationToken)
+    {
+        var startInfo = new ProcessStartInfo(FindDotNetHost())
+        {
+            WorkingDirectory = repositoryRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        startInfo.Environment["NUGET_PACKAGES"] = packageCache;
+        startInfo.ArgumentList.Add("build");
+        startInfo.ArgumentList.Add(projectPath);
+        startInfo.ArgumentList.Add("--nologo");
+        startInfo.ArgumentList.Add("-p:RestoreForceEvaluate=true");
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("dotnet build did not start.");
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+
+            await process.WaitForExitAsync();
+            await Task.WhenAll(standardOutput, standardError);
+            throw new TimeoutException("The repository SDK compile proof exceeded its bounded process lifetime.");
+        }
+
+        await Task.WhenAll(standardOutput, standardError);
+        return new DotNetBuildResult(process.ExitCode);
+    }
+
+    private static string CreateProbeProject(string targetFramework, string localMonitorProject) =>
+        new XDocument(
+            new XElement(
+                "Project",
+                new XAttribute("Sdk", "Microsoft.NET.Sdk"),
+                new XElement(
+                    "PropertyGroup",
+                    new XElement("TargetFramework", targetFramework),
+                    new XElement("Nullable", "enable")),
+                new XElement(
+                    "ItemGroup",
+                    new XElement("ProjectReference", new XAttribute("Include", localMonitorProject)))))
+        .ToString();
 
     private static string CreateCompileProbeSource() => $$"""
         using GitHub.Copilot;
@@ -89,44 +129,17 @@ public sealed class CopilotSdkTelemetryCompileTests
         throw new InvalidOperationException("Repository root was not found.");
     }
 
-    private static string ReadRepositorySdkPackageVersion(string repositoryRoot)
+    private static string ReadTargetFramework(string localMonitorProject)
     {
-        var project = XDocument.Load(Path.Combine(
-            repositoryRoot,
-            "src",
-            "CopilotAgentObservability.LocalMonitor",
-            "CopilotAgentObservability.LocalMonitor.csproj"));
-        var reference = project.Descendants("PackageReference")
-            .Single(element => string.Equals(
-                (string?)element.Attribute("Include"),
-                "GitHub.Copilot.SDK",
-                StringComparison.OrdinalIgnoreCase));
-        return (string?)reference.Attribute("Version")
-            ?? throw new InvalidOperationException("GitHub.Copilot.SDK must have an explicit version.");
+        var project = XDocument.Load(localMonitorProject);
+        return project.Descendants("TargetFramework")
+            .Single()
+            .Value
+            .Trim();
     }
-
-    private static string GetNuGetPackagesRoot() =>
-        Environment.GetEnvironmentVariable("NUGET_PACKAGES") ??
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
 
     private static string FindDotNetHost() =>
         Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
 
-    private static string FindCSharpCompiler()
-    {
-        var runtimeDirectory = Path.GetDirectoryName(typeof(object).Assembly.Location)
-            ?? throw new InvalidOperationException("Runtime directory was not found.");
-        var dotnetRoot = Directory.GetParent(runtimeDirectory)?.Parent?.Parent?.FullName
-            ?? throw new InvalidOperationException("dotnet root was not found.");
-        var compiler = Directory.EnumerateDirectories(Path.Combine(dotnetRoot, "sdk"))
-            .OrderByDescending(Path.GetFileName, StringComparer.Ordinal)
-            .Select(directory => Path.Combine(directory, "Roslyn", "bincore", "csc.dll"))
-            .FirstOrDefault(File.Exists);
-        return compiler ?? throw new InvalidOperationException("C# compiler was not found.");
-    }
-
-    private static IReadOnlyList<string> TrustedPlatformAssemblies() =>
-        ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")
-            ?? throw new InvalidOperationException("Trusted platform assembly list was not found."))
-        .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+    private sealed record DotNetBuildResult(int ExitCode);
 }

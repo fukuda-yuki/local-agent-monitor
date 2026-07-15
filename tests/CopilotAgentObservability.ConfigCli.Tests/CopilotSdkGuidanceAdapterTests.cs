@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Reflection;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot.AppSdk;
@@ -40,6 +41,15 @@ public sealed class CopilotSdkGuidanceAdapterTests
         Assert.Contains(platform.Operations, operation => operation.EndsWith(":1048576", StringComparison.Ordinal));
         Assert.DoesNotContain(platform.Operations, operation => operation.StartsWith("file.read:", StringComparison.Ordinal));
         AssertNoMutationOrExternalObservation(platform);
+    }
+
+    [Theory]
+    [InlineData("12345678901234567890.2.3", "12345678901234567890.2.3")]
+    [InlineData("1.2.3\n", null)]
+    [InlineData("1.2.3\u0001", null)]
+    public void SanitizeVersion_UsesStrictWholeInputSemanticVersionValidation(string version, string? expected)
+    {
+        Assert.Equal(expected, InvokeSanitizer(version));
     }
 
     [Fact]
@@ -101,6 +111,58 @@ public sealed class CopilotSdkGuidanceAdapterTests
         Assert.DoesNotContain(marker, exposed, StringComparison.Ordinal);
         Assert.DoesNotContain(marker, record.TargetLocation, StringComparison.Ordinal);
         Assert.DoesNotContain(marker, Assert.IsType<SetupGuidance>(record.Guidance).Sample, StringComparison.Ordinal);
+        AssertNoMutationOrExternalObservation(platform);
+    }
+
+    [Fact]
+    public void Plan_UsesTheUnixRepositoryProjectPath()
+    {
+        var platform = new SetupTestPlatform(
+            Timestamp,
+            "/home/setup-test/.local/share",
+            SetupPathStyle.Unix,
+            SetupPlanningOs.Linux,
+            "/home/setup-test/.config",
+            "/home/setup-test");
+        SeedPackageProject(platform, "1.0.4");
+
+        var record = Assert.Single(new AppSdkTargetPartition().Plan(CreateContext(platform)).Records);
+
+        Assert.True(record.StatusProjection.Detected);
+        Assert.Contains(
+            "file.read-bounded:src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj:1048576",
+            platform.Operations);
+        AssertNoMutationOrExternalObservation(platform);
+    }
+
+    [Fact]
+    public void Plan_OversizeRepositoryProject_ReturnsSafeUndetectedGuidance()
+    {
+        var platform = new SetupTestPlatform(Timestamp);
+        platform.SeedFile(
+            RepositoryProjectPath(platform),
+            Encoding.UTF8.GetBytes("<Project>" + new string('x', 1024 * 1024)));
+
+        var record = Assert.Single(new AppSdkTargetPartition().Plan(CreateContext(platform)).Records);
+
+        Assert.False(record.StatusProjection.Detected);
+        Assert.Null(record.StatusProjection.DetectedVersion);
+        Assert.Contains(platform.Operations, operation => operation.EndsWith(":1048576", StringComparison.Ordinal));
+        AssertNoMutationOrExternalObservation(platform);
+    }
+
+    [Theory]
+    [InlineData("<Project>")]
+    [InlineData("<!DOCTYPE Project [<!ENTITY blocked SYSTEM 'file:///APP_SDK_DTD_MARKER'>]><Project>&blocked;</Project>")]
+    public void Plan_MalformedOrDtdRepositoryProject_ReturnsSafeUndetectedGuidance(string project)
+    {
+        var platform = new SetupTestPlatform(Timestamp);
+        platform.SeedFile(RepositoryProjectPath(platform), Encoding.UTF8.GetBytes(project));
+
+        var record = Assert.Single(new AppSdkTargetPartition().Plan(CreateContext(platform)).Records);
+
+        Assert.False(record.StatusProjection.Detected);
+        Assert.Null(record.StatusProjection.DetectedVersion);
         AssertNoMutationOrExternalObservation(platform);
     }
 
@@ -184,6 +246,11 @@ public sealed class CopilotSdkGuidanceAdapterTests
     private static string PinnedGuidanceSample() =>
         SetupContractValidator.RehydrateStatusGuidance(
             new SetupStatusGuidance("caller_managed_sample", "dotnet")).Sample;
+
+    private static string? InvokeSanitizer(string version) =>
+        (string?)typeof(AppSdkTargetPartition)
+            .GetMethod("SanitizeVersion", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [version]);
 
     private static void SeedPackageProject(SetupTestPlatform platform, string version) =>
         platform.SeedFile(

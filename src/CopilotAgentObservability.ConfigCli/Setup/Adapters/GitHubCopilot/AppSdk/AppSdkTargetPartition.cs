@@ -15,7 +15,7 @@ internal sealed class AppSdkTargetPartition : IGitHubCopilotTargetPartition
     private const string WindowsProjectPath = "src\\CopilotAgentObservability.LocalMonitor\\CopilotAgentObservability.LocalMonitor.csproj";
     private const string UnixProjectPath = "src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj";
     private static readonly Regex SemanticVersion = new(
-        "^(?:0|[1-9][0-9]{0,18})\\.(?:0|[1-9][0-9]{0,18})\\.(?:0|[1-9][0-9]{0,18})(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
+        "\\A(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?\\z",
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     public string TargetToken => "app-sdk";
