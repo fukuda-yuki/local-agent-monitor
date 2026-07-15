@@ -92,6 +92,39 @@ either VS Code JSON record or a tagged desired state with any other label
 returns `recovery_required` with zero journal or ledger mutation, zero target
 observation, and zero notification attempt.
 
+The producer crash-only seam is coordinator-owned in
+`SetupApplyCoordinator.cs`: an internal test seam terminates the producer
+`Apply` path at each evidence boundary before the in-process compensation catch
+can run. This seam must leave the durable artifacts for close/reopen and must
+not change normal production behavior. Do not expand `ISetupPlatform`, any
+platform execution interface, or `SetupTestPlatform` to provide this seam.
+
+The mandatory producer evidence matrix is:
+
+| Boundary | Journal / ledger / step evidence |
+| --- | --- |
+| `AfterJournalPreparedBeforeLedger` | journal `Prepared` / ledger `Planned` / step `Pending` |
+| `AfterLedgerTransitionBeforeMutationIntent` | journal `Applying` / ledger `Applying` / step `Pending` |
+| `AfterMutationIntentBeforeMutation` | journal `Applying` / ledger `Applying` / step `MutationStarted` before replacement |
+| `AfterMutationBeforeCompletion` | journal `Applying` / ledger `Applying` / step `MutationStarted` after replacement |
+| `AfterCompletionBeforeCommit` | journal `Applying` / ledger `Applying` / step `MutationCompleted` |
+
+Each boundary test snapshots the marker-bearing source and private backup bytes
+plus the durable plan, ledger, and journal bytes before close; after reopen it
+asserts those snapshots are byte-identical before calling public `RecoverNext`.
+For every boundary, recovery expectations are pinned as target-write counts
+(journal/ledger writes excluded): a prior classification returns
+`SetupRecoveryDisposition.Recovered` with zero target writes and prior bytes; a
+desired classification returns `Recovered` with one restore write and prior
+bytes whenever the step is `MutationStarted`/`MutationCompleted`, while a
+`Pending` step returns `SetupRecoveryDisposition.Failed` with zero target
+writes and leaves desired bytes;
+a third-party classification returns `SetupRecoveryDisposition.Failed` with
+zero target writes and leaves third-party bytes unchanged. Third-party state is
+never overwritten. The `Prepared`/`Planned` dormant row returns `None` with
+zero writes and prior bytes when prior; desired or third-party bytes fail
+closed with zero writes and remain unchanged.
+
 **Required tests:**
 
 - Valid tagged changed records are applied only after exact ID/order/cardinality
@@ -110,13 +143,16 @@ observation, and zero notification attempt.
 - `GitHubCopilotSetupAdapterTests` contains an executable RED/GREEN
   production-path forwarding test that uses a real aggregate adapter and real
   `SetupAdapterRegistry` as the generic apply coordinator's revalidator. It
-  plans a marker-bearing tagged JSONC target, persists/closes/reopens the plan,
-  applies it through the coordinator, and proves the exact materialized record
-  ID, order, lowercase hash, and bytes survive partition -> aggregate ->
-  registry -> coordinator. The same test proves canonical diagnostics remain
-  de-duplicated and the raw marker is absent from the record, private plan,
-  ledger, journal, result, log/error text, and committed fixtures; it must fail
-  before both forwarding fixes.
+  plans at least two changed tagged JSONC records with distinct IDs, distinct
+  marker-bearing bytes, and distinct lowercase hashes in deliberately
+  non-sorted record order (for example, lexical record B before record A),
+  persists/closes/reopens the plan, applies it through the coordinator, and
+  proves that exact sequence survives partition -> aggregate -> registry ->
+  coordinator. Feed duplicated warnings/next-actions from multiple aggregation
+  inputs and prove stable canonical de-duplication without changing carrier
+  order/content. The same test proves both raw markers are absent from the
+  records, private plan, ledger, journal, result, log/error text, and committed
+  fixtures; it must fail before both forwarding fixes.
 - Exercise the production generic plan/storage/apply path with a bounded
   source-like existing JSONC buffer containing a marker in an unrelated member:
   positively assert the seed buffer contains the marker; create the tagged Plan
@@ -135,6 +171,13 @@ observation, and zero notification attempt.
   keeps the marker out of journal/ledger/result/log/error/fixture evidence, and
   uses expected hash plus the marker-bearing backup to classify prior, desired,
   and third-party state without overwrite.
+- `SetupCompensationTests` replaces or corrects the old synchronous-compensation
+  assertion so RED proves the coordinator-owned crash-only seam actually exits
+  `Apply` before its compensation catch. It must cover all five evidence rows,
+  preserve each durable artifact until close/reopen, call public `RecoverNext`,
+  assert the disposition/write-count/final-byte matrix above, and verify zero
+  adapter/revalidator/materializer calls after reopen. No platform-interface or
+  test-platform seam is permitted.
 - Existing legacy-inline and environment recovery tests retain their behavior;
   the existing ownership-ledger fixture and task-04b private-plan fixture
   retain their distinct byte-identity guarantees. No sleep/retry is introduced.
@@ -148,12 +191,13 @@ observation, and zero notification attempt.
   coordinator-level desired-state binding before every prepared/active/
   committed/restored/pending-terminal-notification recovery branch,
   the non-vacuous production-path marker proof (positive source and backup,
-  negative record/private-plan/ledger/journal/result/log/error/fixtures), and
-  every deterministic crash boundary.
+  negative record/private-plan/ledger/journal/result/log/error/fixtures), all
+  five producer evidence rows through the coordinator-owned crash-only seam,
+  and the corrected replacement for the old synchronous-compensation test.
 - [ ] Run RED:
 
 ```powershell
-dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupApplyTests|FullyQualifiedName~SetupRecoveryTests|FullyQualifiedName~SetupRollbackTests|FullyQualifiedName~SetupStatusProjectorTests"
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupApplyTests|FullyQualifiedName~SetupCompensationTests|FullyQualifiedName~SetupRecoveryTests|FullyQualifiedName~SetupRollbackTests|FullyQualifiedName~SetupStatusProjectorTests"
 dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter "FullyQualifiedName~SetupAdapterRegistryTests|FullyQualifiedName~GitHubCopilotSetupAdapterTests"
 ```
 
@@ -197,10 +241,16 @@ turning private plans, recovery, or repository-safe evidence into raw storage.
 
 - Apply owns transient bytes only after exact validation; all durable state is
   hashes/backup evidence only.
+- All five named producer evidence states are exercised through the internal
+  coordinator-owned crash-only seam, with byte-identical pre-close/reopen
+  artifacts and the pinned prior/desired/third-party disposition, target-write,
+  and final-byte expectations. The seam exits before in-process compensation;
+  no platform or test-platform interface grows.
 - The real aggregate -> registry -> generic-coordinator forwarding test proves
-  ordered materialized record IDs, hashes, and bytes are unchanged, while
-  warnings/next-actions remain canonical and deduplicated; no raw marker is
-  persisted outside the permitted backup.
+  at least two deliberately non-sorted changed tagged records retain distinct
+  IDs, hashes, and bytes, while duplicated warnings/next-actions remain
+  canonical and deduplicated; no raw marker is persisted outside the permitted
+  backup.
 - The production plan-persist-reopen-apply path proves the marker exists in the
   source and backup but nowhere in record/private-plan/ledger/journal/result/
   log/error/fixture evidence; crash recovery reuses the backup without
