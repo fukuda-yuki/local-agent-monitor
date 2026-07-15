@@ -72,10 +72,13 @@ either of those VS Code JSON records fails `recovery_required`. New VS Code
 emission is owned by task-05, not this task.
 
 `SetupTransactionEvidence` calls this shared desired-state
-arm/adapter/kind/label relation validation rather than duplicating it. Status,
-rollback, and recovery immutable-evidence paths therefore return
-`recovery_required` for the same invalid tagged tuple or invalid inline VS Code
-JSON arm before they classify or act on evidence.
+arm/adapter/kind/label relation validation rather than duplicating it. Recovery
+and rollback immutable-evidence consumers return `recovery_required` for the
+same invalid tagged tuple or invalid inline VS Code JSON arm. Status preserves
+the canonical lifecycle distinction: a non-terminal row returns
+`recovery_required` and prevents projection, while a terminal row projects the
+affected target as `unavailable` with reference `none` and
+`rollback_available=false` rather than failing the whole status command.
 
 **Required tests:**
 
@@ -97,9 +100,12 @@ JSON arm before they classify or act on evidence.
   non-hex hash as `recovery_required`.
 - Prove `SetupRecoveryTests`, `SetupRollbackTests`, and
   `SetupStatusProjectorTests` exercise the shared relation validator through
-  `SetupTransactionEvidence`: invalid arm/adapter/kind/label combinations fail
-  `recovery_required` on every immutable-evidence consumer path. These are
-  behavioral invariant tests, not compile-only constructor updates.
+  `SetupTransactionEvidence`: recovery and rollback reject invalid
+  arm/adapter/kind/label combinations with `recovery_required`.
+  `SetupStatusProjectorTests` pins both lifecycle branches: non-terminal status
+  returns `recovery_required` without projection; terminal status projects the
+  target `unavailable`, reference `none`, and `rollback_available=false`.
+  These are behavioral invariant tests, not compile-only constructor updates.
 - Build a bounded source-like JSONC byte buffer with a previous-state marker in
   an unrelated member and positively assert the marker is present in that
   source buffer. Derive a tagged carrier from the owned members, then prove the
@@ -171,9 +177,11 @@ JSONC documents or treating a private representation change as a migration.
   for `SetupTargetKind.File`/`SetupTargetKind.Toml`/other-adapter/other-label/
   inline-VS-Code-JSON and at
   0/1/2048/2049 string boundaries.
-- Status, rollback, and recovery immutable-evidence consumers share that exact
-  relation validator through `SetupTransactionEvidence` and fail
-  `recovery_required` for every invalid arm/adapter/kind/label combination.
+- Recovery, rollback, and status immutable-evidence consumers share that exact
+  relation validator through `SetupTransactionEvidence`: recovery/rollback and
+  non-terminal status fail `recovery_required`, while terminal status preserves
+  canonical projection as target `unavailable`, reference `none`, and
+  `rollback_available=false`.
 - Focused suites, build, `git diff --check`, and a fresh structural
   data-safety/security review PASS are recorded before task-04c starts. This
   PASS covers only the carrier/storage boundary and does not satisfy the
