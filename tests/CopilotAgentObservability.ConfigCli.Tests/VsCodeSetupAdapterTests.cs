@@ -124,6 +124,37 @@ public sealed class VsCodeSetupAdapterTests
     }
 
     [Fact]
+    public void Plan_MissingExtensionStillObservesEverySupportedChannelInStableThenInsidersOrder()
+    {
+        var platform = CreatePlatform();
+        ScriptVersion(platform, "code", "1.128.0");
+        platform.ScriptProcess(
+            "code",
+            ["--list-extensions", "--show-versions"],
+            new SetupProcessObservation(SetupProcessOutcome.Completed, 0, "ms-dotnettools.csharp@1.0.0\n"));
+        ScriptSupported(platform, "code-insiders", "1.128.0");
+
+        var plan = Plan(platform);
+
+        Assert.Equal(SetupCodes.TargetNotInstalled, plan.FailureCode);
+        Assert.Equal([SetupCodes.InstallGitHubCopilotChatExtension], plan.NextActions);
+        Assert.Empty(plan.Records);
+        Assert.Equal(
+            [
+                "process.run:code:--list-extensions --show-versions",
+                "process.run:code-insiders:--list-extensions --show-versions",
+            ],
+            platform.Operations.Where(operation => operation.Contains("--list-extensions", StringComparison.Ordinal)));
+        AssertNoOperation(platform, "--status");
+        AssertNoProbe(platform);
+        Assert.DoesNotContain(platform.Operations, operation =>
+            (operation.StartsWith("file.exists:", StringComparison.Ordinal) ||
+             operation.StartsWith("file.read", StringComparison.Ordinal)) &&
+            (operation.Contains(DefaultStablePath, StringComparison.Ordinal) ||
+             operation.Contains(DefaultInsidersPath, StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public void Plan_EligibleChannels_RunsExactExtensionAndStatusCommandsInStableThenInsidersOrder()
     {
         var platform = CreatePlatform();
@@ -585,6 +616,60 @@ public sealed class VsCodeSetupAdapterTests
         Assert.DoesNotContain($"file.read:{DefaultStablePath}", platform.Operations);
         Assert.DoesNotContain(platform.Operations, operation => operation.StartsWith("file.write", StringComparison.Ordinal));
         Assert.Equal(malformed, plan.Records.Count == 0);
+    }
+
+    [Theory]
+    [InlineData(false, false, "syntax")]
+    [InlineData(false, true, "syntax")]
+    [InlineData(false, false, "wrong_type")]
+    [InlineData(false, true, "wrong_type")]
+    [InlineData(false, false, "duplicate")]
+    [InlineData(false, true, "duplicate")]
+    [InlineData(true, false, "syntax")]
+    [InlineData(true, true, "syntax")]
+    [InlineData(true, false, "wrong_type")]
+    [InlineData(true, true, "wrong_type")]
+    [InlineData(true, false, "duplicate")]
+    [InlineData(true, true, "duplicate")]
+    public void PlanAndRevalidate_OverriddenOwnedSettingsStillRequireValidJsonc(
+        bool revalidate,
+        bool managed,
+        string invalidCase)
+    {
+        var platform = CreatePlatform();
+        ConfigureOwnedSource(platform, managed, allDefaultMembers: invalidCase == "syntax");
+        ScriptSupported(platform, "code", "1.128.0");
+        ScriptLiveEndpoint(platform);
+        platform.SeedFile(DefaultStablePath, "{}"u8.ToArray());
+        var persisted = revalidate ? CreatePersisted(platform) : default;
+        platform.SeedFile(DefaultStablePath, InvalidOwnedSettings(invalidCase));
+        if (revalidate)
+        {
+            ScriptSupported(platform, "code", "1.128.0");
+            ScriptLiveEndpoint(platform);
+        }
+
+        var operationStart = platform.Operations.Count;
+
+        if (revalidate)
+        {
+            var result = Revalidate(platform, persisted.Plan, persisted.Ledger);
+            Assert.Equal(SetupCodes.MalformedSettings, Assert.IsType<SetupPlanFailure<SetupRevalidation>>(result).Code);
+        }
+        else
+        {
+            var plan = Plan(platform);
+            Assert.Equal(SetupCodes.MalformedSettings, plan.FailureCode);
+            Assert.Empty(plan.Records);
+        }
+
+        var operations = platform.Operations.Skip(operationStart).ToArray();
+        Assert.Single(operations, operation => operation == $"file.read-bounded:{DefaultStablePath}:{1024 * 1024}");
+        Assert.DoesNotContain(operations, operation => operation == $"file.read:{DefaultStablePath}");
+        Assert.DoesNotContain(operations, operation =>
+            operation.StartsWith("file.write", StringComparison.Ordinal) ||
+            operation.StartsWith("file.replace", StringComparison.Ordinal) ||
+            operation.StartsWith("file.delete", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1063,6 +1148,10 @@ public sealed class VsCodeSetupAdapterTests
         var ledgerBeforeReopen = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
         var journalBeforeReopen = fixture.Platform.ReadSeededFile(journalPath);
         var backupBeforeReopen = fixture.Platform.ReadSeededFile(backupPath);
+        var inProgressJournal = Assert.IsType<SetupTransactionJournal>(journalStore.Load(fixture.Plan.ChangeSetId));
+        Assert.Equal(fixture.Plan.ChangeSetId, inProgressJournal.ChangeSetId);
+        Assert.Equal(SetupJournalPhase.Applying, inProgressJournal.Phase);
+        Assert.Equal(SetupJournalStepPhase.MutationStarted, Assert.Single(Assert.Single(inProgressJournal.Targets).Steps).Phase);
         Assert.Contains(marker, Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(DefaultStablePath)), StringComparison.Ordinal);
         Assert.Contains(marker, Encoding.UTF8.GetString(backupBeforeReopen), StringComparison.Ordinal);
         Assert.Equal(1, fixture.VsCode.RevalidateCalls);
@@ -1092,8 +1181,32 @@ public sealed class VsCodeSetupAdapterTests
         Assert.Equal(1, fixture.VsCode.RevalidateCalls);
         Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationStart), operation => operation.StartsWith("process.run:", StringComparison.Ordinal));
         Assert.DoesNotContain(fixture.Platform.Operations.Skip(operationStart), operation => operation.StartsWith($"file.read-bounded:{DefaultStablePath}:", StringComparison.Ordinal));
-        Assert.DoesNotContain(marker, System.Text.Json.JsonSerializer.Serialize(recovery), StringComparison.Ordinal);
-        Assert.DoesNotContain(marker, crash.Message, StringComparison.Ordinal);
+
+        var changeSetId = fixture.Plan.ChangeSetId.ToString();
+        var privatePlanEvidence = Encoding.UTF8.GetString(planBeforeReopen);
+        var ledgerEvidence = Encoding.UTF8.GetString(ledgerBeforeReopen);
+        var journalEvidence = Encoding.UTF8.GetString(journalBeforeReopen);
+        var operationEvidence = string.Join("\n", fixture.Platform.Operations);
+        Assert.All(
+            [privatePlanEvidence, ledgerEvidence, journalEvidence, operationEvidence],
+            evidence => Assert.Contains(changeSetId, evidence, StringComparison.Ordinal));
+
+        var safeCrashEvidence = new Dictionary<string, string>
+        {
+            ["private plan"] = privatePlanEvidence,
+            ["ownership ledger"] = ledgerEvidence,
+            ["in-progress journal"] = journalEvidence,
+            ["operation log"] = operationEvidence,
+            ["recovery result"] = System.Text.Json.JsonSerializer.Serialize(recovery),
+            ["producer crash exception"] = crash.ToString(),
+            ["committed private-plan fixture"] = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Setup", "v1", "private-plan.v1.json")),
+            ["committed ownership-ledger fixture"] = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Setup", "v1", "ownership-ledger.v1.json")),
+        };
+        Assert.All(safeCrashEvidence, evidence =>
+        {
+            Assert.False(string.IsNullOrWhiteSpace(evidence.Value), $"{evidence.Key} evidence must be non-empty.");
+            Assert.DoesNotContain(marker, evidence.Value, StringComparison.Ordinal);
+        });
     }
 
     [Fact]
@@ -1297,6 +1410,35 @@ public sealed class VsCodeSetupAdapterTests
           "github.copilot.chat.otel.otlpEndpoint": "{{Endpoint}}"
         }
         """);
+
+    private static void ConfigureOwnedSource(SetupTestPlatform platform, bool managed, bool allDefaultMembers)
+    {
+        if (managed)
+        {
+            var settings = allDefaultMembers
+                ? $"{{\"CopilotOtelEnabled\":true,\"CopilotOtelExporterType\":\"otlp-http\",\"CopilotOtelEndpoint\":\"{Endpoint}\"}}"
+                : "{\"CopilotOtelEnabled\":true}";
+            platform.SeedManagedObservation(
+                SetupManagedLocation.GitHubCopilotNativeWindowsMachinePolicy,
+                new SetupManagedObservation(SetupManagedOutcome.Present, Encoding.UTF8.GetBytes(settings), true));
+            return;
+        }
+
+        platform.SeedProcessEnvironment("COPILOT_OTEL_ENABLED", "true");
+        if (allDefaultMembers)
+        {
+            platform.SeedProcessEnvironment("COPILOT_OTEL_PROTOCOL", "otlp-http");
+            platform.SeedProcessEnvironment("COPILOT_OTEL_ENDPOINT", Endpoint);
+        }
+    }
+
+    private static byte[] InvalidOwnedSettings(string invalidCase) => invalidCase switch
+    {
+        "syntax" => "{"u8.ToArray(),
+        "wrong_type" => "{\"github.copilot.chat.otel.enabled\":\"true\"}"u8.ToArray(),
+        "duplicate" => "{\"github.copilot.chat.otel.enabled\":true,\"github.copilot.chat.otel.enabled\":true}"u8.ToArray(),
+        _ => throw new ArgumentOutOfRangeException(nameof(invalidCase)),
+    };
 
     private sealed record ProductionFixture(
         SetupTestPlatform Platform,

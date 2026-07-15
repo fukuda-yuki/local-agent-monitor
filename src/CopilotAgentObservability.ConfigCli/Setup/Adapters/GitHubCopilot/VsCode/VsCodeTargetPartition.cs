@@ -123,7 +123,10 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
             return Assessment.Failure(SetupCodes.UnsupportedVersion, [], [SetupCodes.UpgradeVsCode]);
         }
 
-        if (channels.Any(channel => !HasCopilotChatExtension(context.Platform, channel.Executable)))
+        var extensionAvailability = channels
+            .Select(channel => HasCopilotChatExtension(context.Platform, channel.Executable))
+            .ToArray();
+        if (extensionAvailability.Any(available => !available))
         {
             return Assessment.Failure(SetupCodes.TargetNotInstalled, [], [SetupCodes.InstallGitHubCopilotChatExtension]);
         }
@@ -298,6 +301,15 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
 
         var bytes = read.Bytes;
         var content = exists ? StrictUtf8.GetString(bytes) : "{}";
+        var document = JsoncSettingsDocument.Parse(content);
+        ValidateBooleanSetting(document, Enabled);
+        ValidateStringSetting(document, ExporterType);
+        ValidateStringSetting(document, Endpoint);
+        if (context.Request.IncludeContentCapture)
+        {
+            ValidateBooleanSetting(document, CaptureContent);
+        }
+
         var updates = new List<MemberUpdate>();
         content = UpdateBoolean(content, Enabled, true, assessment, environmentOverride: assessment.Environment.Enabled, updates);
         content = UpdateString(content, ExporterType, "otlp-http", "configured", assessment, environmentOverride: assessment.Environment.Protocol, updates);
@@ -347,6 +359,22 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
                 null,
                 changes));
         return new RenderedRecord(record, desiredBytes);
+    }
+
+    private static void ValidateBooleanSetting(JsoncSettingsDocument document, string key)
+    {
+        if (!document.TryGetBoolean(key, out _))
+        {
+            _ = document.AddBoolean(key, false);
+        }
+    }
+
+    private static void ValidateStringSetting(JsoncSettingsDocument document, string key)
+    {
+        if (!document.TryGetString(key, out _))
+        {
+            _ = document.AddString(key, string.Empty);
+        }
     }
 
     private static SetupJsoncOwnedValue CreateOwnedValue(MemberUpdate update) => update.Key switch
