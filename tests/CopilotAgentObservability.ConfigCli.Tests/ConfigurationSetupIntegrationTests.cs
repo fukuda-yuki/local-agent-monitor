@@ -435,10 +435,11 @@ public sealed class ConfigurationSetupIntegrationTests
     }
 
     [Fact]
-    public async Task PhysicalProcessRunner_TimeoutKillsOwnedProcessAndReturnsRepositorySafeEvidence()
+    public async Task PhysicalProcessRunner_TimeoutReportsCompletedOwnedCleanupAndRepositorySafeEvidence()
     {
         string runtimePath;
-        var processId = 0;
+        SetupPhysicalProcessCleanupResult? cleanup = null;
+        var ownedProcessExitedBeforeDisposal = false;
         using (var runtime = new TemporaryRuntimeRoot())
         {
             runtimePath = runtime.Path;
@@ -449,16 +450,75 @@ public sealed class ConfigurationSetupIntegrationTests
                     runtime.Path,
                     ["-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null"],
                     TimeSpan.FromMilliseconds(100),
-                    id => processId = id));
+                    (process, result) =>
+                    {
+                        cleanup = result;
+                        ownedProcessExitedBeforeDisposal = process.HasExited;
+                    }));
 
             Assert.Equal(SetupPhysicalProcessRunner.TimeoutEvidence, exception.Message);
             Assert.DoesNotContain(runtime.Path, exception.Message, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain(RepositoryRoot, exception.Message, StringComparison.OrdinalIgnoreCase);
-            Assert.True(processId > 0);
-            Assert.Throws<ArgumentException>(() => Process.GetProcessById(processId));
+            Assert.Equal(new SetupPhysicalProcessCleanupResult(true, true), cleanup);
+            Assert.True(ownedProcessExitedBeforeDisposal);
         }
 
         Assert.False(Directory.Exists(runtimePath));
+    }
+
+    [Fact]
+    public async Task PhysicalProcessRunner_CleanupDeadlineKeepsTimeoutSafeAndReportsIncompleteDrain()
+    {
+        string runtimePath;
+        SetupPhysicalProcessCleanupResult? cleanup = null;
+        var ownedProcessExitedBeforeDisposal = false;
+        var incompleteDrain = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (var runtime = new TemporaryRuntimeRoot())
+        {
+            runtimePath = runtime.Path;
+            var exception = await Assert.ThrowsAsync<TimeoutException>(() =>
+                SetupPhysicalProcessRunner.RunWithDeadlineAsync(
+                    "pwsh",
+                    RepositoryRoot,
+                    runtime.Path,
+                    ["-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null"],
+                    TimeSpan.FromMilliseconds(100),
+                    (process, result) =>
+                    {
+                        cleanup = result;
+                        ownedProcessExitedBeforeDisposal = process.HasExited;
+                    },
+                    cleanupDeadline: TimeSpan.FromSeconds(1),
+                    drainEvidenceSelector: _ => incompleteDrain.Task));
+
+            Assert.Equal(SetupPhysicalProcessRunner.TimeoutEvidence, exception.Message);
+            Assert.DoesNotContain(runtime.Path, exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(RepositoryRoot, exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(new SetupPhysicalProcessCleanupResult(true, false), cleanup);
+            Assert.True(ownedProcessExitedBeforeDisposal);
+            Assert.False(incompleteDrain.Task.IsCompleted);
+        }
+
+        Assert.False(Directory.Exists(runtimePath));
+    }
+
+    [Fact]
+    public async Task PhysicalProcessRunner_CleanupEvidenceExceptionCannotReplaceFixedTimeout()
+    {
+        const string privateCleanupDetail = "C:\\private\\cleanup.log";
+        using var runtime = new TemporaryRuntimeRoot();
+
+        var exception = await Assert.ThrowsAsync<TimeoutException>(() =>
+            SetupPhysicalProcessRunner.RunWithDeadlineAsync(
+                "pwsh",
+                RepositoryRoot,
+                runtime.Path,
+                ["-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null"],
+                TimeSpan.FromMilliseconds(100),
+                (_, _) => throw new InvalidOperationException(privateCleanupDetail)));
+
+        Assert.Equal(SetupPhysicalProcessRunner.TimeoutEvidence, exception.Message);
+        Assert.DoesNotContain(privateCleanupDetail, exception.Message, StringComparison.Ordinal);
     }
 
     private static Guid ParseChangeSetId(SetupCommandResult result) =>
@@ -737,10 +797,15 @@ internal sealed record SetupPhysicalProcessResult(
     byte[] StandardOutput,
     byte[] StandardError);
 
+internal readonly record struct SetupPhysicalProcessCleanupResult(
+    bool Exited,
+    bool DrainsCompleted);
+
 internal static class SetupPhysicalProcessRunner
 {
     internal const string TimeoutEvidence = "Setup physical process exceeded its fixed execution deadline.";
     private static readonly TimeSpan ExecutionDeadline = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan CleanupDeadline = TimeSpan.FromSeconds(5);
 
     public static Task<SetupPhysicalProcessResult> RunAsync(
         string fileName,
@@ -753,7 +818,7 @@ internal static class SetupPhysicalProcessRunner
             runtimeRoot,
             arguments,
             ExecutionDeadline,
-            processStarted: null);
+            cleanupObserved: null);
 
     internal static async Task<SetupPhysicalProcessResult> RunWithDeadlineAsync(
         string fileName,
@@ -761,7 +826,9 @@ internal static class SetupPhysicalProcessRunner
         string runtimeRoot,
         IEnumerable<string> arguments,
         TimeSpan executionDeadline,
-        Action<int>? processStarted)
+        Action<Process, SetupPhysicalProcessCleanupResult>? cleanupObserved,
+        TimeSpan? cleanupDeadline = null,
+        Func<Task, Task>? drainEvidenceSelector = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -783,7 +850,6 @@ internal static class SetupPhysicalProcessRunner
 
         using var process = Process.Start(startInfo) ??
             throw new InvalidOperationException("Failed to start setup physical process.");
-        processStarted?.Invoke(process.Id);
         var outputTask = ReadBytesAsync(process.StandardOutput.BaseStream);
         var errorTask = ReadBytesAsync(process.StandardError.BaseStream);
         using var deadline = new CancellationTokenSource(executionDeadline);
@@ -795,12 +861,24 @@ internal static class SetupPhysicalProcessRunner
         }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested)
         {
-            await TerminateOwnedProcessTreeAsync(process, outputTask, errorTask);
+            await CleanupAndObserveSafelyAsync(
+                process,
+                outputTask,
+                errorTask,
+                cleanupDeadline ?? CleanupDeadline,
+                drainEvidenceSelector,
+                cleanupObserved);
             throw new TimeoutException(TimeoutEvidence);
         }
         catch
         {
-            await TerminateOwnedProcessTreeAsync(process, outputTask, errorTask);
+            await CleanupAndObserveSafelyAsync(
+                process,
+                outputTask,
+                errorTask,
+                cleanupDeadline ?? CleanupDeadline,
+                drainEvidenceSelector,
+                cleanupObserved);
             throw;
         }
 
@@ -810,25 +888,76 @@ internal static class SetupPhysicalProcessRunner
             await errorTask);
     }
 
-    private static async Task TerminateOwnedProcessTreeAsync(
+    private static async Task CleanupAndObserveSafelyAsync(
         Process process,
         Task<byte[]> outputTask,
-        Task<byte[]> errorTask)
+        Task<byte[]> errorTask,
+        TimeSpan cleanupDeadline,
+        Func<Task, Task>? drainEvidenceSelector,
+        Action<Process, SetupPhysicalProcessCleanupResult>? cleanupObserved)
     {
-        if (!process.HasExited)
+        var result = default(SetupPhysicalProcessCleanupResult);
+        try
         {
-            try
-            {
-                process.Kill(entireProcessTree: true);
-            }
-            catch (InvalidOperationException) when (process.HasExited)
-            {
-            }
+            result = await TerminateOwnedProcessTreeAsync(
+                process,
+                outputTask,
+                errorTask,
+                cleanupDeadline,
+                drainEvidenceSelector);
+        }
+        catch
+        {
         }
 
-        await process.WaitForExitAsync();
+        try
+        {
+            cleanupObserved?.Invoke(process, result);
+        }
+        catch
+        {
+        }
+    }
+
+    private static async Task<SetupPhysicalProcessCleanupResult> TerminateOwnedProcessTreeAsync(
+        Process process,
+        Task<byte[]> outputTask,
+        Task<byte[]> errorTask,
+        TimeSpan cleanupDeadline,
+        Func<Task, Task>? drainEvidenceSelector)
+    {
+        using var deadline = new CancellationTokenSource(cleanupDeadline);
+        try
+        {
+            process.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            await process.WaitForExitAsync(deadline.Token);
+        }
+        catch
+        {
+            return new SetupPhysicalProcessCleanupResult(false, false);
+        }
+
         Task drains = Task.WhenAll(outputTask, errorTask);
-        await drains.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        try
+        {
+            var drainEvidence = drainEvidenceSelector?.Invoke(drains) ?? drains;
+            await drainEvidence.WaitAsync(deadline.Token);
+        }
+        catch
+        {
+            return new SetupPhysicalProcessCleanupResult(true, false);
+        }
+
+        return new SetupPhysicalProcessCleanupResult(
+            true,
+            drains.IsCompletedSuccessfully);
     }
 
     private static async Task<byte[]> ReadBytesAsync(Stream stream)
