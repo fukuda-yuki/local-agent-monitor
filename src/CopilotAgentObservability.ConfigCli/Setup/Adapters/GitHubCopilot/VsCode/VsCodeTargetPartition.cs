@@ -20,6 +20,7 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
     private const string CaptureContent = "github.copilot.chat.otel.captureContent";
     private const string StableLabel = "vscode-stable-default-user-settings";
     private const string InsidersLabel = "vscode-insiders-default-user-settings";
+    private const int MaximumSettingsBytes = 1024 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     public string TargetToken => "vscode";
@@ -35,7 +36,7 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
         try
         {
             var records = assessment.Channels
-                .Select(channel => CreateRecord(context, assessment, channel))
+                .Select(channel => RenderRecord(context, assessment, channel).Record)
                 .ToArray();
             var warnings = assessment.Warnings.ToList();
             var actions = assessment.NextActions.ToList();
@@ -57,6 +58,13 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
         SetupPrivatePlan plan,
         SetupLedgerChangeSet plannedChangeSet)
     {
+        if (HasMissingPersistedChannel(context.Observations, plannedChangeSet))
+        {
+            return SetupPlanResult.Failure<SetupRevalidation>(
+                SetupCodes.TargetNotInstalled,
+                nextActions: [SetupCodes.InstallVsCode]);
+        }
+
         var assessment = Assess(context, includeStatus: false);
         if (assessment.FailureCode is not null)
         {
@@ -68,21 +76,36 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
 
         try
         {
-            if (!MatchesPersistedState(context, assessment, plan, plannedChangeSet))
+            if (!TryMaterializePersistedState(
+                    context,
+                    assessment,
+                    plan,
+                    plannedChangeSet,
+                    out var materializedTargets))
             {
                 return SetupPlanResult.Failure<SetupRevalidation>(SetupCodes.RecoveryRequired);
             }
 
-            return SetupPlanResult.Revalidated(assessment.Warnings, assessment.NextActions);
+            return SetupPlanResult.Revalidated(materializedTargets, assessment.Warnings, assessment.NextActions);
         }
         catch (Exception exception) when (exception is FormatException or InvalidOperationException or DecoderFallbackException)
         {
-            return SetupPlanResult.Failure<SetupRevalidation>(SetupCodes.RecoveryRequired);
+            return SetupPlanResult.Failure<SetupRevalidation>(SetupCodes.MalformedSettings);
         }
     }
 
     private static GitHubCopilotPartitionPlan Failure(Assessment assessment) =>
         new(assessment.FailureCode, [], assessment.Warnings, assessment.NextActions);
+
+    private static bool HasMissingPersistedChannel(
+        GitHubCopilotObservations observations,
+        SetupLedgerChangeSet plannedChangeSet) =>
+        plannedChangeSet.Targets.Any(target => target.TargetLabel switch
+        {
+            StableLabel => !observations.VsCodeStable.Detected,
+            InsidersLabel => !observations.VsCodeInsiders.Detected,
+            _ => false,
+        });
 
     private static Assessment Assess(GitHubCopilotPartitionContext context, bool includeStatus)
     {
@@ -249,7 +272,7 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
     {
         try
         {
-            return platform.UserEnvironment.Get(name) is not null;
+            return platform.ProcessEnvironment.Get(name) is not null;
         }
         catch (Exception)
         {
@@ -257,7 +280,7 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
         }
     }
 
-    private static SetupChangeRecord CreateRecord(
+    private static RenderedRecord RenderRecord(
         GitHubCopilotPartitionContext context,
         Assessment assessment,
         Channel channel,
@@ -265,7 +288,15 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
     {
         var location = GitHubCopilotDetection.GetDefaultSettingsPath(context.Platform, channel.Kind);
         var exists = context.Platform.FileSystem.FileExists(location);
-        var bytes = exists ? context.Platform.FileSystem.ReadAllBytes(location) : [];
+        var read = exists
+            ? context.Platform.FileSystem.ReadAtMostBytes(location, MaximumSettingsBytes)
+            : new SetupBoundedFileRead([], true);
+        if (!read.IsComplete)
+        {
+            throw new FormatException();
+        }
+
+        var bytes = read.Bytes;
         var content = exists ? StrictUtf8.GetString(bytes) : "{}";
         var updates = new List<MemberUpdate>();
         content = UpdateBoolean(content, Enabled, true, assessment, environmentOverride: assessment.Environment.Enabled, updates);
@@ -277,10 +308,15 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
         }
 
         var changes = updates.Select(update => update.Change).ToArray();
-        var operation = changes.All(change => change.Operation == SetupOperation.NoOp)
+        var mutations = changes
+            .Where(change => change.Operation != SetupOperation.NoOp)
+            .Select(change => change.Operation)
+            .Distinct()
+            .ToArray();
+        var operation = mutations.Length == 0
             ? SetupOperation.NoOp
-            : changes.Select(change => change.Operation).Distinct().Count() == 1
-                ? changes[0].Operation
+            : mutations.Length == 1
+                ? mutations[0]
                 : SetupOperation.Mixed;
         var effectiveSource = updates.Any(update => update.Managed)
             ? SetupEffectiveSource.ManagedPolicy
@@ -289,13 +325,16 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
                 : updates.Any(update => update.Existed)
                     ? SetupEffectiveSource.UserSetting
                     : SetupEffectiveSource.Default;
-        return new SetupChangeRecord(
+        var desiredBytes = StrictUtf8.GetBytes(content);
+        var record = new SetupChangeRecord(
             recordId ?? context.Platform.Identifiers.CreateUuidV7(),
             SetupTargetKind.Json,
             location,
             channel.Label,
             SetupHash.File(exists, bytes),
-            content,
+            new SetupJsoncOwnedValuesDesiredState(
+                SetupHash.File(true, desiredBytes),
+                updates.Select(CreateOwnedValue).ToArray()),
             updates.Select(update => new SetupPrivatePlanMember(update.Key, update.Change.Operation, update.DesiredValue)).ToArray(),
             channel.RestartRequirement,
             new SetupStatusProjection(
@@ -307,7 +346,14 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
                 null,
                 null,
                 changes));
+        return new RenderedRecord(record, desiredBytes);
     }
+
+    private static SetupJsoncOwnedValue CreateOwnedValue(MemberUpdate update) => update.Key switch
+    {
+        Enabled or CaptureContent => new SetupJsoncOwnedValue(update.Key, "boolean", true),
+        _ => new SetupJsoncOwnedValue(update.Key, "string", update.DesiredValue),
+    };
 
     private static string UpdateBoolean(
         string content,
@@ -410,12 +456,14 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
         _ => null,
     };
 
-    private static bool MatchesPersistedState(
+    private static bool TryMaterializePersistedState(
         GitHubCopilotPartitionContext context,
         Assessment assessment,
         SetupPrivatePlan plan,
-        SetupLedgerChangeSet ledger)
+        SetupLedgerChangeSet ledger,
+        out IReadOnlyList<SetupMaterializedTarget> materializedTargets)
     {
+        materializedTargets = [];
         var labels = assessment.Channels.Select(channel => channel.Label).ToArray();
         var locations = assessment.Channels
             .Select(channel => GitHubCopilotDetection.GetDefaultSettingsPath(context.Platform, channel.Kind))
@@ -427,36 +475,58 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
             return false;
         }
 
+        var materialized = new List<SetupMaterializedTarget>();
         foreach (var channel in assessment.Channels)
         {
             var location = GitHubCopilotDetection.GetDefaultSettingsPath(context.Platform, channel.Kind);
             var planTarget = planTargets.SingleOrDefault(target => target.TargetLocation == location);
             var ledgerTarget = ledgerTargets.SingleOrDefault(target => target.TargetLabel == channel.Label);
             if (planTarget is null || ledgerTarget is null || planTarget.TargetKind != SetupTargetKind.Json ||
-                ledgerTarget.TargetKind != SetupTargetKind.Json || planTarget.RecordId != ledgerTarget.RecordId)
+                ledgerTarget.TargetKind != SetupTargetKind.Json || planTarget.RecordId != ledgerTarget.RecordId ||
+                !string.Equals(ledgerTarget.StatusProjection.DetectedVersion, channel.Version, StringComparison.Ordinal))
             {
                 return false;
             }
 
-            var exists = context.Platform.FileSystem.FileExists(location);
-            var bytes = exists ? context.Platform.FileSystem.ReadAllBytes(location) : [];
-            if (!string.Equals(planTarget.BaseStateHash, SetupHash.File(exists, bytes), StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            var record = CreateRecord(context, assessment, channel, planTarget.RecordId);
-            if (!string.Equals(record.DesiredState, planTarget.DesiredState, StringComparison.Ordinal) ||
+            var rendered = RenderRecord(context, assessment, channel, planTarget.RecordId);
+            var record = rendered.Record;
+            var hasChanges = planTarget.Members.Any(member => member.Operation != SetupOperation.NoOp);
+            if (!DesiredStatesEqual(record.DesiredState, planTarget.DesiredState, includeExpectedHash: hasChanges) ||
                 !MembersEqual(record.Members, planTarget.Members) ||
+                ledgerTarget.StatusProjection.Operation != record.StatusProjection.Operation ||
                 ledgerTarget.StatusProjection.EffectiveSource != record.StatusProjection.EffectiveSource ||
-                ledgerTarget.StatusProjection.Endpoint != context.Request.Endpoint)
+                ledgerTarget.StatusProjection.Endpoint != context.Request.Endpoint ||
+                !ChangesEqual(ledgerTarget.StatusProjection.Changes, record.StatusProjection.Changes))
             {
                 return false;
+            }
+
+            if (hasChanges)
+            {
+                var desiredState = (SetupJsoncOwnedValuesDesiredState)planTarget.DesiredState;
+                materialized.Add(new SetupMaterializedTarget(
+                    planTarget.RecordId,
+                    rendered.DesiredBytes,
+                    desiredState.ExpectedStateHash));
             }
         }
 
+        materializedTargets = materialized;
         return true;
     }
+
+    private static bool DesiredStatesEqual(
+        SetupPrivateDesiredState left,
+        SetupPrivateDesiredState right,
+        bool includeExpectedHash) =>
+        left is SetupJsoncOwnedValuesDesiredState leftTagged &&
+        right is SetupJsoncOwnedValuesDesiredState rightTagged &&
+        (!includeExpectedHash || string.Equals(leftTagged.ExpectedStateHash, rightTagged.ExpectedStateHash, StringComparison.Ordinal)) &&
+        leftTagged.OwnedValues.Count == rightTagged.OwnedValues.Count &&
+        leftTagged.OwnedValues.Zip(rightTagged.OwnedValues).All(pair =>
+            pair.First.SettingKey == pair.Second.SettingKey &&
+            pair.First.ValueKind == pair.Second.ValueKind &&
+            Equals(pair.First.Value, pair.Second.Value));
 
     private static bool MembersEqual(
         IReadOnlyList<SetupPrivatePlanMember> left,
@@ -465,6 +535,11 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
             pair.First.SettingKey == pair.Second.SettingKey &&
             pair.First.Operation == pair.Second.Operation &&
             pair.First.DesiredValue == pair.Second.DesiredValue);
+
+    private static bool ChangesEqual(
+        IReadOnlyList<SetupMemberChangeResult> left,
+        IReadOnlyList<SetupMemberChangeResult> right) =>
+        left.Count == right.Count && left.Zip(right).All(pair => pair.First == pair.Second);
 
     private sealed class Channel(
         GitHubCopilotVsCodeChannel kind,
@@ -505,6 +580,8 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
         bool Managed,
         bool EnvironmentOverride,
         SetupMemberChangeResult Change);
+
+    private sealed record RenderedRecord(SetupChangeRecord Record, byte[] DesiredBytes);
 
     private static readonly GitHubCopilotManagedPolicyResolution EmptyPolicy = new(
         GitHubCopilotManagedChannel.None,
