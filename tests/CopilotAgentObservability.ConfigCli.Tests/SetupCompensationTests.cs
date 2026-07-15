@@ -24,38 +24,171 @@ public sealed class SetupCompensationTests
             members.Select(member => new SetupMemberChangeResult(member.SettingKey, member.Operation, "present", "configured", "none", false)).ToArray());
     }
 
+    public static TheoryData<string, string> TaggedProducerCrashCases
+    {
+        get
+        {
+            var cases = new TheoryData<string, string>();
+            foreach (var boundary in new[]
+                     {
+                         SetupFaultPoint.AfterJournalPreparedBeforeLedger,
+                         SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent,
+                         SetupFaultPoint.AfterMutationIntentBeforeMutation,
+                         SetupFaultPoint.AfterMutationBeforeCompletion,
+                         SetupFaultPoint.AfterCompletionBeforeCommit,
+                     })
+            {
+                cases.Add(boundary, "prior");
+                cases.Add(boundary, "desired");
+                cases.Add(boundary, "third-party");
+            }
+
+            return cases;
+        }
+    }
+
     [Theory]
-    [InlineData(SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent)]
-    [InlineData(SetupFaultPoint.AfterMutationIntentBeforeMutation)]
-    [InlineData(SetupFaultPoint.AfterMutationBeforeCompletion)]
-    [InlineData(SetupFaultPoint.AfterCompletionBeforeCommit)]
-    public void Apply_TaggedFaultBoundaryCompensatesFromBackupWithoutRematerializing(string faultPoint)
+    [MemberData(nameof(TaggedProducerCrashCases))]
+    public void RecoverNext_TaggedProducerCrashReopensExactEvidenceWithoutRematerializing(
+        string boundary,
+        string currentState)
     {
         var fixture = CompensationFixture.Create(includeEnvironment: false, tagged: true);
-        fixture.Platform.InjectFault($"checkpoint:{faultPoint}", new IOException("private-fault"));
-        SetupApplyException exception;
+        Assert.Contains(
+            TaggedPreviousMarker,
+            Encoding.UTF8.GetString(fixture.PriorBytes),
+            StringComparison.Ordinal);
+        var producer = fixture.CreateCrashCoordinator(boundary);
+        SetupApplyProducerCrashException producerCrash;
         using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
         {
-            exception = Assert.Throws<SetupApplyException>(() =>
-                fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+            producerCrash = Assert.Throws<SetupApplyProducerCrashException>(() =>
+                producer.Apply(acquisition.Lock!, fixture.ChangeSetId));
         }
 
-        Assert.Equal(SetupCodes.InternalError, exception.Code);
-        Assert.Contains(TaggedPreviousMarker,
-            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)),
-            StringComparison.Ordinal);
-        Assert.Contains(TaggedPreviousMarker,
-            Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(
-                fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId))),
-            StringComparison.Ordinal);
         Assert.Equal(1, fixture.MaterializingRevalidator!.Calls);
-        var recovery = fixture.RecoverAfterReopen();
-        Assert.Equal(SetupRecoveryDisposition.None, recovery.Disposition);
+        fixture.SeedTaggedCurrentState(currentState);
+        var expectation = ExpectedProducerCrash(boundary, currentState, fixture);
+        var sourceBeforeReopen = fixture.Platform.ReadSeededFile(fixture.TargetPath);
+        var planBeforeReopen = fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId));
+        var ledgerBeforeReopen = fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger);
+        var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
+        var journalBeforeReopen = fixture.Platform.ReadSeededFile(journalPath);
+        var backupPath = fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.FileRecordId);
+        var backupBeforeReopen = fixture.Platform.ReadSeededFile(backupPath);
+        Assert.Contains(TaggedPreviousMarker, Encoding.UTF8.GetString(backupBeforeReopen), StringComparison.Ordinal);
+
+        var reopenedPlanStore = new SetupPlanStore(fixture.Platform, fixture.Paths);
+        var reopenedLedgerStore = new SetupLedgerStore(fixture.Platform, fixture.Paths, reopenedPlanStore);
+        var reopenedJournalStore = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths);
+        Assert.NotNull(reopenedPlanStore.Load(fixture.ChangeSetId));
+        var reopenedChangeSet = reopenedLedgerStore.LoadForRecovery().ChangeSets
+            .Single(changeSet => changeSet.ChangeSetId == fixture.ChangeSetId);
+        var reopenedJournal = reopenedJournalStore.Load(fixture.ChangeSetId)!;
+        Assert.Equal(planBeforeReopen, fixture.Platform.ReadSeededFile(fixture.Paths.GetPlan(fixture.ChangeSetId)));
+        Assert.Equal(ledgerBeforeReopen, fixture.Platform.ReadSeededFile(fixture.Paths.OwnershipLedger));
+        Assert.Equal(journalBeforeReopen, fixture.Platform.ReadSeededFile(journalPath));
+        Assert.Equal(backupBeforeReopen, fixture.Platform.ReadSeededFile(backupPath));
+        Assert.Equal(sourceBeforeReopen, fixture.Platform.ReadSeededFile(fixture.TargetPath));
+        Assert.Equal(expectation.LedgerState, reopenedChangeSet.State);
+        Assert.Equal(expectation.JournalPhase, reopenedJournal.Phase);
+        Assert.Equal(
+            expectation.StepPhase,
+            Assert.Single(Assert.Single(reopenedJournal.Targets).Steps).Phase);
+        var operationsBeforeRecovery = fixture.Platform.Operations.Count;
+        SetupRecoveryResult result;
+        using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
+        {
+            result = new SetupRecoveryCoordinator(
+                fixture.Platform,
+                fixture.Paths,
+                reopenedPlanStore,
+                reopenedLedgerStore,
+                reopenedJournalStore).RecoverNext(acquisition.Lock!);
+        }
+
+        Assert.Equal(expectation.Disposition, result.Disposition);
+        Assert.Equal(
+            expectation.TargetWrites,
+            CountTargetWrites(
+                fixture.Platform.Operations.Skip(operationsBeforeRecovery),
+                fixture.TargetPath));
+        Assert.Equal(expectation.FinalBytes, fixture.Platform.ReadSeededFile(fixture.TargetPath));
         Assert.Equal(1, fixture.MaterializingRevalidator.Calls);
         fixture.AssertTaggedMarkerAbsentFromSafeEvidence(
-            JsonSerializer.Serialize(recovery),
-            exception.Message);
+            JsonSerializer.Serialize(result),
+            producerCrash.Message);
     }
+
+    private static ProducerCrashExpectation ExpectedProducerCrash(
+        string boundary,
+        string currentState,
+        CompensationFixture fixture)
+    {
+        var journalPhase = boundary == SetupFaultPoint.AfterJournalPreparedBeforeLedger
+            ? SetupJournalPhase.Prepared
+            : SetupJournalPhase.Applying;
+        var ledgerState = boundary == SetupFaultPoint.AfterJournalPreparedBeforeLedger
+            ? SetupChangeSetState.Planned
+            : SetupChangeSetState.Applying;
+        var stepPhase = boundary switch
+        {
+            SetupFaultPoint.AfterJournalPreparedBeforeLedger or
+            SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent => SetupJournalStepPhase.Pending,
+            SetupFaultPoint.AfterMutationIntentBeforeMutation or
+            SetupFaultPoint.AfterMutationBeforeCompletion => SetupJournalStepPhase.MutationStarted,
+            SetupFaultPoint.AfterCompletionBeforeCommit => SetupJournalStepPhase.MutationCompleted,
+            _ => throw new ArgumentOutOfRangeException(nameof(boundary)),
+        };
+        return currentState switch
+        {
+            "prior" => new ProducerCrashExpectation(
+                journalPhase,
+                ledgerState,
+                stepPhase,
+                boundary == SetupFaultPoint.AfterJournalPreparedBeforeLedger
+                    ? SetupRecoveryDisposition.None
+                    : SetupRecoveryDisposition.Recovered,
+                0,
+                fixture.PriorBytes),
+            "desired" when stepPhase == SetupJournalStepPhase.Pending => new ProducerCrashExpectation(
+                journalPhase,
+                ledgerState,
+                stepPhase,
+                SetupRecoveryDisposition.Failed,
+                0,
+                fixture.MaterializingRevalidator!.DesiredBytes),
+            "desired" => new ProducerCrashExpectation(
+                journalPhase,
+                ledgerState,
+                stepPhase,
+                SetupRecoveryDisposition.Recovered,
+                1,
+                fixture.PriorBytes),
+            "third-party" => new ProducerCrashExpectation(
+                journalPhase,
+                ledgerState,
+                stepPhase,
+                SetupRecoveryDisposition.Failed,
+                0,
+                Encoding.UTF8.GetBytes("third-party")),
+            _ => throw new ArgumentOutOfRangeException(nameof(currentState)),
+        };
+    }
+
+    private static int CountTargetWrites(IEnumerable<string> operations, string targetPath) =>
+        operations.Count(operation =>
+            operation.StartsWith("file.replace:", StringComparison.Ordinal) &&
+            operation.EndsWith("->" + targetPath, StringComparison.Ordinal) ||
+            operation == "file.delete:" + targetPath);
+
+    private sealed record ProducerCrashExpectation(
+        SetupJournalPhase JournalPhase,
+        SetupChangeSetState LedgerState,
+        SetupJournalStepPhase StepPhase,
+        SetupRecoveryDisposition Disposition,
+        int TargetWrites,
+        byte[] FinalBytes);
 
     [Theory]
     [InlineData("prior", true)]
@@ -1215,12 +1348,12 @@ public sealed class SetupCompensationTests
             Platform.SeedDirectory(Platform.LocalApplicationData);
             var priorBytes = tagged
                 ? Encoding.UTF8.GetBytes(
-                    "{\n  // " + TaggedPreviousMarker + "\n  \"unrelated\": 1,\n  \"setting\": \"old\",\n}\n")
+                    "{\n  \"unrelated\": \"" + TaggedPreviousMarker + "\",\n  \"setting\": \"old\",\n}\n")
                 : Encoding.UTF8.GetBytes("old");
             PriorBytes = priorBytes.ToArray();
             var desiredBytes = tagged
                 ? Encoding.UTF8.GetBytes(
-                    "{\n  // " + TaggedPreviousMarker + "\n  \"unrelated\": 1,\n  \"setting\": \"new\",\n}\n")
+                    "{\n  \"unrelated\": \"" + TaggedPreviousMarker + "\",\n  \"setting\": \"new\",\n}\n")
                 : Encoding.UTF8.GetBytes(fileNoChange ? "old" : "new");
             Platform.SeedFile(TargetPath, priorBytes);
             Platform.SeedUserEnvironment("ENV_A", "old-a");
@@ -1377,6 +1510,15 @@ public sealed class SetupCompensationTests
 
         public SetupLedgerChangeSet LoadChangeSet() =>
             LedgerStore.Load().ChangeSets.Single(changeSet => changeSet.ChangeSetId == ChangeSetId);
+
+        public SetupApplyCoordinator CreateCrashCoordinator(string boundary) => new(
+            Platform,
+            Paths,
+            PlanStore,
+            LedgerStore,
+            JournalStore,
+            MaterializingRevalidator!,
+            new SetupApplyProducerCrashSeam(boundary));
 
         public SetupRecoveryResult RecoverAfterReopen()
         {

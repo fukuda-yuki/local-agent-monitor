@@ -152,6 +152,7 @@ internal sealed class GitHubCopilotSetupAdapter : ISetupAdapter
             plan.ToolVersion));
         var warnings = new List<string>();
         var nextActions = new List<string>();
+        var materializedTargets = new List<SetupMaterializedTarget>();
         foreach (var target in TargetOrder.Where(input.RoutedTargets.Contains))
         {
             var result = partitions[target].Revalidate(context, plan, plannedChangeSet) ?? throw SetupPlanResult.InvalidOutput();
@@ -167,9 +168,10 @@ internal sealed class GitHubCopilotSetupAdapter : ISetupAdapter
 
             AddDistinct(warnings, success.Warnings);
             AddDistinct(nextActions, success.NextActions);
+            materializedTargets.AddRange(success.Value.MaterializedTargets);
         }
 
-        return SetupPlanResult.Revalidated(warnings, nextActions);
+        return SetupPlanResult.Revalidated(materializedTargets, warnings, nextActions);
     }
 
     private static bool TryGetPlanTargets(string selectedTarget, out IReadOnlyList<string> targets)

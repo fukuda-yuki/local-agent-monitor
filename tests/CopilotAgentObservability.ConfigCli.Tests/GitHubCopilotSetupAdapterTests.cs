@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters;
@@ -362,6 +363,161 @@ public sealed class GitHubCopilotSetupAdapterTests
         Assert.Equal([SetupCodes.ManagedPolicyUnverified, SetupCodes.MonitorNotRunning], result.Warnings);
         Assert.Equal([SetupCodes.RunVsCodePolicyDiagnostics, SetupCodes.StartLocalMonitor], result.NextActions);
         AssertNoDetectionOrProbe(platform);
+    }
+
+    [Fact]
+    public void Revalidate_ProductionRegistryApplyPreservesOrderedTaggedMaterializationsAndDiagnostics()
+    {
+        const string markerB = "PRIVATE_FORWARDING_MARKER_B";
+        const string markerA = "PRIVATE_FORWARDING_MARKER_A";
+        var platform = CreatePlatform();
+        var paths = new SetupRuntimePaths(platform);
+        platform.SeedDirectory("C:\\");
+        platform.SeedDirectory(platform.LocalApplicationData);
+        var recordBId = Guid.Parse("00000000-0000-7000-8000-000000000202");
+        var recordAId = Guid.Parse("00000000-0000-7000-8000-000000000201");
+        var recordBPath = Path.Combine(platform.LocalApplicationData, "forwarding-b.json");
+        var recordAPath = Path.Combine(platform.LocalApplicationData, "forwarding-a.json");
+        var priorB = Encoding.UTF8.GetBytes(
+            "{\n  \"unrelated\": \"" + markerB + "\",\n  \"github.copilot.chat.otel.enabled\": false,\n}\n");
+        var priorA = Encoding.UTF8.GetBytes(
+            "{\n  \"unrelated\": \"" + markerA + "\",\n  \"github.copilot.chat.otel.enabled\": false,\n}\n");
+        var desiredB = Encoding.UTF8.GetBytes(
+            "{\n  \"unrelated\": \"" + markerB + "\",\n  \"github.copilot.chat.otel.enabled\": true,\n}\n");
+        var desiredA = Encoding.UTF8.GetBytes(
+            "{\n  \"unrelated\": \"" + markerA + "\",\n  \"github.copilot.chat.otel.enabled\": true,\n}\n");
+        platform.SeedFile(recordBPath, priorB);
+        platform.SeedFile(recordAPath, priorA);
+        Assert.Contains(markerB, Encoding.UTF8.GetString(platform.ReadSeededFile(recordBPath)), StringComparison.Ordinal);
+        Assert.Contains(markerA, Encoding.UTF8.GetString(platform.ReadSeededFile(recordAPath)), StringComparison.Ordinal);
+        var recordB = CreateTaggedVsCodeRecord(
+            CreateRecord("vscode", 1),
+            recordBId,
+            "vscode-stable-default-user-settings",
+            recordBPath,
+            priorB,
+            desiredB);
+        var recordA = CreateTaggedVsCodeRecord(
+            CreateRecord("vscode", 2),
+            recordAId,
+            "vscode-insiders-default-user-settings",
+            recordAPath,
+            priorA,
+            desiredA);
+        Assert.Equal([recordBId, recordAId], new[] { recordB, recordA }.Select(record => record.RecordId));
+        Assert.Equal(
+            [recordAId, recordBId],
+            new[] { recordBId, recordAId }.OrderBy(recordId => recordId.ToString("D", null)));
+
+        var cliRecord = CreateNoOpCliRecord(platform);
+        var vscode = new ScriptedPartition(
+            "vscode",
+            new GitHubCopilotPartitionPlan(
+                null,
+                [recordB, recordA],
+                [SetupCodes.ManagedPolicyUnverified, SetupCodes.MonitorNotRunning],
+                [SetupCodes.RunVsCodePolicyDiagnostics, SetupCodes.StartLocalMonitor]))
+        {
+            RevalidateHandler = (_, _, _) => SetupPlanResult.Revalidated(
+            [
+                new SetupMaterializedTarget(recordBId, desiredB, SetupHash.File(true, desiredB)),
+                new SetupMaterializedTarget(recordAId, desiredA, SetupHash.File(true, desiredA)),
+            ],
+            [SetupCodes.ManagedPolicyUnverified, SetupCodes.MonitorNotRunning],
+            [SetupCodes.RunVsCodePolicyDiagnostics, SetupCodes.StartLocalMonitor]),
+        };
+        var cli = new ScriptedPartition(
+            "cli",
+            new GitHubCopilotPartitionPlan(
+                null,
+                [cliRecord],
+                [SetupCodes.ManagedPolicyUnverified],
+                [SetupCodes.RunVsCodePolicyDiagnostics]))
+        {
+            RevalidateHandler = (_, _, _) => SetupPlanResult.Revalidated(
+                [SetupCodes.ManagedPolicyUnverified],
+                [SetupCodes.RunVsCodePolicyDiagnostics]),
+        };
+        var appSdk = new ScriptedPartition("app-sdk", CreatePlan("app-sdk", 4));
+        var registry = new SetupAdapterRegistry([CreateAdapter(platform, vscode, cli, appSdk)]);
+        var planned = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            registry.Plan(CreateRequest("all"))).Value;
+        var planStore = new SetupPlanStore(platform, paths);
+        var ledgerStore = new SetupLedgerStore(platform, paths, planStore);
+        using (var setupLock = SetupLock.TryAcquire(platform, paths))
+        {
+            ledgerStore.PersistPlannedChangeSet(
+                setupLock.Lock!,
+                planned.PrivatePlan,
+                planned.PlannedChangeSet);
+        }
+
+        var planBytes = platform.ReadSeededFile(paths.GetPlan(planned.PrivatePlan.ChangeSetId));
+        var reopenedPlanStore = new SetupPlanStore(platform, paths);
+        var reopenedPlan = reopenedPlanStore.Load(planned.PrivatePlan.ChangeSetId)!;
+        Assert.Equal([recordBId, recordAId], reopenedPlan.Targets.Take(2).Select(target => target.RecordId));
+        Assert.Equal(planBytes, platform.ReadSeededFile(paths.GetPlan(planned.PrivatePlan.ChangeSetId)));
+        var reopenedLedgerStore = new SetupLedgerStore(platform, paths, reopenedPlanStore);
+        var coordinator = new SetupApplyCoordinator(
+            platform,
+            paths,
+            reopenedPlanStore,
+            reopenedLedgerStore,
+            new SetupTransactionJournalStore(platform, paths),
+            registry);
+        SetupPlanSuccess<SetupLedgerChangeSet> result;
+        using (var setupLock = SetupLock.TryAcquire(platform, paths))
+        {
+            result = coordinator.Apply(setupLock.Lock!, planned.PrivatePlan.ChangeSetId);
+        }
+
+        Assert.Equal(SetupChangeSetState.Applied, result.Value.State);
+        Assert.Equal(
+            [SetupCodes.ManagedPolicyUnverified, SetupCodes.MonitorNotRunning],
+            result.Warnings);
+        Assert.Equal(
+            [SetupCodes.RunVsCodePolicyDiagnostics, SetupCodes.StartLocalMonitor],
+            result.NextActions);
+        Assert.Equal(1, vscode.RevalidateCalls);
+        Assert.Equal(1, cli.RevalidateCalls);
+        Assert.Equal(0, appSdk.RevalidateCalls);
+        Assert.Equal(desiredB, platform.ReadSeededFile(recordBPath));
+        Assert.Equal(desiredA, platform.ReadSeededFile(recordAPath));
+        var journalBytes = platform.ReadSeededFile(paths.GetTransactionJournal(planned.PrivatePlan.ChangeSetId));
+        var journal = new SetupTransactionJournalStore(platform, paths).Load(planned.PrivatePlan.ChangeSetId)!;
+        Assert.Equal([recordBId, recordAId], journal.Targets.Select(target => target.RecordId));
+        Assert.Equal(
+            [SetupHash.File(true, desiredB), SetupHash.File(true, desiredA)],
+            journal.Targets.Select(target => Assert.Single(target.Steps).DesiredStateHash));
+        Assert.NotEqual(
+            Assert.Single(journal.Targets[0].Steps).DesiredStateHash,
+            Assert.Single(journal.Targets[1].Steps).DesiredStateHash);
+        Assert.All(journal.Targets, target =>
+            Assert.Equal(
+                Assert.Single(target.Steps).DesiredStateHash.ToLowerInvariant(),
+                Assert.Single(target.Steps).DesiredStateHash));
+        Assert.Contains(markerB, Encoding.UTF8.GetString(platform.ReadSeededFile(
+            paths.GetBackup(planned.PrivatePlan.ChangeSetId, recordBId))), StringComparison.Ordinal);
+        Assert.Contains(markerA, Encoding.UTF8.GetString(platform.ReadSeededFile(
+            paths.GetBackup(planned.PrivatePlan.ChangeSetId, recordAId))), StringComparison.Ordinal);
+
+        var safeEvidence = new[]
+        {
+            JsonSerializer.Serialize(new[] { recordB, recordA }),
+            Encoding.UTF8.GetString(planBytes),
+            Encoding.UTF8.GetString(platform.ReadSeededFile(paths.OwnershipLedger)),
+            Encoding.UTF8.GetString(journalBytes),
+            JsonSerializer.Serialize(result.Value),
+            string.Join("\n", platform.Operations),
+            string.Join("\n", result.Value.Targets.Select(target => target.OutcomeCode)),
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Setup", "v1", "private-plan.v1.json")),
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Setup", "v1", "ownership-ledger.v1.json")),
+        };
+        Assert.All(safeEvidence, evidence =>
+        {
+            Assert.DoesNotContain(markerB, evidence, StringComparison.Ordinal);
+            Assert.DoesNotContain(markerA, evidence, StringComparison.Ordinal);
+        });
     }
 
     [Theory]
@@ -1002,6 +1158,54 @@ public sealed class GitHubCopilotSetupAdapterTests
         return result;
     }
 
+    private static SetupChangeRecord CreateTaggedVsCodeRecord(
+        SetupChangeRecord template,
+        Guid recordId,
+        string targetLabel,
+        string targetPath,
+        byte[] priorBytes,
+        byte[] desiredBytes) => template with
+        {
+            RecordId = recordId,
+            TargetLocation = targetPath,
+            TargetLabel = targetLabel,
+            BaseStateHash = SetupHash.File(true, priorBytes),
+            DesiredState = new SetupJsoncOwnedValuesDesiredState(
+                SetupHash.File(true, desiredBytes),
+                [
+                    new SetupJsoncOwnedValue("github.copilot.chat.otel.enabled", "boolean", true),
+                    new SetupJsoncOwnedValue("github.copilot.chat.otel.exporterType", "string", "otlp-http"),
+                    new SetupJsoncOwnedValue("github.copilot.chat.otel.otlpEndpoint", "string", Endpoint),
+                ]),
+        };
+
+    private static SetupChangeRecord CreateNoOpCliRecord(SetupTestPlatform platform)
+    {
+        var template = CreateRecord("cli", 3);
+        foreach (var member in template.Members)
+        {
+            platform.SeedUserEnvironment(member.SettingKey, member.DesiredValue);
+        }
+
+        var members = template.Members
+            .Select(member => member with { Operation = SetupOperation.NoOp })
+            .ToArray();
+        return template with
+        {
+            BaseStateHash = new UserEnvironmentSetupStep(platform)
+                .Capture(members.Select(member => member.SettingKey).ToArray())
+                .AggregateHash,
+            Members = members,
+            StatusProjection = template.StatusProjection with
+            {
+                Operation = SetupOperation.NoOp,
+                Changes = template.StatusProjection.Changes
+                    .Select(change => change with { Operation = SetupOperation.NoOp })
+                    .ToArray(),
+            },
+        };
+    }
+
     private static SetupChangeRecord CreateRecord(string target, int recordNumber, bool includeContentCapture = false)
     {
         var (targetKind, targetLabel, detected, version, operation, source, restart, endpoint, members, guidance, changes) = target switch
@@ -1090,7 +1294,7 @@ public sealed class GitHubCopilotSetupAdapterTests
             StatusProjection = record.StatusProjection with { ExpectedResult = expectedResult },
         };
 
-        return includeContentCapture ? target switch
+        record = includeContentCapture ? target switch
         {
             "vscode" => record with
             {
@@ -1110,6 +1314,29 @@ public sealed class GitHubCopilotSetupAdapterTests
             },
             _ => record,
         } : record;
+
+        if (target == "vscode")
+        {
+            record = record with
+            {
+                DesiredState = new SetupJsoncOwnedValuesDesiredState(
+                    new string('b', 64),
+                    record.Members.Select(member => member.SettingKey switch
+                    {
+                        "github.copilot.chat.otel.enabled" or
+                        "github.copilot.chat.otel.captureContent" => new SetupJsoncOwnedValue(
+                            member.SettingKey,
+                            "boolean",
+                            string.Equals(member.DesiredValue, "true", StringComparison.Ordinal)),
+                        _ => new SetupJsoncOwnedValue(
+                            member.SettingKey,
+                            "string",
+                            member.DesiredValue!),
+                    }).ToArray()),
+            };
+        }
+
+        return record;
     }
 
     private static SetupChangeRecord WithCaptureMember(

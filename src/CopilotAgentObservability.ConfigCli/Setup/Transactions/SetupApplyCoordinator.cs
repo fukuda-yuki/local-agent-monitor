@@ -29,6 +29,7 @@ internal sealed class SetupApplyCoordinator
     private readonly SetupLedgerStore ledgerStore;
     private readonly SetupTransactionJournalStore journalStore;
     private readonly ISetupApplyRevalidator revalidator;
+    private readonly SetupApplyProducerCrashSeam? producerCrashSeam;
     private readonly AtomicFileSetupStep fileStep;
     private readonly UserEnvironmentSetupStep environmentStep;
 
@@ -39,6 +40,25 @@ internal sealed class SetupApplyCoordinator
         SetupLedgerStore ledgerStore,
         SetupTransactionJournalStore journalStore,
         ISetupApplyRevalidator revalidator)
+        : this(
+            platform,
+            paths,
+            planStore,
+            ledgerStore,
+            journalStore,
+            revalidator,
+            null)
+    {
+    }
+
+    internal SetupApplyCoordinator(
+        ISetupPlatform platform,
+        SetupRuntimePaths paths,
+        SetupPlanStore planStore,
+        SetupLedgerStore ledgerStore,
+        SetupTransactionJournalStore journalStore,
+        ISetupApplyRevalidator revalidator,
+        SetupApplyProducerCrashSeam? producerCrashSeam)
     {
         this.platform = platform;
         this.paths = paths;
@@ -46,6 +66,7 @@ internal sealed class SetupApplyCoordinator
         this.ledgerStore = ledgerStore;
         this.journalStore = journalStore;
         this.revalidator = revalidator ?? throw new ArgumentNullException(nameof(revalidator));
+        this.producerCrashSeam = producerCrashSeam;
         fileStep = new AtomicFileSetupStep(platform);
         environmentStep = new UserEnvironmentSetupStep(platform);
     }
@@ -104,16 +125,16 @@ internal sealed class SetupApplyCoordinator
             }
 
             compensationEligible = true;
-            platform.Execution.Checkpoint(SetupFaultPoint.AfterJournalPreparedBeforeLedger);
+            Checkpoint(SetupFaultPoint.AfterJournalPreparedBeforeLedger);
 
             var applying = CreateApplyingChangeSet(planned, changedCaptures);
             SaveChangedSet(setupLock, ledger, changeSetIndex, applying);
             journalStore.MarkTransactionPhase(setupLock, changeSetId, SetupJournalPhase.Applying);
-            platform.Execution.Checkpoint(SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent);
+            Checkpoint(SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent);
 
             ApplyForwardSteps(setupLock, plan, changedCaptures);
             var appliedHashes = VerifyDesiredStates(plan, changedCaptures);
-            platform.Execution.Checkpoint(SetupFaultPoint.AfterCompletionBeforeCommit);
+            Checkpoint(SetupFaultPoint.AfterCompletionBeforeCommit);
             journalStore.MarkTransactionPhase(setupLock, changeSetId, SetupJournalPhase.Committed);
             platform.Execution.Checkpoint(SetupFaultPoint.AfterCommitBeforeLedger);
 
@@ -132,7 +153,7 @@ internal sealed class SetupApplyCoordinator
                 revalidation.Warnings,
                 revalidation.NextActions);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (exception is not SetupApplyProducerCrashException)
         {
             var outcomeCode = MapApplyFailure(exception);
             if (!compensationEligible && outcomeCode == SetupCodes.StalePlan &&
@@ -1352,14 +1373,20 @@ internal sealed class SetupApplyCoordinator
     {
         journalStore.MarkStepPhase(setupLock, changeSetId, recordId, memberKey,
             SetupJournalStepPhase.Pending, SetupJournalStepPhase.MutationStarted);
-        platform.Execution.Checkpoint(SetupFaultPoint.AfterMutationIntentBeforeMutation);
+        Checkpoint(SetupFaultPoint.AfterMutationIntentBeforeMutation);
     }
 
     private void MarkMutationCompleted(SetupLock setupLock, Guid changeSetId, Guid recordId, string? memberKey)
     {
-        platform.Execution.Checkpoint(SetupFaultPoint.AfterMutationBeforeCompletion);
+        Checkpoint(SetupFaultPoint.AfterMutationBeforeCompletion);
         journalStore.MarkStepPhase(setupLock, changeSetId, recordId, memberKey,
             SetupJournalStepPhase.MutationStarted, SetupJournalStepPhase.MutationCompleted);
+    }
+
+    private void Checkpoint(string faultPoint)
+    {
+        platform.Execution.Checkpoint(faultPoint);
+        producerCrashSeam?.Checkpoint(faultPoint);
     }
 
     private void SaveChangedSet(
@@ -1487,4 +1514,44 @@ internal sealed class SetupApplyCoordinator
         SetupLedgerRollbackStatus RollbackStatus,
         bool SafeToPreserveAndContinue = false,
         bool RequiresRecovery = false);
+}
+
+internal sealed class SetupApplyProducerCrashSeam
+{
+    private static readonly HashSet<string> Boundaries = new(StringComparer.Ordinal)
+    {
+        SetupFaultPoint.AfterJournalPreparedBeforeLedger,
+        SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent,
+        SetupFaultPoint.AfterMutationIntentBeforeMutation,
+        SetupFaultPoint.AfterMutationBeforeCompletion,
+        SetupFaultPoint.AfterCompletionBeforeCommit,
+    };
+
+    private readonly string boundary;
+
+    public SetupApplyProducerCrashSeam(string boundary)
+    {
+        if (!Boundaries.Contains(boundary))
+        {
+            throw new ArgumentOutOfRangeException(nameof(boundary));
+        }
+
+        this.boundary = boundary;
+    }
+
+    public void Checkpoint(string faultPoint)
+    {
+        if (string.Equals(boundary, faultPoint, StringComparison.Ordinal))
+        {
+            throw new SetupApplyProducerCrashException();
+        }
+    }
+}
+
+internal sealed class SetupApplyProducerCrashException : Exception
+{
+    public SetupApplyProducerCrashException()
+        : base("setup_apply_producer_crash")
+    {
+    }
 }

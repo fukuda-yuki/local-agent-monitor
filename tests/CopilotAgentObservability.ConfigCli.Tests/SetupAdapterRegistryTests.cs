@@ -618,6 +618,34 @@ public sealed class SetupAdapterRegistryTests
     }
 
     [Fact]
+    public void Revalidate_PreservesTheAdaptersImmutableMaterializedCarrier()
+    {
+        var desiredBytes = "registry-materialized"u8.ToArray();
+        var carrier = SetupPlanResult.Revalidated(
+        [
+            new SetupMaterializedTarget(
+                RecordId,
+                desiredBytes,
+                SetupHash.File(true, desiredBytes)),
+        ]);
+        var adapter = new RecordingAdapter("test-adapter", revalidate: (_, _) => carrier);
+        var registry = new SetupAdapterRegistry([adapter]);
+        var planned = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            registry.Plan(CreateRequest("test-adapter"))).Value;
+
+        var result = Assert.IsType<SetupPlanSuccess<SetupRevalidation>>(
+            ((ISetupApplyRevalidator)registry).Revalidate(
+                planned.PrivatePlan,
+                planned.PlannedChangeSet));
+
+        Assert.Same(carrier.Value, result.Value);
+        var materialized = Assert.Single(result.Value.MaterializedTargets);
+        Assert.Equal(RecordId, materialized.RecordId);
+        Assert.Equal(desiredBytes, materialized.DesiredBytes.ToArray());
+        Assert.Equal(SetupHash.File(true, desiredBytes), materialized.ExpectedStateHash);
+    }
+
+    [Fact]
     public void Revalidate_WhenPersistedOwnerIsMissing_ReturnsUnsupportedAdapterWithoutCallingAnotherAdapter()
     {
         var ownerRegistry = new SetupAdapterRegistry([new RecordingAdapter("removed-adapter")]);

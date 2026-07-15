@@ -169,7 +169,11 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
             throw SetupPlanResult.InvalidOutput();
         }
 
-        return SetupPlanResult.Revalidated(success.Warnings, success.NextActions);
+        return SetupPlanResult.Success(
+            success.Value,
+            [],
+            success.Warnings,
+            success.NextActions);
     }
 
     private static void RequireMatchingRequest(SetupChangePlan aggregate, SetupPlanRequest request)
