@@ -24,18 +24,23 @@ owned paths below may appear.
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Adapters/SetupAdapterRegistry.cs`
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Storage/SetupPlanStore.cs`
 - Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Storage/SetupLedgerStore.cs`
+- Modify: `src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupTransactionEvidence.cs`
 - Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/SetupStorageTests.cs`
 - Modify: `tests/CopilotAgentObservability.ConfigCli.Tests/SetupAdapterRegistryTests.cs`
+- Modify for behavioral invariant coverage:
+  `tests/CopilotAgentObservability.ConfigCli.Tests/SetupRecoveryTests.cs`,
+  `tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs`, and
+  `tests/CopilotAgentObservability.ConfigCli.Tests/SetupStatusProjectorTests.cs`
 - Create: `tests/CopilotAgentObservability.ConfigCli.Tests/Fixtures/Setup/v1/private-plan.v1.json`
 - Modify, compile-only constructor/signature plumbing only:
-  `SetupApplyTests.cs`, `SetupCompensationTests.cs`, `SetupRecoveryTests.cs`,
-  `SetupRollbackTests.cs`, `SetupStatusProjectorTests.cs`, and
+  `SetupApplyTests.cs`, `SetupCompensationTests.cs`, and
   `SetupCommandDispatcherTests.cs` under
   `tests/CopilotAgentObservability.ConfigCli.Tests/`.
 
 **Non-scope:** `VsCode/`, `CopilotCli/`, and `AppSdk/` partition behavior;
-materialization/apply/recovery logic; public DTOs/catalogs; ledger content;
-schema v2; migration; compatibility aliases; and Issue #66 historical cards.
+materialization/apply/recovery execution logic beyond the owned immutable-
+evidence validation call; public DTOs/catalogs; ledger content; schema v2;
+migration; compatibility aliases; and Issue #66 historical cards.
 
 **Carrier contract:** Introduce an internal `SetupPrivateDesiredState` union
 used by `SetupChangeRecord` and `SetupPrivatePlanTarget`.
@@ -66,6 +71,12 @@ remains canonical for generic non-tagged v1 record shapes, but an inline arm on
 either of those VS Code JSON records fails `recovery_required`. New VS Code
 emission is owned by task-05, not this task.
 
+`SetupTransactionEvidence` calls this shared desired-state
+arm/adapter/kind/label relation validation rather than duplicating it. Status,
+rollback, and recovery immutable-evidence paths therefore return
+`recovery_required` for the same invalid tagged tuple or invalid inline VS Code
+JSON arm before they classify or act on evidence.
+
 **Required tests:**
 
 - Keep the existing committed ownership-ledger fixture byte-identical across
@@ -84,6 +95,11 @@ emission is owned by task-05, not this task.
   duplicate/reordered/missing/extra owned key, invalid member relation,
   wrong value type, empty/33-entry array, over-bound string, and uppercase or
   non-hex hash as `recovery_required`.
+- Prove `SetupRecoveryTests`, `SetupRollbackTests`, and
+  `SetupStatusProjectorTests` exercise the shared relation validator through
+  `SetupTransactionEvidence`: invalid arm/adapter/kind/label combinations fail
+  `recovery_required` on every immutable-evidence consumer path. These are
+  behavioral invariant tests, not compile-only constructor updates.
 - Build a bounded source-like JSONC byte buffer with a previous-state marker in
   an unrelated member and positively assert the marker is present in that
   source buffer. Derive a tagged carrier from the owned members, then prove the
@@ -115,9 +131,11 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 ```
 
 - [ ] Implement the internal union and deterministic `desired_state` reader/
-  writer/validator in the owned generic carrier and storage files. Update only
-  necessary fixture constructors in the listed compile-only files; do not alter
-  their behavioral assertions.
+  writer/validator in the owned generic carrier and storage files. Make
+  `SetupTransactionEvidence` call the same relation validator and add the owned
+  recovery/rollback/status behavioral assertions. Update only necessary fixture
+  constructors in the listed compile-only apply/compensation/dispatcher files;
+  do not alter their behavioral assertions.
 - [ ] Run GREEN:
 
 ```powershell
@@ -133,7 +151,7 @@ git diff --check
 - [ ] Commit:
 
 ```powershell
-git add -- src/CopilotAgentObservability.ConfigCli/Setup/Adapters/ISetupAdapter.cs src/CopilotAgentObservability.ConfigCli/Setup/Adapters/SetupAdapterRegistry.cs src/CopilotAgentObservability.ConfigCli/Setup/Storage/SetupPlanStore.cs src/CopilotAgentObservability.ConfigCli/Setup/Storage/SetupLedgerStore.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupStorageTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupAdapterRegistryTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupApplyTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupCompensationTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupRecoveryTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupStatusProjectorTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupCommandDispatcherTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/Fixtures/Setup/v1/private-plan.v1.json
+git add -- src/CopilotAgentObservability.ConfigCli/Setup/Adapters/ISetupAdapter.cs src/CopilotAgentObservability.ConfigCli/Setup/Adapters/SetupAdapterRegistry.cs src/CopilotAgentObservability.ConfigCli/Setup/Storage/SetupPlanStore.cs src/CopilotAgentObservability.ConfigCli/Setup/Storage/SetupLedgerStore.cs src/CopilotAgentObservability.ConfigCli/Setup/Transactions/SetupTransactionEvidence.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupStorageTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupAdapterRegistryTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupApplyTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupCompensationTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupRecoveryTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupRollbackTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupStatusProjectorTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/SetupCommandDispatcherTests.cs tests/CopilotAgentObservability.ConfigCli.Tests/Fixtures/Setup/v1/private-plan.v1.json
 git commit -m "Issues #66-#67: fix(setup): define v1 desired-state union"
 ```
 
@@ -153,6 +171,9 @@ JSONC documents or treating a private representation change as a migration.
   for `SetupTargetKind.File`/`SetupTargetKind.Toml`/other-adapter/other-label/
   inline-VS-Code-JSON and at
   0/1/2048/2049 string boundaries.
+- Status, rollback, and recovery immutable-evidence consumers share that exact
+  relation validator through `SetupTransactionEvidence` and fail
+  `recovery_required` for every invalid arm/adapter/kind/label combination.
 - Focused suites, build, `git diff --check`, and a fresh structural
   data-safety/security review PASS are recorded before task-04c starts. This
   PASS covers only the carrier/storage boundary and does not satisfy the
