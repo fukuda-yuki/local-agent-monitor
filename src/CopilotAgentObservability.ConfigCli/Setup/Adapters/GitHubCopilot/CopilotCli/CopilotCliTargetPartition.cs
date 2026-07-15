@@ -306,20 +306,35 @@ internal sealed class CopilotCliTargetPartition : IGitHubCopilotTargetPartition
         planTarget = null!;
         ledgerTarget = null!;
         if (plan.Adapter != "github-copilot" || plannedChangeSet.Adapter != "github-copilot" ||
-            plan.SelectedTarget != "cli" || plannedChangeSet.SelectedTarget != "cli" ||
+            plan.SelectedTarget != plannedChangeSet.SelectedTarget ||
+            plan.SelectedTarget is not "cli" and not "all" ||
             plan.Targets is null || plannedChangeSet.Targets is null ||
-            plan.Targets.Count != 1 || plannedChangeSet.Targets.Count != 1)
+            plan.SelectedTarget == "cli" && (plan.Targets.Count != 1 || plannedChangeSet.Targets.Count != 1))
         {
             return false;
         }
 
-        planTarget = plan.Targets[0];
-        ledgerTarget = plannedChangeSet.Targets[0];
-        return planTarget.TargetKind == SetupTargetKind.Env &&
-            ledgerTarget.TargetKind == SetupTargetKind.Env &&
-            ledgerTarget.TargetLabel == TargetLabel &&
-            planTarget.RecordId == ledgerTarget.RecordId &&
-            planTarget.Members is not null && ledgerTarget.Members is not null;
+        var candidates = plan.Targets.SelectMany(candidatePlanTarget =>
+            plannedChangeSet.Targets
+                .Where(candidateLedgerTarget =>
+                    candidatePlanTarget.RecordId == candidateLedgerTarget.RecordId &&
+                    candidatePlanTarget.TargetKind == SetupTargetKind.Env &&
+                    candidateLedgerTarget.TargetKind == SetupTargetKind.Env &&
+                    candidateLedgerTarget.TargetLabel == TargetLabel &&
+                    candidateLedgerTarget.OwningAdapter == "github-copilot" &&
+                    candidatePlanTarget.Members is not null &&
+                    candidateLedgerTarget.Members is not null &&
+                    LedgerMembersEqual(candidatePlanTarget.Members, candidateLedgerTarget.Members))
+                .Select(candidateLedgerTarget => (candidatePlanTarget, candidateLedgerTarget)))
+            .ToArray();
+        if (candidates.Length != 1)
+        {
+            return false;
+        }
+
+        planTarget = candidates[0].candidatePlanTarget;
+        ledgerTarget = candidates[0].candidateLedgerTarget;
+        return true;
     }
 
     private static bool MatchesPersistedRecord(

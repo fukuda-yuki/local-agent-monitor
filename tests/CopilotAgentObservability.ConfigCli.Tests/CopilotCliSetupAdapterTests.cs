@@ -13,12 +13,14 @@ public sealed class CopilotCliSetupAdapterTests
     private const string Endpoint = "http://127.0.0.1:4320";
     private const string CliLabel = "copilot-cli-user-environment";
     private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
-    private static readonly string[] DefaultMembers =
+    private static readonly string AppSdkGuidanceSample = SetupContractValidator.RehydrateStatusGuidance(
+        new SetupStatusGuidance("caller_managed_sample", "dotnet")).Sample;
+    private static readonly (string Key, string Value)[] DefaultMembers =
     [
-        "COPILOT_OTEL_ENABLED",
-        "COPILOT_OTEL_EXPORTER_TYPE",
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-        "OTEL_EXPORTER_OTLP_PROTOCOL",
+        ("COPILOT_OTEL_ENABLED", "true"),
+        ("COPILOT_OTEL_EXPORTER_TYPE", "otlp-http"),
+        ("OTEL_EXPORTER_OTLP_ENDPOINT", Endpoint),
+        ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
     ];
 
     [Fact]
@@ -39,9 +41,7 @@ public sealed class CopilotCliSetupAdapterTests
         Assert.Null(plan.FailureCode);
         Assert.Equal(SetupTargetKind.Env, record.TargetKind);
         Assert.Equal(CliLabel, record.TargetLabel);
-        Assert.Equal(
-            DefaultMembers,
-            record.Members.Select(member => member.SettingKey));
+        AssertExactMembers(record, DefaultMembers);
         Assert.Equal(SetupRestartRequirement.RestartTerminalSession, record.RestartRequirement);
         Assert.Equal(SetupEffectiveSource.Environment, record.StatusProjection.EffectiveSource);
         Assert.Equal([SetupCodes.ManagedPolicyUnverified, SetupCodes.SharedUserEnvironmentAffectsOtherProcesses], plan.Warnings);
@@ -57,16 +57,16 @@ public sealed class CopilotCliSetupAdapterTests
         ScriptSupportedCliAndLiveEndpoint(withoutCapture);
         var defaultPlan = Plan(withoutCapture);
 
-        Assert.Equal(DefaultMembers, Assert.Single(defaultPlan.Records).Members.Select(member => member.SettingKey));
+        AssertExactMembers(Assert.Single(defaultPlan.Records), DefaultMembers);
 
         var withCapture = CreatePlatform();
         ScriptSupportedCliAndLiveEndpoint(withCapture);
         var capturePlan = Plan(withCapture, includeContentCapture: true);
         var record = Assert.Single(capturePlan.Records);
 
-        Assert.Equal(
-            DefaultMembers.Append("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"),
-            record.Members.Select(member => member.SettingKey));
+        AssertExactMembers(
+            record,
+            DefaultMembers.Append(("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")));
         Assert.Equal(
             [SetupCodes.ManagedPolicyUnverified, SetupCodes.ContentCaptureSensitive, SetupCodes.SharedUserEnvironmentAffectsOtherProcesses],
             capturePlan.Warnings);
@@ -357,6 +357,56 @@ public sealed class CopilotCliSetupAdapterTests
     }
 
     [Fact]
+    public void Revalidate_AllPlanRoutesTheOneCanonicalCliRecordAlongsideValidCompanionTargets()
+    {
+        var platform = CreatePlatform();
+        ScriptSupportedCliAndLiveEndpoint(platform);
+        ScriptSupportedCliAndLiveEndpoint(platform);
+        var vscode = new CompanionPartition("vscode", new GitHubCopilotPartitionPlan(null, [CreateVsCodeRecord()], [], []));
+        var appSdk = new CompanionPartition("app-sdk", new GitHubCopilotPartitionPlan(null, [CreateAppSdkRecord()], [], []));
+        var adapter = new GitHubCopilotSetupAdapter(platform, [vscode, new CopilotCliTargetPartition(), appSdk]);
+
+        var planned = Assert.IsType<SetupPlanSuccess<SetupChangePlan>>(adapter.Plan(CreateRequest("all")));
+        var (privatePlan, ledger) = CreatePersistedAggregatePlan(planned.Value);
+
+        var result = adapter.Revalidate(privatePlan, ledger);
+
+        var success = Assert.IsType<SetupPlanSuccess<SetupRevalidation>>(result);
+        Assert.Empty(success.Value.MaterializedTargets);
+        Assert.Equal(
+            ["vscode-stable-default-user-settings", CliLabel, "github-copilot-app-sdk-guidance"],
+            planned.Value.Records.Select(record => record.TargetLabel));
+        Assert.Equal(1, vscode.RevalidateCalls);
+        Assert.Equal(0, appSdk.RevalidateCalls);
+        Assert.DoesNotContain(platform.Operations, operation => operation.StartsWith("environment.set:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Revalidate_AllPlanFailsClosedForMissingDuplicateOrMalformedCliRecords()
+    {
+        var platform = CreatePlatform();
+        ScriptSupportedCliAndLiveEndpoint(platform, repetitions: 3);
+        var (_, _, validPlan, validLedger) = CreateValidAllAggregate(platform);
+        var cliIndex = validLedger.Targets
+            .Select((target, index) => (target, index))
+            .Single(item => item.target.TargetLabel == CliLabel)
+            .index;
+
+        var missingPlan = validPlan with { Targets = validPlan.Targets.Where((_, index) => index != cliIndex).ToArray() };
+        var missingLedger = validLedger with { Targets = validLedger.Targets.Where((_, index) => index != cliIndex).ToArray() };
+
+        var duplicatePlan = validPlan with { Targets = validPlan.Targets.Append(validPlan.Targets[cliIndex] with { RecordId = Guid.Parse("00000000-0000-7000-8000-000000000099") }).ToArray() };
+        var duplicateLedger = validLedger with { Targets = validLedger.Targets.Append(validLedger.Targets[cliIndex] with { RecordId = Guid.Parse("00000000-0000-7000-8000-000000000099") }).ToArray() };
+
+        var malformedPlan = validPlan with { Targets = validPlan.Targets.Select((target, index) => index == cliIndex ? target with { TargetKind = SetupTargetKind.File } : target).ToArray() };
+
+        AssertRecoveryRequired(new CopilotCliTargetPartition().Revalidate(CreateContext(platform, selectedTarget: "all"), missingPlan, missingLedger));
+        AssertRecoveryRequired(new CopilotCliTargetPartition().Revalidate(CreateContext(platform, selectedTarget: "all"), duplicatePlan, duplicateLedger));
+        AssertRecoveryRequired(new CopilotCliTargetPartition().Revalidate(CreateContext(platform, selectedTarget: "all"), malformedPlan, validLedger));
+        Assert.DoesNotContain(platform.Operations, operation => operation.StartsWith("environment.set:", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Plan_ExistingEnvironmentMarkerIsRedactedFromRecordsAndDiagnostics()
     {
         const string marker = "existing-environment-secret-marker";
@@ -379,26 +429,33 @@ public sealed class CopilotCliSetupAdapterTests
 
     private static GitHubCopilotPartitionContext CreateContext(
         ISetupPlatform platform,
-        bool includeContentCapture = false) => new(
-            platform,
-            new SetupPlanRequest(
-                "github-copilot",
-                "cli",
-                Endpoint,
-                includeContentCapture,
-                Guid.Parse("00000000-0000-7000-8000-000000000006"),
-                Timestamp,
-                "1.2.3"));
+        bool includeContentCapture = false,
+        string selectedTarget = "cli") => new(platform, CreateRequest(selectedTarget, includeContentCapture));
 
-    private static void ScriptSupportedCliAndLiveEndpoint(SetupTestPlatform platform, string version = "1.0.4")
+    private static SetupPlanRequest CreateRequest(string selectedTarget, bool includeContentCapture = false) => new(
+        "github-copilot",
+        selectedTarget,
+        Endpoint,
+        includeContentCapture,
+        Guid.Parse("00000000-0000-7000-8000-000000000006"),
+        Timestamp,
+        "1.2.3");
+
+    private static void ScriptSupportedCliAndLiveEndpoint(
+        SetupTestPlatform platform,
+        string version = "1.0.4",
+        int repetitions = 1)
     {
-        ScriptCliVersion(platform, version);
-        platform.ScriptHttpProbe(new SetupHttpProbeObservation(
-            SetupHttpProbeOutcome.Response,
-            200,
-            17,
-            "{\"status\":\"live\"}"u8.ToArray(),
-            true));
+        for (var index = 0; index < repetitions; index++)
+        {
+            ScriptCliVersion(platform, version);
+            platform.ScriptHttpProbe(new SetupHttpProbeObservation(
+                SetupHttpProbeOutcome.Response,
+                200,
+                17,
+                "{\"status\":\"live\"}"u8.ToArray(),
+                true));
+        }
     }
 
     private static void ScriptCliVersion(SetupTestPlatform platform, string version) =>
@@ -460,6 +517,124 @@ public sealed class CopilotCliSetupAdapterTests
         return (privatePlan, ledger);
     }
 
+    private static (GitHubCopilotSetupAdapter Adapter, SetupChangePlan Plan, SetupPrivatePlan PrivatePlan, SetupLedgerChangeSet Ledger)
+        CreateValidAllAggregate(SetupTestPlatform platform)
+    {
+        var vscode = new CompanionPartition("vscode", new GitHubCopilotPartitionPlan(null, [CreateVsCodeRecord()], [], []));
+        var appSdk = new CompanionPartition("app-sdk", new GitHubCopilotPartitionPlan(null, [CreateAppSdkRecord()], [], []));
+        var adapter = new GitHubCopilotSetupAdapter(platform, [vscode, new CopilotCliTargetPartition(), appSdk]);
+        var plan = Assert.IsType<SetupPlanSuccess<SetupChangePlan>>(adapter.Plan(CreateRequest("all"))).Value;
+        var (privatePlan, ledger) = CreatePersistedAggregatePlan(plan);
+        return (adapter, plan, privatePlan, ledger);
+    }
+
+    private static (SetupPrivatePlan Plan, SetupLedgerChangeSet Ledger) CreatePersistedAggregatePlan(SetupChangePlan plan)
+    {
+        var privatePlan = new SetupPrivatePlan(
+            1,
+            plan.ChangeSetId,
+            plan.Adapter,
+            plan.SelectedTarget,
+            plan.CreatedAt,
+            plan.ToolVersion,
+            plan.Records.Select(record => new SetupPrivatePlanTarget(
+                record.RecordId,
+                record.TargetKind,
+                record.TargetLocation,
+                record.BaseStateHash,
+                record.DesiredState,
+                record.Members)).ToArray());
+        var ledger = new SetupLedgerChangeSet(
+            privatePlan.ChangeSetId,
+            privatePlan.Adapter,
+            privatePlan.SelectedTarget,
+            privatePlan.CreatedAt,
+            privatePlan.CreatedAt,
+            privatePlan.ToolVersion,
+            null,
+            SetupChangeSetState.Planned,
+            plan.Records.Select(record => new SetupLedgerTarget(
+                record.RecordId,
+                record.TargetKind,
+                record.TargetLabel,
+                "github-copilot",
+                record.Members.Select(member => new SetupLedgerMember(member.SettingKey, member.Operation)).ToArray(),
+                record.BaseStateHash,
+                null,
+                null,
+                null,
+                SetupLedgerRollbackStatus.NotAvailable,
+                record.RestartRequirement,
+                record.StatusProjection,
+                privatePlan.ToolVersion)).ToArray());
+        return (privatePlan, ledger);
+    }
+
+    private static SetupChangeRecord CreateVsCodeRecord() => new(
+        Guid.Parse("00000000-0000-7000-8000-000000000007"),
+        SetupTargetKind.Json,
+        "C:\\setup-test-app-data\\Code\\User\\settings.json",
+        "vscode-stable-default-user-settings",
+        new string('a', 64),
+        new SetupJsoncOwnedValuesDesiredState(
+            new string('b', 64),
+            [
+                new SetupJsoncOwnedValue("github.copilot.chat.otel.enabled", "boolean", true),
+                new SetupJsoncOwnedValue("github.copilot.chat.otel.exporterType", "string", "otlp-http"),
+                new SetupJsoncOwnedValue("github.copilot.chat.otel.otlpEndpoint", "string", Endpoint),
+            ]),
+        [
+            new SetupPrivatePlanMember("github.copilot.chat.otel.enabled", SetupOperation.Replace, "true"),
+            new SetupPrivatePlanMember("github.copilot.chat.otel.exporterType", SetupOperation.Replace, "otlp-http"),
+            new SetupPrivatePlanMember("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, Endpoint),
+        ],
+        SetupRestartRequirement.RestartVsCode,
+        new SetupStatusProjection(
+            true,
+            "1.128.0",
+            SetupOperation.Replace,
+            SetupEffectiveSource.UserSetting,
+            Endpoint,
+            null,
+            null,
+            [
+                new SetupMemberChangeResult("github.copilot.chat.otel.enabled", SetupOperation.Replace, "present_different", "configured", "none", false),
+                new SetupMemberChangeResult("github.copilot.chat.otel.exporterType", SetupOperation.Replace, "present_different", "configured", "none", false),
+                new SetupMemberChangeResult("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, "present_different", "configured_loopback", "none", false),
+            ]));
+
+    private static SetupChangeRecord CreateAppSdkRecord() => new(
+        Guid.Parse("00000000-0000-7000-8000-000000000008"),
+        SetupTargetKind.Guidance,
+        "app-sdk-guidance",
+        "github-copilot-app-sdk-guidance",
+        new string('b', 64),
+        new SetupInlineDesiredState("app-sdk-guidance"),
+        [],
+        SetupRestartRequirement.None,
+        new SetupStatusProjection(
+            false,
+            null,
+            SetupOperation.NoOp,
+            null,
+            null,
+            null,
+            new SetupStatusGuidance("caller_managed_sample", "dotnet"),
+            []),
+        new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample));
+
+    private static void AssertExactMembers(
+        SetupChangeRecord record,
+        IEnumerable<(string Key, string Value)> expected)
+    {
+        var pairs = expected.ToArray();
+        Assert.Equal(pairs.Select(pair => pair.Key), record.Members.Select(member => member.SettingKey));
+        Assert.Equal(pairs.Select(pair => pair.Value), record.Members.Select(member => member.DesiredValue));
+    }
+
+    private static void AssertRecoveryRequired(SetupPlanResult<SetupRevalidation> result) =>
+        Assert.Equal(SetupCodes.RecoveryRequired, Assert.IsType<SetupPlanFailure<SetupRevalidation>>(result).Code);
+
     private static void AssertForbiddenEnvironmentKeys(SetupChangeRecord record)
     {
         var keys = record.Members.Select(member => member.SettingKey).ToArray();
@@ -470,5 +645,23 @@ public sealed class CopilotCliSetupAdapterTests
         Assert.DoesNotContain("COPILOT_OTEL_SOURCE_NAME", keys);
         Assert.DoesNotContain("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", keys);
         Assert.DoesNotContain(keys, key => key.Contains("TOKEN", StringComparison.Ordinal) || key.Contains("SECRET", StringComparison.Ordinal) || key.Contains("CREDENTIAL", StringComparison.Ordinal));
+    }
+
+    private sealed class CompanionPartition(string targetToken, GitHubCopilotPartitionPlan plan) : IGitHubCopilotTargetPartition
+    {
+        public string TargetToken => targetToken;
+
+        public int RevalidateCalls { get; private set; }
+
+        public GitHubCopilotPartitionPlan Plan(GitHubCopilotPartitionContext context) => plan;
+
+        public SetupPlanResult<SetupRevalidation> Revalidate(
+            GitHubCopilotPartitionContext context,
+            SetupPrivatePlan plan,
+            SetupLedgerChangeSet plannedChangeSet)
+        {
+            RevalidateCalls++;
+            return SetupPlanResult.Revalidated();
+        }
     }
 }
