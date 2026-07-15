@@ -303,11 +303,6 @@ public sealed class SetupPlatformTests
     {
         var operations = new List<string>();
         var platform = new SystemSetupPlatform(
-            notificationAttempt: () =>
-            {
-                operations.Add("user.notify");
-                return true;
-            },
             userEnvironmentRead: (name, target) =>
             {
                 operations.Add($"get:{name}:{target}");
@@ -335,6 +330,11 @@ public sealed class SetupPlatformTests
     {
         var operations = new List<string>();
         var platform = new SystemSetupPlatform(
+            notificationAttempt: () =>
+            {
+                operations.Add("user.notify");
+                throw new InvalidOperationException("unexpected user environment notification");
+            },
             userEnvironmentRead: (name, target) =>
             {
                 operations.Add($"user.get:{name}:{target}");
