@@ -24,6 +24,51 @@ public sealed class SetupRecoveryTests
         return new SetupStatusProjection(true, null, aggregate, null, null, expectedResult, null,
             members.Select(member => new SetupMemberChangeResult(member.SettingKey, member.Operation, "present", "configured", "none", false)).ToArray());
     }
+
+    [Theory]
+    [InlineData("inline_exact_label")]
+    [InlineData("tagged_other_label")]
+    public void RecoveryImmutableEvidence_DesiredStateBindingMismatchRequiresRecovery(string variant)
+    {
+        var fixture = RecoveryFixture.CreateFileOnly();
+        var plan = fixture.Plan;
+        var changeSet = fixture.Planned;
+        if (variant == "inline_exact_label")
+        {
+            changeSet = changeSet with
+            {
+                Targets =
+                [
+                    changeSet.Targets[0] with
+                    {
+                        TargetLabel = "vscode-stable-default-user-settings",
+                    },
+                ],
+            };
+        }
+        else
+        {
+            var target = plan.Targets[0];
+            plan = plan with
+            {
+                Targets =
+                [
+                    target with
+                    {
+                        DesiredState = new SetupJsoncOwnedValuesDesiredState(
+                            new string('b', 64),
+                            [new SetupJsoncOwnedValue("setting", "string", "new")]),
+                    },
+                ],
+            };
+        }
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+    }
+
     [Fact]
     public void RecoverNext_Ignores_normal_planned_change_set_without_journal()
     {

@@ -256,7 +256,63 @@ public sealed class SetupStorageTests
         Assert.Equal(HashB, desiredState.GetProperty("expected_state_hash").GetString());
         Assert.Equal(JsonValueKind.String, ownedValue.GetProperty("value").ValueKind);
         Assert.DoesNotContain("previous", json, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TaggedCarrier_ExcludesUnownedPreviousStateFromTheV1StorageBoundary()
+    {
+        const string previousStateMarker = "PREVIOUS_SECRET_MARKER";
+        var sourceBytes = Encoding.UTF8.GetBytes(
+            """
+            {
+              // source-like JSONC retains an unrelated previous value
+              "github.copilot.chat.otel.enabled": "DESIRED_VALUE_MARKER",
+              "unrelated.extension.secret": "PREVIOUS_SECRET_MARKER",
+            }
+            """);
+        var sourceText = Encoding.UTF8.GetString(sourceBytes);
+        Assert.InRange(sourceBytes.Length, 1, 4096);
+        Assert.Contains(previousStateMarker, sourceText, StringComparison.Ordinal);
+
+        var members = CreatePlan().Targets[0].Members;
+        var carrier = new SetupJsoncOwnedValuesDesiredState(
+            HashB,
+            members.Select(member => new SetupJsoncOwnedValue(
+                member.SettingKey,
+                "string",
+                member.DesiredValue!)).ToArray());
+        var plan = CreatePlan() with
+        {
+            Targets = [CreatePlan().Targets[0] with { DesiredState = carrier }],
+        };
+        var carrierJson = JsonSerializer.Serialize(carrier);
+        var serializedPlan = SetupPlanStore.Serialize(plan);
+        var serializedPlanText = Encoding.UTF8.GetString(serializedPlan);
+        var ownershipFixture = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "Fixtures", "Setup", "v1", "ownership-ledger.v1.json"));
+        var privatePlanFixture = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "Fixtures", "Setup", "v1", "private-plan.v1.json"));
+
+        Assert.DoesNotContain(previousStateMarker, carrierJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(previousStateMarker, serializedPlanText, StringComparison.Ordinal);
+        Assert.DoesNotContain(previousStateMarker, ownershipFixture, StringComparison.Ordinal);
+        Assert.DoesNotContain(previousStateMarker, privatePlanFixture, StringComparison.Ordinal);
+
+        var malformed = JsonNode.Parse(serializedPlan)!.AsObject();
+        malformed["targets"]![0]!["desired_state"]!["unexpected_previous_state"] = sourceText;
+        var context = CreateContext();
+        context.Platform.SeedFile(
+            context.Paths.GetPlan(ChangeSetId),
+            Encoding.UTF8.GetBytes(malformed.ToJsonString()));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.PlanStore.Load(ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Message);
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain(previousStateMarker, exception.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -425,7 +481,6 @@ public sealed class SetupStorageTests
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Message);
         Assert.Null(exception.InnerException);
-        Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", exception.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1106,6 +1161,36 @@ public sealed class SetupStorageTests
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
     }
 
+    [Theory]
+    [InlineData("inline_exact_label")]
+    [InlineData("tagged_other_label")]
+    public void ValidatePlanAndLedger_DesiredStateBindingMismatchRequiresRecovery(string variant)
+    {
+        var plan = variant == "inline_exact_label"
+            ? CreateLegacyInlineFixturePlan()
+            : CreatePlan();
+        var changeSet = CreatePlannedChangeSet();
+        if (variant == "tagged_other_label")
+        {
+            changeSet = changeSet with
+            {
+                Targets =
+                [
+                    changeSet.Targets[0] with
+                    {
+                        TargetLabel = "other-json-target",
+                        StatusProjection = changeSet.Targets[0].StatusProjection with { ExpectedResult = null },
+                    },
+                ],
+            };
+        }
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            SetupStorageValidation.ValidatePlanAndLedger(plan, changeSet));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+    }
+
     [Fact]
     public void LedgerValidation_AllNoOpWritableTargetOwnsNoBackupOrAppliedHash()
     {
@@ -1556,8 +1641,6 @@ public sealed class SetupStorageTests
             Assert.Equal(fixtureBytes, writtenBytes);
             Assert.Equal(fixtureBytes, reopenedBytes);
             Assert.NotEqual(ownershipFixtureBytes, fixtureBytes);
-            Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", Encoding.UTF8.GetString(fixtureBytes), StringComparison.Ordinal);
-            Assert.DoesNotContain("PREVIOUS_SECRET_MARKER", Encoding.UTF8.GetString(ownershipFixtureBytes), StringComparison.Ordinal);
         }
         finally
         {

@@ -38,5 +38,7 @@ internal static class SetupTransactionEvidence
                 }
             }
         }
+
+        SetupStorageValidation.ValidateDesiredStateBindings(plan, changeSet);
     }
 }

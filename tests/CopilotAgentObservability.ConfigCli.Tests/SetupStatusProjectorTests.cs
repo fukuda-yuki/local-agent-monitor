@@ -118,6 +118,43 @@ public sealed class SetupStatusProjectorTests
     }
 
     [Theory]
+    [InlineData("inline_exact_label")]
+    [InlineData("tagged_other_label")]
+    public void Project_NonTerminalDesiredStateBindingMismatchRequiresRecoveryBeforeTargetObservation(string variant)
+    {
+        var fixture = CreateDesiredStateBindingStatusFixture(variant, terminal: false);
+        var operationCount = fixture.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            fixture.Projector.Project(fixture.ChangeSet));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.DoesNotContain(
+            fixture.Platform.Operations.Skip(operationCount),
+            operation => operation == $"file.read:{fixture.TargetPath}");
+    }
+
+    [Theory]
+    [InlineData("inline_exact_label")]
+    [InlineData("tagged_other_label")]
+    public void Project_TerminalDesiredStateBindingMismatchProjectsUnavailableWithoutTargetObservation(string variant)
+    {
+        var fixture = CreateDesiredStateBindingStatusFixture(variant, terminal: true);
+        var operationCount = fixture.Platform.Operations.Count;
+
+        var result = fixture.Projector.Project(fixture.ChangeSet);
+
+        var target = Assert.Single(result.Targets);
+        Assert.Equal(SetupCurrentState.Unavailable, target.CurrentState);
+        Assert.Equal(SetupReferenceState.None, target.ReferenceState);
+        Assert.False(target.RollbackAvailable);
+        Assert.False(result.RollbackAvailable);
+        Assert.DoesNotContain(
+            fixture.Platform.Operations.Skip(operationCount),
+            operation => operation == $"file.read:{fixture.TargetPath}");
+    }
+
+    [Theory]
     [InlineData("desired", SetupReferenceState.Desired, SetupCurrentState.Current)]
     [InlineData("previous", SetupReferenceState.Previous, SetupCurrentState.Current)]
     [InlineData("third-party", SetupReferenceState.None, SetupCurrentState.Diverged)]
@@ -884,6 +921,106 @@ public sealed class SetupStatusProjectorTests
         }).ToArray(),
     };
 
+    private static (
+        SetupTestPlatform Platform,
+        SetupStatusProjector Projector,
+        SetupLedgerChangeSet ChangeSet,
+        string TargetPath) CreateDesiredStateBindingStatusFixture(string variant, bool terminal)
+    {
+        var now = new DateTimeOffset(2026, 7, 14, 1, 2, 3, TimeSpan.Zero);
+        var platform = new SetupTestPlatform(now);
+        var paths = new SetupRuntimePaths(platform);
+        var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000682");
+        var recordId = Guid.Parse("00000000-0000-7000-8000-000000000683");
+        var targetPath = Path.Combine(platform.LocalApplicationData, "binding-settings.json");
+        platform.SeedDirectory("C:\\");
+        platform.SeedDirectory(platform.LocalApplicationData);
+        platform.SeedFile(targetPath, Encoding.UTF8.GetBytes("previous"));
+        var operation = terminal ? SetupOperation.NoOp : SetupOperation.Replace;
+        var member = new SetupPrivatePlanMember("setting", operation, terminal ? "previous" : "desired");
+        SetupPrivateDesiredState desiredState = variant switch
+        {
+            "inline_exact_label" => new SetupInlineDesiredState(terminal ? "previous" : "desired"),
+            "tagged_other_label" => new SetupJsoncOwnedValuesDesiredState(
+                new string('b', 64),
+                [new SetupJsoncOwnedValue("setting", "string", terminal ? "previous" : "desired")]),
+            _ => throw new ArgumentOutOfRangeException(nameof(variant)),
+        };
+        var label = variant == "inline_exact_label"
+            ? "vscode-stable-default-user-settings"
+            : "other-json-target";
+        var baseHash = SetupHash.File(true, Encoding.UTF8.GetBytes("previous"));
+        var plan = new SetupPrivatePlan(
+            1,
+            changeSetId,
+            "github-copilot",
+            "vscode",
+            now,
+            "1.2.3",
+            [new SetupPrivatePlanTarget(
+                recordId,
+                SetupTargetKind.Json,
+                targetPath,
+                baseHash,
+                desiredState,
+                [member])]);
+        var expectedResult = variant == "inline_exact_label"
+            ? SourceCapabilityManifestLoader.LoadForSurface("github-copilot-vscode").CanonicalJson
+            : (JsonElement?)null;
+        var changeSet = new SetupLedgerChangeSet(
+            changeSetId,
+            "github-copilot",
+            "vscode",
+            now,
+            now,
+            "1.2.3",
+            terminal ? SetupCodes.NoChanges : null,
+            terminal ? SetupChangeSetState.NoChanges : SetupChangeSetState.Planned,
+            [new SetupLedgerTarget(
+                recordId,
+                SetupTargetKind.Json,
+                label,
+                "github-copilot",
+                [new SetupLedgerMember(member.SettingKey, member.Operation)],
+                baseHash,
+                null,
+                null,
+                terminal ? SetupCodes.NoChanges : null,
+                SetupLedgerRollbackStatus.NotAvailable,
+                SetupRestartRequirement.RestartVsCode,
+                new SetupStatusProjection(
+                    true,
+                    "1.128.7",
+                    operation,
+                    SetupEffectiveSource.UserSetting,
+                    "http://127.0.0.1:4320",
+                    expectedResult,
+                    null,
+                    [new SetupMemberChangeResult(
+                        member.SettingKey,
+                        member.Operation,
+                        "present_same",
+                        "configured_loopback",
+                        "none",
+                        false)]),
+                "1.2.3")]);
+        var planStore = new SetupPlanStore(platform, paths);
+        using (var setupLock = SetupLock.TryAcquire(platform, paths))
+        {
+            planStore.Create(setupLock.Lock!, plan);
+        }
+
+        return (
+            platform,
+            new SetupStatusProjector(
+                platform,
+                paths,
+                planStore,
+                new SetupTransactionJournalStore(platform, paths)),
+            changeSet,
+            targetPath);
+    }
+
     private static SetupLedgerChangeSet RoundTripLedgerRow(SetupLedgerChangeSet row)
     {
         var platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 14, 1, 2, 3, TimeSpan.Zero));
@@ -911,6 +1048,7 @@ public sealed class SetupStatusProjectorTests
 
     private sealed class StatusFixture
     {
+        private const string Adapter = "status-fixture";
         private static readonly DateTimeOffset Now = new(2026, 7, 14, 1, 2, 3, TimeSpan.Zero);
         private readonly SetupPlanStore planStore;
         private readonly SetupLedgerStore ledgerStore;
@@ -976,7 +1114,7 @@ public sealed class SetupStatusProjectorTests
                     recordId,
                     SetupTargetKind.Json,
                     "vscode-stable-default-user-settings",
-                    "github-copilot",
+                    Adapter,
                     [new SetupLedgerMember(member.SettingKey, member.Operation)],
                     baseHash,
                     null,
@@ -1015,7 +1153,7 @@ public sealed class SetupStatusProjectorTests
                     additionalId,
                     SetupTargetKind.Json,
                     "vscode-stable-default-user-settings",
-                    "github-copilot",
+                    Adapter,
                     [new SetupLedgerMember(settingKey, SetupOperation.Replace)],
                     additionalBase,
                     null,
@@ -1057,7 +1195,7 @@ public sealed class SetupStatusProjectorTests
                     envRecordId,
                     SetupTargetKind.Env,
                     "copilot-cli-user-environment",
-                    "github-copilot",
+                    Adapter,
                     [new SetupLedgerMember("ENV_NOOP", SetupOperation.NoOp)],
                     capture.AggregateHash,
                     null,
@@ -1077,10 +1215,10 @@ public sealed class SetupStatusProjectorTests
                     "1.2.3"));
             }
 
-            var plan = new SetupPrivatePlan(1, changeSetId, "github-copilot", "vscode", Now, "1.2.3", planTargets);
+            var plan = new SetupPrivatePlan(1, changeSetId, Adapter, "vscode", Now, "1.2.3", planTargets);
             var ledger = new SetupLedgerChangeSet(
                 changeSetId,
-                "github-copilot",
+                Adapter,
                 "vscode",
                 Now,
                 Now,

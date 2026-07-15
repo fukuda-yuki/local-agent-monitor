@@ -1263,6 +1263,26 @@ public sealed class SetupCommandDispatcherTests
         SetupContractValidator.Validate(result);
     }
 
+    [Theory]
+    [InlineData("inline_exact_label")]
+    [InlineData("tagged_other_label")]
+    public void DispatchApply_DesiredStateBindingMismatchReturnsRecoveryBeforeCoordinator(string variant)
+    {
+        var (fixture, _, changeSetId, _) = CreatePlannedApplyFixture();
+        RebindPersistedDesiredStateBinding(fixture, changeSetId, variant);
+        var applyCalls = new CallCounter();
+        var dispatcher = CreateApplyDispatcher(fixture, [], _ => NoRecovery(), applyCalls);
+
+        var result = dispatcher.Dispatch(CreateApplyOptions(changeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+        Assert.Equal(changeSetId.ToString("D"), result.ChangeSetId);
+        Assert.Equal("github-copilot", result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Equal(0, applyCalls.Value);
+        SetupContractValidator.Validate(result);
+    }
+
     [Fact]
     public void DispatchApply_NonPlannedRowWithIdentityMismatchReturnsRecoveryRequiredWithoutProjection()
     {
@@ -2680,6 +2700,62 @@ public sealed class SetupCommandDispatcherTests
         var changeSetId = Guid.Parse(planned.ChangeSetId!);
         var plannedRow = Assert.Single(fixture.LedgerStore.LoadForRecovery().ChangeSets);
         return (fixture, adapter, changeSetId, plannedRow);
+    }
+
+    private static void RebindPersistedDesiredStateBinding(
+        DispatcherFixture fixture,
+        Guid changeSetId,
+        string variant)
+    {
+        var plan = fixture.PlanStore.Load(changeSetId)!;
+        var ledger = fixture.LedgerStore.LoadForRecovery();
+        var changeSet = Assert.Single(ledger.ChangeSets);
+        var planTarget = Assert.Single(plan.Targets);
+        var ledgerTarget = Assert.Single(changeSet.Targets);
+        var label = variant == "inline_exact_label"
+            ? "vscode-stable-default-user-settings"
+            : "other-json-target";
+        var desiredState = variant switch
+        {
+            "inline_exact_label" => planTarget.DesiredState,
+            "tagged_other_label" => new SetupJsoncOwnedValuesDesiredState(
+                new string('b', 64),
+                [new SetupJsoncOwnedValue("setting_1", "string", "configured")]),
+            _ => throw new ArgumentOutOfRangeException(nameof(variant)),
+        };
+        var reboundPlan = plan with
+        {
+            Adapter = "github-copilot",
+            Targets =
+            [
+                planTarget with
+                {
+                    TargetKind = SetupTargetKind.Json,
+                    DesiredState = desiredState,
+                },
+            ],
+        };
+        var expectedResult = variant == "inline_exact_label"
+            ? SourceCapabilityManifestLoader.LoadForSurface("github-copilot-vscode").CanonicalJson
+            : (JsonElement?)null;
+        var reboundChangeSet = changeSet with
+        {
+            Adapter = "github-copilot",
+            Targets =
+            [
+                ledgerTarget with
+                {
+                    TargetKind = SetupTargetKind.Json,
+                    TargetLabel = label,
+                    OwningAdapter = "github-copilot",
+                    StatusProjection = ledgerTarget.StatusProjection with { ExpectedResult = expectedResult },
+                },
+            ],
+        };
+
+        fixture.Platform.SeedFile(fixture.Paths.GetPlan(changeSetId), SetupPlanStore.Serialize(reboundPlan));
+        using var setupLock = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+        fixture.LedgerStore.Save(setupLock.Lock!, ledger with { ChangeSets = [reboundChangeSet] });
     }
 
     private static SetupRecoveryResult NoRecovery() => new(

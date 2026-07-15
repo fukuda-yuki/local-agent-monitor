@@ -84,6 +84,53 @@ public sealed class SetupRollbackTests
         AssertUntrustedDirectResult(result);
     }
 
+    [Theory]
+    [InlineData("inline_exact_label")]
+    [InlineData("tagged_other_label")]
+    public void RollbackPreflight_DesiredStateBindingMismatchIsUntrustedRecoveryRequired(string variant)
+    {
+        var fixture = RollbackFixture.Create();
+        var plan = new SetupPlanStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
+        var changeSet = fixture.LoadChangeSet();
+        if (variant == "inline_exact_label")
+        {
+            changeSet = changeSet with
+            {
+                Targets =
+                [
+                    changeSet.Targets[0] with
+                    {
+                        TargetLabel = "vscode-stable-default-user-settings",
+                    },
+                ],
+            };
+        }
+        else
+        {
+            var target = plan.Targets[0];
+            plan = plan with
+            {
+                Targets =
+                [
+                    target with
+                    {
+                        DesiredState = new SetupJsoncOwnedValuesDesiredState(
+                            new string('b', 64),
+                            [new SetupJsoncOwnedValue("setting-0", "string", "new-0")]),
+                    },
+                ],
+            };
+        }
+
+        var preparation = SetupRollbackPreflightEvaluator.Prepare(plan, changeSet, journal: null);
+
+        Assert.Null(preparation.Evidence);
+        Assert.Null(preparation.TrustedChangeSet);
+        var result = Assert.IsType<SetupRollbackPreflightResult>(preparation.Result);
+        Assert.Equal(SetupRollbackPreflightClassification.RecoveryRequired, result.Classification);
+        Assert.Equal(SetupCodes.RecoveryRequired, result.Code);
+    }
+
     [Fact]
     public void Rollback_Identity_success_then_journal_evidence_mismatch_is_trusted_recovery_required()
     {

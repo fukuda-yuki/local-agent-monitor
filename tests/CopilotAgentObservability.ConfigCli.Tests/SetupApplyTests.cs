@@ -1462,6 +1462,23 @@ public sealed class SetupApplyTests
         AssertNoTransactionArtifacts(fixture);
     }
 
+    [Theory]
+    [InlineData("inline_exact_label")]
+    [InlineData("tagged_other_label")]
+    public void Apply_RejectsDesiredStateBindingMismatchBeforeRevalidationOrArtifacts(string variant)
+    {
+        var fixture = ApplyFixture.Create();
+        fixture.RebindDesiredStateBinding(variant);
+        using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
+
+        var exception = Assert.Throws<SetupApplyException>(() =>
+            fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(0, fixture.Revalidator.Calls);
+        AssertNoTransactionArtifacts(fixture);
+    }
+
     [Fact]
     public void Apply_AllDesiredTargetsAlreadyCurrentPersistsNoChangesWithoutTransactionArtifacts()
     {
@@ -1969,6 +1986,59 @@ public sealed class SetupApplyTests
                 new SetupLedgerStore(Platform, Paths, planStore),
                 new SetupTransactionJournalStore(Platform, Paths),
                 Revalidator);
+        }
+
+        public void RebindDesiredStateBinding(string variant)
+        {
+            var planStore = new SetupPlanStore(Platform, Paths);
+            var ledgerStore = new SetupLedgerStore(Platform, Paths, planStore);
+            var plan = planStore.Load(ChangeSetId)!;
+            var ledger = ledgerStore.LoadForRecovery();
+            var changeSet = Assert.Single(ledger.ChangeSets);
+            switch (variant)
+            {
+                case "inline_exact_label":
+                    changeSet = changeSet with
+                    {
+                        Targets =
+                        [
+                            changeSet.Targets[0] with
+                            {
+                                TargetLabel = "vscode-stable-default-user-settings",
+                                StatusProjection = changeSet.Targets[0].StatusProjection with
+                                {
+                                    ExpectedResult = SourceCapabilityManifestLoader
+                                        .LoadForSurface("github-copilot-vscode")
+                                        .CanonicalJson,
+                                },
+                            },
+                            .. changeSet.Targets.Skip(1),
+                        ],
+                    };
+                    break;
+                case "tagged_other_label":
+                    var target = plan.Targets[0];
+                    plan = plan with
+                    {
+                        Targets =
+                        [
+                            target with
+                            {
+                                DesiredState = new SetupJsoncOwnedValuesDesiredState(
+                                    new string('b', 64),
+                                    [new SetupJsoncOwnedValue("setting", "string", "new")]),
+                            },
+                            .. plan.Targets.Skip(1),
+                        ],
+                    };
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(variant));
+            }
+
+            Platform.SeedFile(Paths.GetPlan(ChangeSetId), SetupPlanStore.Serialize(plan));
+            using var acquisition = SetupLock.TryAcquire(Platform, Paths);
+            ledgerStore.Save(acquisition.Lock!, ledger with { ChangeSets = [changeSet] });
         }
 
         public void SeedExactBackup(Guid recordId)

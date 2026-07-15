@@ -78,7 +78,6 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
         var records = aggregate.Records.ToArray();
         ValidateGuidanceConsistency(records);
         ValidateTargetIdentity(records, success.Targets);
-        ValidateDesiredStateArmRelations(aggregate.Adapter, records);
 
         var privatePlan = new SetupPrivatePlan(
             1,
@@ -127,7 +126,9 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
         {
             SetupStorageValidation.ValidatePlanAndLedger(privatePlan, plannedChangeSet);
         }
-        catch (FormatException)
+        catch (Exception exception) when (
+            exception is FormatException ||
+            exception is SetupStorageException { Code: SetupCodes.RecoveryRequired })
         {
             throw SetupPlanResult.InvalidOutput();
         }
@@ -145,7 +146,6 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(plannedChangeSet);
         SetupStorageValidation.ValidatePlanAndLedger(plan, plannedChangeSet);
-        ValidatePersistedDesiredStateArmRelations(plan, plannedChangeSet);
 
         if (!adapters.TryGetValue(plan.Adapter, out var adapter))
         {
@@ -183,47 +183,6 @@ internal sealed class SetupAdapterRegistry : ISetupApplyRevalidator
             throw SetupPlanResult.InvalidOutput();
         }
     }
-
-    private static void ValidateDesiredStateArmRelations(
-        string adapter,
-        IReadOnlyList<SetupChangeRecord> records)
-    {
-        foreach (var record in records)
-        {
-            if (RequiresTaggedDesiredState(adapter, record.TargetKind, record.TargetLabel) !=
-                ((object)record.DesiredState is SetupJsoncOwnedValuesDesiredState))
-            {
-                throw SetupPlanResult.InvalidOutput();
-            }
-        }
-    }
-
-    private static void ValidatePersistedDesiredStateArmRelations(
-        SetupPrivatePlan plan,
-        SetupLedgerChangeSet changeSet)
-    {
-        for (var index = 0; index < plan.Targets.Count; index++)
-        {
-            if (RequiresTaggedDesiredState(
-                    plan.Adapter,
-                    plan.Targets[index].TargetKind,
-                    changeSet.Targets[index].TargetLabel) !=
-                ((object)plan.Targets[index].DesiredState is SetupJsoncOwnedValuesDesiredState))
-            {
-                throw new SetupStorageException(SetupCodes.RecoveryRequired);
-            }
-        }
-    }
-
-    private static bool RequiresTaggedDesiredState(
-        string adapter,
-        SetupTargetKind targetKind,
-        string targetLabel) =>
-        adapter == "github-copilot" &&
-        targetKind == SetupTargetKind.Json &&
-        targetLabel is
-            "vscode-stable-default-user-settings" or
-            "vscode-insiders-default-user-settings";
 
     private static void ValidateGuidanceConsistency(IEnumerable<SetupChangeRecord> records)
     {

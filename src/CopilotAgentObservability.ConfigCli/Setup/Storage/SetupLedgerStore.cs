@@ -760,6 +760,34 @@ internal static partial class SetupStorageValidation
         {
             throw new SetupStorageException(SetupStorageCodes.PlanLedgerMismatch);
         }
+
+        ValidateDesiredStateBindings(plan, changeSet);
+    }
+
+    public static void ValidateDesiredStateBindings(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet changeSet)
+    {
+        if (plan.Targets.Count != changeSet.Targets.Count)
+        {
+            throw new SetupStorageException(SetupStorageCodes.PlanLedgerMismatch);
+        }
+
+        for (var index = 0; index < plan.Targets.Count; index++)
+        {
+            var planTarget = plan.Targets[index];
+            var ledgerTarget = changeSet.Targets[index];
+            var requiresTaggedArm = plan.Adapter == "github-copilot" &&
+                planTarget.TargetKind == SetupTargetKind.Json &&
+                ledgerTarget.TargetLabel is
+                    "vscode-stable-default-user-settings" or
+                    "vscode-insiders-default-user-settings";
+            if (requiresTaggedArm !=
+                ((object)planTarget.DesiredState is SetupJsoncOwnedValuesDesiredState))
+            {
+                throw new SetupStorageException(SetupCodes.RecoveryRequired);
+            }
+        }
     }
 
     private static bool IsUuidV7(Guid value)
