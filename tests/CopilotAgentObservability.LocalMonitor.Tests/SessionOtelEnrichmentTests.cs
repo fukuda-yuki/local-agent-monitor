@@ -1,3 +1,4 @@
+using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -55,6 +56,146 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Equal("same-repo", unbound.Repository);
         Assert.Null(store.Resolve(SessionSourceSurface.VisualStudioCode, "trace-unmatched"));
         Assert.Equal(3, store.GetProjectionState("session-otel-enrichment")!.ProjectionCursor);
+    }
+
+    // Issue #108: the exact native-session-ID resolver binds on its own
+    // session.id evidence in the generic (non-promoted) path, without
+    // requiring claude-code-otel adapter promotion (D058).
+    [Fact]
+    public void ProcessNextBatch_GenericPathBindsOnOwnSessionIdEvidenceWithoutAdapterPromotion()
+    {
+        using var temp = new MonitorTempDirectory();
+        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+        var hookSessionId = SeedClaudeSession(store, "GENERIC_NATIVE_001", SessionBindingKind.Native);
+        var payload = BuildOtelPayload("generic-trace-1", "generic-span-1", "GENERIC_NATIVE_001");
+        InsertProjectedSpanWithPayload(temp.DatabasePath, "generic-trace-1", "generic-span-1", "unrecognized-client", "generic-repo", now.AddSeconds(1), payload);
+
+        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+
+        Assert.Equal(1, processed);
+        var detail = store.GetDetail(hookSessionId)!;
+        Assert.Contains(detail.Events, item => item.SourceAdapter == "otel-exact" && item.SourceEventId == "generic-trace-1/generic-span-1");
+        Assert.DoesNotContain(detail.Events, item => item.SourceAdapter == "claude-code-otel");
+        Assert.Single(detail.NativeIds);
+        Assert.Single(store.ListMostRecent(10), item => item.SessionId == hookSessionId);
+
+        var projection = SourceProjectionStateBuilder.Build([], detail);
+        Assert.Equal("exact_linked", projection.BindingState);
+    }
+
+    [Fact]
+    public void ProcessNextBatch_GenericPathWithoutHookSessionCreatesFreshUnboundSession()
+    {
+        using var temp = new MonitorTempDirectory();
+        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+        var payload = BuildOtelPayload("generic-trace-2", "generic-span-2", "NO_MATCHING_HOOK_SESSION");
+        InsertProjectedSpanWithPayload(temp.DatabasePath, "generic-trace-2", "generic-span-2", "unrecognized-client", "generic-repo", now, payload);
+
+        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+
+        Assert.Equal(1, processed);
+        var unbound = Assert.Single(store.ListMostRecent(10));
+        Assert.Equal(SessionCompleteness.Unbound, unbound.Completeness);
+    }
+
+    [Fact]
+    public void ProcessNextBatch_GenericPathAmbiguousSessionIdAttributesRemainUnbound()
+    {
+        using var temp = new MonitorTempDirectory();
+        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+        var hookSessionId = SeedClaudeSession(store, "AMBIGUOUS_NATIVE_001", SessionBindingKind.Native);
+        var payload = BuildOtelPayload("generic-trace-3", "generic-span-3", "AMBIGUOUS_NATIVE_001", "OTHER_VALUE");
+        InsertProjectedSpanWithPayload(temp.DatabasePath, "generic-trace-3", "generic-span-3", "unrecognized-client", "generic-repo", now, payload);
+
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+
+        Assert.DoesNotContain(store.GetDetail(hookSessionId)!.Events, item => item.SourceEventId == "generic-trace-3/generic-span-3");
+        Assert.Contains(store.ListMostRecent(10), item => item.SessionId != hookSessionId && item.Completeness == SessionCompleteness.Unbound);
+    }
+
+    [Theory]
+    [InlineData("byte_native_001")]
+    [InlineData("BYTE_NATIVE_001 ")]
+    public void ProcessNextBatch_GenericPathByteMismatchDoesNotBind(string nearNativeId)
+    {
+        using var temp = new MonitorTempDirectory();
+        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+        var hookSessionId = SeedClaudeSession(store, "BYTE_NATIVE_001", SessionBindingKind.Native);
+        var payload = BuildOtelPayload("generic-trace-4", "generic-span-4", nearNativeId);
+        InsertProjectedSpanWithPayload(temp.DatabasePath, "generic-trace-4", "generic-span-4", "unrecognized-client", "generic-repo", now, payload);
+
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+
+        Assert.DoesNotContain(store.GetDetail(hookSessionId)!.Events, item => item.SourceEventId == "generic-trace-4/generic-span-4");
+        Assert.Contains(store.ListMostRecent(10), item => item.SessionId != hookSessionId && item.Completeness == SessionCompleteness.Unbound);
+    }
+
+    private static string BuildOtelPayload(string traceId, string spanId, params string[] sessionIdValues)
+    {
+        var attributes = string.Join(",", sessionIdValues.Select(value =>
+            $$$"""{"key":"session.id","value":{"stringValue":"{{{value}}}"}}"""));
+        return $$$"""
+            {"resourceSpans":[{"scopeSpans":[{"spans":[
+              {"traceId":"{{{traceId}}}","spanId":"{{{spanId}}}","attributes":[{{{attributes}}}]}
+            ]}]}]}
+            """;
+    }
+
+    private static void InsertProjectedSpanWithPayload(
+        string databasePath, string traceId, string spanId, string clientKind, string repository, DateTimeOffset time, string payloadJson)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var transaction = connection.BeginTransaction();
+        using var raw = connection.CreateCommand();
+        raw.Transaction = transaction;
+        raw.CommandText = """
+            INSERT INTO raw_records(source,trace_id,received_at,payload_json,schema_version)
+            VALUES('raw-otlp',$trace_id,$time,$payload,1);
+            """;
+        raw.Parameters.AddWithValue("$trace_id", traceId);
+        raw.Parameters.AddWithValue("$time", time.ToString("O"));
+        raw.Parameters.AddWithValue("$payload", payloadJson);
+        raw.ExecuteNonQuery();
+        using var idCommand = connection.CreateCommand();
+        idCommand.Transaction = transaction;
+        idCommand.CommandText = "SELECT last_insert_rowid();";
+        var rawRecordId = (long)idCommand.ExecuteScalar()!;
+        using var trace = connection.CreateCommand();
+        trace.Transaction = transaction;
+        trace.CommandText = """
+            INSERT INTO monitor_traces(trace_id,client_kind,first_seen_at,last_seen_at,span_count,projected_at,repository_name)
+            VALUES($trace_id,$client_kind,$time,$time,1,$time,$repository);
+            """;
+        trace.Parameters.AddWithValue("$trace_id", traceId);
+        trace.Parameters.AddWithValue("$client_kind", clientKind);
+        trace.Parameters.AddWithValue("$time", time.ToString("O"));
+        trace.Parameters.AddWithValue("$repository", repository);
+        trace.ExecuteNonQuery();
+        using var span = connection.CreateCommand();
+        span.Transaction = transaction;
+        span.CommandText = """
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,start_time,projected_at)
+            VALUES($raw_record_id,$trace_id,$span_id,0,$time,$time);
+            """;
+        span.Parameters.AddWithValue("$raw_record_id", rawRecordId);
+        span.Parameters.AddWithValue("$trace_id", traceId);
+        span.Parameters.AddWithValue("$span_id", spanId);
+        span.Parameters.AddWithValue("$time", time.ToString("O"));
+        span.ExecuteNonQuery();
+        transaction.Commit();
     }
 
     [Theory]

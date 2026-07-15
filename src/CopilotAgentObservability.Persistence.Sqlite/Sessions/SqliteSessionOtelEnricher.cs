@@ -60,9 +60,10 @@ public sealed class SqliteSessionOtelEnricher
 
     private void Process(ProjectedSpan row)
     {
+        var claudeBoundSessionId = TryFindClaudeExactBinding(row);
         var traceSessionId = FindSessionByTraceId(row.TraceId);
-        var nativeSessionId = string.IsNullOrEmpty(row.ConversationId) ? null : FindUnambiguousSessionByNativeId(row.ConversationId);
-        var sessionId = traceSessionId ?? nativeSessionId ?? Guid.CreateVersion7();
+        var conversationSessionId = string.IsNullOrEmpty(row.ConversationId) ? null : FindUnambiguousSessionByNativeId(row.ConversationId);
+        var sessionId = claudeBoundSessionId ?? traceSessionId ?? conversationSessionId ?? Guid.CreateVersion7();
         var existing = store.GetDetail(sessionId);
         var confirmedSurface = ConfirmSurface(row.ClientKind);
         var eventId = Guid.CreateVersion7();
@@ -70,7 +71,7 @@ public sealed class SqliteSessionOtelEnricher
         var occurredAt = row.StartTime ?? row.ProjectedAt;
 
         var nativeIds = new List<SessionNativeId>();
-        if (nativeSessionId == sessionId && confirmedSurface is not null && row.ConversationId is not null
+        if (conversationSessionId == sessionId && confirmedSurface is not null && row.ConversationId is not null
             && existing!.NativeIds.All(item => item.SourceSurface != confirmedSurface.Value || !string.Equals(item.NativeSessionId, row.ConversationId, StringComparison.Ordinal)))
         {
             nativeIds.Add(new(sessionId, confirmedSurface.Value, row.ConversationId, SessionBindingKind.Native, occurredAt));
@@ -107,6 +108,22 @@ public sealed class SqliteSessionOtelEnricher
             eventId, sessionId, runId, confirmedSurface, null, row.TraceId, null,
             "otel-exact", $"{row.TraceId}/{row.SpanId}", "otel.span", occurredAt, SessionContentState.NotCaptured);
         store.Write(new(new(session, nativeIds, [run], [@event]), []));
+    }
+
+    // Issue #108 / D058: the exact native-session-ID resolver binds on its own
+    // session.id evidence alone. It must not require claude-code-otel adapter
+    // promotion (gated only by ProjectedSpan.IsClaudeCode for ProcessClaude);
+    // a span still labeled raw-otlp (or without an observation row at all)
+    // binds here on byte-identical session.id evidence.
+    private Guid? TryFindClaudeExactBinding(ProjectedSpan row)
+    {
+        if (row.PayloadJson is null)
+        {
+            return null;
+        }
+
+        var claudeNativeSessionId = ReadExactClaudeNativeSessionId(row.PayloadJson, row.TraceId, row.SpanId);
+        return claudeNativeSessionId is null ? null : FindClaudeBinding(claudeNativeSessionId);
     }
 
     private void ProcessClaude(ProjectedSpan row)
