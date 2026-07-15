@@ -548,17 +548,19 @@ other representation is accepted.
   array or value, member mismatch, noncanonical hash, or malformed JSON is
   tolerated.
 
-The tagged arm is valid only for a `file` target that is a new GitHub Copilot
-VS Code Default Profile JSONC record; its two permitted labels are
-`vscode-stable-default-user-settings` and
-`vscode-insiders-default-user-settings`. That target-kind/adapter/label arm
-relation is validated when an adapter record becomes the bound private plan and
-ledger record. New VS Code JSONC targets use only the tagged object; all other
-generic non-tagged file/TOML/opaque targets retain the canonical inline-string
+The tagged arm is valid only for a `SetupTargetKind.Json` target owned by the
+`github-copilot` adapter with label exactly
+`vscode-stable-default-user-settings` or
+`vscode-insiders-default-user-settings`: the two new VS Code Default Profile
+JSONC records. That target-kind/adapter/label arm relation is validated when an
+adapter record becomes the bound private plan and ledger record. These VS Code
+JSON records use only the tagged object; `SetupTargetKind.File`,
+`SetupTargetKind.Toml`, any other adapter or label, and every generic
+non-tagged file/TOML/opaque target retain or require the canonical inline-string
 arm. This is required v1 selection, not a fallback or migration path. The
 tagged object preserves only the owned desired values and expected complete-file
 hash, not a persisted rendered settings document or unowned input. A malformed,
-unknown, or invalid target-kind/arm private-plan union is
+unknown, invalid target-kind/arm, or inline arm on either VS Code JSON record is
 `recovery_required`, before registry/platform/target work.
 
 ## Ownership ledger v1
@@ -809,7 +811,8 @@ For a tagged JSONC target, successful adapter revalidation returns one
 transient materialization for each changed record and none for a `no-op`
 record. `SetupRevalidation` is an in-memory, per-apply carrier only: its
 record IDs are unique and, after excluding `no-op` records, its cardinality and
-order exactly match the tagged file records requiring a write. Each entry is
+order exactly match the tagged `SetupTargetKind.Json` records requiring a write.
+Each entry is
 the complete desired byte sequence plus the record ID and expected lowercase
 hash. Under the existing apply lock, `SetupApplyCoordinator` validates this
 identity/cardinality/hash contract, takes ownership of the bytes, and uses
@@ -1350,11 +1353,13 @@ Focused validation covers:
   restart-readable; task-04b first adds a separate production-serializer
   private-plan fixture containing legacy inline `desired_state`, then
   byte-compares its `SetupPlanStore` write-close-reopen output; inline is the
-  canonical arm for generic non-tagged file/TOML/opaque records, tagged is
-  valid only for VS Code file records, and unknown/missing properties, wrong
+  canonical arm for generic non-tagged file/TOML/opaque records; tagged is
+  accepted only for `SetupTargetKind.Json` `github-copilot` records with either
+  exact VS Code Default Profile label; `SetupTargetKind.File`,
+  `SetupTargetKind.Toml`, other adapters/labels, and inline on either VS Code
+  JSON record fail `recovery_required`, as do unknown/missing properties, wrong
   kind/value type, 0/1/2048/2049 string boundaries, duplicate/reordered keys,
-  non-1:1 members, invalid target-kind/arm relation, and non-lowercase hashes
-  fail `recovery_required`;
+  non-1:1 members, invalid target-kind/arm relation, and non-lowercase hashes;
 - JSONC/TOML malformed fail-closed behavior;
 - file backup/temp/atomic replace and non-reparse path policy;
 - deterministic stale apply/rollback and lock contention;
@@ -1482,7 +1487,7 @@ The setup implementation must keep this requirement-to-test mapping:
 | Requirement | Executable proof |
 | --- | --- |
 | strict unshipped v1 ledger snapshot, constructor/fixture coverage, immutable lifecycle updates, no migration/fallback | `SetupStorageTests` round-trip the production serializer and committed `Fixtures/Setup/v1/ownership-ledger.v1.json`; all ledger-target constructor fixtures in apply, compensation, rollback, and recovery tests compile with the required snapshot |
-| closed v1 private-plan desired-state union and secret-free JSONC plan representation | Before changing `SetupPlanStore` serialization, `SetupStorageTests` capture and commit `Fixtures/Setup/v1/private-plan.v1.json` from the production serializer with a legacy inline-string `desired_state`, then byte-compare production write-close-reopen output; they accept canonical inline generic file/TOML/opaque records and tagged VS Code file records only, reject every malformed/unknown/noncanonical/arm-mismatched union shape and 0/1/2048/2049 string boundary, and prove plan-time/revalidation markers are absent from plan/ledger/journal/log evidence except the private backup |
+| closed v1 private-plan desired-state union and secret-free JSONC plan representation | Before changing `SetupPlanStore` serialization, `SetupStorageTests` capture and commit `Fixtures/Setup/v1/private-plan.v1.json` from the production serializer with a legacy inline-string `desired_state`, then byte-compare production write-close-reopen output; they accept canonical inline generic file/TOML/opaque records and tagged `SetupTargetKind.Json` `github-copilot` records with either exact VS Code Default Profile label, reject tagged `SetupTargetKind.File`/`SetupTargetKind.Toml`/other-adapter/other-label records and inline on those VS Code JSON records, reject every malformed/unknown/noncanonical/arm-mismatched union shape and 0/1/2048/2049 string boundary, and prove plan-time/revalidation markers are absent from plan/ledger/journal/log evidence except the private backup |
 | new-plan exact-current manifest matching versus ledger-origin historical v1 validation | `SetupContractValidationTests` reject a non-current plan manifest; `SetupStorageTests` accept a schema-safe target-matched historical snapshot and reject unknown shape/code, unsafe data, surface mismatch, and cross-field mismatch |
 | finite legal snapshot under the retained ledger cap | `SetupStorageTests` construct the largest accepted 16-target/32-change shape with 128-code-unit versions and largest safe fields, prove it serializes below 1 MiB, and prove an over-cap complete ledger is rejected before replacement |
 | immutable status DTO fields, adapter not rerun, and guidance sample omission/rehydration | `SetupStatusTests` project from the ledger after current installation/policy/manifest facts change and use an adapter fake that fails if invoked; `SetupContractShapeTests` prove the fixed in-memory guidance sample validates while status JSON omits `sample` |

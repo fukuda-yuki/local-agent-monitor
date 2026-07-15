@@ -1861,9 +1861,12 @@ a thin argument/result wrapper.
   the canonical legacy inline string and proves `SetupPlanStore`
   write-close-reopen byte identity. Inline remains canonical for historical
   bytes and generic non-tagged file/TOML/opaque targets; tagged
-  `jsonc_owned_values_v1` is valid only for the two VS Code Default Profile
-  file records. Tagged string values are exactly 1..2048 UTF-16 units and its
-  expected state hash is lowercase. Unknown, malformed, or arm-mismatched
+  `jsonc_owned_values_v1` is valid only for `SetupTargetKind.Json` records
+  owned by `github-copilot` with the two VS Code Default Profile labels
+  `vscode-stable-default-user-settings` and
+  `vscode-insiders-default-user-settings`. Tagged string values are exactly
+  1..2048 UTF-16 units and its expected state hash is lowercase. Unknown,
+  malformed, or arm-mismatched
   union values fail `recovery_required`.
 - One physical file or current-user environment allowlist is one ledger target
   with one base/applied hash and backup; setting changes are bounded members.

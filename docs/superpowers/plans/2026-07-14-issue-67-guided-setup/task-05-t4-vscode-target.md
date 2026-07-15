@@ -43,7 +43,10 @@ other target subdirectory.
   types).
 - Produces: `VsCodeTargetPartition : IGitHubCopilotTargetPartition` with
   `TargetToken == "vscode"` — consumed by T7's composition only.
-- Emits: only the schema-v1 tagged `desired_state` object
+- Emits: only `SetupTargetKind.Json` records owned by `github-copilot` with
+  label `vscode-stable-default-user-settings` or
+  `vscode-insiders-default-user-settings` use the schema-v1 tagged
+  `desired_state` object
   `{"kind":"jsonc_owned_values_v1","expected_state_hash":...,"owned_values":[...]}`
   for new VS Code records. It never emits the canonical inline string retained
   for historical/generic non-tagged targets. `Revalidate` returns the matching transient
@@ -64,8 +67,9 @@ other target subdirectory.
   `--profile`; require `GitHub.copilot-chat`. Missing in any installed
   channel → `target_not_installed` + `install_github_copilot_chat_extension`,
   no partial plan.
-- Both channels eligible → two physical JSON targets, Stable then Insiders,
-  labels exactly `vscode-stable-default-user-settings` /
+- Both channels eligible → two physical `SetupTargetKind.Json` targets, Stable
+  then Insiders, owned by `github-copilot`, with labels exactly
+  `vscode-stable-default-user-settings` /
   `vscode-insiders-default-user-settings`.
 - Writable paths (per channel/OS, from T3a's path rule): Stable
   `%APPDATA%\Code\User\settings.json`,
@@ -165,11 +169,14 @@ other target subdirectory.
   diagnostics, ledger/journal/log evidence, and both committed
   ownership-ledger/private-plan fixtures, while the
   private prior-state backup alone is permitted to contain it). Add exact
-  tagged-union tests: no legacy string for VS Code; exact property sets and
+  tagged-union tests: accept only the two exact `SetupTargetKind.Json`
+  `github-copilot` VS Code labels; reject tagged `SetupTargetKind.File`/
+  `SetupTargetKind.Toml`/other-adapter/other-label records and an inline arm for
+  those VS Code JSON records as `recovery_required`; exact property sets and
   canonical order; 1:1 ordered unique owned values/members; boolean/string
   value types and exact string boundaries 0/1/2048/2049 UTF-16 units; lowercase
-  expected hash; unknown/malformed/noncanonical
-  union rejection as `recovery_required`. Add 1 MiB/1 MiB+sentinel settings
+  expected hash; unknown/malformed/noncanonical union rejection as
+  `recovery_required`. Add 1 MiB/1 MiB+sentinel settings
   boundaries for plan and `Revalidate`, both `malformed_settings` with no
   unbounded read/retry/artifact/write. Add transient-materialization tests for
   changed/no-op cardinality, exact record IDs/order/hash, comment/unowned-byte

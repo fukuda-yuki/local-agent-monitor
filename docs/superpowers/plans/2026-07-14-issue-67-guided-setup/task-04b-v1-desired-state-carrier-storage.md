@@ -55,13 +55,14 @@ used by `SetupChangeRecord` and `SetupPrivatePlanTarget`.
 The serializer chooses one arm from the carrier type; it never probes one shape
 and falls back to another. Loader/validation failure maps through the existing
 private-plan failure path to `recovery_required`, with no raw JSON/value in an
-exception or log. The tagged arm is valid only for `SetupTargetKind.File` and
+exception or log. The tagged arm is valid only for `SetupTargetKind.Json` and
 only when the bound adapter record is `github-copilot` with label
 `vscode-stable-default-user-settings` or
 `vscode-insiders-default-user-settings`; any other **tagged**
 target-kind/adapter/label combination fails `recovery_required`. The inline arm
-remains valid for the existing non-tagged v1 record shapes. New VS Code emission
-is owned by task-05, not this task.
+remains canonical for generic non-tagged v1 record shapes, but an inline arm on
+either of those VS Code JSON records fails `recovery_required`. New VS Code
+emission is owned by task-05, not this task.
 
 **Required tests:**
 
@@ -73,6 +74,10 @@ is owned by task-05, not this task.
 - Round-trip both valid v1 arms through the production serializer. Assert
   tagged property names/order, unique ordered 1:1 member keys, boolean/string
   types, exact 0/1/2048/2049 string boundary, and lowercase expected hash.
+- Accept tagged records only for the two exact `SetupTargetKind.Json`
+  `github-copilot` VS Code labels. Reject tagged `SetupTargetKind.File`,
+  `SetupTargetKind.Toml`, other-adapter, and other-label records, and reject an
+  inline arm on either accepted VS Code JSON record as `recovery_required`.
 - Reject every unknown/missing property, non-object/non-string arm, wrong tag,
   duplicate/reordered/missing/extra owned key, invalid member relation,
   wrong value type, empty/33-entry array, over-bound string, and uppercase or
@@ -95,7 +100,9 @@ is owned by task-05, not this task.
   Do not regenerate this fixture after the union serializer changes.
 - [ ] Add failing storage/registry tests for both union arms, distinct
   ownership-ledger/private-plan fixture identity and restart loading, structural
-  rejections, exact 0/1/2048/2049 boundaries, target-kind/arm validation, and
+  rejections, exact 0/1/2048/2049 boundaries, acceptance of the two JSON
+  records, rejection of `SetupTargetKind.File`/`SetupTargetKind.Toml`/
+  other-adapter/other-label tagged records and inline VS Code JSON records, and
   marker non-leakage.
 - [ ] Run RED:
 
@@ -137,8 +144,11 @@ JSONC documents or treating a private representation change as a migration.
   version, fixture rewrite, migration, fallback, public DTO, or catalog change
   exists.
 - The inline arm remains canonical for generic non-tagged file/TOML/opaque
-  records; the tagged arm is closed, 1:1 with members, exact-target-bound, and
-  fails closed at 0/1/2048/2049 string boundaries.
+  records; the tagged arm is closed, 1:1 with members, restricted to the two
+  exact `SetupTargetKind.Json` `github-copilot` VS Code labels, and fails closed
+  for `SetupTargetKind.File`/`SetupTargetKind.Toml`/other-adapter/other-label/
+  inline-VS-Code-JSON and at
+  0/1/2048/2049 string boundaries.
 - Focused suites, build, `git diff --check`, and a fresh security review PASS
   are recorded before task-04c starts.
 - Root/branch and status/diff scope gates pass before staging.

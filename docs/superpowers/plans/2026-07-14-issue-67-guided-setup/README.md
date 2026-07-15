@@ -81,8 +81,10 @@ Read before implementing any task, in this order:
   persistent environment surface and the only environment mutation target.
 - Private-plan `desired_state` remains schema v1. It is the closed union of the
   canonical inline-string arm for historical bytes and generic non-tagged
-  file/TOML/opaque targets, and the tagged `jsonc_owned_values_v1` arm for new
-  VS Code Default Profile JSONC file records only. The existing committed
+  file/TOML/opaque targets, and the tagged `jsonc_owned_values_v1` arm only for
+  `SetupTargetKind.Json` `github-copilot` records with the exact VS Code Default
+  Profile labels `vscode-stable-default-user-settings` or
+  `vscode-insiders-default-user-settings`. The existing committed
   ownership-ledger v1 fixture remains unchanged/restart-readable; task-04b
   captures a separate production-serializer private-plan fixture with the
   inline string before serializer changes. The two shapes are required v1

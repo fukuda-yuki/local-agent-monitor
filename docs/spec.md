@@ -91,9 +91,11 @@ captures a separate committed production-serializer private-plan v1 fixture
 with legacy inline-string `desired_state` and proves byte-identical
 write-close-reopen behavior. Inline is the canonical v1 arm for historical
 bytes and generic non-tagged file/TOML/opaque targets; a tagged
-`jsonc_owned_values_v1` object is valid only for the two GitHub Copilot VS Code
-Default Profile file labels. Tagged owned string values are exactly 1..2048
-UTF-16 units and the expected SHA-256 hash is lowercase. This is a required v1
+`jsonc_owned_values_v1` object is valid only for `SetupTargetKind.Json` records
+owned by the `github-copilot` adapter with the two VS Code Default Profile
+labels `vscode-stable-default-user-settings` and
+`vscode-insiders-default-user-settings`. Tagged owned string values are exactly
+1..2048 UTF-16 units and the expected SHA-256 hash is lowercase. This is a required v1
 union, not a migration, fallback, or schema-v2 path. It deliberately does not
 persist the complete JSONC document. Bounded Plan-time rendering may hold the
 complete document solely to calculate operations/hash and must discard it
