@@ -62,6 +62,23 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-dashboa
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-dashboard tmp\dashboard-demo\dashboard.json --out-dir tmp\dashboard-demo\site
 ```
 
+Guided setup smoke checks use the byte-faithful repository wrapper. Preserve the
+`change_set_id` returned by `plan` when exercising the mutating verbs:
+
+```powershell
+pwsh scripts\local-monitor\setup.ps1 plan --adapter github-copilot --target all
+pwsh scripts\local-monitor\setup.ps1 apply --change-set <change-set-id>
+pwsh scripts\local-monitor\setup.ps1 status --adapter github-copilot
+pwsh scripts\local-monitor\setup.ps1 rollback --change-set <change-set-id>
+```
+
+Each recognized setup verb returns one `setup.v1` object on stdout. The wrapper
+preserves Config CLI stdout bytes and exit code. Release validation must invoke
+the packaged `scripts/setup.ps1` with `dotnet` unavailable on child `PATH` and
+compare it with repository mode against the same isolated `LOCALAPPDATA` root.
+Static setup success does not prove telemetry receipt; `run_first_trace_doctor`
+is an Issue #69 handoff.
+
 For the complete Config CLI surface, use `docs/specifications/interfaces/config-cli.md` and the user guides.
 
 ## Working Order

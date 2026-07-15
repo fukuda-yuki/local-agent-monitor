@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -10,6 +11,7 @@ public class LocalMonitorScriptTests
         "common.ps1",
         "install.ps1",
         "package-release.ps1",
+        "setup.ps1",
         "start.ps1",
         "stop.ps1",
         "status.ps1",
@@ -118,6 +120,92 @@ public class LocalMonitorScriptTests
         Assert.Contains("Compress-Archive", package, StringComparison.Ordinal);
         Assert.Contains("$LASTEXITCODE", package, StringComparison.Ordinal);
         Assert.Contains("dotnet_publish_failed", package, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReleasePackageContainsSelfContainedConfigCliAndSetupWrapperHasRepositoryParityWithoutDotnet()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateTemporaryDirectory("cao-release-tests");
+        try
+        {
+            var outputDirectory = Path.Combine(root, "release");
+            var package = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                [
+                    "-NoProfile",
+                    "-File",
+                    ScriptPath("package-release.ps1"),
+                    "-OutputDirectory",
+                    outputDirectory,
+                    "-Version",
+                    "0.0.0-test",
+                ],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(10));
+
+            Assert.True(package.ExitCode == 0, $"Package failed: {package.StandardOutputText}{package.StandardErrorText}");
+
+            var staging = Path.Combine(outputDirectory, "staging");
+            var packagedSetup = Path.Combine(staging, "scripts", "setup.ps1");
+            var packagedCli = Path.Combine(staging, "app", "config-cli", "CopilotAgentObservability.ConfigCli.exe");
+            Assert.True(File.Exists(packagedSetup), "The release layout is missing scripts/setup.ps1.");
+            Assert.True(File.Exists(packagedCli), "The release layout is missing the self-contained Config CLI executable.");
+            Assert.True(File.Exists(Path.ChangeExtension(packagedCli, ".runtimeconfig.json")), "The Config CLI runtime configuration is missing.");
+
+            var zipPath = Path.Combine(outputDirectory, "local-monitor-win-x64.zip");
+            Assert.True(File.Exists(zipPath), "The release ZIP was not created.");
+            using (var archive = System.IO.Compression.ZipFile.OpenRead(zipPath))
+            {
+                Assert.Contains(archive.Entries, entry => entry.FullName == "scripts/setup.ps1");
+                Assert.Contains(archive.Entries, entry => entry.FullName == "app/config-cli/CopilotAgentObservability.ConfigCli.exe");
+            }
+
+            var runtimeRoot = Directory.CreateDirectory(Path.Combine(root, "runtime")).FullName;
+            var hiddenPath = Directory.CreateDirectory(Path.Combine(root, "path-without-dotnet")).FullName;
+            var repositoryEnvironment = new Dictionary<string, string?>
+            {
+                ["LOCALAPPDATA"] = runtimeRoot,
+                ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
+                ["DOTNET_NOLOGO"] = "1",
+            };
+            var packagedEnvironment = new Dictionary<string, string?>(repositoryEnvironment)
+            {
+                ["PATH"] = hiddenPath,
+                ["DOTNET_ROOT"] = null,
+                ["DOTNET_HOST_PATH"] = null,
+            };
+
+            var repository = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-File", ScriptPath("setup.ps1"), "status"],
+                repositoryEnvironment,
+                TimeSpan.FromMinutes(2));
+            var release = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-File", packagedSetup, "status"],
+                packagedEnvironment,
+                TimeSpan.FromMinutes(2));
+
+            Assert.Equal(0, repository.ExitCode);
+            Assert.Equal(repository.ExitCode, release.ExitCode);
+            Assert.Empty(repository.StandardErrorBytes);
+            Assert.Empty(release.StandardErrorBytes);
+            Assert.Equal(repository.StandardOutputBytes, release.StandardOutputBytes);
+
+            using var document = JsonDocument.Parse(release.StandardOutputBytes);
+            Assert.Equal("setup.v1", document.RootElement.GetProperty("contract_version").GetString());
+            Assert.Equal("status", document.RootElement.GetProperty("command").GetString());
+            Assert.Equal("status_ready", document.RootElement.GetProperty("code").GetString());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -499,10 +587,81 @@ public class LocalMonitorScriptTests
         return (process.ExitCode, output, error);
     }
 
-    private static string CreateTemporaryDirectory()
+    private static string PowerShellExecutablePath()
     {
-        var path = Path.Combine(Path.GetTempPath(), $"cao-hook-tests-{Guid.NewGuid():N}");
+        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var candidate = Path.Combine(directory, "pwsh.exe");
+            if (File.Exists(candidate))
+            {
+                return Path.GetFullPath(candidate);
+            }
+        }
+
+        throw new InvalidOperationException("pwsh.exe was not found on PATH.");
+    }
+
+    private static ProcessResult RunBoundedProcess(
+        string fileName,
+        IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string?>? environment,
+        TimeSpan timeout)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = fileName,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+            {
+                if (value is null)
+                {
+                    startInfo.Environment.Remove(name);
+                }
+                else
+                {
+                    startInfo.Environment[name] = value;
+                }
+            }
+        }
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Failed to start {fileName}.");
+        using var standardOutput = new MemoryStream();
+        using var standardError = new MemoryStream();
+        var outputCopy = process.StandardOutput.BaseStream.CopyToAsync(standardOutput);
+        var errorCopy = process.StandardError.BaseStream.CopyToAsync(standardError);
+        if (!process.WaitForExit((int)timeout.TotalMilliseconds))
+        {
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit();
+            throw new TimeoutException($"{fileName} exceeded the {timeout} process bound.");
+        }
+
+        Task.WhenAll(outputCopy, errorCopy).GetAwaiter().GetResult();
+        return new ProcessResult(process.ExitCode, standardOutput.ToArray(), standardError.ToArray());
+    }
+
+    private static string CreateTemporaryDirectory(string prefix = "cao-hook-tests")
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private sealed record ProcessResult(int ExitCode, byte[] StandardOutputBytes, byte[] StandardErrorBytes)
+    {
+        public string StandardOutputText => Encoding.UTF8.GetString(StandardOutputBytes);
+
+        public string StandardErrorText => Encoding.UTF8.GetString(StandardErrorBytes);
     }
 }

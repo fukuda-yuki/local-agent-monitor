@@ -5,8 +5,10 @@ These scripts operate LocalMonitor in two modes:
 - `DotnetRun`: repository-local development mode.
 - `Published`: Release ZIP / installed app mode.
 
-Both modes preserve the same loopback-only LocalMonitor boundary. The scripts
-do not edit VS Code, Copilot CLI, or Codex routing settings.
+Both modes preserve the same loopback-only LocalMonitor boundary. LocalMonitor
+lifecycle scripts do not edit VS Code, Copilot CLI, or Codex routing settings.
+The separate `setup.ps1` wrapper changes only an explicitly planned GitHub
+Copilot setup change set.
 
 ## Release ZIP Usage
 
@@ -45,6 +47,23 @@ Optional current-user telemetry environment:
 This persists raw-local-receiver / monitor routing in the current Windows
 user's environment for newly started VS Code and Copilot CLI processes. Restart
 already-running clients after changing it.
+
+Guided GitHub Copilot setup is available from the extracted Release ZIP. Copy
+the `change_set_id` from the plan result into the later commands:
+
+```powershell
+.\scripts\setup.ps1 plan --adapter github-copilot --target all
+.\scripts\setup.ps1 apply --change-set <change-set-id>
+.\scripts\setup.ps1 status --adapter github-copilot
+.\scripts\setup.ps1 rollback --change-set <change-set-id>
+```
+
+The wrapper invokes the packaged self-contained Config CLI under
+`app/config-cli/`; no installed .NET SDK or runtime is required. Each invocation
+preserves the CLI exit code and emits exactly one `setup.v1` JSON result on
+stdout. Setup success verifies static configuration only. It does not prove a
+trace arrived; the `run_first_trace_doctor` next action hands that verification
+off to Issue #69.
 
 Optional Copilot CLI / VS Code Session Hooks forwarding is a separate opt-in:
 
@@ -86,6 +105,15 @@ Remove runtime data only when explicitly intended:
 .\scripts\local-monitor\install-startup-task.ps1 -StartNow
 ```
 
+The same guided setup flow uses the repository Config CLI project:
+
+```powershell
+.\scripts\local-monitor\setup.ps1 plan --adapter github-copilot --target all
+.\scripts\local-monitor\setup.ps1 apply --change-set <change-set-id>
+.\scripts\local-monitor\setup.ps1 status --adapter github-copilot
+.\scripts\local-monitor\setup.ps1 rollback --change-set <change-set-id>
+```
+
 Point VS Code / Copilot Chat at the monitor with the existing Config CLI source
 of truth for a single shell:
 
@@ -111,8 +139,10 @@ pwsh scripts\local-monitor\package-release.ps1
 ```
 
 The package script creates `artifacts\local-monitor-release\local-monitor-win-x64.zip`.
-The ZIP contains the published app, scripts, README, manifest, and notices. It
-must not contain runtime DB, logs, state, raw telemetry, credentials, or PII.
+The ZIP contains the published LocalMonitor app, the self-contained Config CLI
+under `app/config-cli/`, `scripts/setup.ps1`, the remaining scripts, README,
+manifest, and notices. It must not contain runtime DB, logs, state, raw
+telemetry, credentials, or PII.
 
 ## Defaults
 

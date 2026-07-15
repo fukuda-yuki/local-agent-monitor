@@ -44,10 +44,23 @@ The `setup` command family is the reversible configuration surface introduced
 by Issues #66/#67. It does not replace or change the output of existing manual
 profile generators. `setup plan` creates an immutable private plan;
 `setup apply` and `setup rollback` require its UUIDv7 change-set ID. Every setup
-command emits exactly one `setup.v1` JSON result, and stderr contains only a
-fixed result code. The canonical ledger, DTO, error, transaction, policy, and
-GitHub Copilot target rules are defined in
+command emits exactly one `setup.v1` JSON result on stdout, and stderr contains
+only the fixed result code for a non-success result. The process exit code is
+the `setup.v1` code-to-exit mapping defined by the canonical setup interface;
+the PowerShell wrapper must preserve the Config CLI stdout bytes and exit code.
+The canonical ledger, DTO, error, transaction, policy, command-result mapping,
+and GitHub Copilot target rules are defined in
 [configuration-setup.md](configuration-setup.md).
+
+Repository mode invokes the current
+`src/CopilotAgentObservability.ConfigCli/CopilotAgentObservability.ConfigCli.csproj`
+through `dotnet`. A packaged `scripts/setup.ps1` detects the sibling
+`../app/config-cli/` release layout and invokes its self-contained
+`CopilotAgentObservability.ConfigCli.exe` directly. The packaged command must
+not require an installed .NET SDK or runtime, and for the same private runtime
+state it must return the same `setup.v1` stdout bytes and exit code as repository
+mode. This selection changes only executable discovery; argument forwarding,
+stdout, stderr, and exit semantics stay identical.
 
 For the `raw-local-receiver` profile, `profile-vscode-env` selects which local
 raw target the generated VS Code environment points at:
