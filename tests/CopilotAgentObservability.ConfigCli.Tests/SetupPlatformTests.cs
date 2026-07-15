@@ -303,6 +303,11 @@ public sealed class SetupPlatformTests
     {
         var operations = new List<string>();
         var platform = new SystemSetupPlatform(
+            notificationAttempt: () =>
+            {
+                operations.Add("user.notify");
+                return true;
+            },
             userEnvironmentRead: (name, target) =>
             {
                 operations.Add($"get:{name}:{target}");
@@ -323,6 +328,30 @@ public sealed class SetupPlatformTests
             "set:VALUE::User",
         ],
         operations);
+    }
+
+    [Fact]
+    public void SystemPlatform_ProcessEnvironmentSeamReadsCurrentProcessWithoutUsingUserEnvironment()
+    {
+        var operations = new List<string>();
+        var platform = new SystemSetupPlatform(
+            userEnvironmentRead: (name, target) =>
+            {
+                operations.Add($"user.get:{name}:{target}");
+                return "user-value";
+            },
+            userEnvironmentWrite: (name, value, target) =>
+                operations.Add($"user.set:{name}:{target}"),
+            processEnvironmentRead: (name, target) =>
+            {
+                operations.Add($"process.get:{name}:{target}");
+                return "current-process-value";
+            });
+
+        var value = platform.ProcessEnvironment.Get("VALUE");
+
+        Assert.Equal("current-process-value", value);
+        Assert.Equal(["process.get:VALUE:Process"], operations);
     }
 
     [Fact]
@@ -403,6 +432,40 @@ public sealed class SetupPlatformTests
             "environment.get:COPILOT_OTEL_ENABLED",
         ],
         platform.Operations);
+    }
+
+    [Fact]
+    public void TestPlatform_ProcessEnvironmentIsSeparateReadOnlyStore()
+    {
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedProcessEnvironment("VALUE", "process-value");
+        platform.SeedUserEnvironment("VALUE", "user-value");
+
+        Assert.Equal("process-value", platform.ProcessEnvironment.Get("VALUE"));
+        Assert.Equal(["process-environment.get:VALUE"], platform.Operations);
+        Assert.Equal("process-value", platform.ReadProcessEnvironment("VALUE"));
+        Assert.Equal("user-value", platform.ReadUserEnvironment("VALUE"));
+    }
+
+    [Fact]
+    public void TestPlatform_ProcessEnvironmentReturnsDeterministicMissingPresentAndEmptyValues()
+    {
+        const string marker = "process-only-marker";
+        var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
+        platform.SeedProcessEnvironment("PRESENT", marker);
+        platform.SeedProcessEnvironment("EMPTY", string.Empty);
+
+        Assert.Null(platform.ProcessEnvironment.Get("MISSING"));
+        Assert.Equal(marker, platform.ProcessEnvironment.Get("PRESENT"));
+        Assert.Equal(string.Empty, platform.ProcessEnvironment.Get("EMPTY"));
+        Assert.Equal(
+        [
+            "process-environment.get:MISSING",
+            "process-environment.get:PRESENT",
+            "process-environment.get:EMPTY",
+        ],
+        platform.Operations);
+        Assert.DoesNotContain(marker, string.Join('\n', platform.Operations));
     }
 
     [Fact]

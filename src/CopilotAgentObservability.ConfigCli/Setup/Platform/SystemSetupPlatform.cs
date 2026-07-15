@@ -19,11 +19,13 @@ public sealed class SystemSetupPlatform : ISetupPlatform
         string? localApplicationData = null,
         Func<string, FileStream>? exclusiveFileLockAttempt = null,
         Func<string, EnvironmentVariableTarget, string?>? userEnvironmentRead = null,
-        Action<string, string?, EnvironmentVariableTarget>? userEnvironmentWrite = null)
+        Action<string, string?, EnvironmentVariableTarget>? userEnvironmentWrite = null,
+        Func<string, EnvironmentVariableTarget, string?>? processEnvironmentRead = null)
     {
         LocalApplicationData = localApplicationData ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         FileSystem = new SystemSetupFileSystem(exclusiveFileLockAttempt);
         UserEnvironment = new SystemSetupUserEnvironment(notificationAttempt, userEnvironmentRead, userEnvironmentWrite);
+        ProcessEnvironment = new SystemSetupProcessEnvironment(processEnvironmentRead);
         Clock = new SystemSetupClock();
         Identifiers = new SystemSetupIdentifierGenerator();
         Execution = execution ?? NoOpSetupExecution.Instance;
@@ -40,6 +42,8 @@ public sealed class SystemSetupPlatform : ISetupPlatform
     public ISetupFileSystem FileSystem { get; }
 
     public ISetupUserEnvironment UserEnvironment { get; }
+
+    public ISetupProcessEnvironment ProcessEnvironment { get; }
 
     public ISetupClock Clock { get; }
 
@@ -472,6 +476,18 @@ public sealed class SystemSetupPlatform : ISetupPlatform
         {
             public void Dispose() => stream.Dispose();
         }
+    }
+
+    private sealed class SystemSetupProcessEnvironment : ISetupProcessEnvironment
+    {
+        private readonly Func<string, EnvironmentVariableTarget, string?> read;
+
+        public SystemSetupProcessEnvironment(Func<string, EnvironmentVariableTarget, string?>? read)
+        {
+            this.read = read ?? Environment.GetEnvironmentVariable;
+        }
+
+        public string? Get(string name) => read(name, EnvironmentVariableTarget.Process);
     }
 
     private sealed class SystemSetupUserEnvironment : ISetupUserEnvironment

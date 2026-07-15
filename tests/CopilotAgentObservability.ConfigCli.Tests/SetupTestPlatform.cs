@@ -7,6 +7,7 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     private readonly object gate = new();
     private readonly Dictionary<string, byte[]> files;
     private readonly Dictionary<string, string?> environment;
+    private readonly Dictionary<string, string?> processEnvironment;
     private readonly Dictionary<string, Queue<(Exception Exception, Action? Callback)>> faults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<(Exception Exception, Action? Callback)>> afterEffectFaults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SetupTestBarrierState> barriers = new(StringComparer.Ordinal);
@@ -30,12 +31,14 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         var pathComparer = pathStyle == SetupPathStyle.Windows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         files = new Dictionary<string, byte[]>(pathComparer);
         environment = new Dictionary<string, string?>(pathComparer);
+        processEnvironment = new Dictionary<string, string?>(pathComparer);
         pathMetadata = new Dictionary<string, SetupPathMetadata>(pathComparer);
         exclusiveLocks = new HashSet<string>(pathComparer);
         Clock = new SetupTestClock(utcNow);
         Identifiers = new SetupTestIdentifierGenerator();
         FileSystem = new SetupTestFileSystem(this);
         UserEnvironment = new SetupTestUserEnvironment(this);
+        ProcessEnvironment = new SetupTestProcessEnvironment(this);
         Execution = new SetupTestExecution(this);
         OperatingSystem = new SetupTestOperatingSystem(planningOs, applicationData, userProfile);
         ProcessRunner = new SetupTestProcessRunner(this);
@@ -50,6 +53,8 @@ internal sealed class SetupTestPlatform : ISetupPlatform
     public ISetupFileSystem FileSystem { get; }
 
     public ISetupUserEnvironment UserEnvironment { get; }
+
+    public ISetupProcessEnvironment ProcessEnvironment { get; }
 
     public ISetupClock Clock { get; }
 
@@ -139,11 +144,27 @@ internal sealed class SetupTestPlatform : ISetupPlatform
         }
     }
 
+    public void SeedProcessEnvironment(string name, string? value)
+    {
+        lock (gate)
+        {
+            processEnvironment[name] = value;
+        }
+    }
+
     public string? ReadUserEnvironment(string name)
     {
         lock (gate)
         {
             return environment.TryGetValue(name, out var value) ? value : null;
+        }
+    }
+
+    public string? ReadProcessEnvironment(string name)
+    {
+        lock (gate)
+        {
+            return processEnvironment.TryGetValue(name, out var value) ? value : null;
         }
     }
 
@@ -517,6 +538,18 @@ internal sealed class SetupTestPlatform : ISetupPlatform
             if (Interlocked.Exchange(ref disposed, 1) == 0)
             {
                 platform.ReleaseExclusiveFileLock(path);
+            }
+        }
+    }
+
+    private sealed class SetupTestProcessEnvironment(SetupTestPlatform platform) : ISetupProcessEnvironment
+    {
+        public string? Get(string name)
+        {
+            platform.Record($"process-environment.get:{name}");
+            lock (platform.gate)
+            {
+                return platform.processEnvironment.TryGetValue(name, out var value) ? value : null;
             }
         }
     }

@@ -10,6 +10,8 @@ public interface ISetupPlatform
 
     ISetupUserEnvironment UserEnvironment { get; }
 
+    ISetupProcessEnvironment ProcessEnvironment { get; }
+
     ISetupClock Clock { get; }
 
     ISetupIdentifierGenerator Identifiers { get; }
@@ -67,6 +69,11 @@ public interface ISetupUserEnvironment
     void Set(string name, string? value);
 
     void NotifyChange();
+}
+
+public interface ISetupProcessEnvironment
+{
+    string? Get(string name);
 }
 
 public interface ISetupClock
