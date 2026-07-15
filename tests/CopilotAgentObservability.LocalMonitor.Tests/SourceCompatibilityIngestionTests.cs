@@ -123,6 +123,72 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.Equal(0, projectionStore.GetSpanProjectionStatus().Backlog);
     }
 
+    [Theory]
+    [InlineData(ClaudeInteractionWithUserPrompt, "available")]
+    [InlineData(ClaudeInteractionWithoutGatedField, "not_captured")]
+    [InlineData(ForeignSpanOnly, "unsupported")]
+    public async Task PostTraces_DerivesTraceContentStateFromClaudeSpanEvidence(string payload, string expectedContentState)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+        });
+
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var rawStore = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var projectionStore = new RawTelemetryStoreProjectionStore(rawStore);
+        var health = new MonitorHealthState();
+        health.MarkMigrationComplete();
+        var worker = new ProjectionWorker(
+            projectionStore,
+            health,
+            new SqliteSourceCompatibilityStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
+        await worker.RunProjectionPassAsync();
+
+        var tracesResponse = await host.Client.GetAsync("/api/monitor/traces");
+        Assert.Equal(HttpStatusCode.OK, tracesResponse.StatusCode);
+        using var tracesJson = JsonDocument.Parse(await tracesResponse.Content.ReadAsStringAsync());
+        var item = Assert.Single(tracesJson.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal(expectedContentState, item.GetProperty("content_state").GetString());
+    }
+
+    private const string ClaudeInteractionWithUserPrompt = """
+        {"resourceSpans":[{"scopeSpans":[{"spans":[{
+          "traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId":"1111111111111111",
+          "name":"claude_code.interaction",
+          "startTimeUnixNano":"1000000000",
+          "endTimeUnixNano":"1500000000",
+          "attributes":[{"key":"user_prompt","value":{"stringValue":"synthetic-marker"}}]
+        }]}]}]}
+        """;
+
+    private const string ClaudeInteractionWithoutGatedField = """
+        {"resourceSpans":[{"scopeSpans":[{"spans":[{
+          "traceId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "spanId":"2222222222222222",
+          "name":"claude_code.interaction",
+          "startTimeUnixNano":"1000000000",
+          "endTimeUnixNano":"1500000000",
+          "attributes":[{"key":"session.id","value":{"stringValue":"synthetic-marker"}}]
+        }]}]}]}
+        """;
+
+    private const string ForeignSpanOnly = """
+        {"resourceSpans":[{"scopeSpans":[{"spans":[{
+          "traceId":"cccccccccccccccccccccccccccccccc",
+          "spanId":"3333333333333333",
+          "name":"chat gpt-4o",
+          "startTimeUnixNano":"1000000000",
+          "endTimeUnixNano":"1500000000",
+          "attributes":[]
+        }]}]}]}
+        """;
+
     [Fact]
     public async Task PostTraces_NewFingerprintIsCommittedAsDrift()
     {
