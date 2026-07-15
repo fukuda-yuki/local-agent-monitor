@@ -24,11 +24,15 @@ resource, new project, or dependency is added.
 **Tech stack:** .NET (existing ConfigCli project), xunit, deterministic
 platform fakes (`SetupTestPlatform`). No new PackageReference.
 
-**Prerequisite gate:** The Issue #66 T2 gate must have passed first — every
-card in the authoritative dependency order in
-`docs/superpowers/plans/2026-07-14-issue-66-t2-completion/` (including Task
-01a's v1 restart evidence and Task 04a's rollback carrier) must be complete
-with review PASS. No task in this directory starts before that.
+**Prerequisite gate (reopened):** The former Issue #66 T2 gate is not approved
+for Issue #67 work until the T0 corrections below pass. The authoritative #66
+dependency order remains a prerequisite (including Task 01a's v1 restart
+evidence and Task 04a's rollback carrier), but the Task 05 review findings I1,
+I4, and I5 reopen the shared generic boundary. No target task T4/T5/T6 and no
+T7 composition starts until `task-04a`, `task-04b`, and `task-04c` are
+committed, independently reviewed, and receive fresh security, concurrency,
+and recovery review PASS verdicts. This is a gate correction, not a change to
+the historical Issue #66 cards or their ledger.
 
 T3d may add one skeletal, explicitly non-gating compatibility smoke test using
 the real aggregate adapter, scripted partitions, the real #66 registry/
@@ -72,6 +76,27 @@ Read before implementing any task, in this order:
 - Adapters never construct `SetupCommandResult`, never serialize JSON, never
   write through a platform API outside the #66 coordinator, and never touch
   the dispatcher/CLI/wrapper files.
+- `ISetupProcessEnvironment` is the read-only current-process observation
+  surface. `ISetupPlatform.UserEnvironment` remains the separate current-user
+  persistent environment surface and the only environment mutation target.
+- Private-plan `desired_state` remains schema v1. It is the closed union of the
+  byte-identical/restart-readable legacy inline string required for the
+  committed real v1 fixture and the new tagged
+  `jsonc_owned_values_v1` object. The two shapes are v1 representations, not
+  migration, fallback, compatibility, or schema-v2 paths. New VS Code records
+  emit the tagged shape only. It has exactly `kind`, `expected_state_hash`, and
+  1..32 ordered unique `owned_values`; each value is 1:1 with a member, typed,
+  bounded, and the expected hash is lowercase 64-hex.
+- JSONC reads during VS Code plan/revalidation are bounded to 1 MiB plus one
+  sentinel byte; malformed/oversize maps to `malformed_settings`. A different
+  but still-supported persisted version is `recovery_required`.
+- `SetupRevalidation` carries complete JSONC bytes only transiently under the
+  existing apply lock. The coordinator validates exact changed-record IDs,
+  order/cardinality, and expected hashes, then owns/discards the bytes. No-op
+  records have no materialization but keep their generic base guard. Plan,
+  ledger, journal, status, logs, and repository-safe evidence never contain
+  those bytes; recovery never rematerializes and uses expected/journal hashes
+  plus backup in every crash window.
 - Manifest pairing: VS Code targets pair `github-copilot-vscode`, CLI pairs
   `github-copilot-cli` via `SourceCapabilityManifestLoader`; App/SDK has a
   null manifest. A new plan must equal the current canonical manifest exactly
@@ -105,6 +130,18 @@ task-02 T3b managed    task-03 T3c endpoint
    v
 task-04 T3d aggregate adapter + partition seam (freeze)
    |
+   v
+task-04a T0a current-process environment observation
+   |
+   v
+task-04b T0b v1 desired-state union/carrier/storage
+   |
+   v
+task-04c T0c transient JSONC materialization transaction
+   |
+   v
+fresh #66 security + concurrency + recovery reviews PASS
+   |
    +--------------+---------------+
    v              v               v
 task-05 T4     task-06 T5      task-07 T6     (may run in parallel)
@@ -121,18 +158,22 @@ task-09 T8 packaging, wrapper parity, operator docs
 task-10 T9 final reviews, full validation, ledger closeout
 ```
 
-Task-02/03 and task-05/06/07 are the only permitted parallel groups; their
-production/test files are disjoint. When run in parallel, each still gets its
-own independent review, and workers do not revert concurrent edits.
+Task-02/03 and task-05/06/07 are the only permitted parallel groups; the latter
+opens only after all three correction cards and the fresh three-perspective
+review gate PASS. Their production/test files are disjoint. When run in
+parallel, each still gets its own independent review, and workers do not revert
+concurrent edits.
 
 ## Delegation protocol (per task)
 
 For every Codex run state explicitly: objective, owned scope, non-scope,
-constraints, completion criteria, validation commands, and report
-destination — all in the task card. Use a different, fresh read-only Codex
-run for each independent review. Do not accept "DONE" or pass counts alone;
-map each requirement to the exact executable test and inspect the diff and
-command output.
+constraints, completion criteria, validation commands, report destination,
+and the upstream gate it consumes — all in the task card. Use a different,
+fresh read-only Codex run for each independent review. Do not accept "DONE" or
+pass counts alone; map each requirement to the exact executable test and
+inspect the diff and command output. The correction gate requires separate
+fresh PASS findings for data safety/security, lock/concurrency, and
+apply/rollback/recovery crash windows.
 
 ## Validation commands
 
@@ -154,17 +195,19 @@ dotnet test CopilotAgentObservability.slnx
 
 ## Ledger update policy
 
-Same as the #66 plan: after each task's independent review passes, append its
-evidence row to
-`docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md` in a
-documentation-only commit. Task-10 (T9) performs the final sprint-wide
-closeout update.
+Do not edit `docs/sprints/sprint23-configuration-ownership-github-copilot/ledger.md`
+as part of T0 correction or target implementation work. After the applicable
+independent review PASS, a separate documentation-only step may record evidence
+in the ledger. Task-10 (T9) remains the final sprint-wide closeout owner.
 
 ## Stop conditions
 
 - No target task (05–07) may declare Issue #67 behavior complete; only
   task-08's real-producer integration gate proves the cross-surface contract.
   A fake adapter cannot satisfy that gate.
+- T5/T6/T7 are blocked while any T0 correction card, security review,
+  concurrency review, or recovery review is not PASS. A finding reopens its
+  owner and invalidates this gate before downstream work resumes.
 - A finding reopens the owning task and invalidates downstream gates; two
   consecutive fix cycles in one area trigger a contract/test-design re-audit
   before more code.

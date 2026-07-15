@@ -84,6 +84,19 @@ ownership quorum, but their fresh base-state guard still participates in the
 same change-set-wide rollback preflight used by rollback itself. The complete
 ledger retains its 1 MiB cap; finitely bounded snapshot fields must permit the
 largest legal single change set to fit without adding a second cap or pruning.
+Private-plan `desired_state` remains schema v1 and is a closed union: the
+existing committed real fixture's legacy inline string is retained byte-for-byte
+and restart-readable, while new JSONC targets use only a tagged
+`jsonc_owned_values_v1` object containing bounded owned values and an expected
+lowercase SHA-256 state hash. This is a v1 union, not a migration, fallback, or
+schema-v2 path. It deliberately does not persist the complete JSONC document.
+Apply-time adapter revalidation materializes complete desired bytes only under
+the existing lock; the coordinator verifies record identity/cardinality/hash,
+keeps bytes transient, and persists hashes only. Recovery never rematerializes:
+it classifies every crash window from the expected/journal hashes and flushed
+backup. Malformed union/carrier data fails `recovery_required` before an
+artifact or target write. No-op records produce no materialization but retain
+their generic base-state guard.
 Results distinguish requested/created and recovered change-set IDs. No HTTP,
 proxy, Canvas, or Local Monitor UI DTO is added.
 
@@ -117,10 +130,16 @@ Setup recognizes Local Monitor only by
 a bounded no-redirect `GET /health/live` response, using one 500 ms budget and
 4096 payload bytes plus a sentinel byte (or valid `Content-Length`) for the
 oversize boundary. Every connect/read/total timeout is a foreign-owner result.
-Apply revalidates endpoint, policy,
-VS Code/CLI version, extension presence, and planned member semantics before
-creating mutation artifacts, and never treats a static success as first-trace
-receipt. Applying a persisted plan whose adapter is no longer registered
+VS Code settings reads are bounded at 1 MiB plus one sentinel byte during both
+plan and revalidation; malformed/oversize data is `malformed_settings`. Its
+new plans are tagged-only, and a different version that remains above the
+minimum is version drift (`recovery_required`) rather than silently accepted.
+Current-process environment reads use a distinct read-only platform surface;
+the existing user-environment surface remains the only Windows persistent
+writer. Apply revalidates endpoint, policy, VS Code/CLI version, extension
+presence, and planned member semantics before creating mutation artifacts, and
+never treats a static success as first-trace receipt. Applying a persisted plan
+whose adapter is no longer registered
 returns `unsupported_adapter` with no mutation artifact or state transition.
 The complete contract is
 [configuration setup](specifications/interfaces/configuration-setup.md) and the

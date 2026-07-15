@@ -4,10 +4,15 @@
 Profile `settings.json` planning for Stable and Insiders 1.128+, exact
 telemetry members with JSONC preservation, managed-policy and enterprise-
 policy gating, endpoint gating, content-capture opt-in, non-default-profile
-warning, restart guidance, and apply-time revalidation.
+warning, restart guidance, and apply-time revalidation. New VS Code records
+persist only the tagged v1 owned-values desired state; complete JSONC bytes are
+materialized transiently under the generic apply lock.
 
-**Depends on:** task-04 (T3d) committed and reviewed (seam frozen). May run
-in parallel with tasks 06/07; the file sets are disjoint.
+**Depends on:** task-04 (T3d), task-04a, task-04b, and task-04c committed and
+reviewed, plus the fresh #66 security/concurrency/recovery review PASS required
+by the README. The former #66 gate is reopened for these corrections. This task
+may run in parallel with tasks 06/07 only after that gate; the file sets remain
+disjoint.
 
 **Files (T4 ownership):**
 - Create: everything under
@@ -34,6 +39,12 @@ other target subdirectory.
   types).
 - Produces: `VsCodeTargetPartition : IGitHubCopilotTargetPartition` with
   `TargetToken == "vscode"` — consumed by T7's composition only.
+- Emits: only the schema-v1 tagged `desired_state` object
+  `{"kind":"jsonc_owned_values_v1","expected_state_hash":...,"owned_values":[...]}`
+  for new VS Code records. It never emits the legacy inline string retained for
+  the committed v1 fixture. `Revalidate` returns the matching transient
+  materialized bytes only for changed records; no-op records have no carrier
+  entry and retain the generic base-state guard.
 
 **Contract (spec "VS Code GitHub Copilot Chat" — encode verbatim):**
 - Channels: Stable (`code`) and Insiders (`code-insiders`), each 1.128.0+.
@@ -64,6 +75,17 @@ other target subdirectory.
   with `--include-content-capture` it proposes `true` as a separate member
   change in the same file target and emits `content_capture_sensitive` +
   `review_content_capture_warning`.
+- JSONC read/materialization: plan and revalidation read each Default Profile
+  settings file through exactly a 1 MiB payload bound plus one sentinel byte.
+  Oversize or malformed JSONC returns `malformed_settings` with no private
+  plan, artifact, target write, retry, or unbounded read. Planning preserves
+  unrelated bytes in the transient desired document only, stores the exact
+  tagged owned values in member order and the lowercase hash of that complete
+  desired document, and stores no complete JSONC bytes. Revalidation parses
+  and re-derives the owned member facts, preserves comments/formatting and
+  unrelated keys in its transient materialization, then requires its bytes to
+  hash exactly to the persisted `expected_state_hash`; a mismatch is
+  `recovery_required` before artifacts or writes.
 - Non-default profiles: if either channel has any, warning
   `vscode_non_default_profiles_not_modified` exactly once; profile files are
   never opened/hashed/parsed/planned/backed up/written/rolled back (prove
@@ -102,7 +124,10 @@ other target subdirectory.
   endpoint checks against persisted facts through the partition `Revalidate`;
   differing → the matching preflight failure code, fresh warnings/actions;
   unchanged → `Revalidated` with fresh warnings (e.g. unverified policy
-  persists). Make zero `--status` calls during `Revalidate`; do not persist,
+  persists). A different VS Code version that still meets 1.128.0 is supported-
+  version drift and returns `recovery_required`; missing/below-floor versions
+  retain `target_not_installed`/`unsupported_version`. Make zero `--status`
+  calls during `Revalidate`; do not persist,
   compare, recompute, alter, or fail apply/preflight on the ephemeral
   running-state observation or the persisted per-target restart requirement.
 - JSONC: unknown keys/comments/formatting outside owned members preserved
@@ -129,8 +154,19 @@ other target subdirectory.
   plan failure; no retry/sleep; `--status` raw-output non-leakage; JSONC
   preservation; revalidation happy/differing rows with zero `--status` calls
   and unchanged persisted per-target restart requirements; secret-marker
-  negative test (inject a marker as an existing settings value; assert no
-  record/projection/failure carries it).
+  negative test (inject a marker as an existing unrelated settings value;
+  assert it is absent from records, tagged private plan, revalidation carrier
+  diagnostics, ledger/journal/log evidence, and committed fixture, while the
+  private prior-state backup alone is permitted to contain it). Add exact
+  tagged-union tests: no legacy string for VS Code; exact property sets and
+  canonical order; 1:1 ordered unique owned values/members; boolean/string
+  value types and bounds; lowercase expected hash; unknown/malformed/noncanonical
+  union rejection as `recovery_required`. Add 1 MiB/1 MiB+sentinel settings
+  boundaries for plan and `Revalidate`, both `malformed_settings` with no
+  unbounded read/retry/artifact/write. Add transient-materialization tests for
+  changed/no-op cardinality, exact record IDs/order/hash, comment/unowned-byte
+  preservation, hash mismatch → `recovery_required`, and a still-supported
+  version change → `recovery_required` with zero artifacts/writes.
 
 - [ ] **Step 2: Run RED.**
 
@@ -167,11 +203,13 @@ git diff --check
 ## Completion criteria
 
 - Every contract bullet above has at least one executable case, including
-  the profile no-open and secret-marker negative proofs.
+  the profile no-open, 1 MiB-plus-sentinel, tagged-union, transient
+  materialization, supported-version-drift, and secret-marker negative proofs.
 - No T3-owned or shared file edited (`git diff --stat` shows only the two
   owned locations).
 - Full ConfigCli suite and build pass; independent review PASS. This task
   does NOT claim end-to-end #67 behavior — that is task-08's gate.
 
-**Report destination:** chat + ledger row per README policy. Record
+**Report destination:** chat only. Do not edit the sprint ledger during this
+correction task; a separate post-review documentation step owns it. Record
 fake-only macOS/Linux path coverage as unverified scope.

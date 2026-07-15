@@ -1853,7 +1853,12 @@ a thin argument/result wrapper.
   values; exact previous state is captured only in apply-time backups. Version 1 is the first shipped schema; unknown versions
   fail closed and no synthetic v0 migration is invented. The complete ledger
   retains its 1 MiB cap; bounded snapshots add no second cap or automatic
-  pruning, so finite history capacity is accepted.
+  pruning, so finite history capacity is accepted. Private-plan
+  `desired_state` is a closed v1 union, not a migration or fallback: the legacy
+  inline JSON string remains exactly for the committed real v1 fixture, which
+  stays byte-identical and restart-readable; new JSONC targets use only tagged
+  `jsonc_owned_values_v1` with bounded owned values and a lowercase expected
+  state hash. Unknown or malformed union values fail `recovery_required`.
 - One physical file or current-user environment allowlist is one ledger target
   with one base/applied hash and backup; setting changes are bounded members.
   Apply preflights every base hash and path before writing, flushes backups and
@@ -1863,7 +1868,14 @@ a thin argument/result wrapper.
   apply/rollback journals before normal work; unresolved recovery permits status
   only. Rollback is all-target hash guarded,
   one change set at a time, and has no force mode. Concurrency uses an exclusive
-  non-waiting lock; tests use barriers/fault points rather than sleeps.
+  non-waiting lock; tests use barriers/fault points rather than sleeps. A
+  tagged JSONC target persists no full rendered document: `SetupRevalidation`
+  carries its complete desired bytes only under that lock, and the coordinator
+  validates exact record identity/cardinality/hash before it creates artifacts
+  or writes. Ledger and journal retain hashes only. Recovery never calls the
+  adapter or rematerializes JSONC; it uses expected/journal hashes and backups
+  through every interruption window. No-op records add no materialization but
+  retain their generic base-state guard.
 - Apply verifies all desired file/member states again before commit. Every
   compensation or rollback restore reclassifies current state immediately
   before writing; a third-party state is preserved and makes the change set
@@ -1894,7 +1906,11 @@ a thin argument/result wrapper.
   CLI 1.0.4+ writes the exact bounded current-user OTel environment allowlist on
   Windows only. macOS/Linux detect and plan the CLI target, but apply returns
   `unsupported_target` without a shell-profile or target write. GitHub Copilot
-  App/SDK is caller-managed guidance and performs no write.
+  App/SDK is caller-managed guidance and performs no write. Current-process
+  environment observation is a separate read-only platform interface; it never
+  aliases the current-user persistent environment API or becomes a mutation
+  target. VS Code `settings.json` reads are 1 MiB plus one sentinel byte in
+  plan and revalidation; malformed/oversize input is `malformed_settings`.
 - Copilot managed-settings channels use native > server > file precedence and
   the highest present channel wins wholesale without field merging. Its native
   sources are only Windows `HKEY_LOCAL_MACHINE\SOFTWARE\Policies\GitHubCopilot`
@@ -1926,7 +1942,9 @@ a thin argument/result wrapper.
   `recovered_change_set_id` and `recovery_operation`. Apply revalidates target
   OS support, version, VS Code Default Profile extension presence, managed
   state, exact logical members, and loopback endpoint ownership immediately
-  before creating mutation artifacts. Applying a valid persisted plan after its
+  before creating mutation artifacts. A changed version that remains supported
+  is `recovery_required`, not an implicit update of the persisted contract.
+  Applying a valid persisted plan after its
   adapter is removed from the registry is the allowed
   `apply`/`unsupported_adapter` result and leaves the existing plan/ledger
   unchanged. Status is bounded to 100 entries with

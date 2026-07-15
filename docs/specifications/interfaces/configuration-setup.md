@@ -520,6 +520,36 @@ v1 target missing it, containing unknown projection fields, or violating its
 cross-field invariants is `ledger_corrupt`; the loader does not fall back to
 adapter rediscovery, a private-plan reconstruction, or an older v1 shape.
 
+Private plan `desired_state` is also a closed schema-v1 JSON union. It is not a
+schema-v2 change, a migration, a compatibility layer, or a parse fallback:
+the JSON token type selects exactly one of the two v1 representations, and no
+other representation is accepted.
+
+- A JSON string is the legacy inline representation. It is retained exactly
+  and only so the already committed real v1 fixture remains byte-identical and
+  restart-readable. No conversion, rewrite, or synthetic migration of that
+  fixture is permitted.
+- A JSON object is a new JSONC-owned-values representation. It has exactly the
+  properties `kind`, `expected_state_hash`, and `owned_values`, in that
+  canonical write order. `kind` is exactly `jsonc_owned_values_v1` and
+  `expected_state_hash` is exactly one lowercase 64-hex SHA-256 value. Its
+  `owned_values` array has 1 through 32 entries, each with exactly
+  `setting_key`, `value_kind`, and `value` in that write order. Keys are unique,
+  are ordered exactly as the target's ordered members, and correspond 1:1 to
+  those members. `value_kind` is exactly `boolean` (a JSON boolean `value`) or
+  `string` (a JSON string `value` of at most 2,048 UTF-16 code units). No
+  unknown property, duplicate key, wrong JSON value type, empty/over-bound
+  array or value, member mismatch, noncanonical hash, or malformed JSON is
+  tolerated.
+
+New JSONC targets use only the tagged object; the VS Code partition never
+emits the legacy string. The tagged object preserves only the owned desired
+values and their expected complete-file hash, not a rendered settings document
+or unowned input. A malformed or unknown private-plan desired-state union is
+`recovery_required`, before registry/platform/target work. The loaded v1
+fixture remains an acceptance input, not evidence that new targets may choose
+the legacy representation.
+
 ## Ownership ledger v1
 
 The ledger root has `schema_version: 1` and a `change_sets` array. Every change
@@ -653,6 +683,13 @@ or unsupported TOML before a plan is persisted. Issue #67 does not write TOML;
 a later adapter must extend the codec contract before accepting a broader TOML
 shape.
 
+VS Code reads `settings.json` through a 1 MiB payload bound plus one sentinel
+byte. A trustworthy length over 1 MiB, a sentinel byte after 1 MiB, malformed
+JSONC, or a JSONC value outside the owned-value contract is
+`malformed_settings` during both planning and revalidation. No bounded-read
+failure may cause an unbounded retry, a best-effort rewrite, a persisted plan,
+or a mutation artifact.
+
 ## Transaction and concurrency rules
 
 The coordinator acquires `setup.lock` with an exclusive, non-waiting file lock.
@@ -737,7 +774,9 @@ notification, or any target write:
 2. the planning OS still permits that target operation; a macOS/Linux Copilot
    CLI plan returns the command-matrix `unsupported_target` result;
 3. every planned VS Code/CLI channel is still installed at the recorded
-   supported version (`target_not_installed` or `unsupported_version`);
+   supported version (`target_not_installed` or `unsupported_version`); a
+   different version that is still supported is version drift and returns
+   `recovery_required` rather than silently accepting a newly observed target;
 4. every planned VS Code channel still has `GitHub.copilot-chat` installed in
    its Default Profile (`target_not_installed`);
 5. Copilot managed-channel selection and the independent VS Code enterprise
@@ -751,6 +790,30 @@ notification, or any target write:
 8. every distinct endpoint passes the exact recognition probe below, with no
    listener remaining a warning and every other non-recognition outcome
    returning `port_owned_by_foreign_process`.
+
+For a tagged JSONC target, successful adapter revalidation returns one
+transient materialization for each changed record and none for a `no-op`
+record. `SetupRevalidation` is an in-memory, per-apply carrier only: its
+record IDs are unique and, after excluding `no-op` records, its cardinality and
+order exactly match the tagged file records requiring a write. Each entry is
+the complete desired byte sequence plus the record ID and expected lowercase
+hash. Under the existing apply lock, `SetupApplyCoordinator` validates this
+identity/cardinality/hash contract, takes ownership of the bytes, and uses
+them for capture, stale checking, backup/journal construction, replacement,
+and final verification. A missing, duplicate, extra, reordered, mismatched, or
+hash-incorrect entry is `recovery_required` before any artifact or target
+write. The aggregate adapter ignores `no-op` records for materialization; the
+generic base-state guard still captures every planned record, including
+all-`no-op` targets.
+
+Materialized bytes never enter a private plan, ledger, journal, status result,
+log, exception mapping, or repository-safe test evidence. Durable journal and
+ledger fields carry hashes only. Recovery never calls an adapter or
+re-materializes JSONC: in every before-intent, after-intent, after-replace,
+after-completion, compensation, and rollback crash window it classifies files
+using the tagged `expected_state_hash`, the journal hashes, and the flushed
+backup. This preserves the same hash/backup evidence even if the current
+settings JSONC cannot later be parsed.
 
 After this adapter preflight, the generic all-target base/path/hash/reparse
 preflight runs. Any failure in either phase creates no mutation artifact and
@@ -917,8 +980,8 @@ The adapter/backend/CLI source contract is:
 
 | Selected target | Adapter detection/plan source | Physical target DTO | Apply-time adapter source | Mutation owner |
 | --- | --- | --- | --- | --- |
-| `vscode` | Stable/Insiders executable version, per-channel Default Profile extension list and user settings, one bounded per-eligible-channel running-state observation, current environment, read-only Copilot managed channels plus independent VS Code enterprise policies, endpoint probe, canonical `github-copilot-vscode` manifest | one JSON target per eligible installed channel, Stable then Insiders; labels are exactly `vscode-stable-default-user-settings` and `vscode-insiders-default-user-settings`; `expected_result` is the exact manifest | persisted channel/OS/member facts revalidated against current version, Default Profile extension, both policy systems, settings members, and endpoint; the ephemeral running-state observation is not persisted or compared | generic #66 file transaction only |
-| `cli` | Copilot CLI version, current process environment, Windows current-user environment when available, endpoint probe, canonical `github-copilot-cli` manifest; managed sources are deliberately not opened | one `copilot-cli-user-environment` env target; `expected_result` is the exact manifest; macOS/Linux plan remains inspectable but non-applicable | persisted OS/version/member/endpoint facts; Windows is writable, macOS/Linux returns `unsupported_target` | generic #66 Windows user-environment transaction only |
+| `vscode` | Stable/Insiders executable version, per-channel Default Profile extension list and user settings, one bounded per-eligible-channel running-state observation, current process environment, read-only Copilot managed channels plus independent VS Code enterprise policies, endpoint probe, canonical `github-copilot-vscode` manifest | one JSON target per eligible installed channel, Stable then Insiders; labels are exactly `vscode-stable-default-user-settings` and `vscode-insiders-default-user-settings`; `expected_result` is the exact manifest | persisted channel/OS/member facts revalidated against current version (including supported-version drift), Default Profile extension, both policy systems, bounded settings members, and endpoint; the ephemeral running-state observation is not persisted or compared | generic #66 file transaction only with transient tagged-JSONC materialization |
+| `cli` | Copilot CLI version, read-only current-process environment and, on Windows, the distinct current-user environment, endpoint probe, canonical `github-copilot-cli` manifest; managed sources are deliberately not opened | one `copilot-cli-user-environment` env target; `expected_result` is the exact manifest; macOS/Linux plan remains inspectable but non-applicable | persisted OS/version/member/endpoint facts; Windows is writable, macOS/Linux returns `unsupported_target` | generic #66 Windows user-environment transaction only |
 | `app-sdk` | current repository .NET package/version and canonical fixed sample | one `github-copilot-app-sdk-guidance` no-write guidance target with null `expected_result` | no target revalidation or write | none |
 
 Adapters produce the internal plan/record types; the coordinator alone produces
@@ -987,6 +1050,19 @@ The writable user settings are:
 - `github.copilot.chat.otel.enabled = true`;
 - `github.copilot.chat.otel.exporterType = "otlp-http"`;
 - `github.copilot.chat.otel.otlpEndpoint = <validated loopback endpoint>`.
+
+Every newly planned VS Code target serializes `desired_state` only as the
+tagged `jsonc_owned_values_v1` v1 object. Its expected hash is the hash of the
+complete JSONC-preserving desired bytes calculated at plan time, while its
+owned values are exactly the planned members in member order. The complete
+bytes are deliberately not persisted. At apply, revalidation first re-reads
+the bounded current settings, confirms all persisted logical member and
+effective-source facts, then materializes the complete desired bytes under the
+apply lock. It returns those bytes only through the transient revalidation
+carrier and only when the record is not `no-op`; a hash mismatch or a
+different-but-supported VS Code version is `recovery_required` before an
+artifact or write. A missing channel remains `target_not_installed`, and a
+below-floor version remains `unsupported_version`.
 
 The default plan does not add, remove, or change
 `github.copilot.chat.otel.captureContent`. With
@@ -1104,10 +1180,15 @@ artifacts; a then-conflicting value returns the same code/action and no write.
 Setup never removes or rewrites the override.
 
 On Windows, the plan displays current-process versus current-user environment
-state and warns `shared_user_environment_affects_other_processes`. Apply uses
-only the Windows current-user environment API/HKCU user environment and
-broadcasts the framework notification; already-running terminals and Copilot
-CLI sessions require `restart_terminal_session`.
+state and warns `shared_user_environment_affects_other_processes`. These are
+separate observation surfaces: `ISetupProcessEnvironment` is read-only and
+reads only the current Config CLI process, while `ISetupPlatform.UserEnvironment`
+continues to mean the Windows current-user persistent environment. The
+current-process surface has no set/delete/notify operation and is never used as
+the mutation target. Apply uses only the Windows current-user environment
+API/HKCU user environment and broadcasts the framework notification;
+already-running terminals and Copilot CLI sessions require
+`restart_terminal_session`.
 
 On macOS and Linux, detection, version validation, endpoint probing, manifest
 selection, and redacted plan creation still run, so the user can inspect the
@@ -1227,11 +1308,16 @@ must not contain:
 - prompts, responses, tool inputs/results, source fragments, or PII.
 
 Negative tests inject markers into every input boundary and assert that no
-serialized command result, ledger, log, exception mapping, private plan, or
-committed fixture contains previous-state secret/value markers. A flushed local
-backup is allowed to contain exact previous state because it is the rollback
-source; tests instead prove that backup content is never serialized or logged.
-Fixtures are synthetic and use the production DTO serializer.
+serialized command result, ledger, journal, log, exception mapping, tagged
+private plan, transient-carrier diagnostic, or committed fixture contains a
+previous-state secret/value marker. Complete materialized JSONC bytes may exist
+only in the in-memory apply carrier and target write path; they are never
+serialized or surfaced as evidence. A flushed local backup is allowed to
+contain exact previous state because it is the rollback source; tests instead
+prove that backup content is never serialized or logged. Tests also prove the
+committed real v1 fixture is byte-identical before and after the union work and
+is restart-readable through the production loader. Fixtures are synthetic and
+use the production DTO serializer.
 
 ## Validation
 
@@ -1241,6 +1327,12 @@ Focused validation covers:
   validation, plan/current-manifest versus ledger/historical-manifest validation,
   128-code-unit detected-version boundary, missing-snapshot/unknown-version
   rejection, and largest-legal-change-set size below the retained 1 MiB cap;
+- private-plan v1 `desired_state` union serialization/load validation: the
+  committed real v1 fixture remains byte-identical and restart-readable; legacy
+  inline strings are accepted only as that v1 representation; tagged JSONC
+  values reject unknown/missing properties, wrong kind/value type, duplicate or
+  reordered keys, non-1:1 members, over-bound values, and non-lowercase hashes
+  as `recovery_required`;
 - JSONC/TOML malformed fail-closed behavior;
 - file backup/temp/atomic replace and non-reparse path policy;
 - deterministic stale apply/rollback and lock contention;
@@ -1270,7 +1362,8 @@ Focused validation covers:
   changes, including terminal missing-plan/unavailable classification;
 - endpoint, supported-version, and managed-state changes between plan and apply
   plus VS Code extension/member changes between plan and apply produce no
-  mutation artifacts or target writes;
+  mutation artifacts or target writes; a still-supported persisted-version
+  drift is specifically `recovery_required`;
 - endpoint recognition covers exact 200 JSON, whitespace, refused/no-listener,
   every 3xx without redirect following, non-200, connect/read/total timeout,
   valid oversized `Content-Length`, sentinel-based 4096/4097-byte boundaries,
@@ -1279,7 +1372,9 @@ Focused validation covers:
 - VS Code Stable/Insiders Default Profile path selection on Windows/macOS/Linux,
   deterministic dual-channel order, non-default-profile warning de-duplication,
   exact no-`--profile` extension-listing commands, and proof that no non-default
-  profile is created, selected, opened, or included in a plan;
+  profile is created, selected, opened, or included in a plan; plan and
+  revalidation settings reads prove the exact 1 MiB-plus-sentinel limit and
+  `malformed_settings` mapping;
 - VS Code running-state observation uses exactly one `--status` call per
   eligible channel after successful version/extension gates in Stable-then-
   Insiders order, with zero calls on an early gate failure or during
@@ -1314,6 +1409,19 @@ Focused validation covers:
 - adapter plan/revalidation success and sanitized failure carriers preserve
   their closed warnings/actions, while unexpected/framework failures cannot
   leak exception text or invent diagnostics;
+- current-process environment observation is read-only and distinct from the
+  current-user persistent environment writer; process values never become a
+  mutation target;
+- tagged JSONC apply materialization has exact changed-record identity,
+  cardinality, order, and expected-hash validation under the existing apply
+  lock; no-op records produce no materialization while retaining their generic
+  base-state guard; malformed carrier results produce `recovery_required`
+  before artifacts or writes;
+- materialized settings bytes appear only transiently during apply and are
+  absent from plans, ledger, journals, logs, and repository-safe evidence;
+  deterministic crashes before/after intent, replacement, completion,
+  compensation, and rollback prove recovery uses expected hashes plus backups
+  and never calls the adapter or rematerializes JSONC;
 - non-status targets use adapter order for plan and immutable ledger order for
   apply/rollback, with prospective versus actual rollback availability proven
   separately; plan `no_changes` persists an inspectable private plan and
@@ -1351,6 +1459,7 @@ The setup implementation must keep this requirement-to-test mapping:
 | Requirement | Executable proof |
 | --- | --- |
 | strict unshipped v1 snapshot, constructor/fixture coverage, immutable lifecycle updates, no migration/fallback | `SetupStorageTests` round-trip the production serializer and committed `Fixtures/Setup/v1/ownership-ledger.v1.json`; all ledger-target constructor fixtures in apply, compensation, rollback, and recovery tests compile with the required snapshot |
+| closed v1 private-plan desired-state union and secret-free JSONC plan representation | `SetupStorageTests` byte-compare and restart-load the committed real v1 fixture, accept the exact legacy string representation and the exact tagged object, and reject every malformed/unknown/noncanonical union shape; `SetupApplyTests` and `SetupRecoveryTests` prove a previous-state marker is absent from plan/ledger/journal/log evidence except the private backup |
 | new-plan exact-current manifest matching versus ledger-origin historical v1 validation | `SetupContractValidationTests` reject a non-current plan manifest; `SetupStorageTests` accept a schema-safe target-matched historical snapshot and reject unknown shape/code, unsafe data, surface mismatch, and cross-field mismatch |
 | finite legal snapshot under the retained ledger cap | `SetupStorageTests` construct the largest accepted 16-target/32-change shape with 128-code-unit versions and largest safe fields, prove it serializes below 1 MiB, and prove an over-cap complete ledger is rejected before replacement |
 | immutable status DTO fields, adapter not rerun, and guidance sample omission/rehydration | `SetupStatusTests` project from the ledger after current installation/policy/manifest facts change and use an adapter fake that fails if invoked; `SetupContractShapeTests` prove the fixed in-memory guidance sample validates while status JSON omits `sample` |
@@ -1364,7 +1473,7 @@ The setup implementation must keep this requirement-to-test mapping:
 | exact lock/recovery ownership and post-recovery resolution | `SetupCommandDispatcherTests` prove plan/apply one non-waiting lock and one recovery call, plan registry and persisted-apply adapter resolution only afterward, rollback recovery only inside `SetupRollbackCoordinator` under the same lock, and status lock/recovery only inside `SetupStatusService` |
 | diagnostics carrier and non-status target projection ownership | `SetupAdapterRegistryTests` and `SetupCommandDispatcherTests` serialize production plan/revalidation success and sanitized failure carriers, prove closed warning/action preservation and exception redaction, adapter-versus-ledger target source/order, prospective plan versus actual apply rollback availability, and rollback-false results |
 | no-change persistence and missing durable artifact distinctions | `SetupCommandDispatcherTests` prove `plan`/`no_changes` persists a private plan plus `planned` ledger row and later apply reaches terminal `no_changes`; paired apply/rollback/status cases distinguish no row, orphan plan, matching row with missing/unreadable/mismatched plan, and ineligible lifecycle without target activity |
-| VS Code channel/profile, running-state, and managed-source contract | `VsCodeSetupAdapterTests` cover Stable/Insiders Default Profiles on all three OS path maps, exact no-`--profile` extension commands, dual-channel order, fixed non-default warning/no-create/no-open behavior, Copilot whole-channel precedence, independent enterprise-policy equality/conflict, and apply-time version/extension/policy/member revalidation. They also assert exactly one post-gate Stable-then-Insiders `--status` call per eligible channel, zero calls after an early gate failure and during `Revalidate`, no retry/sleep, no stdout leakage, all representable observations (`Completed` with zero, null, or nonzero exit; `NotFound`; `Failed`; `TimedOut`), and the four dual-channel per-record restart combinations with top-level action deduplication only; revalidation proves persisted record requirements are unchanged. Contract shape/validation tests close the warning/action values. |
+| VS Code channel/profile, running-state, and managed-source contract | `VsCodeSetupAdapterTests` cover Stable/Insiders Default Profiles on all three OS path maps, exact no-`--profile` extension commands, dual-channel order, fixed non-default warning/no-create/no-open behavior, Copilot whole-channel precedence, independent enterprise-policy equality/conflict, and apply-time version/extension/policy/member revalidation. They assert the exact tagged v1 `desired_state` union (never an inline document), 1 MiB-plus-sentinel settings reads, supported-version drift as `recovery_required`, and transient materialization with exact expected hash. They also assert exactly one post-gate Stable-then-Insiders `--status` call per eligible channel, zero calls after an early gate failure and during `Revalidate`, no retry/sleep, no stdout leakage, all representable observations (`Completed` with zero, null, or nonzero exit; `NotFound`; `Failed`; `TimedOut`), and the four dual-channel per-record restart combinations with top-level action deduplication only; revalidation proves persisted record requirements are unchanged. Contract shape/validation tests close the warning/action values. |
 | Copilot CLI OS and exact environment contract | `CopilotCliSetupAdapterTests` cover the five-member explicit-capture allowlist, forbidden global identity/resource/header/credential keys, matching/conflicting detect-only trace protocol override, environment-only managed warning, Windows apply, and macOS/Linux no-write apply refusal; contract shape/validation tests close the new code/warning/action values |
 | cross-platform private setup root | `SetupRuntimeTests` cover Windows/macOS/Linux local-application-data mappings, absolute and invalid/unset `XDG_DATA_HOME`, injected platform base, and absence of a CLI/environment override |
 | Local Monitor recognition | `GitHubCopilotEndpointProbeTests` cover the 500 ms/no-redirect/4096-byte-plus-sentinel or oversized-`Content-Length`/exact-JSON matrix and fixed refused-versus-timeout/connected failure mapping |
