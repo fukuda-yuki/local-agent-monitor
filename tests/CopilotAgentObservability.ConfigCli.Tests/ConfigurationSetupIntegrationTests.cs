@@ -1,0 +1,658 @@
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot.AppSdk;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot.CopilotCli;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot.VsCode;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
+using CopilotAgentObservability.ConfigCli.Setup.Cli;
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Platform;
+using CopilotAgentObservability.ConfigCli.Setup.Storage;
+using CopilotAgentObservability.ConfigCli.Setup.Transactions;
+
+namespace CopilotAgentObservability.ConfigCli.Tests;
+
+public sealed class ConfigurationSetupIntegrationTests
+{
+    private const string Endpoint = "http://127.0.0.1:4320";
+    private const string StableSettingsPath = "C:\\Users\\setup-test\\AppData\\Roaming\\Code\\User\\settings.json";
+    private const string InsidersSettingsPath = "C:\\Users\\setup-test\\AppData\\Roaming\\Code - Insiders\\User\\settings.json";
+    private const string AppSdkProjectPath = "src\\CopilotAgentObservability.LocalMonitor\\CopilotAgentObservability.LocalMonitor.csproj";
+    private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+    private static readonly string[] CliMembers =
+    [
+        "COPILOT_OTEL_ENABLED",
+        "COPILOT_OTEL_EXPORTER_TYPE",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+    ];
+
+    [Fact]
+    public void Plan_All_UsesTheProductionCompositionAndPersistsTheOrderedManifestPairedChangeSet()
+    {
+        var platform = CreatePlatform();
+        platform.SeedFile(StableSettingsPath, "{}"u8.ToArray());
+        platform.SeedFile(InsidersSettingsPath, "{}"u8.ToArray());
+        platform.SeedFile(
+            AppSdkProjectPath,
+            "<Project><ItemGroup><PackageReference Include=\"GitHub.Copilot.SDK\" Version=\"1.0.4\" /></ItemGroup></Project>"u8.ToArray());
+        ScriptAllInstalled(platform);
+        ScriptLiveEndpoint(platform);
+        var harness = new IntegrationHarness(platform);
+
+        var result = harness.Plan("all");
+
+        Assert.Equal(SetupCodes.PlanReady, result.Code);
+        Assert.Equal(
+            [
+                "vscode-stable-default-user-settings",
+                "vscode-insiders-default-user-settings",
+                "copilot-cli-user-environment",
+                "github-copilot-app-sdk-guidance",
+            ],
+            result.Targets.Select(target => target.TargetLabel));
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(result.Targets[0].ExpectedResult!.Value));
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(result.Targets[1].ExpectedResult!.Value));
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(result.Targets[2].ExpectedResult!.Value));
+        Assert.Null(result.Targets[3].ExpectedResult);
+        Assert.True(result.Targets[3].Detected);
+
+        var changeSetId = ParseChangeSetId(result);
+        var privatePlan = Assert.IsType<SetupPrivatePlan>(harness.PlanStore.Load(changeSetId));
+        var ledgerRow = Assert.Single(harness.LedgerStore.Load().ChangeSets);
+        Assert.Equal(changeSetId, privatePlan.ChangeSetId);
+        Assert.Equal(changeSetId, ledgerRow.ChangeSetId);
+        Assert.Equal(result.Targets.Select(target => target.RecordId), privatePlan.Targets.Select(target => target.RecordId.ToString("D")));
+        Assert.Equal(result.Targets.Select(target => target.RecordId), ledgerRow.Targets.Select(target => target.RecordId.ToString("D")));
+        Assert.All(result.Targets.Zip(ledgerRow.Targets), pair =>
+        {
+            if (pair.First.ExpectedResult is null)
+            {
+                Assert.Null(pair.Second.StatusProjection.ExpectedResult);
+                return;
+            }
+
+            Assert.NotNull(pair.Second.StatusProjection.ExpectedResult);
+            Assert.True(JsonElement.DeepEquals(
+                pair.First.ExpectedResult.Value,
+                pair.Second.StatusProjection.ExpectedResult.Value));
+        });
+    }
+
+    [Fact]
+    public void Apply_WindowsCli_UsesTheRealTransactionAndEstablishesRollbackOwnership()
+    {
+        var platform = CreatePlatform();
+        ScriptCliOperations(platform, 2);
+        ScriptLiveEndpoint(platform, 2);
+        var harness = new IntegrationHarness(platform);
+
+        var plan = harness.Plan("cli");
+        var changeSetId = ParseChangeSetId(plan);
+        var apply = harness.Apply(changeSetId);
+
+        Assert.Equal(SetupCodes.ApplySucceeded, apply.Code);
+        var target = Assert.Single(apply.Targets);
+        Assert.True(target.RollbackAvailable);
+        Assert.Equal(
+            ["true", "otlp-http", Endpoint, "http/protobuf"],
+            CliMembers.Select(platform.ReadUserEnvironment));
+        var ledgerRow = Assert.Single(harness.LedgerStore.Load().ChangeSets);
+        Assert.Equal(SetupChangeSetState.Applied, ledgerRow.State);
+        Assert.Equal(SetupCodes.ApplySucceeded, ledgerRow.OutcomeCode);
+        var ledgerTarget = Assert.Single(ledgerRow.Targets);
+        Assert.Equal(SetupLedgerRollbackStatus.Pending, ledgerTarget.RollbackStatus);
+        Assert.NotNull(ledgerTarget.AppliedStateHash);
+        Assert.NotNull(ledgerTarget.BackupReference);
+        Assert.True(platform.FileSystem.FileExists(harness.Paths.GetBackup(changeSetId, ledgerTarget.RecordId)));
+        Assert.True(platform.FileSystem.FileExists(harness.Paths.GetTransactionJournal(changeSetId)));
+    }
+
+    [Fact]
+    public void Rollback_WindowsCli_RestoresTheRealTransactionAndClearsRollbackAvailability()
+    {
+        var platform = CreatePlatform();
+        ScriptCliOperations(platform, 2);
+        ScriptLiveEndpoint(platform, 2);
+        var harness = new IntegrationHarness(platform);
+        var changeSetId = ParseChangeSetId(harness.Plan("cli"));
+        Assert.Equal(SetupCodes.ApplySucceeded, harness.Apply(changeSetId).Code);
+
+        var rollback = harness.Rollback(changeSetId);
+
+        Assert.Equal(SetupCodes.RollbackSucceeded, rollback.Code);
+        Assert.All(rollback.Targets, target => Assert.False(target.RollbackAvailable));
+        Assert.All(CliMembers, member => Assert.Null(platform.ReadUserEnvironment(member)));
+        var ledgerRow = Assert.Single(harness.LedgerStore.Load().ChangeSets);
+        Assert.Equal(SetupChangeSetState.RolledBack, ledgerRow.State);
+        Assert.Equal(SetupCodes.RollbackSucceeded, ledgerRow.OutcomeCode);
+        Assert.Equal(SetupLedgerRollbackStatus.Succeeded, Assert.Single(ledgerRow.Targets).RollbackStatus);
+    }
+
+    [Fact]
+    public async Task Apply_VsCodeEditAtTheStaleBoundary_PreservesTheConcurrentBytesAndCreatesNoMutationArtifact()
+    {
+        var platform = CreatePlatform();
+        SeedDirectoryChain(platform, Path.GetDirectoryName(StableSettingsPath)!);
+        platform.SeedFile(StableSettingsPath, "{}"u8.ToArray());
+        ScriptVsCodeStableOperations(platform, planAndApply: true);
+        ScriptLiveEndpoint(platform, 2);
+        var harness = new IntegrationHarness(platform);
+        var changeSetId = ParseChangeSetId(harness.Plan("vscode"));
+        var recordId = Assert.Single(harness.PlanStore.Load(changeSetId)!.Targets).RecordId;
+        var externalBytes = "{\"external\":true}"u8.ToArray();
+        var operationStart = platform.Operations.Count;
+        using var barrier = platform.AddBarrier($"file.read:{StableSettingsPath}");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var applyTask = Task.Run(() => harness.Apply(changeSetId));
+        barrier.WaitUntilReached(cancellation.Token);
+        platform.SeedFile(StableSettingsPath, externalBytes);
+        barrier.Release();
+        var apply = await applyTask;
+
+        Assert.Equal(SetupCodes.StalePlan, apply.Code);
+        Assert.Equal(externalBytes, platform.ReadSeededFile(StableSettingsPath));
+        Assert.False(platform.FileSystem.FileExists(harness.Paths.GetBackup(changeSetId, recordId)));
+        Assert.False(platform.FileSystem.FileExists(harness.Paths.GetTransactionJournal(changeSetId)));
+        Assert.DoesNotContain(
+            platform.Operations.Skip(operationStart),
+            operation => operation.StartsWith("file.replace:", StringComparison.Ordinal) &&
+                operation.EndsWith("->" + StableSettingsPath, StringComparison.Ordinal));
+        Assert.DoesNotContain(platform.Operations.Skip(operationStart), operation => operation.StartsWith("environment.set:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void RepeatedNoOp_WindowsCli_PersistsInspectablePlansWithoutTargetWritesOrOwnership()
+    {
+        var platform = CreatePlatform();
+        SeedDesiredCliEnvironment(platform);
+        ScriptCliOperations(platform, 4);
+        ScriptLiveEndpoint(platform, 4);
+        var harness = new IntegrationHarness(platform);
+        var operationStart = platform.Operations.Count;
+
+        var firstPlan = harness.Plan("cli");
+        var firstApply = harness.Apply(ParseChangeSetId(firstPlan));
+        var secondPlan = harness.Plan("cli");
+        var secondApply = harness.Apply(ParseChangeSetId(secondPlan));
+
+        Assert.Equal(SetupCodes.NoChanges, firstPlan.Code);
+        Assert.Equal(SetupCodes.NoChanges, firstApply.Code);
+        Assert.Equal(SetupCodes.NoChanges, secondPlan.Code);
+        Assert.Equal(SetupCodes.NoChanges, secondApply.Code);
+        Assert.All(firstPlan.Targets.Concat(firstApply.Targets).Concat(secondPlan.Targets).Concat(secondApply.Targets), target => Assert.False(target.RollbackAvailable));
+        Assert.DoesNotContain(platform.Operations.Skip(operationStart), operation => operation.StartsWith("environment.set:", StringComparison.Ordinal));
+        Assert.DoesNotContain("environment.notify", platform.Operations.Skip(operationStart));
+        Assert.All(harness.LedgerStore.Load().ChangeSets, row =>
+        {
+            Assert.Equal(SetupChangeSetState.NoChanges, row.State);
+            Assert.Null(Assert.Single(row.Targets).BackupReference);
+        });
+    }
+
+    [Fact]
+    public void Apply_RemovedAdapter_ReturnsTheExceptionalPairWithoutChangingDurableBytesOrStartingTargetActivity()
+    {
+        var platform = CreatePlatform();
+        ScriptCliOperations(platform, 1);
+        ScriptLiveEndpoint(platform);
+        var harness = new IntegrationHarness(platform);
+        var changeSetId = ParseChangeSetId(harness.Plan("cli"));
+        var planPath = harness.Paths.GetPlan(changeSetId);
+        var planBytes = platform.ReadSeededFile(planPath);
+        var ledgerBytes = platform.ReadSeededFile(harness.Paths.OwnershipLedger);
+        var emptyDispatcher = new SetupCommandDispatcher(
+            platform,
+            harness.Paths,
+            harness.PlanStore,
+            harness.LedgerStore,
+            harness.JournalStore,
+            new SetupAdapterRegistry([]),
+            "1.0.0");
+        var operationStart = platform.Operations.Count;
+
+        var result = DispatchSerialized(
+            emptyDispatcher.Dispatch,
+            new SetupOptions(SetupCommand.Apply, null, null, null, false, changeSetId));
+
+        Assert.Equal(SetupCodes.UnsupportedAdapter, result.Code);
+        Assert.Equal("github-copilot", result.Adapter);
+        Assert.Empty(result.Targets);
+        Assert.Equal(planBytes, platform.ReadSeededFile(planPath));
+        Assert.Equal(ledgerBytes, platform.ReadSeededFile(harness.Paths.OwnershipLedger));
+        AssertNoTargetActivity(platform.Operations.Skip(operationStart));
+        Assert.False(platform.FileSystem.FileExists(harness.Paths.GetTransactionJournal(changeSetId)));
+        Assert.False(platform.FileSystem.FileExists(harness.Paths.GetBackup(changeSetId, Assert.Single(harness.LedgerStore.Load().ChangeSets).Targets[0].RecordId)));
+    }
+
+    [Fact]
+    public void Apply_MacOsCliPlan_ReturnsUnsupportedTargetBeforeAnyShellProfileOrMutationActivity()
+    {
+        var platform = CreatePlatform(SetupPlanningOs.MacOs);
+        ScriptCliOperations(platform, 1);
+        ScriptLiveEndpoint(platform);
+        var harness = new IntegrationHarness(platform);
+        var changeSetId = ParseChangeSetId(harness.Plan("cli"));
+        var planBytes = platform.ReadSeededFile(harness.Paths.GetPlan(changeSetId));
+        var ledgerBytes = platform.ReadSeededFile(harness.Paths.OwnershipLedger);
+        var operationStart = platform.Operations.Count;
+
+        var result = harness.Apply(changeSetId);
+
+        Assert.Equal(SetupCodes.UnsupportedTarget, result.Code);
+        Assert.Empty(result.Targets);
+        Assert.Equal(planBytes, platform.ReadSeededFile(harness.Paths.GetPlan(changeSetId)));
+        Assert.Equal(ledgerBytes, platform.ReadSeededFile(harness.Paths.OwnershipLedger));
+        var operations = platform.Operations.Skip(operationStart).ToArray();
+        AssertNoTargetActivity(operations);
+        Assert.DoesNotContain(operations, operation =>
+            operation.Contains(".zshrc", StringComparison.OrdinalIgnoreCase) ||
+            operation.Contains(".bashrc", StringComparison.OrdinalIgnoreCase) ||
+            operation.Contains(".profile", StringComparison.OrdinalIgnoreCase));
+        Assert.False(platform.FileSystem.FileExists(harness.Paths.GetTransactionJournal(changeSetId)));
+    }
+
+    [Fact]
+    public void Plan_AfterInterruptedApply_ReportsRecoveryCorrelationAndTheExactRerunAction()
+    {
+        var platform = CreatePlatform();
+        ScriptCliOperations(platform, 2);
+        ScriptLiveEndpoint(platform, 2);
+        var harness = new IntegrationHarness(platform);
+        var changeSetId = ParseChangeSetId(harness.Plan("cli"));
+        platform.InjectFault(
+            $"checkpoint:{SetupFaultPoint.AfterMutationBeforeCompletion}",
+            new SetupApplyProducerCrashException());
+        Assert.Equal(SetupCodes.InternalError, harness.Apply(changeSetId).Code);
+        var operationStart = platform.Operations.Count;
+
+        var recovery = harness.Plan("app-sdk");
+
+        Assert.True(recovery.Success);
+        Assert.Equal(SetupCodes.InterruptedApplyRecovered, recovery.Code);
+        Assert.Null(recovery.ChangeSetId);
+        Assert.Equal(changeSetId.ToString("D"), recovery.RecoveredChangeSetId);
+        Assert.Equal(SetupRecoveryOperation.Apply, recovery.RecoveryOperation);
+        Assert.Equal([SetupCodes.RerunRequestedSetupCommand], recovery.NextActions);
+        Assert.DoesNotContain(platform.Operations.Skip(operationStart), operation => operation.StartsWith("process.run:", StringComparison.Ordinal));
+        Assert.DoesNotContain(platform.Operations.Skip(operationStart), operation => operation.StartsWith("http.get:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Status_UsesImmutableLedgerProjectionAndFreshCurrentStateWithoutAggregateDetectionOrProbe()
+    {
+        var platform = CreatePlatform();
+        ScriptCliOperations(platform, 2);
+        ScriptLiveEndpoint(platform, 2);
+        var harness = new IntegrationHarness(platform);
+        var changeSetId = ParseChangeSetId(harness.Plan("cli"));
+        Assert.Equal(SetupCodes.ApplySucceeded, harness.Apply(changeSetId).Code);
+        var operationStart = platform.Operations.Count;
+
+        var currentStatus = harness.Status();
+
+        var currentRow = Assert.Single(currentStatus.ChangeSets);
+        var immutableTarget = Assert.Single(currentRow.Targets);
+        Assert.Equal(SetupCodes.StatusReady, currentStatus.Code);
+        Assert.Equal(SetupChangeSetState.Applied, currentRow.State);
+        Assert.Equal(SetupCurrentState.Current, currentRow.CurrentState);
+        Assert.True(currentRow.RollbackAvailable);
+        Assert.Equal("copilot-cli-user-environment", immutableTarget.TargetLabel);
+        Assert.True(immutableTarget.Detected);
+        Assert.Equal("1.0.4", immutableTarget.DetectedVersion);
+        Assert.Equal(SetupEffectiveSource.Environment, immutableTarget.EffectiveSource);
+        Assert.True(SourceCapabilityManifestLoader.MatchesCanonical(immutableTarget.ExpectedResult!.Value));
+
+        platform.SeedUserEnvironment("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4999");
+        var staleStatus = harness.Status();
+        var staleRow = Assert.Single(staleStatus.ChangeSets);
+        var staleTarget = Assert.Single(staleRow.Targets);
+
+        Assert.Equal(SetupCurrentState.Stale, staleRow.CurrentState);
+        Assert.False(staleRow.RollbackAvailable);
+        Assert.Equal(SetupReferenceState.Desired, staleTarget.ReferenceState);
+        Assert.Equal(SetupCurrentState.Stale, staleTarget.CurrentState);
+        Assert.Equal(immutableTarget.Detected, staleTarget.Detected);
+        Assert.Equal(immutableTarget.DetectedVersion, staleTarget.DetectedVersion);
+        Assert.Equal(immutableTarget.ExpectedResult!.Value.GetRawText(), staleTarget.ExpectedResult!.Value.GetRawText());
+        var statusOperations = platform.Operations.Skip(operationStart).ToArray();
+        Assert.DoesNotContain(statusOperations, operation => operation.StartsWith("process.run:", StringComparison.Ordinal));
+        Assert.DoesNotContain(statusOperations, operation => operation.StartsWith("managed.read:", StringComparison.Ordinal));
+        Assert.DoesNotContain(statusOperations, operation => operation.StartsWith("http.get:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AppSdkAndLinuxCli_NeverBecomeMutationAuthorities()
+    {
+        var appPlatform = CreatePlatform();
+        appPlatform.SeedFile(
+            AppSdkProjectPath,
+            "<Project><ItemGroup><PackageReference Include=\"GitHub.Copilot.SDK\" Version=\"1.0.4\" /></ItemGroup></Project>"u8.ToArray());
+        var appHarness = new IntegrationHarness(appPlatform);
+        var appOperationStart = appPlatform.Operations.Count;
+        var appPlan = appHarness.Plan("app-sdk");
+        var appApply = appHarness.Apply(ParseChangeSetId(appPlan));
+
+        Assert.Equal(SetupCodes.NoChanges, appPlan.Code);
+        Assert.Equal(SetupCodes.NoChanges, appApply.Code);
+        Assert.Equal(SetupTargetKind.Guidance, Assert.Single(appApply.Targets).TargetKind);
+        AssertNoWritesOutsideRuntimeRoot(appPlatform.Operations.Skip(appOperationStart), appHarness.Paths.Root);
+
+        var linuxPlatform = CreatePlatform(SetupPlanningOs.Linux);
+        ScriptCliOperations(linuxPlatform, 1);
+        ScriptLiveEndpoint(linuxPlatform);
+        var linuxHarness = new IntegrationHarness(linuxPlatform);
+        var linuxChangeSetId = ParseChangeSetId(linuxHarness.Plan("cli"));
+        var linuxOperationStart = linuxPlatform.Operations.Count;
+        var linuxApply = linuxHarness.Apply(linuxChangeSetId);
+
+        Assert.Equal(SetupCodes.UnsupportedTarget, linuxApply.Code);
+        AssertNoTargetActivity(linuxPlatform.Operations.Skip(linuxOperationStart));
+        Assert.DoesNotContain(linuxPlatform.Operations, operation =>
+            operation.Contains(".bashrc", StringComparison.OrdinalIgnoreCase) ||
+            operation.Contains(".profile", StringComparison.OrdinalIgnoreCase) ||
+            operation.Contains("/etc/", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ProductionStatus_DirectCliAndPowerShellWrapperUseOneRootAndReturnByteIdenticalSetupV1()
+    {
+        using var runtime = new TemporaryRuntimeRoot();
+
+        var direct = await RunConfigCliAsync(runtime.Path, "status");
+        var wrapper = await RunWrapperAsync(runtime.Path, "status");
+
+        Assert.Equal(0, direct.ExitCode);
+        Assert.Equal(0, wrapper.ExitCode);
+        Assert.Empty(direct.StandardError);
+        Assert.Empty(wrapper.StandardError);
+        Assert.Equal(direct.StandardOutput, wrapper.StandardOutput);
+        using var directJson = JsonDocument.Parse(direct.StandardOutput);
+        Assert.Equal(SetupCodes.ContractVersion, directJson.RootElement.GetProperty("contract_version").GetString());
+        Assert.Equal("status", directJson.RootElement.GetProperty("command").GetString());
+        Assert.Equal(SetupCodes.StatusReady, directJson.RootElement.GetProperty("code").GetString());
+        Assert.True(directJson.RootElement.GetProperty("success").GetBoolean());
+    }
+
+    private static Guid ParseChangeSetId(SetupCommandResult result) =>
+        Guid.Parse(Assert.IsType<string>(result.ChangeSetId));
+
+    private static SetupCommandResult DispatchSerialized(
+        Func<SetupOptions, SetupCommandResult> dispatch,
+        SetupOptions options)
+    {
+        var result = dispatch(options);
+        using var json = JsonDocument.Parse(SetupJson.Serialize(result));
+        Assert.Equal(SetupCodes.ContractVersion, json.RootElement.GetProperty("contract_version").GetString());
+        Assert.Equal(result.Code, json.RootElement.GetProperty("code").GetString());
+        Assert.Equal(result.Success, json.RootElement.GetProperty("success").GetBoolean());
+        return result;
+    }
+
+    private static SetupTestPlatform CreatePlatform(SetupPlanningOs planningOs = SetupPlanningOs.Windows) => planningOs switch
+    {
+        SetupPlanningOs.Windows => new SetupTestPlatform(Timestamp),
+        SetupPlanningOs.MacOs => new SetupTestPlatform(
+            Timestamp,
+            "/Users/setup-test/Library/Application Support",
+            SetupPathStyle.Unix,
+            planningOs,
+            "/Users/setup-test/Library/Application Support",
+            "/Users/setup-test"),
+        SetupPlanningOs.Linux => new SetupTestPlatform(
+            Timestamp,
+            "/home/setup-test/.local/share",
+            SetupPathStyle.Unix,
+            planningOs,
+            "/home/setup-test/.config",
+            "/home/setup-test"),
+        _ => throw new ArgumentOutOfRangeException(nameof(planningOs)),
+    };
+
+    private static void ScriptAllInstalled(SetupTestPlatform platform)
+    {
+        ScriptVersion(platform, "code", ["--version"], "1.128.0");
+        ScriptVersion(platform, "code-insiders", ["--version"], "1.128.0");
+        ScriptVersion(platform, "copilot", ["version"], "1.0.4");
+        ScriptExtension(platform, "code");
+        ScriptExtension(platform, "code-insiders");
+    }
+
+    private static void ScriptCliOperations(SetupTestPlatform platform, int count)
+    {
+        for (var index = 0; index < count; index++)
+        {
+            ScriptVersion(platform, "copilot", ["version"], "1.0.4");
+        }
+    }
+
+    private static void ScriptVsCodeStableOperations(SetupTestPlatform platform, bool planAndApply)
+    {
+        var count = planAndApply ? 2 : 1;
+        for (var index = 0; index < count; index++)
+        {
+            ScriptVersion(platform, "code", ["--version"], "1.128.0");
+            ScriptExtension(platform, "code");
+        }
+    }
+
+    private static void ScriptVersion(
+        SetupTestPlatform platform,
+        string executable,
+        IReadOnlyList<string> arguments,
+        string version) =>
+        platform.ScriptProcess(
+            executable,
+            arguments,
+            new SetupProcessObservation(SetupProcessOutcome.Completed, 0, version + Environment.NewLine));
+
+    private static void ScriptExtension(SetupTestPlatform platform, string executable) =>
+        platform.ScriptProcess(
+            executable,
+            ["--list-extensions", "--show-versions"],
+            new SetupProcessObservation(SetupProcessOutcome.Completed, 0, "GitHub.copilot-chat@0.26.0\n"));
+
+    private static void ScriptLiveEndpoint(SetupTestPlatform platform, int count = 1)
+    {
+        for (var index = 0; index < count; index++)
+        {
+            platform.ScriptHttpProbe(new SetupHttpProbeObservation(
+                SetupHttpProbeOutcome.Response,
+                200,
+                17,
+                "{\"status\":\"live\"}"u8.ToArray(),
+                true));
+        }
+    }
+
+    private static void SeedDesiredCliEnvironment(SetupTestPlatform platform)
+    {
+        platform.SeedUserEnvironment("COPILOT_OTEL_ENABLED", "true");
+        platform.SeedUserEnvironment("COPILOT_OTEL_EXPORTER_TYPE", "otlp-http");
+        platform.SeedUserEnvironment("OTEL_EXPORTER_OTLP_ENDPOINT", Endpoint);
+        platform.SeedUserEnvironment("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
+    }
+
+    private static void SeedDirectoryChain(SetupTestPlatform platform, string directory)
+    {
+        var current = Path.GetPathRoot(directory)!;
+        platform.SeedDirectory(current);
+        foreach (var segment in directory[current.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            platform.SeedDirectory(current);
+        }
+    }
+
+    private static void AssertNoTargetActivity(IEnumerable<string> operations)
+    {
+        var snapshot = operations.ToArray();
+        Assert.DoesNotContain(snapshot, operation => operation.StartsWith("process.run:", StringComparison.Ordinal));
+        Assert.DoesNotContain(snapshot, operation => operation.StartsWith("managed.read:", StringComparison.Ordinal));
+        Assert.DoesNotContain(snapshot, operation => operation.StartsWith("http.get:", StringComparison.Ordinal));
+        Assert.DoesNotContain(snapshot, operation => operation.StartsWith("process-environment.get:", StringComparison.Ordinal));
+        Assert.DoesNotContain(snapshot, operation => operation.StartsWith("environment.get:", StringComparison.Ordinal));
+        Assert.DoesNotContain(snapshot, operation => operation.StartsWith("environment.set:", StringComparison.Ordinal));
+        Assert.DoesNotContain("environment.notify", snapshot);
+    }
+
+    private static void AssertNoWritesOutsideRuntimeRoot(IEnumerable<string> operations, string runtimeRoot)
+    {
+        var snapshot = operations.ToArray();
+        var mutations = snapshot.Where(operation =>
+            operation.StartsWith("file.write:", StringComparison.Ordinal) ||
+            operation.StartsWith("file.write-new:", StringComparison.Ordinal) ||
+            operation.StartsWith("file.try-write-new-flushed:", StringComparison.Ordinal) ||
+            operation.StartsWith("file.replace:", StringComparison.Ordinal) ||
+            operation.StartsWith("file.move:", StringComparison.Ordinal) ||
+            operation.StartsWith("file.delete:", StringComparison.Ordinal)).ToArray();
+        Assert.All(mutations, operation =>
+        {
+            var operands = operation[(operation.IndexOf(':') + 1)..]
+                .Split("->", StringSplitOptions.None);
+            Assert.All(operands, operand => Assert.StartsWith(runtimeRoot, operand, StringComparison.OrdinalIgnoreCase));
+        });
+        Assert.DoesNotContain(snapshot, operation => operation.StartsWith("environment.set:", StringComparison.Ordinal));
+        Assert.DoesNotContain("environment.notify", snapshot);
+    }
+
+    private static async Task<ProcessResult> RunConfigCliAsync(string runtimeRoot, params string[] actionArguments)
+    {
+        var arguments = new List<string>
+        {
+            "run",
+            "--verbosity",
+            "quiet",
+            "--project",
+            ConfigCliProjectPath,
+            "--",
+            "setup",
+        };
+        arguments.AddRange(actionArguments);
+        return await RunProcessAsync("dotnet", runtimeRoot, arguments);
+    }
+
+    private static Task<ProcessResult> RunWrapperAsync(string runtimeRoot, params string[] actionArguments)
+    {
+        var arguments = new List<string>
+        {
+            "-NoProfile",
+            "-File",
+            SetupScriptPath,
+        };
+        arguments.AddRange(actionArguments);
+        return RunProcessAsync("pwsh", runtimeRoot, arguments);
+    }
+
+    private static async Task<ProcessResult> RunProcessAsync(
+        string fileName,
+        string runtimeRoot,
+        IEnumerable<string> arguments)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = fileName,
+            WorkingDirectory = RepositoryRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.Environment["LOCALAPPDATA"] = runtimeRoot;
+        startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+        startInfo.Environment["DOTNET_NOLOGO"] = "1";
+        startInfo.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Failed to start {fileName}.");
+        var outputTask = ReadBytesAsync(process.StandardOutput.BaseStream);
+        var errorTask = ReadBytesAsync(process.StandardError.BaseStream);
+        await Task.WhenAll(outputTask, errorTask, process.WaitForExitAsync());
+        return new ProcessResult(process.ExitCode, await outputTask, await errorTask);
+    }
+
+    private static async Task<byte[]> ReadBytesAsync(Stream stream)
+    {
+        using var output = new MemoryStream();
+        await stream.CopyToAsync(output);
+        return output.ToArray();
+    }
+
+    private static string RepositoryRoot => Path.GetFullPath(Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", ".."));
+
+    private static string ConfigCliProjectPath => Path.Combine(
+        RepositoryRoot,
+        "src",
+        "CopilotAgentObservability.ConfigCli",
+        "CopilotAgentObservability.ConfigCli.csproj");
+
+    private static string SetupScriptPath => Path.Combine(
+        RepositoryRoot,
+        "scripts",
+        "local-monitor",
+        "setup.ps1");
+
+    private sealed record ProcessResult(int ExitCode, byte[] StandardOutput, byte[] StandardError);
+
+    private sealed class TemporaryRuntimeRoot : IDisposable
+    {
+        public TemporaryRuntimeRoot()
+        {
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cao-setup-integration-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose() => Directory.Delete(Path, recursive: true);
+    }
+
+    private sealed class IntegrationHarness
+    {
+        public IntegrationHarness(SetupTestPlatform platform)
+        {
+            Platform = platform;
+            Paths = new SetupRuntimePaths(platform);
+            PlanStore = new SetupPlanStore(platform, Paths);
+            LedgerStore = new SetupLedgerStore(platform, Paths, PlanStore);
+            JournalStore = new SetupTransactionJournalStore(platform, Paths);
+            Dispatch = SetupCompositionRoot.CreateSetupDispatch(platform);
+        }
+
+        public SetupTestPlatform Platform { get; }
+
+        public SetupRuntimePaths Paths { get; }
+
+        public SetupPlanStore PlanStore { get; }
+
+        public SetupLedgerStore LedgerStore { get; }
+
+        public SetupTransactionJournalStore JournalStore { get; }
+
+        public Func<SetupOptions, SetupCommandResult> Dispatch { get; }
+
+        public SetupCommandResult Plan(string target) => DispatchSerialized(
+            Dispatch,
+            new SetupOptions(SetupCommand.Plan, "github-copilot", target, Endpoint, false, null));
+
+        public SetupCommandResult Apply(Guid changeSetId) => DispatchSerialized(
+            Dispatch,
+            new SetupOptions(SetupCommand.Apply, null, null, null, false, changeSetId));
+
+        public SetupCommandResult Rollback(Guid changeSetId) => DispatchSerialized(
+            Dispatch,
+            new SetupOptions(SetupCommand.Rollback, null, null, null, false, changeSetId));
+
+        public SetupCommandResult Status() => DispatchSerialized(
+            Dispatch,
+            new SetupOptions(SetupCommand.Status, null, null, null, false, null));
+    }
+}

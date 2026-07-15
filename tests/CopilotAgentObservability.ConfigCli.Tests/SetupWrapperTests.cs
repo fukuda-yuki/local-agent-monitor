@@ -7,15 +7,16 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public sealed class SetupWrapperTests
 {
     [Fact]
-    public async Task SetupWrapper_ForwardsStatusStdoutByteForByte()
+    public async Task SetupWrapper_ForwardsProductionStatusStdoutByteForByte()
     {
         using var runtime = new TemporaryRuntimeRoot();
 
         var direct = await RunConfigCliAsync(runtime.Path, "status");
         var wrapper = await RunWrapperAsync(runtime.Path, "status");
 
-        Assert.Equal(5, direct.ExitCode);
-        Assert.Equal("internal_error", ReadResultCode(direct.StandardOutput));
+        Assert.Equal(0, direct.ExitCode);
+        Assert.Equal("status_ready", ReadResultCode(direct.StandardOutput));
+        Assert.Empty(direct.StandardError);
         Assert.Equal(direct.StandardOutput, wrapper.StandardOutput);
         Assert.Equal(direct.StandardError, wrapper.StandardError);
         Assert.Equal(direct.ExitCode, wrapper.ExitCode);
