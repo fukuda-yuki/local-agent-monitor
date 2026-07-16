@@ -103,7 +103,10 @@ support is repository-run from inside WSL2.
 
 For `claude-code`, `cli` covers both interactive CLI and `claude -p` and `all`
 means CLI plus Agent SDK guidance. `--allow-wsl2-routing` is required only when
-the Config CLI itself runs in a verified WSL2 process. It is
+the Config CLI itself runs in a verified WSL2 process for a `cli` component.
+An `app-sdk`-only target has no routing target and always returns
+`invalid_arguments` when the option is present; `all` validates the option
+through its CLI component. The option is also
 `invalid_arguments` for Windows-native execution, for native macOS/Linux, and
 for every adapter other than `claude-code`. It authorizes no gateway,
 non-loopback, or Host-header fallback.
@@ -596,8 +599,9 @@ three v1 representations, and no other representation is accepted.
   user-settings representation. It contains exactly `kind`,
   `expected_state_hash`, `owned_env`, and `owned_hooks` in canonical write
   order. The lowercase 64-hex hash covers the complete desired settings bytes.
-  `owned_env` is an ordered 1..8-entry array whose unique keys map 1:1 to the
-  target's env members and whose string values are 1..2,048 UTF-16 units.
+  `owned_env` is an ordered array of exactly 5 default entries or exactly 8
+  explicit-content entries whose unique canonical keys map 1:1 to the target's
+  env members and whose string values are 1..2,048 UTF-16 units.
   `owned_hooks` is the ordered 11-event array defined under the Claude adapter;
   each record contains exactly its event name, executable command, ordered
   arguments, and `timeout_seconds: 5`. The command and arguments remain private
