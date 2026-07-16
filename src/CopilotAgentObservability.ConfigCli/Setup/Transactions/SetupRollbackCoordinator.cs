@@ -90,20 +90,33 @@ internal sealed class SetupRollbackCoordinator
                 priorRecovery);
         }
 
-        SetupPrivatePlan? plan;
         SetupOwnershipLedger ledger;
+        SetupLedgerChangeSet? changeSet;
+        try
+        {
+            ledger = ledgerStore.LoadForRecovery();
+            changeSet = ledger.ChangeSets.SingleOrDefault(item => item.ChangeSetId == changeSetId);
+        }
+        catch (SetupStorageException exception)
+        {
+            return Result(changeSetId, false, exception.Code);
+        }
+        catch (Exception)
+        {
+            return Result(changeSetId, false, SetupCodes.RecoveryRequired);
+        }
+
+        if (changeSet is null)
+        {
+            return Result(changeSetId, false, SetupCodes.InvalidArguments);
+        }
+
+        SetupPrivatePlan? plan;
         SetupTransactionJournal? applyJournal;
-        SetupLedgerChangeSet changeSet;
         try
         {
             plan = planStore.Load(changeSetId);
-            ledger = ledgerStore.LoadForRecovery();
-            changeSet = ledger.ChangeSets.Single(item => item.ChangeSetId == changeSetId);
             applyJournal = journalStore.Load(changeSetId);
-        }
-        catch (InvalidOperationException)
-        {
-            return Result(changeSetId, false, SetupCodes.InvalidArguments);
         }
         catch (Exception)
         {

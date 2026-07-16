@@ -925,6 +925,55 @@ public sealed class SetupRollbackTests
     }
 
     [Theory]
+    [InlineData("absent")]
+    [InlineData("valid")]
+    [InlineData("malformed")]
+    public void Rollback_MissingLedgerRowReturnsInvalidArgumentsWithoutReadingPlan(string planArtifact)
+    {
+        var fixture = RollbackFixture.Create();
+        var planPath = fixture.Paths.GetPlan(fixture.ChangeSetId);
+        switch (planArtifact)
+        {
+            case "absent":
+                fixture.Platform.FileSystem.DeleteFile(planPath);
+                break;
+            case "valid":
+                break;
+            case "malformed":
+                fixture.Platform.SeedFile(planPath, Encoding.UTF8.GetBytes("{not-json"));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(planArtifact));
+        }
+
+        var planStore = new SetupPlanStore(fixture.Platform, fixture.Paths);
+        var ledgerStore = new SetupLedgerStore(fixture.Platform, fixture.Paths, planStore);
+        using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
+        {
+            ledgerStore.Save(acquisition.Lock!, new SetupOwnershipLedger(1, []));
+        }
+
+        var baseline = fixture.Platform.Operations.Count;
+
+        var result = fixture.Rollback();
+        var operations = fixture.Platform.Operations.Skip(baseline).ToArray();
+
+        Assert.False(result.Success);
+        Assert.Equal(SetupCodes.InvalidArguments, result.Code);
+        Assert.Equal(fixture.ChangeSetId, result.RequestedChangeSetId);
+        AssertUntrustedDirectResult(result);
+        var privateArtifacts = new[]
+        {
+            planPath,
+            fixture.Paths.GetTransactionJournal(fixture.ChangeSetId),
+            fixture.Paths.GetBackup(fixture.ChangeSetId, fixture.RecordIds[0]),
+        };
+        Assert.DoesNotContain(operations, operation =>
+            privateArtifacts.Any(path => operation.Contains(path, StringComparison.OrdinalIgnoreCase)) ||
+            fixture.TargetPaths.Any(path => operation.Contains(path, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    [Theory]
     [InlineData("missing")]
     [InlineData("malformed")]
     public void Rollback_Invalid_backup_fails_before_supersession_or_target_write(string variant)
