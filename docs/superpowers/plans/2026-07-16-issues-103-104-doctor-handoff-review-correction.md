@@ -14,11 +14,7 @@ test would still fail for the Claude Code handoff owned by #104. Conversely,
 parallel ownership and prevented either worktree from independently verifying
 its own deliverable.
 
-## Corrected Task 2 RED tests
-
-Replace the bundled
-`ManifestBackedSourceHandoffs_AreImplementedOutsideDoctorCore` test with three
-facts using common reflection/discovery helpers:
+Replace the bundled gate with three owner-specific facts:
 
 ```csharp
 [Fact]
@@ -41,17 +37,17 @@ requires exactly one registration for the requested surface.
 
 ## Finding 2 — incomplete invalid-input coverage
 
-The canonical contract gives invalid source identity, invalid verification
-state, and unsafe evidence the same fixed sanitized failure. The original test
-covered only unsafe evidence. The reviewed test file now contains three shared
-negative tests:
+The canonical contract gives invalid source identity, source-mismatched
+observation, invalid verification state, and unsafe evidence the same fixed
+sanitized failure. The reviewed tests therefore cover:
 
 - `UnsafeObservation_UsesFixedSanitizedError`;
-- `InvalidSourceIdentity_UsesFixedSanitizedError`; and
+- `InvalidSourceIdentity_UsesFixedSanitizedError`;
+- `SourceMismatchedObservation_UsesFixedSanitizedError`; and
 - `InactiveVerification_UsesFixedSanitizedError`.
 
-All three require the exact fixed message and verify that rejected values are
-not echoed.
+All require the exact fixed message and verify that rejected values are not
+echoed.
 
 ## Finding 3 — missing candidate carrier boundary
 
@@ -82,8 +78,8 @@ The shared method:
 - validates the existing candidate class/kind/reference/UUID contract; and
 - never generates IDs, queries or persists evidence, or selects a latest entity.
 
-Two shared tests pin successful inheritance and rejection at the exclusive
-expiry boundary.
+Shared tests pin successful inheritance and rejection at the exclusive expiry
+boundary.
 
 ## Finding 4 — split gates must retain a closed registration set
 
@@ -91,18 +87,31 @@ Splitting the original exact-array assertion into three owner-specific tests
 could allow an unknown fourth registration to pass unnoticed. The reviewed
 shared test
 `SourceHandoffRegistrations_AreUniqueManifestBackedAndOutsideDoctorCore`
-therefore remains GREEN before implementations exist and later rejects:
+therefore rejects:
 
 - every concrete implementation in the Doctor assembly;
 - duplicate source-surface registrations; and
 - every registration outside `github-copilot-vscode`, `github-copilot-cli`, and
   `claude-code`.
 
+## Finding 5 — original G0-3 evidence semantics were not explicit
+
+The initial shared tests did not directly prove two requirements from the G0-3
+brief:
+
+1. an observation for another source cannot be retagged into the requested
+   source; and
+2. synthetic receiver/persistence/projection evidence cannot become a first
+   real trace.
+
+The reviewed test file adds source-mismatch rejection and a two-case theory for
+`github-copilot-vscode` and `claude-code`. With otherwise ready facts and real
+binding/completeness evidence, synthetic ingest/raw/projection evidence must
+produce `ready_no_real_trace`, never `first_trace_ready`.
+
 ## Corrected G0 checkpoint
 
-- Nine shared contract tests are expected GREEN: mapping, completion identity,
-  candidate inheritance, candidate window rejection, three invalid-input tests,
-  the no-source-specific-enum test, and the closed registration-set test.
+- Eleven shared test methods / twelve shared cases are expected GREEN.
 - The two `GitHubCopilot*SourceHandoff` facts are intentionally RED and owned by
   #103.
 - `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore` is intentionally RED
