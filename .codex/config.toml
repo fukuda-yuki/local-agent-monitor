@@ -1,34 +1,38 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+
 # <repository>/.codex/config.toml
 # trusted repository only
 
-# 継続的な自律実装
+# トップレベル設定は、最初のテーブル宣言より前に置く
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
+
+model_verbosity = "low"
+model_reasoning_summary = "concise"
 
 [agents]
 max_depth = 2
 
+# 公開設定側のスレッド上限も合わせる
+max_threads = 24
+
 [features.multi_agent_v2]
 enabled = true
 
-# root orchestrator を含む総スロット数。
+# root を含む同時アクティブスロット数
 max_concurrent_threads_per_session = 24
 
-# spawn_agent に model / reasoning_effort を露出させる
+# spawn_agent の model / reasoning_effort を露出
+expose_spawn_agent_model_overrides = true
+
+# agent_type / service_tier 等を隠さない
 hide_spawn_agent_metadata = false
 
-# collaboration.spawn_agent の予約済みスキーマ衝突を回避
+# collaboration.spawn_agent との名前衝突回避用
 tool_namespace = "agents"
 
-
-enabled-reasoning-efforts = ["medium", "xhigh"]
-model_verbosity = "low"
-model_reasoning_summary = "concise"
-
-notify = ["turn-ended"]
-
-[plugins. "computer-use@openai-bundled"]
+[plugins."computer-use@openai-bundled"]
 enabled = true
 
-[plugins. "browser@openai-bundled"]
+[plugins."browser@openai-bundled"]
 enabled = true
