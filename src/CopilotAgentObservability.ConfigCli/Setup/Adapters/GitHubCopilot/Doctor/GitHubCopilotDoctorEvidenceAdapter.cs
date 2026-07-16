@@ -28,7 +28,8 @@ internal sealed record GitHubCopilotDoctorEvidenceResult(
 
 internal sealed record GitHubCopilotDoctorEvidenceStorePolicy(
     int BusyTimeoutMilliseconds = 5_000,
-    int RetryCount = 0);
+    int RetryCount = 0,
+    int? FaultAfterSuccessfulCandidatePersists = null);
 
 internal static class GitHubCopilotDoctorEvidenceAdapter
 {
@@ -60,6 +61,10 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         {
             throw new ArgumentOutOfRangeException(nameof(storePolicy));
         }
+        if (storePolicy.FaultAfterSuccessfulCandidatePersists is <= 0 or > 5)
+        {
+            throw new ArgumentOutOfRangeException(nameof(storePolicy));
+        }
 
         var partition = Partition.For(selection.Target);
         var gateKey = ObservationGateKey(databasePath, selection.VerificationId);
@@ -73,6 +78,10 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         try
         {
             return ObserveCore(databasePath, timeProvider, selection, storePolicy, partition);
+        }
+        catch (InjectedDoctorStoreBusyException)
+        {
+            return Empty(StoreBusy(), partition, selection.VerificationId, timeProvider.GetUtcNow());
         }
         catch (Microsoft.Data.Sqlite.SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
@@ -210,6 +219,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
 
         var evidenceRefs = new List<string>(evidence.Count);
         var observationResult = status;
+        var newlyPersistedCandidates = 0;
         foreach (var descriptor in evidence)
         {
             var evidenceRef = OpaqueReference(
@@ -237,6 +247,14 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                 evidenceRef,
                 descriptor.ObservedAt,
                 verification.ExpiresAt));
+            if (observationResult.Code == DoctorResultCode.VerificationActive)
+            {
+                newlyPersistedCandidates++;
+                if (newlyPersistedCandidates == storePolicy.FaultAfterSuccessfulCandidatePersists)
+                {
+                    throw new InjectedDoctorStoreBusyException();
+                }
+            }
             if (observationResult.Code != DoctorResultCode.VerificationActive)
             {
                 if (CandidateExists(
@@ -503,6 +521,10 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         public int LeaseCount { get; set; }
 
         public bool Retired { get; set; }
+    }
+
+    private sealed class InjectedDoctorStoreBusyException : Exception
+    {
     }
 
     private sealed record Partition(

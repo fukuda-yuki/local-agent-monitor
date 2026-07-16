@@ -44,7 +44,7 @@ public sealed class GitHubCopilotDoctorEvidenceConcurrencyTests
     }
 
     [Fact]
-    public void Observe_ZeroRetryWriteLock_ReturnsStoreBusyWithoutPartialWrites_ThenExplicitInvocationSucceeds()
+    public void Observe_ZeroRetryWriteLockBeforeFirstWrite_ReturnsStoreBusyWithZeroRows_ThenExplicitInvocationSucceeds()
     {
         using var database = TemporaryDatabase.Create();
         var fixture = CreateExactFixture(database.Path);
@@ -82,6 +82,49 @@ public sealed class GitHubCopilotDoctorEvidenceConcurrencyTests
         Assert.Equal(DoctorResultCode.VerificationActive, explicitAttempt.ObservationResult.Code);
         Assert.Equal(5, explicitAttempt.EvidenceRefs.Count);
         Assert.Equal(5, CountCandidates(database.Path, fixture.VerificationId));
+    }
+
+    [Fact]
+    public void Observe_FaultAfterTwoNewCandidateWrites_ExplicitInvocationReusesPersistedRefsAndCompletesSet()
+    {
+        using var database = TemporaryDatabase.Create();
+        var fixture = CreateExactFixture(database.Path);
+
+        var interrupted = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            database.Path,
+            new FixedTimeProvider(Now),
+            Selection(fixture),
+            new GitHubCopilotDoctorEvidenceStorePolicy(
+                BusyTimeoutMilliseconds: 0,
+                RetryCount: 0,
+                FaultAfterSuccessfulCandidatePersists: 2));
+
+        Assert.Equal(DoctorResultCode.DoctorStoreBusy, interrupted.ObservationResult.Code);
+        Assert.Empty(interrupted.ObservedKinds);
+        Assert.Empty(interrupted.EvidenceRefs);
+        AssertFullyUnknownUnattributed(interrupted);
+        var refsAfterInterruption = ReadCandidateReferences(database.Path, fixture.VerificationId);
+        Assert.Equal(2, refsAfterInterruption.Count);
+        Assert.Equal(2, refsAfterInterruption.Distinct(StringComparer.Ordinal).Count());
+
+        var explicitAttempt = Observe(database.Path, fixture);
+
+        Assert.Equal(DoctorResultCode.VerificationActive, explicitAttempt.ObservationResult.Code);
+        Assert.Equal(5, explicitAttempt.ObservedKinds.Count);
+        Assert.Equal(5, explicitAttempt.EvidenceRefs.Count);
+        Assert.Equal(5, explicitAttempt.EvidenceRefs.Distinct(StringComparer.Ordinal).Count());
+        Assert.All(refsAfterInterruption, reference => Assert.Contains(reference, explicitAttempt.EvidenceRefs));
+        Assert.Equal(5, CountCandidates(database.Path, fixture.VerificationId));
+        Assert.Equal(5, CountDistinctCandidateReferences(database.Path, fixture.VerificationId));
+
+        var reopened = SqliteDoctorApplicationService.Create(
+            new SqliteDoctorVerificationStore(database.Path, new FixedTimeProvider(Now)));
+        var reopenedStatus = reopened.Status(fixture.VerificationId);
+
+        Assert.Equal(DoctorResultCode.VerificationActive, reopenedStatus.Code);
+        Assert.Equal(
+            explicitAttempt.EvidenceRefs.Order(StringComparer.Ordinal),
+            ReadCandidateReferences(database.Path, fixture.VerificationId));
     }
 
     [Fact]
@@ -252,6 +295,21 @@ public sealed class GitHubCopilotDoctorEvidenceConcurrencyTests
             kinds.Add(reader.GetString(0));
         }
         return kinds;
+    }
+
+    private static IReadOnlyList<string> ReadCandidateReferences(string databasePath, string verificationId)
+    {
+        using var connection = Open(databasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT evidence_ref FROM doctor_verification_evidence WHERE verification_id = $id ORDER BY evidence_ref;";
+        command.Parameters.AddWithValue("$id", verificationId);
+        using var reader = command.ExecuteReader();
+        var references = new List<string>();
+        while (reader.Read())
+        {
+            references.Add(reader.GetString(0));
+        }
+        return references;
     }
 
     private static int ExecuteScalar(string databasePath, string sql, string verificationId)
