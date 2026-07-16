@@ -39,6 +39,28 @@ Session sanitized events -----------------> timeline as Session / unowned
 This path does not replace or alter the OTLP receiver and existing monitor
 projection.
 
+Issue #102 adds a source-independent Doctor path shared by direct, CLI, and
+HTTP callers:
+
+```text
+#103/#104 source fact and candidate producers --+
+direct typed-observation caller -----------------+--> shared Doctor domain
+                                                   |-- pure deterministic evaluation
+                                                   |-- doctor.v1 JSON / human projection
+                                                   +-- verification service interface
+                                                            |
+                                                            v
+                                                SQLite Doctor v1 store
+                                                   ^                 ^
+                                                   |                 |
+                                           Config CLI adapter   Local Monitor HTTP
+```
+
+Source-specific producers do not add Doctor states or reorder results. Config
+CLI and Local Monitor consume the same `DoctorResult`. The later proxy/UI is an
+Issue #105 consumer and is not a second domain. Doctor verification is separate
+from D051 process readiness and does not gate monitor startup or ingestion.
+
 Collection profile は telemetry routing mode を表す public interface とする。
 `raw-only` は最小構成、`docker-desktop-langfuse` は標準 full profile である。
 
@@ -103,6 +125,37 @@ and the setup PowerShell wrapper invokes the same command/result contract used
 in repository mode. This introduces no reverse reference from lower libraries
 to Config CLI and no new Local Monitor route.
 
+### Doctor Domain
+
+- Dependency-light source-independent project that owns `DoctorFactSnapshot`,
+  the twenty-state catalog, pure evaluator, `DoctorResult` (`doctor.v1`),
+  serialization/human projection, verification lifecycle types, and clock/store
+  interfaces.
+- Does not read SQLite, environment, process state, endpoints, telemetry, or
+  current time. All observations and timestamps are validated input.
+- Direct evaluation consumes source-neutral typed `DoctorObservation` values;
+  persisted `DoctorEvidenceCandidate` rows remain a separate store carrier.
+- Direct, Config CLI, and Local Monitor HTTP callers project one result; no
+  adapter may re-evaluate facts or create a parallel DTO.
+- Issues #103/#104 produce only the twelve shared fact families and shared
+  source-neutral evidence candidates. Issue #105 owns proxy/UI consumption.
+
+### Doctor SQLite Store
+
+- Implemented by `CopilotAgentObservability.Persistence.Sqlite` in the existing
+  Local Monitor database with its own
+  `schema_version(component='doctor', version=1)`.
+- Owns `doctor_verifications` and `doctor_verification_evidence`, explicit
+  candidate observation, lifecycle reads, compare-and-swap complete/cancel,
+  and transactional migration/rollback.
+- Completion callers select opaque candidate references only; the store/service
+  resolves existing unexpired candidates into trusted observations and never
+  accepts caller-supplied candidate class, kind, or source.
+- Does not change monitor/session component versions. Store initialization
+  failure returns `doctor_store_busy` or `doctor_store_unavailable` and degrades
+  Doctor verification only; stateless evaluation, Local Monitor
+  startup/ingestion, and D051 readiness remain available.
+
 ### SQLite Raw Store
 
 - local raw telemetry store。
@@ -157,6 +210,24 @@ CopilotAgentObservability.Persistence.Sqlite  SQLite raw store access (RawTeleme
         |                              |
 CopilotAgentObservability.ConfigCli    (将来) CopilotAgentObservability.LocalMonitor
 ```
+
+Issue #102 adds a second independent lower-level domain and keeps dependency
+direction acyclic:
+
+```text
+CopilotAgentObservability.Doctor               fact/result/lifecycle contracts + pure evaluator
+        ^
+        |
+CopilotAgentObservability.Persistence.Sqlite   Doctor v1 store implementation
+        ^                         ^
+        |                         |
+CopilotAgentObservability.ConfigCli    CopilotAgentObservability.LocalMonitor
+```
+
+`Doctor` references neither `Persistence.Sqlite`, `Telemetry`, Config CLI, nor
+Local Monitor. Persistence may reference the Doctor contracts; upper adapters
+may reference both. The existing Telemetry dependency direction remains
+unchanged.
 
 - `Telemetry` と `Persistence.Sqlite` は `ConfigCli` を参照しない（単方向依存）。
 - 抽出した型は internal のままとし、`InternalsVisibleTo` で `ConfigCli` / `ConfigCli.Tests`（および将来の `LocalMonitor`）にのみ可視とする。public な共有 API は M1 では定義しない。
@@ -283,6 +354,27 @@ mutation, but it can restore an interrupted transaction before projecting the
 ledger. No setup result is evidence of a first
 trace; Issue #69 owns live receipt verification.
 
+### First-Trace Doctor Loop
+
+```text
+explicit known/unknown fact snapshot + typed observations (direct)
+  -> shared pure evaluator
+  -> ordered doctor.v1 result
+  -> direct / Config CLI JSON or human / Local Monitor HTTP
+
+explicit verification start (expected source + bounded expiry)
+  -> internal #103/#104 candidate observation
+  -> explicit accepted candidate references + expected revision
+  -> store/service resolution to trusted typed observations
+  -> atomic evaluate + evidence acceptance + terminal CAS
+  -> completed/cancelled/derived-expired verification projection
+```
+
+Candidate selection never uses latest trace, repository/workspace/cwd,
+trace-ID-only, or timestamp proximity. Synthetic probes may show receiver,
+persistence, or projection health but do not establish a real first trace.
+D059 schema drift unrelated to the exact evidence remains advisory.
+
 ### Dashboard Artifact Generation
 
 ```text
@@ -330,6 +422,13 @@ Issue #51 Session content is another local raw-bearing storage class. It is
 secret-filtered, stored separately from Session metadata, and expires for reads
 at `captured_at + 90 days`; expired reads report `expired_pending_deletion`.
 Automatic physical deletion remains Issue #57 scope.
+
+Doctor storage is sanitized local runtime metadata. It contains expected
+source/adapter tokens, UUIDv7 lifecycle/candidate identifiers, canonical UTC
+timestamps, fixed evidence class/kind, bounded opaque references, accepted
+ordinals, state, and revision only. It contains no raw telemetry, prompt,
+response, tool body, PII, credential, authorization value, absolute/local path,
+repository/workspace heuristic, or exception text.
 
 ## 5. Aspire AppHost Boundary
 

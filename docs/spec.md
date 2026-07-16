@@ -154,6 +154,47 @@ The complete contract is
 [configuration setup](specifications/interfaces/configuration-setup.md) and the
 security decision is D058.
 
+## First-trace Doctor core
+
+Issue #102 adds one source-independent Doctor domain shared by direct callers,
+Config CLI, and Local Monitor HTTP. `DoctorFactSnapshot` keeps twelve nullable
+fact families with explicit unknown values. The pure evaluator emits the fixed
+twenty-state catalog as blockers only in blocking precedence when any blocker
+exists, or as one terminal state followed by fixed applicable advisories when
+no blocker exists. Each v1 reason code equals its state code. A partial fact
+snapshot has `success=false`, a non-null evaluation, a null primary state, no
+states, and nonempty canonically ordered missing families. The canonical
+machine projection is `DoctorResult` with
+`schema_version = doctor.v1`; CLI human output and HTTP serialize/project that
+same already-evaluated result and do not reinterpret facts.
+
+Direct evaluation supplies source-neutral typed `DoctorObservation` values
+whose fixed class/kind distinguish real-source evidence from synthetic probes.
+Explicit first-trace verification uses a server-generated lowercase UUIDv7,
+expected source/optional adapter, a 1..30 minute UTC window, revision-based
+compare-and-swap, and bounded persisted evidence candidates. A completion
+caller selects opaque references only; the store/service resolves existing
+unexpired candidates into trusted observations, so the caller cannot supply or
+override their class, kind, or source. Candidate selection never guesses from
+latest trace, repository/workspace/cwd, trace ID alone, or timestamp proximity.
+Synthetic probe evidence may prove receiver, persistence, or projection health
+only and cannot satisfy real-source receipt or exact Session binding. D059
+remains in force: unrelated schema drift is advisory and does not by itself fail
+exact verification.
+
+Config CLI exposes evaluate and verification start/status/complete/cancel;
+Local Monitor exposes the corresponding five `/api/doctor` routes. Inputs are
+strict bounded JSON (64 KiB), outputs are sanitized/no-store, and state-changing
+HTTP requests keep loopback/Host/same-origin/CSRF protection. Doctor v1
+persistence is a separate component in the existing SQLite database. Its
+busy/unavailable failures return `doctor_store_busy` /
+`doctor_store_unavailable` and degrade verification operations only; monitor
+startup, ingestion, stateless evaluation, and the D051 readiness
+body/status/threshold contract are unchanged. The complete state/fact/result,
+limit, CLI/HTTP, storage, migration, and #103/#104/#105 handoff contract is
+[first-trace Doctor](specifications/interfaces/first-trace-doctor.md) and the
+architecture decision is D060.
+
 ## Source capability semantic contract v1
 
 `docs/specifications/contracts/source-capabilities/v1/source-capability-manifest.schema.json`
@@ -215,6 +256,7 @@ sanitized. The canonical contract is
 | Collection profile interface | [specifications/interfaces/collection-profiles.md](specifications/interfaces/collection-profiles.md) |
 | Config CLI interface | [specifications/interfaces/config-cli.md](specifications/interfaces/config-cli.md) |
 | Configuration setup interface | [specifications/interfaces/configuration-setup.md](specifications/interfaces/configuration-setup.md) |
+| First-trace Doctor interface | [specifications/interfaces/first-trace-doctor.md](specifications/interfaces/first-trace-doctor.md) |
 | Normalized measurement dataset interface | [specifications/interfaces/measurement-dataset.md](specifications/interfaces/measurement-dataset.md) |
 | Candidate record interfaces | [specifications/interfaces/candidate-records.md](specifications/interfaces/candidate-records.md) |
 | Human-review record interfaces | [specifications/interfaces/human-review-records.md](specifications/interfaces/human-review-records.md) |
@@ -239,12 +281,28 @@ Publicly documented interfaces are:
   and `setup status [--adapter github-copilot]`. The configuration ownership
   ledger is user-scoped runtime data; command output is repository-safe and
   redacted. No setup HTTP/proxy/UI surface exists.
+- Config CLI Doctor commands and shared `doctor.v1` result: `doctor evaluate`,
+  `doctor verification start`, `doctor verification status`,
+  `doctor verification complete`, and `doctor verification cancel`. CLI input
+  is bounded to 64 KiB, JSON/human output is projected from the same shared
+  result, database paths are never emitted, and exit categories are fixed by
+  [first-trace Doctor](specifications/interfaces/first-trace-doctor.md).
 - Collection profile names and `CAO_COLLECTION_PROFILE` values。
 - `OTEL_RESOURCE_ATTRIBUTES` keys and recommended values。
 - Dashboard dataset JSON and CSV logical tables。
 - Static dashboard artifact layout: `index.html` and `dashboard-data.json`。
 - Data safety boundary for repository-stored files。
 - Local Ingestion Monitor loopback endpoints: `POST /v1/traces`、`GET /api/monitor/ingestions`、`GET /api/monitor/traces`、`GET /api/monitor/traces/{traceId}/spans`、`GET /api/monitor/summary`、`GET /api/monitor/overview?period=today|7d|30d`（期間別 token KPI / モデル別集計 / 時間帯分布。D042/D044）、`GET /api/monitor/trace-list?q&model&status&period&sort&offset&limit`（offset paging のトレース一覧 + cache 集計 + `trace_status`。`q` は TraceId 部分一致のみで prompt 本文は検索・返却しない。D042/D044）、`GET /health/live`、`GET /health/ready`、および SSE notification stream。`/api/monitor/*` と SSE は raw / PII を返さない（sanitized のみ）。`/health/ready` は飽和継続時に `503`（瞬間的 backpressure は `degraded` の `2xx`）を返し、`status` / `checks` / `degraded_reasons` を持つ機械可読 body を伴う。既定しきい値は ingestion-stall `10s` / projection-lag `60s`（設定可能）。
+- Local Monitor Doctor endpoints: `POST /api/doctor/evaluations`,
+  `POST /api/doctor/verifications`,
+  `GET /api/doctor/verifications/{verificationId}`,
+  `POST /api/doctor/verifications/{verificationId}/complete`, and
+  `POST /api/doctor/verifications/{verificationId}/cancel`. They return the
+  shared sanitized `doctor.v1` projection, enforce the 64 KiB JSON bound and
+  fixed `200/201/400/404/409/410/422/503/500` mapping, use
+  `Cache-Control: no-store`, and require same-origin plus
+  `x-monitor-csrf: local-monitor` for writes. They do not change
+  `GET /health/ready`.
 - Local Ingestion Monitor raw-bearing routes（既定表示）: trace-detail page（agent-execution view、bounded raw preview inline + full raw record link）、`GET /traces/{rawRecordId}/raw`（server-rendered HTML）、`GET /traces/{traceId}/prompt-label`（JSON、D039）、`GET /traces/{traceId}/spans/{spanId}/detail`（スパンインスペクタ用 JSON: tool 呼出引数 / 結果末尾、llm メッセージ構成 / プレビュー、raw span JSON。D043）、および ダッシュボード（`/`）と トレース一覧（`/traces`）。後者2つは各トレースの代表ユーザープロンプトを server-rendered または same-origin prompt-label route fetch で表示する（raw store の OTLP payload から抽出、truncated、escaped inert text。prompt ラベルのみ raw でその他列は sanitized metadata。D032 / D039 / D042）。raw-bearing route set の全 route で same-origin 強制（cross-site は `403`）、`Cache-Control: no-store`。`--sanitized-only` 起動時は raw-bearing route / raw section を除去（raw-detail route は `404`、dashboard / traces の prompt ラベルは省略し短縮 TraceId にフォールバック）、PII は除外。prompt ラベルは `/api/monitor/*` と SSE には含めない。full-payload JSON raw API は提供しない。Canvas helper は、拡張所有 loopback server の token-gated local screen として、既存 raw-bearing span detail route から選択 trace の prompt / response preview を server-to-server 取得して表示してよく（D050）、同じ token-gated helper screen の `/api/traces` と `/api/summary` highlight trace label でも prompt label を表示してよい（D039 / D050）。Canvas action responses、`session.send()` prompts、logs、repository-safe outputs、static artifacts には raw prompt / response / prompt label を含めない。
 - Local Ingestion Monitor run interface: loopback port（既定 `http://127.0.0.1:4320`）、`--port` / `--url`、`--sanitized-only`（metadata-only モード。raw-bearing route を `404` にし PII を除外）、リクエスト本文サイズ上限 `--max-request-body-bytes`（既定 `31457280` bytes = 30 MiB、env `CAO_MONITOR_MAX_REQUEST_BODY_BYTES`）。`POST /v1/traces` は本文が上限を超えると `413` / `request_too_large` を返し raw を書かない。
 

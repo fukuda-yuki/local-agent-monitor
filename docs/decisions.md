@@ -2055,3 +2055,71 @@ The canonical field and gating contract is
 [Claude Code exact binding](specifications/contracts/source-capabilities/v1/claude-code/exact-binding.md),
 mirrored in
 [Source Schema Drift and Claude Code](specifications/interfaces/source-schema-drift-claude-code.md).
+
+## D060: First-trace Doctor は共有 domain と明示 verification に固定する
+
+Status: Accepted (2026-07-16)
+
+Issue #102 は GitHub Copilot / Claude Code ごとの診断実装を先に分岐させず、direct、
+Config CLI、Local Monitor HTTP が共有する source-independent Doctor domain を
+追加する。正本は
+[First-Trace Doctor Interface](specifications/interfaces/first-trace-doctor.md)
+とする。
+
+決定事項:
+
+- `DoctorFactSnapshot` の 12 個の explicit-known/unknown fact families、20 個の
+  fixed state catalog、severity / retryability / next action、blocking precedence、
+  terminal/advisory ordering、v1 reason-code equality、`DoctorResult`
+  (`doctor.v1`) serialization/human projection を 1 つの shared Doctor domain が
+  所有する。evaluator は pure であり、Config CLI と HTTP は同じ評価済み result を
+  投影し、state selection や fallback interpretation を再実装しない。blocker が
+  1つでもあれば blocker だけを precedence 順で返し、terminal/advisory は返さない。
+  blocker がなければ terminal を1つ返した後に applicable advisory を固定順で返す。
+  `partial_fact_snapshot` は `success=false`、non-null evaluation、null primary、
+  empty states、nonempty ordered missing families に固定する。
+- direct evaluation は source-neutral typed `DoctorObservation`
+  (`real_source|synthetic_probe` と fixed evidence kind) を fact snapshot に含める。
+  persisted `DoctorEvidenceCandidate` は別 carrier とし、verification complete caller は
+  opaque reference だけを選択する。store/service が既存 unexpired candidate を解決して
+  trusted observation を構築するため、caller は candidate class/kind/source を上書き
+  できない。public `ObserveCandidate` route/command は追加しない。
+- first-trace verification は server-generated lowercase UUIDv7、expected
+  source/optional adapter、1..30 minute UTC expiry、revision、既存の bounded opaque
+  evidence candidates を明示的に使う。complete/cancel は compare-and-swap transaction
+  とし、evidence acceptance と completed transition は atomic にする。latest trace、
+  latest Session、repository、workspace、cwd、trace ID 単独、timestamp proximity は
+  candidate selection evidence ではない。source が opaque verification ID を運べない
+  場合も、後続 slice は explicit user selection を使い、推測しない。
+- synthetic probe は receiver / raw persistence / projection health のみを証明する。
+  real-source receipt、exact Session binding、completeness/content を満たさず、
+  synthetic-only selection は `first_trace_ready` にならない。
+- Doctor は D051 `GET /health/ready` から独立した product diagnostic である。
+  Doctor state、source compatibility、verification transition、Doctor schema/store
+  failure によって readiness check/reason/threshold/config/body/status を変更せず、
+  Local Monitor startup、ingestion、projection、stateless evaluation を失敗させない。
+  Doctor store busy/unavailable は verification route/command だけを
+  `doctor_store_busy` / `doctor_store_unavailable` に degrade する。
+- Issues #103/#104 は shared fact snapshot と source-neutral evidence candidate
+  (`real_source|synthetic_probe` と fixed evidence kind) の producer である。
+  source-specific Doctor state/reason/severity/action enum を追加しない。proxy DTO、
+  Razor、JavaScript、Canvas、UI とその live workflow は Issue #105 の所有であり、
+  Issue #102 は facsimile を追加しない。
+- D059 を維持する。exact source/session evidence と論理的に無関係な
+  `schema_drift_detected` 単独では exact verification を失敗させない。
+- Doctor v1 persistence は既存 SQLite 内の separate
+  `schema_version(component='doctor', version=1)`、`doctor_verifications`、
+  `doctor_verification_evidence` に閉じる。schema creation と terminal transition は
+  transactional/restart-safe/idempotent とし、monitor/session component version を
+  変更しない。migration failure は close/reopen 後に exact pre-Doctor schema/rows を
+  復元し、新しい schema version を downgrade/fallback しない。
+
+Consequences:
+
+- Config CLI の five commands と Local Monitor の five `/api/doctor` routes は
+  fixed bounds、exit/HTTP mapping、loopback/Host/same-origin/CSRF/no-store/sanitized
+  boundary を共有する。
+- public/storage output に raw telemetry、prompt/response/tool body、PII、credential、
+  authorization value、absolute/local path、rejected body、exception text を含めない。
+- source-specific live first-trace evidence と proxy/UI の検証は #103/#104/#105 の
+  handoff とし、Issue #102 完了の証拠に見せかけない。

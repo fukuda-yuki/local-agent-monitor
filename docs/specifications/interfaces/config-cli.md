@@ -26,6 +26,11 @@ config-cli setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all>
 config-cli setup apply --change-set <uuid-v7>
 config-cli setup rollback --change-set <uuid-v7>
 config-cli setup status [--adapter github-copilot]
+config-cli doctor evaluate --input <file> [--json]
+config-cli doctor verification start --database <file> --source-surface <value> [--source-adapter <value>] --expires-at <RFC3339> [--json]
+config-cli doctor verification status --database <file> --verification-id <uuid-v7> [--json]
+config-cli doctor verification complete --database <file> --verification-id <uuid-v7> --expected-revision <positive-int> --input <file> [--json]
+config-cli doctor verification cancel --database <file> --verification-id <uuid-v7> --expected-revision <positive-int> [--json]
 ```
 
 Configuration commands must emit placeholders instead of real credentials.
@@ -89,6 +94,58 @@ profile-aware output commands returned a deterministic error for
 `raw-local-receiver`; Sprint7 replaces that reserved error with generated
 configuration that points to the local receiver endpoint and does not emit
 Langfuse credentials, Collector headers, or remote endpoints.
+
+## Doctor Commands
+
+The five `doctor` commands are the source-independent Issue #102 diagnostic
+surface. They do not replace `setup`: setup proves static configuration only,
+while Doctor evaluates explicit facts or carries one bounded real-source
+verification window.
+
+`doctor evaluate --input` reads one strict `DoctorFactSnapshot` JSON object with
+source-neutral typed `DoctorObservation` entries. Doctor verification complete
+reads one strict input object containing `fact_snapshot` and
+`accepted_evidence_refs`; its snapshot observations must be empty. The complete
+caller supplies opaque references only, and the store/service resolves existing
+unexpired persisted candidates into trusted observations. Both files are
+bounded to 65,536 bytes, read with a sentinel byte, and reject
+unknown/duplicate properties, unsupported schema versions, and inconsistent
+fact groups. The database path is input only and must never appear in output,
+stderr, logs, evidence, or an error.
+
+`source-surface` and optional `source-adapter` use the shared bounded token
+grammar. Verification IDs are canonical lowercase UUIDv7, revision is a
+positive integer, `expires-at` is canonical UTC RFC 3339 round-trip form, and
+the requested window must be 1..30 minutes from the injected start time.
+Option names, arity, and values are parsed strictly; no positional/alias
+fallback or permissive unknown option is accepted.
+
+With `--json`, stdout is exactly one canonical `doctor.v1` object. Without
+`--json`, stdout is the bounded human projection from the same already-evaluated
+result. Adapters must not re-evaluate facts or redefine state ordering. Success
+writes nothing to stderr; non-success writes only the fixed result code and one
+newline. Recognized Doctor parse, bounded-read, JSON, filesystem, and SQLite
+failures return sanitized Doctor results and never expose help text, exception
+text, rejected JSON, credentials, raw content, PII, or local paths.
+When any required fact family is unknown, the fixed partial result has
+`success=false`, a non-null evaluation, a null primary state, an empty state
+list, and nonempty canonically ordered missing families.
+
+Exit categories are fixed:
+
+| Exit | Doctor outcome |
+| ---: | --- |
+| `0` | `first_trace_ready`, successful start/status/complete/cancel |
+| `2` | invalid arguments/input/schema |
+| `3` | valid non-ready evaluation or partial fact snapshot |
+| `4` | verification not-found/stale/expired/already-terminal/source/evidence conflict |
+| `5` | `doctor_store_busy`, `doctor_store_unavailable`, or `internal_error` |
+
+The shared result, fact families, complete fixed-code mapping, human projection,
+evidence-selection rules, and persistence semantics are canonical in
+[first-trace-doctor.md](first-trace-doctor.md). Existing setup output remains
+`setup.v1`; Doctor output is never embedded in or substituted for a setup
+result.
 
 ## Raw Data Commands
 

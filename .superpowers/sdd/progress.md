@@ -13,7 +13,12 @@
 - Baseline build: PASS, 0 warnings and 0 errors.
 - Baseline Playwright Chromium bootstrap: PASS.
 - Baseline full tests: PASS, 4,877 passed, 0 failed, 0 skipped.
-- Next action: commit Task 0, then dispatch Task 1 canonical specification implementation and independent review.
+- Task 0 commit: `0a2542d9e973429e39a4986c823996b057fb607b`.
+- Task 1 canonical specification: implementation complete; initial independent
+  review found five Important findings; all five were corrected; re-review PASS
+  with 0 Critical, 0 Important, and 0 Minor findings.
+- Next action: commit Task 1, then dispatch Task 2 thin executable
+  cross-surface slice with TDD and independent review.
 
 ## Worker constraint
 
