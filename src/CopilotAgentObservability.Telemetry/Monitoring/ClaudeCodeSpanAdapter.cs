@@ -2,7 +2,7 @@ namespace CopilotAgentObservability.Telemetry;
 
 internal static class ClaudeCodeSpanAdapter
 {
-    private static readonly HashSet<string> RecognizedSpanNames = new(StringComparer.Ordinal)
+    internal static readonly HashSet<string> RecognizedSpanNames = new(StringComparer.Ordinal)
     {
         "claude_code.interaction",
         "claude_code.llm_request",

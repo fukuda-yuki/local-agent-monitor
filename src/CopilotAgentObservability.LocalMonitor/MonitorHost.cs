@@ -887,6 +887,8 @@ internal static class MonitorHost
                     decodedPayload.StructuralInventory,
                     CountRecognizedSpanEnvelopes(decodedPayload.StructuralInventory),
                     sourceFingerprintRegistry);
+                var captureContentState = ClaudeOtlpCaptureContentStateResolver.Derive(decodedPayload.PayloadJson)
+                    ?? metadata.CaptureContentState;
                 var observation = SourceObservationBatchDraft.Create(
                     Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
                     metadata.SourceSurface,
@@ -895,7 +897,7 @@ internal static class MonitorHost
                     metadata.AdapterVersion,
                     decodedPayload.StructuralInventory,
                     decision,
-                    metadata.CaptureContentState,
+                    captureContentState,
                     observedAt);
                 batch = ValidatedIngestionBatch.Create(record, observation);
             }

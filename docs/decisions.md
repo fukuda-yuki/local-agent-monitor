@@ -2021,3 +2021,37 @@ The canonical interface is
 [configuration setup](specifications/interfaces/configuration-setup.md), and
 its repository-safe/private-data split is fixed in
 [security data boundaries](specifications/security-data-boundaries.md).
+
+## D059: Claude exact session binding is gated on its own evidence, not adapter promotion
+
+Status: Accepted (2026-07-16)
+
+Issue #108 asked whether the exact native-session-ID resolver should stay
+gated on `source_adapter == claude-code-otel` promotion, which made it
+unreachable for real traces because promotion never completes for the
+currently drifted producer shape (Issue #99's open `any_value.int`-as-`double`
+field question).
+
+- The exact native-session-ID resolver is reachable on its own evidence alone:
+  a single unambiguous `session.id` attribute on the OTel span whose UTF-8
+  bytes equal exactly one persisted `claude-code` Hook native session ID with
+  binding kind `Native`, `ExplicitResume`, or `ExplicitHandoff`. It no longer
+  requires `claude-code-otel` adapter promotion; a span still labeled
+  `raw-otlp` binds on this evidence.
+- Adapter promotion continues to gate every other promoted `claude-code-otel`
+  behavior, including the promoted `ProcessClaude` span classification
+  semantics (D057, Issue #101). Only the exact-binding capability is
+  decoupled.
+- Binding never rewrites provenance: evidence stored from a non-promoted span
+  keeps its actual source labels, and the raw `session.id` is still not
+  persisted as a new native ID.
+- Rationale: the drifted `any_value.int` field has no logical relationship to
+  `session.id` byte-equality. Requiring promotion made a fully-specified,
+  independently verifiable binding capability wait on an unrelated open
+  question. The Issue #99 promotion decision remains open and unaffected by
+  this decoupling.
+
+The canonical field and gating contract is
+[Claude Code exact binding](specifications/contracts/source-capabilities/v1/claude-code/exact-binding.md),
+mirrored in
+[Source Schema Drift and Claude Code](specifications/interfaces/source-schema-drift-claude-code.md).

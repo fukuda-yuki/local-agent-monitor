@@ -251,7 +251,9 @@ byte-equivalent trace context is insufficient. A generic link whose kind is
 not `resume` or `handoff` is insufficient. Repository, cwd, transcript
 path, process identity, and timestamp proximity are not binding evidence.
 Duplicate OTel and Hook inputs are idempotent by source identity and canonical
-Hook hash.
+Hook hash. The exact native-session-ID resolver is gated only by its own
+`session.id` byte-equality evidence, not by `claude-code-otel` adapter
+promotion; a span still labeled `raw-otlp` binds on that evidence alone.
 
 For Claude v1, positive `trace_context` binding is deferred because the Session
 event envelope exposes only `trace_id` and no provenance-bearing complete
@@ -413,6 +415,22 @@ or absent, `redacted` when the source explicitly reports redaction, and
 otherwise it is null and completeness reasons describe the missing content.
 `expired_pending_deletion` remains an event-content retention state and is not
 fabricated as a source capture state.
+
+For raw OTLP trace ingestion, `capture_content_state` is derived per ingest
+batch rather than fixed. A batch containing at least one recognized
+`claude_code.*` span derives `available` when an allowed content-bearing gated
+field is present in the batch: the `user_prompt` attribute on
+`claude_code.interaction` (producer gate `OTEL_LOG_USER_PROMPTS=1`), a
+`tool.output` span event on `claude_code.tool` (producer gate
+`OTEL_LOG_TOOL_CONTENT=1`), or the `file_path` attribute on `claude_code.tool`
+(producer gate `OTEL_LOG_TOOL_DETAILS=1`); it derives `not_captured` otherwise.
+The `error` attribute on `claude_code.tool.execution` is never capture
+evidence, because its gated-detail and ungated-category forms share one
+producer path and are indistinguishable at the receiver. `redacted` is not
+derivable on this surface because no explicit redaction signal is documented
+for it. A batch with no recognized Claude span keeps the surface's fixed state
+(`unsupported` for raw OTLP). Derivation inspects field presence only; content
+values are never copied out of the raw payload into the observation.
 
 ## Diagnostics and UI
 
