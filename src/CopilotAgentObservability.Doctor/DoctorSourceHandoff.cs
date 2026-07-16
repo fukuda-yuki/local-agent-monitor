@@ -44,6 +44,14 @@ public interface IDoctorSourceHandoff
         DateTimeOffset observedAt,
         DoctorSetupFactContribution setupFacts,
         DoctorRuntimeFactContribution runtimeFacts);
+
+    DoctorEvidenceCandidate ComposeCandidate(
+        DoctorVerification verification,
+        string candidateId,
+        DoctorEvidenceClass evidenceClass,
+        DoctorEvidenceKind evidenceKind,
+        string evidenceRef,
+        DateTimeOffset observedAt);
 }
 
 public static class DoctorSourceHandoffComposer
@@ -80,9 +88,7 @@ public static class DoctorSourceHandoffComposer
         DoctorSetupFactContribution setupFacts,
         DoctorRuntimeFactContribution runtimeFacts)
     {
-        if (verification is null
-            || verification.State != DoctorVerificationState.Active
-            || !DoctorValidation.IsValidVerification(verification)
+        if (!IsValidActiveVerification(verification)
             || setupFacts is null
             || runtimeFacts is null)
         {
@@ -97,6 +103,40 @@ public static class DoctorSourceHandoffComposer
             setupFacts,
             runtimeFacts,
             []);
+    }
+
+    public static DoctorEvidenceCandidate ComposeCandidate(
+        DoctorVerification verification,
+        string candidateId,
+        DoctorEvidenceClass evidenceClass,
+        DoctorEvidenceKind evidenceKind,
+        string evidenceRef,
+        DateTimeOffset observedAt)
+    {
+        if (!IsValidActiveVerification(verification)
+            || observedAt < verification.StartedAt
+            || observedAt >= verification.ExpiresAt)
+        {
+            throw InvalidComposition();
+        }
+
+        var candidate = new DoctorEvidenceCandidate(
+            candidateId,
+            verification.VerificationId,
+            verification.ExpectedSourceSurface,
+            verification.ExpectedSourceAdapter,
+            evidenceClass,
+            evidenceKind,
+            evidenceRef,
+            observedAt,
+            verification.ExpiresAt);
+
+        if (!DoctorValidation.IsValidEvidenceCandidate(candidate))
+        {
+            throw InvalidComposition();
+        }
+
+        return candidate;
     }
 
     private static DoctorFactSnapshot Compose(
@@ -135,6 +175,11 @@ public static class DoctorSourceHandoffComposer
 
         return snapshot;
     }
+
+    private static bool IsValidActiveVerification(DoctorVerification? verification) =>
+        verification is not null
+        && verification.State == DoctorVerificationState.Active
+        && DoctorValidation.IsValidVerification(verification);
 
     private static ArgumentException InvalidComposition() =>
         new(InvalidCompositionMessage);
