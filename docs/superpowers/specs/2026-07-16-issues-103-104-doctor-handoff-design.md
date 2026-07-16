@@ -177,8 +177,11 @@ The shared tests contain two groups.
   caller observations;
 - candidate composition copies verification scope/expiry and rejects evidence
   outside the half-open verification window;
-- invalid source identity, inactive verification, and unsafe observation
-  references are rejected with the fixed sanitized error;
+- invalid source identity, source-mismatched observations, inactive
+  verification, and unsafe observation references are rejected with the fixed
+  sanitized error;
+- synthetic ingest/raw/projection evidence cannot satisfy
+  `first_trace_ready` for GitHub Copilot or Claude Code;
 - the Doctor assembly still contains no source-specific Doctor enum; and
 - discovered registrations are unique, limited to the three manifest-backed
   surfaces, and kept outside the Doctor assembly.
@@ -242,7 +245,7 @@ dotnet build CopilotAgentObservability.slnx
 
 The intended G0-3 checkpoint is:
 
-- nine shared-boundary tests: GREEN;
+- eleven shared test methods / twelve shared cases: GREEN;
 - the two GitHub Copilot source-implementation tests: RED for #103;
 - the Claude Code source-implementation test: RED for #104;
 - no unrelated test failure or compile failure.
