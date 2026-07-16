@@ -85,11 +85,24 @@ The shared method:
 Two shared tests pin successful inheritance and rejection at the exclusive
 expiry boundary.
 
+## Finding 4 — split gates must retain a closed registration set
+
+Splitting the original exact-array assertion into three owner-specific tests
+could allow an unknown fourth registration to pass unnoticed. The reviewed
+shared test
+`SourceHandoffRegistrations_AreUniqueManifestBackedAndOutsideDoctorCore`
+therefore remains GREEN before implementations exist and later rejects:
+
+- every concrete implementation in the Doctor assembly;
+- duplicate source-surface registrations; and
+- every registration outside `github-copilot-vscode`, `github-copilot-cli`, and
+  `claude-code`.
+
 ## Corrected G0 checkpoint
 
-- Eight shared contract tests are expected GREEN: mapping, completion identity,
+- Nine shared contract tests are expected GREEN: mapping, completion identity,
   candidate inheritance, candidate window rejection, three invalid-input tests,
-  and the no-source-specific-enum test.
+  the no-source-specific-enum test, and the closed registration-set test.
 - The two `GitHubCopilot*SourceHandoff` facts are intentionally RED and owned by
   #103.
 - `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore` is intentionally RED
