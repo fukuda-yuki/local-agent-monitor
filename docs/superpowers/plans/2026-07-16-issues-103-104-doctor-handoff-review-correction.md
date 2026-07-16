@@ -1,10 +1,11 @@
 # Issues #103/#104 Doctor Handoff Plan Review Correction
 
-This correction supersedes only the bundled source-implementation test shown in
+This correction supersedes the bundled source-implementation test and the
+narrow invalid-input example shown in
 `2026-07-16-issues-103-104-doctor-handoff.md`. All other task boundaries,
 production code, commands, and constraints remain unchanged.
 
-## Finding
+## Finding 1 — bundled implementation gate
 
 The original plan required one test to observe all three manifest-backed
 surfaces at once. After #103 implemented its two GitHub Copilot handoffs, that
@@ -38,9 +39,24 @@ assemblies, rejects every concrete implementation in the Doctor assembly,
 requires exactly one `DoctorSourceHandoffAttribute` on each implementation, and
 requires exactly one registration for the requested surface.
 
+## Finding 2 — incomplete invalid-input coverage
+
+The canonical contract gives invalid source identity, invalid verification
+identity/state, and unsafe evidence the same fixed sanitized failure. The
+original test covered only unsafe evidence. The reviewed test file now contains
+three shared negative tests:
+
+- `UnsafeObservation_UsesFixedSanitizedError`;
+- `InvalidSourceIdentity_UsesFixedSanitizedError`; and
+- `InactiveVerification_UsesFixedSanitizedError`.
+
+All three require the exact fixed message and verify that rejected values are
+not echoed.
+
 ## Corrected G0 checkpoint
 
-- Four shared contract tests are expected GREEN.
+- Six shared contract tests are expected GREEN: mapping, completion identity,
+  the three invalid-input tests, and the no-source-specific-enum test.
 - The two `GitHubCopilot*SourceHandoff` facts are intentionally RED and owned by
   #103.
 - `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore` is intentionally RED
