@@ -37,7 +37,7 @@ public sealed class DoctorSourceHandoffContractTests
         Assert.Equal("github-copilot-vscode", snapshot.SourceSurface);
         Assert.Null(snapshot.ExpectedSourceAdapter);
         Assert.Null(snapshot.VerificationId);
-        Assert.Equal(observations, snapshot.Observations);
+        Assert.Equal(observations, snapshot.Observations.ToArray());
         Assert.Equal(new InstallAndSourceVersionFacts(
             MonitorInstallStatus.Installed,
             SourceVersionStatus.Supported,
