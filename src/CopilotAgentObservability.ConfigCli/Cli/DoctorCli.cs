@@ -1,11 +1,12 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using CopilotAgentObservability.Doctor;
 
 namespace CopilotAgentObservability.ConfigCli;
 
-internal static class DoctorCli
+internal static partial class DoctorCli
 {
     private const int MaximumInputBytes = 65_536;
     private const string CanonicalTimestampFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
@@ -49,6 +50,10 @@ internal static class DoctorCli
                 _ => throw new InvalidOperationException(),
             };
         }
+        catch (DoctorUnsupportedSchemaException)
+        {
+            result = Result(DoctorResultCode.UnsupportedSchemaVersion);
+        }
         catch (DoctorInputException)
         {
             result = Result(DoctorResultCode.InvalidInput);
@@ -68,6 +73,7 @@ internal static class DoctorCli
             var json = ReadBoundedUtf8(path);
             using var document = JsonDocument.Parse(json);
             RejectDuplicateProperties(document.RootElement);
+            RequireSupportedSchema(document.RootElement);
             ValidateFactSnapshotShape(document.RootElement);
             var snapshot = DoctorJson.DeserializeFactSnapshot(json);
             ValidateFactSnapshot(snapshot);
@@ -107,6 +113,7 @@ internal static class DoctorCli
                 throw new DoctorInputException();
             }
 
+            RequireSupportedSchema(snapshotElement);
             ValidateFactSnapshotShape(snapshotElement);
             var snapshot = DoctorJson.DeserializeFactSnapshot(snapshotElement.GetRawText());
             ValidateFactSnapshot(snapshot);
@@ -210,26 +217,27 @@ internal static class DoctorCli
 
     private static void ValidateFactSnapshotShape(JsonElement root)
     {
-        RequireExactProperties(
+        RequireProperties(
             root,
-            "schema_version",
-            "source_surface",
-            "expected_source_adapter",
-            "observed_at",
-            "verification_id",
-            "observations",
-            "install_and_source_version",
-            "process_receiver_and_port",
-            "source_effective_configuration",
-            "endpoint_reachability",
-            "protocol_and_signal_compatibility",
-            "source_version_and_schema_diagnostics",
-            "last_ingest",
-            "raw_persistence",
-            "projection",
-            "exact_session_binding",
-            "completeness_and_content",
-            "restart_or_new_process");
+            [
+                "schema_version",
+                "source_surface",
+                "observed_at",
+                "observations",
+                "install_and_source_version",
+                "process_receiver_and_port",
+                "source_effective_configuration",
+                "endpoint_reachability",
+                "protocol_and_signal_compatibility",
+                "source_version_and_schema_diagnostics",
+                "last_ingest",
+                "raw_persistence",
+                "projection",
+                "exact_session_binding",
+                "completeness_and_content",
+                "restart_or_new_process",
+            ],
+            ["expected_source_adapter", "verification_id"]);
 
         RequireNullableFamily(root, "install_and_source_version", "monitor_install", "source_version", "source_feature");
         RequireNullableFamily(root, "process_receiver_and_port", "monitor_process", "receiver_bind", "port_owner");
@@ -274,6 +282,41 @@ internal static class DoctorCli
         RequireExactProperties(family, propertyNames);
     }
 
+    private static void RequireSupportedSchema(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("schema_version", out var schemaElement)
+            || schemaElement.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(schemaElement.GetString()))
+        {
+            throw new DoctorInputException();
+        }
+
+        if (!string.Equals(schemaElement.GetString(), DoctorSchemaVersions.FactsV1, StringComparison.Ordinal))
+        {
+            throw new DoctorUnsupportedSchemaException();
+        }
+    }
+
+    private static void RequireProperties(
+        JsonElement element,
+        IReadOnlyCollection<string> requiredPropertyNames,
+        IReadOnlyCollection<string> optionalPropertyNames)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            throw new DoctorInputException();
+        }
+
+        var actual = element.EnumerateObject().Select(property => property.Name).ToHashSet(StringComparer.Ordinal);
+        if (requiredPropertyNames.Any(propertyName => !actual.Contains(propertyName))
+            || actual.Any(propertyName => !requiredPropertyNames.Contains(propertyName)
+                && !optionalPropertyNames.Contains(propertyName)))
+        {
+            throw new DoctorInputException();
+        }
+    }
+
     private static void RequireExactProperties(JsonElement element, params string[] propertyNames)
     {
         if (element.ValueKind != JsonValueKind.Object)
@@ -292,18 +335,25 @@ internal static class DoctorCli
     private static bool IsSafeEvidenceReference(string? value)
     {
         if (value is not { Length: >= 1 and <= 128 }
-            || !char.IsAsciiLetterOrDigit(value[0])
-            || value.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '.' and not '_' and not ':' and not '-'))
+            || !string.Equals(value, value.Trim(), StringComparison.Ordinal)
+            || value.Any(char.IsControl)
+            || DiagnosisValidator.ContainsUnsafeMaterial(value)
+            || UriSchemePattern().IsMatch(value)
+            || value.IndexOfAny(['/', '\\']) >= 0
+            || value is "." or ".." or "~"
+            || PersonalIdentifierPattern().IsMatch(value))
         {
             return false;
         }
 
-        return !new[]
-        {
-            "authorization", "bearer", "credential", "password", "secret", "token",
-            "prompt", "response", "tool_argument", "tool_result",
-        }.Any(marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
+        return true;
     }
+
+    [GeneratedRegex("\\A[A-Za-z][A-Za-z0-9+.-]*:", RegexOptions.CultureInvariant)]
+    private static partial Regex UriSchemePattern();
+
+    [GeneratedRegex("(?<![0-9])[0-9]{3}-[0-9]{2}-[0-9]{4}(?![0-9])", RegexOptions.CultureInvariant)]
+    private static partial Regex PersonalIdentifierPattern();
 
     private static bool IsSourceToken(string? value)
     {
@@ -520,4 +570,6 @@ internal static class DoctorCli
     }
 
     private sealed class DoctorInputException : Exception;
+
+    private sealed class DoctorUnsupportedSchemaException : Exception;
 }

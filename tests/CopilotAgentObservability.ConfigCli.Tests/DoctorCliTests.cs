@@ -140,6 +140,118 @@ public sealed class DoctorCliTests
         Assert.Equal("invalid_arguments" + Environment.NewLine, result.Error);
     }
 
+    [Theory]
+    [InlineData("evaluate")]
+    [InlineData("complete")]
+    public void UnsupportedSchema_IsClassifiedBeforeV1ShapeOrApplication(string command)
+    {
+        var unsupportedSnapshot = SnapshotJson
+            .Replace(DoctorSchemaVersions.FactsV1, "doctor.facts.v2", StringComparison.Ordinal)
+            .Replace("{", "{\"v2_only_member\":true,", StringComparison.Ordinal);
+        using var input = DoctorInputFile.Create(
+            command == "complete"
+                ? CompleteInputJson(snapshotJson: unsupportedSnapshot)
+                : unsupportedSnapshot);
+        var application = new RecordingDoctorApplication { Result = LifecycleResult(DoctorResultCode.DoctorStoreUnavailable) };
+        var args = command == "complete"
+            ? CompleteArgs(input.Path)
+            : new[] { "doctor", "evaluate", "--input", input.Path, "--json" };
+
+        var result = Run(args, application);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Equal(DoctorResultCode.UnsupportedSchemaVersion, DoctorJson.DeserializeResult(result.Output).Code);
+        Assert.Equal("unsupported_schema_version" + Environment.NewLine, result.Error);
+        Assert.Equal(0, application.TotalCalls);
+    }
+
+    [Fact]
+    public void UnsupportedCompleteSchema_DefaultNoStoreDoesNotOverrideClassification()
+    {
+        using var input = DoctorInputFile.Create(CompleteInputJson(
+            snapshotJson: SnapshotJson.Replace(DoctorSchemaVersions.FactsV1, "doctor.facts.v2", StringComparison.Ordinal)));
+
+        var result = RunProduction(CompleteArgs(input.Path));
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Equal(DoctorResultCode.UnsupportedSchemaVersion, DoctorJson.DeserializeResult(result.Output).Code);
+        Assert.Equal("unsupported_schema_version" + Environment.NewLine, result.Error);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("null")]
+    [InlineData("number")]
+    public void MalformedSchema_RemainsInvalidInput(string scenario)
+    {
+        var json = scenario switch
+        {
+            "missing" => SnapshotJson.Replace("  \"schema_version\":\"doctor.facts.v1\",\n", "", StringComparison.Ordinal),
+            "null" => SnapshotJson.Replace("\"schema_version\":\"doctor.facts.v1\"", "\"schema_version\":null", StringComparison.Ordinal),
+            "number" => SnapshotJson.Replace("\"schema_version\":\"doctor.facts.v1\"", "\"schema_version\":2", StringComparison.Ordinal),
+            _ => throw new InvalidOperationException(),
+        };
+        using var input = DoctorInputFile.Create(json);
+        var application = new RecordingDoctorApplication();
+
+        var result = Run(["doctor", "evaluate", "--input", input.Path, "--json"], application);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Equal(DoctorResultCode.InvalidInput, DoctorJson.DeserializeResult(result.Output).Code);
+        Assert.Equal(0, application.TotalCalls);
+    }
+
+    [Theory]
+    [InlineData("evaluate", false, false)]
+    [InlineData("evaluate", true, false)]
+    [InlineData("evaluate", false, true)]
+    [InlineData("evaluate", true, true)]
+    [InlineData("complete", false, false)]
+    [InlineData("complete", true, false)]
+    [InlineData("complete", false, true)]
+    [InlineData("complete", true, true)]
+    public void OptionalSnapshotMembers_AcceptExplicitNullOrOmission(
+        string command,
+        bool omitExpectedAdapter,
+        bool omitVerificationId)
+    {
+        var snapshotJson = SnapshotJson;
+        if (omitExpectedAdapter)
+        {
+            snapshotJson = snapshotJson.Replace("  \"expected_source_adapter\":null,\n", "", StringComparison.Ordinal);
+        }
+
+        if (omitVerificationId)
+        {
+            snapshotJson = snapshotJson.Replace("  \"verification_id\":null,\n", "", StringComparison.Ordinal);
+        }
+
+        using var input = DoctorInputFile.Create(
+            command == "complete"
+                ? CompleteInputJson(snapshotJson: snapshotJson)
+                : snapshotJson);
+        var application = new RecordingDoctorApplication
+        {
+            Result = command == "complete"
+                ? LifecycleResult(DoctorResultCode.VerificationCompleted)
+                : EvaluationResult(DoctorStateCode.MonitorNotRunning),
+        };
+        var args = command == "complete"
+            ? CompleteArgs(input.Path)
+            : new[] { "doctor", "evaluate", "--input", input.Path, "--json" };
+
+        var result = Run(args, application);
+
+        Assert.Equal(command == "complete" ? 0 : 3, result.ExitCode);
+        Assert.Equal(string.Empty, result.Error);
+        Assert.Equal(1, application.TotalCalls);
+        var snapshot = command == "complete"
+            ? application.CompleteCalls.Single().Input.FactSnapshot
+            : application.EvaluateCalls.Single();
+        Assert.Null(snapshot.ExpectedSourceAdapter);
+        Assert.Null(snapshot.VerificationId);
+    }
+
     [Fact]
     public void InputFiles_AcceptExactly64KiBAndRejectTheSentinelByte()
     {
@@ -210,6 +322,249 @@ public sealed class DoctorCliTests
         Assert.Equal(DoctorResultCode.InvalidInput, DoctorJson.DeserializeResult(result.Output).Code);
         Assert.Equal("invalid_input" + Environment.NewLine, result.Error);
         Assert.DoesNotContain("path", result.Output + result.Error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(UnsafeEvidenceReferenceCases))]
+    public void UnsafeEvidenceReference_DirectObservationNeverReachesApplicationOrOutput(string reference)
+    {
+        using var input = DoctorInputFile.Create(SnapshotWithObservation(reference));
+        var application = new RecordingDoctorApplication();
+
+        var result = Run(["doctor", "evaluate", "--input", input.Path, "--json"], application);
+
+        AssertSanitizedInvalidInput(result, application);
+    }
+
+    [Theory]
+    [MemberData(nameof(UnsafeEvidenceReferenceCases))]
+    public void UnsafeEvidenceReference_CompleteSelectionNeverReachesApplicationOrOutput(string reference)
+    {
+        using var input = DoctorInputFile.Create(CompleteInputJson(
+            references: System.Text.Json.JsonSerializer.Serialize(new[] { reference })));
+        var application = new RecordingDoctorApplication();
+
+        var result = Run(CompleteArgs(input.Path), application);
+
+        AssertSanitizedInvalidInput(result, application);
+    }
+
+    public static TheoryData<string> UnsafeEvidenceReferenceCases()
+    {
+        var cases = new TheoryData<string>
+        {
+            "raw prompt",
+            "RAW RESPONSE",
+            "Tool.Arguments",
+            "TOOL.RESULTS",
+            "Authorization: Bearer abcdefghijklmnop",
+            "credential=abcdefghi",
+            "person@example.com",
+            "user.id=person-001",
+            "123-45-6789",
+            "urn:uuid:018f3b9a-0000-7000-8000-000000000001",
+            "HTTPS://example.invalid/evidence",
+            " urn:uuid:018f3b9a-0000-7000-8000-000000000001",
+            "urn:uuid:018f3b9a-0000-7000-8000-000000000001 ",
+            "C:local.txt",
+            "C:\\local\\evidence.txt",
+            "/tmp/evidence",
+            "\\rooted\\evidence",
+            ".\\current",
+            "./current",
+            "..\\parent",
+            "../parent",
+            "~\\home",
+            "~/home",
+            "folder/local",
+            "folder\\local",
+            "line\nbreak",
+            "control\u0001value",
+            "",
+            "   ",
+            new string('a', 129),
+        };
+        return cases;
+    }
+
+    [Theory]
+    [InlineData(0, 2, 0)]
+    [InlineData(1, 0, 1)]
+    [InlineData(16, 0, 1)]
+    [InlineData(17, 2, 0)]
+    public void ActualCommand_CompleteReferenceCardinalityPinsOffByOneBoundaries(
+        int referenceCount,
+        int expectedExit,
+        int expectedCalls)
+    {
+        var references = Enumerable.Range(0, referenceCount).Select(index => $"candidate-{index:D3}").ToArray();
+        using var input = DoctorInputFile.Create(CompleteInputJson(
+            references: System.Text.Json.JsonSerializer.Serialize(references)));
+        var application = new RecordingDoctorApplication
+        {
+            Result = LifecycleResult(DoctorResultCode.VerificationCompleted),
+        };
+
+        var result = Run(CompleteArgs(input.Path), application);
+
+        Assert.Equal(expectedExit, result.ExitCode);
+        Assert.Equal(expectedCalls, application.TotalCalls);
+        Assert.Equal(expectedExit == 0 ? string.Empty : "invalid_input" + Environment.NewLine, result.Error);
+    }
+
+    [Theory]
+    [InlineData("evaluate", 1, true)]
+    [InlineData("evaluate", 128, true)]
+    [InlineData("evaluate", 0, false)]
+    [InlineData("evaluate", 129, false)]
+    [InlineData("complete", 1, true)]
+    [InlineData("complete", 128, true)]
+    [InlineData("complete", 0, false)]
+    [InlineData("complete", 129, false)]
+    public void ActualCommand_EvidenceReferenceLengthPinsOffByOneBoundaries(
+        string command,
+        int length,
+        bool accepted)
+    {
+        var reference = new string('a', length);
+        using var input = DoctorInputFile.Create(command == "complete"
+            ? CompleteInputJson(references: System.Text.Json.JsonSerializer.Serialize(new[] { reference }))
+            : SnapshotWithObservation(reference));
+        var application = new RecordingDoctorApplication
+        {
+            Result = command == "complete"
+                ? LifecycleResult(DoctorResultCode.VerificationCompleted)
+                : EvaluationResult(DoctorStateCode.MonitorNotRunning),
+        };
+
+        var result = Run(
+            command == "complete" ? CompleteArgs(input.Path) : ["doctor", "evaluate", "--input", input.Path, "--json"],
+            application);
+
+        Assert.Equal(accepted ? command == "complete" ? 0 : 3 : 2, result.ExitCode);
+        Assert.Equal(accepted ? 1 : 0, application.TotalCalls);
+        Assert.Equal(accepted ? string.Empty : "invalid_input" + Environment.NewLine, result.Error);
+    }
+
+    [Theory]
+    [MemberData(nameof(ActualCompleteOutcomeCases))]
+    public void ActualCommand_CompletePinsEvaluationConflictStoreAndInternalOutcomes(
+        DoctorResultCode code,
+        DoctorStateCode? primaryState,
+        int expectedExit)
+    {
+        using var input = DoctorInputFile.Create(CompleteInputJson());
+        var application = new RecordingDoctorApplication
+        {
+            Result = primaryState is null
+                ? ResultForCode(code)
+                : EvaluationResult(primaryState.Value),
+        };
+
+        var result = Run(CompleteArgs(input.Path), application);
+
+        Assert.Equal(expectedExit, result.ExitCode);
+        Assert.Single(application.CompleteCalls);
+        Assert.Equal(application.Result.Success ? string.Empty : SnakeCase(code) + Environment.NewLine, result.Error);
+        Assert.Equal(code, DoctorJson.DeserializeResult(result.Output).Code);
+    }
+
+    public static TheoryData<DoctorResultCode, DoctorStateCode?, int> ActualCompleteOutcomeCases() => new()
+    {
+        { DoctorResultCode.EvaluationCompleted, DoctorStateCode.ReadyNoRealTrace, 3 },
+        { DoctorResultCode.PartialFactSnapshot, null, 3 },
+        { DoctorResultCode.VerificationStale, null, 4 },
+        { DoctorResultCode.DoctorStoreBusy, null, 5 },
+        { DoctorResultCode.InternalError, null, 5 },
+    };
+
+    [Theory]
+    [InlineData("start", DoctorResultCode.VerificationStarted, 0)]
+    [InlineData("start", DoctorResultCode.DoctorStoreUnavailable, 5)]
+    [InlineData("status", DoctorResultCode.VerificationActive, 0)]
+    [InlineData("status", DoctorResultCode.VerificationNotFound, 4)]
+    [InlineData("status", DoctorResultCode.DoctorStoreBusy, 5)]
+    [InlineData("cancel", DoctorResultCode.VerificationCancelled, 0)]
+    [InlineData("cancel", DoctorResultCode.VerificationStale, 4)]
+    [InlineData("cancel", DoctorResultCode.DoctorStoreUnavailable, 5)]
+    public void ActualCommand_StartStatusCancelPinSuccessConflictAndStore(
+        string command,
+        DoctorResultCode code,
+        int expectedExit)
+    {
+        var application = new RecordingDoctorApplication { Result = ResultForCode(code) };
+
+        var result = Run(LifecycleArgs(command, "doctor.db"), application);
+
+        Assert.Equal(expectedExit, result.ExitCode);
+        Assert.Equal(1, application.TotalCalls);
+        Assert.Equal(application.Result.Success ? string.Empty : SnakeCase(code) + Environment.NewLine, result.Error);
+        Assert.Equal(code, DoctorJson.DeserializeResult(result.Output).Code);
+    }
+
+    [Fact]
+    public void ActualCommand_CompletePins64KiBBoundaryAndSentinel()
+    {
+        var json = CompleteInputJson();
+        var byteCount = Encoding.UTF8.GetByteCount(json);
+        using var bounded = DoctorInputFile.Create(json + new string(' ', 65_536 - byteCount));
+        using var oversized = DoctorInputFile.Create(json + new string(' ', 65_537 - byteCount));
+        var application = new RecordingDoctorApplication
+        {
+            Result = LifecycleResult(DoctorResultCode.VerificationCompleted),
+        };
+
+        var accepted = Run(CompleteArgs(bounded.Path), application);
+        var rejected = Run(CompleteArgs(oversized.Path), application);
+
+        Assert.Equal(0, accepted.ExitCode);
+        Assert.Equal(string.Empty, accepted.Error);
+        Assert.Equal(2, rejected.ExitCode);
+        Assert.Equal("invalid_input" + Environment.NewLine, rejected.Error);
+        Assert.Equal(1, application.TotalCalls);
+    }
+
+    [Fact]
+    public void ActualCommand_DefaultProductionLifecycleDoesNotCreateDatabase()
+    {
+        using var input = DoctorInputFile.Create(CompleteInputJson());
+        var databasePath = System.IO.Path.Combine(input.DirectoryPath, "must-not-exist.db");
+        var commands = new[]
+        {
+            LifecycleArgs("start", databasePath),
+            LifecycleArgs("status", databasePath),
+            CompleteArgs(input.Path, databasePath),
+            LifecycleArgs("cancel", databasePath),
+        };
+
+        foreach (var args in commands)
+        {
+            var result = RunProduction(args);
+
+            Assert.Equal(5, result.ExitCode);
+            Assert.Equal(DoctorResultCode.DoctorStoreUnavailable, DoctorJson.DeserializeResult(result.Output).Code);
+            Assert.Equal("doctor_store_unavailable" + Environment.NewLine, result.Error);
+            Assert.False(File.Exists(databasePath));
+        }
+    }
+
+    [Fact]
+    public void ActualCommand_CompleteJsonAndHumanProjectTheSameResultOnce()
+    {
+        using var input = DoctorInputFile.Create(CompleteInputJson());
+        var expected = LifecycleResult(DoctorResultCode.VerificationCompleted);
+        var application = new RecordingDoctorApplication { Result = expected };
+
+        var json = Run(CompleteArgs(input.Path), application);
+        var humanArgs = CompleteArgs(input.Path).Where(argument => argument != "--json").ToArray();
+        var human = Run(humanArgs, application);
+
+        Assert.Equal(DoctorJson.SerializeResult(expected) + Environment.NewLine, json.Output);
+        Assert.Equal(DoctorHumanProjector.Project(expected) + Environment.NewLine, human.Output);
+        Assert.Equal(string.Empty, json.Error);
+        Assert.Equal(string.Empty, human.Error);
+        Assert.Equal(2, application.CompleteCalls.Count);
+        Assert.Equal(2, application.TotalCalls);
     }
 
     [Theory]
@@ -297,6 +652,46 @@ public sealed class DoctorCliTests
         return new CommandResult(exitCode, output.ToString(), error.ToString());
     }
 
+    private static CommandResult RunProduction(string[] args)
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = CliApplication.Run(args, output, error);
+        return new CommandResult(exitCode, output.ToString(), error.ToString());
+    }
+
+    private static string[] CompleteArgs(string inputPath, string databasePath = "doctor.db") =>
+        ["doctor", "verification", "complete", "--database", databasePath, "--verification-id", VerificationId, "--expected-revision", "1", "--input", inputPath, "--json"];
+
+    private static string[] LifecycleArgs(string command, string databasePath) => command switch
+    {
+        "start" => ["doctor", "verification", "start", "--database", databasePath, "--source-surface", "github-copilot-vscode", "--expires-at", ExpiresAt, "--json"],
+        "status" => ["doctor", "verification", "status", "--database", databasePath, "--verification-id", VerificationId, "--json"],
+        "cancel" => ["doctor", "verification", "cancel", "--database", databasePath, "--verification-id", VerificationId, "--expected-revision", "1", "--json"],
+        _ => throw new InvalidOperationException(),
+    };
+
+    private static string SnapshotWithObservation(string reference)
+    {
+        var serializedReference = System.Text.Json.JsonSerializer.Serialize(reference);
+        var observations = $$"""[{"source_surface":"github-copilot-vscode","source_adapter":null,"evidence_class":"real_source","evidence_kind":"ingest","evidence_ref":{{serializedReference}},"observed_at":"2026-07-16T01:02:03.0000000Z"}]""";
+        return SnapshotJson.Replace("\"observations\":[]", $"\"observations\":{observations}", StringComparison.Ordinal);
+    }
+
+    private static void AssertSanitizedInvalidInput(CommandResult result, RecordingDoctorApplication application)
+    {
+        var expected = new DoctorResult(
+            DoctorSchemaVersions.ResultV1,
+            Success: false,
+            DoctorResultCode.InvalidInput,
+            Evaluation: null,
+            Verification: null);
+        Assert.Equal(2, result.ExitCode);
+        Assert.Equal(DoctorJson.SerializeResult(expected) + Environment.NewLine, result.Output);
+        Assert.Equal("invalid_input" + Environment.NewLine, result.Error);
+        Assert.Equal(0, application.TotalCalls);
+    }
+
     private static DoctorResult EvaluationResult(DoctorStateCode stateCode)
     {
         var state = new DoctorState(
@@ -321,6 +716,9 @@ public sealed class DoctorCliTests
     private static DoctorResult LifecycleResult(DoctorResultCode code) =>
         new(DoctorSchemaVersions.ResultV1, true, code, null, null);
 
+    private static DoctorResult ResultForCode(DoctorResultCode code) =>
+        new(DoctorSchemaVersions.ResultV1, IsSuccessfulCode(code), code, null, null);
+
     private static bool IsSuccessfulCode(DoctorResultCode code) =>
         code is DoctorResultCode.EvaluationCompleted
             or DoctorResultCode.VerificationStarted
@@ -328,12 +726,20 @@ public sealed class DoctorCliTests
             or DoctorResultCode.VerificationCompleted
             or DoctorResultCode.VerificationCancelled;
 
-    private static string CompleteInputJson(string observations = "[]", string references = "[\"candidate-001\"]") => $$"""
-        {
-          "fact_snapshot": {{SnapshotJson.Replace("\"verification_id\":null", $"\"verification_id\":\"{VerificationId}\"").Replace("\"observations\":[]", $"\"observations\":{observations}")}},
-          "accepted_evidence_refs": {{references}}
-        }
-        """;
+    private static string CompleteInputJson(
+        string observations = "[]",
+        string references = "[\"candidate-001\"]",
+        string? snapshotJson = null)
+    {
+        var snapshot = snapshotJson
+            ?? SnapshotJson.Replace("\"verification_id\":null", $"\"verification_id\":\"{VerificationId}\"", StringComparison.Ordinal);
+        return $$"""
+            {
+              "fact_snapshot": {{snapshot.Replace("\"observations\":[]", $"\"observations\":{observations}")}},
+              "accepted_evidence_refs": {{references}}
+            }
+            """;
+    }
 
     private static string SnakeCase(DoctorResultCode code) =>
         System.Text.Json.JsonNamingPolicy.SnakeCaseLower.ConvertName(code.ToString());
