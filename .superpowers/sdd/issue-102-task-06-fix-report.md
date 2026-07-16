@@ -2,7 +2,7 @@
 
 ## Identity
 
-- Worktree: `C:\Users\mwam0\.codex\worktrees\0664\copilot-agent-observability\.worktrees\issue-102-http`
+- Worktree: linked Issue #102 worktree
 - Branch: `codex/issue-102-http`
 - Starting HEAD: `07e9cceb0674f0af968116b92fcae909da500070`
 - Review finding: the supported global request-body limit could reject a valid Doctor request before the Doctor-owned 64 KiB reader and return the ingestion-shaped 413 response.

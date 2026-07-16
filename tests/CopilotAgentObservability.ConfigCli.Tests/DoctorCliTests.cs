@@ -525,27 +525,30 @@ public sealed class DoctorCliTests
     }
 
     [Fact]
-    public void ActualCommand_DefaultProductionLifecycleDoesNotCreateDatabase()
+    public void ActualCommand_DefaultProductionLifecycleUsesSuppliedDatabase()
     {
         using var input = DoctorInputFile.Create(CompleteInputJson());
-        var databasePath = System.IO.Path.Combine(input.DirectoryPath, "must-not-exist.db");
-        var commands = new[]
-        {
-            LifecycleArgs("start", databasePath),
-            LifecycleArgs("status", databasePath),
-            CompleteArgs(input.Path, databasePath),
-            LifecycleArgs("cancel", databasePath),
-        };
+        var databasePath = System.IO.Path.Combine(input.DirectoryPath, "doctor.db");
+        var expiresAt = TimeProvider.System.GetUtcNow().AddMinutes(5).ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'");
 
-        foreach (var args in commands)
-        {
-            var result = RunProduction(args);
+        var started = RunProduction([
+            "doctor", "verification", "start", "--database", databasePath,
+            "--source-surface", "github-copilot-vscode", "--expires-at", expiresAt, "--json"]);
+        var verification = Assert.IsType<DoctorVerification>(DoctorJson.DeserializeResult(started.Output).Verification);
+        var status = RunProduction([
+            "doctor", "verification", "status", "--database", databasePath,
+            "--verification-id", verification.VerificationId, "--json"]);
+        var cancelled = RunProduction([
+            "doctor", "verification", "cancel", "--database", databasePath,
+            "--verification-id", verification.VerificationId, "--expected-revision", "1", "--json"]);
 
-            Assert.Equal(5, result.ExitCode);
-            Assert.Equal(DoctorResultCode.DoctorStoreUnavailable, DoctorJson.DeserializeResult(result.Output).Code);
-            Assert.Equal("doctor_store_unavailable" + Environment.NewLine, result.Error);
-            Assert.False(File.Exists(databasePath));
-        }
+        Assert.Equal(0, started.ExitCode);
+        Assert.Equal(DoctorResultCode.VerificationStarted, DoctorJson.DeserializeResult(started.Output).Code);
+        Assert.Equal(0, status.ExitCode);
+        Assert.Equal(DoctorResultCode.VerificationActive, DoctorJson.DeserializeResult(status.Output).Code);
+        Assert.Equal(0, cancelled.ExitCode);
+        Assert.Equal(DoctorResultCode.VerificationCancelled, DoctorJson.DeserializeResult(cancelled.Output).Code);
+        Assert.True(File.Exists(databasePath));
     }
 
     [Fact]

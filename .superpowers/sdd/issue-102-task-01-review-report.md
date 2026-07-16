@@ -2,7 +2,7 @@
 
 ## Identity
 
-- Worktree: `C:\Users\mwam0\.codex\worktrees\0664\copilot-agent-observability`
+- Worktree: linked Issue #102 worktree
 - Branch: `codex/issue-102-doctor-core`
 - Review HEAD: `0a2542d9e973429e39a4986c823996b057fb607b` plus the corrected uncommitted Task 1 diff
 - Identity result: matched the re-review dispatch before inspection and again

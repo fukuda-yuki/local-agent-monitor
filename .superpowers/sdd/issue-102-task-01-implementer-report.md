@@ -2,7 +2,7 @@
 
 ## Identity verified
 
-- Worktree: `C:\Users\mwam0\.codex\worktrees\0664\copilot-agent-observability`
+- Worktree: linked Issue #102 worktree
 - Branch: `codex/issue-102-doctor-core`
 - Starting HEAD: `0a2542d9e973429e39a4986c823996b057fb607b`
 - Identity matched the task brief before editing.

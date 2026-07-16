@@ -23,8 +23,24 @@
   one Minor; both corrected through a second RED/GREEN cycle; re-review PASS.
   Root focused test passed 1/1 and root solution build passed with 0 warnings
   and 0 errors.
-- Next action: commit Task 2, create isolated child worktrees from that commit,
-  and dispatch Tasks 3-5 in parallel before Task 6.
+- Task 2 commit: `80fd19e`.
+- Tasks 3-6 completed in isolated linked worktrees, independently reviewed,
+  locally committed, and cherry-picked into the primary feature branch through
+  `52794b3`. Source and primary commit ranges are preserved in the durable
+  ledger.
+- Task 7 integration implements the shared SQLite application service, default
+  CLI and Local Monitor production composition, trusted candidate completion,
+  D051 isolation, all-state cross-surface equality, and real lifecycle matrices.
+- Task 7 independent review initially found three Important issues. Observation
+  source/adapter mismatches are now rejected before persistence, both real
+  production surfaces cover lifecycle/no-mutation outcomes, and 19 SDD evidence
+  identities were sanitized. Re-review PASS: 0 Critical, 0 Important, 0 Minor.
+- Root Task 7 evidence: Doctor 216/216, Config CLI Doctor 152/152, Local Monitor
+  Doctor 49/49, solution build 0 warnings/0 errors, machine-local path scan 0,
+  prohibited wait/retry scan 0. Implementer full solution: 5,294/5,294 with no
+  failed or skipped tests.
+- Next action: commit Task 7, complete Task 8 derived documentation/ledger review,
+  then run pinned validation and four independent whole-branch reviews.
 
 ## Worker constraint
 

@@ -1,4 +1,5 @@
 using CopilotAgentObservability.Doctor;
+using CopilotAgentObservability.Persistence.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli;
 
@@ -60,4 +61,42 @@ internal sealed class StatelessDoctorCliApplication : IDoctorCliApplication
             DoctorResultCode.DoctorStoreUnavailable,
             Evaluation: null,
             Verification: null);
+}
+
+internal sealed class SqliteDoctorCliApplication : IDoctorCliApplication
+{
+    public static SqliteDoctorCliApplication Instance { get; } = new();
+
+    private SqliteDoctorCliApplication()
+    {
+    }
+
+    public DoctorResult Evaluate(DoctorFactSnapshot snapshot) => DoctorEvaluator.Evaluate(snapshot);
+
+    public DoctorResult Start(
+        string databasePath,
+        string sourceSurface,
+        string? sourceAdapter,
+        DateTimeOffset expiresAt) =>
+        Create(databasePath).Start(sourceSurface, sourceAdapter, expiresAt);
+
+    public DoctorResult Status(string databasePath, string verificationId) =>
+        Create(databasePath).Status(verificationId);
+
+    public DoctorResult Complete(
+        string databasePath,
+        string verificationId,
+        int expectedRevision,
+        DoctorCompletionInput input) =>
+        Create(databasePath).Complete(
+            verificationId,
+            expectedRevision,
+            input.FactSnapshot,
+            input.AcceptedEvidenceRefs);
+
+    public DoctorResult Cancel(string databasePath, string verificationId, int expectedRevision) =>
+        Create(databasePath).Cancel(verificationId, expectedRevision);
+
+    private static SqliteDoctorApplicationService Create(string databasePath) =>
+        SqliteDoctorApplicationService.Create(new SqliteDoctorVerificationStore(databasePath, TimeProvider.System));
 }

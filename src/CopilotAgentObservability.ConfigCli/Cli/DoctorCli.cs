@@ -23,7 +23,7 @@ internal static partial class DoctorCli
             return WriteResult(Result(DoctorResultCode.InvalidArguments), jsonOutput, output, error);
         }
 
-        application ??= StatelessDoctorCliApplication.Instance;
+        application ??= SqliteDoctorCliApplication.Instance;
         DoctorResult result;
         try
         {

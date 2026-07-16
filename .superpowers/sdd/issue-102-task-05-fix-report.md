@@ -2,7 +2,7 @@
 
 ## Identity
 
-- Worktree: `C:\Users\mwam0\.codex\worktrees\0664\copilot-agent-observability\.worktrees\issue-102-cli`
+- Worktree: linked Issue #102 worktree
 - Branch: `codex/issue-102-cli`
 - Reviewed candidate: `fe38bb71bee2f61e184ebab952b0144cbeff9f69`
 - Fix scope: Doctor CLI adapter and Doctor CLI tests only

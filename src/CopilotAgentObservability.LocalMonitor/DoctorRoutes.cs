@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using CopilotAgentObservability.Doctor;
+using CopilotAgentObservability.Persistence.Sqlite;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace CopilotAgentObservability.LocalMonitor;
@@ -737,4 +738,37 @@ internal sealed class StatelessDoctorHttpApplication : IDoctorHttpApplication
         DoctorResultCode.DoctorStoreUnavailable,
         Evaluation: null,
         Verification: null);
+}
+
+internal sealed class SqliteDoctorHttpApplication : IDoctorHttpApplication
+{
+    private readonly SqliteDoctorApplicationService application;
+
+    private SqliteDoctorHttpApplication(SqliteDoctorApplicationService application)
+    {
+        this.application = application;
+    }
+
+    public static SqliteDoctorHttpApplication Create(string databasePath, TimeProvider timeProvider) =>
+        new(SqliteDoctorApplicationService.Create(new SqliteDoctorVerificationStore(databasePath, timeProvider)));
+
+    public DoctorResult Evaluate(DoctorFactSnapshot snapshot) => application.Evaluate(snapshot);
+
+    public DoctorResult Start(string sourceSurface, string? sourceAdapter, DateTimeOffset expiresAt) =>
+        application.Start(sourceSurface, sourceAdapter, expiresAt);
+
+    public DoctorResult Status(string verificationId) => application.Status(verificationId);
+
+    public DoctorResult Complete(string verificationId, int expectedRevision, DoctorHttpCompletionInput input) =>
+        application.Complete(
+            verificationId,
+            expectedRevision,
+            input.FactSnapshot,
+            input.AcceptedEvidenceRefs);
+
+    public DoctorResult Cancel(string verificationId, int expectedRevision) =>
+        application.Cancel(verificationId, expectedRevision);
+
+    internal DoctorResult ObserveCandidate(DoctorEvidenceCandidate candidate) =>
+        application.ObserveCandidate(candidate);
 }

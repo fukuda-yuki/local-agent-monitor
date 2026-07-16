@@ -76,7 +76,8 @@ internal static class MonitorHost
         builder.Services.AddRazorPages();
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(health);
-        var doctorApplication = testOptions?.DoctorApplication ?? StatelessDoctorHttpApplication.Instance;
+        var doctorApplication = testOptions?.DoctorApplication
+            ?? CreateDoctorApplication(options.DatabasePath, timeProvider, testOptions?.DoctorApplicationFactory);
         builder.Services.AddSingleton(doctorApplication);
 
         var compatibilityStore = testOptions?.SourceCompatibilityStore
@@ -1010,6 +1011,22 @@ internal static class MonitorHost
         return app;
     }
 
+    private static IDoctorHttpApplication CreateDoctorApplication(
+        string databasePath,
+        TimeProvider timeProvider,
+        Func<string, TimeProvider, IDoctorHttpApplication>? factory)
+    {
+        try
+        {
+            return factory?.Invoke(databasePath, timeProvider)
+                ?? SqliteDoctorHttpApplication.Create(databasePath, timeProvider);
+        }
+        catch
+        {
+            return StatelessDoctorHttpApplication.Instance;
+        }
+    }
+
     private static int CountRecognizedSpanEnvelopes(SourceStructuralInventory inventory)
     {
         var count = inventory.StructuralOccurrences
@@ -1540,6 +1557,8 @@ internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMet
 internal sealed class MonitorHostTestOptions
 {
     public IDoctorHttpApplication? DoctorApplication { get; init; }
+
+    public Func<string, TimeProvider, IDoctorHttpApplication>? DoctorApplicationFactory { get; init; }
 
     public IngestionQueue? Queue { get; init; }
 

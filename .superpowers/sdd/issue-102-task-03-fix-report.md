@@ -2,7 +2,7 @@
 
 ## Identity and Scope
 
-- Worktree: `C:\Users\mwam0\.codex\worktrees\0664\copilot-agent-observability\.worktrees\issue-102-domain`
+- Worktree: linked Issue #102 worktree
 - Branch: `codex/issue-102-domain`
 - Starting HEAD: `e00063faf82e92ab8186b79b78c9a6baa6085af5`
 - The worktree, branch, and HEAD matched the fix brief before editing.

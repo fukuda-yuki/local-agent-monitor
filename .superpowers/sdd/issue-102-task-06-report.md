@@ -2,7 +2,7 @@
 
 ## Identity
 
-- Worktree: `C:\Users\mwam0\.codex\worktrees\0664\copilot-agent-observability\.worktrees\issue-102-http`
+- Worktree: linked Issue #102 worktree
 - Branch: `codex/issue-102-http`
 - Starting HEAD: `80fd19ebf497a092a4ae112e3321bcf70bcdd7a4`
 - Preferred runtime request: GPT-5.6 Luna with xhigh reasoning was not enforceable or independently verifiable.

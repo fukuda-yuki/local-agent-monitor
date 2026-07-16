@@ -313,7 +313,7 @@ public sealed class DoctorEvaluatorTests
             evaluation.PrimaryState?.EvidenceRefs);
     }
 
-    private static IEnumerable<(DoctorStateCode, DoctorFactSnapshot)> StateSnapshots()
+    internal static IEnumerable<(DoctorStateCode, DoctorFactSnapshot)> StateSnapshots()
     {
         var baseline = DoctorTestSnapshots.ReadyNoRealTrace();
         yield return (DoctorStateCode.MonitorNotInstalled, baseline with

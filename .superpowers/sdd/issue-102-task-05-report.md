@@ -2,7 +2,7 @@
 
 ## Identity
 
-- Worktree: `C:\Users\mwam0\.codex\worktrees\0664\copilot-agent-observability\.worktrees\issue-102-cli`
+- Worktree: linked Issue #102 worktree
 - Branch: `codex/issue-102-cli`
 - Starting HEAD: `80fd19ebf497a092a4ae112e3321bcf70bcdd7a4`
 - The worktree, branch, HEAD, and starting status matched the Task 5 brief before

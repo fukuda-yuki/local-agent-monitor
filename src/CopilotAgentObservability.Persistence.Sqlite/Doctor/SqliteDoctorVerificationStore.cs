@@ -109,6 +109,37 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
         return InsertVerification(verification, DoctorResultCode.VerificationStarted);
     }
 
+    public DoctorStoreOutcome Start(string sourceSurface, string? sourceAdapter, DateTimeOffset expiresAt)
+    {
+        var now = UtcNow();
+        if (expiresAt.Offset != TimeSpan.Zero)
+        {
+            return Invalid();
+        }
+
+        var window = expiresAt - now;
+        if (!DoctorStoreValidation.IsSourceToken(sourceSurface)
+            || !DoctorStoreValidation.IsSourceToken(sourceAdapter, nullable: true)
+            || window < TimeSpan.FromMinutes(1)
+            || window > TimeSpan.FromMinutes(30))
+        {
+            return Invalid();
+        }
+
+        var verification = new DoctorVerification(
+            Guid.CreateVersion7(now).ToString("D"),
+            sourceSurface,
+            sourceAdapter,
+            DoctorVerificationState.Active,
+            Revision: 1,
+            StartedAt: now,
+            ExpiresAt: expiresAt,
+            CompletedAt: null,
+            CancelledAt: null,
+            AcceptedEvidenceRefs: []);
+        return InsertVerification(verification, DoctorResultCode.VerificationStarted);
+    }
+
     public DoctorStoreOutcome Get(string verificationId)
     {
         if (!DoctorStoreValidation.IsCanonicalUuidV7(verificationId))
@@ -165,6 +196,12 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
             {
                 transaction.Rollback();
                 return transitionFailure;
+            }
+            if (!string.Equals(candidate.SourceSurface, verification.ExpectedSourceSurface, StringComparison.Ordinal)
+                || !string.Equals(candidate.SourceAdapter, verification.ExpectedSourceAdapter, StringComparison.Ordinal))
+            {
+                transaction.Rollback();
+                return new(DoctorResultCode.ExpectedSourceMismatch, verification);
             }
             if (candidate.ExpiresAt <= now)
             {

@@ -144,6 +144,51 @@ public sealed class DoctorVerificationStoreTests
                 ("$reference", unsafeReference)));
     }
 
+    [Theory]
+    [InlineData("claude-code", "otel", "mismatched-source")]
+    [InlineData("github-copilot-vscode", "wrong-adapter", "mismatched-adapter")]
+    public void ObserveCandidate_SourceOrAdapterMismatchIsRejectedWithoutPersistence(
+        string sourceSurface,
+        string? sourceAdapter,
+        string marker)
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new DoctorTestTimeProvider(DoctorTestData.Now);
+        var store = NewStore(database, time);
+        var verification = Start(store);
+        var application = SqliteDoctorApplicationService.Create(store);
+        string before;
+        using (var connection = database.Open())
+        {
+            before = SnapshotDoctorDatabase(connection);
+        }
+        var candidate = DoctorTestData.Candidate(
+            verification,
+            marker,
+            sourceSurface: sourceSurface,
+            sourceAdapter: sourceAdapter);
+
+        var result = application.ObserveCandidate(candidate);
+
+        Assert.Equal(DoctorResultCode.ExpectedSourceMismatch, result.Code);
+        Assert.False(result.Success);
+        Assert.Equivalent(verification, result.Verification, strict: true);
+        Assert.DoesNotContain(marker, DoctorJson.SerializeResult(result), StringComparison.Ordinal);
+        using (var reopenedConnection = database.Open())
+        {
+            Assert.Equal(before, SnapshotDoctorDatabase(reopenedConnection));
+            Assert.Equal(
+                0L,
+                DoctorTestDatabase.Scalar(
+                    reopenedConnection,
+                    "SELECT count(*) FROM doctor_verification_evidence WHERE evidence_ref=$reference;",
+                    ("$reference", marker)));
+        }
+        var reopenedStore = new SqliteDoctorVerificationStore(database.Path, time);
+        Assert.Equal(DoctorResultCode.VerificationActive, reopenedStore.CreateSchema().Code);
+        Assert.Equivalent(verification, reopenedStore.Get(verification.VerificationId).Verification, strict: true);
+    }
+
     [Fact]
     public void SourceAdapterReferenceAndAcceptedSelectionBounds_AreInclusiveAndEnforced()
     {
@@ -289,12 +334,6 @@ public sealed class DoctorVerificationStoreTests
             store.Complete(verification.VerificationId, 1, verification.ExpectedSourceSurface, "otel", [expiring.EvidenceRef], _ => DoctorCompletionDecision.Ready).Code);
 
         time.UtcNow = DoctorTestData.Now;
-        var mismatched = DoctorTestData.Candidate(verification, "trace:mismatch", sourceSurface: "claude-code");
-        Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(mismatched).Code);
-        Assert.Equal(
-            DoctorResultCode.ExpectedSourceMismatch,
-            store.Complete(verification.VerificationId, 1, verification.ExpectedSourceSurface, "otel", [mismatched.EvidenceRef], _ => DoctorCompletionDecision.Ready).Code);
-
         var synthetic = DoctorTestData.Candidate(verification, "probe:ingest", DoctorEvidenceClass.SyntheticProbe);
         Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(synthetic).Code);
         Assert.Equal(
