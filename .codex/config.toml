@@ -16,17 +16,5 @@ max_depth = 2
 # 公開設定側のスレッド上限も合わせる
 max_threads = 24
 
-[features.multi_agent_v2]
-enabled = true
-
-# root を含む同時アクティブスロット数
-max_concurrent_threads_per_session = 24
-
-# agent_type / service_tier 等を隠さない
-hide_spawn_agent_metadata = false
-
-# collaboration.spawn_agent との名前衝突回避用
-tool_namespace = "agents"
-
-# spawn_agent の model / reasoning_effort を露出
-expose_spawn_agent_model_overrides = true
+[features]
+multi_agent = true
