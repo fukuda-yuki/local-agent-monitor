@@ -160,6 +160,29 @@ public sealed class DoctorSourceHandoffContractTests
     }
 
     [Fact]
+    public void SourceMismatchedObservation_UsesFixedSanitizedError()
+    {
+        var observations = new[]
+        {
+            new DoctorObservation(
+                "claude-code",
+                null,
+                DoctorEvidenceClass.RealSource,
+                DoctorEvidenceKind.Ingest,
+                "mismatched-ingest-receipt",
+                ObservedAt),
+        };
+
+        AssertInvalidComposition(() => InvokeDirect(
+            "github-copilot-vscode",
+            null,
+            ObservedAt,
+            CreateSetupContribution(),
+            CreateRuntimeContribution(),
+            observations));
+    }
+
+    [Fact]
     public void InactiveVerification_UsesFixedSanitizedError()
     {
         var verification = new DoctorVerification(
@@ -179,6 +202,66 @@ public sealed class DoctorSourceHandoffContractTests
             ObservedAt,
             CreateSetupContribution(),
             CreateRuntimeContribution()));
+    }
+
+    [Theory]
+    [InlineData("github-copilot-vscode")]
+    [InlineData("claude-code")]
+    public void SyntheticEvidence_DoesNotSatisfyFirstTraceReadyAcrossSources(string sourceSurface)
+    {
+        var observations = new[]
+        {
+            new DoctorObservation(
+                sourceSurface,
+                null,
+                DoctorEvidenceClass.SyntheticProbe,
+                DoctorEvidenceKind.Ingest,
+                "synthetic-ingest-receipt",
+                ObservedAt),
+            new DoctorObservation(
+                sourceSurface,
+                null,
+                DoctorEvidenceClass.SyntheticProbe,
+                DoctorEvidenceKind.RawPersistence,
+                "synthetic-raw-receipt",
+                ObservedAt),
+            new DoctorObservation(
+                sourceSurface,
+                null,
+                DoctorEvidenceClass.SyntheticProbe,
+                DoctorEvidenceKind.Projection,
+                "synthetic-projection-receipt",
+                ObservedAt),
+            new DoctorObservation(
+                sourceSurface,
+                null,
+                DoctorEvidenceClass.RealSource,
+                DoctorEvidenceKind.ExactSessionBinding,
+                "exact-binding-receipt",
+                ObservedAt),
+            new DoctorObservation(
+                sourceSurface,
+                null,
+                DoctorEvidenceClass.RealSource,
+                DoctorEvidenceKind.CompletenessContent,
+                "completeness-receipt",
+                ObservedAt),
+        };
+        var snapshot = InvokeDirect(
+            sourceSurface,
+            null,
+            ObservedAt,
+            CreateSetupContribution(),
+            CreateRuntimeContribution(),
+            observations);
+
+        var result = DoctorEvaluator.Evaluate(snapshot);
+
+        Assert.Equal(DoctorResultCode.EvaluationCompleted, result.Code);
+        Assert.Equal(DoctorStateCode.ReadyNoRealTrace, result.Evaluation?.PrimaryState?.StateCode);
+        Assert.DoesNotContain(
+            result.Evaluation?.States ?? [],
+            state => state.StateCode == DoctorStateCode.FirstTraceReady);
     }
 
     [Fact]
@@ -242,6 +325,7 @@ public sealed class DoctorSourceHandoffContractTests
         Assert.DoesNotContain("prompt", argument.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Claude Code", argument.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("ingest-receipt-3", argument.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("mismatched-ingest-receipt", argument.Message, StringComparison.Ordinal);
     }
 
     private static void AssertSourceHandoff(string expectedSourceSurface)
