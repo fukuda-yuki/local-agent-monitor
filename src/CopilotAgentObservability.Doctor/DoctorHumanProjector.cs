@@ -18,9 +18,12 @@ public static class DoctorHumanProjector
             Environment.NewLine,
             $"Doctor: {ToWireValue(state.StateCode)}",
             $"Severity: {ToWireValue(state.Severity)}",
-            $"Source: {state.SourceSurface}",
+            $"Source: {BoundedSource(state.SourceSurface)}",
             $"Next action: {ToWireValue(state.NextAction)}");
     }
+
+    private static string BoundedSource(string sourceSurface) =>
+        DoctorValidation.IsSourceToken(sourceSurface) ? sourceSurface : "unknown";
 
     private static string ToWireValue<T>(T value) where T : struct, Enum =>
         JsonNamingPolicy.SnakeCaseLower.ConvertName(value.ToString());

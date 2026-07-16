@@ -9,12 +9,10 @@ public static class DoctorJson
     private static readonly JsonSerializerOptions Options = CreateOptions();
 
     public static DoctorFactSnapshot DeserializeFactSnapshot(string json) =>
-        JsonSerializer.Deserialize<DoctorFactSnapshot>(json, Options)
-        ?? throw new JsonException("Doctor fact snapshot is required.");
+        DeserializeStrict<DoctorFactSnapshot>(json);
 
     public static DoctorResult DeserializeResult(string json) =>
-        JsonSerializer.Deserialize<DoctorResult>(json, Options)
-        ?? throw new JsonException("Doctor result is required.");
+        DeserializeStrict<DoctorResult>(json);
 
     public static string SerializeResult(DoctorResult result) =>
         JsonSerializer.Serialize(result, Options);
@@ -29,8 +27,47 @@ public static class DoctorJson
             WriteIndented = false
         };
         options.Converters.Add(new CanonicalUtcDateTimeOffsetConverter());
-        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower, allowIntegerValues: false));
+        options.Converters.Add(new CanonicalEnumConverterFactory());
         return options;
+    }
+
+    private static T DeserializeStrict<T>(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            EnsureDistinctProperties(document.RootElement);
+            return JsonSerializer.Deserialize<T>(json, Options)
+                ?? throw new JsonException();
+        }
+        catch (JsonException)
+        {
+            throw new JsonException("invalid_input");
+        }
+    }
+
+    private static void EnsureDistinctProperties(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!names.Add(property.Name))
+                {
+                    throw new JsonException();
+                }
+
+                EnsureDistinctProperties(property.Value);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                EnsureDistinctProperties(item);
+            }
+        }
     }
 
     private sealed class CanonicalUtcDateTimeOffsetConverter : JsonConverter<DateTimeOffset>
@@ -58,5 +95,46 @@ public static class DoctorJson
         {
             writer.WriteStringValue(value.ToUniversalTime().ToString(Format, CultureInfo.InvariantCulture));
         }
+    }
+
+    private sealed class CanonicalEnumConverterFactory : JsonConverterFactory
+    {
+        public override bool CanConvert(Type typeToConvert) => typeToConvert.IsEnum;
+
+        public override JsonConverter CreateConverter(Type typeToConvert, JsonSerializerOptions options) =>
+            (JsonConverter)Activator.CreateInstance(
+                typeof(CanonicalEnumConverter<>).MakeGenericType(typeToConvert))!;
+    }
+
+    private sealed class CanonicalEnumConverter<TEnum> : JsonConverter<TEnum>
+        where TEnum : struct, Enum
+    {
+        private static readonly IReadOnlyDictionary<string, TEnum> FromWire =
+            Enum.GetValues<TEnum>().ToDictionary(ToWire, value => value, StringComparer.Ordinal);
+
+        public override TEnum Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType != JsonTokenType.String
+                || reader.GetString() is not { } value
+                || !FromWire.TryGetValue(value, out var parsed))
+            {
+                throw new JsonException();
+            }
+
+            return parsed;
+        }
+
+        public override void Write(Utf8JsonWriter writer, TEnum value, JsonSerializerOptions options)
+        {
+            if (!Enum.IsDefined(value))
+            {
+                throw new JsonException();
+            }
+
+            writer.WriteStringValue(ToWire(value));
+        }
+
+        private static string ToWire(TEnum value) =>
+            JsonNamingPolicy.SnakeCaseLower.ConvertName(value.ToString());
     }
 }
