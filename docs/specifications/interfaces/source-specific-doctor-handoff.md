@@ -289,6 +289,10 @@ A concrete implementation:
 - delegates direct, completion, and candidate composition to
   `DoctorSourceHandoffComposer`.
 
+No other `DoctorSourceHandoffAttribute` surface is allowed in v1. Registrations
+must be unique by ordinal source-surface value and must all live outside the
+Doctor assembly.
+
 ## Contract tests
 
 `DoctorSourceHandoffContractTests` pins:
@@ -299,13 +303,15 @@ A concrete implementation:
 4. candidate inheritance of verification identity/source/adapter/expiry and
    the half-open observation window;
 5. the fixed sanitized invalid-composition error;
-6. absence of source-specific Doctor enums in the core assembly; and
-7. three separately executable implementation gates:
+6. absence of source-specific Doctor enums in the core assembly;
+7. unique registrations limited to the three manifest-backed surfaces and kept
+   outside the Doctor assembly; and
+8. three separately executable implementation gates:
    - `GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore`;
    - `GitHubCopilotCliSourceHandoff_IsImplementedOutsideDoctorCore`;
    - `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore`.
 
-At the G0-3 checkpoint, items 1 through 6 are GREEN. The three implementation
+At the G0-3 checkpoint, items 1 through 7 are GREEN. The three implementation
 gates are intentionally RED. Issue #103 owns and turns the two GitHub Copilot
 gates GREEN; Issue #104 independently owns and turns the Claude Code gate GREEN.
 This split lets both worktrees verify their own production handoff without
