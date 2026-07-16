@@ -11,7 +11,7 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 - Base branch: `main`
 - Base commit: `920ff43a9ec63088a9cc109bcd15d0e6f4f9dc5c`
 - Current reviewed branch commit before this ledger update:
-  `8395989dcfde0c9b3760af2e8bbf3ee872d52012`
+  `96c9d936c6c3b4f52651a6849b0dadd718ff7914`
 - Pull request, merge, and Issue closure: not performed
 
 ## Commit sequence
@@ -39,6 +39,11 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 | `956f5d028ecd565f29941fbca689d30f8f1014c0` | Promote candidate refresh/restart semantics to the canonical handoff specification |
 | `a6f9390c5a834705558b8ea2ccef8d98c05dbd4b` | Align the approved design with candidate composition and refresh scope |
 | `8395989dcfde0c9b3760af2e8bbf3ee872d52012` | Record the candidate-boundary implementation-plan correction |
+| `8dbcbe923fb42f108dffd02264f5c941439b9b65` | Record the reviewed candidate handoff state |
+| `94525d73deea8137748b797d9e4ffe1ed5522788` | Preserve the closed, unique manifest-backed registration set after RED splitting |
+| `a5fa715c450659759cc7b0487622112fdd886c5a` | Pin the registration allowlist in the canonical handoff specification |
+| `588fff33f0c35eeeb09b0b96b4d4883690ced775` | Align the approved design with the registration allowlist gate |
+| `96c9d936c6c3b4f52651a6849b0dadd718ff7914` | Align the implementation-plan correction with nine shared tests |
 
 The original implementation-plan code block bundled all three surfaces into
 one test, showed one invalid-input example, and exposed only snapshot
@@ -58,9 +63,11 @@ The branch fixes the following source-neutral boundary:
   accepts only `started_at <= observed_at < expires_at`;
 - one discoverable `IDoctorSourceHandoff` interface and
   `DoctorSourceHandoffAttribute` without source-specific Doctor states;
-- surface-scoped v1 verification for `github-copilot-vscode`,
-  `github-copilot-cli`, and `claude-code`, with a null Doctor adapter while
-  referenced source records retain their actual adapter provenance;
+- a unique v1 registration allowlist containing only
+  `github-copilot-vscode`, `github-copilot-cli`, and `claude-code` outside the
+  Doctor assembly;
+- surface-scoped v1 verification with a null Doctor adapter while referenced
+  source records retain their actual adapter provenance;
 - exact verification-ID reuse after restart, without latest-verification,
   latest-trace, or latest-Session selection; and
 - fixed sanitized invalid-composition failure text.
@@ -71,8 +78,8 @@ Session binding behavior is changed.
 
 ## G0-3 test intent
 
-`DoctorSourceHandoffContractTests` contains eight shared-boundary tests and
-three independent source-implementation tests.
+`DoctorSourceHandoffContractTests` contains nine shared-boundary tests and three
+independent source-implementation tests.
 
 The intended post-G0 result is:
 
@@ -85,6 +92,8 @@ The intended post-G0 result is:
 - `InvalidSourceIdentity_UsesFixedSanitizedError`: GREEN;
 - `InactiveVerification_UsesFixedSanitizedError`: GREEN;
 - `DoctorCoreDefinesNoSourceSpecificDoctorEnum`: GREEN;
+- `SourceHandoffRegistrations_AreUniqueManifestBackedAndOutsideDoctorCore`:
+  GREEN;
 - `GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore`: RED until
   Issue #103 provides `github-copilot-vscode`;
 - `GitHubCopilotCliSourceHandoff_IsImplementedOutsideDoctorCore`: RED until
@@ -118,7 +127,7 @@ A complete branch-file inventory against `main` found only:
 - one Doctor test file; and
 - this durable ledger.
 
-Static review corrected six issues before this ledger update:
+Static review corrected seven issues before this ledger update:
 
 1. The first discovery test scanned only Config CLI and Local Monitor, so its
    Doctor-core exclusion assertion was vacuous. It now scans all three
@@ -140,6 +149,10 @@ Static review corrected six issues before this ledger update:
    reviewed interface/composer now owns those fields and the half-open window,
    while ID generation, source collection, deduplication, and persistence
    remain #103/#104 responsibilities.
+7. Splitting the exact surface assertion could have permitted an unknown fourth
+   registration. A shared GREEN test now preserves the closed allowlist,
+   uniqueness, and Doctor-core exclusion independently of the three owner RED
+   tests.
 
 The reviewed source contains no placeholder, fallback, source-specific Doctor
 enum, public candidate-write surface, sleep, polling, retry loop, real raw
@@ -165,7 +178,7 @@ dotnet test CopilotAgentObservability.slnx
 No RED count, GREEN count, successful build, Playwright bootstrap, or full-suite
 result is claimed. The branch must not be merged until a repository-capable
 Windows/.NET environment executes these exact commands and confirms that the
-eight shared tests are GREEN and the only intended failures are the three
+nine shared tests are GREEN and the only intended failures are the three
 source-implementation tests listed above.
 
 ## Handoff
