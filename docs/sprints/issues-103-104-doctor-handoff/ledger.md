@@ -10,8 +10,8 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 - Branch: `codex/issues-103-104-doctor-handoff-contract`
 - Base branch: `main`
 - Base commit: `920ff43a9ec63088a9cc109bcd15d0e6f4f9dc5c`
-- Current reviewed branch commit before this ledger:
-  `072a3eb4822c9b5750e9095ef2a9e2483b65f0d1`
+- Current reviewed branch commit before this ledger update:
+  `9db24b92a191fc82478bf13fef370cd32c16ee1c`
 - Pull request, merge, and Issue closure: not performed
 
 ## Commit sequence
@@ -26,6 +26,14 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 | `87a7ca2985dd5fbabcdd3a26dcd38a5d683804b0` | Add the source-neutral contribution, discovery, interface, and composition types |
 | `c869c39c18a8e3f7469b786e8643b213d7bb2e3b` | Make the implementation gate inspect the Doctor core as well as source assemblies and make missing-type failure explicit |
 | `072a3eb4822c9b5750e9095ef2a9e2483b65f0d1` | Compare composed observations by value rather than depending on overload inference |
+| `f61c669ed2d5dc2932bad98a05a54e4fb02496fb` | Record the initial G0 state and unavailable validation commands |
+| `4b60c130c2fd5581f6270808389d49355f0b3a0f` | Split the bundled source-implementation RED into three independently owned tests |
+| `9db24b92a191fc82478bf13fef370cd32c16ee1c` | Align the canonical specification with the parallel RED ownership |
+
+The original implementation-plan code block bundled all three surfaces into
+one test. The reviewed executable test and canonical specification supersede
+that detail: the three implementation gates are separate so #103 and #104 can
+verify their owned rows independently.
 
 ## G0-2 contract state
 
@@ -49,8 +57,8 @@ Session binding behavior is changed.
 
 ## G0-3 test intent
 
-`DoctorSourceHandoffContractTests` contains four shared-boundary tests and one
-intentional source-implementation coverage test.
+`DoctorSourceHandoffContractTests` contains four shared-boundary tests and three
+independent source-implementation tests.
 
 The intended post-G0 result is:
 
@@ -58,13 +66,27 @@ The intended post-G0 result is:
 - `VerificationComposition_UsesVerificationIdentityAndNoCallerObservations`:
   GREEN;
 - `InvalidComposition_UsesFixedSanitizedError`: GREEN;
-- `DoctorCoreDefinesNoSourceSpecificDoctorEnum`: GREEN; and
-- `ManifestBackedSourceHandoffs_AreImplementedOutsideDoctorCore`: RED until
-  Issue #103 provides `github-copilot-vscode` and `github-copilot-cli`, and
-  Issue #104 provides `claude-code`.
+- `DoctorCoreDefinesNoSourceSpecificDoctorEnum`: GREEN;
+- `GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore`: RED until
+  Issue #103 provides `github-copilot-vscode`;
+- `GitHubCopilotCliSourceHandoff_IsImplementedOutsideDoctorCore`: RED until
+  Issue #103 provides `github-copilot-cli`; and
+- `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore`: RED until Issue
+  #104 provides `claude-code`.
 
 This table records intended contract state only. No test result is claimed
 without command output.
+
+## Parallel execution boundary
+
+Issue #103 owns only the two `GitHubCopilot*SourceHandoff` RED tests. Issue #104
+owns only `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore`. Each lane
+can run its owned methods while the other lane remains intentionally RED. The
+full class becomes GREEN only after integration of both Issues.
+
+Source-specific implementations must not edit the shared expected surface
+values merely to suppress another lane's RED. They satisfy the test by adding
+concrete, annotated production implementations outside the Doctor assembly.
 
 ## Static review
 
@@ -73,10 +95,11 @@ A complete branch-file inventory against `main` found only:
 - one specification-index line;
 - the canonical handoff specification;
 - the approved design and implementation plan;
-- one Doctor source-neutral production file; and
-- one Doctor test file.
+- one Doctor source-neutral production file;
+- one Doctor test file; and
+- this durable ledger.
 
-Static review corrected three issues before this ledger:
+Static review corrected four issues before this ledger update:
 
 1. The first discovery test scanned only Config CLI and Local Monitor, so its
    Doctor-core exclusion assertion was vacuous. It now scans all three
@@ -86,10 +109,14 @@ Static review corrected three issues before this ledger:
    return, avoiding nullable-flow ambiguity.
 3. Observation preservation compares materialized values, avoiding dependence
    on an assertion overload chosen from `IReadOnlyList<T>` and array inputs.
+4. A single test originally required all three source implementations. That
+   would keep both parallel worktrees RED for work owned by the other Issue.
+   The test is now split into two #103 facts and one #104 fact, with common
+   discovery and Doctor-core exclusion logic.
 
 The reviewed source contains no placeholder, fallback, source-specific Doctor
-enum, public candidate-write surface, sleep, polling, retry loop, raw content,
-PII, credential, authorization value, or local path.
+enum, public candidate-write surface, sleep, polling, retry loop, real raw
+content, PII, credential, authorization value, or local path.
 
 ## Validation blocker
 
@@ -111,8 +138,7 @@ dotnet test CopilotAgentObservability.slnx
 No RED count, GREEN count, successful build, Playwright bootstrap, or full-suite
 result is claimed. The branch must not be merged until a repository-capable
 Windows/.NET environment executes these exact commands and confirms that the
-only intended test failure is
-`ManifestBackedSourceHandoffs_AreImplementedOutsideDoctorCore`.
+only intended failures are the three source-implementation tests listed above.
 
 ## Handoff
 
@@ -124,7 +150,7 @@ only intended test failure is
   surface-scoped handoff and delegates composition to
   `DoctorSourceHandoffComposer`.
 - Neither Issue edits the shared test merely to weaken the expected surface
-  list. Each turns its owned missing rows GREEN through production code and
-  source-specific tests.
-- After all three rows are present, the focused test, build, Playwright
+  values. Each turns only its owned RED methods GREEN through production code
+  and source-specific tests.
+- After all three methods are GREEN, the focused test, build, Playwright
   bootstrap, and full solution tests must all pass before integration.
