@@ -86,6 +86,53 @@ Static setup success does not prove telemetry receipt; Issue #69 owns that
 verification. `run_first_trace_doctor` is reserved for that handoff and is not
 emitted by current production setup results.
 
+Focused Doctor validation uses the three owning test projects:
+
+```powershell
+dotnet test tests\CopilotAgentObservability.Doctor.Tests\CopilotAgentObservability.Doctor.Tests.csproj
+dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~Doctor
+dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~Doctor
+```
+
+A repository-root CLI smoke can exercise stateless evaluation plus the public
+start/status/cancel lifecycle without a source-specific candidate producer:
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- doctor evaluate --input tests\CopilotAgentObservability.Doctor.Tests\TestData\monitor-not-running.facts.json --json
+# The valid non-ready fixture intentionally returns exit 3.
+
+$doctorDirectory = Join-Path $PWD 'tmp\doctor-smoke'
+New-Item -ItemType Directory -Force $doctorDirectory | Out-Null
+$doctorDatabase = Join-Path $doctorDirectory 'doctor.db'
+$expiresAt = [DateTimeOffset]::UtcNow.AddMinutes(5).ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'")
+$startJson = dotnet run --project src\CopilotAgentObservability.ConfigCli -- doctor verification start --database $doctorDatabase --source-surface smoke-source --source-adapter smoke-adapter --expires-at $expiresAt --json
+if ($LASTEXITCODE -ne 0) { throw 'Doctor verification start failed.' }
+$start = $startJson | ConvertFrom-Json
+$verificationId = $start.verification.verification_id
+$revision = $start.verification.revision
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- doctor verification status --database $doctorDatabase --verification-id $verificationId --json
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- doctor verification cancel --database $doctorDatabase --verification-id $verificationId --expected-revision $revision --json
+```
+
+Issue #102 intentionally exposes no candidate observation command or route, so
+the generic smoke does not fabricate a successful complete operation. #103 and
+#104 own source-specific candidate producers; #105 owns the proxy/UI workflow.
+Setup success, evaluation success, or verification start does not prove receipt
+of a first real trace.
+
+For a Windows-safe prohibited-wait scan, expand the file list before invoking
+`rg`; do not pass unexpanded `Doctor*` path operands:
+
+```powershell
+$doctorFiles = @(rg --files src tests | Where-Object { $_ -match 'Doctor' })
+rg -n 'Thread\.Sleep|Task\.Delay|\bretry\b|\bpoll\b' -- $doctorFiles
+if ($LASTEXITCODE -eq 1) {
+    Write-Host 'No prohibited Doctor wait/retry usage found.'
+} elseif ($LASTEXITCODE -ne 0) {
+    throw "Doctor wait/retry scan failed with exit code $LASTEXITCODE."
+}
+```
+
 For the complete Config CLI surface, use `docs/specifications/interfaces/config-cli.md` and the user guides.
 
 ## Working Order

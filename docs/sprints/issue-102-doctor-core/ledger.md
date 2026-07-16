@@ -22,7 +22,8 @@ interface specifications.
 | Task 4 SQLite lifecycle and migration | Complete and integrated on feature branch | source `1fa434c..fca4c2e`; primary `851e1910..4671029d` | Doctor persistence PASS: 59/59; safety 26/26; migration 4/4; rollback 3/3; full Doctor 60/60 | Solution build PASS, 0 warnings/0 errors | Independent review initially found sanitizer, migration semantic/sentinel, rollback, and connection-cleanup gaps; all corrected; final PASS (0 Critical/0 Important/0 Minor) | Production must use the concrete completion callback and the same injected `TimeProvider`; Task 7 verified both | Source-specific observation wiring remains #103/#104; no public candidate surface exists |
 | Task 5 Config CLI lifecycle | Complete and integrated on feature branch | source `fe38bb7..ac1a5c1`; primary `71bdf49b..6da6f823` | schema/optional 41/41; unsafe 60/60; boundaries 12/12; real commands 28/28; Doctor filter 152/152; Config CLI full 3,636/3,636 | Solution build PASS, 0 warnings/0 errors | Independent review initially found schema-ordering, optional-field, unsafe-reference, and command-boundary gaps; all corrected; final PASS (0 Critical/0 Important/0 Minor) | Production SQLite composition intentionally completed in Task 7 | #103/#104 do not add CLI candidate commands; #105 owns shared UI/proxy work |
 | Task 6 Local Monitor Doctor API | Complete and integrated on feature branch | source `07e9cce..e607f5f`; primary `8fee2a16..52794b3` | body-boundary 2/2; Doctor HTTP 47/47; Local Monitor full 1,440/1,440 | Solution build PASS, 0 warnings/0 errors | Independent review found global Kestrel body-limit preemption; corrected with bounded per-route handling; final PASS (0 Critical/0 Important/0 Minor) | One pre-existing readiness observation race was isolated and not changed by Doctor work | No Razor, JavaScript, Canvas, proxy DTO, or public candidate route; those remain #105/non-scope |
-| Task 7 production integration and hardening | Approved; ready for local commit | `52794b3` to the commit containing this row | Root fresh: Doctor 216/216; Config CLI Doctor 152/152; Local Monitor Doctor 49/49; prohibited wait/retry scan 0 matches; machine-local evidence path scan 0 matches | Implementer full solution PASS 5,294/5,294, 0 failed/0 skipped; root solution build PASS, 0 warnings/0 errors; pinned full validation will be repeated after Task 8/final review | Independent review initially FAIL (3 Important: observation trust gate, real production lifecycle matrix, local path evidence); all corrected; re-review PASS (0 Critical/0 Important/0 Minor); root diff/code/evidence check PASS | No unresolved Task 7 finding; final pinned validation and four whole-branch reviews remain | #103/#104 candidate producers are compile-shape only and not live-verified; #105 proxy/UI is absent and unverified by design; feature branch is not integrated to `main` |
+| Task 7 production integration and hardening | Complete and committed on feature branch | `52794b3..105e156` | Root fresh: Doctor 216/216; Config CLI Doctor 152/152; Local Monitor Doctor 49/49; prohibited wait/retry scan 0 matches; machine-local evidence path scan 0 matches | Implementer full solution PASS 5,294/5,294 (Doctor 216 + LocalMonitor 1,442 + ConfigCli 3,636), 0 failed/0 skipped; root solution build PASS, 0 warnings/0 errors; pinned full validation will be repeated after Task 8/final review | Independent review initially FAIL (3 Important: observation trust gate, real production lifecycle matrix, local path evidence); all corrected; re-review PASS (0 Critical/0 Important/0 Minor); root diff/code/evidence check PASS | No unresolved Task 7 finding; final pinned validation and four whole-branch reviews remain | #103/#104 candidate producers are compile-shape only and not live-verified; #105 proxy/UI is absent and unverified by design; feature branch is not integrated to `main` |
+| Task 8 derived documentation and durable records | Approved; ready for local commit | `105e156` to the commit containing this row | Fresh CLI smoke: synthetic non-ready evaluate returned canonical `doctor.v1` and expected exit 3; start/status/cancel returned `verification_started`/`verification_active`/`verification_cancelled`; reviewer reran Doctor 216/216, Config CLI Doctor 152/152, and Local Monitor Doctor 49/49; Windows-safe prohibited wait/retry scan returned 0 matches | No build or full solution test rerun for the documentation-only diff; current product evidence remains Task 7 build PASS and 5,294/5,294 full tests, with pinned validation still pending | Implementer canonical-to-derived and overclaim self-review PASS; independent review PASS (0 Critical/0 Important/0 Minor) | `git diff --check`, required marker coverage, and machine-local path scan PASS; pinned validation and whole-branch reviews remain | #103/#104 source-specific producers and live first trace remain unverified; #105 proxy/UI remains absent; no main integration or Issue closure claimed |
 
 ## Evidence Rules
 
@@ -35,6 +36,22 @@ interface specifications.
   sensitive local paths, runtime databases, logs, or generated artifacts.
 - Distinguish verified feature-branch completion from observed integration into
   `main`.
+
+## Accepted Residuals And Handoffs
+
+- Issue #102 proves the source-independent Doctor core with synthetic and
+  deterministic production-surface evidence. It does not prove a live first
+  trace from GitHub Copilot or Claude Code.
+- #103 and #104 own source-specific fact/candidate producers. Their interfaces
+  are compile-shape handoffs only in this branch and remain live-unverified.
+- #105 owns the proxy and UI. No Doctor proxy DTO, Razor, JavaScript, Canvas, or
+  UI workflow is implemented or verified here.
+- Setup success, successful stateless evaluation, and verification start prove
+  static configuration processing, fact evaluation, and window creation
+  respectively; none guarantees a first real trace.
+- `105e156` is a feature-branch commit. Main integration, push, PR creation,
+  external Issue closure, and live first-trace completion have not occurred and
+  are not claimed.
 
 ## Execution Constraints
 

@@ -35,12 +35,24 @@
   source/adapter mismatches are now rejected before persistence, both real
   production surfaces cover lifecycle/no-mutation outcomes, and 19 SDD evidence
   identities were sanitized. Re-review PASS: 0 Critical, 0 Important, 0 Minor.
+- Task 7 commit: `105e156e6beacebe4104f1d0bf2a6a65a1edbda6`.
 - Root Task 7 evidence: Doctor 216/216, Config CLI Doctor 152/152, Local Monitor
   Doctor 49/49, solution build 0 warnings/0 errors, machine-local path scan 0,
-  prohibited wait/retry scan 0. Implementer full solution: 5,294/5,294 with no
-  failed or skipped tests.
-- Next action: commit Task 7, complete Task 8 derived documentation/ledger review,
-  then run pinned validation and four independent whole-branch reviews.
+  prohibited wait/retry scan 0. Implementer full solution: 5,294/5,294 (Doctor
+  216 + LocalMonitor 1,442 + ConfigCli 3,636), with no failed or skipped tests.
+- Task 8 updates the derived Local Monitor guide, repository Doctor smoke
+  commands, roadmap status, durable ledger, and SDD evidence. It does not change
+  canonical behavior or product code. Independent documentation review PASS:
+  0 Critical, 0 Important, 0 Minor. The reviewer reran Doctor 216/216, Config
+  CLI Doctor 152/152, and Local Monitor Doctor 49/49 and confirmed executable
+  evaluate/start/status/cancel guidance, marker coverage, and evidence hygiene.
+- Accepted handoff: #103/#104 source-specific candidate producers remain
+  compile-shape and live-unverified; #105 proxy/UI is absent and unverified.
+  Setup, evaluation, and verification start do not prove a first real trace.
+  The feature branch is not integrated into `main`, and Issue #102 is not
+  recorded as closed.
+- Next action: commit Task 8, run pinned validation, complete the four
+  whole-branch reviews, and make the separate integration/closure decision.
 
 ## Worker constraint
 
