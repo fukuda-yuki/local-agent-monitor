@@ -107,12 +107,12 @@ internal sealed class ProjectionWorker : BackgroundService
                     break;
                 }
 
+                int? ownedProjectionRevision = null;
                 try
                 {
                     var rawRecordId = record.Id!.Value;
                     ValidateProjectionDisposition(rawRecordId);
                     var disposition = store.GetProjectionDisposition(rawRecordId);
-                    var projectionRevision = disposition?.Revision;
                     if (disposition is not null)
                     {
                         if (disposition.State is not (ProjectionDispositionState.NotStarted or ProjectionDispositionState.Pending or ProjectionDispositionState.Failed) ||
@@ -120,10 +120,10 @@ internal sealed class ProjectionWorker : BackgroundService
                         {
                             continue;
                         }
-                        projectionRevision = disposition.Revision + 1;
+                        ownedProjectionRevision = disposition.Revision + 1;
                     }
                     var projection = MonitorProjectionBuilder.Build(CreateProjectionInput(record));
-                    var projected = projectionRevision is { } expectedRevision
+                    var projected = ownedProjectionRevision is { } expectedRevision
                         ? store.ApplyProjection(
                             rawRecordId,
                             record.Source,
@@ -152,10 +152,9 @@ internal sealed class ProjectionWorker : BackgroundService
                     // Non-busy projection failure: keep the raw record, record the
                     // failure, and continue with the next record.
                     var rawRecordId = record.Id!.Value;
-                    var disposition = store.GetProjectionDisposition(rawRecordId);
-                    if (disposition?.State == ProjectionDispositionState.Pending)
+                    if (ownedProjectionRevision is { } expectedRevision)
                     {
-                        store.RecordProjectionFailure(rawRecordId, disposition.Revision, timeProvider.GetUtcNow());
+                        store.RecordProjectionFailure(rawRecordId, expectedRevision, timeProvider.GetUtcNow());
                     }
                     health.RecordProjectionFailure();
                 }

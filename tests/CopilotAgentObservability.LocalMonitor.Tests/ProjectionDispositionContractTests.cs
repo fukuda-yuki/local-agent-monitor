@@ -232,6 +232,42 @@ public sealed class ProjectionDispositionContractTests
     }
 
     [Fact]
+    public async Task ProjectionWorker_CaughtErrorUsesOnlyItsOwnedRevisionWhenAnotherWorkerReclaimsAndCompletes()
+    {
+        using var temp = new MonitorTempDirectory();
+        var committed = Commit(temp.DatabasePath, "{\"corrupt_concurrent_projection\":");
+        var store = ProjectionStore(temp.DatabasePath);
+        using var firstClaimed = new Barrier(participantCount: 2);
+        using var secondClaimed = new Barrier(participantCount: 2);
+        using var firstFailureAttempted = new Barrier(participantCount: 2);
+        var interleavedStore = new InterleavedProjectionStore(
+            new RawTelemetryStoreProjectionStore(store),
+            firstClaimed,
+            secondClaimed,
+            firstFailureAttempted);
+        var firstWorker = new ProjectionWorker(
+            interleavedStore,
+            ReadyHealth(),
+            timeProvider: new MutableTimeProvider(ObservedAt.AddMinutes(1)));
+        var secondWorker = new ProjectionWorker(
+            interleavedStore,
+            ReadyHealth(),
+            timeProvider: new MutableTimeProvider(ObservedAt.AddMinutes(2)));
+
+        var firstPass = Task.Run(() => firstWorker.RunProjectionPassAsync());
+        firstClaimed.SignalAndWait();
+        var secondPass = Task.Run(() => secondWorker.RunProjectionPassAsync());
+        await Task.WhenAll(firstPass, secondPass);
+
+        Assert.Equal(new[] { 1, 2 }, interleavedStore.BeginExpectedRevisions);
+        Assert.Equal(2, interleavedStore.FailureExpectedRevision);
+        Assert.False(interleavedStore.FailureRecorded);
+        Assert.True(interleavedStore.CompletionRecorded);
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.Completed, 4, ObservedAt.AddMinutes(2));
+        Assert.Single(store.ListMonitorIngestions(afterRawRecordId: 0, limit: 10).Items);
+    }
+
+    [Fact]
     public void ProjectionDispositionStoreMethods_AreRequiredInterfaceMembersWithoutDefaultBodies()
     {
         var methods = typeof(IMonitorProjectionStore).GetMethods()
@@ -320,6 +356,13 @@ public sealed class ProjectionDispositionContractTests
     private static MonitorRecordProjection EmptyProjection() =>
         new(TraceId: null, ClientKind: null, SpanCount: 0, TraceContributions: []);
 
+    private static MonitorHealthState ReadyHealth()
+    {
+        var health = new MonitorHealthState();
+        health.MarkMigrationComplete();
+        return health;
+    }
+
     private static string ValidPayload(string traceId) =>
         $$"""{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"{{traceId}}","spanId":"span"}]}]}]}""";
 
@@ -369,5 +412,157 @@ public sealed class ProjectionDispositionContractTests
         var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open();
         return connection;
+    }
+
+    private sealed class InterleavedProjectionStore : IMonitorProjectionStore
+    {
+        private readonly IMonitorProjectionStore inner;
+        private readonly Barrier firstClaimed;
+        private readonly Barrier secondClaimed;
+        private readonly Barrier firstFailureAttempted;
+        private int listCallCount;
+        private int beginCallCount;
+
+        public InterleavedProjectionStore(
+            IMonitorProjectionStore inner,
+            Barrier firstClaimed,
+            Barrier secondClaimed,
+            Barrier firstFailureAttempted)
+        {
+            this.inner = inner;
+            this.firstClaimed = firstClaimed;
+            this.secondClaimed = secondClaimed;
+            this.firstFailureAttempted = firstFailureAttempted;
+        }
+
+        public List<int> BeginExpectedRevisions { get; } = [];
+
+        public int? FailureExpectedRevision { get; private set; }
+
+        public bool FailureRecorded { get; private set; }
+
+        public bool CompletionRecorded { get; private set; }
+
+        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit)
+        {
+            var records = inner.ListUnprocessedForProjection(limit);
+            if (Interlocked.Increment(ref listCallCount) == 1)
+            {
+                return records;
+            }
+
+            return records
+                .Select(record => record with { PayloadJson = ValidPayload("concurrent-complete") })
+                .ToArray();
+        }
+
+        public bool ApplyProjection(
+            long rawRecordId,
+            string source,
+            DateTimeOffset receivedAt,
+            MonitorRecordProjection projection,
+            DateTimeOffset projectedAt) =>
+            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
+
+        public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
+            inner.GetProjectionDisposition(rawRecordId);
+
+        public bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt)
+        {
+            var call = Interlocked.Increment(ref beginCallCount);
+            lock (BeginExpectedRevisions)
+            {
+                BeginExpectedRevisions.Add(expectedRevision);
+            }
+
+            var claimed = inner.TryBeginProjection(rawRecordId, expectedRevision, updatedAt);
+            Assert.True(claimed);
+            if (call == 1)
+            {
+                firstClaimed.SignalAndWait();
+                secondClaimed.SignalAndWait();
+            }
+            else
+            {
+                secondClaimed.SignalAndWait();
+            }
+            return claimed;
+        }
+
+        public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt)
+        {
+            FailureExpectedRevision = expectedRevision;
+            FailureRecorded = inner.RecordProjectionFailure(rawRecordId, expectedRevision, updatedAt);
+            firstFailureAttempted.SignalAndWait();
+            return FailureRecorded;
+        }
+
+        public bool ApplyProjection(
+            long rawRecordId,
+            string source,
+            DateTimeOffset receivedAt,
+            MonitorRecordProjection projection,
+            DateTimeOffset projectedAt,
+            int expectedDispositionRevision)
+        {
+            firstFailureAttempted.SignalAndWait();
+            CompletionRecorded = inner.ApplyProjection(
+                rawRecordId,
+                source,
+                receivedAt,
+                projection,
+                projectedAt,
+                expectedDispositionRevision);
+            return CompletionRecorded;
+        }
+
+        public MonitorProjectionStatus GetProjectionStatus() => inner.GetProjectionStatus();
+
+        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) =>
+            inner.ListUnprocessedForSpanProjection(limit);
+
+        public bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) =>
+            inner.ApplySpanProjection(rawRecordId, spans, projectedAt);
+
+        public MonitorProjectionStatus GetSpanProjectionStatus() => inner.GetSpanProjectionStatus();
+
+        public MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) =>
+            inner.ListMonitorIngestions(afterRawRecordId, limit);
+
+        public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
+            inner.ListMonitorTraces(afterId, limit);
+
+        public MonitorTraceRow? GetMonitorTrace(string traceId) => inner.GetMonitorTrace(traceId);
+
+        public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
+            inner.ListMonitorSpans(traceId, afterId, limit);
+
+        public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) => inner.GetSpansForTrace(traceId);
+
+        public RawTelemetryRecord? GetRawRecordById(long id) => inner.GetRawRecordById(id);
+
+        public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) =>
+            inner.ListRawRecordsByTraceId(traceId, limit);
+
+        public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
+            inner.GetPeriodSummary(startInclusive, endExclusive);
+
+        public IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) =>
+            inner.GetPerModelPeriodSummary(startInclusive, endExclusive);
+
+        public IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) =>
+            inner.GetHourlyTokenDistribution(startInclusive, endExclusive);
+
+        public IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) =>
+            inner.ListTopTokenTraces(startInclusive, endExclusive, limit);
+
+        public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => inner.ListRecentMonitorTraces(limit);
+
+        public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => inner.ListMonitorTracesFiltered(query);
+
+        public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) => inner.GetMonitorSpan(traceId, spanId);
+
+        public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) =>
+            inner.ListConversationTraces(conversationId);
     }
 }
