@@ -11,7 +11,7 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 - Base branch: `main`
 - Base commit: `920ff43a9ec63088a9cc109bcd15d0e6f4f9dc5c`
 - Current reviewed branch commit before this ledger update:
-  `96c9d936c6c3b4f52651a6849b0dadd718ff7914`
+  `c9f3e99d4f86889a7ccf5d5b94be119213690f33`
 - Pull request, merge, and Issue closure: not performed
 
 ## Commit sequence
@@ -44,6 +44,11 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 | `a5fa715c450659759cc7b0487622112fdd886c5a` | Pin the registration allowlist in the canonical handoff specification |
 | `588fff33f0c35eeeb09b0b96b4d4883690ced775` | Align the approved design with the registration allowlist gate |
 | `96c9d936c6c3b4f52651a6849b0dadd718ff7914` | Align the implementation-plan correction with nine shared tests |
+| `c8fdee0cf8376b44d1ded24e496b6bd4ff5c4495` | Record the closed registration review state |
+| `4a439abef3772c5551ab002da45321a4f010f8b8` | Add source-mismatch rejection and cross-source synthetic-evidence semantics |
+| `0acc935d4fba6802812aa5b1934a174a5c3cf668` | Promote source-mismatch and synthetic-evidence semantics to the canonical contract |
+| `d14cffbc6a84b4c7a53f6d39db54cd0feb2903f1` | Align the approved design with eleven shared test methods/twelve cases |
+| `c9f3e99d4f86889a7ccf5d5b94be119213690f33` | Finalize the implementation-plan review correction |
 
 The original implementation-plan code block bundled all three surfaces into
 one test, showed one invalid-input example, and exposed only snapshot
@@ -69,7 +74,8 @@ The branch fixes the following source-neutral boundary:
 - surface-scoped v1 verification with a null Doctor adapter while referenced
   source records retain their actual adapter provenance;
 - exact verification-ID reuse after restart, without latest-verification,
-  latest-trace, or latest-Session selection; and
+  latest-trace, or latest-Session selection;
+- rejection of source-mismatched observations without retagging; and
 - fixed sanitized invalid-composition failure text.
 
 No public Doctor command, route, state, result field, storage schema, dependency,
@@ -78,8 +84,9 @@ Session binding behavior is changed.
 
 ## G0-3 test intent
 
-`DoctorSourceHandoffContractTests` contains nine shared-boundary tests and three
-independent source-implementation tests.
+`DoctorSourceHandoffContractTests` contains eleven shared test methods, yielding
+twelve shared cases because the synthetic-evidence test runs for GitHub Copilot
+and Claude Code, plus three independent source-implementation tests.
 
 The intended post-G0 result is:
 
@@ -90,7 +97,10 @@ The intended post-G0 result is:
 - `CandidateOutsideVerificationWindow_UsesFixedSanitizedError`: GREEN;
 - `UnsafeObservation_UsesFixedSanitizedError`: GREEN;
 - `InvalidSourceIdentity_UsesFixedSanitizedError`: GREEN;
+- `SourceMismatchedObservation_UsesFixedSanitizedError`: GREEN;
 - `InactiveVerification_UsesFixedSanitizedError`: GREEN;
+- `SyntheticEvidence_DoesNotSatisfyFirstTraceReadyAcrossSources`: GREEN for
+  `github-copilot-vscode` and `claude-code`;
 - `DoctorCoreDefinesNoSourceSpecificDoctorEnum`: GREEN;
 - `SourceHandoffRegistrations_AreUniqueManifestBackedAndOutsideDoctorCore`:
   GREEN;
@@ -127,7 +137,7 @@ A complete branch-file inventory against `main` found only:
 - one Doctor test file; and
 - this durable ledger.
 
-Static review corrected seven issues before this ledger update:
+Static review corrected nine issues before this ledger update:
 
 1. The first discovery test scanned only Config CLI and Local Monitor, so its
    Doctor-core exclusion assertion was vacuous. It now scans all three
@@ -142,8 +152,8 @@ Static review corrected seven issues before this ledger update:
    The test is now split into two #103 facts and one #104 fact, with common
    discovery and Doctor-core exclusion logic.
 5. The fixed invalid-composition error was initially covered only for an unsafe
-   evidence reference. The reviewed test also pins invalid source identity and
-   inactive verification without echoing rejected values.
+   evidence reference. The reviewed test also pins invalid source identity,
+   source mismatch, and inactive verification without echoing rejected values.
 6. Snapshot-only composition left candidate verification ID, source, adapter,
    expiry, and observation-window rules to source-specific reconstruction. The
    reviewed interface/composer now owns those fields and the half-open window,
@@ -153,6 +163,12 @@ Static review corrected seven issues before this ledger update:
    registration. A shared GREEN test now preserves the closed allowlist,
    uniqueness, and Doctor-core exclusion independently of the three owner RED
    tests.
+8. The original tests did not prove that a source-mismatched observation is
+   rejected rather than retagged. A dedicated test now fixes that boundary.
+9. The original tests did not directly prove that synthetic health evidence
+   cannot become first real trace success. A two-source theory now requires
+   `ready_no_real_trace` for otherwise-ready GitHub Copilot and Claude Code
+   snapshots backed by synthetic ingest/raw/projection observations.
 
 The reviewed source contains no placeholder, fallback, source-specific Doctor
 enum, public candidate-write surface, sleep, polling, retry loop, real raw
@@ -178,8 +194,8 @@ dotnet test CopilotAgentObservability.slnx
 No RED count, GREEN count, successful build, Playwright bootstrap, or full-suite
 result is claimed. The branch must not be merged until a repository-capable
 Windows/.NET environment executes these exact commands and confirms that the
-nine shared tests are GREEN and the only intended failures are the three
-source-implementation tests listed above.
+eleven shared test methods/twelve cases are GREEN and the only intended
+failures are the three source-implementation tests listed above.
 
 ## Handoff
 
