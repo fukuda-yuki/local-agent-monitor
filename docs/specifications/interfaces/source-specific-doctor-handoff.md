@@ -15,6 +15,8 @@ This interface fixes:
   `DoctorFactSnapshot`;
 - how source-specific implementations identify themselves without adding a
   source-specific Doctor enum;
+- how candidate carriers inherit the exact verification source, adapter,
+  identity, and expiry;
 - how first-trace verifications scope evidence when more than one concrete
   adapter may contribute to one source journey; and
 - the RED contract gates that Issues #103 and #104 must turn GREEN.
@@ -87,9 +89,17 @@ DoctorFactSnapshot ComposeVerificationCompletion(
     DateTimeOffset observedAt,
     DoctorSetupFactContribution setupFacts,
     DoctorRuntimeFactContribution runtimeFacts);
+
+DoctorEvidenceCandidate ComposeCandidate(
+    DoctorVerification verification,
+    string candidateId,
+    DoctorEvidenceClass evidenceClass,
+    DoctorEvidenceKind evidenceKind,
+    string evidenceRef,
+    DateTimeOffset observedAt);
 ```
 
-A concrete implementation delegates composition to
+A concrete implementation delegates all three operations to
 `DoctorSourceHandoffComposer`. It does not select a Doctor state, evaluate the
 snapshot, query a store, collect telemetry, persist candidates, or introduce a
 source-specific result type.
@@ -161,12 +171,54 @@ The empty observation rule is mandatory. Persisted completion accepts only
 caller-selected opaque references; the existing store resolves candidates and
 constructs trusted observations.
 
+### Candidate composition and refresh boundary
+
+```csharp
+DoctorEvidenceCandidate ComposeCandidate(
+    DoctorVerification verification,
+    string candidateId,
+    DoctorEvidenceClass evidenceClass,
+    DoctorEvidenceKind evidenceKind,
+    string evidenceRef,
+    DateTimeOffset observedAt)
+```
+
+It accepts only a valid active verification and a candidate observed in the
+half-open verification window:
+
+```text
+verification.started_at <= observed_at < verification.expires_at
+```
+
+It creates the existing `DoctorEvidenceCandidate` with:
+
+- caller-supplied canonical UUIDv7 `candidate_id`;
+- `verification_id` copied exactly from the verification;
+- source surface and nullable adapter copied exactly from the verification;
+- the supplied existing evidence class, evidence kind, and bounded opaque
+  reference;
+- the supplied canonical `observed_at`; and
+- `expires_at` copied exactly from the verification.
+
+The caller cannot override verification source, adapter, ID, or expiry. A
+source-specific refresh first loads the exact persisted verification by its
+opaque ID, observes source records, composes candidates through this method,
+and persists them through the existing internal `ObserveCandidate` operation.
+After a Local Monitor restart it reloads and reuses that same verification ID;
+it never selects the latest verification, trace, or Session.
+
+This method does not generate IDs, query evidence stores, deduplicate refresh
+results, or persist candidates. Those source/store integration responsibilities
+remain in #103/#104 and must preserve the existing candidate-count and evidence
+uniqueness contract.
+
 ### Validation and error
 
-Both methods call the existing `DoctorValidation` contract. Null contributions,
-invalid source/adapter/timestamp/verification, invalid enum combinations,
-source-mismatched observations, duplicate observations, or unsafe evidence
-references throw:
+All composer methods use the existing `DoctorValidation` contract. Null
+contributions, invalid source/adapter/timestamp/verification, inactive
+verification, candidate outside the verification window, invalid enum
+combinations, source-mismatched observations, duplicate observations, or unsafe
+evidence references throw:
 
 ```text
 Source handoff produced an invalid Doctor fact snapshot.
@@ -209,13 +261,15 @@ The candidate contract is unchanged:
 - use only `real_source|synthetic_probe`;
 - use only `ingest`, `raw_persistence`, `projection`,
   `exact_session_binding`, or `completeness_content`;
+- compose through the shared candidate method;
 - persist through the existing internal `ObserveCandidate` operation;
 - preserve the verification source, null Doctor adapter, expiry, and bounded
   opaque reference; and
 - require explicit caller selection at completion.
 
-Latest trace, latest Session, repository, workspace, cwd, process identity,
-trace ID alone, and timestamp proximity are forbidden selection inputs.
+Latest verification, latest trace, latest Session, repository, workspace, cwd,
+process identity, trace ID alone, and timestamp proximity are forbidden
+selection inputs.
 
 ## Implementation placement
 
@@ -232,7 +286,8 @@ A concrete implementation:
 - has one `DoctorSourceHandoffAttribute`;
 - exposes one of the three manifest-backed surface values above;
 - returns `ExpectedSourceAdapter = null` for this v1 handoff; and
-- delegates both composition methods to `DoctorSourceHandoffComposer`.
+- delegates direct, completion, and candidate composition to
+  `DoctorSourceHandoffComposer`.
 
 ## Contract tests
 
@@ -241,14 +296,16 @@ A concrete implementation:
 1. setup/runtime authority partition and canonical snapshot mapping;
 2. direct observation preservation and null verification ID;
 3. persisted completion identity and empty observations;
-4. the fixed sanitized invalid-composition error;
-5. absence of source-specific Doctor enums in the core assembly; and
-6. three separately executable implementation gates:
+4. candidate inheritance of verification identity/source/adapter/expiry and
+   the half-open observation window;
+5. the fixed sanitized invalid-composition error;
+6. absence of source-specific Doctor enums in the core assembly; and
+7. three separately executable implementation gates:
    - `GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore`;
    - `GitHubCopilotCliSourceHandoff_IsImplementedOutsideDoctorCore`;
    - `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore`.
 
-At the G0-3 checkpoint, items 1 through 5 are GREEN. The three implementation
+At the G0-3 checkpoint, items 1 through 6 are GREEN. The three implementation
 gates are intentionally RED. Issue #103 owns and turns the two GitHub Copilot
 gates GREEN; Issue #104 independently owns and turns the Claude Code gate GREEN.
 This split lets both worktrees verify their own production handoff without
