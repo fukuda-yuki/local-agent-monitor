@@ -181,6 +181,68 @@ never selection or binding evidence. The shared Config CLI JSON/human result
 and the five Local Monitor HTTP routes remain unchanged; Issue #105 owns any
 common proxy or UI.
 
+#### GitHub Copilot setup-to-Doctor orchestration
+
+Issue #103 adds an internal GitHub Copilot-only orchestrator; it adds no Config
+CLI command, HTTP route, proxy, or UI contract. Its distinct setup evaluation,
+start, status, selected-evidence continuation, and rollback-cancel operations
+prevent nullable mode combinations. Setup evaluation receives one exact
+successful setup result and has no database input. Start receives one
+caller-selected guided-setup target, the Doctor database path, and an explicit
+expiry. Status receives the exact verification ID and revision.
+Status also receives the newly obtained matching setup-status result and its
+singular selected target; it does not rediscover either value.
+Selected-evidence continuation receives the exact successful `apply` or
+`no_changes` setup result used for its static facts, requires an explicit
+raw-record ID, and accepts the exact native Session identity; App/SDK requires
+that native identity. Rollback-cancel receives the exact successful rollback
+result, its singular selected target, verification ID, and revision; it rejects
+failed rollback results, other setup commands/codes, and target mismatches
+before lifecycle mutation. None of those values is derived from a latest
+record, repository, workspace, cwd, process, trace ID alone, or timestamp
+proximity.
+
+The lifecycle mapping is closed:
+
+- `plan` never starts a verification;
+- successful `apply` (`apply_succeeded` or `no_changes`) may start one for the
+  singular selected target;
+- a newly obtained `status` may start only from exactly one matching change-set
+  in `applied` or `no_changes` state: the singular CLI target and all one-or-two
+  VS Code targets are `current` with the `desired` reference; caller-managed
+  App/SDK has one unchanged guidance target with `not_applicable` current state,
+  the `none` reference, and a `no_changes` change-set;
+- an exact verification ID reuses `status`; it does not extend expiry or add a
+  verification row; and
+- successful `rollback` may only cancel the caller-supplied verification ID at
+  the caller-supplied revision.
+
+Starting remains allowed while restart/new-process is `required`, so the fixed
+`agent_restart_required` diagnosis and `restart_source_process` action can be
+shown before the bounded source interaction handoff. Setup success itself does
+not clear that requirement and produces no evidence candidate. The orchestrator
+keeps it `required` until the caller explicitly selects matching real-source
+evidence within the verification window; only then may the merged runtime
+observation set restart/new-process to `not_required`. Synthetic/probe evidence
+never does so.
+
+For evaluation or completion the orchestrator maps setup families 1--5 and 12
+through the GitHub Copilot setup mapper and replaces only runtime families
+6--11 with the exact evidence-adapter snapshot. It preserves the frozen
+`DoctorResult` contract and source/verification identity. It cannot complete a
+verification before exact persisted candidate references exist, and it emits
+no raw/native identity, database path, content, PII, credential, or source path
+in results or evidence references.
+
+Each operation returns an unmodified valid `DoctorResult` projection. In
+particular, exact status reuse returns `verification_active` with
+`evaluation=null`; it never attaches a setup evaluation to a lifecycle result.
+Setup-only evaluation, when needed, is a separate `evaluation_completed` or
+`partial_fact_snapshot` result with `verification=null`. Only genuine Complete
+after persisted candidate resolution may return a merged evaluation and
+verification together. Wrong revisions return `verification_stale` without
+creating candidates or changing lifecycle state.
+
 ## Fixed state catalog
 
 The catalog contains exactly these twenty states. Severity, retryability, next
