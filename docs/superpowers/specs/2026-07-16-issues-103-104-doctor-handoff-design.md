@@ -38,19 +38,21 @@ for the source-specific producer implementations owned by Issues #103 and
 ### 1. Documentation-only handoff
 
 This would add an authority table but no executable boundary. It is minimal,
-but #103 and #104 could still assemble `DoctorFactSnapshot` differently and
-silently move a fact family between setup and runtime authority.
+but #103 and #104 could still assemble `DoctorFactSnapshot` and candidate
+carriers differently and silently move a fact family or verification field
+between authorities.
 
 ### 2. Source-neutral contribution records plus a composer — selected
 
 The Doctor assembly adds two records whose property sets divide the existing
 twelve fact families into five setup-owned and seven runtime-owned families.
-A composer creates direct-evaluation or persisted-verification snapshots while
+A composer creates direct-evaluation snapshots, persisted-verification
+completion snapshots, and verification-scoped evidence candidates while
 preserving the existing Doctor types and validation rules. Source-specific
 implementations remain outside the Doctor core.
 
-This is the smallest executable boundary that prevents authority drift without
-creating a new framework or source-specific enum.
+This is the smallest executable boundary that prevents authority and carrier
+drift without creating a new framework or source-specific enum.
 
 ### 3. New source-adapter project and registry
 
@@ -76,16 +78,19 @@ and Issue #105 reuse. G0 does not need that machinery and therefore rejects it.
   - `projection`;
   - `exact_session_binding`;
   - `completeness_and_content`.
-- `DoctorSourceHandoffComposer`, with two entry points:
+- `DoctorSourceHandoffComposer`, with three entry points:
   - direct evaluation accepts typed observations and emits no verification ID;
   - persisted completion accepts an existing `DoctorVerification`, copies its
     exact source/adapter/verification ID, and always emits an empty observation
-    list so the store remains the only trusted candidate resolver.
+    list so the store remains the only trusted candidate resolver; and
+  - candidate composition accepts an existing active verification, copies its
+    source/adapter/verification ID/expiry, and accepts evidence observed only in
+    the half-open verification window.
 
 The composer does not evaluate a snapshot, read stores, inspect processes,
-collect telemetry, persist candidates, select evidence, or choose a Doctor
-state. It validates only through the existing `DoctorValidation` contract and
-returns a source-neutral `DoctorFactSnapshot`.
+collect telemetry, persist candidates, select evidence, generate candidate
+IDs, or choose a Doctor state. It validates through the existing
+`DoctorValidation` contract and returns existing source-neutral Doctor types.
 
 ## Authority table
 
@@ -135,19 +140,30 @@ use the same twelve families when implemented.
 
 ## Verification and candidate flow
 
-1. The source-specific slice obtains an active `DoctorVerification`.
-2. Trusted internal source code observes exact records within that explicit
-   verification context.
-3. It creates bounded `DoctorEvidenceCandidate` values using the existing five
-   evidence kinds and calls the existing internal `ObserveCandidate` path.
-4. A caller explicitly selects opaque evidence references.
-5. Completion submits a snapshot with an empty `observations` array.
-6. The store resolves the selected candidates, validates source and expiry, and
+1. The source-specific slice loads an active `DoctorVerification` by the exact
+   opaque verification ID.
+2. Trusted internal source code observes exact records within
+   `started_at <= observed_at < expires_at`.
+3. It composes bounded `DoctorEvidenceCandidate` values through the shared
+   composer. Verification ID, source, nullable adapter, and expiry are copied
+   from the persisted verification and cannot be overridden.
+4. It persists candidates through the existing internal `ObserveCandidate`
+   path.
+5. A caller explicitly selects opaque evidence references.
+6. Completion submits a snapshot with an empty `observations` array.
+7. The store resolves the selected candidates, validates source and expiry, and
    constructs trusted observations for the evaluator.
 
-Forbidden selection signals remain unchanged: latest trace, latest Session,
-repository, workspace, cwd, process identity, trace ID alone, and timestamp
-proximity.
+After a Local Monitor restart, the source slice reloads the same persisted
+verification ID and repeats the source refresh under that context. It does not
+select the latest verification, latest trace, or latest Session. Candidate ID
+generation, deduplication against already persisted candidates, and source/store
+integration remain #103/#104 responsibilities under the existing store
+contract.
+
+Forbidden selection signals remain unchanged: latest verification, latest
+trace, latest Session, repository, workspace, cwd, process identity, trace ID
+alone, and timestamp proximity.
 
 ## G0-3 executable contract tests
 
@@ -159,8 +175,10 @@ The shared tests contain two groups.
 - direct composition retains typed observations and has no verification ID;
 - persisted-completion composition copies the verification identity and has no
   caller observations;
-- invalid source identity, invalid verification identity, and unsafe observation
-  references are rejected by the existing validation contract; and
+- candidate composition copies verification scope/expiry and rejects evidence
+  outside the half-open verification window;
+- invalid source identity, inactive verification, and unsafe observation
+  references are rejected with the fixed sanitized error; and
 - the Doctor assembly still contains no source-specific Doctor enum.
 
 ### Intentional RED source-implementation tests
@@ -188,17 +206,20 @@ surface.
 - nullable `ExpectedSourceAdapter`;
 - direct composition from the two contribution records plus typed observations;
 - persisted-completion composition from an existing verification plus the two
-  contribution records.
+  contribution records; and
+- candidate composition from an existing verification plus existing evidence
+  class/kind/reference values.
 
 Implementations must use `DoctorSourceHandoffComposer`; they must not select a
-state, reorder facts, inject candidate observations into a completion snapshot,
-or add a source-specific result type.
+state, reorder facts, override candidate verification scope, inject candidate
+observations into a completion snapshot, or add a source-specific result type.
 
 ## Error and safety behavior
 
 - Invalid composition throws one fixed `ArgumentException` message without
   echoing a source value, evidence reference, path, payload, or exception detail.
-- Evidence-reference validation remains authoritative in `DoctorValidation`.
+- Evidence-reference and candidate validation remain authoritative in
+  `DoctorValidation`.
 - The handoff stores no prompt, response, tool body, source fragment, PII,
   credential, authorization value, local path, database path, or raw payload.
 - No network, process, clock, database, or filesystem operation is added to the
@@ -215,7 +236,7 @@ dotnet build CopilotAgentObservability.slnx
 
 The intended G0-3 checkpoint is:
 
-- shared-boundary tests: GREEN;
+- eight shared-boundary tests: GREEN;
 - the two GitHub Copilot source-implementation tests: RED for #103;
 - the Claude Code source-implementation test: RED for #104;
 - no unrelated test failure or compile failure.
