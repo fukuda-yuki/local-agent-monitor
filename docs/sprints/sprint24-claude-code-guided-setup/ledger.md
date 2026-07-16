@@ -7,8 +7,8 @@ Updated: 2026-07-16
 - Worktree: `C:\Users\mwam0\.codex\worktrees\8660\copilot-agent-observability`
 - Branch: `codex/issue-68-claude-guided-setup`
 - Start HEAD: `8940b34f4e031b894705682dc50c079a9ed5c180`
-- Current end HEAD: `8940b34f4e031b894705682dc50c079a9ed5c180`
-- Feature-branch commit range: pending
+- Current end HEAD: `399b7881d66085473d7e4ef35b2260cd5602dc0a`
+- Feature-branch commit range: `8940b34f4e031b894705682dc50c079a9ed5c180..399b7881d66085473d7e4ef35b2260cd5602dc0a`
 - Main integration: not performed
 - Push, pull request, and external Issue closure: not performed
 
@@ -16,8 +16,8 @@ Updated: 2026-07-16
 
 | Task | State | Owner | Start/end HEAD | Commit range | Focused/full tests | Review | Unresolved |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| W0 canonical contract and ledger | Complete, uncommitted; re-review pending | delegated documentation implementer | `8940b34f` / `8940b34f` plus working tree | pending root commit | baseline full PASS; post-remediation `git diff --check` and both-interface identifier/scoped-diff checks PASS | initial independent review C0/I3/M1 plus root cross-check I1; all five remediated; re-review pending | none |
-| W1 cross-surface RED contract | Pending | unassigned | pending | pending | pending | pending | adapter/registry/dispatcher/wrapper interface |
+| W0 canonical contract and ledger | Complete, committed | delegated documentation implementer | `8940b34f` / `399b7881` | `8940b34f..399b7881` | baseline full PASS; post-remediation `git diff --check` and both-interface identifier/scoped-diff checks PASS | independent remediation re-review PASS, C0/I0/M0 | none |
+| W1 cross-surface RED contract | Complete, uncommitted RED checkpoint | delegated test implementer | `399b7881` / working tree | pending root commit | ConfigCli: physical parity 1 PASS and 2 intended RED; Release three-way transport 1 PASS; existing wrapper/release regressions 6 PASS | initial C0/I2/M0 remediated; independent re-review PASS C0/I0/M0 | aggregate adapter and single-option parser are intentionally absent |
 | W2a settings/storage | Pending | unassigned | pending | pending | pending | pending | private-plan arm and renderer |
 | W2b detection/WSL2 | Pending | unassigned | pending | pending | pending | pending | loopback readiness and platform trust |
 | W2c Agent SDK guidance | Pending | unassigned | pending | pending | pending | pending | caller-managed no-write guidance |
@@ -34,6 +34,7 @@ Updated: 2026-07-16
 | Baseline full test | `dotnet test CopilotAgentObservability.slnx` | PASS on completed rerun: ConfigCli 3,484/3,484; LocalMonitor 1,393/1,393; 0 failed/skipped |
 | Earlier bounded orchestration attempt | same full-test command under a 120-second outer limit | Inconclusive timeout; not counted as pass/fail evidence |
 | W0 documentation | `git diff --check` plus required identifier and scoped-diff inspection | PASS; documentation-only scope, required identifiers present, D058/D059/D060 order verified |
+| W1 executable RED | Config `FullyQualifiedName~ClaudeConfigurationSetupIntegrationTests`; LocalMonitor `FullyQualifiedName~ClaudeSetup` | Config: 1 safe pre-dispatch transport PASS + 2 intended assertion RED; LocalMonitor direct/repository/Release transport PASS; no compile/process/package/parity failure |
 
 ## Review state
 
@@ -41,7 +42,8 @@ No implementation review verdict is recorded yet. The W0 documentation's
 initial independent review found C0/I3/M1: ambiguous Claude readiness probing,
 non-generic status syntax, unsafe user-guide wording, and a stale table heading.
 Root cross-check then found the same public surface stale in `config-cli.md`.
-All five are remediated in the working tree; independent re-review is pending.
+All five were remediated before the W0 commit; independent re-review returned
+PASS C0/I0/M0.
 Implementers and reviewers remain separate for later waves.
 
 Final review requires three independent perspectives:

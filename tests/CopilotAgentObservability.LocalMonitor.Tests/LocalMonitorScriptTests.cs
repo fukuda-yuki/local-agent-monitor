@@ -208,6 +208,100 @@ public class LocalMonitorScriptTests
         }
     }
 
+    [Fact]
+    public void ClaudeSetup_RepositoryAndReleaseWrappersPreserveWslOptInTransportParityWithoutDotnet()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateTemporaryDirectory("cao-claude-setup-release-tests");
+        try
+        {
+            var outputDirectory = Path.Combine(root, "release");
+            var package = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                [
+                    "-NoProfile",
+                    "-File",
+                    ScriptPath("package-release.ps1"),
+                    "-OutputDirectory",
+                    outputDirectory,
+                    "-Version",
+                    "0.0.0-test",
+                ],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(10));
+
+            Assert.True(package.ExitCode == 0, $"Package failed with exit code {package.ExitCode}: {package.StandardOutputText}{package.StandardErrorText}");
+
+            string[] actionArguments =
+            [
+                "plan",
+                "--adapter",
+                "claude-code",
+                "--target",
+                "cli",
+                "--endpoint",
+                "http://127.0.0.1:4320",
+                "--allow-wsl2-routing",
+                "--allow-wsl2-routing",
+            ];
+            var direct = RunBoundedProcess(
+                "dotnet",
+                [
+                    "run",
+                    "--verbosity",
+                    "quiet",
+                    "--project",
+                    ConfigCliProjectPath,
+                    "--",
+                    "setup",
+                    .. actionArguments,
+                ],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(2));
+            var repositorySetup = ScriptPath("setup.ps1");
+            var repository = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-File", repositorySetup, .. actionArguments],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(2));
+
+            var packagedSetup = Path.Combine(outputDirectory, "staging", "scripts", "setup.ps1");
+            var hiddenPath = Directory.CreateDirectory(Path.Combine(root, "path-without-dotnet")).FullName;
+            var release = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-File", packagedSetup, .. actionArguments],
+                new Dictionary<string, string?>
+                {
+                    ["PATH"] = hiddenPath,
+                    ["DOTNET_ROOT"] = null,
+                    ["DOTNET_HOST_PATH"] = null,
+                },
+                TimeSpan.FromMinutes(2));
+
+            Assert.Equal(2, direct.ExitCode);
+            Assert.Equal(Encoding.UTF8.GetBytes("invalid_arguments\n"), direct.StandardErrorBytes);
+            Assert.Equal(direct.ExitCode, repository.ExitCode);
+            Assert.Equal(direct.StandardOutputBytes, repository.StandardOutputBytes);
+            Assert.Equal(direct.StandardErrorBytes, repository.StandardErrorBytes);
+            Assert.Equal(direct.ExitCode, release.ExitCode);
+            Assert.Equal(direct.StandardOutputBytes, release.StandardOutputBytes);
+            Assert.Equal(direct.StandardErrorBytes, release.StandardErrorBytes);
+            using var document = JsonDocument.Parse(release.StandardOutputBytes);
+            var result = document.RootElement;
+            Assert.Equal("setup.v1", result.GetProperty("contract_version").GetString());
+            Assert.Equal("invalid_arguments", result.GetProperty("code").GetString());
+            Assert.Equal(JsonValueKind.Null, result.GetProperty("adapter").ValueKind);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -604,6 +698,16 @@ public class LocalMonitorScriptTests
     {
         return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "scripts", "local-monitor", fileName));
     }
+
+    private static string ConfigCliProjectPath => Path.Combine(
+        RepositoryRoot,
+        "src",
+        "CopilotAgentObservability.ConfigCli",
+        "CopilotAgentObservability.ConfigCli.csproj");
+
+    private static string RepositoryRoot => Path.GetFullPath(Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", ".."));
 
     private static string TestScriptPath(string fileName)
     {
