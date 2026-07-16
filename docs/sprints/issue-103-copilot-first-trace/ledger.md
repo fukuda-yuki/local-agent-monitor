@@ -19,7 +19,7 @@ a second plan.
 
 | Issue checklist section | State | Commit range | Focused / full tests | Independent review | Unresolved |
 | --- | --- | --- | --- | --- | --- |
-| 103-A | In progress | pending | kickoff baseline PASS; executable cross-surface RED pending | pending | canonical contract/spec and failing boundary test |
+| 103-A | In progress | `920ff43..e99767c`; canonical promotion and RED test awaiting checkpoint commit | kickoff baseline PASS; ConfigCli and cross-surface focused REDs have only expected `CS0103` calls to missing `GitHubCopilotDoctorFactMapper` | contract table and final spec/RED re-review PASS C0/I0/M0 | mapper GREEN |
 | 103-B | Pending | pending | pending | pending | trusted candidate producer |
 | 103-C | Pending | pending | pending | pending | setup-to-verification orchestration |
 | 103-D | Pending | pending | pending | pending | regression/privacy/concurrency matrix |

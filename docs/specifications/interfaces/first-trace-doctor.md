@@ -145,6 +145,42 @@ empty; non-empty observations are `invalid_input`. This separation prevents a
 caller from promoting a selected synthetic candidate to `real_source` while
 keeping direct evaluation independently capable of representing typed evidence.
 
+### GitHub Copilot source adapter handoff
+
+Issue #103 uses one source-specific Doctor adapter identity across all evidence
+selected for a verification because the v1 store requires exact adapter
+equality. The canonical pairs are:
+
+| Guided setup target | `source_surface` | `source_adapter` |
+| --- | --- | --- |
+| VS Code Copilot Chat | `github-copilot-vscode` | `github-copilot-doctor` |
+| Copilot CLI | `github-copilot-cli` | `github-copilot-doctor` |
+| caller-managed App/SDK | `github-copilot-app-sdk` | `github-copilot-doctor` |
+
+`github-copilot-doctor` is the candidate-producing adapter, not a replacement
+for actual OTLP, compatible-Hook, or SDK provenance. Before normalization it
+must validate source-owned evidence for the selected surface: exact selected
+raw/Session identity, actual source adapter, and exact linkage needed by the
+claimed evidence kind. Capability-manifest composite adapter labels are not
+Doctor adapter tokens and capability declaration is not observed evidence.
+
+Setup detect/plan/apply/no-op/rollback/status may populate only directly
+observed install/version, receiver/port, effective configuration, reachability,
+protocol/signal, and restart/new-process facts. Setup success and synthetic
+probes produce no real-source candidate. Accepted ingest, raw persistence,
+projection, exact binding, and completeness/content remain independent runtime
+evidence gates. A selected raw record with no successful projection row does
+not distinguish `not_started`, `pending`, or `failed`; all remain unknown until
+an exact per-record projection disposition exists.
+
+When a surface cannot safely carry the opaque verification ID, candidate
+selection is an explicit raw-record or native-Session selection followed by
+exact source and identity validation. Latest trace/Session, repository,
+workspace, cwd, process identity, trace ID alone, and timestamp proximity are
+never selection or binding evidence. The shared Config CLI JSON/human result
+and the five Local Monitor HTTP routes remain unchanged; Issue #105 owns any
+common proxy or UI.
+
 ## Fixed state catalog
 
 The catalog contains exactly these twenty states. Severity, retryability, next

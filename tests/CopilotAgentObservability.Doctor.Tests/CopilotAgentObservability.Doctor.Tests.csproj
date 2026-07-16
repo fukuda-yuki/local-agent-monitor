@@ -23,6 +23,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\CopilotAgentObservability.ConfigCli.Tests\SetupTestPlatform.cs"
+             Link="TestSupport\SetupTestPlatform.cs" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.ConfigCli\CopilotAgentObservability.ConfigCli.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.Doctor\CopilotAgentObservability.Doctor.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.LocalMonitor\CopilotAgentObservability.LocalMonitor.csproj" />

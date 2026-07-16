@@ -6,12 +6,111 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot;
+using CopilotAgentObservability.ConfigCli.Setup.Cli;
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Platform;
+using CopilotAgentObservability.ConfigCli.Tests;
 using CopilotAgentObservability.Doctor.Tests.Persistence;
 
 namespace CopilotAgentObservability.Doctor.Tests;
 
 public sealed class DoctorCrossSurfaceContractTests
 {
+    [Fact]
+    public async Task GitHubCopilotSetupMapperUsesOneCanonicalResultAcrossDirectCliAndHttp()
+    {
+        const string endpoint = "http://127.0.0.1:4320";
+        var observedAt = DateTimeOffset.Parse("2026-07-17T01:02:03Z");
+        var platform = new SetupTestPlatform(observedAt);
+        foreach (var pair in new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["COPILOT_OTEL_ENABLED"] = "true",
+            ["COPILOT_OTEL_EXPORTER_TYPE"] = "otlp-http",
+            ["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint,
+            ["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/protobuf",
+        })
+        {
+            platform.SeedUserEnvironment(pair.Key, pair.Value);
+        }
+        platform.ScriptProcess(
+            "copilot",
+            ["version"],
+            new SetupProcessObservation(SetupProcessOutcome.Completed, 0, "1.0.4\n"));
+        platform.ScriptHttpProbe(new SetupHttpProbeObservation(
+            SetupHttpProbeOutcome.Response,
+            200,
+            17,
+            "{\"status\":\"live\"}"u8.ToArray(),
+            true));
+        var setupResult = SetupCompositionRoot.CreateSetupDispatch(platform)(new SetupOptions(
+            SetupCommand.Plan,
+            "github-copilot",
+            "cli",
+            endpoint,
+            IncludeContentCapture: false,
+            ChangeSetId: null));
+        var snapshot = GitHubCopilotDoctorFactMapper.FromSetup(setupResult, "cli", observedAt);
+        var snapshotJson = SerializeSnapshot(snapshot);
+        var direct = DoctorEvaluator.Evaluate(snapshot);
+        var directJson = DoctorJson.SerializeResult(direct);
+        var directory = Path.Combine(Path.GetTempPath(), $"copilot-doctor-cross-surface-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var fixturePath = Path.Combine(directory, "copilot-setup.facts.json");
+            await File.WriteAllTextAsync(fixturePath, snapshotJson);
+
+            using var cliJsonOutput = new StringWriter();
+            using var cliJsonError = new StringWriter();
+            var cliJsonExit = CliApplication.Run(
+                ["doctor", "evaluate", "--input", fixturePath, "--json"],
+                cliJsonOutput,
+                cliJsonError);
+
+            using var cliHumanOutput = new StringWriter();
+            using var cliHumanError = new StringWriter();
+            var cliHumanExit = CliApplication.Run(
+                ["doctor", "evaluate", "--input", fixturePath],
+                cliHumanOutput,
+                cliHumanError);
+
+            await using var monitor = await RunningDoctorMonitor.StartAsync();
+            using var response = await monitor.Client.PostAsync(
+                "/api/doctor/evaluations",
+                new StringContent(snapshotJson, Encoding.UTF8, "application/json"));
+            var httpJson = await response.Content.ReadAsStringAsync();
+
+            Assert.Equal(3, cliJsonExit);
+            Assert.Equal(3, cliHumanExit);
+            Assert.Equal(string.Empty, cliJsonError.ToString());
+            Assert.Equal(string.Empty, cliHumanError.ToString());
+            Assert.Equal(directJson + Environment.NewLine, cliJsonOutput.ToString());
+            Assert.Equal(DoctorHumanProjector.Project(direct) + Environment.NewLine, cliHumanOutput.ToString());
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(directJson, httpJson);
+
+            var cliResult = DoctorJson.DeserializeResult(cliJsonOutput.ToString().TrimEnd());
+            var httpResult = DoctorJson.DeserializeResult(httpJson);
+            Assert.Equivalent(direct, cliResult, strict: true);
+            Assert.Equivalent(direct, httpResult, strict: true);
+            Assert.Equal(DoctorStateCode.AgentRestartRequired, direct.Evaluation?.PrimaryState?.StateCode);
+            Assert.Equal(
+                direct.Evaluation?.PrimaryState?.EvidenceRefs,
+                httpResult.Evaluation?.PrimaryState?.EvidenceRefs);
+            Assert.Equal(
+                direct.Evaluation?.PrimaryState?.NextAction,
+                httpResult.Evaluation?.PrimaryState?.NextAction);
+            Assert.DoesNotContain(
+                direct.Evaluation?.States ?? [],
+                state => state.StateCode == DoctorStateCode.FirstTraceReady);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task AllCatalogStatesUseOneCanonicalProductionResultAcrossDirectCliAndHttp()
     {

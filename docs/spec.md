@@ -194,6 +194,31 @@ body/status/threshold contract are unchanged. The complete state/fact/result,
 limit, CLI/HTTP, storage, migration, and #103/#104/#105 handoff contract is
 [first-trace Doctor](specifications/interfaces/first-trace-doctor.md) and the
 architecture decision is D060.
+
+## GitHub Copilot first-trace slice
+
+Issue #103 maps the completed GitHub Copilot setup surface into the frozen
+Issue #102 Doctor contract without adding a Doctor state, evidence kind,
+precedence rule, route, or result DTO. The canonical verification identities
+are `github-copilot-vscode`, `github-copilot-cli`, and
+`github-copilot-app-sdk`; each uses `github-copilot-doctor` as the Doctor
+candidate-producing adapter. The adapter retains and validates the actual
+OTLP/Hook/SDK provenance behind that normalized identity.
+
+Setup detection, apply, no-op, rollback, endpoint probe, and restart guidance
+populate only the fact families they directly observe. They never constitute
+real-source evidence. Runtime completion requires independently persisted
+accepted-ingest, raw-record, exact per-record projection, exact Session binding
+when required, and completeness/content candidates. When a verification ID
+cannot be propagated safely, a caller explicitly selects a raw record or native
+Session identity and the adapter validates exact joins; it never selects by
+latest trace, repository, workspace, cwd, process, or timestamp proximity.
+Current raw-row presence without a successful projection row cannot distinguish
+`not_started`, `pending`, or `failed`, so those values remain unknown until an
+exact per-record projection disposition exists. The existing CLI JSON/human
+projection and five Local Monitor HTTP routes continue to emit the same
+`doctor.v1`; #105 owns later common proxy/UI/Release closeout.
+
 ## Claude Code guided setup
 
 Issue #68 adds the `claude-code` adapter to the same transaction and
