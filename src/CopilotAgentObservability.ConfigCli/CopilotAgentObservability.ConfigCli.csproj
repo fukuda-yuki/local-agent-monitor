@@ -12,4 +12,13 @@
     <ProjectReference Include="..\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\docs\specifications\contracts\source-capabilities\v1\manifests\github-copilot-vscode.json"
+                      Link="Setup\Capabilities\Manifests\github-copilot-vscode.json"
+                      LogicalName="CopilotAgentObservability.ConfigCli.Setup.Capabilities.Manifests.github-copilot-vscode.json" />
+    <EmbeddedResource Include="..\..\docs\specifications\contracts\source-capabilities\v1\manifests\github-copilot-cli.json"
+                      Link="Setup\Capabilities\Manifests\github-copilot-cli.json"
+                      LogicalName="CopilotAgentObservability.ConfigCli.Setup.Capabilities.Manifests.github-copilot-cli.json" />
+  </ItemGroup>
+
 </Project>

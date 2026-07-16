@@ -158,6 +158,30 @@ Copilot の実行をリアルタイムで収集するには、テレメトリの
 
 ---
 
+## GitHub Copilot のガイド付きセットアップ
+
+Config CLI の reversible setup は、変更内容を先に redacted plan として保存し、返された
+`change_set_id` を指定した場合だけ適用します。Repository では次の順に実行します。
+
+```powershell
+pwsh scripts\local-monitor\setup.ps1 plan --adapter github-copilot --target all
+pwsh scripts\local-monitor\setup.ps1 apply --change-set <change-set-id>
+pwsh scripts\local-monitor\setup.ps1 status --adapter github-copilot
+pwsh scripts\local-monitor\setup.ps1 rollback --change-set <change-set-id>
+```
+
+Windows x64 Release ZIP では、同じ引数を `.\scripts\setup.ps1` に渡します。ZIP 内の
+self-contained Config CLI を直接使うため、.NET SDK / Runtime は不要です。各コマンドは
+stdout に 1 個の `setup.v1` JSON を返します。
+
+`success: true` は静的な構成検証の成功であり、テレメトリが到着した証拠ではありません。
+初回 trace 確認は Issue #69 の責務です。`run_first_trace_doctor` はその handoff 用に
+予約された action 名ですが、現在の production setup result は返しません。
+詳しい対象範囲と rollback 条件は
+[Local Ingestion Monitor ガイド](docs/user-guide/local-monitor.md)を参照してください。
+
+---
+
 ## クイックスタート（Docker Desktop + Langfuse）
 
 1. Docker Desktop を起動し、Langfuse self-host をローカルで起動する

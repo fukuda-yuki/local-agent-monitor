@@ -22,6 +22,10 @@ config-cli collector-copilot-cli-env
 config-cli langfuse-codex-app-config
 config-cli collector-codex-app-config
 config-cli validate-resource-attributes <OTEL_RESOURCE_ATTRIBUTES>
+config-cli setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture]
+config-cli setup apply --change-set <uuid-v7>
+config-cli setup rollback --change-set <uuid-v7>
+config-cli setup status [--adapter github-copilot]
 ```
 
 Configuration commands must emit placeholders instead of real credentials.
@@ -35,6 +39,38 @@ instead of silently choosing a profile.
 
 Existing explicit commands such as `langfuse-vscode-env` and
 `collector-vscode-env` remain supported compatibility entry points.
+
+The `setup` command family is the reversible configuration surface introduced
+by Issues #66/#67. It does not replace or change the output of existing manual
+profile generators. `setup plan` creates an immutable private plan;
+`setup apply` and `setup rollback` require its UUIDv7 change-set ID. Every setup
+command emits exactly one `setup.v1` JSON result on stdout, and stderr contains
+only the fixed result code for a non-success result. The process exit code is
+the `setup.v1` code-to-exit mapping defined by the canonical setup interface;
+the PowerShell wrapper must preserve the Config CLI stdout bytes and exit code.
+The canonical ledger, DTO, error, transaction, policy, command-result mapping,
+and GitHub Copilot target rules are defined in
+[configuration-setup.md](configuration-setup.md).
+
+Repository mode invokes the current
+`src/CopilotAgentObservability.ConfigCli/CopilotAgentObservability.ConfigCli.csproj`
+through `dotnet`. A packaged `scripts/setup.ps1` detects the sibling
+`../app/config-cli/` release layout and invokes its self-contained
+`CopilotAgentObservability.ConfigCli.exe` directly. The packaged command must
+not require an installed .NET SDK or runtime, and for the same private runtime
+state it must return the same `setup.v1` stdout bytes and exit code as repository
+mode. This selection changes only executable discovery; argument forwarding,
+stdout, stderr, and exit semantics stay identical.
+
+The presence of the sibling `../app/config-cli/` directory commits the wrapper
+to packaged mode. If the expected
+`CopilotAgentObservability.ConfigCli.exe` is absent or is not a file, the
+wrapper must not fall back to repository `dotnet`. Because no Config CLI result
+producer is available, it returns no stdout DTO, writes exactly
+`internal_error\n` to stderr, and exits `5`, without an absolute/user path or a
+raw PowerShell exception. An executable-start failure after the file check has
+the same fixed outcome. A Config CLI process that starts normally retains its
+own stdout, stderr, and exit code, including non-success results.
 
 For the `raw-local-receiver` profile, `profile-vscode-env` selects which local
 raw target the generated VS Code environment points at:

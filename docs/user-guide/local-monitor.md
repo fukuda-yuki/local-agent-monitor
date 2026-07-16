@@ -193,7 +193,43 @@ monitor に向ける設定は、次の Step 2 の user environment script また
 
 詳細は [Task Scheduler operation](../operations/local-monitor-task-scheduler.md) を参照してください。
 
-### Step 2 — クライアントの環境変数を永続化する
+### Step 2 — GitHub Copilot をガイド付きで設定する
+
+変更前に redacted plan を確認し、返された `change_set_id` を指定して apply します。
+Release ZIP では次の順に実行します。
+
+```powershell
+.\scripts\setup.ps1 plan --adapter github-copilot --target all
+.\scripts\setup.ps1 apply --change-set <change-set-id>
+.\scripts\setup.ps1 status --adapter github-copilot
+.\scripts\setup.ps1 rollback --change-set <change-set-id>
+```
+
+Repository では wrapper の場所だけが変わります。
+
+```powershell
+.\scripts\local-monitor\setup.ps1 plan --adapter github-copilot --target all
+.\scripts\local-monitor\setup.ps1 apply --change-set <change-set-id>
+.\scripts\local-monitor\setup.ps1 status --adapter github-copilot
+.\scripts\local-monitor\setup.ps1 rollback --change-set <change-set-id>
+```
+
+`all` は VS Code Stable / Insiders の Default Profile、GitHub Copilot CLI、
+caller-managed App / SDK guidance を計画します。App / SDK は sample contract のみで、
+caller-owned file を変更しません。apply 後は既に起動済みの VS Code、terminal、
+Copilot CLI を target ごとの `restart_requirement` と `next_actions` に従って再起動してください。
+
+各 command は stdout に 1 個の `setup.v1` JSON を返します。`success: true` は
+設定ファイル／current-user environment の静的な検証結果であり、trace 到着の証拠では
+ありません。この setup command 自体は初回 trace の受信確認を行わず、確認は Issue #69
+へ引き継ぎます。`run_first_trace_doctor` はその handoff 用に予約された action 名ですが、
+現在の production setup result は返しません。
+
+Release ZIP の wrapper は `app/config-cli/` の self-contained executable を直接使うため、
+.NET SDK / Runtime を必要としません。Repository wrapper と引数、stdout、exit code の
+契約は同じです。
+
+### 代替 — クライアントの環境変数を手動で永続化する
 
 Windows ユーザーで新しく起動する VS Code GitHub Copilot Chat と GitHub Copilot CLI
 を常に monitor に向けるには、current user の永続環境変数を設定します。

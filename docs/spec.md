@@ -57,6 +57,103 @@ Issue #56 は `canvas-effect-comparison.md` の exact-linked comparison boundary
 
 GitHub Pages publish workflow は現行スコープから削除した（D049）。Static dashboard は `generate-static-dashboard` で local artifact として生成する。
 
+Issue #66/#67 adds a user-scoped configuration setup path beside the existing
+manual profile generators and startup scripts. The Config CLI owns a versioned
+configuration ownership ledger and immutable private plans under the platform
+local-application-data root: `%LOCALAPPDATA%` on Windows,
+`$HOME/Library/Application Support` on macOS, and absolute `XDG_DATA_HOME` or
+`$HOME/.local/share` on Linux, followed by
+`CopilotAgentObservability/LocalMonitor/setup/`. Public commands
+are `setup plan`, `setup apply`, `setup rollback`, and `setup status`; the
+Release ZIP carries a self-contained Config CLI plus a PowerShell wrapper that
+forwards the same `setup.v1` JSON result. Apply is explicit and change-set based,
+validates every base hash before writing, uses backup + same-directory atomic
+replace for files and current-user environment APIs for environment values, and
+flushes a write-ahead intent before each file/environment-member mutation or
+restore. Recovery classifies prior/desired/third-party state per step,
+compensates in reverse step order, and persists partial outcomes without
+overwriting third-party state. Rollback is hash-guarded and has no force mode.
+Ledger v1 persists each plan-time repository-safe status-target projection as
+an immutable snapshot, including the then-current canonical expected-result
+facts. Ledger-origin expected results remain valid when they satisfy the strict
+v1 shape, closed codes, safety, and target/surface invariants; unlike a newly
+created plan, they need not equal the currently embedded manifest. Status
+combines the snapshot with freshly verified lifecycle, current-target,
+ownership, and backup facts. All-no-op targets own no backup and are outside the
+ownership quorum, but their fresh base-state guard still participates in the
+same change-set-wide rollback preflight used by rollback itself. The complete
+ledger retains its 1 MiB cap; finitely bounded snapshot fields must permit the
+largest legal single change set to fit without adding a second cap or pruning.
+Private-plan `desired_state` remains schema v1 and is a closed union. The
+existing committed real ownership-ledger fixture remains unchanged and
+restart-readable as ledger evidence. Before changing `SetupPlanStore`, task-04b
+captures a separate committed production-serializer private-plan v1 fixture
+with legacy inline-string `desired_state` and proves byte-identical
+write-close-reopen behavior. Inline is the canonical v1 arm for historical
+bytes and generic non-tagged file/TOML/opaque targets; a tagged
+`jsonc_owned_values_v1` object is valid only for `SetupTargetKind.Json` records
+owned by the `github-copilot` adapter with the two VS Code Default Profile
+labels `vscode-stable-default-user-settings` and
+`vscode-insiders-default-user-settings`. Tagged owned string values are exactly
+1..2048 UTF-16 units and the expected SHA-256 hash is lowercase. This is a required v1
+union, not a migration, fallback, or schema-v2 path. It deliberately does not
+persist the complete JSONC document. Bounded Plan-time rendering may hold the
+complete document solely to calculate operations/hash and must discard it
+before persistence; apply-time adapter revalidation materializes complete
+desired bytes only under the existing lock. The coordinator verifies record
+identity/cardinality/hash, keeps bytes transient, and persists hashes only.
+Recovery never rematerializes: it classifies every crash window from the
+expected/journal hashes and flushed backup. Malformed union/carrier data fails
+`recovery_required` before an artifact or target write. No-op records produce
+no materialization but retain their generic base-state guard.
+Results distinguish requested/created and recovered change-set IDs. No HTTP,
+proxy, Canvas, or Local Monitor UI DTO is added.
+
+Setup endpoint input is an explicit-port loopback HTTP origin only. Input may
+normalize a case-equivalent host/scheme and one root slash; plans, ledger-safe
+DTOs, and configured values use the canonical no-trailing-slash origin. Userinfo,
+non-root paths, query, fragment, HTTPS, remote hosts, and implicit ports fail
+closed.
+
+The initial `github-copilot` adapter supports VS Code Stable and Insiders 1.128+
+Default Profiles, terminal Copilot CLI 1.0.4+, and caller-managed .NET App/SDK
+telemetry guidance. Non-default VS Code profiles are detected only to emit
+`vscode_non_default_profiles_not_modified` and are never edited. Copilot
+managed-settings channels use native > server > file precedence; the highest
+present channel wins wholesale without merging. VS Code enterprise
+`CopilotOtel*` policies are a separate read-only system and neither participate
+in that channel order nor suppress Copilot server/file evaluation. A differing
+observed constraint in either system blocks the plan; an unobservable
+signed-in-account policy is `managed_policy_unverified`. The resolved
+per-setting precedence is policy, environment, user setting, then default. VS
+Code writes only the documented Copilot OTel
+user settings. Terminal CLI detection is environment-only and always reports
+managed policy as unverified. Its bounded current-user OTel environment
+allowlist is writable on Windows; macOS/Linux plans remain inspectable but
+apply returns `unsupported_target` without writing a shell profile or any
+target. Existing `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` is detect-only: matching
+`http/protobuf` is retained with a warning, while another value returns
+`environment_override_conflict` and no plan. Content capture remains unchanged
+unless the user selects the explicit sensitive option. App/SDK is no-write.
+Setup recognizes Local Monitor only by
+a bounded no-redirect `GET /health/live` response, using one 500 ms budget and
+4096 payload bytes plus a sentinel byte (or valid `Content-Length`) for the
+oversize boundary. Every connect/read/total timeout is a foreign-owner result.
+VS Code settings reads are bounded at 1 MiB plus one sentinel byte during both
+plan and revalidation; malformed/oversize data is `malformed_settings`. Its
+new plans are tagged-only, and a different version that remains above the
+minimum is version drift (`recovery_required`) rather than silently accepted.
+Current-process environment reads use a distinct read-only platform surface;
+the existing user-environment surface remains the only Windows persistent
+writer. Apply revalidates endpoint, policy, VS Code/CLI version, extension
+presence, and planned member semantics before creating mutation artifacts, and
+never treats a static success as first-trace receipt. Applying a persisted plan
+whose adapter is no longer registered
+returns `unsupported_adapter` with no mutation artifact or state transition.
+The complete contract is
+[configuration setup](specifications/interfaces/configuration-setup.md) and the
+security decision is D058.
+
 ## Source capability semantic contract v1
 
 `docs/specifications/contracts/source-capabilities/v1/source-capability-manifest.schema.json`
@@ -117,6 +214,7 @@ sanitized. The canonical contract is
 | Security and data boundaries | [specifications/security-data-boundaries.md](specifications/security-data-boundaries.md) |
 | Collection profile interface | [specifications/interfaces/collection-profiles.md](specifications/interfaces/collection-profiles.md) |
 | Config CLI interface | [specifications/interfaces/config-cli.md](specifications/interfaces/config-cli.md) |
+| Configuration setup interface | [specifications/interfaces/configuration-setup.md](specifications/interfaces/configuration-setup.md) |
 | Normalized measurement dataset interface | [specifications/interfaces/measurement-dataset.md](specifications/interfaces/measurement-dataset.md) |
 | Candidate record interfaces | [specifications/interfaces/candidate-records.md](specifications/interfaces/candidate-records.md) |
 | Human-review record interfaces | [specifications/interfaces/human-review-records.md](specifications/interfaces/human-review-records.md) |
@@ -135,6 +233,12 @@ sanitized. The canonical contract is
 Publicly documented interfaces are:
 
 - Config CLI command names, arguments, CSV / JSON output shape。
+- Config CLI configuration setup commands and `setup.v1` JSON result:
+  `setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all>`,
+  `setup apply --change-set <uuid-v7>`, `setup rollback --change-set <uuid-v7>`,
+  and `setup status [--adapter github-copilot]`. The configuration ownership
+  ledger is user-scoped runtime data; command output is repository-safe and
+  redacted. No setup HTTP/proxy/UI surface exists.
 - Collection profile names and `CAO_COLLECTION_PROFILE` values。
 - `OTEL_RESOURCE_ATTRIBUTES` keys and recommended values。
 - Dashboard dataset JSON and CSV logical tables。

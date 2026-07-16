@@ -1868,3 +1868,156 @@ Issues #62-#65 implement the Issue #61 contract with the following boundaries:
 
 The canonical field, state, storage, HTTP, UI, safety, and test contract is
 [Source Schema Drift and Claude Code](specifications/interfaces/source-schema-drift-claude-code.md).
+
+## D058: Guided setup は user-scoped ownership ledger と hash-guarded transaction に閉じる
+
+Status: Accepted
+
+Issues #66/#67 add reversible configuration setup without turning Local Monitor
+into a general machine-management service. The same Config CLI implementation
+serves repository mode and the self-contained Windows Release ZIP; PowerShell is
+a thin argument/result wrapper.
+
+決定事項:
+
+- Public commands are `setup plan`, `setup apply`, `setup rollback`, and
+  `setup status`. Plan persists a private immutable change set; apply and
+  rollback require its UUIDv7 ID. Public output is the fixed repository-safe
+  `setup.v1` JSON contract.
+- The version-1 ownership ledger lives under the current user's Local Monitor
+  runtime root: `%LOCALAPPDATA%` on Windows,
+  `$HOME/Library/Application Support` on macOS, or absolute `XDG_DATA_HOME`
+  with `$HOME/.local/share` fallback on Linux, followed by
+  `CopilotAgentObservability/LocalMonitor/setup/`. This cross-platform private
+  root lets macOS/Linux persist an inspectable plan before apply refuses its
+  CLI target. The ledger stores fixed labels, timestamps, state/error codes,
+  hashes, opaque backup references, and the immutable repository-safe plan-time
+  target projection required by `status`. Exact values and paths are confined to
+  private plans/backups/journals. Plans retain desired state but not previous
+  values; exact previous state is captured only in apply-time backups. Version 1 is the first shipped schema; unknown versions
+  fail closed and no synthetic v0 migration is invented. The complete ledger
+  retains its 1 MiB cap; bounded snapshots add no second cap or automatic
+  pruning, so finite history capacity is accepted. Private-plan
+  `desired_state` is a closed v1 union, not a migration or fallback. The
+  existing committed real ownership-ledger v1 fixture remains byte-identical
+  and restart-readable as ledger evidence. Before serializer changes, task-04b
+  captures a separate production-serializer private-plan v1 fixture containing
+  the canonical legacy inline string and proves `SetupPlanStore`
+  write-close-reopen byte identity. Inline remains canonical for historical
+  bytes and generic non-tagged file/TOML/opaque targets; tagged
+  `jsonc_owned_values_v1` is valid only for `SetupTargetKind.Json` records
+  owned by `github-copilot` with the two VS Code Default Profile labels
+  `vscode-stable-default-user-settings` and
+  `vscode-insiders-default-user-settings`. Tagged string values are exactly
+  1..2048 UTF-16 units and its expected state hash is lowercase. Unknown,
+  malformed, or arm-mismatched
+  union values fail `recovery_required`.
+- One physical file or current-user environment allowlist is one ledger target
+  with one base/applied hash and backup; setting changes are bounded members.
+  Apply preflights every base hash and path before writing, flushes backups and
+  a write-ahead journal, persists a flushed intent before each atomic file
+  replacement or current-user environment member write, and compensates in
+  reverse step order. Rollback uses the same pre-restore intent protocol. Every command recovers interrupted
+  apply/rollback journals before normal work; unresolved recovery permits status
+  only. Rollback is all-target hash guarded,
+  one change set at a time, and has no force mode. Concurrency uses an exclusive
+  non-waiting lock; tests use barriers/fault points rather than sleeps. A
+  tagged JSONC target persists no full rendered document: bounded Plan-time
+  rendering may hold complete bytes solely to derive operations/expected hash,
+  then discards them before persistence; `SetupRevalidation` carries its
+  complete desired bytes only under that lock. The coordinator validates exact
+  record identity/cardinality/hash before it creates artifacts or writes.
+  Ledger and journal retain hashes only. Recovery never calls the adapter or
+  rematerializes JSONC; it uses expected/journal hashes and backups through
+  every interruption window. No-op records add no materialization but retain
+  their generic base-state guard.
+- Apply verifies all desired file/member states again before commit. Every
+  compensation or rollback restore reclassifies current state immediately
+  before writing; a third-party state is preserved and makes the change set
+  partial. Status reports target state and derives change-set state and rollback
+  availability from all writable targets; guidance targets are not writable.
+  Target status is lifecycle-relative through an explicit base/desired/previous/
+  none reference. A third-party value preserved during a transaction is
+  `diverged`, as is a safely classified aggregate target whose members mix
+  desired and previous state. Classification failure is `unavailable` instead.
+  Status rebuilds immutable detected/version/source/endpoint/manifest/guidance/
+  redacted-member fields from the ledger snapshot, but freshly verifies
+  reference/current/rollback facts from the lifecycle, private artifacts, and
+  current target. A ledger-origin manifest is validated against the strict v1
+  shape, closed codes, safety rules, and target/surface invariants without being
+  compared to the currently embedded manifest; a newly produced plan must still
+  match the current canonical manifest exactly. An all-`no-op` physical target
+  grants no rollback ownership and needs no backup, but its fresh base-state
+  check remains part of the change-set-wide rollback preflight. Drift in that
+  unowned target therefore makes rollback unavailable, matching the rollback
+  command's no-write `rollback_stale` behavior.
+- Symlink/junction/reparse/path traversal, malformed structured configuration,
+  machine-wide environment, `setx`, implicit administrator elevation, raw
+  exception output, and DB/log/runtime-data deletion are excluded.
+- The initial adapter ID is `github-copilot`. VS Code Stable and Insiders
+  1.128+ write only documented Copilot OTel settings in each channel's Default
+  Profile. Non-default profiles are never opened or edited and produce the
+  fixed warning `vscode_non_default_profiles_not_modified`. Terminal Copilot
+  CLI 1.0.4+ writes the exact bounded current-user OTel environment allowlist on
+  Windows only. macOS/Linux detect and plan the CLI target, but apply returns
+  `unsupported_target` without a shell-profile or target write. GitHub Copilot
+  App/SDK is caller-managed guidance and performs no write. Current-process
+  environment observation is a separate read-only platform interface; it never
+  aliases the current-user persistent environment API or becomes a mutation
+  target. VS Code `settings.json` reads are 1 MiB plus one sentinel byte in
+  plan and revalidation; malformed/oversize input is `malformed_settings`.
+- Copilot managed-settings channels use native > server > file precedence and
+  the highest present channel wins wholesale without field merging. Its native
+  sources are only Windows `HKEY_LOCAL_MACHINE\SOFTWARE\Policies\GitHubCopilot`
+  and macOS `com.github.copilot`; Linux has no native channel. VS Code
+  enterprise `CopilotOtel*` policies under `Software\Policies\Microsoft\VSCode`,
+  macOS configuration profiles, and `/etc/vscode/policy.json` are a separate
+  policy system. Both systems are read-only and resolved independently; an
+  enterprise policy never suppresses Copilot server/file discovery. Any
+  observed differing telemetry constraint blocks with
+  `managed_policy_conflict`, while an equal constraint is managed/no-write.
+  Signed-in-account server policy that an external CLI cannot prove is
+  `managed_policy_unverified` even when an enterprise policy is observed;
+  Copilot CLI uses environment-only detection and always reports the same
+  warning.
+- Content capture is preserved by default. Enabling it requires the independent
+  `--include-content-capture` option, a separate member plan change, and a sensitive
+  warning. Global `client.kind`, `OTEL_SERVICE_NAME`,
+  `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`,
+  `COPILOT_OTEL_SOURCE_NAME`, credentials, and unrelated resource attributes
+  are not changed. Existing `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` is detect-only:
+  exact `http/protobuf` is preserved with
+  `cli_trace_protocol_override_not_modified`; any other value returns
+  `environment_override_conflict` and no plan. It is never added to the write
+  allowlist.
+- Setup static verification does not prove telemetry receipt. First-trace
+  diagnosis remains Issue #69. No HTTP, proxy, Canvas action, Razor UI, database,
+  or AppHost resource is added.
+- Public results separate the requested/created `change_set_id` from
+  `recovered_change_set_id` and `recovery_operation`. Apply revalidates target
+  OS support, version, VS Code Default Profile extension presence, managed
+  state, exact logical members, and loopback endpoint ownership immediately
+  before creating mutation artifacts. A changed version that remains supported
+  is `recovery_required`, not an implicit update of the persisted contract.
+  Applying a valid persisted plan after its
+  adapter is removed from the registry is the allowed
+  `apply`/`unsupported_adapter` result and leaves the existing plan/ledger
+  unchanged. Status is bounded to 100 entries with
+  recovery-blocking states prioritized, and may perform mandatory recovery
+  before projection.
+- Local Monitor recognition is exactly a no-redirect
+  `GET <origin>/health/live` under one 500 ms total timeout and a 4096-byte body
+  cap. The probe reads at most 4096 payload bytes plus one sentinel byte unless
+  a trustworthy `Content-Length` already proves oversize. Only HTTP 200 and an
+  exact JSON object containing solely string `status=live` is accepted.
+  Refused/no-listener is `monitor_not_running`; every connect/read/total
+  timeout, redirect, non-200, oversize, malformed/non-object, or different JSON
+  response is `port_owned_by_foreign_process`.
+- Environment notification is attempted after an uninterrupted final state.
+  Recovery may replay it because exactly-once delivery cannot be proven across
+  a process crash without an acknowledgement protocol.
+
+The canonical interface is
+[configuration setup](specifications/interfaces/configuration-setup.md), and
+its repository-safe/private-data split is fixed in
+[security data boundaries](specifications/security-data-boundaries.md).

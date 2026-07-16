@@ -21,6 +21,10 @@ internal static class CliHelpText
           config-cli langfuse-codex-app-config
           config-cli collector-codex-app-config
           config-cli validate-resource-attributes <OTEL_RESOURCE_ATTRIBUTES>
+          config-cli setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture]
+          config-cli setup apply --change-set <uuid-v7>
+          config-cli setup rollback --change-set <uuid-v7>
+          config-cli setup status [--adapter github-copilot]
           config-cli ingest-raw <raw.json> --db <raw-store.db>
           config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]
           config-cli serve-raw-local-receiver [--db <raw-store.db>] [--url <loopback-http-url>]

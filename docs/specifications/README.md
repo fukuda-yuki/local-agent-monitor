@@ -20,6 +20,7 @@
 | --- | --- |
 | Collection profiles | [interfaces/collection-profiles.md](interfaces/collection-profiles.md) |
 | Config CLI | [interfaces/config-cli.md](interfaces/config-cli.md) |
+| Configuration setup | [interfaces/configuration-setup.md](interfaces/configuration-setup.md) |
 | Normalized measurement dataset | [interfaces/measurement-dataset.md](interfaces/measurement-dataset.md) |
 | Candidate records | [interfaces/candidate-records.md](interfaces/candidate-records.md) |
 | Human-review records | [interfaces/human-review-records.md](interfaces/human-review-records.md) |

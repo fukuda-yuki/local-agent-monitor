@@ -1,4 +1,6 @@
 using System.Net;
+using CopilotAgentObservability.ConfigCli.Setup.Cli;
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 
 namespace CopilotAgentObservability.ConfigCli;
 
@@ -6,10 +8,24 @@ internal static class CliApplication
 {
     public static int Run(string[] args, TextWriter output, TextWriter error)
     {
+        return Run(args, output, error, null);
+    }
+
+    public static int Run(
+        string[] args,
+        TextWriter output,
+        TextWriter error,
+        Func<SetupOptions, SetupCommandResult>? setupDispatcher)
+    {
         if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
         {
             output.WriteLine(CliHelpText.Text);
             return args.Length == 0 ? 1 : 0;
+        }
+
+        if (args[0] == "setup")
+        {
+            return RunSetupCommand(args, output, error, setupDispatcher);
         }
 
         switch (args[0])
@@ -158,6 +174,207 @@ internal static class CliApplication
                 return 1;
         }
     }
+
+    private static int RunSetupCommand(
+        string[] args,
+        TextWriter output,
+        TextWriter error,
+        Func<SetupOptions, SetupCommandResult>? setupDispatcher)
+    {
+        if (!TryGetSetupCommand(args, out var command))
+        {
+            WriteSetupError(error, SetupCodes.InvalidArguments);
+            return 2;
+        }
+
+        var parseResult = SetupOptions.Parse(args);
+        if (parseResult.Options is null)
+        {
+            var changeSetId = command is SetupCommand.Apply or SetupCommand.Rollback
+                ? TryGetUnambiguousChangeSetId(args)
+                : null;
+            var fallback = CreateSetupFailure(command, SetupCodes.InvalidArguments, null, changeSetId);
+            return WriteSetupResult(
+                fallback,
+                fallback,
+                output,
+                error);
+        }
+
+        var fallbackResult = CreateSetupFailure(
+            command,
+            SetupCodes.InternalError,
+            command is SetupCommand.Plan or SetupCommand.Status ? parseResult.Options.Adapter : null,
+            command is SetupCommand.Apply or SetupCommand.Rollback ? parseResult.Options.ChangeSetId!.Value.ToString("D") : null);
+        SetupCommandResult? result;
+        try
+        {
+            result = setupDispatcher is null
+                ? fallbackResult
+                : setupDispatcher(parseResult.Options);
+        }
+        catch (Exception)
+        {
+            result = fallbackResult;
+        }
+
+        return WriteSetupResult(
+            HasRequestedContext(result, parseResult.Options) ? result! : fallbackResult,
+            fallbackResult,
+            output,
+            error);
+    }
+
+    private static bool TryGetSetupCommand(string[] args, out SetupCommand command)
+    {
+        command = default;
+        if (args.Length < 2)
+        {
+            return false;
+        }
+
+        command = args[1] switch
+        {
+            "plan" => SetupCommand.Plan,
+            "apply" => SetupCommand.Apply,
+            "rollback" => SetupCommand.Rollback,
+            "status" => SetupCommand.Status,
+            _ => default,
+        };
+
+        return args[1] is "plan" or "apply" or "rollback" or "status";
+    }
+
+    private static bool HasRequestedContext(SetupCommandResult? result, SetupOptions options)
+    {
+        if (result is null || result.Command != options.Command)
+        {
+            return false;
+        }
+
+        return options.Command switch
+        {
+            SetupCommand.Plan or SetupCommand.Status => string.Equals(result.Adapter, options.Adapter, StringComparison.Ordinal),
+            SetupCommand.Apply or SetupCommand.Rollback => string.Equals(result.ChangeSetId, options.ChangeSetId!.Value.ToString("D"), StringComparison.Ordinal),
+            _ => false,
+        };
+    }
+
+    private static string? TryGetUnambiguousChangeSetId(string[] args)
+    {
+        string? changeSetId = null;
+        var changeSetOptionCount = 0;
+
+        for (var index = 2; index < args.Length; index++)
+        {
+            if (args[index] != "--change-set")
+            {
+                continue;
+            }
+
+            changeSetOptionCount++;
+            if (changeSetOptionCount != 1 ||
+                index + 1 >= args.Length ||
+                !TryParseCanonicalUuidV7(args[index + 1], out var parsedChangeSetId))
+            {
+                return null;
+            }
+
+            changeSetId = parsedChangeSetId.ToString("D");
+            index++;
+        }
+
+        return changeSetOptionCount == 1 ? changeSetId : null;
+    }
+
+    private static bool TryParseCanonicalUuidV7(string value, out Guid changeSetId)
+    {
+        changeSetId = Guid.Empty;
+        return Guid.TryParseExact(value, "D", out changeSetId) &&
+            string.Equals(value, changeSetId.ToString("D"), StringComparison.Ordinal) &&
+            value[14] == '7' && value[19] is '8' or '9' or 'a' or 'b';
+    }
+
+    private static SetupCommandResult CreateSetupFailure(SetupCommand command, string code, string? adapter, string? changeSetId) => new(
+        command,
+        false,
+        code,
+        changeSetId,
+        null,
+        null,
+        adapter,
+        [],
+        [],
+        [],
+        [],
+        false);
+
+    private static int WriteSetupResult(
+        SetupCommandResult result,
+        SetupCommandResult fallbackResult,
+        TextWriter output,
+        TextWriter error)
+    {
+        SetupCommandResult serializedResult = result;
+        string json;
+        try
+        {
+            json = SetupJson.Serialize(result);
+        }
+        catch (Exception)
+        {
+            serializedResult = fallbackResult;
+            json = SetupJson.Serialize(fallbackResult);
+        }
+
+        output.WriteLine(json);
+        if (!serializedResult.Success)
+        {
+            WriteSetupError(error, serializedResult.Code);
+        }
+
+        return MapExitCode(serializedResult.Code);
+    }
+
+    private static void WriteSetupError(TextWriter error, string code)
+    {
+        error.Write(code);
+        error.Write('\n');
+    }
+
+    private static int MapExitCode(string code) => code switch
+    {
+        SetupCodes.PlanReady or
+        SetupCodes.NoChanges or
+        SetupCodes.ApplySucceeded or
+        SetupCodes.RollbackSucceeded or
+        SetupCodes.StatusReady or
+        SetupCodes.InterruptedApplyRecovered or
+        SetupCodes.InterruptedRollbackRecovered => 0,
+        SetupCodes.InvalidArguments => 2,
+        SetupCodes.ManagedPolicyConflict or
+        SetupCodes.EnvironmentOverrideConflict or
+        SetupCodes.StalePlan or
+        SetupCodes.RollbackStale => 3,
+        SetupCodes.UnsupportedAdapter or
+        SetupCodes.UnsupportedTarget or
+        SetupCodes.TargetNotInstalled or
+        SetupCodes.UnsupportedVersion or
+        SetupCodes.RollbackNotAvailable or
+        SetupCodes.PortOwnedByForeignProcess => 4,
+        SetupCodes.PartialRollback => 6,
+        SetupCodes.MalformedSettings or
+        SetupCodes.PermissionDenied or
+        SetupCodes.UnsafePath or
+        SetupCodes.PartialApply or
+        SetupCodes.SetupBusy or
+        SetupCodes.RecoveryRequired or
+        SetupCodes.InterruptedRecoveryFailed or
+        SetupCodes.LedgerCorrupt or
+        SetupCodes.LedgerVersionUnsupported or
+        SetupCodes.InternalError => 5,
+        _ => 5,
+    };
 
     private static int RunProfileCommand(string[] args, TextWriter output, TextWriter error, Func<string, string> createOutput)
     {
