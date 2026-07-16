@@ -62,6 +62,16 @@ state it must return the same `setup.v1` stdout bytes and exit code as repositor
 mode. This selection changes only executable discovery; argument forwarding,
 stdout, stderr, and exit semantics stay identical.
 
+The presence of the sibling `../app/config-cli/` directory commits the wrapper
+to packaged mode. If the expected
+`CopilotAgentObservability.ConfigCli.exe` is absent or is not a file, the
+wrapper must not fall back to repository `dotnet`. Because no Config CLI result
+producer is available, it returns no stdout DTO, writes exactly
+`internal_error\n` to stderr, and exits `5`, without an absolute/user path or a
+raw PowerShell exception. An executable-start failure after the file check has
+the same fixed outcome. A Config CLI process that starts normally retains its
+own stdout, stderr, and exit code, including non-success results.
+
 For the `raw-local-receiver` profile, `profile-vscode-env` selects which local
 raw target the generated VS Code environment points at:
 

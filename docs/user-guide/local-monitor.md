@@ -217,12 +217,13 @@ Repository では wrapper の場所だけが変わります。
 `all` は VS Code Stable / Insiders の Default Profile、GitHub Copilot CLI、
 caller-managed App / SDK guidance を計画します。App / SDK は sample contract のみで、
 caller-owned file を変更しません。apply 後は既に起動済みの VS Code、terminal、
-Copilot CLI を結果の `restart_required` に従って再起動してください。
+Copilot CLI を target ごとの `restart_requirement` と `next_actions` に従って再起動してください。
 
 各 command は stdout に 1 個の `setup.v1` JSON を返します。`success: true` は
 設定ファイル／current-user environment の静的な検証結果であり、trace 到着の証拠では
-ありません。結果の `run_first_trace_doctor` next action は Issue #69 への handoff で、
-この setup command 自体は初回 trace の受信確認を行いません。
+ありません。この setup command 自体は初回 trace の受信確認を行わず、確認は Issue #69
+へ引き継ぎます。`run_first_trace_doctor` はその handoff 用に予約された action 名ですが、
+現在の production setup result は返しません。
 
 Release ZIP の wrapper は `app/config-cli/` の self-contained executable を直接使うため、
 .NET SDK / Runtime を必要としません。Repository wrapper と引数、stdout、exit code の

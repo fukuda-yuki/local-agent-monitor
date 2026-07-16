@@ -201,6 +201,101 @@ public class LocalMonitorScriptTests
             Assert.Equal("setup.v1", document.RootElement.GetProperty("contract_version").GetString());
             Assert.Equal("status", document.RootElement.GetProperty("command").GetString());
             Assert.Equal("status_ready", document.RootElement.GetProperty("code").GetString());
+
+            var repositoryFailure = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-File", ScriptPath("setup.ps1"), "status", "--unexpected"],
+                repositoryEnvironment,
+                TimeSpan.FromMinutes(2));
+            var releaseFailure = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-File", packagedSetup, "status", "--unexpected"],
+                packagedEnvironment,
+                TimeSpan.FromMinutes(2));
+
+            Assert.Equal(2, repositoryFailure.ExitCode);
+            Assert.Equal(repositoryFailure.ExitCode, releaseFailure.ExitCode);
+            Assert.Equal(repositoryFailure.StandardOutputBytes, releaseFailure.StandardOutputBytes);
+            Assert.Equal(repositoryFailure.StandardErrorBytes, releaseFailure.StandardErrorBytes);
+            Assert.Equal("invalid_arguments\n", releaseFailure.StandardErrorText);
+            using var failureDocument = JsonDocument.Parse(releaseFailure.StandardOutputBytes);
+            Assert.Equal("setup.v1", failureDocument.RootElement.GetProperty("contract_version").GetString());
+            Assert.Equal("invalid_arguments", failureDocument.RootElement.GetProperty("code").GetString());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PackagedSetupFailsClosedWhenConfigCliExecutableIsNotAFile(bool createDirectoryAtExecutablePath)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateTemporaryDirectory("cao-incomplete-release-tests");
+        try
+        {
+            var scriptsDirectory = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var configCliDirectory = Directory.CreateDirectory(Path.Combine(root, "app", "config-cli")).FullName;
+            var packagedSetup = Path.Combine(scriptsDirectory, "setup.ps1");
+            File.Copy(ScriptPath("setup.ps1"), packagedSetup);
+            if (createDirectoryAtExecutablePath)
+            {
+                Directory.CreateDirectory(Path.Combine(configCliDirectory, "CopilotAgentObservability.ConfigCli.exe"));
+            }
+
+            var result = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-File", packagedSetup, "status"],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(1));
+
+            Assert.Equal(5, result.ExitCode);
+            Assert.Empty(result.StandardOutputBytes);
+            Assert.Equal(Encoding.UTF8.GetBytes("internal_error\n"), result.StandardErrorBytes);
+            Assert.DoesNotContain(root, result.StandardErrorText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("PowerShell", result.StandardErrorText, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PackagedSetupFailsClosedWhenConfigCliExecutableCannotStart()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateTemporaryDirectory("cao-invalid-release-tests");
+        try
+        {
+            var scriptsDirectory = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var configCliDirectory = Directory.CreateDirectory(Path.Combine(root, "app", "config-cli")).FullName;
+            var packagedSetup = Path.Combine(scriptsDirectory, "setup.ps1");
+            File.Copy(ScriptPath("setup.ps1"), packagedSetup);
+            File.WriteAllText(Path.Combine(configCliDirectory, "CopilotAgentObservability.ConfigCli.exe"), "not-an-executable");
+
+            var result = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-File", packagedSetup, "status"],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(1));
+
+            Assert.Equal(5, result.ExitCode);
+            Assert.Empty(result.StandardOutputBytes);
+            Assert.Equal(Encoding.UTF8.GetBytes("internal_error\n"), result.StandardErrorBytes);
+            Assert.DoesNotContain(root, result.StandardErrorText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("PowerShell", result.StandardErrorText, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

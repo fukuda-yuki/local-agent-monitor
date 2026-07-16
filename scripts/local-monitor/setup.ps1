@@ -22,7 +22,22 @@ if ($null -ne $Arguments) {
 $releaseCliDirectory = Join-Path $PSScriptRoot '..' 'app' 'config-cli'
 if (Test-Path -LiteralPath $releaseCliDirectory -PathType Container) {
     $releaseCli = Join-Path $releaseCliDirectory 'CopilotAgentObservability.ConfigCli.exe'
-    & $releaseCli @setupArgs
+    if (-not (Test-Path -LiteralPath $releaseCli -PathType Leaf)) {
+        [Console]::Error.Write("internal_error`n")
+        exit 5
+    }
+
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        & $releaseCli @setupArgs
+        $cliExitCode = $LASTEXITCODE
+    }
+    catch {
+        [Console]::Error.Write("internal_error`n")
+        exit 5
+    }
+
+    exit $cliExitCode
 }
 else {
     $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path

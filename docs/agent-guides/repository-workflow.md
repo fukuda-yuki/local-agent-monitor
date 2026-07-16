@@ -76,8 +76,9 @@ Each recognized setup verb returns one `setup.v1` object on stdout. The wrapper
 preserves Config CLI stdout bytes and exit code. Release validation must invoke
 the packaged `scripts/setup.ps1` with `dotnet` unavailable on child `PATH` and
 compare it with repository mode against the same isolated `LOCALAPPDATA` root.
-Static setup success does not prove telemetry receipt; `run_first_trace_doctor`
-is an Issue #69 handoff.
+Static setup success does not prove telemetry receipt; Issue #69 owns that
+verification. `run_first_trace_doctor` is reserved for that handoff and is not
+emitted by current production setup results.
 
 For the complete Config CLI surface, use `docs/specifications/interfaces/config-cli.md` and the user guides.
 
