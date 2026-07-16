@@ -11,7 +11,7 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 - Base branch: `main`
 - Base commit: `920ff43a9ec63088a9cc109bcd15d0e6f4f9dc5c`
 - Current reviewed branch commit before this ledger update:
-  `af0d0aab9cb6a71607fab530285fda3b6789f653`
+  `8395989dcfde0c9b3760af2e8bbf3ee872d52012`
 - Pull request, merge, and Issue closure: not performed
 
 ## Commit sequence
@@ -33,10 +33,17 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 | `116c37e8214aef0ad20aacd64d67c4748a24a32f` | Record the implementation-plan correction for parallel ownership |
 | `d8fc9da4a3af08111be2281233ba4c200d4ae317` | Cover invalid source identity and inactive verification with the fixed sanitized error |
 | `af0d0aab9cb6a71607fab530285fda3b6789f653` | Align the plan correction with the reviewed six shared tests |
+| `a61e6b2e4a0b771e392832688cc3ee49d9ad0399` | Record the reviewed parallel G0 state |
+| `461a9546782f2a642b3fe9eebddb4e835daa6bd5` | Add candidate-scope and half-open verification-window RED tests |
+| `d49eb2d198f4a1502737158207909add3f916a43` | Add verification-scoped candidate composition to the shared interface/composer |
+| `956f5d028ecd565f29941fbca689d30f8f1014c0` | Promote candidate refresh/restart semantics to the canonical handoff specification |
+| `a6f9390c5a834705558b8ea2ccef8d98c05dbd4b` | Align the approved design with candidate composition and refresh scope |
+| `8395989dcfde0c9b3760af2e8bbf3ee872d52012` | Record the candidate-boundary implementation-plan correction |
 
 The original implementation-plan code block bundled all three surfaces into
-one test and showed one invalid-input example. The reviewed executable test,
-canonical specification, and plan-correction record supersede those details.
+one test, showed one invalid-input example, and exposed only snapshot
+composition. The reviewed executable test, canonical specification, and
+plan-correction record supersede those details.
 
 ## G0-2 contract state
 
@@ -47,11 +54,15 @@ The branch fixes the following source-neutral boundary:
 - direct composition with typed observations and no verification ID;
 - persisted completion composition with exact active-verification identity and
   an empty caller-observation list;
+- candidate composition that copies verification ID/source/adapter/expiry and
+  accepts only `started_at <= observed_at < expires_at`;
 - one discoverable `IDoctorSourceHandoff` interface and
   `DoctorSourceHandoffAttribute` without source-specific Doctor states;
 - surface-scoped v1 verification for `github-copilot-vscode`,
   `github-copilot-cli`, and `claude-code`, with a null Doctor adapter while
-  referenced source records retain their actual adapter provenance; and
+  referenced source records retain their actual adapter provenance;
+- exact verification-ID reuse after restart, without latest-verification,
+  latest-trace, or latest-Session selection; and
 - fixed sanitized invalid-composition failure text.
 
 No public Doctor command, route, state, result field, storage schema, dependency,
@@ -60,14 +71,16 @@ Session binding behavior is changed.
 
 ## G0-3 test intent
 
-`DoctorSourceHandoffContractTests` contains six shared-boundary tests and three
-independent source-implementation tests.
+`DoctorSourceHandoffContractTests` contains eight shared-boundary tests and
+three independent source-implementation tests.
 
 The intended post-G0 result is:
 
 - `DirectComposition_MapsFixedAuthorityAndPreservesObservations`: GREEN;
 - `VerificationComposition_UsesVerificationIdentityAndNoCallerObservations`:
   GREEN;
+- `CandidateComposition_CopiesVerificationScopeAndExpiry`: GREEN;
+- `CandidateOutsideVerificationWindow_UsesFixedSanitizedError`: GREEN;
 - `UnsafeObservation_UsesFixedSanitizedError`: GREEN;
 - `InvalidSourceIdentity_UsesFixedSanitizedError`: GREEN;
 - `InactiveVerification_UsesFixedSanitizedError`: GREEN;
@@ -90,8 +103,9 @@ can run its owned methods while the other lane remains intentionally RED. The
 full class becomes GREEN only after integration of both Issues.
 
 Source-specific implementations must not edit the shared expected surface
-values merely to suppress another lane's RED. They satisfy the test by adding
-concrete, annotated production implementations outside the Doctor assembly.
+values merely to suppress another lane's RED. They satisfy the tests by adding
+concrete, annotated production implementations outside the Doctor assembly and
+implementing all three shared composition operations.
 
 ## Static review
 
@@ -104,7 +118,7 @@ A complete branch-file inventory against `main` found only:
 - one Doctor test file; and
 - this durable ledger.
 
-Static review corrected five issues before this ledger update:
+Static review corrected six issues before this ledger update:
 
 1. The first discovery test scanned only Config CLI and Local Monitor, so its
    Doctor-core exclusion assertion was vacuous. It now scans all three
@@ -121,6 +135,11 @@ Static review corrected five issues before this ledger update:
 5. The fixed invalid-composition error was initially covered only for an unsafe
    evidence reference. The reviewed test also pins invalid source identity and
    inactive verification without echoing rejected values.
+6. Snapshot-only composition left candidate verification ID, source, adapter,
+   expiry, and observation-window rules to source-specific reconstruction. The
+   reviewed interface/composer now owns those fields and the half-open window,
+   while ID generation, source collection, deduplication, and persistence
+   remain #103/#104 responsibilities.
 
 The reviewed source contains no placeholder, fallback, source-specific Doctor
 enum, public candidate-write surface, sleep, polling, retry loop, real raw
@@ -146,7 +165,8 @@ dotnet test CopilotAgentObservability.slnx
 No RED count, GREEN count, successful build, Playwright bootstrap, or full-suite
 result is claimed. The branch must not be merged until a repository-capable
 Windows/.NET environment executes these exact commands and confirms that the
-only intended failures are the three source-implementation tests listed above.
+eight shared tests are GREEN and the only intended failures are the three
+source-implementation tests listed above.
 
 ## Handoff
 
@@ -155,8 +175,11 @@ only intended failures are the three source-implementation tests listed above.
 - Issue #104 implements and annotates the `claude-code` handoff outside the
   Doctor assembly.
 - Each implementation returns a null expected Doctor adapter for this v1
-  surface-scoped handoff and delegates composition to
-  `DoctorSourceHandoffComposer`.
+  surface-scoped handoff and delegates direct, completion, and candidate
+  composition to `DoctorSourceHandoffComposer`.
+- A refresh reloads the exact active verification by ID after restart and
+  composes candidates only from records observed inside that verification
+  window. It does not select a latest entity.
 - Neither Issue edits the shared test merely to weaken the expected surface
   values. Each turns only its owned RED methods GREEN through production code
   and source-specific tests.
