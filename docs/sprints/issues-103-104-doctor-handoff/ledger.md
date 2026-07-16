@@ -11,7 +11,7 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 - Base branch: `main`
 - Base commit: `920ff43a9ec63088a9cc109bcd15d0e6f4f9dc5c`
 - Current reviewed branch commit before this ledger update:
-  `c9f3e99d4f86889a7ccf5d5b94be119213690f33`
+  `ef1946d16420638afcc1578dd58f7fa6e75fb4b5`
 - Pull request, merge, and Issue closure: not performed
 
 ## Commit sequence
@@ -49,6 +49,9 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 | `0acc935d4fba6802812aa5b1934a174a5c3cf668` | Promote source-mismatch and synthetic-evidence semantics to the canonical contract |
 | `d14cffbc6a84b4c7a53f6d39db54cd0feb2903f1` | Align the approved design with eleven shared test methods/twelve cases |
 | `c9f3e99d4f86889a7ccf5d5b94be119213690f33` | Finalize the implementation-plan review correction |
+| `5cd2f697a0cc24769c58fe86c3efda5bcb991c6f` | Record the cross-source G0 review state |
+| `9eb26a52939855847d6524e965e8fa92b7d58cee` | Verify registered runtime source/adapter identity through a stateless wrapper |
+| `ef1946d16420638afcc1578dd58f7fa6e75fb4b5` | Pin parameterless construction and attribute/runtime identity in the canonical contract |
 
 The original implementation-plan code block bundled all three surfaces into
 one test, showed one invalid-input example, and exposed only snapshot
@@ -71,6 +74,8 @@ The branch fixes the following source-neutral boundary:
 - a unique v1 registration allowlist containing only
   `github-copilot-vscode`, `github-copilot-cli`, and `claude-code` outside the
   Doctor assembly;
+- parameterless stateless wrappers whose runtime `SourceSurface` equals their
+  attribute and whose expected Doctor adapter is null;
 - surface-scoped v1 verification with a null Doctor adapter while referenced
   source records retain their actual adapter provenance;
 - exact verification-ID reuse after restart, without latest-verification,
@@ -111,6 +116,10 @@ The intended post-G0 result is:
 - `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore`: RED until Issue
   #104 provides `claude-code`.
 
+Each source implementation gate also constructs the registered wrapper and
+requires runtime source identity to equal its attribute plus
+`ExpectedSourceAdapter = null`.
+
 This table records intended contract state only. No test result is claimed
 without command output.
 
@@ -123,8 +132,8 @@ full class becomes GREEN only after integration of both Issues.
 
 Source-specific implementations must not edit the shared expected surface
 values merely to suppress another lane's RED. They satisfy the tests by adding
-concrete, annotated production implementations outside the Doctor assembly and
-implementing all three shared composition operations.
+concrete, annotated, parameterless production wrappers outside the Doctor
+assembly and implementing all three shared composition operations.
 
 ## Static review
 
@@ -137,7 +146,7 @@ A complete branch-file inventory against `main` found only:
 - one Doctor test file; and
 - this durable ledger.
 
-Static review corrected nine issues before this ledger update:
+Static review corrected ten issues before this ledger update:
 
 1. The first discovery test scanned only Config CLI and Local Monitor, so its
    Doctor-core exclusion assertion was vacuous. It now scans all three
@@ -169,6 +178,9 @@ Static review corrected nine issues before this ledger update:
    cannot become first real trace success. A two-source theory now requires
    `ready_no_real_trace` for otherwise-ready GitHub Copilot and Claude Code
    snapshots backed by synthetic ingest/raw/projection observations.
+10. Attribute discovery alone could not detect a runtime `SourceSurface` or
+    expected-adapter mismatch. Each owner gate now constructs the stateless
+    wrapper and checks exact identity plus null adapter.
 
 The reviewed source contains no placeholder, fallback, source-specific Doctor
 enum, public candidate-write surface, sleep, polling, retry loop, real raw
@@ -203,9 +215,9 @@ failures are the three source-implementation tests listed above.
   `github-copilot-cli` handoffs outside the Doctor assembly.
 - Issue #104 implements and annotates the `claude-code` handoff outside the
   Doctor assembly.
-- Each implementation returns a null expected Doctor adapter for this v1
-  surface-scoped handoff and delegates direct, completion, and candidate
-  composition to `DoctorSourceHandoffComposer`.
+- Each parameterless wrapper returns a runtime source equal to its attribute,
+  returns a null expected Doctor adapter, and delegates direct, completion, and
+  candidate composition to `DoctorSourceHandoffComposer`.
 - A refresh reloads the exact active verification by ID after restart and
   composes candidates only from records observed inside that verification
   window. It does not select a latest entity.
