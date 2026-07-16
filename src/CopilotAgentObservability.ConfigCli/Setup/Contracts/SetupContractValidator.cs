@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode.AgentSdk;
 using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Contracts;
@@ -22,6 +23,35 @@ public static class SetupContractValidator
                 OtlpProtocol = "http/protobuf"
             }
         }
+        """;
+    private const string ClaudePythonGuidanceSample = """
+        import os
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        options = ClaudeAgentOptions(env={
+            **os.environ,
+            "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+            "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+            "OTEL_TRACES_EXPORTER": "otlp",
+            "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "<canonical-origin>/v1/traces",
+        })
+
+        # Flush telemetry before a short-lived process exits.
+        """;
+    private const string ClaudeTypeScriptGuidanceSample = """
+        const options = {
+          env: {
+            ...process.env,
+            CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+            CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1",
+            OTEL_TRACES_EXPORTER: "otlp",
+            OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: "http/protobuf",
+            OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "<canonical-origin>/v1/traces",
+          },
+        };
+
+        // Pass options.env to the Agent SDK and flush telemetry before a short-lived process exits.
         """;
 
     private static readonly Regex UuidV7 = new(
@@ -65,6 +95,7 @@ public static class SetupContractValidator
         SetupCodes.SharedUserEnvironmentAffectsOtherProcesses,
         SetupCodes.VscodeNonDefaultProfilesNotModified,
         SetupCodes.CliTraceProtocolOverrideNotModified,
+        SetupCodes.ClaudeHooksCaptureRawContent,
     };
 
     private static readonly HashSet<string> NextActionCodes = new(StringComparer.Ordinal)
@@ -80,6 +111,7 @@ public static class SetupContractValidator
         SetupCodes.StartLocalMonitor,
         SetupCodes.ReviewContentCaptureWarning,
         SetupCodes.ReviewCliTraceProtocolOverride,
+        SetupCodes.RestartClaudeProcess,
         SetupCodes.RunFirstTraceDoctor,
         SetupCodes.RerunRequestedSetupCommand,
     };
@@ -229,8 +261,8 @@ public static class SetupContractValidator
             }
             : command switch
             {
-                SetupCommand.Plan => IsCommonFailure(code) || code is SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget or SetupCodes.TargetNotInstalled or SetupCodes.UnsupportedVersion or SetupCodes.ManagedPolicyConflict or SetupCodes.EnvironmentOverrideConflict or SetupCodes.MalformedSettings or SetupCodes.PortOwnedByForeignProcess,
-                SetupCommand.Apply => IsCommonFailure(code) || code is SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget or SetupCodes.TargetNotInstalled or SetupCodes.UnsupportedVersion or SetupCodes.ManagedPolicyConflict or SetupCodes.EnvironmentOverrideConflict or SetupCodes.MalformedSettings or SetupCodes.StalePlan or SetupCodes.PortOwnedByForeignProcess or SetupCodes.PartialApply,
+                SetupCommand.Plan => IsCommonFailure(code) || code is SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget or SetupCodes.TargetNotInstalled or SetupCodes.UnsupportedVersion or SetupCodes.ManagedPolicyConflict or SetupCodes.EnvironmentOverrideConflict or SetupCodes.MalformedSettings or SetupCodes.PortOwnedByForeignProcess or SetupCodes.EndpointUnreachable or SetupCodes.HookCommandConflict or SetupCodes.ContentPolicyConflict or SetupCodes.Wsl2OptInRequired or SetupCodes.Wsl2RoutingUnavailable,
+                SetupCommand.Apply => IsCommonFailure(code) || code is SetupCodes.UnsupportedAdapter or SetupCodes.UnsupportedTarget or SetupCodes.TargetNotInstalled or SetupCodes.UnsupportedVersion or SetupCodes.ManagedPolicyConflict or SetupCodes.EnvironmentOverrideConflict or SetupCodes.MalformedSettings or SetupCodes.StalePlan or SetupCodes.PortOwnedByForeignProcess or SetupCodes.EndpointUnreachable or SetupCodes.HookCommandConflict or SetupCodes.ContentPolicyConflict or SetupCodes.Wsl2OptInRequired or SetupCodes.Wsl2RoutingUnavailable or SetupCodes.PartialApply,
                 SetupCommand.Rollback => IsCommonFailure(code) || code is SetupCodes.RollbackStale or SetupCodes.RollbackNotAvailable or SetupCodes.PartialRollback,
                 SetupCommand.Status => code is SetupCodes.InvalidArguments or SetupCodes.SetupBusy or SetupCodes.RecoveryRequired or SetupCodes.InterruptedRecoveryFailed or SetupCodes.LedgerCorrupt or SetupCodes.LedgerVersionUnsupported or SetupCodes.InternalError,
                 _ => false,
@@ -268,7 +300,7 @@ public static class SetupContractValidator
             result.Warnings.Count != 0 ||
             result.NextActions.Count != 0 ||
             result.Truncated ||
-            result.Code == SetupCodes.UnsupportedTarget && result.Adapter != "github-copilot")
+            result.Code == SetupCodes.UnsupportedTarget && result.Adapter is not ("github-copilot" or "claude-code"))
         {
             Reject();
         }
@@ -430,11 +462,18 @@ public static class SetupContractValidator
             Reject();
         }
 
-        if (target.Guidance.Kind != "caller_managed_sample" || target.Guidance.Language != "dotnet")
-        {
-            Reject();
-        }
-        if ((!isStatusTarget || target.Guidance.Sample is not null) && target.Guidance.Sample != AppSdkGuidanceSample)
+        var knownGuidance = GuidanceSample(
+            target.TargetLabel,
+            target.Guidance.Kind,
+            target.Guidance.Language) is not null;
+        var validSample = target.Guidance.Sample is not null && IsGuidanceSample(
+            target.TargetLabel,
+            target.Guidance.Kind,
+            target.Guidance.Language,
+            target.Guidance.Sample);
+        if (!knownGuidance ||
+            !isStatusTarget && !validSample ||
+            isStatusTarget && target.Guidance.Sample is not null && !validSample)
         {
             Reject();
         }
@@ -586,8 +625,7 @@ public static class SetupContractValidator
                     projection.Endpoint is null &&
                     projection.ExpectedResult is null &&
                     projection.Guidance is not null &&
-                    projection.Guidance.Kind == "caller_managed_sample" &&
-                    projection.Guidance.Language == "dotnet" &&
+                    GuidanceSample(targetLabel, projection.Guidance.Kind, projection.Guidance.Language) is not null &&
                     projection.Changes.Count == 0;
             }
 
@@ -612,12 +650,51 @@ public static class SetupContractValidator
     internal static SetupGuidance RehydrateStatusGuidance(SetupStatusGuidance guidance)
     {
         ArgumentNullException.ThrowIfNull(guidance);
-        if (guidance.Kind != "caller_managed_sample" || guidance.Language != "dotnet")
+        var sample = GuidanceSample(guidance.Kind, guidance.Language);
+        if (sample is null)
         {
             Reject();
         }
 
-        return new SetupGuidance(guidance.Kind, guidance.Language, AppSdkGuidanceSample);
+        return new SetupGuidance(guidance.Kind, guidance.Language, sample);
+    }
+
+    internal static SetupGuidance RehydrateStatusGuidance(
+        SetupStatusGuidance guidance,
+        string targetLabel)
+    {
+        ArgumentNullException.ThrowIfNull(guidance);
+        var sample = GuidanceSample(targetLabel, guidance.Kind, guidance.Language);
+        if (sample is null)
+        {
+            Reject();
+        }
+
+        return new SetupGuidance(guidance.Kind, guidance.Language, sample);
+    }
+
+    internal static SetupGuidance RehydrateStatusGuidance(
+        SetupStatusGuidance guidance,
+        string targetLabel,
+        bool includeContentCapture)
+    {
+        ArgumentNullException.ThrowIfNull(guidance);
+        if (targetLabel is ClaudeAgentSdkGuidanceVariant.PythonLabel or
+            ClaudeAgentSdkGuidanceVariant.TypeScriptLabel)
+        {
+            return ClaudeAgentSdkGuidanceVariant.CreateGuidance(
+                targetLabel,
+                guidance.Kind,
+                guidance.Language,
+                includeContentCapture);
+        }
+
+        if (includeContentCapture)
+        {
+            Reject();
+        }
+
+        return RehydrateStatusGuidance(guidance, targetLabel);
     }
 
     private static void ValidateExpectedResult(JsonElement? expectedResult, string? expectedSurface, bool requireCurrentManifest)
@@ -674,8 +751,48 @@ public static class SetupContractValidator
         (SetupTargetKind.Json, "vscode-stable-default-user-settings") => "github-copilot-vscode",
         (SetupTargetKind.Json, "vscode-insiders-default-user-settings") => "github-copilot-vscode",
         (SetupTargetKind.Env, "copilot-cli-user-environment") => "github-copilot-cli",
+        (SetupTargetKind.Json, "claude-code-user-settings") => "claude-code",
         _ => null,
     };
+
+    private static string? GuidanceSample(string kind, string language) => (kind, language) switch
+    {
+        ("caller_managed_sample", "dotnet") => AppSdkGuidanceSample,
+        _ => null,
+    };
+
+    private static string? GuidanceSample(string targetLabel, string kind, string language) =>
+        (targetLabel, kind, language) switch
+        {
+            ("github-copilot-app-sdk-guidance", "caller_managed_sample", "dotnet") => AppSdkGuidanceSample,
+            ("claude-agent-sdk-python-guidance", "caller_managed_sample", "python") => ClaudePythonGuidanceSample,
+            ("claude-agent-sdk-typescript-guidance", "caller_managed_sample", "typescript") => ClaudeTypeScriptGuidanceSample,
+            _ => null,
+        };
+
+    private static bool IsGuidanceSample(
+        string targetLabel,
+        string kind,
+        string language,
+        string? sample)
+    {
+        if (sample is null)
+        {
+            return false;
+        }
+
+        if (targetLabel is ClaudeAgentSdkGuidanceVariant.PythonLabel or
+            ClaudeAgentSdkGuidanceVariant.TypeScriptLabel)
+        {
+            return ClaudeAgentSdkGuidanceVariant.IsValidSample(
+                targetLabel,
+                kind,
+                language,
+                sample);
+        }
+
+        return sample == GuidanceSample(targetLabel, kind, language);
+    }
 
     private static void ValidateStringList(IReadOnlyList<string> values, ISet<string> allowedValues)
     {

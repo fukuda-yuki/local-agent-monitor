@@ -2,6 +2,7 @@ using System.Text.Json;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode.AgentSdk;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Storage;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
@@ -66,6 +67,9 @@ public sealed partial class ClaudeCodeSetupAdapterTests
         Assert.DoesNotContain("OTEL_LOG_USER_PROMPTS", python.Sample, StringComparison.Ordinal);
         Assert.DoesNotContain("OTEL_LOG_USER_PROMPTS", typescript.Sample, StringComparison.Ordinal);
         Assert.All(records, record => Assert.InRange(record.Guidance!.Sample.Length, 1, 2048));
+        Assert.Equal(
+            ["claude-agent-sdk-python-guidance", "claude-agent-sdk-typescript-guidance"],
+            records.Select(record => Assert.IsType<SetupInlineDesiredState>(record.DesiredState).Value));
     }
 
     [Fact]
@@ -106,6 +110,12 @@ public sealed partial class ClaudeCodeSetupAdapterTests
             Assert.Contains(setting, python.Sample, StringComparison.Ordinal);
             Assert.Contains(setting, typescript.Sample, StringComparison.Ordinal);
         }
+        Assert.Equal(
+            [
+                "claude-agent-sdk-python-guidance:content-capture-v1",
+                "claude-agent-sdk-typescript-guidance:content-capture-v1",
+            ],
+            records.Select(record => Assert.IsType<SetupInlineDesiredState>(record.DesiredState).Value));
     }
 
     [Fact]

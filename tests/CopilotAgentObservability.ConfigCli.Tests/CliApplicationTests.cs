@@ -840,12 +840,13 @@ public class CliApplicationTests
     }
 
     [Fact]
-    public void HelpText_ListsAllFourSetupCommandsExactly()
+    public void HelpText_ListsAllSetupCommandsAndAdaptersExactly()
     {
         Assert.Contains("  config-cli setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture]", CliHelpText.Text);
+        Assert.Contains("  config-cli setup plan --adapter claude-code --target <cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture] [--allow-wsl2-routing]", CliHelpText.Text);
         Assert.Contains("  config-cli setup apply --change-set <uuid-v7>", CliHelpText.Text);
         Assert.Contains("  config-cli setup rollback --change-set <uuid-v7>", CliHelpText.Text);
-        Assert.Contains("  config-cli setup status [--adapter github-copilot]", CliHelpText.Text);
+        Assert.Contains("  config-cli setup status [--adapter <id>]", CliHelpText.Text);
     }
 
     public static TheoryData<SetupCommandResult, int> ProcessResults => new()
@@ -871,6 +872,11 @@ public class CliApplicationTests
         { CreateResult(SetupCommand.Rollback, false, SetupCodes.RollbackStale), 3 },
         { CreateResult(SetupCommand.Rollback, false, SetupCodes.RollbackNotAvailable), 4 },
         { CreateResult(SetupCommand.Plan, false, SetupCodes.PortOwnedByForeignProcess), 4 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.EndpointUnreachable), 4 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.HookCommandConflict), 3 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.ContentPolicyConflict), 3 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.Wsl2OptInRequired), 4 },
+        { CreateResult(SetupCommand.Plan, false, SetupCodes.Wsl2RoutingUnavailable), 4 },
         { CreateResult(SetupCommand.Apply, false, SetupCodes.PartialApply), 5 },
         { CreateResult(SetupCommand.Rollback, false, SetupCodes.PartialRollback), 6 },
         { CreateResult(SetupCommand.Plan, false, SetupCodes.SetupBusy), 5 },

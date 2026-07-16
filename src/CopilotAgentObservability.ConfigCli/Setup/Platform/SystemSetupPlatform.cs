@@ -97,6 +97,12 @@ public sealed class SystemSetupPlatform : ISetupPlatform
             readValue,
             valuePrefix);
 
+    [SupportedOSPlatform("windows")]
+    internal static SetupManagedObservation ReadBoundedClaudeRegistrySettings(
+        Func<string, RegistryValueKind> readKind,
+        Func<string, RegistryValueOptions, object?> readValue) =>
+        SystemSetupManagedSettingsSource.ReadBoundedClaudeRegistrySettings(readKind, readValue);
+
     internal enum ManagedFileReadStage
     {
         AncestorsOpened,
@@ -695,8 +701,12 @@ public sealed class SystemSetupPlatform : ISetupPlatform
     private sealed class SystemSetupManagedSettingsSource : ISetupManagedSettingsSource
     {
         private const int MaximumBytes = 64 * 1024;
+        private const int ClaudeMaximumBytes = 1024 * 1024;
         private const string GitHubCopilotPolicyPath = @"SOFTWARE\Policies\GitHubCopilot";
         private const string VsCodePolicyPath = @"Software\Policies\Microsoft\VSCode";
+        private const string ClaudeCodePolicyPath = @"SOFTWARE\Policies\ClaudeCode";
+        private const string ClaudeCodeSettingsValueName = "Settings";
+        private static readonly UTF8Encoding StrictUtf8 = new(false, true);
         private readonly string? windowsProgramFiles;
         private readonly Action<ManagedFileReadStage>? readHook;
 
@@ -732,6 +742,10 @@ public sealed class SystemSetupPlatform : ISetupPlatform
                         ReadMacOsPreferences("com.microsoft.VSCode", "CopilotOtel"),
                     SetupManagedLocation.VsCodeEnterpriseLinuxPolicyFile =>
                         ReadFileFor(SetupPlanningOs.Linux, "/etc/vscode/policy.json"),
+                    SetupManagedLocation.ClaudeCodeWindowsMachinePolicy =>
+                        ReadClaudeWindowsRegistry(machine: true),
+                    SetupManagedLocation.ClaudeCodeWindowsUserPolicy =>
+                        ReadClaudeWindowsRegistry(machine: false),
                     _ => SetupManagedObservation.Failed,
                 };
             }
@@ -760,6 +774,67 @@ public sealed class SystemSetupPlatform : ISetupPlatform
             }
 
             return ReadWindowsRegistryCore(key, valuePrefix);
+        }
+
+        private static SetupManagedObservation ReadClaudeWindowsRegistry(bool machine)
+        {
+            if (!System.OperatingSystem.IsWindows())
+            {
+                return SetupManagedObservation.Absent;
+            }
+
+            var hive = machine ? RegistryHive.LocalMachine : RegistryHive.CurrentUser;
+            using var baseKey = RegistryKey.OpenBaseKey(hive, RegistryView.Default);
+            using var key = baseKey.OpenSubKey(ClaudeCodePolicyPath, writable: false);
+            if (key is null)
+            {
+                return SetupManagedObservation.Absent;
+            }
+
+            return ReadClaudeWindowsRegistryCore(key);
+        }
+
+        [SupportedOSPlatform("windows")]
+        private static SetupManagedObservation ReadClaudeWindowsRegistryCore(RegistryKey key) =>
+            ReadBoundedClaudeRegistrySettings(
+                key.GetValueKind,
+                (name, options) => key.GetValue(name, defaultValue: null, options));
+
+        [SupportedOSPlatform("windows")]
+        internal static SetupManagedObservation ReadBoundedClaudeRegistrySettings(
+            Func<string, RegistryValueKind> readKind,
+            Func<string, RegistryValueOptions, object?> readValue)
+        {
+            try
+            {
+                var value = readValue(
+                    ClaudeCodeSettingsValueName,
+                    RegistryValueOptions.DoNotExpandEnvironmentNames);
+                if (value is null)
+                {
+                    return SetupManagedObservation.Absent;
+                }
+
+                var kind = readKind(ClaudeCodeSettingsValueName);
+                if (kind is not (RegistryValueKind.String or RegistryValueKind.ExpandString) || value is not string text)
+                {
+                    return SetupManagedObservation.Failed;
+                }
+
+                if (text.Length > ClaudeMaximumBytes)
+                {
+                    return new SetupManagedObservation(SetupManagedOutcome.Present, [], false);
+                }
+
+                var byteCount = StrictUtf8.GetByteCount(text);
+                return byteCount <= ClaudeMaximumBytes
+                    ? new SetupManagedObservation(SetupManagedOutcome.Present, StrictUtf8.GetBytes(text), true)
+                    : new SetupManagedObservation(SetupManagedOutcome.Present, [], false);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or EncoderFallbackException)
+            {
+                return SetupManagedObservation.Failed;
+            }
         }
 
         [SupportedOSPlatform("windows")]

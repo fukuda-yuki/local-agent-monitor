@@ -1,4 +1,5 @@
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode;
 
@@ -27,7 +28,7 @@ internal static class ClaudeCodeExecutionContextDetector
         {
             return new ClaudeCodeExecutionContextDetection(
                 ClaudeCodeExecutionContext.WindowsNative,
-                allowWsl2Routing ? "invalid_arguments" : null);
+                allowWsl2Routing ? SetupCodes.InvalidArguments : null);
         }
 
         if (platform.OperatingSystem.Current == SetupPlanningOs.MacOs)
@@ -38,14 +39,14 @@ internal static class ClaudeCodeExecutionContextDetector
         return IsVerifiedWsl2(platform)
             ? new ClaudeCodeExecutionContextDetection(
                 ClaudeCodeExecutionContext.Wsl2Repository,
-                allowWsl2Routing ? null : "wsl2_opt_in_required")
+                allowWsl2Routing ? null : SetupCodes.Wsl2OptInRequired)
             : Unsupported(allowWsl2Routing);
     }
 
     private static ClaudeCodeExecutionContextDetection Unsupported(bool allowWsl2Routing) =>
         new(
             ClaudeCodeExecutionContext.UnsupportedNativeUnix,
-            allowWsl2Routing ? "invalid_arguments" : "unsupported_target");
+            allowWsl2Routing ? SetupCodes.InvalidArguments : SetupCodes.UnsupportedTarget);
 
     private static bool IsVerifiedWsl2(ISetupPlatform platform)
     {

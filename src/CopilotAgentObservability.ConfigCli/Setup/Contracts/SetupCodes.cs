@@ -25,6 +25,11 @@ public static class SetupCodes
     public const string RollbackStale = "rollback_stale";
     public const string RollbackNotAvailable = "rollback_not_available";
     public const string PortOwnedByForeignProcess = "port_owned_by_foreign_process";
+    public const string EndpointUnreachable = "endpoint_unreachable";
+    public const string HookCommandConflict = "hook_command_conflict";
+    public const string ContentPolicyConflict = "content_policy_conflict";
+    public const string Wsl2OptInRequired = "wsl2_opt_in_required";
+    public const string Wsl2RoutingUnavailable = "wsl2_routing_unavailable";
     public const string PartialApply = "partial_apply";
     public const string PartialRollback = "partial_rollback";
     public const string SetupBusy = "setup_busy";
@@ -40,6 +45,7 @@ public static class SetupCodes
     public const string SharedUserEnvironmentAffectsOtherProcesses = "shared_user_environment_affects_other_processes";
     public const string VscodeNonDefaultProfilesNotModified = "vscode_non_default_profiles_not_modified";
     public const string CliTraceProtocolOverrideNotModified = "cli_trace_protocol_override_not_modified";
+    public const string ClaudeHooksCaptureRawContent = "claude_hooks_capture_raw_content";
 
     public const string InstallVsCode = "install_vscode";
     public const string InstallGitHubCopilotChatExtension = "install_github_copilot_chat_extension";
@@ -52,6 +58,7 @@ public static class SetupCodes
     public const string StartLocalMonitor = "start_local_monitor";
     public const string ReviewContentCaptureWarning = "review_content_capture_warning";
     public const string ReviewCliTraceProtocolOverride = "review_cli_trace_protocol_override";
+    public const string RestartClaudeProcess = "restart_claude_process";
     public const string RunFirstTraceDoctor = "run_first_trace_doctor";
     public const string RerunRequestedSetupCommand = "rerun_requested_setup_command";
 
@@ -78,6 +85,11 @@ public static class SetupCodes
         RollbackStale,
         RollbackNotAvailable,
         PortOwnedByForeignProcess,
+        EndpointUnreachable,
+        HookCommandConflict,
+        ContentPolicyConflict,
+        Wsl2OptInRequired,
+        Wsl2RoutingUnavailable,
         PartialApply,
         PartialRollback,
         SetupBusy,

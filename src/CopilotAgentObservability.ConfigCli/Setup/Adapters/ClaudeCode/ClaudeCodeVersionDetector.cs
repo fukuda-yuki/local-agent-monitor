@@ -1,3 +1,4 @@
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode;
@@ -29,7 +30,7 @@ internal static class ClaudeCodeVersionDetector
 
         if (observation.Outcome == SetupProcessOutcome.NotFound)
         {
-            return new ClaudeCodeVersionDetection(false, false, null, "target_not_installed");
+            return new ClaudeCodeVersionDetection(false, false, null, SetupCodes.TargetNotInstalled);
         }
 
         if (observation.Outcome != SetupProcessOutcome.Completed || observation.ExitCode != 0)
@@ -44,7 +45,7 @@ internal static class ClaudeCodeVersionDetector
     }
 
     private static ClaudeCodeVersionDetection Unsupported(bool detected) =>
-        new(false, detected, null, "unsupported_version");
+        new(false, detected, null, SetupCodes.UnsupportedVersion);
 
     private static string? ParseExactVersion(string? output)
     {

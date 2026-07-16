@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode;
@@ -69,7 +70,7 @@ internal static class ClaudeCodeReadinessProbe
 
         if (context == ClaudeCodeExecutionContext.UnsupportedNativeUnix)
         {
-            return Failure("unsupported_target");
+            return Failure(SetupCodes.UnsupportedTarget);
         }
 
         SetupHttpProbeObservation observation;
@@ -111,8 +112,8 @@ internal static class ClaudeCodeReadinessProbe
 
     private static string FailureCode(ClaudeCodeExecutionContext context) =>
         context == ClaudeCodeExecutionContext.Wsl2Repository
-            ? "wsl2_routing_unavailable"
-            : "endpoint_unreachable";
+            ? SetupCodes.Wsl2RoutingUnavailable
+            : SetupCodes.EndpointUnreachable;
 
     private static bool IsRecognizedReadiness(byte[] body)
     {

@@ -156,9 +156,9 @@ public sealed class SetupStatusOrderingTests
             ["first", "second"],
             targets.Select(target => target.GetProperty("target_label").GetString()));
         Assert.All(targets, target =>
-            Assert.False(target.GetProperty("guidance").TryGetProperty("sample", out _)));
+            Assert.Equal(JsonValueKind.Null, target.GetProperty("guidance").ValueKind));
         Assert.All(projected.ChangeSets[0].Targets, target =>
-            Assert.False(string.IsNullOrEmpty(target.Guidance?.Sample)));
+            Assert.Null(target.Guidance));
     }
 
     [Fact]
@@ -325,28 +325,33 @@ public sealed class SetupStatusOrderingTests
         SetupStorageJson.FormatTimestamp(changeSet.UpdatedAt),
         changeSet.State,
         changeSet.OutcomeCode,
-        SetupCurrentState.NotApplicable,
+        SetupCurrentState.Current,
         false,
         [
-            Target("first"),
-            Target("second"),
+            Target("first", changeSet.State),
+            Target("second", changeSet.State),
         ]);
 
-    private static SetupTargetResult Target(string label) => new(
+    private static SetupTargetResult Target(string label, SetupChangeSetState state) => new(
         "00000000-0000-7000-8000-000000000001",
-        SetupTargetKind.Guidance,
+        SetupTargetKind.File,
         label,
         false,
         null,
         SetupOperation.NoOp,
         null,
-        SetupReferenceState.None,
-        SetupCurrentState.NotApplicable,
+        state switch
+        {
+            SetupChangeSetState.Planned => SetupReferenceState.Base,
+            SetupChangeSetState.Restored or SetupChangeSetState.RolledBack => SetupReferenceState.Previous,
+            SetupChangeSetState.Applying or SetupChangeSetState.Compensating or SetupChangeSetState.RollingBack => SetupReferenceState.Base,
+            _ => SetupReferenceState.Desired,
+        },
+        SetupCurrentState.Current,
         SetupRestartRequirement.None,
         false,
         null,
         null,
-        SetupContractValidator.RehydrateStatusGuidance(
-            new SetupStatusGuidance("caller_managed_sample", "dotnet")),
-        []);
+        null,
+        [new SetupMemberChangeResult("ordering.setting", SetupOperation.NoOp, "present_equal", "present_equal", "none", false)]);
 }

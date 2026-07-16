@@ -9,7 +9,8 @@ internal sealed record SetupOptions(
     string? Target,
     string? Endpoint,
     bool IncludeContentCapture,
-    Guid? ChangeSetId)
+    Guid? ChangeSetId,
+    bool AllowWsl2Routing = false)
 {
     private const string DefaultEndpoint = "http://127.0.0.1:4320";
     private static readonly Regex SafeSlug = new(
@@ -40,6 +41,7 @@ internal sealed record SetupOptions(
         string? target = null;
         string? endpoint = null;
         var includeContentCapture = false;
+        var allowWsl2Routing = false;
         var adapterSet = false;
         var targetSet = false;
         var endpointSet = false;
@@ -88,6 +90,15 @@ internal sealed record SetupOptions(
                     includeContentCapture = true;
                     break;
 
+                case "--allow-wsl2-routing":
+                    if (allowWsl2Routing)
+                    {
+                        return Failure(SetupCodes.InvalidArguments);
+                    }
+
+                    allowWsl2Routing = true;
+                    break;
+
                 default:
                     return Failure(SetupCodes.InvalidArguments);
             }
@@ -103,13 +114,19 @@ internal sealed record SetupOptions(
             return Failure(SetupCodes.InvalidArguments);
         }
 
+        if (allowWsl2Routing && !string.Equals(adapter, "claude-code", StringComparison.Ordinal))
+        {
+            return Failure(SetupCodes.InvalidArguments);
+        }
+
         return Success(new SetupOptions(
             SetupCommand.Plan,
             adapter,
             target,
             endpoint ?? DefaultEndpoint,
             includeContentCapture,
-            null));
+            null,
+            allowWsl2Routing));
     }
 
     private static SetupOptionsParseResult ParseChangeSetCommand(string[] args, SetupCommand command)

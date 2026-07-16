@@ -1182,7 +1182,7 @@ public sealed class SetupContractValidationTests
     }
 
     private static SetupTargetResult CreateGuidanceTarget() => new(
-        "00000000-0000-7000-8000-000000000001", SetupTargetKind.Guidance, "app-sdk-guidance", false, null,
+        "00000000-0000-7000-8000-000000000001", SetupTargetKind.Guidance, "github-copilot-app-sdk-guidance", false, null,
         SetupOperation.NoOp, null, null, null, SetupRestartRequirement.None, false, null, null,
         new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), []);
 

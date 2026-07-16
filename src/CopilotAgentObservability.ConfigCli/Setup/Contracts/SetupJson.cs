@@ -238,6 +238,7 @@ public static class SetupJson
         SetupRestartRequirement.None => "none",
         SetupRestartRequirement.RestartVsCode => "restart_vscode",
         SetupRestartRequirement.RestartTerminalSession => "restart_terminal_session",
+        SetupRestartRequirement.RestartAgentProcess => "restart_agent_process",
         _ => throw new ArgumentOutOfRangeException(nameof(value)),
     };
 

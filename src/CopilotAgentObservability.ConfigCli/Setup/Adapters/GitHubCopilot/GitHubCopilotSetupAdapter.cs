@@ -242,7 +242,7 @@ internal sealed class GitHubCopilotSetupAdapter : ISetupAdapter
             record.StatusProjection.Changes.Count == 0 &&
             record.RestartRequirement == SetupRestartRequirement.None &&
             record.Guidance is { Kind: "caller_managed_sample", Language: "dotnet", Sample: var sample } &&
-            sample == SetupContractValidator.RehydrateStatusGuidance(record.StatusProjection.Guidance!).Sample,
+            sample == SetupContractValidator.RehydrateStatusGuidance(record.StatusProjection.Guidance!, record.TargetLabel).Sample,
         _ => false,
     };
 

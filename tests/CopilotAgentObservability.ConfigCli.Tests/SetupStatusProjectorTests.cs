@@ -1263,7 +1263,7 @@ public sealed class SetupStatusProjectorTests
             var ledger = new SetupLedgerChangeSet(
                 changeSetId, "github-copilot", "app-sdk", Now, Now, "1.2.3", null, SetupChangeSetState.Planned,
                 [new SetupLedgerTarget(
-                    recordId, SetupTargetKind.Guidance, "app-sdk-guidance", "github-copilot", [], SetupHash.File(false, []),
+                    recordId, SetupTargetKind.Guidance, "github-copilot-app-sdk-guidance", "github-copilot", [], SetupHash.File(false, []),
                     null, null, null, SetupLedgerRollbackStatus.NotAvailable, SetupRestartRequirement.None,
                     new SetupStatusProjection(false, null, SetupOperation.NoOp, null, null, null,
                         new SetupStatusGuidance("caller_managed_sample", "dotnet"), []), "1.2.3")]);

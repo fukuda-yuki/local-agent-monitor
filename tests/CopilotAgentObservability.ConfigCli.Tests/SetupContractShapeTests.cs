@@ -29,7 +29,7 @@ public sealed class SetupContractShapeTests
             "http://127.0.0.1:4320", expectedResultDocument.RootElement.Clone(), null,
             [new SetupMemberChangeResult("github.copilot.chat.otel.otlpEndpoint", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
         var guidanceTarget = new SetupTargetResult(
-            "00000000-0000-7000-8000-000000000002", SetupTargetKind.Guidance, "app-sdk-guidance", false, null,
+            "00000000-0000-7000-8000-000000000002", SetupTargetKind.Guidance, "github-copilot-app-sdk-guidance", false, null,
             SetupOperation.NoOp, null, null, null, SetupRestartRequirement.None, false, null, null,
             new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), []);
         var result = new SetupCommandResult(
@@ -81,7 +81,7 @@ public sealed class SetupContractShapeTests
         AssertTargetShape(guidance);
         Assert.Equal("00000000-0000-7000-8000-000000000002", guidance.GetProperty("record_id").GetString());
         Assert.Equal("guidance", guidance.GetProperty("target_kind").GetString());
-        Assert.Equal("app-sdk-guidance", guidance.GetProperty("target_label").GetString());
+        Assert.Equal("github-copilot-app-sdk-guidance", guidance.GetProperty("target_label").GetString());
         Assert.False(guidance.GetProperty("detected").GetBoolean());
         Assert.Equal(JsonValueKind.Null, guidance.GetProperty("detected_version").ValueKind);
         Assert.Equal("no-op", guidance.GetProperty("operation").GetString());
@@ -178,7 +178,7 @@ public sealed class SetupContractShapeTests
         AssertTargetShape(nestedGuidanceTarget);
         Assert.Equal("00000000-0000-7000-8000-000000000021", nestedGuidanceTarget.GetProperty("record_id").GetString());
         Assert.Equal("guidance", nestedGuidanceTarget.GetProperty("target_kind").GetString());
-        Assert.Equal("app-sdk-guidance", nestedGuidanceTarget.GetProperty("target_label").GetString());
+        Assert.Equal("github-copilot-app-sdk-guidance", nestedGuidanceTarget.GetProperty("target_label").GetString());
         Assert.False(nestedGuidanceTarget.GetProperty("detected").GetBoolean());
         Assert.Equal(JsonValueKind.Null, nestedGuidanceTarget.GetProperty("detected_version").ValueKind);
         Assert.Equal("no-op", nestedGuidanceTarget.GetProperty("operation").GetString());
@@ -311,19 +311,19 @@ public sealed class SetupContractShapeTests
 
         Assert.Equal(
             [
-                ("ApplySucceeded", "apply_succeeded"), ("CliTraceProtocolOverrideNotModified", "cli_trace_protocol_override_not_modified"), ("ContentCaptureSensitive", "content_capture_sensitive"), ("ContractVersion", "setup.v1"),
-                ("EnvironmentOverrideConflict", "environment_override_conflict"),
+                ("ApplySucceeded", "apply_succeeded"), ("ClaudeHooksCaptureRawContent", "claude_hooks_capture_raw_content"), ("CliTraceProtocolOverrideNotModified", "cli_trace_protocol_override_not_modified"), ("ContentCaptureSensitive", "content_capture_sensitive"), ("ContentPolicyConflict", "content_policy_conflict"), ("ContractVersion", "setup.v1"),
+                ("EndpointUnreachable", "endpoint_unreachable"), ("EnvironmentOverrideConflict", "environment_override_conflict"), ("HookCommandConflict", "hook_command_conflict"),
                 ("InstallCopilotCli", "install_copilot_cli"), ("InstallGitHubCopilotChatExtension", "install_github_copilot_chat_extension"), ("InstallVsCode", "install_vscode"),
                 ("InternalError", "internal_error"), ("InterruptedApplyRecovered", "interrupted_apply_recovered"), ("InterruptedRecoveryFailed", "interrupted_recovery_failed"), ("InterruptedRollbackRecovered", "interrupted_rollback_recovered"),
                 ("InvalidArguments", "invalid_arguments"), ("LedgerCorrupt", "ledger_corrupt"), ("LedgerVersionUnsupported", "ledger_version_unsupported"), ("MalformedSettings", "malformed_settings"),
                 ("ManagedPolicyConflict", "managed_policy_conflict"), ("ManagedPolicyUnverified", "managed_policy_unverified"), ("MonitorNotRunning", "monitor_not_running"), ("NoChanges", "no_changes"),
                 ("PartialApply", "partial_apply"), ("PartialRollback", "partial_rollback"), ("PermissionDenied", "permission_denied"), ("PlanReady", "plan_ready"), ("PortOwnedByForeignProcess", "port_owned_by_foreign_process"),
-                ("RecoveryRequired", "recovery_required"), ("RerunRequestedSetupCommand", "rerun_requested_setup_command"), ("RestartTerminalSession", "restart_terminal_session"), ("RestartVsCode", "restart_vscode"),
+                ("RecoveryRequired", "recovery_required"), ("RerunRequestedSetupCommand", "rerun_requested_setup_command"), ("RestartClaudeProcess", "restart_claude_process"), ("RestartTerminalSession", "restart_terminal_session"), ("RestartVsCode", "restart_vscode"),
                 ("ReviewCliTraceProtocolOverride", "review_cli_trace_protocol_override"), ("ReviewContentCaptureWarning", "review_content_capture_warning"), ("RollbackNotAvailable", "rollback_not_available"), ("RollbackStale", "rollback_stale"), ("RollbackSucceeded", "rollback_succeeded"),
                 ("RunFirstTraceDoctor", "run_first_trace_doctor"), ("RunVsCodePolicyDiagnostics", "run_vscode_policy_diagnostics"), ("SetupBusy", "setup_busy"), ("SharedUserEnvironmentAffectsOtherProcesses", "shared_user_environment_affects_other_processes"),
                 ("StalePlan", "stale_plan"), ("StartLocalMonitor", "start_local_monitor"), ("StatusReady", "status_ready"), ("TargetNotInstalled", "target_not_installed"), ("UnsafePath", "unsafe_path"),
                 ("UnsupportedAdapter", "unsupported_adapter"), ("UnsupportedTarget", "unsupported_target"), ("UnsupportedVersion", "unsupported_version"), ("UpgradeCopilotCli", "upgrade_copilot_cli"), ("UpgradeVsCode", "upgrade_vscode"),
-                ("VscodeNonDefaultProfilesNotModified", "vscode_non_default_profiles_not_modified"),
+                ("VscodeNonDefaultProfilesNotModified", "vscode_non_default_profiles_not_modified"), ("Wsl2OptInRequired", "wsl2_opt_in_required"), ("Wsl2RoutingUnavailable", "wsl2_routing_unavailable"),
             ],
             actual);
     }
@@ -384,7 +384,7 @@ public sealed class SetupContractShapeTests
         Assert.Equal([SetupEffectiveSource.ManagedPolicy, SetupEffectiveSource.Environment, SetupEffectiveSource.UserSetting, SetupEffectiveSource.Default], Enum.GetValues<SetupEffectiveSource>());
         Assert.Equal([SetupReferenceState.Base, SetupReferenceState.Desired, SetupReferenceState.Previous, SetupReferenceState.None], Enum.GetValues<SetupReferenceState>());
         Assert.Equal([SetupCurrentState.Current, SetupCurrentState.Stale, SetupCurrentState.Diverged, SetupCurrentState.Unavailable, SetupCurrentState.NotApplicable], Enum.GetValues<SetupCurrentState>());
-        Assert.Equal([SetupRestartRequirement.None, SetupRestartRequirement.RestartVsCode, SetupRestartRequirement.RestartTerminalSession], Enum.GetValues<SetupRestartRequirement>());
+        Assert.Equal([SetupRestartRequirement.None, SetupRestartRequirement.RestartVsCode, SetupRestartRequirement.RestartTerminalSession, SetupRestartRequirement.RestartAgentProcess], Enum.GetValues<SetupRestartRequirement>());
         Assert.Equal([SetupChangeSetState.Planned, SetupChangeSetState.Applying, SetupChangeSetState.Applied, SetupChangeSetState.NoChanges, SetupChangeSetState.Compensating, SetupChangeSetState.Restored, SetupChangeSetState.RollingBack, SetupChangeSetState.Partial, SetupChangeSetState.RolledBack], Enum.GetValues<SetupChangeSetState>());
     }
 
@@ -395,12 +395,12 @@ public sealed class SetupContractShapeTests
     public static TheoryData<SetupEffectiveSource, string> EffectiveSourceWireValues => new() { { SetupEffectiveSource.ManagedPolicy, "managed_policy" }, { SetupEffectiveSource.Environment, "environment" }, { SetupEffectiveSource.UserSetting, "user_setting" }, { SetupEffectiveSource.Default, "default" } };
     public static TheoryData<SetupReferenceState, string> ReferenceStateWireValues => new() { { SetupReferenceState.Base, "base" }, { SetupReferenceState.Desired, "desired" }, { SetupReferenceState.Previous, "previous" }, { SetupReferenceState.None, "none" } };
     public static TheoryData<SetupCurrentState, string> CurrentStateWireValues => new() { { SetupCurrentState.Current, "current" }, { SetupCurrentState.Stale, "stale" }, { SetupCurrentState.Diverged, "diverged" }, { SetupCurrentState.Unavailable, "unavailable" }, { SetupCurrentState.NotApplicable, "not_applicable" } };
-    public static TheoryData<SetupRestartRequirement, string> RestartRequirementWireValues => new() { { SetupRestartRequirement.None, "none" }, { SetupRestartRequirement.RestartVsCode, "restart_vscode" }, { SetupRestartRequirement.RestartTerminalSession, "restart_terminal_session" } };
+    public static TheoryData<SetupRestartRequirement, string> RestartRequirementWireValues => new() { { SetupRestartRequirement.None, "none" }, { SetupRestartRequirement.RestartVsCode, "restart_vscode" }, { SetupRestartRequirement.RestartTerminalSession, "restart_terminal_session" }, { SetupRestartRequirement.RestartAgentProcess, "restart_agent_process" } };
     public static TheoryData<SetupChangeSetState, string> ChangeSetStateWireValues => new() { { SetupChangeSetState.Planned, "planned" }, { SetupChangeSetState.Applying, "applying" }, { SetupChangeSetState.Applied, "applied" }, { SetupChangeSetState.NoChanges, "no_changes" }, { SetupChangeSetState.Compensating, "compensating" }, { SetupChangeSetState.Restored, "restored" }, { SetupChangeSetState.RollingBack, "rolling_back" }, { SetupChangeSetState.Partial, "partial" }, { SetupChangeSetState.RolledBack, "rolled_back" } };
 
     private static SetupTargetResult CreateStatusWritableTarget(SetupReferenceState referenceState = SetupReferenceState.Desired, SetupCurrentState currentState = SetupCurrentState.Current, bool rollbackAvailable = true) => new("00000000-0000-7000-8000-000000000020", SetupTargetKind.Json, "vscode-stable-default-user-settings", true, "1.128.0", SetupOperation.Replace, SetupEffectiveSource.UserSetting, referenceState, currentState, SetupRestartRequirement.RestartVsCode, rollbackAvailable, "http://127.0.0.1:4320", SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.VsCode)!.CanonicalJson, null, [new SetupMemberChangeResult("setting", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
 
-    private static SetupTargetResult CreateStatusGuidanceTarget() => new("00000000-0000-7000-8000-000000000021", SetupTargetKind.Guidance, "app-sdk-guidance", false, null, SetupOperation.NoOp, null, SetupReferenceState.None, SetupCurrentState.NotApplicable, SetupRestartRequirement.None, false, null, null, new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), []);
+    private static SetupTargetResult CreateStatusGuidanceTarget() => new("00000000-0000-7000-8000-000000000021", SetupTargetKind.Guidance, "github-copilot-app-sdk-guidance", false, null, SetupOperation.NoOp, null, SetupReferenceState.None, SetupCurrentState.NotApplicable, SetupRestartRequirement.None, false, null, null, new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), []);
 
     private static SetupCommandResult CreateCommandWireResult(SetupCommand command) => command switch
     {
@@ -446,7 +446,7 @@ public sealed class SetupContractShapeTests
         rollbackAvailable: state == SetupChangeSetState.Applied);
 
     private static SetupTargetResult CreatePlanTarget(SetupTargetKind targetKind = SetupTargetKind.Json, SetupOperation operation = SetupOperation.Replace, SetupEffectiveSource? effectiveSource = SetupEffectiveSource.UserSetting, SetupRestartRequirement restartRequirement = SetupRestartRequirement.RestartVsCode) => targetKind == SetupTargetKind.Guidance
-        ? new SetupTargetResult("00000000-0000-7000-8000-000000000032", targetKind, "app-sdk-guidance", false, null, SetupOperation.NoOp, null, null, null, SetupRestartRequirement.None, false, null, null, new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), [])
+        ? new SetupTargetResult("00000000-0000-7000-8000-000000000032", targetKind, "github-copilot-app-sdk-guidance", false, null, SetupOperation.NoOp, null, null, null, SetupRestartRequirement.None, false, null, null, new SetupGuidance("caller_managed_sample", "dotnet", AppSdkGuidanceSample), [])
         : new SetupTargetResult("00000000-0000-7000-8000-000000000032", targetKind, "target", true, "1.128.0", operation, effectiveSource, null, null, restartRequirement, true, "http://127.0.0.1:4320", null, null, [new SetupMemberChangeResult("setting", operation, "present_different", "configured_loopback", "none", false)]);
 
     private static void AssertWire(SetupCommandResult result, string property, string expected)

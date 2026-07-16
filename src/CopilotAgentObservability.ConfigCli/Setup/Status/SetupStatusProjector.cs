@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode.AgentSdk;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
@@ -54,6 +55,7 @@ internal sealed class SetupStatusProjector
         var terminal = IsTerminal(evidenceChangeSet.State);
         SetupPrivatePlan? plan;
         SetupTransactionJournal? journal;
+        var guidanceIncludesContent = false;
         var journalDisposition = SetupStatusJournalDisposition.None;
         IReadOnlyDictionary<Guid, SetupReferenceState>? activeReferences = null;
         try
@@ -71,6 +73,10 @@ internal sealed class SetupStatusProjector
 
             SetupTransactionEvidence.RequireImmutableIdentity(plan, evidenceChangeSet);
             SetupTransactionEvidence.RequireImmutableIdentity(plan, projectedChangeSet);
+            if (plan.Adapter == "claude-code" || evidenceChangeSet.Adapter == "claude-code")
+            {
+                guidanceIncludesContent = ClaudeAgentSdkGuidanceVariant.ValidatePair(plan, evidenceChangeSet);
+            }
             journal = journalStore.Load(evidenceChangeSet.ChangeSetId);
             journalDisposition = RequireJournalLifecycle(evidenceChangeSet.State, journal);
             if (journal is not null &&
@@ -119,7 +125,7 @@ internal sealed class SetupStatusProjector
         {
             var ledgerTarget = projectedChangeSet.Targets[index];
             targets[index] = ledgerTarget.TargetKind == SetupTargetKind.Guidance
-                ? CreateGuidanceTarget(ledgerTarget)
+                ? CreateGuidanceTarget(ledgerTarget, guidanceIncludesContent)
                 : CreateWritableTarget(
                     projectedChangeSet.State,
                     ledgerTarget,
@@ -221,7 +227,9 @@ internal sealed class SetupStatusProjector
         return new SetupStatusRollbackResult(result.IsAvailable, availability, observations);
     }
 
-    private static SetupTargetResult CreateGuidanceTarget(SetupLedgerTarget target)
+    private static SetupTargetResult CreateGuidanceTarget(
+        SetupLedgerTarget target,
+        bool? includeContentCapture)
     {
         var projection = target.StatusProjection;
         return new SetupTargetResult(
@@ -238,7 +246,15 @@ internal sealed class SetupStatusProjector
             false,
             projection.Endpoint,
             projection.ExpectedResult,
-            SetupContractValidator.RehydrateStatusGuidance(projection.Guidance!),
+            includeContentCapture.HasValue
+                ? SetupContractValidator.RehydrateStatusGuidance(
+                    projection.Guidance!,
+                    target.TargetLabel,
+                    includeContentCapture.Value)
+                : new SetupGuidance(
+                    projection.Guidance!.Kind,
+                    projection.Guidance.Language,
+                    null!),
             projection.Changes);
     }
 
@@ -345,7 +361,7 @@ internal sealed class SetupStatusProjector
     private static SetupChangeSetStatusResult Unavailable(SetupLedgerChangeSet changeSet)
     {
         var targets = changeSet.Targets.Select(target => target.TargetKind == SetupTargetKind.Guidance
-            ? CreateGuidanceTarget(target)
+            ? CreateGuidanceTarget(target, includeContentCapture: null)
             : CreateUnavailableTarget(target)).ToArray();
         return new SetupChangeSetStatusResult(
             changeSet.ChangeSetId.ToString("D"),

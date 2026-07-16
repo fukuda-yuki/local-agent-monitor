@@ -19,6 +19,9 @@
     <EmbeddedResource Include="..\..\docs\specifications\contracts\source-capabilities\v1\manifests\github-copilot-cli.json"
                       Link="Setup\Capabilities\Manifests\github-copilot-cli.json"
                       LogicalName="CopilotAgentObservability.ConfigCli.Setup.Capabilities.Manifests.github-copilot-cli.json" />
+    <EmbeddedResource Include="..\..\docs\specifications\contracts\source-capabilities\v1\manifests\claude-code.json"
+                      Link="Setup\Capabilities\Manifests\claude-code.json"
+                      LogicalName="CopilotAgentObservability.ConfigCli.Setup.Capabilities.Manifests.claude-code.json" />
   </ItemGroup>
 
 </Project>

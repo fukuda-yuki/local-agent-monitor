@@ -531,9 +531,10 @@ public sealed class SetupStorageTests
     }
 
     [Theory]
-    [InlineData(1, true)]
+    [InlineData(5, true)]
     [InlineData(8, true)]
     [InlineData(0, false)]
+    [InlineData(1, false)]
     [InlineData(9, false)]
     public void Plan_ClaudeOwnedEnvEnforcesEntryCountBoundaries(int count, bool valid)
     {
@@ -653,6 +654,195 @@ public sealed class SetupStorageTests
         SetupStorageValidation.ValidateDesiredStateBindings(
             CreateClaudePlan("1"),
             CreateClaudePlannedChangeSet());
+    }
+
+    [Theory]
+    [InlineData("cli")]
+    [InlineData("app-sdk")]
+    [InlineData("all")]
+    public void ValidatePlanAndLedger_ClaudeExactTargetPartitionsAreAccepted(string selectedTarget)
+    {
+        var cliPlan = CreateClaudePlan("1");
+        var cliLedger = CreateClaudePlannedChangeSet();
+        var pythonPlan = CreateClaudeGuidancePlanTarget(true);
+        var typescriptPlan = CreateClaudeGuidancePlanTarget(false);
+        var pythonLedger = CreateClaudeGuidanceLedgerTarget(true);
+        var typescriptLedger = CreateClaudeGuidanceLedgerTarget(false);
+        var plan = selectedTarget switch
+        {
+            "cli" => cliPlan,
+            "app-sdk" => cliPlan with
+            {
+                SelectedTarget = selectedTarget,
+                Targets = [pythonPlan, typescriptPlan],
+            },
+            _ => cliPlan with
+            {
+                SelectedTarget = selectedTarget,
+                Targets = [cliPlan.Targets[0], pythonPlan, typescriptPlan],
+            },
+        };
+        var changeSet = selectedTarget switch
+        {
+            "cli" => cliLedger,
+            "app-sdk" => cliLedger with
+            {
+                SelectedTarget = selectedTarget,
+                Targets = [pythonLedger, typescriptLedger],
+            },
+            _ => cliLedger with
+            {
+                SelectedTarget = selectedTarget,
+                Targets = [cliLedger.Targets[0], pythonLedger, typescriptLedger],
+            },
+        };
+
+        SetupStorageValidation.ValidatePlanAndLedger(plan, changeSet);
+    }
+
+    [Theory]
+    [InlineData("cli_missing_writable")]
+    [InlineData("all_guidance_only")]
+    [InlineData("app_sdk_with_writable")]
+    [InlineData("all_reordered")]
+    [InlineData("all_extra")]
+    [InlineData("cli_wrong_label")]
+    public void PersistPlannedChangeSet_ClaudeTargetPartitionTamperRequiresRecoveryBeforeWriting(
+        string mutation)
+    {
+        var context = CreateContext();
+        var plan = CreateClaudePlan("1");
+        var changeSet = CreateClaudePlannedChangeSet();
+        var pythonPlan = CreateClaudeGuidancePlanTarget(true);
+        var typescriptPlan = CreateClaudeGuidancePlanTarget(false);
+        var pythonLedger = CreateClaudeGuidanceLedgerTarget(true);
+        var typescriptLedger = CreateClaudeGuidanceLedgerTarget(false);
+        switch (mutation)
+        {
+            case "cli_missing_writable":
+                plan = plan with { Targets = [] };
+                changeSet = changeSet with { Targets = [] };
+                break;
+            case "all_guidance_only":
+                plan = plan with { SelectedTarget = "all", Targets = [pythonPlan, typescriptPlan] };
+                changeSet = changeSet with { SelectedTarget = "all", Targets = [pythonLedger, typescriptLedger] };
+                break;
+            case "app_sdk_with_writable":
+                plan = plan with
+                {
+                    SelectedTarget = "app-sdk",
+                    Targets = [pythonPlan, typescriptPlan, plan.Targets[0]],
+                };
+                changeSet = changeSet with
+                {
+                    SelectedTarget = "app-sdk",
+                    Targets = [pythonLedger, typescriptLedger, changeSet.Targets[0]],
+                };
+                break;
+            case "all_reordered":
+                plan = plan with
+                {
+                    SelectedTarget = "all",
+                    Targets = [pythonPlan, plan.Targets[0], typescriptPlan],
+                };
+                changeSet = changeSet with
+                {
+                    SelectedTarget = "all",
+                    Targets = [pythonLedger, changeSet.Targets[0], typescriptLedger],
+                };
+                break;
+            case "all_extra":
+                var extraPlan = typescriptPlan with
+                {
+                    RecordId = Guid.Parse("00000000-0000-7000-8000-000000000204"),
+                };
+                var extraLedger = typescriptLedger with
+                {
+                    RecordId = extraPlan.RecordId,
+                };
+                plan = plan with
+                {
+                    SelectedTarget = "all",
+                    Targets = [plan.Targets[0], pythonPlan, typescriptPlan, extraPlan],
+                };
+                changeSet = changeSet with
+                {
+                    SelectedTarget = "all",
+                    Targets = [changeSet.Targets[0], pythonLedger, typescriptLedger, extraLedger],
+                };
+                break;
+            case "cli_wrong_label":
+                changeSet = changeSet with
+                {
+                    Targets =
+                    [
+                        changeSet.Targets[0] with
+                        {
+                            TargetLabel = "rebound-claude-settings",
+                            StatusProjection = changeSet.Targets[0].StatusProjection with { ExpectedResult = null },
+                        },
+                    ],
+                };
+                break;
+        }
+
+        var operationCount = context.Platform.Operations.Count;
+
+        var exception = Assert.Throws<SetupStorageException>(() =>
+            context.Store.PersistPlannedChangeSet(context.Lock, plan, changeSet));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(operationCount, context.Platform.Operations.Count);
+        Assert.False(context.Platform.FileSystem.FileExists(context.Paths.GetPlan(ChangeSetId)));
+        Assert.False(context.Platform.FileSystem.FileExists(context.Paths.OwnershipLedger));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(6)]
+    [InlineData(7)]
+    public void PlanLoad_ClaudePartialCanonicalEnvRequiresRecovery(int envCount)
+    {
+        var context = CreateContext();
+        var sourceEnvCount = envCount < 5 ? 5 : 8;
+        var plan = CreateClaudePlan("1", includeContentCapture: sourceEnvCount == 8);
+        var root = JsonNode.Parse(SetupPlanStore.Serialize(plan))!.AsObject();
+        var target = root["targets"]![0]!.AsObject();
+        var desiredState = target["desired_state"]!.AsObject();
+        var env = desiredState["owned_env"]!.AsArray();
+        while (env.Count > envCount)
+        {
+            env.RemoveAt(env.Count - 1);
+        }
+
+        var members = target["members"]!.AsArray();
+        var envMembers = members.Take(envCount).Select(member => member!.DeepClone()).ToArray();
+        var hooks = members.Skip(sourceEnvCount).Select(member => member!.DeepClone()).ToArray();
+        while (members.Count > 0)
+        {
+            members.RemoveAt(members.Count - 1);
+        }
+        foreach (var envMember in envMembers)
+        {
+            members.Add(envMember);
+        }
+        foreach (var hook in hooks)
+        {
+            members.Add(hook);
+        }
+
+        context.Platform.SeedFile(
+            context.Paths.GetPlan(ChangeSetId),
+            Encoding.UTF8.GetBytes(root.ToJsonString()));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.PlanStore.Load(ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Message);
+        Assert.Null(exception.InnerException);
     }
 
     [Theory]
@@ -1128,7 +1318,7 @@ public sealed class SetupStorageTests
         var guidanceTarget = CreateLedgerTarget() with
         {
             TargetKind = SetupTargetKind.Guidance,
-            TargetLabel = "app-sdk-guidance",
+            TargetLabel = "github-copilot-app-sdk-guidance",
             Members = [],
             RestartRequirement = SetupRestartRequirement.None,
             StatusProjection = new SetupStatusProjection(
@@ -1144,13 +1334,16 @@ public sealed class SetupStorageTests
 
         Assert.Equal(["kind", "language"], storedGuidance.EnumerateObject().Select(property => property.Name));
         Assert.False(storedGuidance.TryGetProperty("sample", out _));
-        var rehydrated = SetupContractValidator.RehydrateStatusGuidance(guidanceTarget.StatusProjection.Guidance!);
+        var rehydrated = SetupContractValidator.RehydrateStatusGuidance(
+            guidanceTarget.StatusProjection.Guidance!,
+            guidanceTarget.TargetLabel);
         Assert.Contains("OtlpEndpoint", rehydrated.Sample, StringComparison.Ordinal);
         Assert.DoesNotContain("C:\\", rehydrated.Sample, StringComparison.Ordinal);
     }
 
     [Theory]
     [InlineData("other_kind", "dotnet")]
+    [InlineData("caller_managed_sample", "python")]
     [InlineData("caller_managed_sample", "typescript")]
     public void LedgerValidation_GuidanceMetadataMustMatchFixedContract(string kind, string language)
     {
@@ -1949,9 +2142,9 @@ public sealed class SetupStorageTests
                 [new SetupPrivatePlanMember("github.copilot.chat.otel.enabled", SetupOperation.Replace, "DESIRED_VALUE_MARKER")]),
         ]);
 
-    private static SetupPrivatePlan CreateClaudePlan(string firstEnvValue)
+    private static SetupPrivatePlan CreateClaudePlan(string firstEnvValue, bool includeContentCapture = false)
     {
-        var env = new[]
+        var env = new List<SetupClaudeSettingsEnvValue>
         {
             new SetupClaudeSettingsEnvValue("CLAUDE_CODE_ENABLE_TELEMETRY", firstEnvValue),
             new SetupClaudeSettingsEnvValue("CLAUDE_CODE_ENHANCED_TELEMETRY_BETA", "1"),
@@ -1959,6 +2152,15 @@ public sealed class SetupStorageTests
             new SetupClaudeSettingsEnvValue("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf"),
             new SetupClaudeSettingsEnvValue("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4320/v1/traces"),
         };
+        if (includeContentCapture)
+        {
+            env.AddRange(
+            [
+                new SetupClaudeSettingsEnvValue("OTEL_LOG_USER_PROMPTS", "1"),
+                new SetupClaudeSettingsEnvValue("OTEL_LOG_TOOL_DETAILS", "1"),
+                new SetupClaudeSettingsEnvValue("OTEL_LOG_TOOL_CONTENT", "1"),
+            ]);
+        }
         var events = new[]
         {
             "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse",
@@ -1990,6 +2192,50 @@ public sealed class SetupStorageTests
                     new SetupClaudeSettingsOwnedValuesDesiredState(HashB, env, hooks),
                     members),
             ]);
+    }
+
+    private static SetupPrivatePlanTarget CreateClaudeGuidancePlanTarget(bool python)
+    {
+        var label = python
+            ? "claude-agent-sdk-python-guidance"
+            : "claude-agent-sdk-typescript-guidance";
+        return new SetupPrivatePlanTarget(
+            Guid.Parse(python
+                ? "00000000-0000-7000-8000-000000000202"
+                : "00000000-0000-7000-8000-000000000203"),
+            SetupTargetKind.Guidance,
+            label,
+            new string('0', 64),
+            new SetupInlineDesiredState(label),
+            []);
+    }
+
+    private static SetupLedgerTarget CreateClaudeGuidanceLedgerTarget(bool python)
+    {
+        var planTarget = CreateClaudeGuidancePlanTarget(python);
+        var label = planTarget.TargetLocation;
+        return new SetupLedgerTarget(
+            planTarget.RecordId,
+            SetupTargetKind.Guidance,
+            label,
+            "claude-code",
+            [],
+            planTarget.BaseStateHash,
+            null,
+            null,
+            null,
+            SetupLedgerRollbackStatus.NotAvailable,
+            SetupRestartRequirement.None,
+            new SetupStatusProjection(
+                true,
+                null,
+                SetupOperation.NoOp,
+                null,
+                null,
+                null,
+                new SetupStatusGuidance("caller_managed_sample", python ? "python" : "typescript"),
+                []),
+            "1.2.3");
     }
 
     private static SetupLedgerChangeSet CreateClaudePlannedChangeSet()
@@ -2032,10 +2278,10 @@ public sealed class SetupStorageTests
                     new SetupStatusProjection(
                         true,
                         "2.1.207",
-                        SetupOperation.Replace,
+                        SetupOperation.Mixed,
                         SetupEffectiveSource.UserSetting,
-                        "configured_loopback",
-                        LoadHistoricalManifest(),
+                        "http://127.0.0.1:4320",
+                        SourceCapabilityManifestLoader.LoadForSurface("claude-code").CanonicalJson,
                         null,
                         changes),
                     "1.2.3"),
@@ -2252,7 +2498,7 @@ public sealed class SetupStorageTests
     private static SetupLedgerTarget CreateGuidanceLedgerTarget() => CreateLedgerTarget() with
     {
         TargetKind = SetupTargetKind.Guidance,
-        TargetLabel = "app-sdk-guidance",
+        TargetLabel = "github-copilot-app-sdk-guidance",
         Members = [],
         RestartRequirement = SetupRestartRequirement.None,
         StatusProjection = new SetupStatusProjection(
