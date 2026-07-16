@@ -149,6 +149,10 @@ It creates `doctor.facts.v1` with:
 - the supplied ordered observations; and
 - the five setup plus seven runtime families in canonical snapshot order.
 
+Every observation must match the snapshot source and, when non-null, expected
+adapter. A source-mismatched observation is invalid input; the composer never
+retags it to the requested source.
+
 ### Persisted completion
 
 ```csharp
@@ -267,6 +271,12 @@ The candidate contract is unchanged:
   opaque reference; and
 - require explicit caller selection at completion.
 
+Synthetic probe evidence may establish only ingest, raw-persistence, or
+projection health. Even when every fact value appears ready and real exact
+binding/completeness evidence exists, synthetic ingest/raw/projection evidence
+does not satisfy `first_trace_ready`; the shared evaluator returns
+`ready_no_real_trace` for both GitHub Copilot and Claude Code.
+
 Latest verification, latest trace, latest Session, repository, workspace, cwd,
 process identity, trace ID alone, and timestamp proximity are forbidden
 selection inputs.
@@ -302,16 +312,19 @@ Doctor assembly.
 3. persisted completion identity and empty observations;
 4. candidate inheritance of verification identity/source/adapter/expiry and
    the half-open observation window;
-5. the fixed sanitized invalid-composition error;
-6. absence of source-specific Doctor enums in the core assembly;
-7. unique registrations limited to the three manifest-backed surfaces and kept
+5. the fixed sanitized invalid-composition error, including source-mismatched
+   observation rejection;
+6. synthetic evidence cannot establish `first_trace_ready` for either GitHub
+   Copilot or Claude Code;
+7. absence of source-specific Doctor enums in the core assembly;
+8. unique registrations limited to the three manifest-backed surfaces and kept
    outside the Doctor assembly; and
-8. three separately executable implementation gates:
+9. three separately executable implementation gates:
    - `GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore`;
    - `GitHubCopilotCliSourceHandoff_IsImplementedOutsideDoctorCore`;
    - `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore`.
 
-At the G0-3 checkpoint, items 1 through 7 are GREEN. The three implementation
+At the G0-3 checkpoint, items 1 through 8 are GREEN. The three implementation
 gates are intentionally RED. Issue #103 owns and turns the two GitHub Copilot
 gates GREEN; Issue #104 independently owns and turns the Claude Code gate GREEN.
 This split lets both worktrees verify their own production handoff without
