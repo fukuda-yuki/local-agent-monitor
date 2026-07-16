@@ -148,6 +148,32 @@ internal static class MonitorSchemaMigrator
         }
     }
 
+    public static void EnsureProjectionDispositionSchema(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        Execute(
+            connection,
+            transaction,
+            """
+            CREATE TABLE IF NOT EXISTS monitor_projection_dispositions (
+                raw_record_id INTEGER PRIMARY KEY,
+                state TEXT NOT NULL CHECK (state IN ('not_started', 'pending', 'completed', 'failed')),
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                updated_at TEXT NOT NULL
+            );
+            """);
+        Execute(
+            connection,
+            transaction,
+            """
+            INSERT OR IGNORE INTO monitor_projection_dispositions (raw_record_id, state, revision, updated_at)
+            SELECT projected.raw_record_id,
+                   'completed',
+                   1,
+                   projected.projected_at
+            FROM monitor_ingestions AS projected;
+            """);
+    }
+
     public static long? ReadMonitorSchemaVersion(SqliteConnection connection, SqliteTransaction transaction)
     {
         using var tableCommand = connection.CreateCommand();

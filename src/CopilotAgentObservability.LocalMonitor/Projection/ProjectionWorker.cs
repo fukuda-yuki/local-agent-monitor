@@ -109,14 +109,34 @@ internal sealed class ProjectionWorker : BackgroundService
 
                 try
                 {
-                    ValidateProjectionDisposition(record.Id!.Value);
+                    var rawRecordId = record.Id!.Value;
+                    ValidateProjectionDisposition(rawRecordId);
+                    var disposition = store.GetProjectionDisposition(rawRecordId);
+                    var projectionRevision = disposition?.Revision;
+                    if (disposition is not null)
+                    {
+                        if (disposition.State is not (ProjectionDispositionState.NotStarted or ProjectionDispositionState.Pending or ProjectionDispositionState.Failed) ||
+                            !store.TryBeginProjection(rawRecordId, disposition.Revision, timeProvider.GetUtcNow()))
+                        {
+                            continue;
+                        }
+                        projectionRevision = disposition.Revision + 1;
+                    }
                     var projection = MonitorProjectionBuilder.Build(CreateProjectionInput(record));
-                    var projected = store.ApplyProjection(
-                        record.Id!.Value,
-                        record.Source,
-                        record.ReceivedAt,
-                        projection,
-                        timeProvider.GetUtcNow());
+                    var projected = projectionRevision is { } expectedRevision
+                        ? store.ApplyProjection(
+                            rawRecordId,
+                            record.Source,
+                            record.ReceivedAt,
+                            projection,
+                            timeProvider.GetUtcNow(),
+                            expectedRevision)
+                        : store.ApplyProjection(
+                            rawRecordId,
+                            record.Source,
+                            record.ReceivedAt,
+                            projection,
+                            timeProvider.GetUtcNow());
                     if (projected)
                     {
                         anyProjected = true;
@@ -131,6 +151,12 @@ internal sealed class ProjectionWorker : BackgroundService
                 {
                     // Non-busy projection failure: keep the raw record, record the
                     // failure, and continue with the next record.
+                    var rawRecordId = record.Id!.Value;
+                    var disposition = store.GetProjectionDisposition(rawRecordId);
+                    if (disposition?.State == ProjectionDispositionState.Pending)
+                    {
+                        store.RecordProjectionFailure(rawRecordId, disposition.Revision, timeProvider.GetUtcNow());
+                    }
                     health.RecordProjectionFailure();
                 }
             }

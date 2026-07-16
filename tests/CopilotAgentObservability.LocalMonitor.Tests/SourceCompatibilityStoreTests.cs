@@ -195,7 +195,7 @@ public sealed class SourceCompatibilityStoreTests
         using (var connection = Open(database.Path))
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "UPDATE schema_version SET version = 6 WHERE component = 'monitor';";
+            command.CommandText = "UPDATE schema_version SET version = 7 WHERE component = 'monitor';";
             command.ExecuteNonQuery();
         }
 
@@ -203,11 +203,11 @@ public sealed class SourceCompatibilityStoreTests
 
         Assert.Contains("newer", exception.Message, StringComparison.OrdinalIgnoreCase);
         using var verification = Open(database.Path);
-        Assert.Equal(6L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(7L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
     }
 
     [Fact]
-    public void RawInitialization_PreservesV5AndFutureMonitorStamps()
+    public void RawInitialization_PreservesV6AndFutureMonitorStamps()
     {
         using var database = new TestDatabase();
         new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
@@ -216,16 +216,16 @@ public sealed class SourceCompatibilityStoreTests
         rawStore.CreateMonitorSchema();
 
         using var connection = Open(database.Path);
-        Assert.Equal(5L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(6L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "UPDATE schema_version SET version = 6 WHERE component = 'monitor';";
+            command.CommandText = "UPDATE schema_version SET version = 7 WHERE component = 'monitor';";
             command.ExecuteNonQuery();
         }
 
         rawStore.CreateMonitorSchema();
 
-        Assert.Equal(6L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(7L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
     }
 
     [Fact]

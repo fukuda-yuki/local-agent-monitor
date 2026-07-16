@@ -381,6 +381,24 @@ public class MonitorTraceDetailTests
             DateTimeOffset projectedAt) =>
             throw new NotSupportedException();
 
+        public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
+            throw new NotSupportedException();
+
+        public bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
+            throw new NotSupportedException();
+
+        public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
+            throw new NotSupportedException();
+
+        public bool ApplyProjection(
+            long rawRecordId,
+            string source,
+            DateTimeOffset receivedAt,
+            MonitorRecordProjection projection,
+            DateTimeOffset projectedAt,
+            int expectedDispositionRevision) =>
+            throw new NotSupportedException();
+
         public MonitorProjectionStatus GetProjectionStatus() =>
             throw new NotSupportedException();
 

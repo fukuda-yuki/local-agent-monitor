@@ -542,6 +542,18 @@ public class MonitorAnalysisRouteTests
         public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) =>
             inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
 
+        public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
+            inner.GetProjectionDisposition(rawRecordId);
+
+        public bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
+            inner.TryBeginProjection(rawRecordId, expectedRevision, updatedAt);
+
+        public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
+            inner.RecordProjectionFailure(rawRecordId, expectedRevision, updatedAt);
+
+        public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) =>
+            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision);
+
         public MonitorProjectionStatus GetProjectionStatus() =>
             inner.GetProjectionStatus();
 

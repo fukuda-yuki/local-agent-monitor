@@ -22,7 +22,7 @@ a second plan.
 | 103-A | In progress | `920ff43..e99767c`; canonical promotion and RED test awaiting checkpoint commit | kickoff baseline PASS; ConfigCli and cross-surface focused REDs have only expected `CS0103` calls to missing `GitHubCopilotDoctorFactMapper` | contract table and final spec/RED re-review PASS C0/I0/M0 | mapper GREEN |
 | 103-B | Pending | pending | pending | pending | trusted candidate producer |
 | 103-C | Pending | pending | pending | pending | setup-to-verification orchestration |
-| 103-D | In progress | projection disposition RED awaiting checkpoint commit | focused RED has only missing `ProjectionDisposition` / `ProjectionDispositionState`; no sleep/retry | projection RED re-review PASS C0/I0/M0 | GREEN implementation, source matrices, privacy, full regressions |
+| 103-D | In progress | projection RED `8650465`; GREEN awaiting checkpoint commit | disposition/migration/worker/compatibility 77/77 PASS; Doctor migration 12/12 PASS; no sleep/retry | projection RED and final GREEN re-reviews PASS C0/I0/M0 | source matrices, privacy, full regressions |
 | 103-E | Pending | pending | pending | pending | supported live surface or exact external blocker |
 
 ## Validation evidence

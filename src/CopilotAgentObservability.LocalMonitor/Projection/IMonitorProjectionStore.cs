@@ -23,6 +23,20 @@ internal interface IMonitorProjectionStore
         MonitorRecordProjection projection,
         DateTimeOffset projectedAt);
 
+    ProjectionDisposition? GetProjectionDisposition(long rawRecordId);
+
+    bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt);
+
+    bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt);
+
+    bool ApplyProjection(
+        long rawRecordId,
+        string source,
+        DateTimeOffset receivedAt,
+        MonitorRecordProjection projection,
+        DateTimeOffset projectedAt,
+        int expectedDispositionRevision);
+
     MonitorProjectionStatus GetProjectionStatus();
 
     IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit);
@@ -84,6 +98,30 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
         MonitorRecordProjection projection,
         DateTimeOffset projectedAt) =>
         Guard(() => store.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt));
+
+    public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
+        Guard(() => store.GetProjectionDisposition(rawRecordId));
+
+    public bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
+        Guard(() => store.TryBeginProjection(rawRecordId, expectedRevision, updatedAt));
+
+    public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
+        Guard(() => store.RecordProjectionFailure(rawRecordId, expectedRevision, updatedAt));
+
+    public bool ApplyProjection(
+        long rawRecordId,
+        string source,
+        DateTimeOffset receivedAt,
+        MonitorRecordProjection projection,
+        DateTimeOffset projectedAt,
+        int expectedDispositionRevision) =>
+        Guard(() => store.ApplyProjection(
+            rawRecordId,
+            source,
+            receivedAt,
+            projection,
+            projectedAt,
+            expectedDispositionRevision));
 
     public MonitorProjectionStatus GetProjectionStatus() =>
         Guard(store.GetProjectionStatus);

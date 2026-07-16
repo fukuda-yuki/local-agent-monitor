@@ -186,6 +186,71 @@ public sealed class ProjectionDispositionContractTests
     }
 
     [Fact]
+    public async Task ProjectionWorker_AfterRestartClaimsExactPendingRevisionAndCompletesProjection()
+    {
+        using var temp = new MonitorTempDirectory();
+        var committed = Commit(temp.DatabasePath, ValidPayload("pending-restart-complete"));
+        var store = ProjectionStore(temp.DatabasePath);
+        Assert.True(store.TryBeginProjection(committed.RawRecordId, expectedRevision: 1, ObservedAt.AddMinutes(1)));
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.Pending, 2, ObservedAt.AddMinutes(1));
+
+        var health = new MonitorHealthState();
+        health.MarkMigrationComplete();
+        var restartedWorker = new ProjectionWorker(
+            new RawTelemetryStoreProjectionStore(ProjectionStore(temp.DatabasePath)),
+            health,
+            new SqliteSourceCompatibilityStore(temp.DatabasePath),
+            new MutableTimeProvider(ObservedAt.AddMinutes(2)));
+
+        await restartedWorker.RunProjectionPassAsync();
+
+        Assert.Single(store.ListMonitorIngestions(afterRawRecordId: 0, limit: 10).Items);
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.Completed, 4, ObservedAt.AddMinutes(2));
+    }
+
+    [Fact]
+    public async Task ProjectionWorker_AfterRestartClaimsExactPendingRevisionAndRecordsCaughtFailure()
+    {
+        using var temp = new MonitorTempDirectory();
+        var committed = Commit(temp.DatabasePath, "{\"corrupt_pending_restart\":");
+        var store = ProjectionStore(temp.DatabasePath);
+        Assert.True(store.TryBeginProjection(committed.RawRecordId, expectedRevision: 1, ObservedAt.AddMinutes(1)));
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.Pending, 2, ObservedAt.AddMinutes(1));
+
+        var health = new MonitorHealthState();
+        health.MarkMigrationComplete();
+        var restartedWorker = new ProjectionWorker(
+            new RawTelemetryStoreProjectionStore(ProjectionStore(temp.DatabasePath)),
+            health,
+            new SqliteSourceCompatibilityStore(temp.DatabasePath),
+            new MutableTimeProvider(ObservedAt.AddMinutes(2)));
+
+        await restartedWorker.RunProjectionPassAsync();
+
+        Assert.Empty(store.ListMonitorIngestions(afterRawRecordId: 0, limit: 10).Items);
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.Failed, 4, ObservedAt.AddMinutes(2));
+    }
+
+    [Fact]
+    public void ProjectionDispositionStoreMethods_AreRequiredInterfaceMembersWithoutDefaultBodies()
+    {
+        var methods = typeof(IMonitorProjectionStore).GetMethods()
+            .Where(method =>
+                method.Name is nameof(IMonitorProjectionStore.GetProjectionDisposition)
+                    or nameof(IMonitorProjectionStore.TryBeginProjection)
+                    or nameof(IMonitorProjectionStore.RecordProjectionFailure) ||
+                method.Name == nameof(IMonitorProjectionStore.ApplyProjection) && method.GetParameters().Length == 6)
+            .ToArray();
+
+        Assert.Equal(4, methods.Length);
+        Assert.All(methods, method =>
+        {
+            Assert.True(method.IsAbstract, $"{method.Name} must be implemented explicitly by every projection store.");
+            Assert.Null(method.GetMethodBody());
+        });
+    }
+
+    [Fact]
     public void ProjectionDispositionDto_ExposesOnlySanitizedStateAndCasMembers()
     {
         Assert.Equal(

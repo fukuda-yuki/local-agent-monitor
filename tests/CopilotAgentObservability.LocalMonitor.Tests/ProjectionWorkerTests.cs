@@ -749,6 +749,21 @@ public class ProjectionWorkerTests
             }
         }
 
+        public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => null;
+
+        public bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
+
+        public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
+
+        public bool ApplyProjection(
+            long rawRecordId,
+            string source,
+            DateTimeOffset receivedAt,
+            MonitorRecordProjection projection,
+            DateTimeOffset projectedAt,
+            int expectedDispositionRevision) =>
+            ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
+
         public MonitorProjectionStatus GetProjectionStatus()
         {
             if (StatusThrowsBusy)

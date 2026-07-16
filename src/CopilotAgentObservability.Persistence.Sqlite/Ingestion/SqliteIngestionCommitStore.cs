@@ -32,6 +32,7 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
                 transaction,
                 rawRecordId,
                 batch.Observation);
+            InsertProjectionDisposition(connection, transaction, rawRecordId, batch.RawRecord.ReceivedAt);
             transaction.Commit();
             return new CommittedIngestionIds(rawRecordId, observationId);
         }
@@ -39,6 +40,24 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
         {
             throw new IngestionCommitBusyException();
         }
+    }
+
+    private static void InsertProjectionDisposition(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long rawRecordId,
+        DateTimeOffset observedAt)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            INSERT INTO monitor_projection_dispositions (raw_record_id, state, revision, updated_at)
+            VALUES ($raw_record_id, 'not_started', 1, $updated_at);
+            """;
+        command.Parameters.AddWithValue("$raw_record_id", rawRecordId);
+        command.Parameters.AddWithValue("$updated_at", observedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        command.ExecuteNonQuery();
     }
 
     private static CommittedIngestionIds? FindExisting(

@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
 {
     private const int MaximumListLimit = 200;
-    public const int MonitorSchemaVersion = 5;
+    public const int MonitorSchemaVersion = 6;
     private readonly string databasePath;
     private readonly RawTelemetryStoreConnectionOptions connectionOptions;
     private readonly Action<SqliteConnection, SqliteTransaction>? migrationCheckpoint;
@@ -78,7 +78,6 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
                 )
             );
             """);
-        migrationCheckpoint?.Invoke(connection, transaction);
         Execute(
             connection,
             transaction,
@@ -105,6 +104,8 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
             connection,
             transaction,
             "CREATE INDEX IF NOT EXISTS IX_source_unknown_observations_cursor ON source_unknown_observations(source_observation_id, id);");
+        MonitorSchemaMigrator.EnsureProjectionDispositionSchema(connection, transaction);
+        migrationCheckpoint?.Invoke(connection, transaction);
         MonitorSchemaMigrator.SetMonitorSchemaVersion(connection, transaction, MonitorSchemaVersion);
         transaction.Commit();
     }

@@ -115,6 +115,52 @@ public sealed class MonitorSchemaMigrationFixtureTests
         }
     }
 
+    [Fact]
+    public void Historical_v4_migration_backfills_only_exact_completed_evidence_and_keeps_unprojected_raw_unknown_across_restarts()
+    {
+        var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "monitor");
+        var manifestPath = Path.Combine(fixtureDirectory, "manifest.json");
+        var manifest = JsonSerializer.Deserialize<FixtureManifest>(File.ReadAllText(manifestPath), JsonOptions);
+        Assert.NotNull(manifest);
+        var fixture = Assert.Single(manifest.Fixtures, candidate => candidate.Version == 4);
+        var fixturePath = Path.Combine(fixtureDirectory, fixture.File);
+        Assert.Equal(fixture.Sha256, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(fixturePath))).ToLowerInvariant());
+
+        var migratedPath = Path.Combine(Path.GetTempPath(), $"monitor-migration-unprojected-{Guid.NewGuid():N}.sqlite");
+        File.Copy(fixturePath, migratedPath);
+        try
+        {
+            long unprojectedRawRecordId;
+            using (var historical = Open(migratedPath))
+            {
+                using var insert = historical.CreateCommand();
+                insert.CommandText =
+                    """
+                    INSERT INTO raw_records
+                        (source, trace_id, received_at, resource_attributes_json, payload_json, schema_version)
+                    VALUES
+                        ('raw-otlp', NULL, '2026-07-12T00:00:02.0000000+00:00', NULL, '{"fixture_unprojected":true}', 1);
+                    SELECT last_insert_rowid();
+                    """;
+                unprojectedRawRecordId = (long)insert.ExecuteScalar()!;
+            }
+
+            new SqliteSourceCompatibilityStore(migratedPath).CreateSchema();
+            AssertHistoricalDispositionEvidence(migratedPath, fixture.Sentinels.RawRecordId, unprojectedRawRecordId);
+
+            new SqliteSourceCompatibilityStore(migratedPath).CreateSchema();
+            AssertHistoricalDispositionEvidence(migratedPath, fixture.Sentinels.RawRecordId, unprojectedRawRecordId);
+
+            new SqliteSourceCompatibilityStore(migratedPath).CreateSchema();
+            AssertHistoricalDispositionEvidence(migratedPath, fixture.Sentinels.RawRecordId, unprojectedRawRecordId);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            File.Delete(migratedPath);
+        }
+    }
+
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
     public void InjectedV6Failure_RestoresExactOriginalHistoricalSchemaVersionAndRowsAfterReopen(int version, string sourceCommit)
@@ -179,6 +225,22 @@ public sealed class MonitorSchemaMigrationFixtureTests
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'monitor_projection_dispositions';";
         Assert.Equal(1L, (long)command.ExecuteScalar()!);
         throw new InvalidOperationException("injected v6 migration failure");
+    }
+
+    private static void AssertHistoricalDispositionEvidence(
+        string databasePath,
+        long completedRawRecordId,
+        long unprojectedRawRecordId)
+    {
+        var store = new RawTelemetryStore(databasePath);
+        var completed = Assert.IsType<ProjectionDisposition>(store.GetProjectionDisposition(completedRawRecordId));
+        Assert.Equal(ProjectionDispositionState.Completed, completed.State);
+        Assert.Null(store.GetProjectionDisposition(unprojectedRawRecordId));
+
+        using var connection = Open(databasePath);
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM monitor_projection_dispositions;"));
+        Assert.Equal(CurrentMonitorSchemaVersion, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal("ok", Scalar<string>(connection, "PRAGMA integrity_check;"));
     }
 
     private static void AssertCompleteMigratedState(string databasePath, FixtureSentinels sentinels)

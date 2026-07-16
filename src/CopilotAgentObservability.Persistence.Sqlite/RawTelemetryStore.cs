@@ -135,13 +135,38 @@ internal sealed partial class RawTelemetryStore
         string source,
         DateTimeOffset receivedAt,
         MonitorRecordProjection projection,
-        DateTimeOffset projectedAt)
+        DateTimeOffset projectedAt) =>
+        ApplyProjectionCore(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision: null);
+
+    public bool ApplyProjection(
+        long rawRecordId,
+        string source,
+        DateTimeOffset receivedAt,
+        MonitorRecordProjection projection,
+        DateTimeOffset projectedAt,
+        int expectedDispositionRevision) =>
+        ApplyProjectionCore(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision);
+
+    private bool ApplyProjectionCore(
+        long rawRecordId,
+        string source,
+        DateTimeOffset receivedAt,
+        MonitorRecordProjection projection,
+        DateTimeOffset projectedAt,
+        int? expectedDispositionRevision)
     {
         var receivedAtText = FormatTimestamp(receivedAt);
         var projectedAtText = FormatTimestamp(projectedAt);
 
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
+
+        if (expectedDispositionRevision is { } expectedRevision &&
+            !HasPendingDisposition(connection, transaction, rawRecordId, expectedRevision))
+        {
+            transaction.Rollback();
+            return false;
+        }
 
         int inserted;
         using (var insert = connection.CreateCommand())
@@ -217,9 +242,111 @@ internal sealed partial class RawTelemetryStore
             upsert.ExecuteNonQuery();
         }
 
+        if (expectedDispositionRevision is { } dispositionRevision)
+        {
+            using var complete = connection.CreateCommand();
+            complete.Transaction = transaction;
+            complete.CommandText =
+                """
+                UPDATE monitor_projection_dispositions
+                SET state = 'completed', revision = revision + 1, updated_at = $updated_at
+                WHERE raw_record_id = $raw_record_id AND state = 'pending' AND revision = $expected_revision;
+                """;
+            AddParameter(complete, "$updated_at", projectedAtText);
+            AddParameter(complete, "$raw_record_id", rawRecordId);
+            AddParameter(complete, "$expected_revision", dispositionRevision);
+            if (complete.ExecuteNonQuery() != 1)
+            {
+                transaction.Rollback();
+                return false;
+            }
+        }
+
         transaction.Commit();
         return true;
     }
+
+    public ProjectionDisposition? GetProjectionDisposition(long rawRecordId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT raw_record_id, state, revision, updated_at
+            FROM monitor_projection_dispositions
+            WHERE raw_record_id = $raw_record_id;
+            """;
+        AddParameter(command, "$raw_record_id", rawRecordId);
+        using var reader = command.ExecuteReader();
+        return reader.Read()
+            ? new ProjectionDisposition(
+                reader.GetInt64(0),
+                ParseProjectionDispositionState(reader.GetString(1)),
+                reader.GetInt32(2),
+                ParseTimestamp(reader.GetString(3))!.Value)
+            : null;
+    }
+
+    public bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
+        TransitionProjectionDisposition(
+            rawRecordId,
+            expectedRevision,
+            updatedAt,
+            "state IN ('not_started', 'pending', 'failed')",
+            "pending");
+
+    public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
+        TransitionProjectionDisposition(rawRecordId, expectedRevision, updatedAt, "state = 'pending'", "failed");
+
+    private bool TransitionProjectionDisposition(
+        long rawRecordId,
+        int expectedRevision,
+        DateTimeOffset updatedAt,
+        string expectedStateSql,
+        string nextState)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"""
+            UPDATE monitor_projection_dispositions
+            SET state = $next_state, revision = revision + 1, updated_at = $updated_at
+            WHERE raw_record_id = $raw_record_id AND revision = $expected_revision AND {expectedStateSql};
+            """;
+        AddParameter(command, "$next_state", nextState);
+        AddParameter(command, "$updated_at", FormatTimestamp(updatedAt));
+        AddParameter(command, "$raw_record_id", rawRecordId);
+        AddParameter(command, "$expected_revision", expectedRevision);
+        return command.ExecuteNonQuery() == 1;
+    }
+
+    private static bool HasPendingDisposition(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long rawRecordId,
+        int expectedRevision)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT COUNT(*)
+            FROM monitor_projection_dispositions
+            WHERE raw_record_id = $raw_record_id AND state = 'pending' AND revision = $expected_revision;
+            """;
+        AddParameter(command, "$raw_record_id", rawRecordId);
+        AddParameter(command, "$expected_revision", expectedRevision);
+        return (long)command.ExecuteScalar()! == 1;
+    }
+
+    private static ProjectionDispositionState ParseProjectionDispositionState(string state) => state switch
+    {
+        "not_started" => ProjectionDispositionState.NotStarted,
+        "pending" => ProjectionDispositionState.Pending,
+        "completed" => ProjectionDispositionState.Completed,
+        "failed" => ProjectionDispositionState.Failed,
+        _ => throw new InvalidOperationException("The stored projection disposition state is invalid."),
+    };
 
     /// <summary>Backlog count and oldest unprocessed ingestion time (for projection-lag readiness).</summary>
     public MonitorProjectionStatus GetProjectionStatus()
