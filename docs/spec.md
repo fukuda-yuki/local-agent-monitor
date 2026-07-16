@@ -154,6 +154,32 @@ The complete contract is
 [configuration setup](specifications/interfaces/configuration-setup.md) and the
 security decision is D058.
 
+Issue #68 adds the `claude-code` adapter to the same transaction and
+`setup.v1` result surface. Its public plan target is `cli`, `app-sdk`, or
+`all`; `cli` covers both interactive Claude Code and `claude -p`, while
+`app-sdk` is caller-managed Python/TypeScript guidance with no mutation or
+rollback target. The CLI target owns only the approved `env` members and the
+approved mapper-compatible Hook entries in the user settings document. The
+private-plan v1 closed union gains the `claude_settings_owned_values_v1` arm;
+it stores the expected complete-state hash plus ordered owned env and
+event-specific command/args/timeout data, but public results, the ledger,
+journal, logs, and repository-safe evidence contain no setting value, absolute
+path, or Hook command.
+
+The adapter supports normal Claude Code releases at or above `2.1.207`.
+Windows native apply/rollback uses the existing file transaction. WSL2 is an
+explicit opt-in through `--allow-wsl2-routing`, is recognized only from a
+Linux process with both `WSL_DISTRO_NAME` and a Microsoft kernel marker, and
+continues only when the WSL process can reach the loopback Local Monitor
+`/health/ready` endpoint. There is no gateway, non-loopback, Host-header, or
+NAT fallback. Native macOS/Linux installation is outside Issue #68. The
+default plan preserves the three OTel content gates; the explicit content
+option manages all three together. The approved Hook set is installed by
+default and may capture raw prompt/tool content independently, so plans carry
+the fixed `claude_hooks_capture_raw_content` warning. Static setup does not
+emit `run_first_trace_doctor`; first real trace and Doctor integration remain
+Issue #104. D060 records the adapter-specific boundary.
+
 ## Source capability semantic contract v1
 
 `docs/specifications/contracts/source-capabilities/v1/source-capability-manifest.schema.json`
@@ -235,8 +261,10 @@ Publicly documented interfaces are:
 - Config CLI command names, arguments, CSV / JSON output shape。
 - Config CLI configuration setup commands and `setup.v1` JSON result:
   `setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all>`,
+  `setup plan --adapter claude-code --target <cli|app-sdk|all>
+  [--allow-wsl2-routing]`,
   `setup apply --change-set <uuid-v7>`, `setup rollback --change-set <uuid-v7>`,
-  and `setup status [--adapter github-copilot]`. The configuration ownership
+  and `setup status [--adapter <id>]`. The configuration ownership
   ledger is user-scoped runtime data; command output is repository-safe and
   redacted. No setup HTTP/proxy/UI surface exists.
 - Collection profile names and `CAO_COLLECTION_PROFILE` values。

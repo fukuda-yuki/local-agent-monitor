@@ -34,6 +34,18 @@ Profile の一覧は [collection profile specification](specifications/interface
 | Static Dashboard | 複数 run の傾向を俯瞰したい | `generate-dashboard-dataset`, `generate-static-dashboard` |
 | Diagnosis / Improvement Support | 失敗傾向と改善候補を整理したい | `generate-diagnosis-candidates`, `generate-improvement-candidates`, `generate-auto-decisions` |
 
+## Claude Code の guided setup
+
+Claude Code 2.1.207 以上では、まず設定値や path そのものを含まない redacted な member state、operation、対象 label を表示する plan を作成します。plan だけでは設定を書き換えません。
+
+```powershell
+pwsh scripts\local-monitor\setup.ps1 plan --adapter claude-code --target cli
+```
+
+interactive CLI と `claude -p` は同じ user settings を使います。既定 plan は OTel の prompt / tool content gate を変更しませんが、mapper 対応済み Hook は raw-bearing event を取得し得るため、`claude_hooks_capture_raw_content` warning を確認してください。OTel content gate も明示的に有効化する場合だけ `--include-content-capture` を追加します。
+
+WSL2 から実行する場合は、WSL 内の process から Local Monitor の loopback readiness に到達できることを確認し、`--allow-wsl2-routing` を明示します。Windows native ではこの option を指定しません。gateway / non-loopback fallback はありません。Agent SDK は `--target app-sdk` で Python / TypeScript の caller-managed guidance を確認できますが、setup はアプリケーションコードを書き換えません。plan 後の apply / rollback は返された change-set ID を使います。setup 完了は static configuration の確認であり、first real trace / Doctor の成功を意味しません。
+
 ## 最小の安全ルール
 
 - 実 credential、secret、Base64 authorization header を repository に保存しない。
