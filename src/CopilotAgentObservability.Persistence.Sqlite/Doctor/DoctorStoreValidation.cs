@@ -1,4 +1,5 @@
 using CopilotAgentObservability.Doctor;
+using CopilotAgentObservability.Telemetry;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
@@ -32,7 +33,8 @@ internal static class DoctorStoreValidation
     {
         if (value is null
             || value.Length is < 1 or > 128
-            || value.Any(character => char.IsControl(character) || char.IsWhiteSpace(character)))
+            || value.Any(character => char.IsControl(character) || char.IsWhiteSpace(character))
+            || MeasurementSanitizer.IsUnsafeStringValue(value))
         {
             return false;
         }

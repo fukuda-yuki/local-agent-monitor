@@ -10,6 +10,7 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
     private readonly TimeProvider timeProvider;
     private readonly int busyTimeoutMilliseconds;
     private readonly Action<string>? checkpoint;
+    private readonly Func<string, SqliteConnection> connectionFactory;
 
     public SqliteDoctorVerificationStore(string databasePath, TimeProvider? timeProvider = null)
         : this(databasePath, timeProvider, busyTimeoutMilliseconds: 5_000, checkpoint: null)
@@ -20,7 +21,8 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
         string databasePath,
         TimeProvider? timeProvider = null,
         int busyTimeoutMilliseconds = 5_000,
-        Action<string>? checkpoint = null)
+        Action<string>? checkpoint = null,
+        Func<string, SqliteConnection>? connectionFactory = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         if (busyTimeoutMilliseconds < 0)
@@ -31,6 +33,7 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.busyTimeoutMilliseconds = busyTimeoutMilliseconds;
         this.checkpoint = checkpoint;
+        this.connectionFactory = connectionFactory ?? (connectionString => new SqliteConnection(connectionString));
     }
 
     public DoctorStoreOutcome CreateSchema()
@@ -794,19 +797,28 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
             Pooling = false,
             DefaultTimeout = Math.Max(1, checked((busyTimeoutMilliseconds + 999) / 1_000)),
         };
-        var connection = new SqliteConnection(builder.ToString());
-        connection.Open();
-        using (var foreignKeys = connection.CreateCommand())
+        var connection = connectionFactory(builder.ToString());
+        try
         {
-            foreignKeys.CommandText = "PRAGMA foreign_keys=ON;";
-            foreignKeys.ExecuteNonQuery();
+            connection.Open();
+            checkpoint?.Invoke("after-connection-open");
+            using (var foreignKeys = connection.CreateCommand())
+            {
+                foreignKeys.CommandText = "PRAGMA foreign_keys=ON;";
+                foreignKeys.ExecuteNonQuery();
+            }
+            using (var busyTimeout = connection.CreateCommand())
+            {
+                busyTimeout.CommandText = $"PRAGMA busy_timeout={busyTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)};";
+                busyTimeout.ExecuteNonQuery();
+            }
+            return connection;
         }
-        using (var busyTimeout = connection.CreateCommand())
+        catch
         {
-            busyTimeout.CommandText = $"PRAGMA busy_timeout={busyTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)};";
-            busyTimeout.ExecuteNonQuery();
+            connection.Dispose();
+            throw;
         }
-        return connection;
     }
 
     private void EnsureParentDirectory()

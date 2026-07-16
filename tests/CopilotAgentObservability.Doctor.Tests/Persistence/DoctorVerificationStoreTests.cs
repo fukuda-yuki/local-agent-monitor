@@ -1,9 +1,40 @@
+using System.Data;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Doctor.Tests.Persistence;
 
 public sealed class DoctorVerificationStoreTests
 {
+    public static TheoryData<string> RepositoryUnsafeEvidenceReferences => new()
+    {
+        "prompt:captured-user-text",
+        "PrOmPt:captured-user-text",
+        "response:captured-model-text",
+        "RESPONSE:captured-model-text",
+        "content:captured-content",
+        "CoNtEnT:captured-content",
+        "tool argument captured-value",
+        "TOOL ARGUMENT captured-value",
+        "tool result captured-value",
+        "Tool Result captured-value",
+        "Authorization: Bearer synthetic-secret",
+        "Basic synthetic-secret",
+        "api_key=synthetic-secret",
+        "secret=synthetic-secret",
+        "password=synthetic-secret",
+        "user@example.invalid",
+        @"C:\private\trace.json",
+        @"\\server\private\trace.json",
+        "../private/trace.json",
+        @"..\private\trace.json",
+        "/home/private/trace.json",
+        "/usr/private/trace.json",
+        "/var/private/trace.json",
+        "/tmp/private/trace.json",
+        "/etc/private/trace.json",
+        "/opt/private/trace.json",
+    };
+
     [Fact]
     public void StartAndGet_GenerateCanonicalUuidV7AndDeriveExpiryWithoutPersistingIt()
     {
@@ -82,6 +113,35 @@ public sealed class DoctorVerificationStoreTests
 
         using var connection = database.Open();
         Assert.Equal(100L, DoctorTestDatabase.Scalar(connection, "SELECT count(*) FROM doctor_verification_evidence;"));
+    }
+
+    [Theory]
+    [MemberData(nameof(RepositoryUnsafeEvidenceReferences))]
+    public void ObserveCandidate_RepositoryUnsafeReferenceIsRejectedWithoutPersistenceOrEcho(string unsafeReference)
+    {
+        using var database = new DoctorTestDatabase();
+        var store = NewStore(database);
+        var verification = Start(store);
+        string before;
+        using (var connection = database.Open())
+        {
+            before = SnapshotDoctorDatabase(connection);
+        }
+
+        var result = store.ObserveCandidate(DoctorTestData.Candidate(verification, unsafeReference));
+
+        Assert.Equal(DoctorResultCode.InvalidInput, result.Code);
+        Assert.Null(result.Verification);
+        Assert.Empty(result.ResolvedCandidates);
+        Assert.DoesNotContain(unsafeReference, result.ToString(), StringComparison.OrdinalIgnoreCase);
+        using var reopened = database.Open();
+        Assert.Equal(before, SnapshotDoctorDatabase(reopened));
+        Assert.Equal(
+            0L,
+            DoctorTestDatabase.Scalar(
+                reopened,
+                "SELECT count(*) FROM doctor_verification_evidence WHERE evidence_ref=$reference;",
+                ("$reference", unsafeReference)));
     }
 
     [Fact]
@@ -320,6 +380,65 @@ public sealed class DoctorVerificationStoreTests
     }
 
     [Fact]
+    public void StartCheckpointFailure_RestoresExactPriorDoctorSchemaAndRowsAfterReopen()
+    {
+        using var database = new DoctorTestDatabase();
+        _ = NewStore(database);
+        string before;
+        using (var connection = database.Open())
+        {
+            before = SnapshotDoctorDatabase(connection);
+        }
+        var failingStore = new SqliteDoctorVerificationStore(
+            database.Path,
+            new DoctorTestTimeProvider(DoctorTestData.Now),
+            checkpoint: point =>
+            {
+                if (point == "after-verification-insert")
+                {
+                    throw new InvalidOperationException("injected start failure");
+                }
+            });
+
+        var result = failingStore.Start("github-copilot-vscode", "otel", TimeSpan.FromMinutes(5));
+
+        Assert.Equal(DoctorResultCode.DoctorStoreUnavailable, result.Code);
+        Assert.DoesNotContain("injected start failure", result.ToString(), StringComparison.Ordinal);
+        using var reopened = database.Open();
+        Assert.Equal(before, SnapshotDoctorDatabase(reopened));
+    }
+
+    [Fact]
+    public void CancelCheckpointFailure_RestoresExactPriorDoctorSchemaAndRowsAfterReopen()
+    {
+        using var database = new DoctorTestDatabase();
+        var baseStore = NewStore(database);
+        var verification = Start(baseStore);
+        string before;
+        using (var connection = database.Open())
+        {
+            before = SnapshotDoctorDatabase(connection);
+        }
+        var failingStore = new SqliteDoctorVerificationStore(
+            database.Path,
+            new DoctorTestTimeProvider(DoctorTestData.Now.AddSeconds(30)),
+            checkpoint: point =>
+            {
+                if (point == "after-terminal-update")
+                {
+                    throw new InvalidOperationException("injected cancel failure");
+                }
+            });
+
+        var result = failingStore.Cancel(verification.VerificationId, expectedRevision: 1);
+
+        Assert.Equal(DoctorResultCode.DoctorStoreUnavailable, result.Code);
+        Assert.DoesNotContain("injected cancel failure", result.ToString(), StringComparison.Ordinal);
+        using var reopened = database.Open();
+        Assert.Equal(before, SnapshotDoctorDatabase(reopened));
+    }
+
+    [Fact]
     public async Task CompleteVersusCancel_BarrierAllowsExactlyOneTerminalWinner()
     {
         using var database = new DoctorTestDatabase();
@@ -439,6 +558,43 @@ public sealed class DoctorVerificationStoreTests
         writeLock.Rollback();
     }
 
+    [Fact]
+    public void ConnectionInitializationFailure_DisposesOwnedConnectionAndReturnsSanitizedUnavailable()
+    {
+        using var database = new DoctorTestDatabase();
+        SqliteConnection? createdConnection = null;
+        var store = new SqliteDoctorVerificationStore(
+            database.Path,
+            new DoctorTestTimeProvider(DoctorTestData.Now),
+            checkpoint: point =>
+            {
+                if (point == "after-connection-open")
+                {
+                    throw new InvalidOperationException("injected initialization failure with private path");
+                }
+            },
+            connectionFactory: connectionString =>
+            {
+                createdConnection = new SqliteConnection(connectionString);
+                return createdConnection;
+            });
+
+        var result = store.CreateSchema();
+
+        Assert.Equal(DoctorResultCode.DoctorStoreUnavailable, result.Code);
+        Assert.DoesNotContain("injected initialization failure", result.ToString(), StringComparison.Ordinal);
+        Assert.NotNull(createdConnection);
+        Assert.Equal(ConnectionState.Closed, createdConnection.State);
+        using (var lockCheck = database.Open())
+        using (var transaction = lockCheck.BeginTransaction(deferred: false))
+        {
+            transaction.Rollback();
+        }
+        Assert.Equal(
+            DoctorResultCode.VerificationActive,
+            new SqliteDoctorVerificationStore(database.Path, new DoctorTestTimeProvider(DoctorTestData.Now)).CreateSchema().Code);
+    }
+
     private static SqliteDoctorVerificationStore NewStore(
         DoctorTestDatabase database,
         DoctorTestTimeProvider? time = null)
@@ -465,5 +621,16 @@ public sealed class DoctorVerificationStoreTests
     private static string SnapshotDoctorRows(SqliteConnection connection) => string.Join(
         '\n',
         DoctorTestDatabase.Rows(connection, "SELECT * FROM doctor_verifications ORDER BY verification_id;")
+            .Concat(DoctorTestDatabase.Rows(connection, "SELECT * FROM doctor_verification_evidence ORDER BY candidate_id;")));
+
+    private static string SnapshotDoctorDatabase(SqliteConnection connection) => string.Join(
+        '\n',
+        DoctorTestDatabase.Rows(
+            connection,
+            "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name LIKE 'doctor_%' ORDER BY type,name;")
+            .Concat(DoctorTestDatabase.Rows(
+                connection,
+                "SELECT component,version FROM schema_version WHERE component='doctor';"))
+            .Concat(DoctorTestDatabase.Rows(connection, "SELECT * FROM doctor_verifications ORDER BY verification_id;"))
             .Concat(DoctorTestDatabase.Rows(connection, "SELECT * FROM doctor_verification_evidence ORDER BY candidate_id;")));
 }
