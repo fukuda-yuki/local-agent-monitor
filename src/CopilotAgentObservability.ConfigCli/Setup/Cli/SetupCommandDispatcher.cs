@@ -1,4 +1,5 @@
 using CopilotAgentObservability.ConfigCli.Setup.Adapters;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode.AgentSdk;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Status;
@@ -196,7 +197,8 @@ internal sealed class SetupCommandDispatcher
                 options.IncludeContentCapture,
                 platform.Identifiers.CreateUuidV7(),
                 platform.Clock.UtcNow,
-                toolVersion);
+                toolVersion,
+                options.AllowWsl2Routing);
             var plan = adapterRegistry.Plan(request);
             if (plan is SetupPlanFailure<SetupPlannedChangeSet> failure)
             {
@@ -328,7 +330,7 @@ internal sealed class SetupCommandDispatcher
                     SetupCodes.InvalidArguments,
                     correlationId,
                     changeSet.Adapter,
-                    ProjectApplyTargets(changeSet, SetupCodes.InvalidArguments)));
+                    ProjectApplyTargets(changeSet, SetupCodes.InvalidArguments, plan)));
             }
 
             try
@@ -352,7 +354,7 @@ internal sealed class SetupCommandDispatcher
                 null,
                 null,
                 changeSet.Adapter,
-                ProjectApplyTargets(changeSet, SetupCodes.ApplySucceeded),
+                ProjectApplyTargets(changeSet, SetupCodes.ApplySucceeded, plan),
                 [],
                 [],
                 [],
@@ -433,7 +435,7 @@ internal sealed class SetupCommandDispatcher
                 null,
                 null,
                 changeSet.Adapter,
-                ProjectApplyTargets(applied.Value, code),
+                ProjectApplyTargets(applied.Value, code, plan),
                 [],
                 Snapshot(applied.Warnings),
                 Snapshot(applied.NextActions),
@@ -785,9 +787,13 @@ internal sealed class SetupCommandDispatcher
 
     internal static IReadOnlyList<SetupTargetResult> ProjectApplyTargets(
         SetupLedgerChangeSet changeSet,
-        string code)
+        string code,
+        SetupPrivatePlan? plan = null)
     {
         ArgumentNullException.ThrowIfNull(changeSet);
+        var contentVariants = plan is null
+            ? null
+            : ResolveClaudeGuidanceVariants(plan, changeSet);
         return Array.AsReadOnly(changeSet.Targets.Select(target => new SetupTargetResult(
             target.RecordId.ToString("D"),
             target.TargetKind,
@@ -803,7 +809,10 @@ internal sealed class SetupCommandDispatcher
             target.StatusProjection.Endpoint,
             target.StatusProjection.ExpectedResult?.Clone(),
             target.StatusProjection.Guidance is { } guidance
-                ? SetupContractValidator.RehydrateStatusGuidance(guidance)
+                ? SetupContractValidator.RehydrateStatusGuidance(
+                    guidance,
+                    target.TargetLabel,
+                    contentVariants is not null && contentVariants.TryGetValue(target.RecordId, out var includeContent) && includeContent)
                 : null,
             Array.AsReadOnly(target.StatusProjection.Changes.Select(change => new SetupMemberChangeResult(
                 change.SettingKey,
@@ -821,6 +830,21 @@ internal sealed class SetupCommandDispatcher
         target.AppliedStateHash is not null &&
         string.Equals(target.BackupReference, target.RecordId.ToString("D"), StringComparison.Ordinal) &&
         target.RollbackStatus == SetupLedgerRollbackStatus.Pending;
+
+    private static IReadOnlyDictionary<Guid, bool> ResolveClaudeGuidanceVariants(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet changeSet)
+    {
+        if (plan.Adapter != "claude-code" && changeSet.Adapter != "claude-code")
+        {
+            return new Dictionary<Guid, bool>();
+        }
+
+        var includeContentCapture = ClaudeAgentSdkGuidanceVariant.ValidatePair(plan, changeSet);
+        return changeSet.Targets
+            .Where(target => target.TargetKind == SetupTargetKind.Guidance)
+            .ToDictionary(target => target.RecordId, _ => includeContentCapture);
+    }
 
     private static bool ImmutableApplyProjectionMatches(
         SetupLedgerChangeSet expected,
@@ -882,6 +906,11 @@ internal sealed class SetupCommandDispatcher
         SetupCodes.UnsafePath or
         SetupCodes.StalePlan or
         SetupCodes.PortOwnedByForeignProcess or
+        SetupCodes.EndpointUnreachable or
+        SetupCodes.HookCommandConflict or
+        SetupCodes.ContentPolicyConflict or
+        SetupCodes.Wsl2OptInRequired or
+        SetupCodes.Wsl2RoutingUnavailable or
         SetupCodes.PartialApply or
         SetupCodes.RecoveryRequired or
         SetupCodes.InternalError;
@@ -901,7 +930,7 @@ internal sealed class SetupCommandDispatcher
             }
 
             SetupTransactionEvidence.RequireImmutableIdentity(plan, changeSet);
-            return ProjectApplyTargets(changeSet, code);
+            return ProjectApplyTargets(changeSet, code, plan);
         }
         catch (Exception exception) when (
             exception is SetupStorageException or FormatException or ArgumentException or InvalidOperationException)

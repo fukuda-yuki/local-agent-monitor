@@ -23,9 +23,10 @@ config-cli langfuse-codex-app-config
 config-cli collector-codex-app-config
 config-cli validate-resource-attributes <OTEL_RESOURCE_ATTRIBUTES>
 config-cli setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture]
+config-cli setup plan --adapter claude-code --target <cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture] [--allow-wsl2-routing]
 config-cli setup apply --change-set <uuid-v7>
 config-cli setup rollback --change-set <uuid-v7>
-config-cli setup status [--adapter github-copilot]
+config-cli setup status [--adapter <id>]
 config-cli doctor evaluate --input <file> [--json]
 config-cli doctor verification start --database <file> --source-surface <value> [--source-adapter <value>] --expires-at <RFC3339> [--json]
 config-cli doctor verification status --database <file> --verification-id <uuid-v7> [--json]
@@ -46,7 +47,7 @@ Existing explicit commands such as `langfuse-vscode-env` and
 `collector-vscode-env` remain supported compatibility entry points.
 
 The `setup` command family is the reversible configuration surface introduced
-by Issues #66/#67. It does not replace or change the output of existing manual
+by Issues #66/#67/#68. It does not replace or change the output of existing manual
 profile generators. `setup plan` creates an immutable private plan;
 `setup apply` and `setup rollback` require its UUIDv7 change-set ID. Every setup
 command emits exactly one `setup.v1` JSON result on stdout, and stderr contains
@@ -54,7 +55,7 @@ only the fixed result code for a non-success result. The process exit code is
 the `setup.v1` code-to-exit mapping defined by the canonical setup interface;
 the PowerShell wrapper must preserve the Config CLI stdout bytes and exit code.
 The canonical ledger, DTO, error, transaction, policy, command-result mapping,
-and GitHub Copilot target rules are defined in
+and GitHub Copilot / Claude Code target rules are defined in
 [configuration-setup.md](configuration-setup.md).
 
 Repository mode invokes the current
@@ -66,6 +67,11 @@ not require an installed .NET SDK or runtime, and for the same private runtime
 state it must return the same `setup.v1` stdout bytes and exit code as repository
 mode. This selection changes only executable discovery; argument forwarding,
 stdout, stderr, and exit semantics stay identical.
+Argument forwarding includes the exact `--allow-wsl2-routing` token without
+interpretation. A Windows Release ZIP invocation does not thereby claim or
+perform Windows-to-WSL settings mutation; Claude WSL2 setup remains
+repository-run from inside the verified WSL2 process as defined by the
+canonical setup interface.
 
 The presence of the sibling `../app/config-cli/` directory commits the wrapper
 to packaged mode. If the expected

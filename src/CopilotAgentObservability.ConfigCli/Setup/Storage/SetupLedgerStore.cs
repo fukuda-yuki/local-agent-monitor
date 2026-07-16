@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Text.Json;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode.AgentSdk;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 
@@ -531,6 +532,31 @@ internal static class SetupStorageFile
 internal static partial class SetupStorageValidation
 {
     private static readonly HashSet<string> OutcomeCodes = new(SetupCodes.ResultCodes, StringComparer.Ordinal);
+    private static readonly string[] ClaudeEnvKeys =
+    [
+        "CLAUDE_CODE_ENABLE_TELEMETRY",
+        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
+        "OTEL_TRACES_EXPORTER",
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_LOG_USER_PROMPTS",
+        "OTEL_LOG_TOOL_DETAILS",
+        "OTEL_LOG_TOOL_CONTENT",
+    ];
+    private static readonly string[] ClaudeHookEvents =
+    [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "SubagentStart",
+        "SubagentStop",
+        "Stop",
+        "StopFailure",
+        "SessionEnd",
+    ];
 
     [GeneratedRegex("^[a-z0-9]+(?:-[a-z0-9]+)*$", RegexOptions.CultureInvariant)]
     private static partial Regex SlugPattern();
@@ -599,6 +625,12 @@ internal static partial class SetupStorageValidation
             return;
         }
 
+        if ((object)target.DesiredState is SetupClaudeSettingsOwnedValuesDesiredState claude)
+        {
+            ValidateClaudeDesiredState(adapter, target, members, claude);
+            return;
+        }
+
         if ((object)target.DesiredState is not SetupJsoncOwnedValuesDesiredState tagged)
         {
             throw new FormatException();
@@ -625,6 +657,46 @@ internal static partial class SetupStorageValidation
             .Select(ownedValue => ownedValue.SettingKey)
             .Distinct(StringComparer.Ordinal)
             .Count() == ownedValues.Count);
+    }
+
+    private static void ValidateClaudeDesiredState(
+        string adapter,
+        SetupPrivatePlanTarget target,
+        IReadOnlyList<SetupPrivatePlanMember> members,
+        SetupClaudeSettingsOwnedValuesDesiredState desiredState)
+    {
+        Require(adapter == "claude-code" && target.TargetKind == SetupTargetKind.Json);
+        RequirePattern(desiredState.ExpectedStateHash, HashPattern());
+        var env = RequireNotNull(desiredState.OwnedEnv);
+        var hooks = RequireNotNull(desiredState.OwnedHooks);
+        Require(env.Count is 5 or 8);
+        Require(hooks.Count == ClaudeHookEvents.Length);
+        Require(members.Count == env.Count + hooks.Count);
+
+        for (var index = 0; index < env.Count; index++)
+        {
+            var value = RequireNotNull(env[index]);
+            Require(value.Key == ClaudeEnvKeys[index]);
+            Require(value.Value is { Length: >= 1 and <= 2048 });
+            Require(members[index].SettingKey == $"env.{value.Key}");
+        }
+
+        Require(env.Select(value => value.Key).Distinct(StringComparer.Ordinal).Count() == env.Count);
+        for (var index = 0; index < hooks.Count; index++)
+        {
+            var hook = RequireNotNull(hooks[index]);
+            Require(hook.EventName == ClaudeHookEvents[index]);
+            Require(hook.Command is { Length: >= 1 and <= 2048 });
+            var arguments = RequireNotNull(hook.Arguments);
+            Require(arguments.Count is >= 1 and <= 32);
+            foreach (var argument in arguments)
+            {
+                Require(argument is { Length: >= 1 and <= 2048 });
+            }
+
+            Require(hook.TimeoutSeconds == 5);
+            Require(members[env.Count + index].SettingKey == $"hooks.{hook.EventName}");
+        }
     }
 
     public static void ValidateLedger(SetupOwnershipLedger ledger)
@@ -720,6 +792,7 @@ internal static partial class SetupStorageValidation
     public static void ValidatePlanAndLedger(SetupPrivatePlan plan, SetupLedgerChangeSet changeSet)
     {
         ValidatePlan(plan);
+        ValidateClaudeTargetBindings(plan, changeSet);
         ValidateLedger(new SetupOwnershipLedger(1, [changeSet]));
         var matches = changeSet.State == SetupChangeSetState.Planned &&
             plan.ChangeSetId == changeSet.ChangeSetId &&
@@ -764,10 +837,66 @@ internal static partial class SetupStorageValidation
         ValidateDesiredStateBindings(plan, changeSet);
     }
 
+    private static void ValidateClaudeTargetBindings(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet changeSet)
+    {
+        if (plan.Adapter != "claude-code" && changeSet.Adapter != "claude-code")
+        {
+            return;
+        }
+
+        var expected = plan.SelectedTarget switch
+        {
+            "cli" => new[]
+            {
+                (Kind: SetupTargetKind.Json, Label: "claude-code-user-settings"),
+            },
+            "app-sdk" => new[]
+            {
+                (Kind: SetupTargetKind.Guidance, Label: "claude-agent-sdk-python-guidance"),
+                (Kind: SetupTargetKind.Guidance, Label: "claude-agent-sdk-typescript-guidance"),
+            },
+            "all" => new[]
+            {
+                (Kind: SetupTargetKind.Json, Label: "claude-code-user-settings"),
+                (Kind: SetupTargetKind.Guidance, Label: "claude-agent-sdk-python-guidance"),
+                (Kind: SetupTargetKind.Guidance, Label: "claude-agent-sdk-typescript-guidance"),
+            },
+            _ => [],
+        };
+        if (plan.Adapter != "claude-code" ||
+            changeSet.Adapter != "claude-code" ||
+            plan.SelectedTarget != changeSet.SelectedTarget ||
+            expected.Length == 0 ||
+            plan.Targets.Count != expected.Length ||
+            changeSet.Targets is null ||
+            changeSet.Targets.Count != expected.Length)
+        {
+            throw new SetupStorageException(SetupCodes.RecoveryRequired);
+        }
+
+        for (var index = 0; index < expected.Length; index++)
+        {
+            var planTarget = plan.Targets[index];
+            var ledgerTarget = changeSet.Targets[index];
+            if (planTarget.TargetKind != expected[index].Kind ||
+                ledgerTarget is null ||
+                ledgerTarget.TargetKind != expected[index].Kind ||
+                ledgerTarget.TargetLabel != expected[index].Label ||
+                expected[index].Kind == SetupTargetKind.Guidance &&
+                planTarget.TargetLocation != expected[index].Label)
+            {
+                throw new SetupStorageException(SetupCodes.RecoveryRequired);
+            }
+        }
+    }
+
     public static void ValidateDesiredStateBindings(
         SetupPrivatePlan plan,
         SetupLedgerChangeSet changeSet)
     {
+        ValidateClaudeTargetBindings(plan, changeSet);
         if (plan.Targets.Count != changeSet.Targets.Count)
         {
             throw new SetupStorageException(SetupStorageCodes.PlanLedgerMismatch);
@@ -777,16 +906,72 @@ internal static partial class SetupStorageValidation
         {
             var planTarget = plan.Targets[index];
             var ledgerTarget = changeSet.Targets[index];
-            var requiresTaggedArm = plan.Adapter == "github-copilot" &&
+            var requiresGithubArm = plan.Adapter == "github-copilot" &&
                 planTarget.TargetKind == SetupTargetKind.Json &&
                 ledgerTarget.TargetLabel is
                     "vscode-stable-default-user-settings" or
                     "vscode-insiders-default-user-settings";
-            if (requiresTaggedArm !=
-                ((object)planTarget.DesiredState is SetupJsoncOwnedValuesDesiredState))
+            var requiresClaudeArm = plan.Adapter == "claude-code" &&
+                planTarget.TargetKind == SetupTargetKind.Json &&
+                ledgerTarget.TargetLabel == "claude-code-user-settings";
+            var actualGithubArm = (object)planTarget.DesiredState is SetupJsoncOwnedValuesDesiredState;
+            var actualClaudeArm = (object)planTarget.DesiredState is SetupClaudeSettingsOwnedValuesDesiredState;
+            if (requiresGithubArm != actualGithubArm ||
+                requiresClaudeArm != actualClaudeArm ||
+                (requiresGithubArm && actualClaudeArm) ||
+                (requiresClaudeArm && actualGithubArm))
             {
                 throw new SetupStorageException(SetupCodes.RecoveryRequired);
             }
+        }
+
+        ValidateGuidanceBindings(plan, changeSet);
+        if (plan.Adapter == "claude-code")
+        {
+            try
+            {
+                _ = ClaudeAgentSdkGuidanceVariant.ValidatePair(plan, changeSet);
+            }
+            catch (InvalidOperationException)
+            {
+                throw new SetupStorageException(SetupCodes.RecoveryRequired);
+            }
+        }
+    }
+
+    private static void ValidateGuidanceBindings(
+        SetupPrivatePlan plan,
+        SetupLedgerChangeSet changeSet)
+    {
+        var guidance = changeSet.Targets
+            .Where(target => target.TargetKind == SetupTargetKind.Guidance)
+            .ToArray();
+        if (plan.Adapter == "github-copilot")
+        {
+            Require(guidance.All(target =>
+                target.TargetLabel == "github-copilot-app-sdk-guidance" &&
+                target.StatusProjection.Guidance is { Kind: "caller_managed_sample", Language: "dotnet" }));
+            return;
+        }
+
+        if (plan.Adapter != "claude-code")
+        {
+            return;
+        }
+
+        var labels = guidance.Select(target => target.TargetLabel).ToArray();
+        var expected = plan.SelectedTarget switch
+        {
+            "cli" => Array.Empty<string>(),
+            "app-sdk" or "all" =>
+            ["claude-agent-sdk-python-guidance", "claude-agent-sdk-typescript-guidance"],
+            _ => throw new FormatException(),
+        };
+        Require(labels.SequenceEqual(expected, StringComparer.Ordinal));
+        if (guidance.Length == 2)
+        {
+            Require(guidance[0].StatusProjection.Guidance is { Kind: "caller_managed_sample", Language: "python" });
+            Require(guidance[1].StatusProjection.Guidance is { Kind: "caller_managed_sample", Language: "typescript" });
         }
     }
 
@@ -1073,6 +1258,7 @@ internal static class SetupStorageJson
         SetupRestartRequirement.None => "none",
         SetupRestartRequirement.RestartVsCode => "restart_vscode",
         SetupRestartRequirement.RestartTerminalSession => "restart_terminal_session",
+        SetupRestartRequirement.RestartAgentProcess => "restart_agent_process",
         _ => throw new FormatException(),
     };
 
@@ -1081,6 +1267,7 @@ internal static class SetupStorageJson
         "none" => SetupRestartRequirement.None,
         "restart_vscode" => SetupRestartRequirement.RestartVsCode,
         "restart_terminal_session" => SetupRestartRequirement.RestartTerminalSession,
+        "restart_agent_process" => SetupRestartRequirement.RestartAgentProcess,
         _ => throw new FormatException(),
     };
 }

@@ -46,7 +46,7 @@ internal sealed class AppSdkTargetPartition : IGitHubCopilotTargetPartition
                     null,
                     statusGuidance,
                     []),
-                SetupContractValidator.RehydrateStatusGuidance(statusGuidance))],
+                SetupContractValidator.RehydrateStatusGuidance(statusGuidance, "github-copilot-app-sdk-guidance"))],
             [],
             []);
     }

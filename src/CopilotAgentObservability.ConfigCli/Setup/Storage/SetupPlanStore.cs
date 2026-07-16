@@ -58,6 +58,37 @@ internal sealed record SetupJsoncOwnedValue(
     string ValueKind,
     object Value);
 
+internal sealed record SetupClaudeSettingsOwnedValuesDesiredState(
+    string ExpectedStateHash,
+    IReadOnlyList<SetupClaudeSettingsEnvValue> OwnedEnv,
+    IReadOnlyList<SetupClaudeSettingsHook> OwnedHooks) : SetupPrivateDesiredState
+{
+    internal override SetupPrivateDesiredState Snapshot() => new SetupClaudeSettingsOwnedValuesDesiredState(
+        ExpectedStateHash,
+        Array.AsReadOnly((OwnedEnv ?? throw new FormatException())
+            .Select(value => value is null
+                ? throw new FormatException()
+                : new SetupClaudeSettingsEnvValue(value.Key, value.Value))
+            .ToArray()),
+        Array.AsReadOnly((OwnedHooks ?? throw new FormatException())
+            .Select(hook => hook is null
+                ? throw new FormatException()
+                : new SetupClaudeSettingsHook(
+                    hook.EventName,
+                    hook.Command,
+                    Array.AsReadOnly((hook.Arguments ?? throw new FormatException()).ToArray()),
+                    hook.TimeoutSeconds))
+            .ToArray()));
+}
+
+internal sealed record SetupClaudeSettingsEnvValue(string Key, string Value);
+
+internal sealed record SetupClaudeSettingsHook(
+    string EventName,
+    string Command,
+    IReadOnlyList<string> Arguments,
+    int TimeoutSeconds);
+
 internal sealed record SetupPrivatePlanMember(
     string SettingKey,
     SetupOperation Operation,
@@ -186,6 +217,12 @@ internal sealed class SetupPlanStore
             return;
         }
 
+        if ((object)desiredState is SetupClaudeSettingsOwnedValuesDesiredState claude)
+        {
+            WriteClaudeDesiredState(writer, claude);
+            return;
+        }
+
         if ((object)desiredState is not SetupJsoncOwnedValuesDesiredState tagged)
         {
             throw new FormatException();
@@ -211,6 +248,47 @@ internal sealed class SetupPlanStore
                 writer.WriteStringValue((string)ownedValue.Value);
             }
 
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+        writer.WriteEndObject();
+    }
+
+    private static void WriteClaudeDesiredState(
+        Utf8JsonWriter writer,
+        SetupClaudeSettingsOwnedValuesDesiredState desiredState)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("kind", "claude_settings_owned_values_v1");
+        writer.WriteString("expected_state_hash", desiredState.ExpectedStateHash);
+        writer.WritePropertyName("owned_env");
+        writer.WriteStartArray();
+        foreach (var value in desiredState.OwnedEnv)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("key", value.Key);
+            writer.WriteString("value", value.Value);
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+        writer.WritePropertyName("owned_hooks");
+        writer.WriteStartArray();
+        foreach (var hook in desiredState.OwnedHooks)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("event", hook.EventName);
+            writer.WriteString("command", hook.Command);
+            writer.WritePropertyName("args");
+            writer.WriteStartArray();
+            foreach (var argument in hook.Arguments)
+            {
+                writer.WriteStringValue(argument);
+            }
+
+            writer.WriteEndArray();
+            writer.WriteNumber("timeout_seconds", hook.TimeoutSeconds);
             writer.WriteEndObject();
         }
 
@@ -275,11 +353,22 @@ internal sealed class SetupPlanStore
             throw new FormatException();
         }
 
-        SetupStorageJson.RequireProperties(element, "kind", "expected_state_hash", "owned_values");
-        if (SetupStorageJson.GetString(element, "kind") != "jsonc_owned_values_v1")
+        if (!element.TryGetProperty("kind", out var kindElement) || kindElement.ValueKind != JsonValueKind.String)
         {
             throw new FormatException();
         }
+
+        return kindElement.GetString() switch
+        {
+            "jsonc_owned_values_v1" => ReadJsoncDesiredState(element),
+            "claude_settings_owned_values_v1" => ReadClaudeDesiredState(element),
+            _ => throw new FormatException(),
+        };
+    }
+
+    private static SetupPrivateDesiredState ReadJsoncDesiredState(JsonElement element)
+    {
+        SetupStorageJson.RequireProperties(element, "kind", "expected_state_hash", "owned_values");
 
         var ownedValues = new List<SetupJsoncOwnedValue>();
         foreach (var ownedValueElement in SetupStorageJson.GetArray(element, "owned_values"))
@@ -302,5 +391,45 @@ internal sealed class SetupPlanStore
         return new SetupJsoncOwnedValuesDesiredState(
             SetupStorageJson.GetString(element, "expected_state_hash"),
             Array.AsReadOnly(ownedValues.ToArray()));
+    }
+
+    private static SetupPrivateDesiredState ReadClaudeDesiredState(JsonElement element)
+    {
+        SetupStorageJson.RequireProperties(element, "kind", "expected_state_hash", "owned_env", "owned_hooks");
+        var env = new List<SetupClaudeSettingsEnvValue>();
+        foreach (var valueElement in SetupStorageJson.GetArray(element, "owned_env"))
+        {
+            SetupStorageJson.RequireProperties(valueElement, "key", "value");
+            env.Add(new SetupClaudeSettingsEnvValue(
+                SetupStorageJson.GetString(valueElement, "key"),
+                SetupStorageJson.GetString(valueElement, "value")));
+        }
+
+        var hooks = new List<SetupClaudeSettingsHook>();
+        foreach (var hookElement in SetupStorageJson.GetArray(element, "owned_hooks"))
+        {
+            SetupStorageJson.RequireProperties(hookElement, "event", "command", "args", "timeout_seconds");
+            var arguments = new List<string>();
+            foreach (var argumentElement in SetupStorageJson.GetArray(hookElement, "args"))
+            {
+                if (argumentElement.ValueKind != JsonValueKind.String)
+                {
+                    throw new FormatException();
+                }
+
+                arguments.Add(argumentElement.GetString() ?? throw new FormatException());
+            }
+
+            hooks.Add(new SetupClaudeSettingsHook(
+                SetupStorageJson.GetString(hookElement, "event"),
+                SetupStorageJson.GetString(hookElement, "command"),
+                Array.AsReadOnly(arguments.ToArray()),
+                hookElement.GetProperty("timeout_seconds").GetInt32()));
+        }
+
+        return new SetupClaudeSettingsOwnedValuesDesiredState(
+            SetupStorageJson.GetString(element, "expected_state_hash"),
+            Array.AsReadOnly(env.ToArray()),
+            Array.AsReadOnly(hooks.ToArray()));
     }
 }

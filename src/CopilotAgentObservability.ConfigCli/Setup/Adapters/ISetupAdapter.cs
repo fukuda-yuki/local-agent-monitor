@@ -21,7 +21,8 @@ internal sealed record SetupPlanRequest(
     bool IncludeContentCapture,
     Guid ChangeSetId,
     DateTimeOffset CreatedAt,
-    string ToolVersion);
+    string ToolVersion,
+    bool AllowWsl2Routing = false);
 
 internal sealed record SetupChangePlan(
     Guid ChangeSetId,

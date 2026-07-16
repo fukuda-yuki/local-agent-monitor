@@ -194,6 +194,42 @@ body/status/threshold contract are unchanged. The complete state/fact/result,
 limit, CLI/HTTP, storage, migration, and #103/#104/#105 handoff contract is
 [first-trace Doctor](specifications/interfaces/first-trace-doctor.md) and the
 architecture decision is D060.
+## Claude Code guided setup
+
+Issue #68 adds the `claude-code` adapter to the same transaction and
+`setup.v1` result surface. Its public plan target is `cli`, `app-sdk`, or
+`all`; `cli` covers both interactive Claude Code and `claude -p`, while
+`app-sdk` is caller-managed Python/TypeScript guidance with no mutation or
+rollback target. The CLI target owns only the approved `env` members and the
+approved mapper-compatible Hook entries in the user settings document. The
+private-plan v1 closed union gains the `claude_settings_owned_values_v1` arm;
+it stores the expected complete-state hash plus ordered owned env and
+event-specific command/args/timeout data, but public results, the ledger,
+journal, logs, and repository-safe evidence contain no setting value, absolute
+path, or Hook command.
+
+The adapter supports normal Claude Code releases at or above `2.1.207`.
+Windows native apply/rollback uses the existing file transaction. WSL2 is an
+explicit opt-in through `--allow-wsl2-routing`, is recognized only from a
+Linux process with both `WSL_DISTRO_NAME` and a Microsoft kernel marker, and
+continues only when the WSL process can reach the loopback Local Monitor
+`/health/ready` endpoint. There is no gateway, non-loopback, Host-header, or
+NAT fallback. Native macOS/Linux installation is outside Issue #68. The
+default plan preserves the three OTel content gates; the explicit content
+option manages all three together. The approved Hook set is installed by
+default and may capture raw prompt/tool content independently, so plans carry
+the fixed `claude_hooks_capture_raw_content` warning. Static setup does not
+emit `run_first_trace_doctor`; first real trace and Doctor integration remain
+Issue #104. The invocation directory is the only selected Claude project root:
+the adapter observes its exact local and project settings files without parent,
+child, Git-root, or `--add-dir` discovery. Managed env precedence is current
+process > one platform-selected managed object > local > project > user; the
+highest present source wins per key, except that selecting the managed object
+itself never merges or falls through across its platform tiers. Every observed
+settings file is strictly bounded and malformed input fails closed. Hook
+execution layout is resolved only from the injected repository or Release
+layout and never from the current directory or `PATH`. D061 records the
+adapter-specific boundary.
 
 ## Source capability semantic contract v1
 
@@ -277,8 +313,10 @@ Publicly documented interfaces are:
 - Config CLI command names, arguments, CSV / JSON output shape。
 - Config CLI configuration setup commands and `setup.v1` JSON result:
   `setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all>`,
+  `setup plan --adapter claude-code --target <cli|app-sdk|all>
+  [--allow-wsl2-routing]`,
   `setup apply --change-set <uuid-v7>`, `setup rollback --change-set <uuid-v7>`,
-  and `setup status [--adapter github-copilot]`. The configuration ownership
+  and `setup status [--adapter <id>]`. The configuration ownership
   ledger is user-scoped runtime data; command output is repository-safe and
   redacted. No setup HTTP/proxy/UI surface exists.
 - Config CLI Doctor commands and shared `doctor.v1` result: `doctor evaluate`,

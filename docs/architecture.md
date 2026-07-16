@@ -118,6 +118,9 @@ Config CLI は repository-local な中核ツールである。
   plan/apply/rollback/status coordination.
 - GitHub Copilot VS Code/CLI detection and bounded setup adapters; App/SDK
   remains caller-managed guidance.
+- Claude Code CLI detection and bounded user-settings ownership for Windows
+  native and explicitly opted-in WSL2; Agent SDK remains caller-managed
+  Python/TypeScript guidance.
 
 The setup framework lives in the Config CLI rather than Local Monitor HTTP/UI.
 The Windows Release ZIP publishes the Config CLI beside the Local Monitor app
@@ -337,7 +340,7 @@ measurements
 ### Reversible Configuration Setup Loop
 
 ```text
-GitHub Copilot target detection
+GitHub Copilot or Claude Code target detection
   -> redacted immutable setup plan + base hashes
   -> explicit change-set apply
   -> flushed backup + per-file/per-env-member write-ahead intents
@@ -351,8 +354,19 @@ environment are observed through injected platform boundaries. Filesystem and
 environment writes are serialized by a non-waiting exclusive setup lock.
 Compensation runs in reverse journal-step order. `status` requests no new setup
 mutation, but it can restore an interrupted transaction before projecting the
-ledger. No setup result is evidence of a first
-trace; Issue #69 owns live receipt verification.
+ledger. No setup result is evidence of a first trace. GitHub Copilot receipt
+remains the downstream Doctor integration, while Claude Code first-real-trace
+evidence is Issue #104.
+
+Claude user settings use a dedicated ownership-aware renderer for nested
+`env` and `hooks`. The private plan holds only the approved owned values and
+the expected complete-state hash; the complete rendered document is transient
+under the setup lock. Windows native uses the existing atomic file boundary.
+WSL2 execution is detected from the Linux process, distro environment, and
+kernel marker together and requires an explicit CLI opt-in plus a successful
+loopback readiness probe from that same process. The architecture deliberately
+does not add a Windows-to-WSL mutation bridge, gateway discovery, non-loopback
+listener, or Local Monitor HTTP/UI management endpoint.
 
 ### First-Trace Doctor Loop
 

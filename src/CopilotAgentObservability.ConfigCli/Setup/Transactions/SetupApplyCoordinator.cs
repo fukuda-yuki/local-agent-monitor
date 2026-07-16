@@ -20,6 +20,12 @@ internal sealed class SetupApplyCoordinator
         SetupCodes.StalePlan,
         SetupCodes.RecoveryRequired,
         SetupCodes.PortOwnedByForeignProcess,
+        SetupCodes.EndpointUnreachable,
+        SetupCodes.HookCommandConflict,
+        SetupCodes.ContentPolicyConflict,
+        SetupCodes.Wsl2OptInRequired,
+        SetupCodes.Wsl2RoutingUnavailable,
+        SetupCodes.UnsupportedTarget,
         SetupCodes.InternalError,
     };
 
@@ -989,7 +995,7 @@ internal sealed class SetupApplyCoordinator
         SetupRevalidation revalidation)
     {
         var expected = plan.Targets
-            .Where(target => target.DesiredState is SetupJsoncOwnedValuesDesiredState &&
+            .Where(target => target.DesiredState is SetupJsoncOwnedValuesDesiredState or SetupClaudeSettingsOwnedValuesDesiredState &&
                 target.Members.Any(member => member.Operation != SetupOperation.NoOp))
             .ToArray();
         var actual = revalidation.MaterializedTargets;
@@ -1003,13 +1009,18 @@ internal sealed class SetupApplyCoordinator
         for (var index = 0; index < expected.Length; index++)
         {
             var expectedTarget = expected[index];
-            var expectedState = (SetupJsoncOwnedValuesDesiredState)expectedTarget.DesiredState;
+            var expectedHash = expectedTarget.DesiredState switch
+            {
+                SetupJsoncOwnedValuesDesiredState state => state.ExpectedStateHash,
+                SetupClaudeSettingsOwnedValuesDesiredState state => state.ExpectedStateHash,
+                _ => throw new SetupApplyException(SetupCodes.RecoveryRequired),
+            };
             var materialized = actual[index];
             var bytes = materialized.DesiredBytes.ToArray();
             var actualHash = SetupHash.File(true, bytes);
             if (materialized.RecordId != expectedTarget.RecordId ||
-                !string.Equals(materialized.ExpectedStateHash, expectedState.ExpectedStateHash, StringComparison.Ordinal) ||
-                !string.Equals(actualHash, expectedState.ExpectedStateHash, StringComparison.Ordinal) ||
+                !string.Equals(materialized.ExpectedStateHash, expectedHash, StringComparison.Ordinal) ||
+                !string.Equals(actualHash, expectedHash, StringComparison.Ordinal) ||
                 !string.Equals(actualHash, materialized.ExpectedStateHash, StringComparison.Ordinal))
             {
                 throw new SetupApplyException(SetupCodes.RecoveryRequired);
@@ -1084,6 +1095,8 @@ internal sealed class SetupApplyCoordinator
                         {
                             SetupInlineDesiredState inline => Encoding.UTF8.GetBytes(inline.Value),
                             SetupJsoncOwnedValuesDesiredState when materializedBytes.TryGetValue(
+                                target.RecordId, out var bytes) => bytes,
+                            SetupClaudeSettingsOwnedValuesDesiredState when materializedBytes.TryGetValue(
                                 target.RecordId, out var bytes) => bytes,
                             _ => null,
                         },

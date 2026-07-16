@@ -2123,3 +2123,47 @@ Consequences:
   authorization value、absolute/local path、rejected body、exception text を含めない。
 - source-specific live first-trace evidence と proxy/UI の検証は #103/#104/#105 の
   handoff とし、Issue #102 完了の証拠に見せかけない。
+## D061: Claude guided setup owns bounded user settings and requires explicit WSL2 routing
+
+Status: Accepted (2026-07-16)
+
+Issue #68 extends the D058 transaction rather than adding another setup
+service. The `claude-code` adapter uses the existing private plan, immutable
+ledger projection, apply/rollback journal, stale guard, compensation, and
+exclusive non-waiting lock.
+
+- The public plan command selects `cli`, `app-sdk`, or `all`. CLI covers the
+  interactive executable and `claude -p` because they share the same user
+  settings. Agent SDK is no-write Python/TypeScript caller guidance.
+- The writable boundary is the Claude user settings `env` object plus the
+  approved mapper-compatible Hook entries. Unrelated JSON, comments, newline,
+  Hook order, and non-owned Hook entries are preserved. An owned
+  `hook-forward --source claude-code` entry that differs from the planned
+  command/args/timeout is a no-write conflict; setup does not take ownership of
+  another command.
+- A new closed private-plan v1 arm,
+  `claude_settings_owned_values_v1`, stores the expected complete-state hash,
+  ordered owned env values, and event-specific command/args/timeout. It does
+  not change the existing inline or `jsonc_owned_values_v1` bytes. Complete
+  rendered settings are transient. Public DTOs, ledger, journal, logs, and
+  repository-safe evidence contain no raw setting value, path, Hook command,
+  credential, or token.
+- Windows native may apply and roll back through the D058 file transaction.
+  WSL2 requires a Linux process, `WSL_DISTRO_NAME`, a Microsoft kernel marker,
+  explicit `--allow-wsl2-routing`, and successful loopback readiness from
+  that process. Gateway discovery, non-loopback binding, Host-header
+  relaxation, and NAT fallback are rejected. Windows native and other adapters
+  reject the WSL option as `invalid_arguments`; native macOS/Linux installation
+  remains outside Issue #68.
+- Default planning enables Claude telemetry/export routing but preserves the
+  three OTel content gates. Explicit content capture manages all three
+  together. The approved default Hook set can itself observe raw prompt/tool
+  events, so `claude_hooks_capture_raw_content` is always surfaced separately
+  from the OTel content option.
+- Static setup ends with process-restart guidance and does not emit
+  `run_first_trace_doctor`. First real trace and Doctor integration remain
+  Issue #104. No HTTP route, proxy DTO, UI, DB schema, remote collector,
+  shell-profile mutation, or non-loopback exposure is added.
+
+The complete command, settings, Hook, WSL2, storage, and evidence contract is
+[configuration setup](specifications/interfaces/configuration-setup.md).

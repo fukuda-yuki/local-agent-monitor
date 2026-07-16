@@ -1,4 +1,6 @@
 using CopilotAgentObservability.ConfigCli.Setup.Adapters;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode.AgentSdk;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot.AppSdk;
 using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot.CopilotCli;
@@ -15,7 +17,9 @@ internal static class SetupCompositionRoot
     public static Func<SetupOptions, SetupCommandResult> CreateSetupDispatch() =>
         CreateSetupDispatch(new SystemSetupPlatform());
 
-    internal static Func<SetupOptions, SetupCommandResult> CreateSetupDispatch(ISetupPlatform platform)
+    internal static Func<SetupOptions, SetupCommandResult> CreateSetupDispatch(
+        ISetupPlatform platform,
+        IClaudeHookCommandProvider? claudeHookCommandProvider = null)
     {
         ArgumentNullException.ThrowIfNull(platform);
 
@@ -30,7 +34,17 @@ internal static class SetupCompositionRoot
                 new CopilotCliTargetPartition(),
                 new AppSdkTargetPartition(),
             ]);
-        var registry = new SetupAdapterRegistry([adapter]);
+        var claudeAdapter = new ClaudeCodeSetupAdapter(
+            platform,
+            new ClaudeAgentSdkTargetPartition(),
+            claudeHookCommandProvider ?? new ClaudeHookCommandProvider(AppContext.BaseDirectory),
+            new ClaudeHigherPrecedenceObserver(
+                platform,
+                Environment.CurrentDirectory,
+                platform.OperatingSystem.Current == SetupPlanningOs.Windows
+                    ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "ClaudeCode", "managed-settings.json")
+                    : "/etc/claude-code/managed-settings.json"));
+        var registry = new SetupAdapterRegistry([adapter, claudeAdapter]);
         var toolVersion = typeof(SetupCompositionRoot).Assembly.GetName().Version!.ToString();
         var dispatcher = new SetupCommandDispatcher(
             platform,

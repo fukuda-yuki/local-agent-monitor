@@ -135,6 +135,7 @@ public enum SetupRestartRequirement
     None,
     RestartVsCode,
     RestartTerminalSession,
+    RestartAgentProcess,
 }
 
 public enum SetupChangeSetState

@@ -371,12 +371,17 @@ internal static class CliApplication
         SetupCodes.EnvironmentOverrideConflict or
         SetupCodes.StalePlan or
         SetupCodes.RollbackStale => 3,
+        SetupCodes.HookCommandConflict or
+        SetupCodes.ContentPolicyConflict => 3,
         SetupCodes.UnsupportedAdapter or
         SetupCodes.UnsupportedTarget or
         SetupCodes.TargetNotInstalled or
         SetupCodes.UnsupportedVersion or
         SetupCodes.RollbackNotAvailable or
         SetupCodes.PortOwnedByForeignProcess => 4,
+        SetupCodes.EndpointUnreachable or
+        SetupCodes.Wsl2OptInRequired or
+        SetupCodes.Wsl2RoutingUnavailable => 4,
         SetupCodes.PartialRollback => 6,
         SetupCodes.MalformedSettings or
         SetupCodes.PermissionDenied or

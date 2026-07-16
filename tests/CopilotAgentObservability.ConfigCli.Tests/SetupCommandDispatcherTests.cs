@@ -3197,7 +3197,7 @@ public sealed class SetupCommandDispatcherTests
             recordId,
             SetupTargetKind.Guidance,
             "private://app-sdk-guidance",
-            "app-sdk-guidance",
+            "github-copilot-app-sdk-guidance",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             new SetupInlineDesiredState("configured"),
             [],
@@ -3211,7 +3211,9 @@ public sealed class SetupCommandDispatcherTests
                 null,
                 statusGuidance,
                 []),
-            SetupContractValidator.RehydrateStatusGuidance(statusGuidance));
+            SetupContractValidator.RehydrateStatusGuidance(
+                statusGuidance,
+                "github-copilot-app-sdk-guidance"));
     }
 
     private static SetupChangeRecord CreateInvalidGuidanceRecord(Guid recordId, string sample)

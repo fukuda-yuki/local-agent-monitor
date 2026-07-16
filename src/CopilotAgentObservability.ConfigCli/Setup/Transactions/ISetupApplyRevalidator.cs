@@ -18,6 +18,7 @@ internal static class SetupDesiredStateHash
     {
         SetupInlineDesiredState inline => SetupHash.File(true, Encoding.UTF8.GetBytes(inline.Value)),
         SetupJsoncOwnedValuesDesiredState tagged => tagged.ExpectedStateHash,
+        SetupClaudeSettingsOwnedValuesDesiredState claude => claude.ExpectedStateHash,
         _ => throw new FormatException(),
     };
 }

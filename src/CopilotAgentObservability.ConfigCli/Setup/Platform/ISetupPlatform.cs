@@ -150,6 +150,8 @@ public enum SetupManagedLocation
     VsCodeEnterpriseWindowsUserPolicy,
     VsCodeEnterpriseMacOsConfigurationProfile,
     VsCodeEnterpriseLinuxPolicyFile,
+    ClaudeCodeWindowsMachinePolicy,
+    ClaudeCodeWindowsUserPolicy,
 }
 
 public enum SetupManagedOutcome

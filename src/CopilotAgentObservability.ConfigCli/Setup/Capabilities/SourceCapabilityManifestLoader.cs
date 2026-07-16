@@ -6,8 +6,10 @@ internal static class SourceCapabilityManifestLoader
 {
     private const string VsCodeSurface = "github-copilot-vscode";
     private const string CliSurface = "github-copilot-cli";
+    private const string ClaudeSurface = "claude-code";
     private const string VsCodeResourceName = "CopilotAgentObservability.ConfigCli.Setup.Capabilities.Manifests.github-copilot-vscode.json";
     private const string CliResourceName = "CopilotAgentObservability.ConfigCli.Setup.Capabilities.Manifests.github-copilot-cli.json";
+    private const string ClaudeResourceName = "CopilotAgentObservability.ConfigCli.Setup.Capabilities.Manifests.claude-code.json";
     private static readonly string[] ManifestProperties =
     [
         "contract_version", "source_surface", "source_adapter", "support_status", "stability",
@@ -44,6 +46,7 @@ internal static class SourceCapabilityManifestLoader
         {
             VsCodeSurface => LoadEmbedded(VsCodeSurface, VsCodeResourceName),
             CliSurface => LoadEmbedded(CliSurface, CliResourceName),
+            ClaudeSurface => LoadEmbedded(ClaudeSurface, ClaudeResourceName),
             _ => throw new InvalidDataException("Unknown source capability manifest."),
         };
     }
@@ -76,11 +79,13 @@ internal static class SourceCapabilityManifestLoader
 
     public static bool IsValidLedgerManifest(JsonElement candidate, string expectedSurface)
     {
-        if (expectedSurface is not VsCodeSurface and not CliSurface ||
+        if (expectedSurface is not VsCodeSurface and not CliSurface and not ClaudeSurface ||
             !HasExactProperties(candidate, ManifestProperties) ||
             !HasString(candidate, "contract_version", "v1") ||
             !HasString(candidate, "source_surface", expectedSurface) ||
-            !HasString(candidate, "source_adapter", "otel-http+copilot-compatible-hook") ||
+            !HasString(candidate, "source_adapter", expectedSurface == ClaudeSurface
+                ? "claude-code-otel+claude-code-hook"
+                : "otel-http+copilot-compatible-hook") ||
             !HasClosedString(candidate, "support_status", "active", "planned", "unsupported") ||
             !HasClosedString(candidate, "stability", "stable", "preview", "beta", "internal-unstable") ||
             !IsCapability(candidate.GetProperty("source_version_detector")) ||

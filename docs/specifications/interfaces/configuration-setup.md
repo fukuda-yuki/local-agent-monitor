@@ -1,9 +1,9 @@
 # Configuration Setup Interface
 
-This document is the canonical contract for Issue #66 configuration ownership
-and Issue #67 GitHub Copilot guided setup. It defines the public command/result
-surface, durable ownership record, transaction semantics, and supported GitHub
-Copilot targets.
+This document is the canonical contract for Issue #66 configuration ownership,
+Issue #67 GitHub Copilot guided setup, and Issue #68 Claude Code guided setup.
+It defines the public command/result surface, durable ownership record,
+transaction semantics, and supported agent targets.
 
 ## Scope
 
@@ -14,22 +14,30 @@ Issue #66 supplies a reusable setup framework. Issue #67 supplies the
 - terminal GitHub Copilot CLI;
 - caller-managed GitHub Copilot App / SDK integration guidance.
 
+Issue #68 supplies the `claude-code` adapter for:
+
+- interactive Claude Code CLI and `claude -p`, which share user settings;
+- caller-managed Python and TypeScript Agent SDK guidance;
+- Windows-native and explicitly opted-in WSL2 repository execution.
+
 The framework does not add a Local Monitor HTTP route, Canvas proxy, Razor UI,
 remote provisioning, first-trace verification, force rollback, or machine-wide
-configuration. Claude Code and Codex adapters remain separate issues.
+configuration. Issue #68 also excludes native macOS/Linux installation, a
+Windows-to-WSL settings bridge, remote collectors, and Codex setup.
 
 ## Cross-surface contract table
 
-| Surface | Producer | Consumer | Contract | Issue #66/#67 status |
+| Surface | Producer | Consumer | Contract | Setup status |
 | --- | --- | --- | --- | --- |
 | CLI command dispatch | `CliApplication` / `SetupCommandDispatcher` | `SetupAdapterRegistry`, transaction coordinators, and status service | parsed `SetupOptions`; private plans, ledger records, recovery, and transaction results remain internal | required |
-| Adapter registry | `SetupAdapterRegistry` | registered `ISetupAdapter` | adapter selection plus typed `Plan` and `Revalidate` carriers; adapters do not produce the public DTO | required |
+| Adapter registry | `SetupAdapterRegistry` | registered `ISetupAdapter` | `github-copilot` or `claude-code` selection plus typed `Plan` and `Revalidate` carriers; adapters do not produce the public DTO | required |
 | GitHub Copilot aggregate | `GitHubCopilotSetupAdapter` | VS Code, Copilot CLI, and App/SDK target partitions | typed partition plan/revalidation carriers and bounded platform observations; no `Detect` method or public DTO reconstruction | required |
+| Claude Code aggregate | `ClaudeCodeSetupAdapter` | CLI/settings, WSL2 detection, and Agent SDK guidance partitions | `SetupPlanRequest` to typed plan/revalidation carriers; nested settings ownership and endpoint/process facts stay private | required for #68 |
 | Apply revalidation | persisted private plan + registered owning adapter | `SetupApplyCoordinator` | endpoint/policy/version/extension/member revalidation and materialized-target result; no public DTO reconstruction | required |
 | CLI result | `SetupCommandDispatcher` through `CliApplication` / `SetupJson` | terminal user / PowerShell wrapper | the sole public result is `SetupCommandResult` JSON (`setup.v1`) | required |
 | PowerShell | repository or Release ZIP `setup.ps1` | Config CLI executable | exact CLI arguments and unchanged JSON stdout | required |
-| HTTP | none | none | no route or DTO | not added |
-| proxy | none | none | no proxy DTO | not added |
+| HTTP | existing Local Monitor | Claude endpoint probes, OTel exporter, and installed `hook-forward` | existing `/health/ready`, `/v1/traces`, and `/api/session-ingest/v1/events`; no new route or DTO | reused, unchanged |
+| proxy | repository or Release ZIP `setup.ps1` | Config CLI executable | byte-faithful argument, stdout, and exit-code forwarding, including `--allow-wsl2-routing`; no reshaping | required |
 | Local Monitor UI | none | none | no view model | not added |
 
 Mocks and fixtures must be serialized from the same C# result types used by the
@@ -40,9 +48,10 @@ cross-surface test because those surfaces are not part of this interface.
 
 ```text
 config-cli setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture]
+config-cli setup plan --adapter claude-code --target <cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture] [--allow-wsl2-routing]
 config-cli setup apply --change-set <uuid-v7>
 config-cli setup rollback --change-set <uuid-v7>
-config-cli setup status [--adapter github-copilot]
+config-cli setup status [--adapter <id>]
 ```
 
 The `setup.v1` surface is recognized only after the first token is exactly
@@ -88,6 +97,19 @@ The PowerShell wrapper exposes the same four actions and forwards stdout
 without reshaping it. Repository mode invokes the Config CLI project. Release
 ZIP mode invokes the self-contained Config CLI published under
 `app/config-cli/`. Using the Release ZIP must not require a .NET SDK or runtime.
+The wrapper forwards `--allow-wsl2-routing` without interpretation. Windows
+Release ZIP execution does not claim to mutate WSL settings; Issue #68 WSL2
+support is repository-run from inside WSL2.
+
+For `claude-code`, `cli` covers both interactive CLI and `claude -p` and `all`
+means CLI plus Agent SDK guidance. `--allow-wsl2-routing` is required only when
+the Config CLI itself runs in a verified WSL2 process for a `cli` component.
+An `app-sdk`-only target has no routing target and always returns
+`invalid_arguments` when the option is present; `all` validates the option
+through its CLI component. The option is also
+`invalid_arguments` for Windows-native execution, for native macOS/Linux, and
+for every adapter other than `claude-code`. It authorizes no gateway,
+non-loopback, or Host-header fallback.
 
 ## Result contract
 
@@ -224,20 +246,28 @@ foreign endpoints are reported only as `loopback`, `remote`,
 inventing capabilities. A newly produced plan must match the currently embedded
 canonical manifest exactly, with JSON property order ignored. VS Code uses
 surface `github-copilot-vscode`; terminal CLI uses `github-copilot-cli`.
-App/SDK has no Issue #61 manifest and returns a null manifest with
+Claude CLI uses `claude-code`. App/SDK guidance has no Issue #61 manifest and
+returns a null manifest with
 `planned_source_not_enabled` guidance rather than borrowing another surface's
 capability declaration. Ledger-origin status validation is deliberately
 separate, as defined below, so a valid immutable historical snapshot is not
 silently rewritten or rejected only because the embedded manifest later
 changes.
 
+`restart_requirement` is `none`, `restart_vscode`,
+`restart_terminal_session`, or `restart_agent_process`. Claude Code writable
+settings use `restart_agent_process`; their top-level next action is
+`restart_claude_process`.
+
 `reference_state` and `current_state` are null in plan/apply/rollback target
 results. In status, `reference_state` is `base`, `desired`, `previous`, or
 `none`; `current_state` is `current`, `stale`, `diverged`, `unavailable`, or
 `not_applicable`. `changes` is empty only for a `guidance` target. `guidance` is null for writable
-targets. App/SDK uses the bounded shape
-`{"kind":"caller_managed_sample","language":"dotnet","sample":"..."}`.
-It never contains a discovered caller path or file content.
+targets. Guidance uses the bounded shape
+`{"kind":"caller_managed_sample","language":"<fixed-language>","sample":"..."}`.
+The fixed language is `dotnet` for GitHub Copilot and `python` or `typescript`
+for Claude Agent SDK. It never contains a discovered caller path or file
+content.
 
 ### Status projection
 
@@ -297,8 +327,8 @@ content, or PII.
 Ledger-origin `expected_result` validation is a separate strict path. It
 requires the exact source-capability v1 object shape with no unknown or
 duplicate fields, `contract_version: "v1"`, the fixed
-`github-copilot-vscode` or `github-copilot-cli` public surface matching that
-snapshot target, `source_adapter: "otel-http+copilot-compatible-hook"`, the
+`github-copilot-vscode`, `github-copilot-cli`, or `claude-code` public surface
+matching that snapshot target, the matching canonical `source_adapter`, the
 schema's closed support/stability/availability codes and fixed
 provenance/completeness arrays, and all source-capability safety and cross-field
 invariants. No free-form manifest string remains. Guidance must keep
@@ -430,6 +460,11 @@ Failure codes:
 - `rollback_stale`
 - `rollback_not_available`
 - `port_owned_by_foreign_process`
+- `endpoint_unreachable`
+- `hook_command_conflict`
+- `content_policy_conflict`
+- `wsl2_opt_in_required`
+- `wsl2_routing_unavailable`
 - `partial_apply`
 - `partial_rollback`
 - `setup_busy`
@@ -439,14 +474,14 @@ Failure codes:
 - `ledger_version_unsupported`
 - `internal_error`
 
-The process exit mapping is exhaustive over all 29 result codes:
+The process exit mapping is exhaustive over all 34 result codes:
 
 | Exit | Exact result codes |
 | --- | --- |
 | `0` | `plan_ready`, `no_changes`, `apply_succeeded`, `rollback_succeeded`, `status_ready`, `interrupted_apply_recovered`, `interrupted_rollback_recovered` |
 | `2` | `invalid_arguments` |
-| `3` | `managed_policy_conflict`, `environment_override_conflict`, `stale_plan`, `rollback_stale` |
-| `4` | `unsupported_adapter`, `unsupported_target`, `target_not_installed`, `unsupported_version`, `rollback_not_available`, `port_owned_by_foreign_process` |
+| `3` | `managed_policy_conflict`, `environment_override_conflict`, `hook_command_conflict`, `content_policy_conflict`, `stale_plan`, `rollback_stale` |
+| `4` | `unsupported_adapter`, `unsupported_target`, `target_not_installed`, `unsupported_version`, `rollback_not_available`, `port_owned_by_foreign_process`, `endpoint_unreachable`, `wsl2_opt_in_required`, `wsl2_routing_unavailable` |
 | `5` | `malformed_settings`, `permission_denied`, `unsafe_path`, `partial_apply`, `setup_busy`, `recovery_required`, `interrupted_recovery_failed`, `ledger_corrupt`, `ledger_version_unsupported`, `internal_error` |
 | `6` | `partial_rollback` |
 
@@ -457,6 +492,17 @@ no-JSON behavior specified under Public commands. No raw exception text or help
 text may be appended to a setup result.
 `environment_override_conflict` is valid only for a CLI-target `plan` or
 pre-artifact `apply` revalidation.
+
+The Issue #68 codes are also pre-artifact/no-write outcomes.
+`endpoint_unreachable` means the selected Windows-native Claude endpoint did
+not satisfy the bounded readiness reachability check;
+`wsl2_routing_unavailable` is the equivalent after a verified WSL2 explicit
+opt-in. `wsl2_opt_in_required` means the context is verified WSL2 but the flag
+is absent. `hook_command_conflict` means the exact owned Hook slot exists with
+different private command/args/timeout. `content_policy_conflict` means an
+observed higher-priority content gate contradicts the requested explicit
+capture policy. None creates or changes a private plan, backup, journal, target,
+or ledger lifecycle row for the requested operation.
 
 ## Runtime storage and versioning
 
@@ -496,7 +542,7 @@ is captured only in flushed apply-time backups after all stale checks pass.
 These artifacts must never be copied into logs, command output,
 CI artifacts, docs, Issues, or committed files. The default retention is
 indefinite so rollback remains available. Automatic cleanup is not part of
-Issues #66/#67.
+Issues #66/#67/#68.
 
 The ownership ledger retains its existing hard limit of 1 MiB for the complete
 serialized file, on bounded read and before atomic replacement. This is the one
@@ -508,7 +554,7 @@ fields) is finite and must serialize below 1 MiB in an executable boundary
 test. Indefinite retention does not imply unlimited history: once appending a
 legal row would exceed the ledger cap, the write fails closed without replacing
 the durable ledger or leaving a claimed change set. That finite local-history
-capacity is an accepted constraint for Issues #66/#67; automatic pruning,
+capacity is an accepted constraint for Issues #66/#67/#68; automatic pruning,
 retention policy, and a larger or second cap are not introduced here.
 
 Schema version `1` is the first shipped ownership-ledger version. There is no
@@ -524,8 +570,8 @@ adapter rediscovery, a private-plan reconstruction, or an older v1 shape.
 
 Private plan `desired_state` is also a closed schema-v1 JSON union. It is not a
 schema-v2 change, a migration, a compatibility layer, or a parse fallback:
-the JSON token type selects exactly one of the two v1 representations, and no
-other representation is accepted.
+the bound target adapter/kind/label and tagged `kind` select exactly one of the
+three v1 representations, and no other representation is accepted.
 
 - A JSON string is the canonical v1 inline representation for historical
   private-plan bytes and generic non-tagged file, TOML, and opaque targets. It
@@ -549,6 +595,29 @@ other representation is accepted.
   unknown property, duplicate key, wrong JSON value type, empty/over-bound
   array or value, member mismatch, noncanonical hash, or malformed JSON is
   tolerated.
+- A JSON object with `kind: "claude_settings_owned_values_v1"` is the Claude
+  user-settings representation. It contains exactly `kind`,
+  `expected_state_hash`, `owned_env`, and `owned_hooks` in canonical write
+  order. The lowercase 64-hex hash covers the complete desired settings bytes.
+  `owned_env` is an ordered array of exactly 5 default entries or exactly 8
+  explicit-content entries whose unique canonical keys map 1:1 to the target's
+  env members and whose string values are 1..2,048 UTF-16 units.
+  `owned_hooks` is the ordered 11-event array defined under the Claude adapter;
+  each record contains exactly its event name, executable command, ordered
+  arguments, and `timeout_seconds: 5`. The command and arguments remain private
+  plan data. Missing, duplicate, unknown, reordered, over-bound, noncanonical,
+  or adapter/kind/label-mismatched data is `recovery_required` before target
+  activity.
+
+For the Claude settings target, private-plan and public projection members use
+one closed order and naming rule. Owned env members come first as
+`env.<ENV_NAME>`, followed by all Hook members as `hooks.<EventName>` in the
+canonical Hook order. A default plan therefore has 5 env plus 11 Hook members
+(16 total); explicit content capture has 8 env plus 11 Hook members (19 total).
+The three content-gate keys are preserved but are not members when explicit
+capture is absent. `owned_env` stores the env name without the `env.` prefix
+and maps 1:1 in order to the env-member slice; `owned_hooks` stores the event
+name and maps 1:1 in order to the Hook-member slice.
 
 The tagged arm is valid only for a `SetupTargetKind.Json` target owned by the
 `github-copilot` adapter with label exactly
@@ -564,6 +633,26 @@ tagged object preserves only the owned desired values and expected complete-file
 hash, not a persisted rendered settings document or unowned input. A malformed,
 unknown, invalid target-kind/arm, or inline arm on either VS Code JSON record is
 `recovery_required`, before registry/platform/target work.
+
+The Claude tagged arm is valid only for a `SetupTargetKind.Json` target owned
+by `claude-code` with label exactly `claude-code-user-settings`. That record
+must use `claude_settings_owned_values_v1`; it cannot use inline or
+`jsonc_owned_values_v1`. The legacy inline and GitHub JSONC tagged fixture bytes
+remain unchanged. This is an additive arm in the same unshipped private-plan v1
+contract, not a migration, fallback, or schema-v2 path.
+
+Restart compatibility must use the two actual committed v1 fixtures created by
+the Issue #66/#67 production serializers. The committed historical ledger row
+is already terminal `applied`, its synthetic fixture hashes do not bind to the
+committed private-plan target bytes, and it has no terminal transaction journal.
+Storage load/reopen and status projection preserve the fixture, while a fresh
+production command composition fails closed during mandatory recovery with
+`recovery_required` before status, same-ID apply/rollback, or a new plan can
+begin. Append compatibility is proved through the production storage writer
+under the setup lock, preserving the historical row and private-plan bytes.
+Successful apply/status/rollback restart evidence uses a newly generated current
+schema-v1 plan in a fresh setup root. No fabricated older version, fixture
+rewrite, compatibility shim, or permissive parse path is allowed.
 
 ## Ownership ledger v1
 
@@ -1257,9 +1346,252 @@ caller-managed and are linked to the official SDK observability contract rather
 than inferred. App/SDK success means the sample is available; it does not mean
 the caller used it or a trace arrived.
 
-## Endpoint and error-state detection
+## Claude Code adapter
 
-Before returning a writable plan, the adapter probes the selected loopback port.
+Adapter ID is `claude-code`. It reuses the Issue #66 storage, transaction,
+status, recovery, concurrency, and rollback coordinators. It does not own a
+second public DTO or transaction path.
+
+The adapter/backend/CLI source contract is:
+
+| Selected target | Adapter producer | Physical target DTO | Consumer/mutation owner |
+| --- | --- | --- | --- |
+| `cli` | strict Claude version and execution-context detection, user settings reader, higher-priority configuration observation, Local Monitor endpoint probe | one `claude-code-user-settings` JSON target with `restart_agent_process` | generic #66 file transaction with transient Claude-settings materialization |
+| `app-sdk` | canonical fixed Python and TypeScript guidance | `claude-agent-sdk-python-guidance` then `claude-agent-sdk-typescript-guidance`; both no-write guidance | caller only; setup has no file, environment, backup, or rollback target |
+| `all` | CLI producer then both SDK guidance records | the same records in that order | each record keeps the owner above; first failure returns no partial plan |
+
+### Version and execution-context detection
+
+Detection runs `claude --version` once through the bounded process runner. A
+supported result is exactly one normal `MAJOR.MINOR.PATCH (Claude Code)` line,
+apart from its final platform newline, at version `2.1.207` or newer. An older
+normal release, a prerelease/build-suffixed version, malformed or additional
+output, nonzero exit, timeout, or missing executable returns
+`unsupported_version` or `target_not_installed` as applicable without settings
+or endpoint activity. Normal future releases are accepted.
+
+The execution context is one of:
+
+- Windows native: Windows process, not WSL2; writable through the existing file
+  transaction and `--allow-wsl2-routing` is invalid;
+- WSL2 repository-run: Linux process, non-empty `WSL_DISTRO_NAME`, and a bounded
+  kernel release containing the Microsoft marker are all required;
+- native macOS/Linux or an incomplete WSL observation: no Issue #68 installer
+  target and planning fails `unsupported_target`.
+
+A verified WSL2 context without `--allow-wsl2-routing` returns
+`wsl2_opt_in_required`. With the opt-in, it follows the Claude readiness probe
+below. The adapter does not discover or configure a WSL gateway, Windows host
+alias, non-loopback bind, Host-header relaxation, NAT forwarding, or
+Windows-to-WSL mutation bridge. Windows Release ZIP execution does not claim
+WSL settings mutation.
+
+### Claude Local Monitor readiness recognition
+
+Windows-native and verified, opted-in WSL2 CLI plans both probe readiness. The
+same check runs again during apply revalidation after recovery and all other
+adapter validation, but before backup, journal, ledger transition, or target
+write. The probe is closed and bounded:
+
+- send exactly `GET <canonical-origin>/health/ready` with redirects disabled;
+- enforce one 500 ms total budget over connect, request, response headers, and
+  body read;
+- reject a trustworthy valid `Content-Length` over 4096 immediately;
+  otherwise read at most 4096 payload bytes plus one sentinel byte;
+- recognize Local Monitor only for HTTP 200 and a complete JSON object that
+  validates the exact readiness body defined in
+  [telemetry ingestion](../layers/telemetry-ingestion.md): exactly top-level
+  `status`, `checks`, and `degraded_reasons`, no duplicate or unknown fields,
+  the documented exact checks `loopback_bound`, `db_open`,
+  `migration_complete`, `writer_running`, `projection_worker_running`,
+  `ingestion_accepting`, `projection_lag_seconds`, `projection_backlog`,
+  `span_projection_lag_seconds`, `span_projection_backlog`, and
+  `projection_failure_count` with their documented types,
+  `checks.loopback_bound=true`, and `status` exactly `ready` or `degraded` with
+  the documented HTTP/status/reason invariants. This identity accepts a healthy
+  or momentarily degraded Local Monitor but not a foreign JSON service;
+- connection refused/no listener, connect/read/total timeout, redirect, every
+  non-200 response including readiness `503`, another transport failure,
+  oversized body, malformed/non-object JSON, missing/duplicate/unknown/wrong-
+  typed fields, false loopback identity, or an invalid readiness invariant is a
+  hard no-plan/no-write failure. Windows native returns
+  `endpoint_unreachable`; verified WSL2 returns
+  `wsl2_routing_unavailable`.
+
+Claude readiness failure never becomes `monitor_not_running`,
+`port_owned_by_foreign_process`, or `start_local_monitor`; those outcomes
+belong only to the GitHub Copilot liveness probe below. No retry, sleep,
+gateway discovery, non-loopback fallback, Host-header relaxation, or NAT path
+is permitted.
+
+### Claude user settings ownership
+
+The writable document is the current user's official
+`~/.claude/settings.json`. It is read with the same 1 MiB plus one sentinel
+bound used for setup JSON settings. The dedicated Claude renderer preserves
+unrelated JSON properties, comments, existing Hook array order, and final
+newline. Malformed, duplicate, unsupported, or oversize input fails closed as
+`malformed_settings`; setup never replaces it with an empty document.
+
+The default owned `env` values are exactly:
+
+```text
+CLAUDE_CODE_ENABLE_TELEMETRY=1
+CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+OTEL_TRACES_EXPORTER=otlp
+OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=<canonical-origin>/v1/traces
+```
+
+Only explicit `--include-content-capture` adds these three owned values, all
+set to string `1`:
+
+```text
+OTEL_LOG_USER_PROMPTS
+OTEL_LOG_TOOL_DETAILS
+OTEL_LOG_TOOL_CONTENT
+```
+
+Without that option, setup preserves those three keys whether absent or
+present. It never sets `OTEL_LOG_RAW_API_BODIES`, metrics/log exporters,
+`OTEL_EXPORTER_OTLP_HEADERS`, another authorization header, credential, global
+resource attribute, service name, or caller identity.
+
+The process invocation directory is the selected Claude project root for this
+Issue #68 observation. Setup reads exactly
+`<invocation-directory>/.claude/settings.local.json` and then
+`<invocation-directory>/.claude/settings.json`. It does not scan a parent or
+child directory, infer a Git root, or discover configuration through
+`--add-dir`.
+
+For each managed env key, effective precedence is exactly current process
+environment > selected managed object > local settings > project settings >
+the writable user target. Setup evaluates the highest source in which that key
+is present. When that value equals the requested value, setup reports only
+redacted read-only evidence; lower sources are irrelevant and are neither
+merged nor used as conflicting evidence. A differing value maps as follows:
+
+| Highest present source | Non-content managed env key | Any of `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`, `OTEL_LOG_TOOL_CONTENT` |
+| --- | --- | --- |
+| current process environment | `environment_override_conflict` | `content_policy_conflict` |
+| selected managed object | `managed_policy_conflict` | `content_policy_conflict` |
+| local or project settings | `environment_override_conflict` | `content_policy_conflict` |
+
+Without `--include-content-capture`, setup does not manage or evaluate those
+three content keys on any source.
+
+Windows native selects at most one complete managed settings object in this
+exact tier order:
+
+1. the `Settings` string value under
+   `HKLM\SOFTWARE\Policies\ClaudeCode`;
+2. `C:\Program Files\ClaudeCode\managed-settings.json`;
+3. the `Settings` string value under
+   `HKCU\SOFTWARE\Policies\ClaudeCode`.
+
+Once a higher tier object is present, there is no per-key merge or fallthrough
+to a lower tier. WSL2 observes only
+`/etc/claude-code/managed-settings.json`. Server-delivered managed settings,
+macOS MDM/plist, and `managed-settings.d` cannot be observed by the version-1
+static installer and remain outside this observation; their absence is not a
+successful verification claim. Native macOS installation remains out of
+scope.
+
+Every observed settings file, including user, local, project, and the selected
+file-based managed source, is read with a 1 MiB limit plus one sentinel byte.
+Its root must be an object with no duplicate properties; unrelated properties
+remain permitted and are preserved in the writable user target. An observed
+`env` member must be a nested object with string values. Malformed, duplicate,
+wrong-typed, or oversized input fails `malformed_settings`. Paths and observed
+values remain private. No conflict result writes settings, backup, journal, or
+ledger lifecycle state. Public projection reports only fixed
+endpoint/protocol/signal/process-inheritance state names, never source paths or
+values.
+
+### Claude Hooks
+
+The CLI target manages all Hook events already supported by the installed
+Claude mapper, in this canonical order:
+
+```text
+SessionStart
+UserPromptSubmit
+PreToolUse
+PermissionRequest
+PostToolUse
+PostToolUseFailure
+SubagentStart
+SubagentStop
+Stop
+StopFailure
+SessionEnd
+```
+
+For every event, setup adds one command-handler group with matcher omitted,
+handler timeout `5` seconds, and an exec-form command. The private command and
+arguments invoke the installed Local Monitor `hook-forward` command with the
+canonical loopback endpoint, `--timeout-ms 250`, and exact
+`--source claude-code` plus the bounded detected source provenance required by
+the existing Hook forwarding contract. Repository mode invokes the Local
+Monitor project with `dotnet run --no-build`; Release mode invokes the packaged
+Local Monitor executable. The PowerShell wrapper does not rewrite those
+private arguments.
+
+Hook command resolution is an injected, closed internal observation. Release
+mode accepts only the packaged Config CLI layout under `app/config-cli` and
+resolves the packaged Local Monitor executable from its parent `app`
+directory. Repository mode accepts only the compiled Config CLI's fixed
+repository-relative Local Monitor project. Neither mode searches the current
+directory or `PATH`. An unknown or ambiguous layout fails closed as
+`internal_error`. The private Hook command arguments may contain the absolute
+packaged executable or repository project path only inside the private plan and
+transient target; public DTOs, the ownership ledger, journal, diagnostics, and
+logs never contain that path or Hook command.
+
+Every non-owned Hook entry remains in its original position. Setup owns only an
+entry whose command and ordered arguments identify its exact
+`hook-forward --source claude-code` form. An identical owned entry is no-op; a
+different command, argument order/value, or timeout in such an entry returns
+`hook_command_conflict` and performs no write. Setup never deletes, reorders,
+or takes ownership of another Hook command.
+
+Hook capture and OTel content gates are independent. Because the default event
+set includes prompt and tool events that can carry raw content, every
+successful CLI plan emits `claude_hooks_capture_raw_content`, even when
+`--include-content-capture` is absent. Explicit OTel content capture also emits
+`content_capture_sensitive` and `review_content_capture_warning`.
+
+Plan and revalidation render complete desired settings only in bounded memory,
+calculate the expected state hash, and discard the bytes before persistence.
+The private plan uses only `claude_settings_owned_values_v1`. Apply-time
+revalidation rereads the version, execution context, endpoint, higher-priority
+sources, env members, Hook ownership, and current document under the setup
+lock, returns one transient materialization for the changed record, and applies
+the generic identity/cardinality/hash gate before any artifact or write.
+Status and recovery never rerun the adapter or materialize the document.
+
+### Agent SDK guidance
+
+Agent SDK guidance is caller-managed and has no setup mutation or rollback
+target. The fixed Python guidance uses `ClaudeAgentOptions(env=...)`; the fixed
+TypeScript guidance uses `options.env`. Both instruct the caller to merge with,
+not replace, its existing process environment and to flush telemetry before a
+short-lived process exits. Guidance contains no discovered application path,
+token, authorization header, raw setting value, or caller code. Its success
+means only that guidance is available.
+
+### Claude completion boundary
+
+A successful changed CLI target returns next action
+`restart_claude_process`; the target restart requirement is
+`restart_agent_process`. Setup verifies only static settings and endpoint
+reachability. It does not emit `run_first_trace_doctor`, wait for telemetry, or
+claim a first real trace. Issue #104 owns first-real-trace and Doctor mapping.
+
+## GitHub Copilot endpoint and error-state detection
+
+Before returning a writable GitHub Copilot plan, the `github-copilot` adapter
+probes the selected loopback port.
 Apply repeats the probe for every distinct writable endpoint after recovery and
 all other validation, but before backups or any write:
 
@@ -1296,6 +1628,7 @@ The warning allowlist is closed and exhaustive:
 | `shared_user_environment_affects_other_processes` | Windows CLI user-environment target is planned |
 | `vscode_non_default_profiles_not_modified` | one or both channels have a non-default profile; emitted once per command, with no remediation action |
 | `cli_trace_protocol_override_not_modified` | existing trace-specific protocol override already equals `http/protobuf` and is left untouched |
+| `claude_hooks_capture_raw_content` | Claude CLI plan manages the default prompt/tool-capable Hook set, independently of OTel content-gate selection |
 
 The `next_actions` allowlist is also closed and exhaustive:
 
@@ -1309,10 +1642,11 @@ The `next_actions` allowlist is also closed and exhaustive:
 | `run_vscode_policy_diagnostics` | emitted whenever `managed_policy_unverified` is returned for VS Code |
 | `restart_vscode` | one or more eligible VS Code target records have their own bounded `--status` observation completed with exit code `0`; the action is deduplicated, but each record retains its independent requirement |
 | `restart_terminal_session` | a Windows CLI user-environment change requires a new process |
+| `restart_claude_process` | Claude user settings changed and a new Claude process is required to inherit them |
 | `start_local_monitor` | endpoint probe proves no listener |
 | `review_content_capture_warning` | explicit sensitive content capture was requested |
 | `review_cli_trace_protocol_override` | trace-specific protocol override blocks the requested global protocol |
-| `run_first_trace_doctor` | handoff to Issue #69 after static setup; never performed here |
+| `run_first_trace_doctor` | reserved for downstream first-trace work; Issue #68 never emits it and Claude handoff is Issue #104 |
 | `rerun_requested_setup_command` | mandatory recovery completed instead of the requested command |
 
 ## Security and evidence rules
@@ -1362,6 +1696,11 @@ Focused validation covers:
   JSON record fail `recovery_required`, as do unknown/missing properties, wrong
   kind/value type, 0/1/2048/2049 string boundaries, duplicate/reordered keys,
   non-1:1 members, invalid target-kind/arm relation, and non-lowercase hashes;
+- Claude private-plan arm validation accepts only the exact adapter/kind/label,
+  1..8 ordered unique env members, the exact 11 ordered Hook events, bounded
+  command/argument/value strings, timeout 5, and lowercase expected hash; it
+  rejects inline/GitHub-tagged substitution, unknown/missing/duplicate/reordered
+  fields, 0/1/2048/2049 string boundaries, and any public/ledger/log leak;
 - JSONC/TOML malformed fail-closed behavior;
 - file backup/temp/atomic replace and non-reparse path policy;
 - deterministic stale apply/rollback and lock contention;
@@ -1426,7 +1765,7 @@ Focused validation covers:
   no public setup override;
 - setup CLI recognition covers all four exact verbs, recognized-verb option
   failures, bare `setup`, unknown setup verbs, and an unknown non-setup
-  top-level command; all 29 result codes are mapped exhaustively to process
+  top-level command; all 34 result codes are mapped exhaustively to process
   exits and exact stdout/stderr behavior;
 - adapter parsing covers the 1/128 UTF-16-code-unit lowercase-slug boundaries,
   malformed/uppercase/over-bound input, plan registry resolution only after
@@ -1473,6 +1812,20 @@ Focused validation covers:
   equivalence when that unowned target remains current, drifts, or is
   unavailable;
 - VS Code/CLI/App-SDK detection and plan contracts;
+- Claude strict-version, Windows-native/WSL2/native-Unix partition, explicit
+  routing opt-in, readiness reachability, user-settings env/Hook ownership,
+  content-policy conflict, and Python/TypeScript SDK guidance contracts;
+- Claude settings preservation covers comments, unrelated JSON, Hook ordering,
+  stale plan and final guard, single-writable-target compensation, rollback
+  bytes, idempotent duplicate apply, and non-waiting barrier-controlled
+  concurrent apply without sleeps or retries; Claude `all` has one writable
+  JSON target plus two nonparticipating guidance targets, so generic Issue #66
+  `SetupCompensationTests` own reverse-order multi-writable-target proof;
+- actual committed ownership-ledger/private-plan v1 fixtures are copied to a
+  fresh runtime root and exercised through storage close/reopen, projection,
+  production missing-journal fail-closed behavior, and storage-writer append;
+  the historical row/private-plan bytes remain unchanged, while a separately
+  generated current-v1 Claude plan proves the successful restart lifecycle;
 - mixed-member target-operation aggregation;
 - per-target and change-set status state/rollback aggregation for mixed
   writable and guidance targets;
@@ -1499,7 +1852,7 @@ The setup implementation must keep this requirement-to-test mapping:
 | filter, priority, deterministic tie-break, hard 100-row cap, truncation | `SetupStatusOrderingTests.Project_AppliesExactAdapterAndChangeSetFiltersBeforePriorityCapAndProjection`, `Project_PrioritizesRecoveryRowsThenPlannedThenTerminalAndPreservesTargetOrder`, `Project_UsesLowercaseCanonicalUuidOrdinalTieBreakWithinEqualPriorityAndTimestamp`, and `Project_CapsEligibleRowsAtOneHundredAndSetsTruncatedFromEligibleCount` cover filtering, ordering, cap, and truncation |
 | terminal pending environment notification artifact identity and notification-only target isolation | `SetupRecoveryTests` use actual `SetupApplyCoordinator` artifacts for successful replay and valid-64-hex tampering of journal prior/desired hashes and ledger previous/applied aggregates; they also cover missing/corrupt/rebound plan or backup, canonical backup reference, applied/restored/rolled-back terminal lifecycles, current-target drift, no target reads/writes, preserved terminal durable lifecycle, fixed failed overlay, and unchanged completed-notification handling |
 | closed apply/error command composition | `SetupCommandDispatcherTests.DispatchApply_ExceptionalCoordinatorFailureRetainsAdapterWithEmptyPayloads`, `SetupContractValidationTests.Serialize_WhenApplyCannotUsePersistedPlan_PreservesTheArtifactFreeExceptionalResult`, and `ConfigurationSetupIntegrationTests.Apply_RemovedAdapter_ReturnsTheExceptionalPairWithoutChangingDurableBytesOrStartingTargetActivity` / `Apply_MacOsCliPlan_ReturnsUnsupportedTargetBeforeAnyShellProfileOrMutationActivity` cover the closed exceptional `apply` pairs and artifact-free no-write behavior |
-| setup.v1 recognition, generic adapter parsing, and exhaustive process mapping | `SetupOptionsTests` cover the 1/128 lowercase-slug bounds and recognized-verb grammar; `CliApplicationTests` cover each of the 29 result-code exits, one-JSON stdout/fixed stderr, bare/unknown setup verbs with no JSON/help/lock, and preserved legacy unknown-top-level behavior |
+| setup.v1 recognition, generic adapter parsing, and exhaustive process mapping | `SetupOptionsTests` cover the 1/128 lowercase-slug bounds and recognized-verb grammar; `CliApplicationTests` cover each of the 34 result-code exits, one-JSON stdout/fixed stderr, bare/unknown setup verbs with no JSON/help/lock, and preserved legacy unknown-top-level behavior |
 | exact lock/recovery ownership and post-recovery resolution | `SetupCommandDispatcherTests.DispatchPlan_WhenLockIsBusyStopsBeforeRecoveryAndAdapterResolution`, `DispatchApply_ApplicableRowRunsExactlyOneLockAcquisitionAndOneRecoveryPass`, and `DispatchStatus_DelegatesValidatedSameInstanceWithoutOuterLockOrRecovery`, plus `SetupStatusServiceTests.Status_ProductionServiceCompletesRecoveryReadBeforeStatusReadAndProjection` and `Status_LockContentionReturnsSetupBusyWithoutRunningRecoveryOrProjection`, cover lock/recovery ownership and post-recovery resolution |
 | diagnostics carrier and non-status target projection ownership | `SetupAdapterRegistryTests` and `SetupCommandDispatcherTests` serialize production plan/revalidation success and sanitized failure carriers, prove closed warning/action preservation and exception redaction, adapter-versus-ledger target source/order, prospective plan versus actual apply rollback availability, and rollback-false results |
 | no-change persistence and missing durable artifact distinctions | `SetupCommandDispatcherTests` prove `plan`/`no_changes` persists a private plan plus `planned` ledger row and later apply reaches terminal `no_changes`; paired apply/rollback/status cases distinguish no row, orphan plan, matching row with missing/unreadable/mismatched plan, and ineligible lifecycle without target activity |
@@ -1507,6 +1860,10 @@ The setup implementation must keep this requirement-to-test mapping:
 | Copilot CLI OS and exact environment contract | `CopilotCliSetupAdapterTests` cover the five-member explicit-capture allowlist, forbidden global identity/resource/header/credential keys, matching/conflicting detect-only trace protocol override, environment-only managed warning, Windows apply, and macOS/Linux no-write apply refusal; contract shape/validation tests close the new code/warning/action values |
 | cross-platform private setup root | `SetupRuntimeTests` cover Windows/macOS/Linux local-application-data mappings, absolute and invalid/unset `XDG_DATA_HOME`, injected platform base, and absence of a CLI/environment override |
 | Local Monitor recognition | `GitHubCopilotEndpointProbeTests` cover the 500 ms/no-redirect/4096-byte-plus-sentinel or oversized-`Content-Length`/exact-JSON matrix and fixed refused-versus-timeout/connected failure mapping |
+| Claude nested settings and private-plan arm | `ClaudeSettingsDocumentTests` and `SetupStorageTests` cover exact nested ownership, preservation, malformed/duplicate/oversize input, both existing v1 fixture byte identities, `claude_settings_owned_values_v1` bounds and arm relation, and secret/path/command non-leakage outside the private plan |
+| Claude adapter and WSL2 contract | `ClaudeCodeSetupAdapterTests` cover strict 2.1.207 version floor/future version acceptance, prerelease/older/malformed rejection, Windows-native and three-factor WSL2 classification, explicit opt-in, no gateway fallback, and the `/health/ready` matrix: exact ready/degraded identity, refused/no-listener, connect/read/total timeout, every redirect/non-200 including 503, 4096/4097 and `Content-Length` oversize, malformed/non-object/duplicate/unknown/wrong-typed/false-loopback/invalid-invariant responses, with platform-specific fixed codes; they also cover env/content/Hook rules, restart guidance, and Python/TypeScript no-write guidance |
+| Claude cross-surface integration | `ClaudeConfigurationSetupIntegrationTests` cover adapter to registry/dispatcher/`setup.v1`; `ClaudeSetupTransactionHardeningTests` cover apply-time revalidation, stale/final guard, compensation, rollback, idempotency, and deterministic lock contention; `ClaudeSetupPrivacyEvidenceTests` cover private-versus-repository-safe artifacts; and `LocalMonitorScriptTests.ClaudeSetup_RepositoryAndReleaseWrappersPreserveTransportParityWithoutDotnetAndIsolatedUserState` covers the physical Config CLI, extracted Release wrapper, exact `--allow-wsl2-routing` forwarding, no-dotnet execution, isolated user state, and stdout/stderr/exit parity |
+| Actual-v1 restart compatibility after Claude arm | `SetupStorageTests` and `ClaudeSetupMigrationCompatibilityTests` copy the committed `ownership-ledger.v1.json` and `private-plan.v1.json`, run storage write-close-reopen and historical status projection, prove fresh production commands fail closed at missing-journal recovery without target activity, append/reopen a current schema-v1 Claude plan through the production storage writer while preserving the historical private-plan bytes and ledger row, separately exercise that plan's apply/status/rollback lifecycle across fresh-root restart, and use no v0/v2 or fallback parsing |
 
 Required repository validation remains:
 

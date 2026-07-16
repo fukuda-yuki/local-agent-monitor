@@ -22,9 +22,10 @@ internal static class CliHelpText
           config-cli collector-codex-app-config
           config-cli validate-resource-attributes <OTEL_RESOURCE_ATTRIBUTES>
           config-cli setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture]
+          config-cli setup plan --adapter claude-code --target <cli|app-sdk|all> [--endpoint <loopback-http-url>] [--include-content-capture] [--allow-wsl2-routing]
           config-cli setup apply --change-set <uuid-v7>
           config-cli setup rollback --change-set <uuid-v7>
-          config-cli setup status [--adapter github-copilot]
+          config-cli setup status [--adapter <id>]
           config-cli doctor evaluate --input <file> [--json]
           config-cli doctor verification start --database <file> --source-surface <value> [--source-adapter <value>] --expires-at <RFC3339> [--json]
           config-cli doctor verification status --database <file> --verification-id <uuid-v7> [--json]
