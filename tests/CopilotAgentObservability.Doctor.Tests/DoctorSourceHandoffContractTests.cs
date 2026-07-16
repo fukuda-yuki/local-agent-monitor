@@ -98,7 +98,7 @@ public sealed class DoctorSourceHandoffContractTests
     }
 
     [Fact]
-    public void InvalidComposition_UsesFixedSanitizedError()
+    public void UnsafeObservation_UsesFixedSanitizedError()
     {
         var observations = new[]
         {
@@ -111,18 +111,47 @@ public sealed class DoctorSourceHandoffContractTests
                 ObservedAt),
         };
 
-        var exception = Assert.Throws<TargetInvocationException>(() => InvokeDirect(
+        AssertInvalidComposition(() => InvokeDirect(
             "github-copilot-vscode",
             null,
             ObservedAt,
             CreateSetupContribution(),
             CreateRuntimeContribution(),
             observations));
-        var argument = Assert.IsType<ArgumentException>(exception.InnerException);
+    }
 
-        Assert.Equal(InvalidCompositionMessage, argument.Message);
-        Assert.DoesNotContain("secret-value", argument.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("prompt", argument.Message, StringComparison.OrdinalIgnoreCase);
+    [Fact]
+    public void InvalidSourceIdentity_UsesFixedSanitizedError()
+    {
+        AssertInvalidComposition(() => InvokeDirect(
+            "Claude Code",
+            null,
+            ObservedAt,
+            CreateSetupContribution(),
+            CreateRuntimeContribution(),
+            []));
+    }
+
+    [Fact]
+    public void InactiveVerification_UsesFixedSanitizedError()
+    {
+        var verification = new DoctorVerification(
+            "01890abc-def0-7000-8000-000000000002",
+            "claude-code",
+            null,
+            DoctorVerificationState.Cancelled,
+            2,
+            ObservedAt,
+            ObservedAt.AddMinutes(5),
+            null,
+            ObservedAt.AddMinutes(1),
+            []);
+
+        AssertInvalidComposition(() => InvokeCompletion(
+            verification,
+            ObservedAt,
+            CreateSetupContribution(),
+            CreateRuntimeContribution()));
     }
 
     [Fact]
@@ -151,6 +180,17 @@ public sealed class DoctorSourceHandoffContractTests
     [Fact]
     public void ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore() =>
         AssertSourceHandoff("claude-code");
+
+    private static void AssertInvalidComposition(Action action)
+    {
+        var exception = Assert.Throws<TargetInvocationException>(action);
+        var argument = Assert.IsType<ArgumentException>(exception.InnerException);
+
+        Assert.Equal(InvalidCompositionMessage, argument.Message);
+        Assert.DoesNotContain("secret-value", argument.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("prompt", argument.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Claude Code", argument.Message, StringComparison.Ordinal);
+    }
 
     private static void AssertSourceHandoff(string expectedSourceSurface)
     {
