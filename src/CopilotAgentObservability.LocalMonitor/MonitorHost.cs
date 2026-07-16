@@ -76,6 +76,8 @@ internal static class MonitorHost
         builder.Services.AddRazorPages();
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(health);
+        var doctorApplication = testOptions?.DoctorApplication ?? StatelessDoctorHttpApplication.Instance;
+        builder.Services.AddSingleton(doctorApplication);
 
         var compatibilityStore = testOptions?.SourceCompatibilityStore
             ?? new SqliteSourceCompatibilityStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
@@ -167,7 +169,14 @@ internal static class MonitorHost
         {
             if (!IsValidHostHeader(context.Request.Host.Host))
             {
-                await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_host", "Host header must be loopback.");
+                if (DoctorRoutes.IsDoctorPath(context.Request.Path))
+                {
+                    await DoctorRoutes.WriteInvalidHostAsync(context);
+                }
+                else
+                {
+                    await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_host", "Host header must be loopback.");
+                }
                 return;
             }
 
@@ -175,7 +184,7 @@ internal static class MonitorHost
         });
         app.UseStaticFiles();
         app.MapRazorPages();
-        DoctorRoutes.Map(app);
+        DoctorRoutes.Map(app, doctorApplication);
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;
@@ -1530,6 +1539,8 @@ internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMet
 
 internal sealed class MonitorHostTestOptions
 {
+    public IDoctorHttpApplication? DoctorApplication { get; init; }
+
     public IngestionQueue? Queue { get; init; }
 
     public IIngestionCommitStore? IngestionCommitStore { get; init; }
