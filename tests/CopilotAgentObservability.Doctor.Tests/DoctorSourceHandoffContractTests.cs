@@ -141,7 +141,30 @@ public sealed class DoctorSourceHandoffContractTests
     }
 
     [Fact]
-    public void ManifestBackedSourceHandoffs_AreImplementedOutsideDoctorCore()
+    public void GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore() =>
+        AssertSourceHandoff("github-copilot-vscode");
+
+    [Fact]
+    public void GitHubCopilotCliSourceHandoff_IsImplementedOutsideDoctorCore() =>
+        AssertSourceHandoff("github-copilot-cli");
+
+    [Fact]
+    public void ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore() =>
+        AssertSourceHandoff("claude-code");
+
+    private static void AssertSourceHandoff(string expectedSourceSurface)
+    {
+        var doctorAssembly = typeof(DoctorFactSnapshot).Assembly;
+        var registrations = SourceHandoffRegistrations();
+
+        Assert.DoesNotContain(registrations, registration => registration.Type.Assembly == doctorAssembly);
+        Assert.Single(registrations.Where(registration => string.Equals(
+            registration.SourceSurface,
+            expectedSourceSurface,
+            StringComparison.Ordinal)));
+    }
+
+    private static IReadOnlyList<(Type Type, string SourceSurface)> SourceHandoffRegistrations()
     {
         var doctorAssembly = typeof(DoctorFactSnapshot).Assembly;
         var interfaceType = RequireDoctorType("IDoctorSourceHandoff");
@@ -154,22 +177,16 @@ public sealed class DoctorSourceHandoffContractTests
         }
         .Distinct()
         .SelectMany(assembly => assembly.GetTypes())
-        .Where(type => !type.IsAbstract && interfaceType.IsAssignableFrom(type))
+        .Where(type => !type.IsAbstract && !type.IsInterface && interfaceType.IsAssignableFrom(type))
         .ToArray();
 
-        Assert.DoesNotContain(implementationTypes, type => type.Assembly == doctorAssembly);
-
-        var actualSurfaces = implementationTypes
-            .Select(type => type.GetCustomAttributes(attributeType, inherit: false).SingleOrDefault())
-            .Where(attribute => attribute is not null)
-            .Select(attribute => Assert.IsType<string>(
-                attributeType.GetProperty("SourceSurface")!.GetValue(attribute)))
-            .OrderBy(value => value, StringComparer.Ordinal)
-            .ToArray();
-
-        Assert.Equal(
-            ["claude-code", "github-copilot-cli", "github-copilot-vscode"],
-            actualSurfaces);
+        return implementationTypes.Select(type =>
+        {
+            var attribute = Assert.Single(type.GetCustomAttributes(attributeType, inherit: false));
+            var sourceSurface = Assert.IsType<string>(
+                attributeType.GetProperty("SourceSurface")!.GetValue(attribute));
+            return (type, sourceSurface);
+        }).ToArray();
     }
 
     private static object CreateSetupContribution() => Activator.CreateInstance(
