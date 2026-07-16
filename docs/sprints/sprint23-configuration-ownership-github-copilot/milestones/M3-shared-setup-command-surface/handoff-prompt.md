@@ -8,7 +8,7 @@ current requirements and specifications remain authoritative.
 ---
 
 ```
-Repository: C:\Users\mwam0\.codex\worktrees\80e4\copilot-agent-observability
+Repository: repository root (verify before editing)
 Branch: codex/issues-66-67-guided-setup
 Implementation baseline: 399f441 (working tree clean before this handoff-only documentation change)
 Do not push or create a PR unless the user explicitly asks.

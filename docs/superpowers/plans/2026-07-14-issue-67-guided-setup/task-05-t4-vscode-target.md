@@ -15,7 +15,7 @@ may run in parallel with tasks 06/07 only after that gate; the file sets remain
 disjoint.
 
 **Worktree / branch:** Run only from
-`C:\Users\mwam0\Documents\Codex\copilot-agent-observability` on
+the repository root on
 `codex/issues-66-67-guided-setup`. Before editing and before committing, verify
 the root/branch plus `git status --short` and `git diff --name-only`; only
 `VsCodeTargetPartition.cs` and `VsCodeSetupAdapterTests.cs` may appear.

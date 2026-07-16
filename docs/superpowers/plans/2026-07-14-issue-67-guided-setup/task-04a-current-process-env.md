@@ -9,7 +9,7 @@ independent review before task-04b starts and before any T4/T5/T6 target task
 starts.
 
 **Worktree / branch:** Run only from
-`C:\Users\mwam0\Documents\Codex\copilot-agent-observability` on
+the repository root on
 `codex/issues-66-67-guided-setup`. Before editing and before committing, verify
 the root/branch plus `git status --short` and `git diff --name-only`; only the
 four owned paths below may appear.

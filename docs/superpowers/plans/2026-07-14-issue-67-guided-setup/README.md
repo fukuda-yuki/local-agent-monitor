@@ -184,7 +184,7 @@ concurrent edits.
 
 For every Codex run state explicitly: objective, owned scope, non-scope,
 constraints, completion criteria, validation commands, report destination,
-upstream gate, **worktree** `C:\Users\mwam0\Documents\Codex\copilot-agent-observability`,
+upstream gate, **worktree** repository root,
 and **branch** `codex/issues-66-67-guided-setup` — all in the task card. Before
 editing and before committing, the run verifies that root/branch, `git status
 --short`, and `git diff --name-only` contain only the card's owned paths, and

@@ -24,7 +24,8 @@ declare Issue #66 or the combined #66/#67 work finally complete. The subsequent
 Issue #67 T7 gate now wires `Program.cs` to the production dispatcher and proves
 real direct-CLI/wrapper `setup status` `status_ready`/exit-0 byte parity (see the
 T7 row below). T8 packaging/operator docs is now closed by the Release/repository
-integration row below; only T9 final joint review remains open.
+integration row below; T9 final reviews, pinned full validation, contradiction
+checks, and ledger reconciliation remain open.
 
 ## Issue #66 T2 closeout gate (2026-07-15)
 

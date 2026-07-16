@@ -14,4 +14,5 @@ canonical in requirements, spec, and interface documents.
 
 See [ledger.md](ledger.md) for current execution evidence.
 The current session-resume boundary is recorded in
-[the M3 implementation handoff](milestones/M3-shared-setup-command-surface/handoff-prompt.md).
+[the Issue #67 guided setup plan](../../superpowers/plans/2026-07-14-issue-67-guided-setup/README.md),
+starting with T9 final closeout.

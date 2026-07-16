@@ -12,7 +12,7 @@ and recovery reviews must all PASS after this task before T4/T5/T6 begins; T7
 remains blocked until those downstream tasks then pass.
 
 **Worktree / branch:** Run only from
-`C:\Users\mwam0\Documents\Codex\copilot-agent-observability` on
+the repository root on
 `codex/issues-66-67-guided-setup`. Before editing and before committing, verify
 the root/branch plus `git status --short` and `git diff --name-only`; only the
 owned paths below may appear.

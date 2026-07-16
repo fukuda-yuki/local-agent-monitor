@@ -236,7 +236,7 @@ git commit -m "Issue #67: feat(setup): freeze Copilot aggregate seam"
 
 **Report destination:** chat + ledger row per README policy.
 
-**Worktree/branch:** `C:\Users\mwam0\Documents\Codex\copilot-agent-observability`
+**Worktree/branch:** repository root
 on `codex/issues-66-67-guided-setup`.
 
 **Local commit subject:**

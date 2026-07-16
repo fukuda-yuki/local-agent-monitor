@@ -54,7 +54,7 @@ dotnet build CopilotAgentObservability.slnx
 git diff --check
 ```
 
-**Worktree/branch:** `C:\Users\mwam0\Documents\Codex\copilot-agent-observability`
+**Worktree/branch:** repository root
 on `codex/issues-66-67-guided-setup`.
 
 **Report destination:** chat + Task 01a's own evidence row in

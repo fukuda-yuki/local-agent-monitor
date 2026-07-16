@@ -79,7 +79,7 @@ dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservab
 git diff --check
 ```
 
-**Worktree/branch:** `C:\Users\mwam0\Documents\Codex\copilot-agent-observability`
+**Worktree/branch:** repository root
 on `codex/issues-66-67-guided-setup`.
 
 **Report destination:** chat + ledger row per the Issue #66 README policy,
