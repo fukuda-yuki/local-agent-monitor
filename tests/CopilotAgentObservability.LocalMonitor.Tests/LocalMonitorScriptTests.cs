@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -209,7 +210,7 @@ public class LocalMonitorScriptTests
     }
 
     [Fact]
-    public void ClaudeSetup_RepositoryAndReleaseWrappersPreserveWslOptInTransportParityWithoutDotnet()
+    public void ClaudeSetup_RepositoryAndReleaseWrappersPreserveTransportParityWithoutDotnetAndIsolatedUserState()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -269,7 +270,12 @@ public class LocalMonitorScriptTests
                 environment: null,
                 timeout: TimeSpan.FromMinutes(2));
 
-            var packagedSetup = Path.Combine(outputDirectory, "staging", "scripts", "setup.ps1");
+            var zipPath = Path.Combine(outputDirectory, "local-monitor-win-x64.zip");
+            var extractedRelease = Path.Combine(root, "extracted-release");
+            System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, extractedRelease);
+            var extractedReleaseBefore = SnapshotPackageTree(extractedRelease);
+            Assert.NotEmpty(extractedReleaseBefore);
+            var packagedSetup = Path.Combine(extractedRelease, "scripts", "setup.ps1");
             var hiddenPath = Directory.CreateDirectory(Path.Combine(root, "path-without-dotnet")).FullName;
             var release = RunBoundedProcess(
                 PowerShellExecutablePath(),
@@ -295,6 +301,78 @@ public class LocalMonitorScriptTests
             Assert.Equal("setup.v1", result.GetProperty("contract_version").GetString());
             Assert.Equal("invalid_arguments", result.GetProperty("code").GetString());
             Assert.Equal(JsonValueKind.Null, result.GetProperty("adapter").ValueKind);
+
+            var isolatedUser = Directory.CreateDirectory(Path.Combine(root, "isolated-user")).FullName;
+            var isolatedLocalAppData = Directory.CreateDirectory(Path.Combine(isolatedUser, "local-app-data")).FullName;
+            var isolatedAppData = Directory.CreateDirectory(Path.Combine(isolatedUser, "app-data")).FullName;
+            var isolatedClaudeConfig = Directory.CreateDirectory(Path.Combine(isolatedUser, ".claude")).FullName;
+            var dotnetRoot = Path.GetDirectoryName(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH")) ??
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet");
+            Assert.True(File.Exists(Path.Combine(dotnetRoot, "dotnet.exe")), "The isolated repository PATH is missing dotnet.exe.");
+            var isolatedEnvironment = new Dictionary<string, string?>
+            {
+                ["HOME"] = isolatedUser,
+                ["USERPROFILE"] = isolatedUser,
+                ["LOCALAPPDATA"] = isolatedLocalAppData,
+                ["APPDATA"] = isolatedAppData,
+                ["CLAUDE_CONFIG_DIR"] = isolatedClaudeConfig,
+                ["OTEL_EXPORTER_OTLP_HEADERS"] = "authorization=ISSUE68_PHYSICAL_SECRET_MARKER",
+                ["DOTNET_ROOT"] = dotnetRoot,
+                ["DOTNET_HOST_PATH"] = null,
+                ["PATH"] = dotnetRoot,
+            };
+            string[] validPlanArguments =
+            [
+                "plan",
+                "--adapter",
+                "claude-code",
+                "--target",
+                "cli",
+                "--endpoint",
+                "http://127.0.0.1:43199",
+            ];
+            var isolatedRepository = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-File", repositorySetup, .. validPlanArguments],
+                isolatedEnvironment,
+                TimeSpan.FromMinutes(2));
+            isolatedEnvironment["PATH"] = hiddenPath;
+            isolatedEnvironment["DOTNET_ROOT"] = null;
+            var isolatedRelease = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-File", packagedSetup, .. validPlanArguments],
+                isolatedEnvironment,
+                TimeSpan.FromMinutes(2));
+            var extractedReleaseAfter = SnapshotPackageTree(extractedRelease);
+
+            Assert.Equal(4, isolatedRepository.ExitCode);
+            Assert.Equal(Encoding.UTF8.GetBytes("target_not_installed\n"), isolatedRepository.StandardErrorBytes);
+            Assert.Equal(isolatedRepository.ExitCode, isolatedRelease.ExitCode);
+            Assert.Equal(isolatedRepository.StandardOutputBytes, isolatedRelease.StandardOutputBytes);
+            Assert.Equal(isolatedRepository.StandardErrorBytes, isolatedRelease.StandardErrorBytes);
+            using var validDocument = JsonDocument.Parse(isolatedRelease.StandardOutputBytes);
+            var validResult = validDocument.RootElement;
+            Assert.Equal("setup.v1", validResult.GetProperty("contract_version").GetString());
+            Assert.Equal("plan", validResult.GetProperty("command").GetString());
+            Assert.False(validResult.GetProperty("success").GetBoolean());
+            Assert.Equal("target_not_installed", validResult.GetProperty("code").GetString());
+            Assert.Equal("claude-code", validResult.GetProperty("adapter").GetString());
+            Assert.DoesNotContain("ISSUE68_PHYSICAL_SECRET_MARKER", isolatedRelease.StandardOutputText, StringComparison.Ordinal);
+            Assert.DoesNotContain("ISSUE68_PHYSICAL_SECRET_MARKER", isolatedRelease.StandardErrorText, StringComparison.Ordinal);
+            Assert.DoesNotContain(isolatedUser, isolatedRelease.StandardOutputText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(isolatedUser, isolatedRelease.StandardErrorText, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(Directory.EnumerateFiles(isolatedClaudeConfig, "*", SearchOption.AllDirectories));
+            var isolatedSetupRoot = Path.Combine(
+                isolatedLocalAppData,
+                "CopilotAgentObservability",
+                "LocalMonitor",
+                "setup");
+            if (Directory.Exists(isolatedSetupRoot))
+            {
+                Assert.Empty(Directory.EnumerateFiles(isolatedSetupRoot, "*", SearchOption.AllDirectories));
+            }
+
+            Assert.Equal(extractedReleaseBefore, extractedReleaseAfter);
         }
         finally
         {
@@ -781,6 +859,21 @@ public class LocalMonitorScriptTests
         throw new InvalidOperationException("pwsh.exe was not found on PATH.");
     }
 
+    private static PackageFileSnapshot[] SnapshotPackageTree(string packageRoot)
+    {
+        return Directory.EnumerateFiles(packageRoot, "*", SearchOption.AllDirectories)
+            .Select(path =>
+            {
+                using var stream = File.OpenRead(path);
+                return new PackageFileSnapshot(
+                    Path.GetRelativePath(packageRoot, path).Replace('\\', '/'),
+                    stream.Length,
+                    Convert.ToHexString(SHA256.HashData(stream)));
+            })
+            .OrderBy(snapshot => snapshot.RelativePath, StringComparer.Ordinal)
+            .ToArray();
+    }
+
     private static ProcessResult RunBoundedProcess(
         string fileName,
         IReadOnlyList<string> arguments,
@@ -843,4 +936,6 @@ public class LocalMonitorScriptTests
 
         public string StandardErrorText => Encoding.UTF8.GetString(StandardErrorBytes);
     }
+
+    private sealed record PackageFileSnapshot(string RelativePath, long Length, string Sha256);
 }

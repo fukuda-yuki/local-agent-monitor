@@ -638,12 +638,17 @@ remain unchanged. This is an additive arm in the same unshipped private-plan v1
 contract, not a migration, fallback, or schema-v2 path.
 
 Restart compatibility must use the two actual committed v1 fixtures created by
-the Issue #66/#67 production serializers. A fresh production composition loads
-them without rewriting their bytes, closes and reopens storage, and can project
-status and run the eligible apply/rollback lifecycle of the historical GitHub
-plan after the Claude arm is registered. Adding and reopening a new Claude plan
-must not change the historical fixture bytes or state transitions. No fabricated
-older version or permissive parse path is allowed.
+the Issue #66/#67 production serializers. The committed historical ledger row
+is already terminal `applied`, its synthetic fixture hashes do not bind to the
+committed private-plan target bytes, and it has no terminal transaction journal.
+Storage load/reopen and status projection preserve the fixture, while a fresh
+production command composition fails closed during mandatory recovery with
+`recovery_required` before status, same-ID apply/rollback, or a new plan can
+begin. Append compatibility is proved through the production storage writer
+under the setup lock, preserving the historical row and private-plan bytes.
+Successful apply/status/rollback restart evidence uses a newly generated current
+schema-v1 plan in a fresh setup root. No fabricated older version, fixture
+rewrite, compatibility shim, or permissive parse path is allowed.
 
 ## Ownership ledger v1
 
@@ -1807,13 +1812,16 @@ Focused validation covers:
   routing opt-in, readiness reachability, user-settings env/Hook ownership,
   content-policy conflict, and Python/TypeScript SDK guidance contracts;
 - Claude settings preservation covers comments, unrelated JSON, Hook ordering,
-  stale plan and final guard, reverse compensation, rollback bytes, idempotent
-  duplicate apply, and non-waiting barrier-controlled concurrent apply without
-  sleeps or retries;
+  stale plan and final guard, single-writable-target compensation, rollback
+  bytes, idempotent duplicate apply, and non-waiting barrier-controlled
+  concurrent apply without sleeps or retries; Claude `all` has one writable
+  JSON target plus two nonparticipating guidance targets, so generic Issue #66
+  `SetupCompensationTests` own reverse-order multi-writable-target proof;
 - actual committed ownership-ledger/private-plan v1 fixtures are copied to a
-  fresh runtime root and exercised through close/reopen and fresh production
-  composition before and after a Claude-arm plan; historical GitHub
-  status/apply/rollback and fixture bytes remain unchanged;
+  fresh runtime root and exercised through storage close/reopen, projection,
+  production missing-journal fail-closed behavior, and storage-writer append;
+  the historical row/private-plan bytes remain unchanged, while a separately
+  generated current-v1 Claude plan proves the successful restart lifecycle;
 - mixed-member target-operation aggregation;
 - per-target and change-set status state/rollback aggregation for mixed
   writable and guidance targets;
@@ -1850,8 +1858,8 @@ The setup implementation must keep this requirement-to-test mapping:
 | Local Monitor recognition | `GitHubCopilotEndpointProbeTests` cover the 500 ms/no-redirect/4096-byte-plus-sentinel or oversized-`Content-Length`/exact-JSON matrix and fixed refused-versus-timeout/connected failure mapping |
 | Claude nested settings and private-plan arm | `ClaudeSettingsDocumentTests` and `SetupStorageTests` cover exact nested ownership, preservation, malformed/duplicate/oversize input, both existing v1 fixture byte identities, `claude_settings_owned_values_v1` bounds and arm relation, and secret/path/command non-leakage outside the private plan |
 | Claude adapter and WSL2 contract | `ClaudeCodeSetupAdapterTests` cover strict 2.1.207 version floor/future version acceptance, prerelease/older/malformed rejection, Windows-native and three-factor WSL2 classification, explicit opt-in, no gateway fallback, and the `/health/ready` matrix: exact ready/degraded identity, refused/no-listener, connect/read/total timeout, every redirect/non-200 including 503, 4096/4097 and `Content-Length` oversize, malformed/non-object/duplicate/unknown/wrong-typed/false-loopback/invalid-invariant responses, with platform-specific fixed codes; they also cover env/content/Hook rules, restart guidance, and Python/TypeScript no-write guidance |
-| Claude cross-surface integration | `ClaudeConfigurationSetupIntegrationTests` cover adapter to registry/dispatcher/`setup.v1`, physical Config CLI, repository and Release wrappers, exact `--allow-wsl2-routing` forwarding, stdout/exit parity, apply-time revalidation, stale/final guard, reverse compensation, rollback, idempotency, and deterministic lock contention |
-| Actual-v1 restart compatibility after Claude arm | `SetupStorageTests` and `ClaudeConfigurationSetupIntegrationTests` copy the committed `ownership-ledger.v1.json` and `private-plan.v1.json`, run write-close-reopen through a fresh production composition, exercise historical GitHub status/apply/rollback as eligible, add/reopen a Claude plan, and byte-compare both historical fixtures without v0/v2 or fallback parsing |
+| Claude cross-surface integration | `ClaudeConfigurationSetupIntegrationTests` cover adapter to registry/dispatcher/`setup.v1`; `ClaudeSetupTransactionHardeningTests` cover apply-time revalidation, stale/final guard, compensation, rollback, idempotency, and deterministic lock contention; `ClaudeSetupPrivacyEvidenceTests` cover private-versus-repository-safe artifacts; and `LocalMonitorScriptTests.ClaudeSetup_RepositoryAndReleaseWrappersPreserveTransportParityWithoutDotnetAndIsolatedUserState` covers the physical Config CLI, extracted Release wrapper, exact `--allow-wsl2-routing` forwarding, no-dotnet execution, isolated user state, and stdout/stderr/exit parity |
+| Actual-v1 restart compatibility after Claude arm | `SetupStorageTests` and `ClaudeSetupMigrationCompatibilityTests` copy the committed `ownership-ledger.v1.json` and `private-plan.v1.json`, run storage write-close-reopen and historical status projection, prove fresh production commands fail closed at missing-journal recovery without target activity, append/reopen a current schema-v1 Claude plan through the production storage writer while preserving the historical private-plan bytes and ledger row, separately exercise that plan's apply/status/rollback lifecycle across fresh-root restart, and use no v0/v2 or fallback parsing |
 
 Required repository validation remains:
 
