@@ -330,11 +330,15 @@ public sealed class DoctorSourceHandoffContractTests
 
     private static void AssertSourceHandoff(string expectedSourceSurface)
     {
-        var registrations = SourceHandoffRegistrations();
-        Assert.Single(registrations.Where(registration => string.Equals(
+        var registration = Assert.Single(SourceHandoffRegistrations().Where(registration => string.Equals(
             registration.SourceSurface,
             expectedSourceSurface,
             StringComparison.Ordinal)));
+        var instance = Assert.IsAssignableFrom<IDoctorSourceHandoff>(
+            Activator.CreateInstance(registration.Type, nonPublic: true));
+
+        Assert.Equal(expectedSourceSurface, instance.SourceSurface);
+        Assert.Null(instance.ExpectedSourceAdapter);
     }
 
     private static IReadOnlyList<(Type Type, string SourceSurface)> SourceHandoffRegistrations()
