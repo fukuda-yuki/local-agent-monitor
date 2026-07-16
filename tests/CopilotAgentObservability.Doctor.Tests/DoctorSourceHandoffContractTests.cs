@@ -73,17 +73,7 @@ public sealed class DoctorSourceHandoffContractTests
     [Fact]
     public void VerificationComposition_UsesVerificationIdentityAndNoCallerObservations()
     {
-        var verification = new DoctorVerification(
-            "01890abc-def0-7000-8000-000000000001",
-            "claude-code",
-            null,
-            DoctorVerificationState.Active,
-            1,
-            ObservedAt,
-            ObservedAt.AddMinutes(5),
-            null,
-            null,
-            []);
+        var verification = ActiveVerification();
 
         var snapshot = InvokeCompletion(
             verification,
@@ -95,6 +85,41 @@ public sealed class DoctorSourceHandoffContractTests
         Assert.Null(snapshot.ExpectedSourceAdapter);
         Assert.Equal(verification.VerificationId, snapshot.VerificationId);
         Assert.Empty(snapshot.Observations);
+    }
+
+    [Fact]
+    public void CandidateComposition_CopiesVerificationScopeAndExpiry()
+    {
+        var verification = ActiveVerification();
+        var candidate = InvokeCandidate(
+            verification,
+            "01890abc-def0-7000-8000-000000000003",
+            DoctorEvidenceClass.RealSource,
+            DoctorEvidenceKind.Ingest,
+            "ingest-receipt-2",
+            ObservedAt.AddMinutes(1));
+
+        Assert.Equal("01890abc-def0-7000-8000-000000000003", candidate.CandidateId);
+        Assert.Equal(verification.VerificationId, candidate.VerificationId);
+        Assert.Equal(verification.ExpectedSourceSurface, candidate.SourceSurface);
+        Assert.Equal(verification.ExpectedSourceAdapter, candidate.SourceAdapter);
+        Assert.Equal(DoctorEvidenceClass.RealSource, candidate.EvidenceClass);
+        Assert.Equal(DoctorEvidenceKind.Ingest, candidate.EvidenceKind);
+        Assert.Equal("ingest-receipt-2", candidate.EvidenceRef);
+        Assert.Equal(ObservedAt.AddMinutes(1), candidate.ObservedAt);
+        Assert.Equal(verification.ExpiresAt, candidate.ExpiresAt);
+    }
+
+    [Fact]
+    public void CandidateOutsideVerificationWindow_UsesFixedSanitizedError()
+    {
+        AssertInvalidComposition(() => InvokeCandidate(
+            ActiveVerification(),
+            "01890abc-def0-7000-8000-000000000004",
+            DoctorEvidenceClass.RealSource,
+            DoctorEvidenceKind.Ingest,
+            "ingest-receipt-3",
+            ObservedAt.AddMinutes(5)));
     }
 
     [Fact]
@@ -181,6 +206,18 @@ public sealed class DoctorSourceHandoffContractTests
     public void ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore() =>
         AssertSourceHandoff("claude-code");
 
+    private static DoctorVerification ActiveVerification() => new(
+        "01890abc-def0-7000-8000-000000000001",
+        "claude-code",
+        null,
+        DoctorVerificationState.Active,
+        1,
+        ObservedAt,
+        ObservedAt.AddMinutes(5),
+        null,
+        null,
+        []);
+
     private static void AssertInvalidComposition(Action action)
     {
         var exception = Assert.Throws<TargetInvocationException>(action);
@@ -190,6 +227,7 @@ public sealed class DoctorSourceHandoffContractTests
         Assert.DoesNotContain("secret-value", argument.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("prompt", argument.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Claude Code", argument.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("ingest-receipt-3", argument.Message, StringComparison.Ordinal);
     }
 
     private static void AssertSourceHandoff(string expectedSourceSurface)
@@ -289,6 +327,22 @@ public sealed class DoctorSourceHandoffContractTests
             observedAt,
             setup,
             runtime)!;
+
+    private static DoctorEvidenceCandidate InvokeCandidate(
+        DoctorVerification verification,
+        string candidateId,
+        DoctorEvidenceClass evidenceClass,
+        DoctorEvidenceKind evidenceKind,
+        string evidenceRef,
+        DateTimeOffset observedAt) =>
+        (DoctorEvidenceCandidate)InvokeComposer(
+            "ComposeCandidate",
+            verification,
+            candidateId,
+            evidenceClass,
+            evidenceKind,
+            evidenceRef,
+            observedAt)!;
 
     private static object? InvokeComposer(string methodName, params object?[] arguments)
     {
