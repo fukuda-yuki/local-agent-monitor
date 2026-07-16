@@ -148,6 +148,23 @@ public sealed class DoctorEvaluatorTests
     }
 
     [Fact]
+    public void Evaluate_EachExplicitUnknownFamily_ReturnsItsOrderedPartialProjection()
+    {
+        foreach (var (familyName, snapshot) in ExplicitUnknownFamilySnapshots())
+        {
+            var result = DoctorEvaluator.Evaluate(snapshot);
+
+            Assert.False(result.Success);
+            Assert.Equal(DoctorResultCode.PartialFactSnapshot, result.Code);
+            Assert.Null(result.Verification);
+            var evaluation = Assert.IsType<DoctorEvaluation>(result.Evaluation);
+            Assert.Null(evaluation.PrimaryState);
+            Assert.Empty(evaluation.States);
+            Assert.Equal([familyName], evaluation.MissingFactFamilies);
+        }
+    }
+
+    [Fact]
     public void Evaluate_AdvisoryOnlyUnknowns_KeepSupportedTerminalAndReportMissingFamilies()
     {
         var snapshot = DoctorTestSnapshots.ReadyNoRealTrace() with
@@ -378,5 +395,73 @@ public sealed class DoctorEvaluatorTests
         });
         yield return (DoctorStateCode.ReadyNoRealTrace, baseline);
         yield return (DoctorStateCode.FirstTraceReady, DoctorTestSnapshots.FirstTraceReady());
+    }
+
+    private static IEnumerable<(string FamilyName, DoctorFactSnapshot Snapshot)> ExplicitUnknownFamilySnapshots()
+    {
+        var baseline = DoctorTestSnapshots.ReadyNoRealTrace();
+        yield return (FamilyOrder[0], baseline with
+        {
+            InstallAndSourceVersion = new InstallAndSourceVersionFacts(
+                MonitorInstallStatus.Unknown,
+                SourceVersionStatus.Supported,
+                SourceFeatureStatus.Available),
+        });
+        yield return (FamilyOrder[1], baseline with
+        {
+            ProcessReceiverAndPort = new ProcessReceiverAndPortFacts(
+                MonitorProcessStatus.Unknown,
+                ReceiverBindStatus.Bound,
+                PortOwnerStatus.Monitor),
+        });
+        yield return (FamilyOrder[2], baseline with
+        {
+            SourceEffectiveConfiguration = new SourceEffectiveConfigurationFacts(EndpointAlignmentStatus.Unknown),
+        });
+        yield return (FamilyOrder[3], baseline with
+        {
+            EndpointReachability = new EndpointReachabilityFacts(ReachabilityStatus.Unknown),
+        });
+        yield return (FamilyOrder[4], baseline with
+        {
+            ProtocolAndSignalCompatibility = new ProtocolAndSignalCompatibilityFacts(
+                ProtocolStatus.Unknown,
+                TraceSignalStatus.Enabled),
+        });
+        yield return (FamilyOrder[5], baseline with
+        {
+            SourceVersionAndSchemaDiagnostics = new SourceVersionAndSchemaDiagnosticsFacts(
+                SourceCompatibilityStatus.Unknown,
+                SchemaStatus.Matching),
+        });
+        yield return (FamilyOrder[6], baseline with
+        {
+            LastIngest = new LastIngestFacts(LastIngestOutcome.Unknown),
+        });
+        yield return (FamilyOrder[7], baseline with
+        {
+            RawPersistence = new RawPersistenceFacts(RawPersistenceOutcome.Unknown),
+        });
+        yield return (FamilyOrder[8], baseline with
+        {
+            Projection = new ProjectionFacts(ProjectionOutcome.Unknown),
+        });
+        yield return (FamilyOrder[9], baseline with
+        {
+            ExactSessionBinding = new ExactSessionBindingFacts(
+                ExactSessionBindingRequirement.Unknown,
+                ExactSessionBindingOutcome.Unknown),
+        });
+        yield return (FamilyOrder[10], DoctorTestSnapshots.FirstTraceReady() with
+        {
+            CompletenessAndContent = new CompletenessAndContentFacts(
+                DoctorCompleteness.Unknown,
+                ContentCaptureStatus.Enabled,
+                RawAccessStatus.Available),
+        });
+        yield return (FamilyOrder[11], baseline with
+        {
+            RestartOrNewProcess = new RestartOrNewProcessFacts(RestartRequirement.Unknown),
+        });
     }
 }

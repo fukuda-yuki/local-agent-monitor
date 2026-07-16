@@ -1,9 +1,80 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace CopilotAgentObservability.Doctor.Tests;
 
 public sealed class DoctorValidationTests
 {
+    public static TheoryData<string> RequiredFactSnapshotProperties => new()
+    {
+        "schema_version",
+        "source_surface",
+        "observed_at",
+        "observations",
+        "install_and_source_version",
+        "process_receiver_and_port",
+        "source_effective_configuration",
+        "endpoint_reachability",
+        "protocol_and_signal_compatibility",
+        "source_version_and_schema_diagnostics",
+        "last_ingest",
+        "raw_persistence",
+        "projection",
+        "exact_session_binding",
+        "completeness_and_content",
+        "restart_or_new_process",
+    };
+
+    public static TheoryData<string, string> RequiredNestedFactProperties => new()
+    {
+        { "install_and_source_version", "monitor_install" },
+        { "install_and_source_version", "source_version" },
+        { "install_and_source_version", "source_feature" },
+        { "process_receiver_and_port", "monitor_process" },
+        { "process_receiver_and_port", "receiver_bind" },
+        { "process_receiver_and_port", "port_owner" },
+        { "source_effective_configuration", "endpoint_alignment" },
+        { "endpoint_reachability", "reachability" },
+        { "protocol_and_signal_compatibility", "protocol" },
+        { "protocol_and_signal_compatibility", "trace_signal" },
+        { "source_version_and_schema_diagnostics", "compatibility" },
+        { "source_version_and_schema_diagnostics", "schema" },
+        { "last_ingest", "outcome" },
+        { "raw_persistence", "outcome" },
+        { "projection", "outcome" },
+        { "exact_session_binding", "requirement" },
+        { "exact_session_binding", "outcome" },
+        { "completeness_and_content", "completeness" },
+        { "completeness_and_content", "content_capture" },
+        { "completeness_and_content", "raw_access" },
+        { "restart_or_new_process", "requirement" },
+    };
+
+    public static TheoryData<string> FactFamilyProperties => new()
+    {
+        "install_and_source_version",
+        "process_receiver_and_port",
+        "source_effective_configuration",
+        "endpoint_reachability",
+        "protocol_and_signal_compatibility",
+        "source_version_and_schema_diagnostics",
+        "last_ingest",
+        "raw_persistence",
+        "projection",
+        "exact_session_binding",
+        "completeness_and_content",
+        "restart_or_new_process",
+    };
+
+    public static TheoryData<string> RequiredObservationProperties => new()
+    {
+        "source_surface",
+        "evidence_class",
+        "evidence_kind",
+        "evidence_ref",
+        "observed_at",
+    };
+
     [Fact]
     public void Evaluate_UnsupportedFactSchema_ReturnsFixedUnsupportedSchemaResult()
     {
@@ -40,6 +111,25 @@ public sealed class DoctorValidationTests
         {
             AssertInvalidInput(snapshot);
         }
+    }
+
+    [Fact]
+    public void Evaluate_ObservationCount_AcceptsSixteenAndRejectsSeventeen()
+    {
+        var baseline = DoctorTestSnapshots.ReadyNoRealTrace();
+        var observations = Enumerable.Range(0, DoctorValidation.MaximumObservations)
+            .Select(index => DoctorTestSnapshots.Observation(DoctorEvidenceKind.Ingest, $"event-{index}"))
+            .ToArray();
+
+        var atLimit = DoctorEvaluator.Evaluate(baseline with { Observations = observations });
+        var overLimit = DoctorEvaluator.Evaluate(baseline with
+        {
+            Observations = observations.Append(
+                DoctorTestSnapshots.Observation(DoctorEvidenceKind.Ingest, "event-16")).ToArray(),
+        });
+
+        Assert.Equal(DoctorResultCode.EvaluationCompleted, atLimit.Code);
+        Assert.Equal(DoctorResultCode.InvalidInput, overLimit.Code);
     }
 
     [Fact]
@@ -98,11 +188,27 @@ public sealed class DoctorValidationTests
         "tool argument raw",
         "tool result raw",
         "https://example.test/trace",
+        "file:relative/trace.json",
+        "urn:doctor:evidence",
         @"C:\Users\person\trace.json",
         "C:/Users/person/trace.json",
+        "C:trace.json",
         @"\\server\share\trace.json",
+        "./trace.json",
+        @".\trace.json",
         "../trace.json",
+        @"..\trace.json",
+        "~/trace.json",
+        @"~\trace.json",
+        "folder/trace.json",
+        @"folder\trace.json",
+        "/trace.json",
+        @"\trace.json",
         "/home/person/trace.json",
+        ".",
+        "..",
+        "~",
+        "event\nref",
     };
 
     [Theory]
@@ -118,7 +224,12 @@ public sealed class DoctorValidationTests
         var json = DoctorJson.SerializeResult(result);
 
         Assert.Equal(DoctorResultCode.InvalidInput, result.Code);
-        Assert.DoesNotContain(evidenceRef, json, StringComparison.Ordinal);
+        Assert.Null(result.Evaluation);
+        Assert.Null(result.Verification);
+        if (evidenceRef is not "." and not ".." and not "~")
+        {
+            Assert.DoesNotContain(evidenceRef, json, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -147,6 +258,16 @@ public sealed class DoctorValidationTests
     }
 
     [Fact]
+    public void Validation_EvidenceReferenceLength_AcceptsOneAndOneHundredTwentyEightOnly()
+    {
+        Assert.True(DoctorValidation.IsValidEvidenceReference("x"));
+        Assert.True(DoctorValidation.IsValidEvidenceReference(new string('x', 128)));
+        Assert.False(DoctorValidation.IsValidEvidenceReference(string.Empty));
+        Assert.False(DoctorValidation.IsValidEvidenceReference(new string('x', 129)));
+        Assert.False(DoctorValidation.IsValidEvidenceReference("event\nref"));
+    }
+
+    [Fact]
     public void Validation_VerificationState_EnforcesWindowTerminalTimestampAndAcceptedEvidenceShape()
     {
         var active = new DoctorVerification(
@@ -167,9 +288,22 @@ public sealed class DoctorValidationTests
             CompletedAt = DoctorTestSnapshots.ObservedAt.AddMinutes(1),
             AcceptedEvidenceRefs = ["event-ingest"],
         };
+        var expired = active with { State = DoctorVerificationState.Expired };
+        var cancelled = active with
+        {
+            State = DoctorVerificationState.Cancelled,
+            Revision = 2,
+            CancelledAt = DoctorTestSnapshots.ObservedAt.AddMinutes(1),
+        };
 
         Assert.True(DoctorValidation.IsValidVerification(active));
+        Assert.True(DoctorValidation.IsValidVerification(expired));
         Assert.True(DoctorValidation.IsValidVerification(completed));
+        Assert.True(DoctorValidation.IsValidVerification(cancelled));
+        Assert.False(DoctorValidation.IsValidVerification(active with { Revision = 2 }));
+        Assert.False(DoctorValidation.IsValidVerification(expired with { Revision = 2 }));
+        Assert.False(DoctorValidation.IsValidVerification(completed with { Revision = 1 }));
+        Assert.False(DoctorValidation.IsValidVerification(cancelled with { Revision = 1 }));
         Assert.False(DoctorValidation.IsValidVerification(completed with { AcceptedEvidenceRefs = [] }));
         Assert.False(DoctorValidation.IsValidVerification(active with { AcceptedEvidenceRefs = ["event-ingest"] }));
         Assert.False(DoctorValidation.IsValidVerification(completed with { CompletedAt = completed.ExpiresAt.AddTicks(1) }));
@@ -202,6 +336,71 @@ public sealed class DoctorValidationTests
         }
     }
 
+    [Theory]
+    [MemberData(nameof(RequiredFactSnapshotProperties))]
+    public void DeserializeFactSnapshot_OmittedRequiredRootProperty_IsRejected(string propertyName)
+    {
+        var root = LoadValidFactsNode();
+        Assert.True(root.Remove(propertyName));
+
+        AssertInvalidJson(root.ToJsonString());
+    }
+
+    [Theory]
+    [MemberData(nameof(RequiredNestedFactProperties))]
+    public void DeserializeFactSnapshot_OmittedRequiredNestedProperty_IsRejected(
+        string familyName,
+        string propertyName)
+    {
+        var root = LoadValidFactsNode();
+        var family = root[familyName]!.AsObject();
+        Assert.True(family.Remove(propertyName));
+
+        AssertInvalidJson(root.ToJsonString());
+    }
+
+    [Theory]
+    [MemberData(nameof(RequiredObservationProperties))]
+    public void DeserializeFactSnapshot_OmittedRequiredObservationProperty_IsRejected(string propertyName)
+    {
+        var root = LoadValidFactsNode();
+        var observation = new JsonObject
+        {
+            ["source_surface"] = "github-copilot-vscode",
+            ["source_adapter"] = null,
+            ["evidence_class"] = "real_source",
+            ["evidence_kind"] = "ingest",
+            ["evidence_ref"] = "event-ingest",
+            ["observed_at"] = "2026-07-16T01:02:03.0000000Z",
+        };
+        root["observations"] = new JsonArray(observation);
+        Assert.True(observation.Remove(propertyName));
+
+        AssertInvalidJson(root.ToJsonString());
+    }
+
+    [Theory]
+    [MemberData(nameof(FactFamilyProperties))]
+    public void DeserializeFactSnapshot_ExplicitNullFamily_IsAccepted(string familyName)
+    {
+        var root = LoadValidFactsNode();
+        root[familyName] = null;
+        var snapshot = DoctorJson.DeserializeFactSnapshot(root.ToJsonString());
+
+        Assert.NotEqual(DoctorResultCode.InvalidInput, DoctorEvaluator.Evaluate(snapshot).Code);
+    }
+
+    [Fact]
+    public void DeserializeFactSnapshot_ExplicitUnknownEnum_IsAccepted()
+    {
+        var root = LoadValidFactsNode();
+        root["install_and_source_version"]!["monitor_install"] = "unknown";
+        var snapshot = DoctorJson.DeserializeFactSnapshot(root.ToJsonString());
+
+        Assert.Equal(MonitorInstallStatus.Unknown, snapshot.InstallAndSourceVersion!.MonitorInstall);
+        Assert.NotEqual(DoctorResultCode.InvalidInput, DoctorEvaluator.Evaluate(snapshot).Code);
+    }
+
     private static void AssertInvalidInput(DoctorFactSnapshot snapshot)
     {
         var result = DoctorEvaluator.Evaluate(snapshot);
@@ -209,5 +408,17 @@ public sealed class DoctorValidationTests
         Assert.Equal(DoctorResultCode.InvalidInput, result.Code);
         Assert.Null(result.Evaluation);
         Assert.Null(result.Verification);
+    }
+
+    private static JsonObject LoadValidFactsNode()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "TestData", "monitor-not-running.facts.json");
+        return JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+    }
+
+    private static void AssertInvalidJson(string json)
+    {
+        var exception = Assert.Throws<JsonException>(() => DoctorJson.DeserializeFactSnapshot(json));
+        Assert.Equal("invalid_input", exception.Message);
     }
 }

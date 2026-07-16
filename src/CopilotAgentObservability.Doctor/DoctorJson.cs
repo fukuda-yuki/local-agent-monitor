@@ -7,9 +7,52 @@ namespace CopilotAgentObservability.Doctor;
 public static class DoctorJson
 {
     private static readonly JsonSerializerOptions Options = CreateOptions();
+    private static readonly string[] RequiredFactSnapshotProperties =
+    [
+        "schema_version",
+        "source_surface",
+        "observed_at",
+        "observations",
+        "install_and_source_version",
+        "process_receiver_and_port",
+        "source_effective_configuration",
+        "endpoint_reachability",
+        "protocol_and_signal_compatibility",
+        "source_version_and_schema_diagnostics",
+        "last_ingest",
+        "raw_persistence",
+        "projection",
+        "exact_session_binding",
+        "completeness_and_content",
+        "restart_or_new_process",
+    ];
+    private static readonly IReadOnlyDictionary<string, string[]> RequiredFactFamilyProperties =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["install_and_source_version"] = ["monitor_install", "source_version", "source_feature"],
+            ["process_receiver_and_port"] = ["monitor_process", "receiver_bind", "port_owner"],
+            ["source_effective_configuration"] = ["endpoint_alignment"],
+            ["endpoint_reachability"] = ["reachability"],
+            ["protocol_and_signal_compatibility"] = ["protocol", "trace_signal"],
+            ["source_version_and_schema_diagnostics"] = ["compatibility", "schema"],
+            ["last_ingest"] = ["outcome"],
+            ["raw_persistence"] = ["outcome"],
+            ["projection"] = ["outcome"],
+            ["exact_session_binding"] = ["requirement", "outcome"],
+            ["completeness_and_content"] = ["completeness", "content_capture", "raw_access"],
+            ["restart_or_new_process"] = ["requirement"],
+        };
+    private static readonly string[] RequiredObservationProperties =
+    [
+        "source_surface",
+        "evidence_class",
+        "evidence_kind",
+        "evidence_ref",
+        "observed_at",
+    ];
 
     public static DoctorFactSnapshot DeserializeFactSnapshot(string json) =>
-        DeserializeStrict<DoctorFactSnapshot>(json);
+        DeserializeStrict<DoctorFactSnapshot>(json, EnsureFactSnapshotShape);
 
     public static DoctorResult DeserializeResult(string json) =>
         DeserializeStrict<DoctorResult>(json);
@@ -31,18 +74,58 @@ public static class DoctorJson
         return options;
     }
 
-    private static T DeserializeStrict<T>(string json)
+    private static T DeserializeStrict<T>(string json, Action<JsonElement>? validateShape = null)
     {
         try
         {
             using var document = JsonDocument.Parse(json);
             EnsureDistinctProperties(document.RootElement);
+            validateShape?.Invoke(document.RootElement);
             return JsonSerializer.Deserialize<T>(json, Options)
                 ?? throw new JsonException();
         }
         catch (JsonException)
         {
             throw new JsonException("invalid_input");
+        }
+    }
+
+    private static void EnsureFactSnapshotShape(JsonElement root)
+    {
+        EnsureRequiredProperties(root, RequiredFactSnapshotProperties);
+
+        foreach (var family in RequiredFactFamilyProperties)
+        {
+            var familyElement = root.GetProperty(family.Key);
+            if (familyElement.ValueKind == JsonValueKind.Object)
+            {
+                EnsureRequiredProperties(familyElement, family.Value);
+            }
+        }
+
+        var observations = root.GetProperty("observations");
+        if (observations.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var observation in observations.EnumerateArray())
+            {
+                EnsureRequiredProperties(observation, RequiredObservationProperties);
+            }
+        }
+    }
+
+    private static void EnsureRequiredProperties(JsonElement element, IEnumerable<string> requiredProperties)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            throw new JsonException();
+        }
+
+        foreach (var propertyName in requiredProperties)
+        {
+            if (!element.TryGetProperty(propertyName, out _))
+            {
+                throw new JsonException();
+            }
         }
     }
 

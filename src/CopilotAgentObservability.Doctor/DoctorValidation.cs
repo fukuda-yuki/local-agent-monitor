@@ -23,7 +23,7 @@ public static class DoctorValidation
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private static readonly Regex UriPattern = new(
-        @"[a-z][a-z0-9+.-]*://",
+        @"^[a-z][a-z0-9+.-]*:",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public static bool IsValidFactSnapshot(DoctorFactSnapshot snapshot)
@@ -93,15 +93,18 @@ public static class DoctorValidation
         return verification.State switch
         {
             DoctorVerificationState.Active or DoctorVerificationState.Expired =>
-                verification.CompletedAt is null
+                verification.Revision == 1
+                && verification.CompletedAt is null
                 && verification.CancelledAt is null
                 && verification.AcceptedEvidenceRefs.Count == 0,
             DoctorVerificationState.Completed =>
-                IsTerminalTimestampInWindow(verification.CompletedAt, verification)
+                verification.Revision == 2
+                && IsTerminalTimestampInWindow(verification.CompletedAt, verification)
                 && verification.CancelledAt is null
                 && verification.AcceptedEvidenceRefs.Count > 0,
             DoctorVerificationState.Cancelled =>
-                verification.CompletedAt is null
+                verification.Revision == 2
+                && verification.CompletedAt is null
                 && IsTerminalTimestampInWindow(verification.CancelledAt, verification)
                 && verification.AcceptedEvidenceRefs.Count == 0,
             _ => false,
@@ -133,11 +136,9 @@ public static class DoctorValidation
             && !value.Contains("content:", StringComparison.OrdinalIgnoreCase)
             && !value.Contains("tool argument", StringComparison.OrdinalIgnoreCase)
             && !value.Contains("tool result", StringComparison.OrdinalIgnoreCase)
-            && !Regex.IsMatch(value, @"[A-Za-z]:[\\/]", RegexOptions.CultureInvariant)
-            && !value.StartsWith(@"\\", StringComparison.Ordinal)
-            && !value.Contains("../", StringComparison.Ordinal)
-            && !value.Contains(@"..\", StringComparison.Ordinal)
-            && !value.StartsWith("/", StringComparison.Ordinal);
+            && !value.Contains('/')
+            && !value.Contains('\\')
+            && value is not "." and not ".." and not "~";
     }
 
     public static bool IsSourceToken(string? value) =>
