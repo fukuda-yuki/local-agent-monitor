@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class MonitorSchemaMigrationFixtureTests
 {
-    private const int CurrentMonitorSchemaVersion = 5;
+    private const int CurrentMonitorSchemaVersion = 6;
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateMonitorSchemaFixtures/GenerateMonitorSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/monitor";
 
     public static TheoryData<int, string> HistoricalSchemas => new()
@@ -63,7 +63,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
 
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
-    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v5_state_after_restart(int version, string sourceCommit)
+    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v6_state_across_two_restarts(int version, string sourceCommit)
     {
         Assert.Equal(CurrentMonitorSchemaVersion, SqliteSourceCompatibilityStore.MonitorSchemaVersion);
 
@@ -104,6 +104,9 @@ public sealed class MonitorSchemaMigrationFixtureTests
 
             new SqliteSourceCompatibilityStore(migratedPath).CreateSchema();
             AssertCompleteMigratedState(migratedPath, fixture.Sentinels);
+
+            new SqliteSourceCompatibilityStore(migratedPath).CreateSchema();
+            AssertCompleteMigratedState(migratedPath, fixture.Sentinels);
         }
         finally
         {
@@ -114,7 +117,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
 
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
-    public void InjectedV5Failure_RestoresExactOriginalHistoricalSchemaVersionAndRows(int version, string sourceCommit)
+    public void InjectedV6Failure_RestoresExactOriginalHistoricalSchemaVersionAndRowsAfterReopen(int version, string sourceCommit)
     {
         Assert.False(string.IsNullOrWhiteSpace(sourceCommit));
         var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "monitor");
@@ -135,11 +138,11 @@ public sealed class MonitorSchemaMigrationFixtureTests
             var store = new SqliteSourceCompatibilityStore(
                 migratedPath,
                 connectionOptions: null,
-                migrationCheckpoint: (_, _) => throw new InvalidOperationException("injected v5 migration failure"));
+                migrationCheckpoint: AssertV6TableExistsThenFail);
 
             var exception = Assert.Throws<InvalidOperationException>(store.CreateSchema);
 
-            Assert.Equal("injected v5 migration failure", exception.Message);
+            Assert.Equal("injected v6 migration failure", exception.Message);
             using var restored = Open(migratedPath);
             AssertSchemaContract(originalSchema, ReadSchemaContract(restored));
             Assert.Equal(version, Scalar<long>(restored, "SELECT version FROM schema_version WHERE component = 'monitor';"));
@@ -168,11 +171,21 @@ public sealed class MonitorSchemaMigrationFixtureTests
         }
     }
 
+    private static void AssertV6TableExistsThenFail(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'monitor_projection_dispositions';";
+        Assert.Equal(1L, (long)command.ExecuteScalar()!);
+        throw new InvalidOperationException("injected v6 migration failure");
+    }
+
     private static void AssertCompleteMigratedState(string databasePath, FixtureSentinels sentinels)
     {
         using var connection = Open(databasePath);
 
-        AssertSchemaContract(ExpectedV5SchemaContract, ReadSchemaContract(connection));
+        AssertSchemaContract(ExpectedV6SchemaContract, ReadSchemaContract(connection));
 
         Assert.Equal(new[] { $"s:monitor|i:{CurrentMonitorSchemaVersion}" }, ReadRows(connection, "schema_version"));
         Assert.Equal(new[] { $"i:{sentinels.RawRecordId}|s:raw-otlp|s:{sentinels.TraceId}|s:2026-07-12T00:00:00.0000000+00:00|<null>|s:{{\"fixture\":true}}|i:1" }, ReadRows(connection, "raw_records"));
@@ -188,6 +201,10 @@ public sealed class MonitorSchemaMigrationFixtureTests
         Assert.Equal(expectedSpanRows, ReadRows(connection, "monitor_spans"));
         Assert.Empty(ReadRows(connection, "source_schema_observations"));
         Assert.Empty(ReadRows(connection, "source_unknown_observations"));
+        Assert.Equal(
+            new[] { $"i:{sentinels.RawRecordId}|s:completed|i:1|s:2026-07-12T00:00:01.0000000+00:00" },
+            ReadRows(connection, "monitor_projection_dispositions"));
+        Assert.Equal("ok", Scalar<string>(connection, "PRAGMA integrity_check;"));
     }
 
     private static void AssertSchemaContract(SchemaContract expected, SchemaContract actual)
@@ -622,6 +639,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
 
     private static readonly SchemaContract ExpectedV4SchemaContract = CreateExpectedV4SchemaContract();
     private static readonly SchemaContract ExpectedV5SchemaContract = CreateExpectedV5SchemaContract();
+    private static readonly SchemaContract ExpectedV6SchemaContract = CreateExpectedV6SchemaContract();
 
     private static SchemaContract CreateExpectedV4SchemaContract()
     {
@@ -751,6 +769,30 @@ public sealed class MonitorSchemaMigrationFixtureTests
             I("source_unknown_observations","IX_source_unknown_observations_cursor",0,"c", X(0,1,"source_observation_id"), X(1,0,"id"), X(2,-1,"<rowid>",key:0)),
         }).OrderBy(index => index.Table, StringComparer.Ordinal).ThenBy(index => index.SemanticSortKey, StringComparer.Ordinal).ToArray();
         return new SchemaContract(tables, columns, tableSql, indexes, Array.Empty<ForeignKeyDefinition>(), Array.Empty<string>());
+    }
+
+    private static SchemaContract CreateExpectedV6SchemaContract()
+    {
+        var tables = ExpectedV5SchemaContract.Tables.Concat(new[]
+        {
+            new TableListDefinition("main", "monitor_projection_dispositions", "table", 4, 0, 0),
+        }).OrderBy(table => table.Schema, StringComparer.Ordinal).ThenBy(table => table.Name, StringComparer.Ordinal).ToArray();
+        var columns = ExpectedV5SchemaContract.Columns.Concat(new[]
+        {
+            C("monitor_projection_dispositions",0,"raw_record_id","INTEGER",pk:1),
+            C("monitor_projection_dispositions",1,"state","TEXT",notNull:1),
+            C("monitor_projection_dispositions",2,"revision","INTEGER",notNull:1),
+            C("monitor_projection_dispositions",3,"updated_at","TEXT",notNull:1),
+        }).OrderBy(column => column.Table, StringComparer.Ordinal).ThenBy(column => column.Cid).ToArray();
+        var tableSql = ExpectedV5SchemaContract.TableSql.Concat(new[]
+        {
+            new TableSqlDefinition("monitor_projection_dispositions", false, CheckSignature(new[]
+            {
+                CanonicalExpression("state IN ('not_started','pending','completed','failed')"),
+                CanonicalExpression("revision > 0"),
+            })),
+        }).OrderBy(table => table.Table, StringComparer.Ordinal).ToArray();
+        return new SchemaContract(tables, columns, tableSql, ExpectedV5SchemaContract.Indexes, Array.Empty<ForeignKeyDefinition>(), Array.Empty<string>());
     }
 
     private static ColumnDefinition C(string table, int cid, string name, string type, int notNull = 0, string? defaultValue = null, int pk = 0, int hidden = 0) => new(table, cid, name, type, notNull, defaultValue, pk, hidden);
