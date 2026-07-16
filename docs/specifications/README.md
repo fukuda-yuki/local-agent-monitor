@@ -22,6 +22,7 @@
 | Config CLI | [interfaces/config-cli.md](interfaces/config-cli.md) |
 | Configuration setup | [interfaces/configuration-setup.md](interfaces/configuration-setup.md) |
 | First-trace Doctor | [interfaces/first-trace-doctor.md](interfaces/first-trace-doctor.md) |
+| Source-specific Doctor handoff | [interfaces/source-specific-doctor-handoff.md](interfaces/source-specific-doctor-handoff.md) |
 | Normalized measurement dataset | [interfaces/measurement-dataset.md](interfaces/measurement-dataset.md) |
 | Candidate records | [interfaces/candidate-records.md](interfaces/candidate-records.md) |
 | Human-review records | [interfaces/human-review-records.md](interfaces/human-review-records.md) |
