@@ -1,9 +1,9 @@
 # Issues #103/#104 Doctor Handoff Plan Review Correction
 
-This correction supersedes the bundled source-implementation test and the
-narrow invalid-input example shown in
+This correction supersedes the bundled source-implementation test, the narrow
+invalid-input example, and the snapshot-only interface shown in
 `2026-07-16-issues-103-104-doctor-handoff.md`. All other task boundaries,
-production code, commands, and constraints remain unchanged.
+commands, and constraints remain unchanged.
 
 ## Finding 1 — bundled implementation gate
 
@@ -42,9 +42,9 @@ requires exactly one registration for the requested surface.
 ## Finding 2 — incomplete invalid-input coverage
 
 The canonical contract gives invalid source identity, invalid verification
-identity/state, and unsafe evidence the same fixed sanitized failure. The
-original test covered only unsafe evidence. The reviewed test file now contains
-three shared negative tests:
+state, and unsafe evidence the same fixed sanitized failure. The original test
+covered only unsafe evidence. The reviewed test file now contains three shared
+negative tests:
 
 - `UnsafeObservation_UsesFixedSanitizedError`;
 - `InvalidSourceIdentity_UsesFixedSanitizedError`; and
@@ -53,10 +53,43 @@ three shared negative tests:
 All three require the exact fixed message and verify that rejected values are
 not echoed.
 
+## Finding 3 — missing candidate carrier boundary
+
+The original snapshot-only interface left source implementations free to
+reconstruct `DoctorEvidenceCandidate` verification ID, source, adapter, expiry,
+and observation-window rules independently. That contradicted the G0-2 goal of
+fixing candidate collection and restart/reuse boundaries before #103/#104
+parallelize.
+
+The reviewed `IDoctorSourceHandoff` and `DoctorSourceHandoffComposer` therefore
+add:
+
+```csharp
+DoctorEvidenceCandidate ComposeCandidate(
+    DoctorVerification verification,
+    string candidateId,
+    DoctorEvidenceClass evidenceClass,
+    DoctorEvidenceKind evidenceKind,
+    string evidenceRef,
+    DateTimeOffset observedAt);
+```
+
+The shared method:
+
+- accepts only a valid active verification;
+- requires `started_at <= observed_at < expires_at`;
+- copies verification ID, source surface, nullable adapter, and expiry;
+- validates the existing candidate class/kind/reference/UUID contract; and
+- never generates IDs, queries or persists evidence, or selects a latest entity.
+
+Two shared tests pin successful inheritance and rejection at the exclusive
+expiry boundary.
+
 ## Corrected G0 checkpoint
 
-- Six shared contract tests are expected GREEN: mapping, completion identity,
-  the three invalid-input tests, and the no-source-specific-enum test.
+- Eight shared contract tests are expected GREEN: mapping, completion identity,
+  candidate inheritance, candidate window rejection, three invalid-input tests,
+  and the no-source-specific-enum test.
 - The two `GitHubCopilot*SourceHandoff` facts are intentionally RED and owned by
   #103.
 - `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore` is intentionally RED
@@ -67,6 +100,8 @@ not echoed.
 
 - #103 may run and turn GREEN only its two named facts while #104 remains RED.
 - #104 may run and turn GREEN only its named fact while #103 remains RED.
+- Both Issues implement the expanded shared interface and delegate candidate as
+  well as snapshot composition to `DoctorSourceHandoffComposer`.
 - The full `DoctorSourceHandoffContractTests` class becomes GREEN only after the
   two implementation branches are integrated.
 - Neither branch edits the expected surface values to suppress a test owned by
