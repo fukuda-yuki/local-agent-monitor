@@ -178,8 +178,10 @@ The shared tests contain two groups.
 - candidate composition copies verification scope/expiry and rejects evidence
   outside the half-open verification window;
 - invalid source identity, inactive verification, and unsafe observation
-  references are rejected with the fixed sanitized error; and
-- the Doctor assembly still contains no source-specific Doctor enum.
+  references are rejected with the fixed sanitized error;
+- the Doctor assembly still contains no source-specific Doctor enum; and
+- discovered registrations are unique, limited to the three manifest-backed
+  surfaces, and kept outside the Doctor assembly.
 
 ### Intentional RED source-implementation tests
 
@@ -214,6 +216,10 @@ Implementations must use `DoctorSourceHandoffComposer`; they must not select a
 state, reorder facts, override candidate verification scope, inject candidate
 observations into a completion snapshot, or add a source-specific result type.
 
+No concrete implementation may be registered in the Doctor assembly. The v1
+registration allowlist is exactly `github-copilot-vscode`,
+`github-copilot-cli`, and `claude-code`, with one registration per surface.
+
 ## Error and safety behavior
 
 - Invalid composition throws one fixed `ArgumentException` message without
@@ -236,7 +242,7 @@ dotnet build CopilotAgentObservability.slnx
 
 The intended G0-3 checkpoint is:
 
-- eight shared-boundary tests: GREEN;
+- nine shared-boundary tests: GREEN;
 - the two GitHub Copilot source-implementation tests: RED for #103;
 - the Claude Code source-implementation test: RED for #104;
 - no unrelated test failure or compile failure.
