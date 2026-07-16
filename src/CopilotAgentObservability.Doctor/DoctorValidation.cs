@@ -23,7 +23,7 @@ public static class DoctorValidation
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private static readonly Regex UriPattern = new(
-        @"^[a-z][a-z0-9+.-]*:",
+        @"[a-z][a-z0-9+.-]*:",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public static bool IsValidFactSnapshot(DoctorFactSnapshot snapshot)
@@ -120,25 +120,27 @@ public static class DoctorValidation
             return false;
         }
 
-        return !EmailPattern.IsMatch(value)
-            && !UriPattern.IsMatch(value)
-            && !value.Contains("Bearer ", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("Basic ", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("Authorization:", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("api_key", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("apikey", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("secret", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("password", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("credential", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("token", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("prompt:", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("response:", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("content:", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("tool argument", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains("tool result", StringComparison.OrdinalIgnoreCase)
-            && !value.Contains('/')
-            && !value.Contains('\\')
-            && value is not "." and not ".." and not "~";
+        var normalized = value.Trim();
+        return normalized.Length == value.Length
+            && !EmailPattern.IsMatch(normalized)
+            && !UriPattern.IsMatch(normalized)
+            && !normalized.Contains("Bearer ", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("Basic ", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("Authorization:", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("api_key", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("apikey", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("secret", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("password", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("credential", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("token", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("prompt:", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("response:", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("content:", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("tool argument", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains("tool result", StringComparison.OrdinalIgnoreCase)
+            && !normalized.Contains('/')
+            && !normalized.Contains('\\')
+            && normalized is not "." and not ".." and not "~";
     }
 
     public static bool IsSourceToken(string? value) =>

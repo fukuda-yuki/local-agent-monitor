@@ -71,6 +71,36 @@ The SDK emitted informational `NETSDK1057` preview-support-policy messages; the 
 
 Verdict: all three Important findings and the Minor finding are resolved within Task 3 ownership. No unresolved item remains in this fix lane.
 
+## Re-review Follow-up — Disguised Unsafe References
+
+- Re-review starting HEAD: `4c90d52de919ef22f9d444ab6fd865ad18c6c5be`.
+- Remaining finding I-1R was verified: the anchored URI regex allowed a leading-space `urn:` value and an embedded `urn:` value to reach `evaluation_completed` and state evidence.
+- Scope remained limited to `DoctorValidation.cs`, `DoctorValidationTests.cs`, and this fix report.
+
+TDD evidence:
+
+1. Tests were added first for leading/trailing whitespace around file/URN and otherwise-valid opaque values, a tab-prefixed file value, embedded/surrounded URI forms, and embedded/surrounded slash/backslash path forms.
+2. RED command: `dotnet test tests\CopilotAgentObservability.Doctor.Tests\CopilotAgentObservability.Doctor.Tests.csproj --filter FullyQualifiedName~Evaluate_UnsafeEvidenceReference --no-restore`.
+   - Observed 4 failures: ` event-ref`, `event-ref `, ` urn:doctor:evidence`, and `prefix urn:doctor:evidence suffix` all returned `evaluation_completed` instead of `invalid_input`.
+   - The path-bearing additions already rejected through the prior separator rule, confirming the remaining bypass was whitespace/scheme detection rather than path emission.
+3. Minimal production fix:
+   - reject any evidence reference whose leading/trailing whitespace would change under `Trim()`;
+   - run scheme, unsafe-content, and separator checks against the normalized value;
+   - detect RFC3986 scheme tokens anywhere in the accepted string;
+   - never substitute normalized text into a state or result.
+4. GREEN rerun: 45 passed, 0 failed, 0 skipped.
+
+Fresh follow-up verification after the final production/test edit:
+
+1. Focused Task 3 tests: 147 passed, 0 failed, 0 skipped.
+2. Full Doctor test project: 148 passed, 0 failed, 0 skipped.
+3. Exact unsafe/omission/revision/boundary/unknown/cross-surface slice: 92 passed, 0 failed, 0 skipped.
+4. `dotnet build CopilotAgentObservability.slnx`: 0 warnings, 0 errors.
+5. `git diff --check`: exit 0, no output before this report update.
+6. Status showed only the two authorized source/test edits and the supplied untracked fix/review artifacts.
+
+Follow-up self-review found no alternate whitespace, embedded-scheme, or separator path that can pass the shared evidence guard. Valid opaque references without surrounding whitespace, including the pinned 1- and 128-character boundaries, remain accepted. I-1R is resolved with no remaining Task 3 finding.
+
 ## Intentionally Unverified Later Handoffs
 
 Task 4 persistence, Task 5 lifecycle CLI, Task 6 lifecycle HTTP, Task 7 full integration/security, Issues #103/#104 source producers, and Issue #105 UI remain outside this fix scope. Playwright bootstrap and the full solution test suite were not required by the fix brief and are not represented as completion evidence.
