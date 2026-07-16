@@ -36,7 +36,7 @@ Profile の一覧は [collection profile specification](specifications/interface
 
 ## Claude Code の guided setup
 
-Claude Code 2.1.207 以上では、まず設定値や path そのものを含まない redacted な member state、operation、対象 label を表示する plan を作成します。plan だけでは設定を書き換えません。
+Claude Code 2.1.207 以上では、対象にする Claude project の root へ移動してから、設定値や path そのものを含まない redacted な member state、operation、対象 label を表示する plan を作成します。setup は実行 directory 直下の `.claude/settings.local.json` と `.claude/settings.json` だけを確認し、親 directory、子 directory、Git root、`--add-dir` の project は探索しません。plan だけでは設定を書き換えません。
 
 ```powershell
 pwsh scripts\local-monitor\setup.ps1 plan --adapter claude-code --target cli

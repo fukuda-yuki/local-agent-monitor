@@ -1448,13 +1448,52 @@ present. It never sets `OTEL_LOG_RAW_API_BODIES`, metrics/log exporters,
 `OTEL_EXPORTER_OTLP_HEADERS`, another authorization header, credential, global
 resource attribute, service name, or caller identity.
 
-Process, managed, project, and local configuration surfaces that have higher
-precedence than user settings are observed read-only. An observed value equal
-to the requested value is redacted read-only evidence and is not rewritten. A
-differing routing/telemetry value returns `content_policy_conflict` for a
-content gate and the existing fixed managed/environment conflict code for its
-respective non-content source. No conflict result writes settings, backup,
-journal, or ledger lifecycle state. Public projection reports only fixed
+The process invocation directory is the selected Claude project root for this
+Issue #68 observation. Setup reads exactly
+`<invocation-directory>/.claude/settings.local.json` and then
+`<invocation-directory>/.claude/settings.json`. It does not scan a parent or
+child directory, infer a Git root, or discover configuration through
+`--add-dir`.
+
+For each managed env key, effective precedence is exactly current process
+environment > selected managed object > local settings > project settings >
+the writable user target. Setup evaluates the highest source in which that key
+is present. When that value equals the requested value, setup reports only
+redacted read-only evidence; lower sources are irrelevant and are neither
+merged nor used as conflicting evidence. A differing value maps as follows:
+
+| Highest present source | Non-content managed env key | Any of `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`, `OTEL_LOG_TOOL_CONTENT` |
+| --- | --- | --- |
+| current process environment | `environment_override_conflict` | `content_policy_conflict` |
+| selected managed object | `managed_policy_conflict` | `content_policy_conflict` |
+| local or project settings | `environment_override_conflict` | `content_policy_conflict` |
+
+Without `--include-content-capture`, setup does not manage or evaluate those
+three content keys on any source.
+
+Windows native selects at most one complete managed settings object in this
+exact tier order:
+
+1. `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`;
+2. `C:\Program Files\ClaudeCode\managed-settings.json`;
+3. `HKCU\SOFTWARE\Policies\ClaudeCode\Settings`.
+
+Once a higher tier object is present, there is no per-key merge or fallthrough
+to a lower tier. WSL2 observes only
+`/etc/claude-code/managed-settings.json`. Server-delivered managed settings,
+macOS MDM/plist, and `managed-settings.d` cannot be observed by the version-1
+static installer and remain outside this observation; their absence is not a
+successful verification claim. Native macOS installation remains out of
+scope.
+
+Every observed settings file, including user, local, project, and the selected
+file-based managed source, is read with a 1 MiB limit plus one sentinel byte.
+Its root must be an object with no duplicate properties; unrelated properties
+remain permitted and are preserved in the writable user target. An observed
+`env` member must be a nested object with string values. Malformed, duplicate,
+wrong-typed, or oversized input fails `malformed_settings`. Paths and observed
+values remain private. No conflict result writes settings, backup, journal, or
+ledger lifecycle state. Public projection reports only fixed
 endpoint/protocol/signal/process-inheritance state names, never source paths or
 values.
 
@@ -1486,6 +1525,17 @@ the existing Hook forwarding contract. Repository mode invokes the Local
 Monitor project with `dotnet run --no-build`; Release mode invokes the packaged
 Local Monitor executable. The PowerShell wrapper does not rewrite those
 private arguments.
+
+Hook command resolution is an injected, closed internal observation. Release
+mode accepts only the packaged Config CLI layout under `app/config-cli` and
+resolves the packaged Local Monitor executable from its parent `app`
+directory. Repository mode accepts only the compiled Config CLI's fixed
+repository-relative Local Monitor project. Neither mode searches the current
+directory or `PATH`. An unknown or ambiguous layout fails closed as
+`internal_error`. The private Hook command arguments may contain the absolute
+packaged executable or repository project path only inside the private plan and
+transient target; public DTOs, the ownership ledger, journal, diagnostics, and
+logs never contain that path or Hook command.
 
 Every non-owned Hook entry remains in its original position. Setup owns only an
 entry whose command and ordered arguments identify its exact

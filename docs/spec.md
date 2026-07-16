@@ -178,7 +178,16 @@ option manages all three together. The approved Hook set is installed by
 default and may capture raw prompt/tool content independently, so plans carry
 the fixed `claude_hooks_capture_raw_content` warning. Static setup does not
 emit `run_first_trace_doctor`; first real trace and Doctor integration remain
-Issue #104. D060 records the adapter-specific boundary.
+Issue #104. The invocation directory is the only selected Claude project root:
+the adapter observes its exact local and project settings files without parent,
+child, Git-root, or `--add-dir` discovery. Managed env precedence is current
+process > one platform-selected managed object > local > project > user; the
+highest present source wins per key, except that selecting the managed object
+itself never merges or falls through across its platform tiers. Every observed
+settings file is strictly bounded and malformed input fails closed. Hook
+execution layout is resolved only from the injected repository or Release
+layout and never from the current directory or `PATH`. D060 records the
+adapter-specific boundary.
 
 ## Source capability semantic contract v1
 
