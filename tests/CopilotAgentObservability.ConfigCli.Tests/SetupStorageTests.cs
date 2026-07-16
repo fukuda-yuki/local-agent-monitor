@@ -484,6 +484,265 @@ public sealed class SetupStorageTests
     }
 
     [Fact]
+    public void Plan_RoundTripsClaudeOwnedSettingsArmInCanonicalOrder()
+    {
+        var context = CreateContext();
+        var plan = CreateClaudePlan("1");
+
+        context.PlanStore.Create(context.Lock, plan);
+        var reopened = context.PlanStore.Load(ChangeSetId);
+        using var document = JsonDocument.Parse(context.Platform.ReadSeededFile(context.Paths.GetPlan(ChangeSetId)));
+        var desired = document.RootElement.GetProperty("targets")[0].GetProperty("desired_state");
+
+        Assert.Equivalent(plan, reopened, strict: true);
+        Assert.Equal(
+            ["kind", "expected_state_hash", "owned_env", "owned_hooks"],
+            desired.EnumerateObject().Select(property => property.Name));
+        Assert.Equal("claude_settings_owned_values_v1", desired.GetProperty("kind").GetString());
+        Assert.Equal(["key", "value"], desired.GetProperty("owned_env")[0].EnumerateObject().Select(property => property.Name));
+        Assert.Equal(
+            ["event", "command", "args", "timeout_seconds"],
+            desired.GetProperty("owned_hooks")[0].EnumerateObject().Select(property => property.Name));
+        Assert.Equal(5, desired.GetProperty("owned_env").GetArrayLength());
+        Assert.Equal(11, desired.GetProperty("owned_hooks").GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(2048, true)]
+    [InlineData(2049, false)]
+    public void Plan_ClaudeOwnedStringsEnforceUtf16Boundary(int length, bool valid)
+    {
+        var plan = CreateClaudePlan(new string('x', length));
+
+        if (!valid)
+        {
+            Assert.Throws<FormatException>(() => SetupPlanStore.Serialize(plan));
+            return;
+        }
+
+        using var document = JsonDocument.Parse(SetupPlanStore.Serialize(plan));
+        Assert.Equal(
+            length,
+            document.RootElement.GetProperty("targets")[0]
+                .GetProperty("desired_state").GetProperty("owned_env")[0]
+                .GetProperty("value").GetString()!.Length);
+    }
+
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(8, true)]
+    [InlineData(0, false)]
+    [InlineData(9, false)]
+    public void Plan_ClaudeOwnedEnvEnforcesEntryCountBoundaries(int count, bool valid)
+    {
+        var original = CreateClaudePlan("1");
+        var state = Assert.IsType<SetupClaudeSettingsOwnedValuesDesiredState>(original.Targets[0].DesiredState);
+        var canonical = new[]
+        {
+            new SetupClaudeSettingsEnvValue("CLAUDE_CODE_ENABLE_TELEMETRY", "1"),
+            new SetupClaudeSettingsEnvValue("CLAUDE_CODE_ENHANCED_TELEMETRY_BETA", "1"),
+            new SetupClaudeSettingsEnvValue("OTEL_TRACES_EXPORTER", "otlp"),
+            new SetupClaudeSettingsEnvValue("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf"),
+            new SetupClaudeSettingsEnvValue("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4320/v1/traces"),
+            new SetupClaudeSettingsEnvValue("OTEL_LOG_USER_PROMPTS", "1"),
+            new SetupClaudeSettingsEnvValue("OTEL_LOG_TOOL_DETAILS", "1"),
+            new SetupClaudeSettingsEnvValue("OTEL_LOG_TOOL_CONTENT", "1"),
+            new SetupClaudeSettingsEnvValue("UNKNOWN_ENV", "1"),
+        }.Take(count).ToArray();
+        var hookMembers = original.Targets[0].Members.Where(member => member.SettingKey.StartsWith("hooks.", StringComparison.Ordinal));
+        var members = canonical.Select(value => new SetupPrivatePlanMember($"env.{value.Key}", SetupOperation.Replace, value.Value))
+            .Concat(hookMembers)
+            .ToArray();
+        var plan = original with
+        {
+            Targets = [original.Targets[0] with { DesiredState = state with { OwnedEnv = canonical }, Members = members }],
+        };
+
+        if (valid)
+        {
+            _ = SetupPlanStore.Serialize(plan);
+        }
+        else
+        {
+            Assert.Throws<FormatException>(() => SetupPlanStore.Serialize(plan));
+        }
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(2048, true)]
+    [InlineData(2049, false)]
+    public void Plan_ClaudeHookCommandEnforcesUtf16Boundary(int length, bool valid)
+    {
+        var plan = CreateClaudePlan("1");
+        var state = Assert.IsType<SetupClaudeSettingsOwnedValuesDesiredState>(plan.Targets[0].DesiredState);
+        var hooks = state.OwnedHooks.ToArray();
+        hooks[0] = hooks[0] with { Command = new string('x', length) };
+        plan = plan with
+        {
+            Targets = [plan.Targets[0] with { DesiredState = state with { OwnedHooks = hooks } }],
+        };
+
+        if (valid)
+        {
+            _ = SetupPlanStore.Serialize(plan);
+        }
+        else
+        {
+            Assert.Throws<FormatException>(() => SetupPlanStore.Serialize(plan));
+        }
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(2048, true)]
+    [InlineData(2049, false)]
+    public void Plan_ClaudeHookArgumentEnforcesUtf16Boundary(int length, bool valid)
+    {
+        var plan = CreateClaudePlan("1");
+        var state = Assert.IsType<SetupClaudeSettingsOwnedValuesDesiredState>(plan.Targets[0].DesiredState);
+        var hooks = state.OwnedHooks.ToArray();
+        var arguments = hooks[0].Arguments.ToArray();
+        arguments[0] = new string('x', length);
+        hooks[0] = hooks[0] with { Arguments = arguments };
+        plan = plan with
+        {
+            Targets = [plan.Targets[0] with { DesiredState = state with { OwnedHooks = hooks } }],
+        };
+
+        if (valid)
+        {
+            _ = SetupPlanStore.Serialize(plan);
+        }
+        else
+        {
+            Assert.Throws<FormatException>(() => SetupPlanStore.Serialize(plan));
+        }
+    }
+
+    [Theory]
+    [InlineData("claude-code", SetupTargetKind.File, "claude-code-user-settings")]
+    [InlineData("github-copilot", SetupTargetKind.Json, "claude-code-user-settings")]
+    [InlineData("claude-code", SetupTargetKind.Json, "wrong-label")]
+    public void DesiredStateBinding_ClaudeArmRejectsWrongAdapterKindOrLabel(
+        string adapter,
+        SetupTargetKind targetKind,
+        string label)
+    {
+        var plan = CreateClaudePlan("1") with
+        {
+            Adapter = adapter,
+            Targets = [CreateClaudePlan("1").Targets[0] with { TargetKind = targetKind }],
+        };
+        var ledger = CreateClaudePlannedChangeSet() with
+        {
+            Adapter = adapter,
+            Targets = [CreateClaudePlannedChangeSet().Targets[0] with { TargetKind = targetKind, TargetLabel = label, OwningAdapter = adapter }],
+        };
+
+        Assert.Throws<SetupStorageException>(() => SetupStorageValidation.ValidateDesiredStateBindings(plan, ledger));
+    }
+
+    [Fact]
+    public void DesiredStateBinding_ClaudeArmAcceptsExactAdapterKindAndLabel()
+    {
+        SetupStorageValidation.ValidateDesiredStateBindings(
+            CreateClaudePlan("1"),
+            CreateClaudePlannedChangeSet());
+    }
+
+    [Theory]
+    [InlineData("reordered_hooks")]
+    [InlineData("duplicate_hook")]
+    [InlineData("wrong_timeout")]
+    [InlineData("unknown_hook")]
+    [InlineData("empty_args")]
+    public void Plan_ClaudeArmRejectsNoncanonicalHookContract(string mutation)
+    {
+        var plan = CreateClaudePlan("1");
+        var state = Assert.IsType<SetupClaudeSettingsOwnedValuesDesiredState>(plan.Targets[0].DesiredState);
+        var hooks = state.OwnedHooks.ToArray();
+        switch (mutation)
+        {
+            case "reordered_hooks":
+                (hooks[0], hooks[1]) = (hooks[1], hooks[0]);
+                break;
+            case "duplicate_hook":
+                hooks[1] = hooks[0];
+                break;
+            case "wrong_timeout":
+                hooks[0] = hooks[0] with { TimeoutSeconds = 4 };
+                break;
+            case "unknown_hook":
+                hooks[0] = hooks[0] with { EventName = "UnknownEvent" };
+                break;
+            case "empty_args":
+                hooks[0] = hooks[0] with { Arguments = [] };
+                break;
+        }
+
+        plan = plan with
+        {
+            Targets = [plan.Targets[0] with { DesiredState = state with { OwnedHooks = hooks } }],
+        };
+
+        Assert.Throws<FormatException>(() => SetupPlanStore.Serialize(plan));
+    }
+
+    [Theory]
+    [InlineData("unknown_arm")]
+    [InlineData("unknown_field")]
+    [InlineData("duplicate_env_key_field")]
+    [InlineData("owned_env_wrong_type")]
+    [InlineData("argument_wrong_type")]
+    public void PlanLoad_MalformedClaudeArmFailsRecoveryWithoutEcho(string mutation)
+    {
+        const string privateMarker = "PRIVATE_COMMAND_MARKER";
+        var context = CreateContext();
+        var root = JsonNode.Parse(SetupPlanStore.Serialize(CreateClaudePlan("1")))!.AsObject();
+        var desired = root["targets"]![0]!["desired_state"]!.AsObject();
+        string serialized;
+        switch (mutation)
+        {
+            case "unknown_arm":
+                desired["kind"] = "claude_settings_owned_values_v2";
+                serialized = root.ToJsonString();
+                break;
+            case "unknown_field":
+                desired["private_marker"] = privateMarker;
+                serialized = root.ToJsonString();
+                break;
+            case "duplicate_env_key_field":
+                serialized = root.ToJsonString().Replace(
+                    "\"key\":\"CLAUDE_CODE_ENABLE_TELEMETRY\"",
+                    "\"key\":\"CLAUDE_CODE_ENABLE_TELEMETRY\",\"key\":\"CLAUDE_CODE_ENABLE_TELEMETRY\"",
+                    StringComparison.Ordinal);
+                break;
+            case "owned_env_wrong_type":
+                desired["owned_env"] = "private-marker";
+                serialized = root.ToJsonString();
+                break;
+            case "argument_wrong_type":
+                desired["owned_hooks"]![0]!["args"]![0] = true;
+                serialized = root.ToJsonString();
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mutation));
+        }
+
+        context.Platform.SeedFile(context.Paths.GetPlan(ChangeSetId), Encoding.UTF8.GetBytes(serialized));
+
+        var exception = Assert.Throws<SetupStorageException>(() => context.PlanStore.Load(ChangeSetId));
+
+        Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
+        Assert.DoesNotContain(privateMarker, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Plan_EnvNoOpWithMissingDesiredValue_WritesVersionOneAndReopens()
     {
         var temporaryRoot = Path.Combine(Path.GetTempPath(), $"copilot-agent-observability-{Guid.NewGuid():N}");
@@ -1689,6 +1948,99 @@ public sealed class SetupStorageTests
                     [new SetupJsoncOwnedValue("github.copilot.chat.otel.enabled", "string", "DESIRED_VALUE_MARKER")]),
                 [new SetupPrivatePlanMember("github.copilot.chat.otel.enabled", SetupOperation.Replace, "DESIRED_VALUE_MARKER")]),
         ]);
+
+    private static SetupPrivatePlan CreateClaudePlan(string firstEnvValue)
+    {
+        var env = new[]
+        {
+            new SetupClaudeSettingsEnvValue("CLAUDE_CODE_ENABLE_TELEMETRY", firstEnvValue),
+            new SetupClaudeSettingsEnvValue("CLAUDE_CODE_ENHANCED_TELEMETRY_BETA", "1"),
+            new SetupClaudeSettingsEnvValue("OTEL_TRACES_EXPORTER", "otlp"),
+            new SetupClaudeSettingsEnvValue("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf"),
+            new SetupClaudeSettingsEnvValue("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4320/v1/traces"),
+        };
+        var events = new[]
+        {
+            "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse",
+            "PostToolUseFailure", "SubagentStart", "SubagentStop", "Stop", "StopFailure", "SessionEnd",
+        };
+        var hooks = events.Select(eventName => new SetupClaudeSettingsHook(
+            eventName,
+            "monitor.exe",
+            ["hook-forward", "--endpoint", "http://127.0.0.1:4320", "--timeout-ms", "250", "--source", "claude-code", "--source-version", "2.1.207"],
+            5)).ToArray();
+        var members = env.Select(value => new SetupPrivatePlanMember(
+                $"env.{value.Key}", SetupOperation.Replace, value.Value))
+            .Concat(hooks.Select(hook => new SetupPrivatePlanMember(
+                $"hooks.{hook.EventName}", SetupOperation.Add, "configured")))
+            .ToArray();
+        return new SetupPrivatePlan(
+            1,
+            ChangeSetId,
+            "claude-code",
+            "cli",
+            CreatedAt,
+            "1.2.3",
+            [
+                new SetupPrivatePlanTarget(
+                    RecordId,
+                    SetupTargetKind.Json,
+                    "C:\\Synthetic\\claude-settings.json",
+                    HashA,
+                    new SetupClaudeSettingsOwnedValuesDesiredState(HashB, env, hooks),
+                    members),
+            ]);
+    }
+
+    private static SetupLedgerChangeSet CreateClaudePlannedChangeSet()
+    {
+        var plan = CreateClaudePlan("1");
+        var members = plan.Targets[0].Members
+            .Select(member => new SetupLedgerMember(member.SettingKey, member.Operation))
+            .ToArray();
+        var changes = plan.Targets[0].Members
+            .Select(member => new SetupMemberChangeResult(
+                member.SettingKey,
+                member.Operation,
+                "redacted",
+                "configured",
+                "none",
+                false))
+            .ToArray();
+        return new SetupLedgerChangeSet(
+            ChangeSetId,
+            "claude-code",
+            "cli",
+            CreatedAt,
+            CreatedAt,
+            "1.2.3",
+            null,
+            SetupChangeSetState.Planned,
+            [
+                new SetupLedgerTarget(
+                    RecordId,
+                    SetupTargetKind.Json,
+                    "claude-code-user-settings",
+                    "claude-code",
+                    members,
+                    HashA,
+                    null,
+                    null,
+                    null,
+                    SetupLedgerRollbackStatus.NotAvailable,
+                    SetupRestartRequirement.RestartVsCode,
+                    new SetupStatusProjection(
+                        true,
+                        "2.1.207",
+                        SetupOperation.Replace,
+                        SetupEffectiveSource.UserSetting,
+                        "configured_loopback",
+                        LoadHistoricalManifest(),
+                        null,
+                        changes),
+                    "1.2.3"),
+            ]);
+    }
 
     private static SetupPrivatePlan CreateLegacyInlineFixturePlan() => new(
         1,

@@ -531,6 +531,31 @@ internal static class SetupStorageFile
 internal static partial class SetupStorageValidation
 {
     private static readonly HashSet<string> OutcomeCodes = new(SetupCodes.ResultCodes, StringComparer.Ordinal);
+    private static readonly string[] ClaudeEnvKeys =
+    [
+        "CLAUDE_CODE_ENABLE_TELEMETRY",
+        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
+        "OTEL_TRACES_EXPORTER",
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_LOG_USER_PROMPTS",
+        "OTEL_LOG_TOOL_DETAILS",
+        "OTEL_LOG_TOOL_CONTENT",
+    ];
+    private static readonly string[] ClaudeHookEvents =
+    [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "SubagentStart",
+        "SubagentStop",
+        "Stop",
+        "StopFailure",
+        "SessionEnd",
+    ];
 
     [GeneratedRegex("^[a-z0-9]+(?:-[a-z0-9]+)*$", RegexOptions.CultureInvariant)]
     private static partial Regex SlugPattern();
@@ -599,6 +624,12 @@ internal static partial class SetupStorageValidation
             return;
         }
 
+        if ((object)target.DesiredState is SetupClaudeSettingsOwnedValuesDesiredState claude)
+        {
+            ValidateClaudeDesiredState(adapter, target, members, claude);
+            return;
+        }
+
         if ((object)target.DesiredState is not SetupJsoncOwnedValuesDesiredState tagged)
         {
             throw new FormatException();
@@ -625,6 +656,49 @@ internal static partial class SetupStorageValidation
             .Select(ownedValue => ownedValue.SettingKey)
             .Distinct(StringComparer.Ordinal)
             .Count() == ownedValues.Count);
+    }
+
+    private static void ValidateClaudeDesiredState(
+        string adapter,
+        SetupPrivatePlanTarget target,
+        IReadOnlyList<SetupPrivatePlanMember> members,
+        SetupClaudeSettingsOwnedValuesDesiredState desiredState)
+    {
+        Require(adapter == "claude-code" && target.TargetKind == SetupTargetKind.Json);
+        RequirePattern(desiredState.ExpectedStateHash, HashPattern());
+        var env = RequireNotNull(desiredState.OwnedEnv);
+        var hooks = RequireNotNull(desiredState.OwnedHooks);
+        Require(env.Count is >= 1 and <= 8);
+        Require(hooks.Count == ClaudeHookEvents.Length);
+        Require(members.Count == env.Count + hooks.Count);
+
+        var previousEnvIndex = -1;
+        for (var index = 0; index < env.Count; index++)
+        {
+            var value = RequireNotNull(env[index]);
+            var canonicalIndex = Array.IndexOf(ClaudeEnvKeys, value.Key);
+            Require(canonicalIndex > previousEnvIndex);
+            previousEnvIndex = canonicalIndex;
+            Require(value.Value is { Length: >= 1 and <= 2048 });
+            Require(members[index].SettingKey == $"env.{value.Key}");
+        }
+
+        Require(env.Select(value => value.Key).Distinct(StringComparer.Ordinal).Count() == env.Count);
+        for (var index = 0; index < hooks.Count; index++)
+        {
+            var hook = RequireNotNull(hooks[index]);
+            Require(hook.EventName == ClaudeHookEvents[index]);
+            Require(hook.Command is { Length: >= 1 and <= 2048 });
+            var arguments = RequireNotNull(hook.Arguments);
+            Require(arguments.Count is >= 1 and <= 32);
+            foreach (var argument in arguments)
+            {
+                Require(argument is { Length: >= 1 and <= 2048 });
+            }
+
+            Require(hook.TimeoutSeconds == 5);
+            Require(members[env.Count + index].SettingKey == $"hooks.{hook.EventName}");
+        }
     }
 
     public static void ValidateLedger(SetupOwnershipLedger ledger)
@@ -777,13 +851,20 @@ internal static partial class SetupStorageValidation
         {
             var planTarget = plan.Targets[index];
             var ledgerTarget = changeSet.Targets[index];
-            var requiresTaggedArm = plan.Adapter == "github-copilot" &&
+            var requiresGithubArm = plan.Adapter == "github-copilot" &&
                 planTarget.TargetKind == SetupTargetKind.Json &&
                 ledgerTarget.TargetLabel is
                     "vscode-stable-default-user-settings" or
                     "vscode-insiders-default-user-settings";
-            if (requiresTaggedArm !=
-                ((object)planTarget.DesiredState is SetupJsoncOwnedValuesDesiredState))
+            var requiresClaudeArm = plan.Adapter == "claude-code" &&
+                planTarget.TargetKind == SetupTargetKind.Json &&
+                ledgerTarget.TargetLabel == "claude-code-user-settings";
+            var actualGithubArm = (object)planTarget.DesiredState is SetupJsoncOwnedValuesDesiredState;
+            var actualClaudeArm = (object)planTarget.DesiredState is SetupClaudeSettingsOwnedValuesDesiredState;
+            if (requiresGithubArm != actualGithubArm ||
+                requiresClaudeArm != actualClaudeArm ||
+                (requiresGithubArm && actualClaudeArm) ||
+                (requiresClaudeArm && actualGithubArm))
             {
                 throw new SetupStorageException(SetupCodes.RecoveryRequired);
             }

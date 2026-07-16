@@ -605,6 +605,16 @@ three v1 representations, and no other representation is accepted.
   or adapter/kind/label-mismatched data is `recovery_required` before target
   activity.
 
+For the Claude settings target, private-plan and public projection members use
+one closed order and naming rule. Owned env members come first as
+`env.<ENV_NAME>`, followed by all Hook members as `hooks.<EventName>` in the
+canonical Hook order. A default plan therefore has 5 env plus 11 Hook members
+(16 total); explicit content capture has 8 env plus 11 Hook members (19 total).
+The three content-gate keys are preserved but are not members when explicit
+capture is absent. `owned_env` stores the env name without the `env.` prefix
+and maps 1:1 in order to the env-member slice; `owned_hooks` stores the event
+name and maps 1:1 in order to the Hook-member slice.
+
 The tagged arm is valid only for a `SetupTargetKind.Json` target owned by the
 `github-copilot` adapter with label exactly
 `vscode-stable-default-user-settings` or
