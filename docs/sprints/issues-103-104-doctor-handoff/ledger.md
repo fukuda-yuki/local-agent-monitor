@@ -11,7 +11,7 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 - Base branch: `main`
 - Base commit: `920ff43a9ec63088a9cc109bcd15d0e6f4f9dc5c`
 - Current reviewed branch commit before this ledger update:
-  `9db24b92a191fc82478bf13fef370cd32c16ee1c`
+  `af0d0aab9cb6a71607fab530285fda3b6789f653`
 - Pull request, merge, and Issue closure: not performed
 
 ## Commit sequence
@@ -29,11 +29,14 @@ G0-3 cross-source RED contract-test checkpoint. Product behavior belongs in
 | `f61c669ed2d5dc2932bad98a05a54e4fb02496fb` | Record the initial G0 state and unavailable validation commands |
 | `4b60c130c2fd5581f6270808389d49355f0b3a0f` | Split the bundled source-implementation RED into three independently owned tests |
 | `9db24b92a191fc82478bf13fef370cd32c16ee1c` | Align the canonical specification with the parallel RED ownership |
+| `6048c13033717be75da00f50435f2c5af618b356` | Align the approved design with the three parallel implementation gates |
+| `116c37e8214aef0ad20aacd64d67c4748a24a32f` | Record the implementation-plan correction for parallel ownership |
+| `d8fc9da4a3af08111be2281233ba4c200d4ae317` | Cover invalid source identity and inactive verification with the fixed sanitized error |
+| `af0d0aab9cb6a71607fab530285fda3b6789f653` | Align the plan correction with the reviewed six shared tests |
 
 The original implementation-plan code block bundled all three surfaces into
-one test. The reviewed executable test and canonical specification supersede
-that detail: the three implementation gates are separate so #103 and #104 can
-verify their owned rows independently.
+one test and showed one invalid-input example. The reviewed executable test,
+canonical specification, and plan-correction record supersede those details.
 
 ## G0-2 contract state
 
@@ -57,7 +60,7 @@ Session binding behavior is changed.
 
 ## G0-3 test intent
 
-`DoctorSourceHandoffContractTests` contains four shared-boundary tests and three
+`DoctorSourceHandoffContractTests` contains six shared-boundary tests and three
 independent source-implementation tests.
 
 The intended post-G0 result is:
@@ -65,7 +68,9 @@ The intended post-G0 result is:
 - `DirectComposition_MapsFixedAuthorityAndPreservesObservations`: GREEN;
 - `VerificationComposition_UsesVerificationIdentityAndNoCallerObservations`:
   GREEN;
-- `InvalidComposition_UsesFixedSanitizedError`: GREEN;
+- `UnsafeObservation_UsesFixedSanitizedError`: GREEN;
+- `InvalidSourceIdentity_UsesFixedSanitizedError`: GREEN;
+- `InactiveVerification_UsesFixedSanitizedError`: GREEN;
 - `DoctorCoreDefinesNoSourceSpecificDoctorEnum`: GREEN;
 - `GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore`: RED until
   Issue #103 provides `github-copilot-vscode`;
@@ -94,12 +99,12 @@ A complete branch-file inventory against `main` found only:
 
 - one specification-index line;
 - the canonical handoff specification;
-- the approved design and implementation plan;
+- the approved design, implementation plan, and reviewed plan correction;
 - one Doctor source-neutral production file;
 - one Doctor test file; and
 - this durable ledger.
 
-Static review corrected four issues before this ledger update:
+Static review corrected five issues before this ledger update:
 
 1. The first discovery test scanned only Config CLI and Local Monitor, so its
    Doctor-core exclusion assertion was vacuous. It now scans all three
@@ -113,6 +118,9 @@ Static review corrected four issues before this ledger update:
    would keep both parallel worktrees RED for work owned by the other Issue.
    The test is now split into two #103 facts and one #104 fact, with common
    discovery and Doctor-core exclusion logic.
+5. The fixed invalid-composition error was initially covered only for an unsafe
+   evidence reference. The reviewed test also pins invalid source identity and
+   inactive verification without echoing rejected values.
 
 The reviewed source contains no placeholder, fallback, source-specific Doctor
 enum, public candidate-write surface, sleep, polling, retry loop, real raw
