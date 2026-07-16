@@ -16,8 +16,3 @@ internal sealed record DoctorStoreOutcome(
 {
     public IReadOnlyList<DoctorEvidenceCandidate> ResolvedCandidates { get; } = Candidates ?? [];
 }
-
-internal sealed class DoctorStoreOperationException(DoctorResultCode code) : Exception(code.ToString())
-{
-    public DoctorResultCode Code { get; } = code;
-}

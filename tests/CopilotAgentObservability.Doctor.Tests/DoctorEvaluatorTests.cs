@@ -183,24 +183,26 @@ public sealed class DoctorEvaluatorTests
             evaluation.MissingFactFamilies);
     }
 
-    [Fact]
-    public void Evaluate_UnknownContentFactThatAlonePreventsFirstReady_ReturnsPartial()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Evaluate_AdvisoryOnlyUnknownContentFact_PreservesFirstTraceReady(bool contentCaptureUnknown)
     {
         var snapshot = DoctorTestSnapshots.FirstTraceReady() with
         {
             CompletenessAndContent = new CompletenessAndContentFacts(
                 DoctorCompleteness.Full,
-                ContentCaptureStatus.Unknown,
-                RawAccessStatus.Available),
+                contentCaptureUnknown ? ContentCaptureStatus.Unknown : ContentCaptureStatus.Enabled,
+                contentCaptureUnknown ? RawAccessStatus.Available : RawAccessStatus.Unknown),
         };
 
         var result = DoctorEvaluator.Evaluate(snapshot);
 
-        Assert.False(result.Success);
-        Assert.Equal(DoctorResultCode.PartialFactSnapshot, result.Code);
+        Assert.True(result.Success);
+        Assert.Equal(DoctorResultCode.EvaluationCompleted, result.Code);
         var evaluation = Assert.IsType<DoctorEvaluation>(result.Evaluation);
-        Assert.Null(evaluation.PrimaryState);
-        Assert.Empty(evaluation.States);
+        Assert.Equal(DoctorStateCode.FirstTraceReady, evaluation.PrimaryState?.StateCode);
+        Assert.Equal([DoctorStateCode.FirstTraceReady], evaluation.States.Select(state => state.StateCode));
         Assert.Equal(["completeness_and_content"], evaluation.MissingFactFamilies);
     }
 

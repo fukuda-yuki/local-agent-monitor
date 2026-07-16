@@ -145,9 +145,7 @@ public static class DoctorEvaluator
 
         var content = snapshot.CompletenessAndContent;
         var contentUnknown = content is null
-            || content.Completeness == DoctorCompleteness.Unknown
-            || content.ContentCapture == ContentCaptureStatus.Unknown
-            || content.RawAccess == RawAccessStatus.Unknown;
+            || content.Completeness == DoctorCompleteness.Unknown;
         return contentUnknown && MeetsFirstTraceRequirementsExceptKnownContent(snapshot);
     }
 
@@ -230,9 +228,7 @@ public static class DoctorEvaluator
             || snapshot.RawPersistence?.Outcome != RawPersistenceOutcome.Persisted
             || snapshot.Projection?.Outcome != ProjectionOutcome.Completed
             || snapshot.CompletenessAndContent is null
-            || snapshot.CompletenessAndContent.Completeness == DoctorCompleteness.Unknown
-            || snapshot.CompletenessAndContent.ContentCapture == ContentCaptureStatus.Unknown
-            || snapshot.CompletenessAndContent.RawAccess == RawAccessStatus.Unknown)
+            || snapshot.CompletenessAndContent.Completeness == DoctorCompleteness.Unknown)
         {
             return false;
         }

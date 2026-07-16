@@ -64,7 +64,7 @@ public sealed class DoctorMigrationTests
             store.Start("github-copilot-vscode", "otel", TimeSpan.FromMinutes(5)).Verification);
         Assert.Equal(
             DoctorResultCode.VerificationActive,
-            store.ObserveCandidate(DoctorTestData.Candidate(verification, $"fixture:monitor-v{version}")).Code);
+            store.ObserveCandidate(DoctorTestData.Candidate(verification, $"fixture-monitor-v{version}")).Code);
 
         string firstRestartRows;
         using (var firstRestart = database.Open())

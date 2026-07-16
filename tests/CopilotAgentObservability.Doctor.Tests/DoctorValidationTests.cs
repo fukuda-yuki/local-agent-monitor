@@ -187,6 +187,10 @@ public sealed class DoctorValidationTests
         "content: raw",
         "tool argument raw",
         "tool result raw",
+        "user.id=person-001",
+        "123-45-6789",
+        "ghp_abcdefghijklmnop",
+        "QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
         "https://example.test/trace",
         "file:relative/trace.json",
         "urn:doctor:evidence",
@@ -273,6 +277,8 @@ public sealed class DoctorValidationTests
     {
         Assert.True(DoctorValidation.IsValidEvidenceReference("x"));
         Assert.True(DoctorValidation.IsValidEvidenceReference(new string('x', 128)));
+        Assert.True(DoctorValidation.IsValidEvidenceReference("opaque receipt 001"));
+        Assert.True(DoctorValidation.IsValidEvidenceReference("YWJjZGVmZ2hpamtsbW5vcA=="));
         Assert.False(DoctorValidation.IsValidEvidenceReference(string.Empty));
         Assert.False(DoctorValidation.IsValidEvidenceReference(new string('x', 129)));
         Assert.False(DoctorValidation.IsValidEvidenceReference("event\nref"));

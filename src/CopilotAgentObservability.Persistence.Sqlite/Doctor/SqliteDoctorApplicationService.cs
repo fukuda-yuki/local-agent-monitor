@@ -65,7 +65,8 @@ internal sealed class SqliteDoctorApplicationService
         }
         if (!DoctorValidation.IsValidFactSnapshot(snapshot)
             || snapshot.Observations.Count != 0
-            || !string.Equals(snapshot.VerificationId, verificationId, StringComparison.Ordinal))
+            || snapshot.VerificationId is not null
+                && !string.Equals(snapshot.VerificationId, verificationId, StringComparison.Ordinal))
         {
             return Error(DoctorResultCode.InvalidInput);
         }
@@ -81,6 +82,8 @@ internal sealed class SqliteDoctorApplicationService
             {
                 var trustedSnapshot = snapshot with
                 {
+                    ExpectedSourceAdapter = candidates[0].SourceAdapter,
+                    VerificationId = verificationId,
                     Observations = candidates.Select(ToObservation).ToArray(),
                 };
                 evaluation = evaluator(trustedSnapshot);

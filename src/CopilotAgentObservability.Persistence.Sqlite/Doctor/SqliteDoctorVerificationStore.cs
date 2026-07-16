@@ -2,7 +2,7 @@ using CopilotAgentObservability.Doctor;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
+internal sealed class SqliteDoctorVerificationStore
 {
     private const int MaximumCandidates = 100;
     private const int MaximumAcceptedEvidence = 16;
@@ -246,7 +246,7 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
             || !DoctorStoreValidation.IsSourceToken(sourceAdapter, nullable: true)
             || acceptedEvidenceRefs.Count is < 1 or > MaximumAcceptedEvidence
             || acceptedEvidenceRefs.Distinct(StringComparer.Ordinal).Count() != acceptedEvidenceRefs.Count
-            || acceptedEvidenceRefs.Any(reference => !DoctorStoreValidation.IsEvidenceReference(reference)))
+            || acceptedEvidenceRefs.Any(reference => !DoctorValidation.IsValidEvidenceReference(reference)))
         {
             return Invalid();
         }
@@ -275,7 +275,8 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
                 return transitionFailure;
             }
             if (!string.Equals(sourceSurface, verification.ExpectedSourceSurface, StringComparison.Ordinal)
-                || !string.Equals(sourceAdapter, verification.ExpectedSourceAdapter, StringComparison.Ordinal))
+                || sourceAdapter is not null
+                    && !string.Equals(sourceAdapter, verification.ExpectedSourceAdapter, StringComparison.Ordinal))
             {
                 transaction.Rollback();
                 return new(DoctorResultCode.ExpectedSourceMismatch, verification);
@@ -413,66 +414,6 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
         }
     }
 
-    DoctorVerification IDoctorVerificationStore.Start(DoctorVerification verification)
-    {
-        var result = InsertVerification(verification, DoctorResultCode.VerificationStarted);
-        return RequireVerification(result);
-    }
-
-    DoctorVerification? IDoctorVerificationStore.Find(string verificationId)
-    {
-        var result = Get(verificationId);
-        return result.Code == DoctorResultCode.VerificationNotFound ? null : RequireVerification(result);
-    }
-
-    void IDoctorVerificationStore.ObserveCandidate(DoctorEvidenceCandidate candidate) =>
-        RequireSuccess(ObserveCandidate(candidate), DoctorResultCode.VerificationActive);
-
-    IReadOnlyList<DoctorEvidenceCandidate> IDoctorVerificationStore.ResolveCandidates(
-        string verificationId,
-        IReadOnlyList<string> evidenceRefs,
-        DateTimeOffset observedAt)
-    {
-        if (observedAt.Offset != TimeSpan.Zero)
-        {
-            throw new DoctorStoreOperationException(DoctorResultCode.InvalidInput);
-        }
-        var result = ResolveCandidates(verificationId, evidenceRefs, observedAt);
-        RequireSuccess(result, DoctorResultCode.VerificationActive);
-        return result.ResolvedCandidates;
-    }
-
-    DoctorVerification? IDoctorVerificationStore.Complete(
-        string verificationId,
-        int expectedRevision,
-        IReadOnlyList<string> acceptedEvidenceRefs,
-        DateTimeOffset completedAt)
-    {
-        var current = Get(verificationId);
-        var verification = RequireVerification(current);
-        if (completedAt.Offset != TimeSpan.Zero)
-        {
-            throw new DoctorStoreOperationException(DoctorResultCode.InvalidInput);
-        }
-        var result = Complete(
-            verificationId,
-            expectedRevision,
-            verification.ExpectedSourceSurface,
-            verification.ExpectedSourceAdapter,
-            acceptedEvidenceRefs,
-            _ => DoctorCompletionDecision.Ready);
-        return RequireVerification(result);
-    }
-
-    DoctorVerification? IDoctorVerificationStore.Cancel(string verificationId, int expectedRevision, DateTimeOffset cancelledAt)
-    {
-        if (cancelledAt.Offset != TimeSpan.Zero)
-        {
-            throw new DoctorStoreOperationException(DoctorResultCode.InvalidInput);
-        }
-        return RequireVerification(Cancel(verificationId, expectedRevision));
-    }
-
     private DoctorStoreOutcome InsertVerification(DoctorVerification verification, DoctorResultCode successCode)
     {
         if (!IsValidNewVerification(verification))
@@ -514,68 +455,6 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
         catch (SqliteException exception) when (exception.SqliteErrorCode == 19)
         {
             return Invalid();
-        }
-        catch (Exception)
-        {
-            return Unavailable();
-        }
-    }
-
-    private DoctorStoreOutcome ResolveCandidates(
-        string verificationId,
-        IReadOnlyList<string> evidenceRefs,
-        DateTimeOffset observedAt)
-    {
-        if (!DoctorStoreValidation.IsCanonicalUuidV7(verificationId)
-            || evidenceRefs.Count is < 1 or > MaximumAcceptedEvidence
-            || evidenceRefs.Distinct(StringComparer.Ordinal).Count() != evidenceRefs.Count
-            || evidenceRefs.Any(reference => !DoctorStoreValidation.IsEvidenceReference(reference)))
-        {
-            return Invalid();
-        }
-        try
-        {
-            using var connection = OpenConnection();
-            using var transaction = connection.BeginTransaction();
-            if (!DoctorSchemaV1.IsValid(connection, transaction))
-            {
-                transaction.Rollback();
-                return Unavailable();
-            }
-            var verification = ReadVerification(connection, transaction, verificationId);
-            if (verification is null)
-            {
-                transaction.Rollback();
-                return NotFound();
-            }
-            var transitionFailure = CheckActiveTransition(verification, verification.Revision, observedAt);
-            if (transitionFailure is not null)
-            {
-                transaction.Rollback();
-                return transitionFailure;
-            }
-            var candidates = new List<DoctorEvidenceCandidate>();
-            foreach (var evidenceRef in evidenceRefs)
-            {
-                var candidate = ReadCandidate(connection, transaction, verificationId, evidenceRef);
-                if (candidate is null)
-                {
-                    transaction.Rollback();
-                    return new(DoctorResultCode.EvidenceNotFound, verification);
-                }
-                if (candidate.ExpiresAt <= observedAt)
-                {
-                    transaction.Rollback();
-                    return new(DoctorResultCode.EvidenceExpired, verification);
-                }
-                candidates.Add(candidate);
-            }
-            transaction.Commit();
-            return new(DoctorResultCode.VerificationActive, verification, candidates);
-        }
-        catch (SqliteException exception) when (IsBusy(exception))
-        {
-            return Busy();
         }
         catch (Exception)
         {
@@ -667,7 +546,12 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
         var references = new List<string>();
         while (reader.Read())
         {
-            references.Add(reader.GetString(0));
+            var reference = reader.GetString(0);
+            if (!DoctorValidation.IsValidEvidenceReference(reference))
+            {
+                throw new InvalidOperationException("Stored Doctor evidence reference is invalid.");
+            }
+            references.Add(reference);
         }
         return references;
     }
@@ -694,7 +578,7 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
         {
             return null;
         }
-        return new(
+        var candidate = new DoctorEvidenceCandidate(
             reader.GetString(0),
             reader.GetString(1),
             reader.GetString(2),
@@ -704,6 +588,9 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
             reader.GetString(6),
             ParseTimestamp(reader.GetString(7)),
             ParseTimestamp(reader.GetString(8)));
+        return DoctorValidation.IsValidEvidenceCandidate(candidate)
+            ? candidate
+            : throw new InvalidOperationException("Stored Doctor evidence candidate is invalid.");
     }
 
     private static bool CandidateExists(
@@ -925,34 +812,6 @@ internal sealed class SqliteDoctorVerificationStore : IDoctorVerificationStore
         command.Parameters.AddWithValue(name, value ?? DBNull.Value);
 
     private static bool IsBusy(SqliteException exception) => exception.SqliteErrorCode is 5 or 6;
-
-    private static DoctorVerification RequireVerification(DoctorStoreOutcome outcome)
-    {
-        if (outcome.Verification is null
-            || outcome.Code is DoctorResultCode.DoctorStoreBusy
-                or DoctorResultCode.DoctorStoreUnavailable
-                or DoctorResultCode.InvalidInput
-                or DoctorResultCode.VerificationNotFound
-                or DoctorResultCode.VerificationStale
-                or DoctorResultCode.VerificationExpired
-                or DoctorResultCode.VerificationAlreadyCancelled
-                or DoctorResultCode.VerificationAlreadyCompleted
-                or DoctorResultCode.ExpectedSourceMismatch
-                or DoctorResultCode.EvidenceNotFound
-                or DoctorResultCode.EvidenceExpired)
-        {
-            throw new DoctorStoreOperationException(outcome.Code);
-        }
-        return outcome.Verification;
-    }
-
-    private static void RequireSuccess(DoctorStoreOutcome outcome, DoctorResultCode expected)
-    {
-        if (outcome.Code != expected)
-        {
-            throw new DoctorStoreOperationException(outcome.Code);
-        }
-    }
 
     private static DoctorStoreOutcome Active(DoctorVerification? verification = null) =>
         new(DoctorResultCode.VerificationActive, verification);

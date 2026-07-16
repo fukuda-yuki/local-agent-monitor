@@ -22,6 +22,10 @@ public sealed class DoctorVerificationStoreTests
         "api_key=synthetic-secret",
         "secret=synthetic-secret",
         "password=synthetic-secret",
+        "user.id=person-001",
+        "123-45-6789",
+        "ghp_abcdefghijklmnop",
+        "QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
         "user@example.invalid",
         @"C:\private\trace.json",
         @"\\server\private\trace.json",
@@ -93,7 +97,7 @@ public sealed class DoctorVerificationStoreTests
             DoctorResultCode.InvalidInput,
             store.ObserveCandidate(DoctorTestData.Candidate(
                 verification,
-                "session:synthetic-binding",
+                "synthetic-binding",
                 DoctorEvidenceClass.SyntheticProbe,
                 DoctorEvidenceKind.ExactSessionBinding)).Code);
 
@@ -101,15 +105,15 @@ public sealed class DoctorVerificationStoreTests
         {
             Assert.Equal(
                 DoctorResultCode.VerificationActive,
-                store.ObserveCandidate(DoctorTestData.Candidate(verification, $"session:candidate-{index:D3}")).Code);
+                store.ObserveCandidate(DoctorTestData.Candidate(verification, $"candidate-{index:D3}")).Code);
         }
 
         Assert.Equal(
             DoctorResultCode.InvalidInput,
-            store.ObserveCandidate(DoctorTestData.Candidate(verification, "session:candidate-100")).Code);
+            store.ObserveCandidate(DoctorTestData.Candidate(verification, "candidate-100")).Code);
         Assert.Equal(
             DoctorResultCode.InvalidInput,
-            store.ObserveCandidate(DoctorTestData.Candidate(verification, "session:candidate-000")).Code);
+            store.ObserveCandidate(DoctorTestData.Candidate(verification, "candidate-000")).Code);
 
         using var connection = database.Open();
         Assert.Equal(100L, DoctorTestDatabase.Scalar(connection, "SELECT count(*) FROM doctor_verification_evidence;"));
@@ -142,6 +146,35 @@ public sealed class DoctorVerificationStoreTests
                 reopened,
                 "SELECT count(*) FROM doctor_verification_evidence WHERE evidence_ref=$reference;",
                 ("$reference", unsafeReference)));
+    }
+
+    [Theory]
+    [InlineData("user.id=person-001")]
+    [InlineData("123-45-6789")]
+    [InlineData("ghp_abcdefghijklmnop")]
+    [InlineData("QWxhZGRpbjpvcGVuIHNlc2FtZQ==")]
+    public void Get_PersistedUnsafeReferenceFailsClosedWithoutEcho(string unsafeReference)
+    {
+        using var database = new DoctorTestDatabase();
+        var store = NewStore(database);
+        var verification = Start(store);
+        var candidate = DoctorTestData.Candidate(verification, "safe-receipt");
+        Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(candidate).Code);
+        using (var connection = database.Open())
+        {
+            DoctorTestDatabase.Execute(
+                connection,
+                "UPDATE doctor_verification_evidence SET evidence_ref=$unsafe,accepted=1,accepted_ordinal=0 WHERE candidate_id=$candidate;",
+                ("$unsafe", unsafeReference),
+                ("$candidate", candidate.CandidateId));
+        }
+
+        var result = store.Get(verification.VerificationId);
+
+        Assert.Equal(DoctorResultCode.DoctorStoreUnavailable, result.Code);
+        Assert.Null(result.Verification);
+        Assert.Empty(result.ResolvedCandidates);
+        Assert.DoesNotContain(unsafeReference, result.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
@@ -211,7 +244,7 @@ public sealed class DoctorVerificationStoreTests
         var references = new List<string>();
         for (var index = 0; index < 17; index++)
         {
-            var reference = $"trace:accepted-{index:D2}";
+            var reference = $"accepted-{index:D2}";
             references.Add(reference);
             Assert.Equal(
                 DoctorResultCode.VerificationActive,
@@ -245,8 +278,8 @@ public sealed class DoctorVerificationStoreTests
         var time = new DoctorTestTimeProvider(DoctorTestData.Now);
         var store = NewStore(database, time);
         var verification = Start(store);
-        var projection = DoctorTestData.Candidate(verification, "trace:projection", evidenceKind: DoctorEvidenceKind.Projection);
-        var ingest = DoctorTestData.Candidate(verification, "trace:ingest", evidenceKind: DoctorEvidenceKind.Ingest);
+        var projection = DoctorTestData.Candidate(verification, "trace-projection", evidenceKind: DoctorEvidenceKind.Projection);
+        var ingest = DoctorTestData.Candidate(verification, "trace-ingest", evidenceKind: DoctorEvidenceKind.Ingest);
         Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(projection).Code);
         Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(ingest).Code);
 
@@ -270,7 +303,7 @@ public sealed class DoctorVerificationStoreTests
         using (var connection = database.Open())
         {
             Assert.Equal(
-                ["trace:ingest|1|0", "trace:projection|1|1"],
+                ["trace-ingest|1|0", "trace-projection|1|1"],
                 DoctorTestDatabase.Rows(connection, "SELECT evidence_ref,accepted,accepted_ordinal FROM doctor_verification_evidence WHERE accepted=1 ORDER BY accepted_ordinal;"));
         }
 
@@ -294,7 +327,7 @@ public sealed class DoctorVerificationStoreTests
         using var database = new DoctorTestDatabase();
         var store = NewStore(database);
         var verification = Start(store);
-        var candidate = DoctorTestData.Candidate(verification, "trace:not-ready");
+        var candidate = DoctorTestData.Candidate(verification, "trace-not-ready");
         Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(candidate).Code);
 
         var result = store.Complete(
@@ -324,9 +357,9 @@ public sealed class DoctorVerificationStoreTests
 
         Assert.Equal(
             DoctorResultCode.EvidenceNotFound,
-            store.Complete(verification.VerificationId, 1, verification.ExpectedSourceSurface, "otel", ["trace:missing"], _ => DoctorCompletionDecision.Ready).Code);
+            store.Complete(verification.VerificationId, 1, verification.ExpectedSourceSurface, "otel", ["trace-missing"], _ => DoctorCompletionDecision.Ready).Code);
 
-        var expiring = DoctorTestData.Candidate(verification, "trace:expired", expiresAt: DoctorTestData.Now.AddMinutes(1));
+        var expiring = DoctorTestData.Candidate(verification, "trace-expired", expiresAt: DoctorTestData.Now.AddMinutes(1));
         Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(expiring).Code);
         time.UtcNow = DoctorTestData.Now.AddMinutes(1);
         Assert.Equal(
@@ -334,7 +367,7 @@ public sealed class DoctorVerificationStoreTests
             store.Complete(verification.VerificationId, 1, verification.ExpectedSourceSurface, "otel", [expiring.EvidenceRef], _ => DoctorCompletionDecision.Ready).Code);
 
         time.UtcNow = DoctorTestData.Now;
-        var synthetic = DoctorTestData.Candidate(verification, "probe:ingest", DoctorEvidenceClass.SyntheticProbe);
+        var synthetic = DoctorTestData.Candidate(verification, "probe-ingest", DoctorEvidenceClass.SyntheticProbe);
         Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(synthetic).Code);
         Assert.Equal(
             DoctorResultCode.ExpectedSourceMismatch,
@@ -380,7 +413,7 @@ public sealed class DoctorVerificationStoreTests
         using var database = new DoctorTestDatabase();
         var baseStore = NewStore(database);
         var verification = Start(baseStore);
-        var candidate = DoctorTestData.Candidate(verification, "trace:rollback");
+        var candidate = DoctorTestData.Candidate(verification, "trace-rollback");
         if (failurePoint != "after-candidate-insert")
         {
             Assert.Equal(DoctorResultCode.VerificationActive, baseStore.ObserveCandidate(candidate).Code);
@@ -483,7 +516,7 @@ public sealed class DoctorVerificationStoreTests
         using var database = new DoctorTestDatabase();
         var baseStore = NewStore(database);
         var verification = Start(baseStore);
-        var candidate = DoctorTestData.Candidate(verification, "trace:race");
+        var candidate = DoctorTestData.Candidate(verification, "trace-race");
         Assert.Equal(DoctorResultCode.VerificationActive, baseStore.ObserveCandidate(candidate).Code);
         using var barrier = new Barrier(2);
 
@@ -547,7 +580,7 @@ public sealed class DoctorVerificationStoreTests
         using var database = new DoctorTestDatabase();
         var baseStore = NewStore(database);
         var verification = Start(baseStore);
-        var candidate = DoctorTestData.Candidate(verification, "trace:same-complete-race");
+        var candidate = DoctorTestData.Candidate(verification, "trace-same-complete-race");
         Assert.Equal(DoctorResultCode.VerificationActive, baseStore.ObserveCandidate(candidate).Code);
         using var barrier = new Barrier(2);
         SqliteDoctorVerificationStore RacingStore() => new(

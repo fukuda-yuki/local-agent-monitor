@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace CopilotAgentObservability.Doctor;
@@ -25,6 +26,18 @@ public static class DoctorValidation
     private static readonly Regex UriPattern = new(
         @"[a-z][a-z0-9+.-]*:",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static readonly Regex PersonalIdentifierPattern = new(
+        @"(?<![0-9])[0-9]{3}-[0-9]{2}-[0-9]{4}(?![0-9])",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex BasicAuthPattern = new(
+        @"(?i)\bbasic\s+[a-z0-9+/]+={0,2}\b",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex Base64CandidatePattern = new(
+        @"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{16,}={0,2}(?![A-Za-z0-9+/=])",
+        RegexOptions.CultureInvariant);
 
     public static bool IsValidFactSnapshot(DoctorFactSnapshot snapshot)
     {
@@ -124,23 +137,57 @@ public static class DoctorValidation
         return normalized.Length == value.Length
             && !EmailPattern.IsMatch(normalized)
             && !UriPattern.IsMatch(normalized)
-            && !normalized.Contains("Bearer ", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("Basic ", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("Authorization:", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("api_key", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("apikey", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("secret", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("password", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("credential", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("token", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("prompt:", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("response:", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("content:", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("tool argument", StringComparison.OrdinalIgnoreCase)
-            && !normalized.Contains("tool result", StringComparison.OrdinalIgnoreCase)
+            && !PersonalIdentifierPattern.IsMatch(normalized)
+            && !BasicAuthPattern.IsMatch(normalized)
+            && !ContainsUnsafeMarker(normalized)
+            && !ContainsStandaloneBase64Credential(normalized)
             && !normalized.Contains('/')
             && !normalized.Contains('\\')
             && normalized is not "." and not ".." and not "~";
+    }
+
+    private static bool ContainsUnsafeMarker(string value)
+    {
+        string[] unsafeMarkers =
+        [
+            "raw prompt", "prompt content", "prompt:", "raw response", "response content", "response:",
+            "captured content", "content:", "tool argument", "tool.arguments", "tool result", "tool.results",
+            "credential", "secret", "password", "authorization", "api key", "api.key", "api_key", "apikey",
+            "access token", "refresh token", "auth token", "bearer ", "basic ", "ghp_", "github_pat_", "base64",
+            "otel_exporter_otlp_headers", "x-langfuse", "user.email", "user.id", "email=",
+        ];
+
+        return unsafeMarkers.Any(marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool ContainsStandaloneBase64Credential(string value)
+    {
+        foreach (Match match in Base64CandidatePattern.Matches(value))
+        {
+            var candidate = match.Value;
+            if (candidate.Length % 4 != 0)
+            {
+                continue;
+            }
+
+            try
+            {
+                var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(candidate));
+                if (decoded.Contains(':', StringComparison.Ordinal)
+                    || decoded.Contains("secret", StringComparison.OrdinalIgnoreCase)
+                    || decoded.Contains("key", StringComparison.OrdinalIgnoreCase)
+                    || decoded.Contains("token", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            catch (FormatException)
+            {
+                // Non-Base64 opaque references remain eligible for the other fixed checks.
+            }
+        }
+
+        return false;
     }
 
     public static bool IsSourceToken(string? value) =>

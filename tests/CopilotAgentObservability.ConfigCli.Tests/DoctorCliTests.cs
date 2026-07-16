@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using CopilotAgentObservability.Doctor;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
@@ -52,6 +53,22 @@ public sealed class DoctorCliTests
         Assert.Equal(string.Empty, human.Error);
         Assert.Equal(2, application.EvaluateCalls.Count);
         Assert.All(application.EvaluateCalls, snapshot => Assert.Equal("github-copilot-vscode", snapshot.SourceSurface));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Evaluate_AdvisoryOnlyUnknownContentFact_RealCommandReturnsFirstTraceReady(bool contentCaptureUnknown)
+    {
+        using var input = DoctorInputFile.Create(FirstReadySnapshotJson(contentCaptureUnknown));
+
+        var command = RunProduction(["doctor", "evaluate", "--input", input.Path, "--json"]);
+
+        Assert.Equal(0, command.ExitCode);
+        Assert.Equal(string.Empty, command.Error);
+        var result = DoctorJson.DeserializeResult(command.Output);
+        Assert.Equal(DoctorStateCode.FirstTraceReady, result.Evaluation?.PrimaryState?.StateCode);
+        Assert.Equal(["completeness_and_content"], result.Evaluation?.MissingFactFamilies);
     }
 
     [Fact]
@@ -362,6 +379,8 @@ public sealed class DoctorCliTests
             "person@example.com",
             "user.id=person-001",
             "123-45-6789",
+            "ghp_abcdefghijklmnop",
+            "QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
             "urn:uuid:018f3b9a-0000-7000-8000-000000000001",
             "HTTPS://example.invalid/evidence",
             " urn:uuid:018f3b9a-0000-7000-8000-000000000001",
@@ -552,6 +571,61 @@ public sealed class DoctorCliTests
     }
 
     [Fact]
+    public void ActualCommand_ProductionCompleteEnrichesOmittedOptionalContext()
+    {
+        using var input = DoctorInputFile.Create("{}");
+        var databasePath = System.IO.Path.Combine(input.DirectoryPath, "doctor.db");
+        var now = TimeProvider.System.GetUtcNow().ToUniversalTime();
+        var expiresAt = now.AddMinutes(5);
+        var started = RunProduction([
+            "doctor", "verification", "start", "--database", databasePath,
+            "--source-surface", "github-copilot-vscode", "--source-adapter", "otel",
+            "--expires-at", expiresAt.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'"), "--json"]);
+        var verification = Assert.IsType<DoctorVerification>(DoctorJson.DeserializeResult(started.Output).Verification);
+        var store = new SqliteDoctorVerificationStore(databasePath, TimeProvider.System);
+        var candidates = Enum.GetValues<DoctorEvidenceKind>()
+            .Where(kind => kind != DoctorEvidenceKind.ExactSessionBinding)
+            .Select((kind, index) => new DoctorEvidenceCandidate(
+                $"01890abc-def0-7000-8000-{index + 1:x12}",
+                verification.VerificationId,
+                verification.ExpectedSourceSurface,
+                verification.ExpectedSourceAdapter,
+                DoctorEvidenceClass.RealSource,
+                kind,
+                $"receipt-{System.Text.Json.JsonNamingPolicy.SnakeCaseLower.ConvertName(kind.ToString())}",
+                now,
+                expiresAt))
+            .ToArray();
+        foreach (var candidate in candidates)
+        {
+            Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(candidate).Code);
+        }
+        var snapshot = Regex.Replace(
+                FirstReadySnapshotJson(contentCaptureUnknown: false),
+                "\"observations\":\\[.*?\\],",
+                "\"observations\":[],",
+                RegexOptions.Singleline)
+            .Replace("\"expected_source_adapter\":null,", string.Empty, StringComparison.Ordinal)
+            .Replace("\"verification_id\":null,", string.Empty, StringComparison.Ordinal)
+            .Replace("2026-07-16T01:02:03.0000000Z", now.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'"), StringComparison.Ordinal);
+        using var completionInput = DoctorInputFile.Create(CompleteInputJson(
+            snapshotJson: snapshot,
+            references: System.Text.Json.JsonSerializer.Serialize(candidates.Select(candidate => candidate.EvidenceRef))));
+
+        var completed = RunProduction([
+            "doctor", "verification", "complete", "--database", databasePath,
+            "--verification-id", verification.VerificationId, "--expected-revision", "1",
+            "--input", completionInput.Path, "--json"]);
+
+        Assert.True(completed.ExitCode == 0, completed.Output + completed.Error);
+        Assert.Equal(string.Empty, completed.Error);
+        var result = DoctorJson.DeserializeResult(completed.Output);
+        Assert.Equal(DoctorResultCode.VerificationCompleted, result.Code);
+        Assert.Equal("otel", result.Verification?.ExpectedSourceAdapter);
+        Assert.Equal(DoctorStateCode.FirstTraceReady, result.Evaluation?.PrimaryState?.StateCode);
+    }
+
+    [Fact]
     public void ActualCommand_CompleteJsonAndHumanProjectTheSameResultOnce()
     {
         using var input = DoctorInputFile.Create(CompleteInputJson());
@@ -679,6 +753,24 @@ public sealed class DoctorCliTests
         var serializedReference = System.Text.Json.JsonSerializer.Serialize(reference);
         var observations = $$"""[{"source_surface":"github-copilot-vscode","source_adapter":null,"evidence_class":"real_source","evidence_kind":"ingest","evidence_ref":{{serializedReference}},"observed_at":"2026-07-16T01:02:03.0000000Z"}]""";
         return SnapshotJson.Replace("\"observations\":[]", $"\"observations\":{observations}", StringComparison.Ordinal);
+    }
+
+    private static string FirstReadySnapshotJson(bool contentCaptureUnknown)
+    {
+        var observations = "["
+            + "{\"source_surface\":\"github-copilot-vscode\",\"source_adapter\":null,\"evidence_class\":\"real_source\",\"evidence_kind\":\"ingest\",\"evidence_ref\":\"receipt-ingest\",\"observed_at\":\"2026-07-16T01:02:03.0000000Z\"},"
+            + "{\"source_surface\":\"github-copilot-vscode\",\"source_adapter\":null,\"evidence_class\":\"real_source\",\"evidence_kind\":\"raw_persistence\",\"evidence_ref\":\"receipt-raw\",\"observed_at\":\"2026-07-16T01:02:03.0000000Z\"},"
+            + "{\"source_surface\":\"github-copilot-vscode\",\"source_adapter\":null,\"evidence_class\":\"real_source\",\"evidence_kind\":\"projection\",\"evidence_ref\":\"receipt-projection\",\"observed_at\":\"2026-07-16T01:02:03.0000000Z\"},"
+            + "{\"source_surface\":\"github-copilot-vscode\",\"source_adapter\":null,\"evidence_class\":\"real_source\",\"evidence_kind\":\"completeness_content\",\"evidence_ref\":\"receipt-content\",\"observed_at\":\"2026-07-16T01:02:03.0000000Z\"}]";
+        return SnapshotJson
+            .Replace("\"monitor_process\":\"not_running\",\"receiver_bind\":\"not_bound\",\"port_owner\":\"none\"", "\"monitor_process\":\"running\",\"receiver_bind\":\"bound\",\"port_owner\":\"monitor\"", StringComparison.Ordinal)
+            .Replace("\"observations\":[]", $"\"observations\":{observations}", StringComparison.Ordinal)
+            .Replace("\"outcome\":\"none\"", "\"outcome\":\"accepted\"", StringComparison.Ordinal)
+            .Replace("\"outcome\":\"not_persisted\"", "\"outcome\":\"persisted\"", StringComparison.Ordinal)
+            .Replace("\"outcome\":\"not_started\"", "\"outcome\":\"completed\"", StringComparison.Ordinal)
+            .Replace("\"completeness\":\"full\",\"content_capture\":\"enabled\",\"raw_access\":\"available\"",
+                $"\"completeness\":\"full\",\"content_capture\":\"{(contentCaptureUnknown ? "unknown" : "enabled")}\",\"raw_access\":\"{(contentCaptureUnknown ? "available" : "unknown")}\"",
+                StringComparison.Ordinal);
     }
 
     private static void AssertSanitizedInvalidInput(CommandResult result, RecordingDoctorApplication application)

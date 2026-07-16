@@ -3,6 +3,21 @@ namespace CopilotAgentObservability.Doctor.Tests.Persistence;
 public sealed class DoctorApplicationServiceTests
 {
     [Fact]
+    public void ProductionStore_HasNoReadyFixedInterfaceCompletionPath()
+    {
+        var storeType = typeof(SqliteDoctorVerificationStore);
+
+        Assert.DoesNotContain(typeof(IDoctorVerificationStore), storeType.GetInterfaces());
+        var completion = Assert.Single(
+            storeType.GetMethods(),
+            method => method.Name == nameof(SqliteDoctorVerificationStore.Complete));
+        Assert.Contains(
+            completion.GetParameters(),
+            parameter => parameter.ParameterType.IsGenericType
+                && parameter.ParameterType.GetGenericTypeDefinition() == typeof(Func<,>));
+    }
+
+    [Fact]
     public void Complete_ResolvesTrustedCandidatesAndEvaluatesExactlyOnce()
     {
         using var database = new DoctorTestDatabase();
@@ -65,6 +80,44 @@ public sealed class DoctorApplicationServiceTests
                 candidate.EvidenceRef,
                 candidate.ObservedAt)),
             Assert.IsType<DoctorFactSnapshot>(evaluatedSnapshot).Observations);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Complete_AdvisoryOnlyUnknownContentContext_CompletesAtomically(bool contentCaptureUnknown)
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new DoctorTestTimeProvider(DoctorTestData.Now);
+        var application = SqliteDoctorApplicationService.Create(
+            new SqliteDoctorVerificationStore(database.Path, time));
+        var verification = Assert.IsType<DoctorVerification>(
+            application.Start("claude-code", "otel", time.UtcNow.AddMinutes(5)).Verification);
+        var candidates = Enum.GetValues<DoctorEvidenceKind>()
+            .Select(kind => Candidate(verification, $"receipt-{kind.ToString().ToLowerInvariant()}", kind))
+            .ToArray();
+        foreach (var candidate in candidates)
+        {
+            Assert.Equal(DoctorResultCode.VerificationActive, application.ObserveCandidate(candidate).Code);
+        }
+        var snapshot = Context(DoctorTestSnapshots.FirstTraceReady(exactBindingRequired: true), verification, time) with
+        {
+            CompletenessAndContent = new CompletenessAndContentFacts(
+                DoctorCompleteness.Full,
+                contentCaptureUnknown ? ContentCaptureStatus.Unknown : ContentCaptureStatus.Enabled,
+                contentCaptureUnknown ? RawAccessStatus.Available : RawAccessStatus.Unknown),
+        };
+
+        var result = application.Complete(
+            verification.VerificationId,
+            1,
+            snapshot,
+            candidates.Select(candidate => candidate.EvidenceRef).ToArray());
+
+        Assert.Equal(DoctorResultCode.VerificationCompleted, result.Code);
+        Assert.Equal(DoctorStateCode.FirstTraceReady, result.Evaluation?.PrimaryState?.StateCode);
+        Assert.Equal(["completeness_and_content"], result.Evaluation?.MissingFactFamilies);
+        Assert.Equal(DoctorVerificationState.Completed, result.Verification?.State);
     }
 
     [Fact]
@@ -166,7 +219,7 @@ public sealed class DoctorApplicationServiceTests
                 return DoctorEvaluator.Evaluate(snapshot);
             });
         var verification = Assert.IsType<DoctorVerification>(
-            application.Start("claude-code", null, time.UtcNow.AddMinutes(5)).Verification);
+            application.Start("claude-code", "otel", time.UtcNow.AddMinutes(5)).Verification);
         var readySnapshot = DoctorTestSnapshots.FirstTraceReady();
         var callerObservation = Context(readySnapshot, verification, time) with
         {
@@ -176,6 +229,10 @@ public sealed class DoctorApplicationServiceTests
         {
             VerificationId = "01890abc-def0-7000-8000-000000000999",
             Observations = [],
+        };
+        var wrongAdapter = Context(readySnapshot, verification, time) with
+        {
+            ExpectedSourceAdapter = "wrong-adapter",
         };
 
         var observationsRejected = application.Complete(
@@ -188,9 +245,15 @@ public sealed class DoctorApplicationServiceTests
             1,
             wrongId,
             ["receipt-ingest"]);
+        var adapterRejected = application.Complete(
+            verification.VerificationId,
+            1,
+            wrongAdapter,
+            ["receipt-ingest"]);
 
         Assert.Equal(DoctorResultCode.InvalidInput, observationsRejected.Code);
         Assert.Equal(DoctorResultCode.InvalidInput, contextRejected.Code);
+        Assert.Equal(DoctorResultCode.ExpectedSourceMismatch, adapterRejected.Code);
         Assert.Equal(0, evaluatorCalls);
     }
 

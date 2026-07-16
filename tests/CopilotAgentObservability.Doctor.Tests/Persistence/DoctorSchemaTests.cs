@@ -90,7 +90,7 @@ public sealed class DoctorSchemaTests
             ("$id", verification.VerificationId)));
         Assert.Equal(19, invalidTerminal.SqliteErrorCode);
 
-        var candidate = DoctorTestData.Candidate(verification, "session:constraint");
+        var candidate = DoctorTestData.Candidate(verification, "session-constraint");
         DoctorTestDatabase.Execute(
             connection,
             "INSERT INTO doctor_verification_evidence(candidate_id,verification_id,source_surface,source_adapter,evidence_class,evidence_kind,evidence_ref,observed_at,expires_at,accepted,accepted_ordinal) VALUES($candidate,$verification,$source,$adapter,'real_source','ingest',$reference,$observed,$expires,0,NULL);",
@@ -113,7 +113,7 @@ public sealed class DoctorSchemaTests
             ("$observed", "2026-07-16T01:02:03.0000000Z"), ("$expires", "2026-07-16T01:07:03.0000000Z")));
         Assert.Equal(19, duplicate.SqliteErrorCode);
 
-        var orphan = DoctorTestData.Candidate(verification with { VerificationId = Guid.CreateVersion7(DoctorTestData.Now).ToString("D") }, "session:orphan");
+        var orphan = DoctorTestData.Candidate(verification with { VerificationId = Guid.CreateVersion7(DoctorTestData.Now).ToString("D") }, "session-orphan");
         var foreignKey = Assert.Throws<SqliteException>(() => DoctorTestDatabase.Execute(
             connection,
             "INSERT INTO doctor_verification_evidence(candidate_id,verification_id,source_surface,source_adapter,evidence_class,evidence_kind,evidence_ref,observed_at,expires_at,accepted,accepted_ordinal) VALUES($candidate,$verification,$source,$adapter,'real_source','ingest',$reference,$observed,$expires,0,NULL);",

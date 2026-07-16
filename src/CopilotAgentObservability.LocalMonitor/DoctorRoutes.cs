@@ -14,17 +14,15 @@ internal static class DoctorRoutes
     private const string JsonContentType = "application/json";
     private const string CanonicalTimestampFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
 
-    private static readonly Regex EmailPattern = new(
-        @"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-    private static readonly Regex UriPattern = new(
-        @"[a-z][a-z0-9+.-]*://",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
     public static void Map(WebApplication app, IDoctorHttpApplication application)
     {
         app.Use(async (context, next) =>
         {
+            if (IsDoctorPath(context.Request.Path))
+            {
+                context.Response.Headers.CacheControl = "no-store";
+            }
+
             if (HttpMethods.IsPost(context.Request.Method)
                 && IsDoctorBodyPath(context.Request.Path)
                 && !TrySetDoctorRequestBodyLimit(context))
@@ -182,7 +180,7 @@ internal static class DoctorRoutes
                 .Select(element => element.ValueKind == JsonValueKind.String ? element.GetString() : null)
                 .ToArray();
             if (evidenceRefs.Length is < 1 or > 16
-                || evidenceRefs.Any(reference => !IsSafeEvidenceReference(reference))
+                || evidenceRefs.Any(reference => !DoctorValidation.IsValidEvidenceReference(reference))
                 || evidenceRefs.Distinct(StringComparer.Ordinal).Count() != evidenceRefs.Length)
             {
                 throw new DoctorTransportException();
@@ -268,7 +266,8 @@ internal static class DoctorRoutes
             || snapshot.Observations is null
             || snapshot.Observations.Count > 16
             || directEvaluation && snapshot.VerificationId is not null
-            || !directEvaluation && !string.Equals(snapshot.VerificationId, requiredVerificationId, StringComparison.Ordinal)
+            || !directEvaluation && snapshot.VerificationId is not null
+                && !string.Equals(snapshot.VerificationId, requiredVerificationId, StringComparison.Ordinal)
             || snapshot.VerificationId is not null && !IsCanonicalUuidV7(snapshot.VerificationId)
             || snapshot.ExactSessionBinding is
                 { Requirement: not ExactSessionBindingRequirement.NotRequired, Outcome: ExactSessionBindingOutcome.NotApplicable })
@@ -284,7 +283,7 @@ internal static class DoctorRoutes
                 || observation.SourceAdapter is not null && !IsSourceToken(observation.SourceAdapter)
                 || snapshot.ExpectedSourceAdapter is not null
                     && !string.Equals(observation.SourceAdapter, snapshot.ExpectedSourceAdapter, StringComparison.Ordinal)
-                || !IsSafeEvidenceReference(observation.EvidenceRef)
+                || !DoctorValidation.IsValidEvidenceReference(observation.EvidenceRef)
                 || !evidenceRefs.Add(observation.EvidenceRef))
             {
                 throw new DoctorTransportException();
@@ -296,26 +295,27 @@ internal static class DoctorRoutes
 
     private static void ValidateFactSnapshotShape(JsonElement root)
     {
-        RequireExactProperties(
+        RequireProperties(
             root,
-            "schema_version",
-            "source_surface",
-            "expected_source_adapter",
-            "observed_at",
-            "verification_id",
-            "observations",
-            "install_and_source_version",
-            "process_receiver_and_port",
-            "source_effective_configuration",
-            "endpoint_reachability",
-            "protocol_and_signal_compatibility",
-            "source_version_and_schema_diagnostics",
-            "last_ingest",
-            "raw_persistence",
-            "projection",
-            "exact_session_binding",
-            "completeness_and_content",
-            "restart_or_new_process");
+            [
+                "schema_version",
+                "source_surface",
+                "observed_at",
+                "observations",
+                "install_and_source_version",
+                "process_receiver_and_port",
+                "source_effective_configuration",
+                "endpoint_reachability",
+                "protocol_and_signal_compatibility",
+                "source_version_and_schema_diagnostics",
+                "last_ingest",
+                "raw_persistence",
+                "projection",
+                "exact_session_binding",
+                "completeness_and_content",
+                "restart_or_new_process",
+            ],
+            ["expected_source_adapter", "verification_id"]);
         RequireNullableFamily(root, "install_and_source_version", "monitor_install", "source_version", "source_feature");
         RequireNullableFamily(root, "process_receiver_and_port", "monitor_process", "receiver_bind", "port_owner");
         RequireNullableFamily(root, "source_effective_configuration", "endpoint_alignment");
@@ -492,30 +492,6 @@ internal static class DoctorRoutes
         && string.Equals(value, parsed.ToString("D"), StringComparison.Ordinal)
         && value[14] == '7'
         && value[19] is '8' or '9' or 'a' or 'b';
-
-    private static bool IsSafeEvidenceReference(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)
-            || value.Length > 128
-            || value.Any(char.IsControl)
-            || EmailPattern.IsMatch(value)
-            || UriPattern.IsMatch(value)
-            || Regex.IsMatch(value, @"[A-Za-z]:[\\/]", RegexOptions.CultureInvariant)
-            || value.StartsWith(@"\\", StringComparison.Ordinal)
-            || value.StartsWith("/", StringComparison.Ordinal)
-            || value.Contains("../", StringComparison.Ordinal)
-            || value.Contains(@"..\", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        return !new[]
-        {
-            "authorization", "bearer ", "basic ", "api_key", "apikey", "credential",
-            "password", "secret", "token", "prompt:", "response:", "content:",
-            "tool argument", "tool result",
-        }.Any(marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
-    }
 
     private static bool AuthorizeMutation(HttpContext context) =>
         !MonitorHost.IsCrossSiteRequest(context)

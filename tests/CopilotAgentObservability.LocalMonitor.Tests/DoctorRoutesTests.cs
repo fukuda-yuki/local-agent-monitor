@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using CopilotAgentObservability.Doctor;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -243,7 +244,7 @@ public sealed class DoctorRoutesTests
         using var completeRequest = Mutation(
             HttpMethod.Post,
             $"/api/doctor/verifications/{VerificationId}/complete",
-            $$"""{"expected_revision":1,"fact_snapshot":{{NonReadySnapshotJson(VerificationId)}},"accepted_evidence_refs":["evidence:1"]}""");
+            $$"""{"expected_revision":1,"fact_snapshot":{{NonReadySnapshotJson(VerificationId)}},"accepted_evidence_refs":["evidence-1"]}""");
         using var complete = await host.Client.SendAsync(completeRequest);
         using var cancelRequest = Mutation(
             HttpMethod.Post,
@@ -312,7 +313,7 @@ public sealed class DoctorRoutesTests
         },
         {
             $"/api/doctor/verifications/{VerificationId}/complete",
-            $$"""{"expected_revision":1,"fact_snapshot":{{NonReadySnapshotJson(VerificationId)}},"accepted_evidence_refs":["evidence:1"]}"""
+            $$"""{"expected_revision":1,"fact_snapshot":{{NonReadySnapshotJson(VerificationId)}},"accepted_evidence_refs":["evidence-1"]}"""
         },
         {
             $"/api/doctor/verifications/{VerificationId}/cancel",
@@ -418,7 +419,7 @@ public sealed class DoctorRoutesTests
         yield return [$"/api/doctor/verifications/not-a-uuid", string.Empty, false, null!];
         yield return [
             $"/api/doctor/verifications/{VerificationId}/complete",
-            $$"""{"expected_revision":0,"fact_snapshot":{{NonReadySnapshotJson(VerificationId)}},"accepted_evidence_refs":["evidence:1"]}""",
+            $$"""{"expected_revision":0,"fact_snapshot":{{NonReadySnapshotJson(VerificationId)}},"accepted_evidence_refs":["evidence-1"]}""",
             true,
             "application/json"];
         yield return [
@@ -441,6 +442,200 @@ public sealed class DoctorRoutesTests
             """{"expected_revision":1,"unknown":true}""",
             true,
             "application/json"];
+    }
+
+    public static TheoryData<string> UnsafeEvidenceReferenceCases => new()
+    {
+        "user.id=person-001",
+        "123-45-6789",
+        "ghp_abcdefghijklmnop",
+        "QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+        "person@example.invalid",
+        "urn:doctor:evidence",
+        @"C:\private\trace.json",
+        "prompt:captured-user-text",
+    };
+
+    [Theory]
+    [MemberData(nameof(UnsafeEvidenceReferenceCases))]
+    public async Task UnsafeEvidenceReference_IsRejectedWithoutApplicationCallOrEcho(string unsafeReference)
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        var application = new RecordingDoctorApplication();
+        await using var host = await StartHostAsync(tempDirectory, application);
+        var observation = JsonSerializer.Serialize(new
+        {
+            source_surface = "github-copilot",
+            source_adapter = (string?)null,
+            evidence_class = "real_source",
+            evidence_kind = "ingest",
+            evidence_ref = unsafeReference,
+            observed_at = "2026-07-16T00:00:00.0000000Z",
+        });
+        var snapshot = NonReadySnapshotJson(verificationId: null).Replace(
+            "\"observations\":[]",
+            $"\"observations\":[{observation}]",
+            StringComparison.Ordinal);
+
+        using var evaluation = await host.Client.PostAsync(
+            "/api/doctor/evaluations",
+            JsonContent(snapshot));
+        using var completion = await host.Client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/doctor/verifications/{VerificationId}/complete",
+            $$"""{"expected_revision":1,"fact_snapshot":{{NonReadySnapshotJson(VerificationId)}},"accepted_evidence_refs":[{{JsonSerializer.Serialize(unsafeReference)}}]}"""));
+
+        AssertDoctorResponse(evaluation, HttpStatusCode.BadRequest);
+        AssertDoctorResponse(completion, HttpStatusCode.BadRequest);
+        var output = await evaluation.Content.ReadAsStringAsync() + await completion.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(unsafeReference, output, StringComparison.Ordinal);
+        Assert.Equal(0, application.TotalCalls);
+    }
+
+    [Fact]
+    public async Task DoctorPathFamily_FallbackMalformedAndUnsupportedMethodsAlwaysDisableCaching()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(tempDirectory, new RecordingDoctorApplication());
+        var routes = new (string Path, HttpMethod Allowed)[]
+        {
+            ("/api/doctor/evaluations", HttpMethod.Post),
+            ("/api/doctor/verifications", HttpMethod.Post),
+            ($"/api/doctor/verifications/{VerificationId}", HttpMethod.Get),
+            ($"/api/doctor/verifications/{VerificationId}/complete", HttpMethod.Post),
+            ($"/api/doctor/verifications/{VerificationId}/cancel", HttpMethod.Post),
+        };
+        HttpMethod[] methods =
+        [
+            HttpMethod.Get,
+            HttpMethod.Post,
+            HttpMethod.Put,
+            HttpMethod.Patch,
+            HttpMethod.Delete,
+            HttpMethod.Head,
+            HttpMethod.Options,
+        ];
+
+        foreach (var (path, allowed) in routes)
+        {
+            foreach (var method in methods.Where(candidate => candidate != allowed))
+            {
+                using var response = await host.Client.SendAsync(new HttpRequestMessage(method, path));
+                Assert.True(response.Headers.CacheControl?.NoStore, $"{method} {path}");
+            }
+        }
+
+        foreach (var path in new[] { "/api/doctor/unmatched", "/api/doctor//malformed", "/api/doctor/verifications//complete" })
+        {
+            using var response = await host.Client.GetAsync(path);
+            Assert.True(response.Headers.CacheControl?.NoStore, path);
+        }
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Evaluate_AcceptsOmittedOptionalSnapshotProperties(bool omitAdapter, bool omitVerificationId)
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        var application = new RecordingDoctorApplication();
+        await using var host = await StartHostAsync(tempDirectory, application);
+        var snapshot = OmitOptionalSnapshotProperties(
+            NonReadySnapshotJson(verificationId: null),
+            omitAdapter,
+            omitVerificationId);
+
+        using var response = await host.Client.PostAsync("/api/doctor/evaluations", JsonContent(snapshot));
+
+        AssertDoctorResponse(response, HttpStatusCode.OK);
+        Assert.Equal(1, application.EvaluateCalls);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Evaluate_AdvisoryOnlyUnknownContentFact_ReturnsFirstTraceReady(bool contentCaptureUnknown)
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(tempDirectory, new RecordingDoctorApplication(evaluateSnapshot: true));
+        var snapshot = ReadySnapshotJson(null!)
+            .Replace(
+                "\"content_capture\":\"enabled\"",
+                $"\"content_capture\":\"{(contentCaptureUnknown ? "unknown" : "enabled")}\"",
+                StringComparison.Ordinal)
+            .Replace(
+                "\"raw_access\":\"available\"",
+                $"\"raw_access\":\"{(contentCaptureUnknown ? "available" : "unknown")}\"",
+                StringComparison.Ordinal);
+        snapshot = snapshot.Replace(
+            "\"observations\":[]",
+            "\"observations\":["
+                + "{\"source_surface\":\"github-copilot\",\"source_adapter\":null,\"evidence_class\":\"real_source\",\"evidence_kind\":\"ingest\",\"evidence_ref\":\"receipt-ingest\",\"observed_at\":\"2026-07-16T00:00:00.0000000Z\"},"
+                + "{\"source_surface\":\"github-copilot\",\"source_adapter\":null,\"evidence_class\":\"real_source\",\"evidence_kind\":\"raw_persistence\",\"evidence_ref\":\"receipt-raw\",\"observed_at\":\"2026-07-16T00:00:00.0000000Z\"},"
+                + "{\"source_surface\":\"github-copilot\",\"source_adapter\":null,\"evidence_class\":\"real_source\",\"evidence_kind\":\"projection\",\"evidence_ref\":\"receipt-projection\",\"observed_at\":\"2026-07-16T00:00:00.0000000Z\"},"
+                + "{\"source_surface\":\"github-copilot\",\"source_adapter\":null,\"evidence_class\":\"real_source\",\"evidence_kind\":\"exact_session_binding\",\"evidence_ref\":\"receipt-binding\",\"observed_at\":\"2026-07-16T00:00:00.0000000Z\"},"
+                + "{\"source_surface\":\"github-copilot\",\"source_adapter\":null,\"evidence_class\":\"real_source\",\"evidence_kind\":\"completeness_content\",\"evidence_ref\":\"receipt-content\",\"observed_at\":\"2026-07-16T00:00:00.0000000Z\"}]",
+            StringComparison.Ordinal);
+
+        using var response = await host.Client.PostAsync("/api/doctor/evaluations", JsonContent(snapshot));
+
+        AssertDoctorResponse(response, HttpStatusCode.OK);
+        var result = await ResultAsync(response);
+        Assert.Equal(DoctorStateCode.FirstTraceReady, result.Evaluation?.PrimaryState?.StateCode);
+        Assert.Equal(["completeness_and_content"], result.Evaluation?.MissingFactFamilies);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task ProductionComplete_EnrichesOmittedOptionalContextFromTrustedVerification(
+        bool omitAdapter,
+        bool omitVerificationId)
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        var time = new MutableTimeProvider(new DateTimeOffset(2026, 7, 16, 0, 0, 0, TimeSpan.Zero));
+        await using var host = await StartHostAsync(tempDirectory, timeProvider: time);
+        using var startRequest = Mutation(
+            HttpMethod.Post,
+            "/api/doctor/verifications",
+            """{"source_surface":"github-copilot","source_adapter":"otel","expires_at":"2026-07-16T00:05:00.0000000Z"}""");
+        using var startResponse = await host.Client.SendAsync(startRequest);
+        var verification = Assert.IsType<DoctorVerification>((await ResultAsync(startResponse)).Verification);
+        var store = new SqliteDoctorVerificationStore(tempDirectory.DatabasePath, time);
+        var candidates = Enum.GetValues<DoctorEvidenceKind>()
+            .Select((kind, index) => new DoctorEvidenceCandidate(
+                $"01890abc-def0-7000-8000-{index + 1:x12}",
+                verification.VerificationId,
+                verification.ExpectedSourceSurface,
+                verification.ExpectedSourceAdapter,
+                DoctorEvidenceClass.RealSource,
+                kind,
+                $"receipt-{JsonNamingPolicy.SnakeCaseLower.ConvertName(kind.ToString())}",
+                verification.StartedAt,
+                verification.ExpiresAt))
+            .ToArray();
+        foreach (var candidate in candidates)
+        {
+            Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(candidate).Code);
+        }
+        var snapshot = ReadySnapshotJson(verification.VerificationId)
+            .Replace("\"expected_source_adapter\":null", "\"expected_source_adapter\":null", StringComparison.Ordinal);
+        snapshot = OmitOptionalSnapshotProperties(snapshot, omitAdapter, omitVerificationId);
+
+        using var response = await CompleteAsync(
+            host.Client,
+            verification.VerificationId,
+            1,
+            snapshot,
+            candidates.Select(candidate => candidate.EvidenceRef).ToArray());
+
+        AssertDoctorResponse(response, HttpStatusCode.OK);
+        var result = await ResultAsync(response);
+        Assert.Equal(DoctorResultCode.VerificationCompleted, result.Code);
+        Assert.Equal("otel", result.Verification?.ExpectedSourceAdapter);
+        Assert.Equal(DoctorStateCode.FirstTraceReady, result.Evaluation?.PrimaryState?.StateCode);
     }
 
     [Theory]
@@ -744,6 +939,19 @@ public sealed class DoctorRoutesTests
             "\"install_and_source_version\":null",
             StringComparison.Ordinal);
 
+    private static string OmitOptionalSnapshotProperties(string snapshot, bool omitAdapter, bool omitVerificationId)
+    {
+        if (omitAdapter)
+        {
+            snapshot = Regex.Replace(snapshot, "\\s*\\\"expected_source_adapter\\\":null,", string.Empty);
+        }
+        if (omitVerificationId)
+        {
+            snapshot = Regex.Replace(snapshot, "\\s*\\\"verification_id\\\":(?:null|\\\"[^\\\"]+\\\"),", string.Empty);
+        }
+        return snapshot;
+    }
+
     private static async Task<DoctorVerification> StartVerificationAsync(
         HttpClient client,
         TimeProvider timeProvider,
@@ -888,7 +1096,7 @@ public sealed class DoctorRoutesTests
                 CancelledAt: state == DoctorVerificationState.Cancelled
                     ? DateTimeOffset.Parse("2026-07-16T00:01:00.0000000Z")
                     : null,
-                AcceptedEvidenceRefs: state == DoctorVerificationState.Completed ? ["evidence:1"] : []);
+                AcceptedEvidenceRefs: state == DoctorVerificationState.Completed ? ["evidence-1"] : []);
     }
 
     private sealed class FixedDoctorApplication(DoctorResult result) : IDoctorHttpApplication

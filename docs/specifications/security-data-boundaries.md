@@ -847,6 +847,15 @@ happens only after a final state. Recovery may replay the notification when
 prior delivery cannot be proven; exactly-once external broadcast is not
 claimed.
 
+## First-Trace Doctor Boundary
+
+Issue #102's shared diagnosis result, persisted verification evidence, Config
+CLI commands, and Local Monitor routes follow the data-minimization, local HTTP,
+and lifecycle rules in
+[`interfaces/first-trace-doctor.md`](interfaces/first-trace-doctor.md). That
+interface is the canonical behavior authority; this section is only a security
+boundary cross-reference.
+
 ## Proposal Apply Boundary
 
 Issue #55 is the only privileged local file-mutation surface. A Canvas action,

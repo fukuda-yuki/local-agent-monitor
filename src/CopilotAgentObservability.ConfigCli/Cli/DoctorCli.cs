@@ -126,7 +126,7 @@ internal static partial class DoctorCli
                 .Select(element => element.ValueKind == JsonValueKind.String ? element.GetString() : null)
                 .ToArray();
             if (references.Length is < 1 or > 16
-                || references.Any(reference => !IsSafeEvidenceReference(reference))
+                || references.Any(reference => !DoctorValidation.IsValidEvidenceReference(reference))
                 || references.Distinct(StringComparer.Ordinal).Count() != references.Length)
             {
                 throw new DoctorInputException();
@@ -207,7 +207,7 @@ internal static partial class DoctorCli
                 || snapshot.ExpectedSourceAdapter is not null
                     && !string.Equals(observation.SourceAdapter, snapshot.ExpectedSourceAdapter, StringComparison.Ordinal)
                 || observation.SourceAdapter is not null && !IsSourceToken(observation.SourceAdapter)
-                || !IsSafeEvidenceReference(observation.EvidenceRef))
+                || !DoctorValidation.IsValidEvidenceReference(observation.EvidenceRef))
             || snapshot.ExactSessionBinding is
                 { Requirement: not ExactSessionBindingRequirement.NotRequired, Outcome: ExactSessionBindingOutcome.NotApplicable })
         {
@@ -331,29 +331,6 @@ internal static partial class DoctorCli
             throw new DoctorInputException();
         }
     }
-
-    private static bool IsSafeEvidenceReference(string? value)
-    {
-        if (value is not { Length: >= 1 and <= 128 }
-            || !string.Equals(value, value.Trim(), StringComparison.Ordinal)
-            || value.Any(char.IsControl)
-            || DiagnosisValidator.ContainsUnsafeMaterial(value)
-            || UriSchemePattern().IsMatch(value)
-            || value.IndexOfAny(['/', '\\']) >= 0
-            || value is "." or ".." or "~"
-            || PersonalIdentifierPattern().IsMatch(value))
-        {
-            return false;
-        }
-
-        return true;
-    }
-
-    [GeneratedRegex("\\A[A-Za-z][A-Za-z0-9+.-]*:", RegexOptions.CultureInvariant)]
-    private static partial Regex UriSchemePattern();
-
-    [GeneratedRegex("(?<![0-9])[0-9]{3}-[0-9]{2}-[0-9]{4}(?![0-9])", RegexOptions.CultureInvariant)]
-    private static partial Regex PersonalIdentifierPattern();
 
     private static bool IsSourceToken(string? value)
     {
