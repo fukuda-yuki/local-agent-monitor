@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -25,22 +26,119 @@ internal sealed record GitHubCopilotDoctorEvidenceResult(
     IReadOnlyList<string> EvidenceRefs,
     bool SessionUnbound);
 
+internal sealed record GitHubCopilotDoctorEvidenceStorePolicy(
+    int BusyTimeoutMilliseconds = 5_000,
+    int RetryCount = 0);
+
 internal static class GitHubCopilotDoctorEvidenceAdapter
 {
     private const string DoctorAdapter = "github-copilot-doctor";
+    private static readonly GitHubCopilotDoctorEvidenceStorePolicy DefaultStorePolicy = new();
+    private static readonly ConcurrentDictionary<string, ObservationGate> ObservationGates = new(StringComparer.OrdinalIgnoreCase);
 
     public static GitHubCopilotDoctorEvidenceResult Observe(
         string databasePath,
         TimeProvider timeProvider,
-        GitHubCopilotDoctorEvidenceSelection selection)
+        GitHubCopilotDoctorEvidenceSelection selection) =>
+        Observe(databasePath, timeProvider, selection, DefaultStorePolicy);
+
+    internal static GitHubCopilotDoctorEvidenceResult Observe(
+        string databasePath,
+        TimeProvider timeProvider,
+        GitHubCopilotDoctorEvidenceSelection selection,
+        GitHubCopilotDoctorEvidenceStorePolicy storePolicy)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(selection);
+        ArgumentNullException.ThrowIfNull(storePolicy);
+        if (storePolicy.BusyTimeoutMilliseconds < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(storePolicy));
+        }
+        if (storePolicy.RetryCount != 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(storePolicy));
+        }
 
         var partition = Partition.For(selection.Target);
-        var service = SqliteDoctorApplicationService.Create(
-            new SqliteDoctorVerificationStore(databasePath, timeProvider));
+        var gateKey = ObservationGateKey(databasePath, selection.VerificationId);
+        var observationGate = AcquireObservationGate(gateKey);
+        if (!Monitor.TryEnter(observationGate.SerializationLock, storePolicy.BusyTimeoutMilliseconds))
+        {
+            ReleaseObservationGate(gateKey, observationGate);
+            return Empty(StoreBusy(), partition, selection.VerificationId, timeProvider.GetUtcNow());
+        }
+
+        try
+        {
+            return ObserveCore(databasePath, timeProvider, selection, storePolicy, partition);
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            return Empty(StoreBusy(), partition, selection.VerificationId, timeProvider.GetUtcNow());
+        }
+        finally
+        {
+            Monitor.Exit(observationGate.SerializationLock);
+            ReleaseObservationGate(gateKey, observationGate);
+        }
+    }
+
+    internal static int ObservationGateCount(string databasePath, string verificationId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(verificationId);
+        return ObservationGates.ContainsKey(ObservationGateKey(databasePath, verificationId)) ? 1 : 0;
+    }
+
+    private static ObservationGate AcquireObservationGate(string key)
+    {
+        while (true)
+        {
+            var gate = ObservationGates.GetOrAdd(key, static _ => new ObservationGate());
+            lock (gate.LeaseLock)
+            {
+                if (gate.Retired)
+                {
+                    continue;
+                }
+
+                gate.LeaseCount++;
+                return gate;
+            }
+        }
+    }
+
+    private static void ReleaseObservationGate(string key, ObservationGate gate)
+    {
+        lock (gate.LeaseLock)
+        {
+            gate.LeaseCount--;
+            if (gate.LeaseCount != 0)
+            {
+                return;
+            }
+
+            gate.Retired = true;
+            ObservationGates.TryRemove(new KeyValuePair<string, ObservationGate>(key, gate));
+        }
+    }
+
+    private static string ObservationGateKey(string databasePath, string verificationId) =>
+        $"{Path.GetFullPath(databasePath)}|{verificationId}";
+
+    private static GitHubCopilotDoctorEvidenceResult ObserveCore(
+        string databasePath,
+        TimeProvider timeProvider,
+        GitHubCopilotDoctorEvidenceSelection selection,
+        GitHubCopilotDoctorEvidenceStorePolicy storePolicy,
+        Partition partition)
+    {
+        var service = SqliteDoctorApplicationService.Create(new SqliteDoctorVerificationStore(
+            databasePath,
+            timeProvider,
+            storePolicy.BusyTimeoutMilliseconds));
         var status = service.Status(selection.VerificationId);
         var empty = Empty(status, partition, selection.VerificationId, timeProvider.GetUtcNow());
         if (status.Code != DoctorResultCode.VerificationActive || status.Verification is not { } verification ||
@@ -51,7 +149,10 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             return empty;
         }
 
-        var rawStore = new RawTelemetryStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var connectionOptions = new RawTelemetryStoreConnectionOptions(
+            EnableWriteAheadLog: true,
+            storePolicy.BusyTimeoutMilliseconds);
+        var rawStore = new RawTelemetryStore(databasePath, connectionOptions);
         var raw = rawStore.GetRawRecordById(selection.RawRecordId);
         if (raw is null || raw.ReceivedAt < verification.StartedAt || raw.ReceivedAt >= verification.ExpiresAt ||
             !string.Equals(raw.Source, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
@@ -62,7 +163,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
 
         var compatibility = new SqliteSourceCompatibilityStore(
             databasePath,
-            RawTelemetryStoreConnectionOptions.MonitorWriter).GetByRawRecordId(selection.RawRecordId);
+            connectionOptions).GetByRawRecordId(selection.RawRecordId);
         if (compatibility is null ||
             !string.Equals(compatibility.SourceSurface, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
             !string.Equals(compatibility.SourceAdapter, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
@@ -71,7 +172,12 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             return empty;
         }
 
-        var binding = ResolveBinding(databasePath, selection.NativeSession, partition, raw.TraceId);
+        var binding = ResolveBinding(
+            databasePath,
+            selection.NativeSession,
+            partition,
+            raw.TraceId,
+            storePolicy.BusyTimeoutMilliseconds);
         if (binding is not null && !WithinVerificationWindow(binding.ObservedAt, verification))
         {
             binding = null;
@@ -112,7 +218,11 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                 descriptor.Kind,
                 descriptor.Identity);
             evidenceRefs.Add(evidenceRef);
-            if (CandidateExists(databasePath, selection.VerificationId, evidenceRef))
+            if (CandidateExists(
+                databasePath,
+                selection.VerificationId,
+                evidenceRef,
+                storePolicy.BusyTimeoutMilliseconds))
             {
                 continue;
             }
@@ -129,7 +239,11 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                 verification.ExpiresAt));
             if (observationResult.Code != DoctorResultCode.VerificationActive)
             {
-                if (CandidateExists(databasePath, selection.VerificationId, evidenceRef))
+                if (CandidateExists(
+                    databasePath,
+                    selection.VerificationId,
+                    evidenceRef,
+                    storePolicy.BusyTimeoutMilliseconds))
                 {
                     observationResult = service.Status(selection.VerificationId);
                     continue;
@@ -147,6 +261,13 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             binding);
         return new(observationResult, snapshot, evidence.Select(item => item.Kind).ToArray(), evidenceRefs, binding is null);
     }
+
+    private static DoctorResult StoreBusy() => new(
+        DoctorSchemaVersions.ResultV1,
+        Success: false,
+        DoctorResultCode.DoctorStoreBusy,
+        Evaluation: null,
+        Verification: null);
 
     private static DoctorFactSnapshot Snapshot(
         Partition partition,
@@ -248,7 +369,8 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         string databasePath,
         GitHubCopilotNativeSessionSelection? selection,
         Partition partition,
-        string? traceId)
+        string? traceId,
+        int busyTimeoutMilliseconds)
     {
         if (selection is null || string.IsNullOrWhiteSpace(traceId) ||
             !string.Equals(selection.SourceSurface, partition.NativeSurfaceWire, StringComparison.Ordinal) ||
@@ -257,7 +379,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             return null;
         }
 
-        var store = new SqliteSessionStore(databasePath);
+        var store = new SqliteSessionStore(databasePath, busyTimeoutMilliseconds);
         var session = store.Resolve(partition.NativeSurface, selection.NativeSessionId);
         if (session is null || store.GetDetail(session.SessionId) is not { } detail)
         {
@@ -334,11 +456,25 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             $"issue103|{verificationId}|{rawRecordId}|{kind}|{identity}")));
 
-    private static bool CandidateExists(string databasePath, string verificationId, string evidenceRef)
+    private static bool CandidateExists(
+        string databasePath,
+        string verificationId,
+        string evidenceRef,
+        int busyTimeoutMilliseconds)
     {
         using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
-            new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString());
+            new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Pooling = false,
+                DefaultTimeout = Math.Max(1, checked((busyTimeoutMilliseconds + 999) / 1_000)),
+            }.ToString());
         connection.Open();
+        using (var busyTimeout = connection.CreateCommand())
+        {
+            busyTimeout.CommandText = $"PRAGMA busy_timeout={busyTimeoutMilliseconds};";
+            busyTimeout.ExecuteNonQuery();
+        }
         using var command = connection.CreateCommand();
         command.CommandText =
             "SELECT EXISTS(SELECT 1 FROM doctor_verification_evidence WHERE verification_id = $verification_id AND evidence_ref = $evidence_ref);";
@@ -357,6 +493,17 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         ObservedSessionEvent Event,
         DateTimeOffset ObservedAt,
         string Identity);
+
+    private sealed class ObservationGate
+    {
+        public object LeaseLock { get; } = new();
+
+        public object SerializationLock { get; } = new();
+
+        public int LeaseCount { get; set; }
+
+        public bool Retired { get; set; }
+    }
 
     private sealed record Partition(
         string SourceSurface,
