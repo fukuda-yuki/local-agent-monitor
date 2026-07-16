@@ -17,7 +17,7 @@ This interface fixes:
   source-specific Doctor enum;
 - how first-trace verifications scope evidence when more than one concrete
   adapter may contribute to one source journey; and
-- the RED contract gate that Issues #103 and #104 must turn GREEN.
+- the RED contract gates that Issues #103 and #104 must turn GREEN.
 
 This interface does not implement a GitHub Copilot or Claude Code producer,
 add a public candidate-write route or command, add UI, or change the Doctor
@@ -243,11 +243,17 @@ A concrete implementation:
 3. persisted completion identity and empty observations;
 4. the fixed sanitized invalid-composition error;
 5. absence of source-specific Doctor enums in the core assembly; and
-6. discoverable concrete handoffs for the three manifest-backed surfaces.
+6. three separately executable implementation gates:
+   - `GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore`;
+   - `GitHubCopilotCliSourceHandoff_IsImplementedOutsideDoctorCore`;
+   - `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore`.
 
-At the G0-3 checkpoint, items 1 through 5 are GREEN. Item 6 is intentionally RED
-until #103 supplies both GitHub Copilot surfaces and #104 supplies Claude Code.
-The RED is an assertion failure, not a compile failure or unrelated test error.
+At the G0-3 checkpoint, items 1 through 5 are GREEN. The three implementation
+gates are intentionally RED. Issue #103 owns and turns the two GitHub Copilot
+gates GREEN; Issue #104 independently owns and turns the Claude Code gate GREEN.
+This split lets both worktrees verify their own production handoff without
+weakening or editing the other Issue's expected row. Each RED is an assertion
+failure, not a compile failure or unrelated test error.
 
 ## Security and non-regression
 
