@@ -148,9 +148,11 @@ public sealed class DoctorSourceHandoffContractTests
         var attributeType = RequireDoctorType("DoctorSourceHandoffAttribute");
         var implementationTypes = new[]
         {
+            doctorAssembly,
             typeof(CliApplication).Assembly,
             typeof(MonitorHost).Assembly,
         }
+        .Distinct()
         .SelectMany(assembly => assembly.GetTypes())
         .Where(type => !type.IsAbstract && interfaceType.IsAssignableFrom(type))
         .ToArray();
@@ -245,7 +247,7 @@ public sealed class DoctorSourceHandoffContractTests
             $"CopilotAgentObservability.Doctor.{name}",
             throwOnError: false,
             ignoreCase: false);
-        Assert.NotNull(type);
-        return type;
+        Assert.True(type is not null, $"Missing Doctor contract type: {name}");
+        return type!;
     }
 }
