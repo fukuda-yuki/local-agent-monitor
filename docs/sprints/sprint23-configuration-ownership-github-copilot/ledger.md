@@ -14,18 +14,53 @@ and the dated resolution appended to
 are T2 evidence/history, not the current continuation. The active resume
 boundary and authoritative execution plan are defined by the
 [Issue #67 guided setup plan](../../superpowers/plans/2026-07-14-issue-67-guided-setup/README.md).
-Older coarse task and requirement rows below are retained historical snapshots;
-they must not override this current note or the newer Task 08-11/T2 rows. T9
-owns final evidence-table reconciliation.
+Older coarse task rows below are retained historical snapshots; their pending
+or residual text is superseded by this current note, the T9 final closeout, and
+the reconciled current task and requirement rows below.
 
 Task 11 passed the **Issue #66 T2 gate only** at reviewed Task 10 HEAD
 `0b0885424f59ad5cdfafe0fa77b5e2fc53ed0407`; that historical gate did not
 declare Issue #66 or the combined #66/#67 work finally complete. The subsequent
 Issue #67 T7 gate now wires `Program.cs` to the production dispatcher and proves
 real direct-CLI/wrapper `setup status` `status_ready`/exit-0 byte parity (see the
-T7 row below). T8 packaging/operator docs is now closed by the Release/repository
-integration row below; T9 final reviews, pinned full validation, contradiction
-checks, and ledger reconciliation remain open.
+T7 row below). T8 packaging/operator docs is closed by the Release/repository
+integration row below, and T9 is complete on this feature branch. Push, pull
+request, main-branch integration, and external Issue #66/#67 closure have not
+been performed.
+
+## T9 final closeout (2026-07-16)
+
+The completed implementation/evidence range is `df868e6..c766703`. Final code
+validation and review were pinned at code HEAD `64f52d8`; documentation status
+is `c766703`. The repository-safe evidence remediation is `716a835`, the
+rollback identity-first correction is `64f52d8`, and the T8 release-package
+fix/evidence pair is `f5765e2` / `78f20f2`.
+
+Five separate final verdicts at `64f52d8` are PASS, C0/I0/M0:
+
+- **Security:** PASS; no unresolved Critical, Important, or Minor finding.
+- **Concurrency/Atomicity:** PASS after the initial C0/I1/M0 rollback
+  identity-order finding was closed by `64f52d8`.
+- **Migration — N/A / v1 restart:** PASS; v1 is the first shipped schema and
+  committed-v1 close/reopen byte identity remains the executable evidence.
+- **Real #66 → #67 integration:** PASS; the production dispatcher,
+  transactions, aggregate/adapters, `SetupJson`, direct CLI, and repository
+  wrapper are covered end to end; HTTP/proxy/UI are N/A.
+- **Repository-safe/full-diff:** PASS after the initial C0/I2/M1 findings were
+  closed by `716a835`; no added user paths or tracked runtime artifacts remain.
+
+The exact pinned repository validation at `64f52d8` passed without substitution:
+
+- `dotnet build CopilotAgentObservability.slnx`: 7 projects, 0 warnings, 0
+  errors.
+- `pwsh scripts\test\install-playwright-chromium.ps1`: exit 0.
+- `dotnet test CopilotAgentObservability.slnx`: ConfigCli 2,592/2,592 plus
+  LocalMonitor 940/940, total 3,532/3,532, 0 failed, 0 skipped.
+
+Contradiction and full-range checks were clean. The code range
+`df868e6..64f52d8` contains 105 commits and touches 98 files; repository-safe
+inspection found no added user paths or tracked runtime artifacts. These final
+results supersede pending statements retained inside older task snapshots.
 
 ## Issue #66 T2 closeout gate (2026-07-15)
 
@@ -231,12 +266,12 @@ HTTP/public proxy/UI surfaces remain N/A.
 | Issue #66-#67 Task 04b / v1 desired-state carrier and storage | #66-#67 | Complete (Task 04b only; prior #66 prerequisite reopening closed by Task 04c `28c8d61` + remediation `ab90c05`) | `524357a`; remediation `e3626c8`; reviewed dependency docs `b0eef1e`, `b7e5c40`, `0457499`, `b837c5f` | Behavioral RED: 1 failure; remediation RED: 14 passed/1 failed; storage+registry GREEN 215/215; full card GREEN 1,069/1,069; build 0 warnings/0 errors; production `private-plan.v1.json` capture 789 bytes, SHA-256 `BD2DA01340392F9C13BD265F6C2ABC307AAEEFFAC86D9B0F78192E45899F1DAC`; committed `ownership-ledger.v1.json` fixture hash unchanged (`B4DC2C24AF501BD3F56FDAF6D6C1031B034D0C984A503965CFB39566B419E457`); `git diff --check` and self-review PASS | Initial review C0/I2/M0; intermediate C0/I1/M0; final adjusted-scope PASS C0/I0/M0. Closed the schema-v1 inline/tagged union, structural source-marker absence proof, and shared desired-state relation-validator mappings; no raw marker/value evidence is retained. | Public `RecoverNext` mapping and production-backup security were closed by Task 04c `28c8d61` + remediation `ab90c05`; Issue #66 final remains pending T7 production composition/direct CLI-wrapper parity and T8/T9. Issue #67 T4/T5/T6/T7/T8/T9 remain pending; migration N/A; HTTP/proxy/UI N/A |
 | Issue #66-#67 Task 04c / transient materialization forwarding and recovery | #66-#67 | Complete (Task 04c only; reopened #66 correction gate closes for prerequisite use by T4/T5/T6, not final Issue #66 completion) | range `28c8d61..ab90c05`: implementation `28c8d61`; plan corrections `5506a22`, `37f2f8f`, `1096a6d`; remediation `ab90c05` | Initial RED forwarding through real aggregate → registry → coordinator failed `recovery_required`; initial RED crash matrix failed to compile CS0246/CS1729 because the seam was missing. GREEN: implementer 900/900 + 99/99 and build 0 warnings/0 errors; root independently reran 900/900 + 99/99 and build 0/0. The five-checkpoint × three-classification matrix proves zero rematerialization; carrier order, exact bytes, and hashes are preserved; no sleep/retry is used; the crash seam is safe-marker confined. Fresh security PASS C0/I0/M0 (474+525), concurrency PASS C0/I0/M0 (627+48+91), and recovery PASS C0/I0/M0 (580+15+20+3+2). Fixture hashes are exactly `B4DC2C24AF501BD3F56FDAF6D6C1031B034D0C984A503965CFB39566B419E457` and `BD2DA01340392F9C13BD265F6C2ABC307AAEEFFAC86D9B0F78192E45899F1DAC`. | Initial independent reviews correctly failed the real forwarding and missing-seam cases; all final clean independent re-reviews PASS C0/I0/M0 for security/data safety, concurrency, and recovery. | No unresolved Task 04c interface. The next unverified interface is real T4 partition materialization through the frozen forwarding path, followed by real all-partition T7. Issue #66 final remains pending T7 production composition/direct CLI-wrapper parity and T8/T9; Issue #67 T4/T5/T6/T7/T8/T9 remain pending. Full solution test and Playwright were not run at this checkpoint; final pinned validation remains pending. Migration N/A, schema v1 only with v1 restart/byte evidence retained; HTTP/proxy/UI N/A; macOS/Linux runtime unexecuted (fake/static only). |
 | Issue interface executable test / T7 production composition | #66-#67 | Complete (T7 gate only; no final Issue #66/#67 completion) | `b70f13d`; evidence remediation `bb90bb3`; bounded cleanup remediation `4d931ec` | `SetupCompositionRoot` now owns one shared `ISetupPlatform`, three partitions in order, exactly one `github-copilot` aggregate/registry, real stores/journal/dispatcher/coordinators, and one-line `Program.cs` injection. The real 10-case matrix and direct/wrapper process parity cover exact canonical VS Code/CLI manifest pairing, apply/rollback/stale/no-op/unsupported_adapter/unsupported_target/recovery/status/mutation-authority negatives. No sleeps/retries/polls; stale uses a barrier; execution and cleanup have separate bounded deadlines and physical collection is nonparallel. TDD RED included the missing composition root, JSON assertion diagnosis, swap-proof manifest, canonical-backup mutation, collection/runner compile, and unbounded-cleanup API; the timeout deadlock was root-caused to exit+drain `WhenAll`. Final implementer evidence: focused 15/15, combined 20/20, wide 2,293/2,293, ConfigCli 2,589/2,589, build 0 warnings/0 errors. Root independently reran the same counts/build and manually used an isolated physical `LOCALAPPDATA` root: direct and wrapper exit 0/0, stderr 0/0, stdout 262/262, exact byte equality, SHA-256 `FF8AB6FBC6D1B873F4A3EA54B8E9AA05A559F218D1C31F6B2A6E9C212E6E1062`, and `setup.v1/status_ready`. Fixture hashes remain `B4DC2C24AF501BD3F56FDAF6D6C1031B034D0C984A503965CFB39566B419E457` and `BD2DA01340392F9C13BD265F6C2ABC307AAEEFFAC86D9B0F78192E45899F1DAC`; process/temp orphans 0. | Review history: first Spec/Quality CHANGES REQUESTED C0/I3/M0; second Spec PASS / Quality CHANGES REQUESTED C0/I1/M1; final Spec PASS / Quality PASS C0/I0/M0. | Real #66 producer/dispatcher/transaction → #67 aggregate/partitions → `SetupJson` → direct/wrapper is now PASS. HTTP/proxy/UI remain N/A. Migration is schema v1/N/A with restart byte evidence unchanged; macOS/Linux native runtime remains unexecuted (deterministic fake/static only). T8 packaging/self-contained release/operator docs and T9 four fresh final reviews plus pinned full validation remain. No first trace is claimed. |
-| Copilot detection and precedence | #67 | Pending | - | - | - | - |
+| Copilot detection and precedence | #67 | Complete (T3a-T3d) | platform observations `6c52757`, `5f50bd0`, `a917e88`; policy/endpoint `74e644b`, `15c424b`, `1a031e6`, `21e7662`; aggregate `1535a17`, `5943fef`, `85e5ec6`, `d29d5db` | `SetupRuntimeTests`, `GitHubCopilotDetectionTests`, `GitHubCopilotManagedPolicyTests`, `GitHubCopilotEndpointProbeTests`, and `GitHubCopilotSetupAdapterTests` cover bounded platform observations, whole-channel native > server > file precedence, independent computer-over-user enterprise policy, fail-closed endpoint ownership, one shared lazy observation set, exact target shapes, and first-failure/no-partial aggregation. | Final independent reviews PASS C0/I0/M0 after the recorded policy-provenance and aggregate-contract remediations. | T3a-T3d are complete and consumed by T4-T7; native macOS/Linux branches remain deterministic fake/static evidence only. |
 | VS Code adapter | #67 | Complete (T4 only; no final Issue #67 completion) | `003b8da`; remediation `a6b7484`, `eedae93` | Original implementation `003b8da` was corrected after Task 04a–04c prerequisites. `a6b7484` RED clusters covered the first-review findings; GREEN focused 66/66 and full ConfigCli 2,517/2,517 with build 0/0. `eedae93` RED covered extension validation, a 12-case Plan/Revalidate override matrix, and mutation-tested crash negative proof; GREEN focused 79/79, ConfigCli 2,530/2,530, build 0/0. Final root reruns: focused 79/79, full 2,530/2,530, build 0/0; no orphan and fixture hashes unchanged. One exact full run became inconclusive/hung with flat CPU and no summary; root killed only the exact owned process tree. Diagnostic blame full 2,530/2,530 passed with no sequence; a fresh original exact run and later root exact full run passed. | First independent review FAIL C0/I6/M1: process vs user environment, no-op aggregate, inline raw carrier, bounded reads, materialization/version drift, and test gaps. Post-`a6b7484` review FAIL Spec/Quality C0/I3/M0: dual-channel extension short-circuit, override bypassed JSONC validation, and crash-marker negative gap. Final independent review: Spec PASS / Quality PASS C0/I0/M0. | Stable/Insiders Default Profile only; process environment is read-only and user environment is never read; JSONC reads use 1 MiB plus sentinel; persisted state is tagged only; materialization is transient. Real partition → aggregate → registry → coordinator marker proof and representative crash/reopen are covered; no sleep/retry. T4 only: T6–T9 and real all-partition T7 remain pending. Migration schema v1/N/A; HTTP/proxy/UI N/A; macOS/Linux fake/static only. |
 | Copilot CLI adapter | #67 | Complete (T5 only; no final Issue #67 completion) | implementation `8cf5d7c`; remediation `a5662c6` | TDD initial missing-partition RED; matrix GREEN 27/27, full ConfigCli 2,557/2,557, build 0 warnings/0 errors. Self-review corrected Windows process/current-user 3×3 redacted state. Remediation `a5662c6`: real aggregate `all` RED 1 fail/1 pass, then GREEN aggregate 2/2 and focused 29/29; literal ordered 4/5 key-value assertions; missing, duplicate, and malformed CLI inputs fail closed. Final implementer full ConfigCli 2,559/2,559 and build 0/0; root reran focused 29/29, full 2,559/2,559, and build 0/0, with fixtures unchanged and no orphan. One full attempt was inconclusive at 120s with no summary; its exact owned tree was identified and stopped. A diagnostic blame run passed 2,559 with no sequence; fresh original exact 2,559/2,559 and later root exact 2,559/2,559 passed. The inconclusive attempt is neither a success nor a failure. | Initial independent Spec/Quality review FAIL C0/I1/M1: `selected_target=all` rejection and key-only allowlist test gaps. Final Spec/Quality review PASS C0/I0/M0. | Exact allowlist and forbidden negatives; trace override is detect-only. Windows process/current-user 3×3 state is redacted, with current-user mutation and zero managed reads. OS target tags are safe; non-Windows plans return `unsupported_target` before observation, and unknown tags return `recovery_required`. Endpoint gates and metric `not_verified` are covered; no shell/profile I/O and no sleep/retry. T5 is complete; T7 real all-partition/direct-wrapper parity is closed by the T7 row, while T8/T9 remain pending. Migration schema v1/N/A; HTTP/proxy/UI N/A; macOS/Linux fake/static only, not native runtime evidence. |
 | App/SDK guidance adapter | #67 | Complete (T6 only; no final Issue #67 completion) | implementation `97056a1`; remediation `8332290`, `e4705fc` | TDD RED evidence covered the missing namespace/type, SemVer trailing-LF acceptance and 20-digit rejection, the empty-cache old-test missing assembly, and the old nested ProjectReference mutating generated-state snapshots. Final behavior is bounded 1 MiB `ISetupFileSystem` repository package detection; strict sanitized SemVer with no path/raw version; exactly one no-op guidance target (`github-copilot-app-sdk-guidance`) with null manifest, rollback unavailable, and the validator-owned sample; no mutation, external observation, or revalidation; Unix, oversize, malformed, and DTD evidence; compile uses the normal-build-restored exact SDK asset plus an offline no-PackageReference temporary probe with no source-graph mutation; bounded sanitized diagnostic tail; no sleep/retry/poll. Final implementer evidence: focused 15/15, ConfigCli 2,574/2,574, build 0 warnings/0 errors, csproj diff empty, stale/orphan 0. | Review history: first Spec/Quality CHANGES REQUESTED C0/I2/M2; second Spec PASS / Quality CHANGES REQUESTED C0/I2/M0; final Spec PASS / Quality PASS C0/I0/M0. | T6 is complete only; its real guidance partition is consumed by the T7 aggregate/composition gate. T7 production composition/real all-partition #66→#67/direct CLI-wrapper parity is complete; T8 and T9 remain pending. HTTP/proxy/UI N/A; migration schema v1/N/A; macOS/Linux runtime remains fake/static/unexecuted as applicable. |
 | Release/repository integration | #67 | Complete (T8 only; no final Issue #67 completion) | implementation `1d067a2`; remediation `f5765e2` | Focused RED/GREEN and final 27/27; root independently reran focused 27/27; ConfigCli 2,589/2,589; LocalMonitor 940/940; build 0 warnings/0 errors. Self-contained release package was validated without `dotnet` and direct/wrapper same-root outputs were byte-identical. Incomplete release layout was fixed to fail closed with no fallback/path leak (`internal_error`/5); field/documentation correction is recorded. First-trace Issue #69 is reserved and not emitted. | Initial independent review findings C0/I3/M0; second review C0/I1/M0; final Spec/Quality re-review PASS C0/I0/M0 | macOS/Linux runtime unexecuted on this Windows host; HTTP/proxy/UI N/A. T8 is closed; T9 final joint review and requirement-table reconciliation remain pending. |
-| Final integration | #66-#67 | Pending | - | - | - | - |
+| Final integration | #66-#67 | Complete on feature branch (T7/T8/T9) | implementation/evidence `df868e6..c766703`; T7 `b70f13d`, `bb90bb3`, `4d931ec`; T8 `1d067a2`, `f5765e2`, `78f20f2`; repository-safe remediation `716a835`; rollback identity fix and final code-validation HEAD `64f52d8` | Real 10-case #66→#67 production composition and direct/wrapper byte parity PASS; self-contained release-package checks PASS; pinned build 7 projects 0 warnings/0 errors, Playwright install exit 0, and solution 3,532/3,532 (ConfigCli 2,592 + LocalMonitor 940), 0 failed/0 skipped; contradiction/full-range checks clean across 105 commits and 98 files at code HEAD. | Security PASS; Concurrency/Atomicity PASS after C0/I1/M0 closure; Migration-N/A/v1 restart PASS; Real #66→#67 Integration PASS; Repository-safe/full-diff PASS after C0/I2/M1 closure; every final verdict C0/I0/M0. | No unresolved Critical/Important/Minor and no unverified Issue #66→#67 interface; HTTP/proxy/UI N/A. Native macOS/Linux, induced sudden power loss/native crash, native Windows broadcast/current-user mutation, and Issue #69 first-trace remain outside executed live evidence. Push/PR/main integration/external issue closure not performed. |
 
 ## Requirement-to-test evidence
 
@@ -246,85 +281,34 @@ HTTP/public proxy/UI surfaces remain N/A.
 | Public setup wire contract | Canonical literal plan/status/error fixtures, every enum mapping, fixed-code catalog, sole serializer | SetupContractShapeTests 47/47; independent review PASS/APPROVED |
 | Repository-safe DTO validation | Exact/over bounds, canonical manifest membership, origin-only endpoint, fixed non-echo failures, recovery/lifecycle matrix | SetupContractValidationTests 74/74; independent review PASS/APPROVED |
 | Stale plan/apply and rollback | Barrier-controlled hash changes without sleeps | Apply preflight and post-mutation full-target verification covered by SetupApplyTests 55/55; file, single-environment, mixed rollback restart recovery, committed lagging-ledger reconciliation, notification ambiguity/replay recovery, and file/single-environment/mixed/all-NoOp normal rollback cover stale/no-op/third-party/unavailable classification, pre/post rollback races, crash recovery, and retry admission in SetupRecoveryTests/SetupRollbackTests |
-| Rollback journal supersession atomicity and rebind | Deterministic fault injection across replacement, reopen, identity checks, and shared-lock lifetime | Task 6a0a/6a0b1/6a0b2 focused 41/41; Journal/Storage+Journal 268/268; all Setup 1,037/1,037; ConfigCli 1,365/1,365; exact build 0 warnings/0 errors; independent implementation, security, concurrency, and integration reviews PASS/APPROVED; same-byte regular-file identity is a nonblocking residual |
+| Rollback journal supersession atomicity and rebind | Deterministic fault injection across replacement, reopen, identity checks, and shared-lock lifetime | Task 6a0a/6a0b1/6a0b2 focused 41/41; Journal/Storage+Journal 268/268; all Setup 1,037/1,037; ConfigCli 1,365/1,365; `SetupRollbackTests.Rollback_Lifecycle_ineligible_rebound_identity_is_untrusted_recovery_required` and `Rollback_Applied_rebound_identity_is_untrusted_recovery_required` close identity-first handling at `64f52d8`; final security and concurrency/atomicity reviews PASS C0/I0/M0 |
 | Atomic file update | Backup/temp/replace fault injection and restart-visible state | SetupFileStepTests 65/65; capture/durable-backup/write split plus fault/rebind matrix; independent review PASS/APPROVED |
 | Partial compensation | Deterministic multi-target failure at each boundary | SetupCompensationTests focused 36/36 cover file plus ENV_A/B/C forward/restore faults, reverse order, third-party preservation, restored/partial journal-before-ledger ordering, and intent/completion before/after-effect characterization; Apply+Compensation+Recovery 428/428 and storage+journal+contract 326/326; independent review PASS/APPROVED |
-| Crash recovery | Pre-file/per-env-member mutation and restore intents; deterministic faults before/during/after each step; close/reopen recovery classifies prior/desired/partial/foreign states | Apply terminal, notification-only, file active, environment active, mixed recovery, interrupted file/single-environment/mixed rollback, committed lagging-ledger reconciliation, and notification ambiguity/replay recovery covered; actual Apply producer→fresh-store Recovery consumer passes for the three audited windows (focused 3/3; Recovery 279/279); Compensation 36/36; Windows broadcast represented by deterministic seam; seeded-only phases remain Minor/unverified |
-| Recovery result correlation | Producer DTO tests distinguish requested/created and recovered change-set IDs for plan/apply/rollback/status, including failed-recovery status projection | Pending |
-| Status hard cap | 99/100/101 fixtures, recovery-blocking/planned/terminal priority, UUID tie-break, and filter-before-cap | Pending |
-| Apply-time revalidation | Endpoint ownership, supported version, and managed state changed after plan produce no backup/journal/ledger transition/write | Generic required revalidator boundary and fixed no-artifact matrix pass in SetupApplyTests; real GitHub Copilot implementation remains Task 8b |
-| Final-state race | Barrier edits after mutation completion and after rollback preflight are preserved; apply does not commit and restore does not overwrite | Pending |
-| Status aggregation | Lifecycle reference matrix plus all-desired/all-previous/desired+previous/third-party/unavailable aggregate target cases prove change-set state and partial rollback unavailable | Pending |
+| Crash recovery | Pre-file/per-env-member mutation and restore intents; deterministic faults before/during/after each step; close/reopen recovery classifies prior/desired/partial/foreign states | `SetupApplyTests`, `SetupCompensationTests`, `SetupRecoveryTests`, and `SetupRollbackTests` cover terminal, notification-only, file, environment, mixed, and interrupted rollback recovery; actual Apply producer→fresh-store Recovery consumer covers the audited windows; native crash/power loss and Windows broadcast are represented by deterministic seams and safe tests, not induced live |
+| Recovery result correlation | Producer DTO tests distinguish requested/created and recovered change-set IDs for plan/apply/rollback/status, including failed-recovery status projection | PASS: `SetupCommandDispatcherTests.DispatchPlan_WhenRecoveryCompletesReturnsCorrelationAndDoesNotConsumeRequestedPlanId`, `DispatchApply_RecoveryKeepsRequestedIdAndCorrelatesRecoveredTransactionBeforeLedgerRead`, `DispatchRollback_ConsumedRecoveryKeepsRequestedAndRecoveredCorrelationWithRerunAction`, `SetupStatusProjectorTests.ProjectFailedRecovery_UsesDurableTerminalEvidenceAndEffectivePartialLifecycle`, and `SetupStatusServiceTests.Status_FailedRecoveryUsesCanonicalTerminalEffectiveOverlayWithoutChangingDurableLedger` |
+| Status hard cap | 99/100/101 fixtures, recovery-blocking/planned/terminal priority, UUID tie-break, and filter-before-cap | PASS: `SetupStatusOrderingTests.Project_CapsEligibleRowsAtOneHundredAndSetsTruncatedFromEligibleCount`, `Project_PrioritizesRecoveryRowsThenPlannedThenTerminalAndPreservesTargetOrder`, `Project_UsesLowercaseCanonicalUuidOrdinalTieBreakWithinEqualPriorityAndTimestamp`, and `Project_AppliesExactAdapterAndChangeSetFiltersBeforePriorityCapAndProjection`; `SetupStatusServiceTests.Status_OverlaidRecoveryRowIsPrioritizedBeforeHardCapAndProjectedOnce` closes recovered-row composition |
+| Apply-time revalidation | Endpoint ownership, supported version, and managed state changed after plan produce no backup/journal/ledger transition/write | PASS: `SetupApplyTests.Apply_RunsAllAdapterRevalidationBeforeCaptureAndLeavesNoArtifactsOnRejection`; `VsCodeSetupAdapterTests.Revalidate_ChangedVersionExtensionPolicyAndEndpointReturnTheirCurrentFailureCodesWithoutStatus` and `Revalidate_PersistedMemberOrEffectiveSourceMismatchRequiresRecoveryWithoutStatus`; `CopilotCliSetupAdapterTests.Revalidate_WindowsRechecksVersionAndEveryPlannedMemberBeforeMutation` |
+| Final-state race | Barrier edits after mutation completion and after rollback preflight are preserved; apply does not commit and restore does not overwrite | PASS: `ConfigurationSetupIntegrationTests.Apply_VsCodeEditAtTheStaleBoundary_PreservesTheConcurrentBytesAndCreatesNoMutationArtifact`, `SetupApplyTests.Apply_FinalDesiredRacePreservesThirdPartyStateAndRecordsPartialCompensation`, `SetupRollbackTests.Rollback_Edit_after_preflight_is_preserved_as_partial_while_safe_targets_continue`, and `Rollback_Environment_noop_drift_after_preflight_is_caught_by_full_final_guard` |
+| Status aggregation | Lifecycle reference matrix plus all-desired/all-previous/desired+previous/third-party/unavailable aggregate target cases prove change-set state and partial rollback unavailable | PASS: `SetupStatusProjectorTests.Project_TerminalAndPlannedLifecycle_UsesCanonicalReference`, `Project_PartialLifecycle_ClassifiesFreshAggregate`, `Project_PartialEnvironmentWithDesiredPreviousMixture_IsDiverged`, `Project_MultiWritable_DivergedPrecedesUnavailableAndCurrent`, `Project_MultiWritable_StalePrecedesUnavailableAndCurrent`, and `Project_MultiWritable_UnavailablePrecedesCurrentAndPreservesOrder` cover canonical lifecycle/current aggregation and partial rollback false |
 | Environment notification | Deterministic faults before/after delivery prove no early delivery and permit replay after recovery | Single-environment and mixed/all-NoOp normal rollback notification ambiguity covers deterministic faults, direct `partial_rollback` versus recovery provenance, and zero-I/O notification-only replay; producer 2/2 and related transaction 784/784 |
-| Ownership preservation | Unowned JSON/TOML/environment values survive apply and rollback | Pending |
-| Secret-safe evidence | Negative assertions across plan, ledger, logs, and wrapper output | Pending |
-| Copilot precedence | Producer DTO tests for policy, environment, and user settings | Pending |
-| Content-capture opt-in | Default no-change plus explicit-option warning tests | Pending |
-| Cross-surface contract | Real #66 producer DTO consumed by all #67 adapters | T7 PASS: real dispatcher/transaction producer consumed by the aggregate and all three partitions, serialized by `SetupJson`, and matched by direct CLI/wrapper byte parity; 10-case matrix and final T7 reviews C0/I0/M0 |
-| Full regression | Build, Playwright bootstrap, full solution tests | Baseline build 0/0, bootstrap exit 0, full 1,250/1,250 |
+| Ownership preservation | Unowned JSON/TOML/environment values survive apply and rollback | PASS: `SetupDocumentTests.Jsonc_Remove_FirstMiddleOrLast_PreservesComments` and `Toml_AddAndRemove_PreserveUnrelatedLinesCommentsAndNewline`; `VsCodeSetupAdapterTests.Plan_ExistingSensitiveUnknownJsonNeverAppearsInThePublicProjection`; `SetupEnvironmentStepTests.Capture_PreservesOrderedMissingEmptyAndValueStatesWithoutReadingUnrelatedNames`; `SetupRollbackTests.Rollback_Environment_noop_drift_blocks_supersession_and_preserves_all_members`; `SetupCompensationTests.Apply_ThirdPartyEnvironmentMemberIsPreservedWhileEarlierOwnedStepsAreRestored` |
+| Secret-safe evidence | Negative assertions across plan, ledger, logs, and wrapper output | PASS: `SetupContractValidationTests.Serialize_WhenExpectedResultAddsSensitiveField_RejectsWithoutEchoingIt` and `Serialize_WhenExpectedResultContainsNonCanonicalSecurityOrPathField_RejectsWithoutEchoingIt`; `SetupStorageTests.LoadForRecovery_CorruptOrUnsupportedLedgerFailsClosedWithoutEcho`; `SetupAdapterRegistryTests.Plan_WhenAdapterReturnsMalformedDiagnostics_FailsWithoutRawText`; `SetupCommandDispatcherTests.DispatchPlan_UnexpectedFailuresMapToInternalErrorWithoutRawText`; `VsCodeSetupAdapterTests.Plan_InvalidJsoncFailsWithTheFixedCodeWithoutLeakingItsRawContent`; `CopilotCliSetupAdapterTests.Plan_ExistingEnvironmentMarkerIsRedactedFromRecordsAndDiagnostics`; CLI/wrapper byte and repository-safe full-diff review PASS C0/I0/M0 |
+| Copilot precedence | Producer DTO tests for policy, environment, and user settings | PASS: `GitHubCopilotManagedPolicyTests.Resolve_NativeEqualAndContradictoryFile_WinsNativeWithoutReadingFile` and `Resolve_WindowsEnterpriseMachinePolicyWinsOverUserWithoutSuppressingCopilotFile`; `VsCodeSetupAdapterTests.Plan_ManagedPolicyDifferenceFailsClosedBeforeEndpointOrSettingsRead`, `Plan_EnvironmentOverrideIsReportedReadOnlyWithoutReturningTheCliOnlyFailureCode`, and `Plan_EqualManagedPolicyIsReadOnlyAndDoesNotRewriteItsUserSetting`; `CopilotCliSetupAdapterTests.Plan_WindowsReportsTheFullProcessUserStateMatrixButOnlyCurrentUserStateDeterminesTheMutation` |
+| Content-capture opt-in | Default no-change plus explicit-option warning tests | PASS: `VsCodeSetupAdapterTests.Plan_OnlyExplicitContentCaptureAddsTheSensitiveFourthMemberAndPreservesJsonc`, `CopilotCliSetupAdapterTests.Plan_DefaultDoesNotAddCaptureButExplicitOptInAddsOnlyTheFifthAllowedMember`, and `GitHubCopilotSetupAdapterTests.Revalidate_DerivesCaptureFlagFromCoherentPersistedTargetMembers` |
+| Cross-surface contract | Real #66 producer DTO consumed by all #67 adapters | FINAL PASS C0/I0/M0: real dispatcher/transaction producer is consumed by the aggregate and all three partitions, serialized by `SetupJson`, and matched by direct CLI/repository-wrapper byte parity in the T7 10-case matrix; the final real #66→#67 integration review found no unresolved interface |
+| Full regression | Build, Playwright bootstrap, full solution tests | PASS at `64f52d8`: build 7 projects, 0 warnings/0 errors; Playwright bootstrap exit 0; ConfigCli 2,592/2,592 plus LocalMonitor 940/940, total 3,532/3,532, 0 failed, 0 skipped |
 
 ## Unverified Issue interfaces
 
-- Early Issue #66 transaction integration review at `07ab09e` (combined
-  889/889) had four findings. The P1 Apply operation/hash coherence finding is
-  closed by spec `8b38ac1` and remediations `f184cdb`, `708a7d5`, `78acf1a`,
-  `7d42ffb`, and `fae367c`; fresh combined 820/820, Storage 64/64, and build
-  0/0 passed, with independent A1/A2/A3 aggregate closure PASS. B1
-  continuation remediation resolved the accumulated safe-classification
-  evidence and continuation gap. B1+B2a+B2b close finding 2 (restore/
-  completion and journal-transition ambiguity). Finding 3 (terminal
-  environment hash binding) is closed by `25afcf7`; independent static and
-  final fresh reviews PASS, with no requirements/security/concurrency/migration
-  findings. Migration review approves strict v1-only handling; no legacy
-  migration is required. HTTP, proxy, and UI remain N/A. Task-level approvals
-  do not supersede the remaining integration gate. Gap 4 is closed only for
-  the three audited actual-producer reopen windows; status semantics/order and
-  rollback evaluator remain open for final review, while the #66-to-#67
-  real-producer cross-surface gate is now closed by T7 below.
-
-- The canonical physical-target/member-change DTO is compiled and consumed
-  across the CLI/PowerShell boundary by T7's exact direct/wrapper pairing; no
-  T7 interface remains unverified.
-- The normal rollback producer is implemented and independently reviewed for
-  file-only, single-environment, mixed, and all-NoOp targets (Tasks 6a through
-  6a3), including pre/post rollback races, crash/fault recovery,
-  direct-versus-recovery notification provenance, and zero-I/O replay. Mixed
-  active/committed rollback recovery, committed lagging-ledger reconciliation,
-  and notification ambiguity/replay recovery evidence is complete through
-  Task 5d3b2b2.
-- Supported keys and floors are fixed from official sources: stable VS Code
-  1.128+ for apply and terminal Copilot CLI 1.0.4+.
-- HTTP, proxy, and UI DTOs are explicitly N/A; independent re-review is pending.
-- App/SDK guidance output is consumed as the real no-write partition in the T7
-  aggregate and receives the real #66 plan carrier through the composition root.
-- The #66 C1 SetupOptions parser is complete through `c048946`, but full
-  ConfigCli concurrent-state evidence is not final; status/terminal/C2+ remain
-  open.
-- Task 07 closes the historical-manifest command-surface evidence and opened
-  the Task 08 gate. Task 08 Important 1 (malformed Apply-success carrier
-  identity/projection) is closed by `2d9940b` and `be1fac9`; the final review is
-  Spec PASS, Quality APPROVED, Security/Trust PASS, Transaction/Concurrency
-  PASS, C0/I0/M0. Task 08 Important 2 (malformed/null/exceptional Status
-  fallback) is closed by runtime `548f720` and test cleanup `b254ab5`; the final
-  review is Spec PASS, Quality APPROVED, Security/Data Safety PASS,
-  Transaction/Concurrency PASS, C0/I0/M0. The fresh integrated rerun confirms
-  the Task 08 gate PASS and unblocks Task 09. The producer matrix and executable
-  #66-to-#67 adapter interfaces are now covered by T7. This ledger also closes B2b/finding 2, finding
-  3 terminal environment hash binding, and Gap 4 for the three audited
-  actual-producer reopen windows. Status semantics/order, rollback evaluator,
-  and C3 adapter pre-resolution remain final-review items; the #66-to-#67
-  real-producer cross-surface gate is closed by T7. Seeded-only producer phases
-  remain Minor/unverified.
-- Re-audit corrections define per-step apply/rollback intents, recovery-result
-  correlation, failed-recovery status projection, apply-time endpoint/version/
-  policy revalidation, exact 100-entry ordering, and replayable notification;
-  they have not yet passed independent review.
-
-- Task09 prerequisite contract correction was recorded before any Task09 CLI
-  edits. The reviewed contract range is `3cbe822..7976ea4`: the intended RED
-  had 1 failure (`setup_contract_invalid`), focused GREEN was 171/171, and an
-  independent orchestrator rerun was 171/171. Independent review passed
-  (C0/I0/M0) for spec, quality, security, and matrix coverage, with no
-  unresolved issue in the prerequisite scope. Task09 CLI implementation and
-  full tests remain pending; HTTP/proxy/UI are N/A, and migration remains N/A
-  with the existing v1 restart evidence unchanged.
+- No unresolved Critical, Important, or Minor finding remains, and no
+  #66→#67, HTTP, proxy, or UI interface remains unverified; HTTP/proxy/UI are
+  N/A for this feature.
+- Native macOS/Linux branches were not executed on this Windows host; their
+  evidence is deterministic fake/static coverage only.
+- Actual sudden power loss/native process crash and native Windows environment
+  broadcast/current-user mutation were not induced live; deterministic seams
+  and safe tests represent those behaviors.
+- Issue #69 first-trace validation was not performed and no first trace is
+  claimed.
+- Main-branch integration, push, pull request, and external Issue #66/#67
+  closure have not been performed.
