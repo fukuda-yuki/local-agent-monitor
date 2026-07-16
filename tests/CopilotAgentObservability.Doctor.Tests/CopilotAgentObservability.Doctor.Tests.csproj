@@ -19,16 +19,21 @@
     <Using Include="CopilotAgentObservability.ConfigCli" />
     <Using Include="CopilotAgentObservability.Doctor" />
     <Using Include="CopilotAgentObservability.LocalMonitor" />
+    <Using Include="CopilotAgentObservability.Persistence.Sqlite" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\CopilotAgentObservability.ConfigCli\CopilotAgentObservability.ConfigCli.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.Doctor\CopilotAgentObservability.Doctor.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.LocalMonitor\CopilotAgentObservability.LocalMonitor.csproj" />
+    <ProjectReference Include="..\..\src\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <None Include="TestData\*.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\CopilotAgentObservability.LocalMonitor.Tests\TestData\SchemaMigrations\monitor\*"
+          Link="TestData\SchemaMigrations\monitor\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
