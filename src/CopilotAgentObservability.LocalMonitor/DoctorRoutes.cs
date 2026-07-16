@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using CopilotAgentObservability.Doctor;
+using Microsoft.AspNetCore.Http.Features;
 
 namespace CopilotAgentObservability.LocalMonitor;
 
@@ -21,6 +22,19 @@ internal static class DoctorRoutes
 
     public static void Map(WebApplication app, IDoctorHttpApplication application)
     {
+        app.Use(async (context, next) =>
+        {
+            if (HttpMethods.IsPost(context.Request.Method)
+                && IsDoctorBodyPath(context.Request.Path)
+                && !TrySetDoctorRequestBodyLimit(context))
+            {
+                PrepareResponse(context);
+                await WriteErrorAsync(context, StatusCodes.Status500InternalServerError, DoctorResultCode.InternalError);
+                return;
+            }
+
+            await next();
+        });
         app.MapPost("/api/doctor/evaluations", context => EvaluateAsync(context, application));
         app.MapPost("/api/doctor/verifications", context => StartAsync(context, application));
         app.MapGet(
@@ -505,6 +519,39 @@ internal static class DoctorRoutes
     private static bool AuthorizeMutation(HttpContext context) =>
         !MonitorHost.IsCrossSiteRequest(context)
         && string.Equals(context.Request.Headers["x-monitor-csrf"], "local-monitor", StringComparison.Ordinal);
+
+    private static bool IsDoctorBodyPath(PathString path) =>
+        string.Equals(path.Value, "/api/doctor/evaluations", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(path.Value, "/api/doctor/verifications", StringComparison.OrdinalIgnoreCase)
+        || (path.StartsWithSegments("/api/doctor/verifications", out var remaining)
+            && Regex.IsMatch(
+                remaining.Value ?? string.Empty,
+                "^/[^/]+/(complete|cancel)$",
+                RegexOptions.CultureInvariant | RegexOptions.IgnoreCase));
+
+    private static bool TrySetDoctorRequestBodyLimit(HttpContext context)
+    {
+        var feature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+        if (feature is null || feature.IsReadOnly)
+        {
+            return false;
+        }
+
+        try
+        {
+            var requiredLimit = MaximumInputBytes + 1L;
+            if (feature.MaxRequestBodySize is { } currentLimit && currentLimit < requiredLimit)
+            {
+                feature.MaxRequestBodySize = requiredLimit;
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static bool IsJson(string? contentType) =>
         contentType?.Split(';', 2)[0].Trim().Equals(JsonContentType, StringComparison.OrdinalIgnoreCase) == true;

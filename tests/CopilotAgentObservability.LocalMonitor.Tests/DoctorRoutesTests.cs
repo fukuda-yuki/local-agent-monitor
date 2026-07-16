@@ -292,6 +292,47 @@ public sealed class DoctorRoutesTests
     }
 
     [Fact]
+    public async Task DoctorBoundaryOverridesALowerGlobalRequestBodyLimit()
+    {
+        const int globalLimit = 1_024;
+        using var tempDirectory = new MonitorTempDirectory();
+        var application = new RecordingDoctorApplication(evaluateSnapshot: true);
+        await using var host = await StartHostAsync(tempDirectory, application, globalLimit);
+        var atDoctorLimit = PadToUtf8Length(NonReadySnapshotJson(verificationId: null), 65_536);
+        var overDoctorLimit = atDoctorLimit + " ";
+
+        using var accepted = await host.Client.PostAsync("/api/doctor/evaluations", JsonContent(atDoctorLimit));
+        using var rejected = await host.Client.PostAsync("/api/doctor/evaluations", JsonContent(overDoctorLimit));
+        var acceptedBody = await accepted.Content.ReadAsStringAsync();
+        var rejectedBody = await rejected.Content.ReadAsStringAsync();
+
+        AssertDoctorResponse(accepted, HttpStatusCode.OK);
+        AssertDoctorResponse(rejected, HttpStatusCode.BadRequest);
+        Assert.Equal("evaluation_completed", await ReadCodeAsync(accepted));
+        Assert.Equal("invalid_input", await ReadCodeAsync(rejected));
+        Assert.Contains("\"state_code\":\"monitor_not_running\"", acceptedBody, StringComparison.Ordinal);
+        Assert.Equal(
+            """{"schema_version":"doctor.v1","success":false,"code":"invalid_input","evaluation":null,"verification":null}""",
+            rejectedBody);
+        Assert.DoesNotContain("request_too_large", rejectedBody, StringComparison.Ordinal);
+        Assert.Equal(1, application.EvaluateCalls);
+    }
+
+    [Fact]
+    public async Task DoctorBoundaryDoesNotRaiseTheGlobalTraceRequestBodyLimit()
+    {
+        const int globalLimit = 1_024;
+        using var tempDirectory = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(tempDirectory, maxRequestBodyBytes: globalLimit);
+        using var content = new StringContent(new string('x', globalLimit + 1), Encoding.UTF8, "application/json");
+
+        using var response = await host.Client.PostAsync("/v1/traces", content);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Contains("request_too_large", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task InvalidUtf8IsRejectedWithoutInvokingTheApplication()
     {
         using var tempDirectory = new MonitorTempDirectory();
@@ -385,9 +426,11 @@ public sealed class DoctorRoutesTests
 
     private static Task<RunningMonitorHost> StartHostAsync(
         MonitorTempDirectory tempDirectory,
-        IDoctorHttpApplication? doctorApplication = null) =>
+        IDoctorHttpApplication? doctorApplication = null,
+        int maxRequestBodyBytes = MonitorOptions.DefaultMaxRequestBodyBytes) =>
         MonitorTestHost.StartAsync(
             tempDirectory,
+            maxRequestBodyBytes: maxRequestBodyBytes,
             testOptions: new MonitorHostTestOptions
             {
                 DoctorApplication = doctorApplication,
@@ -484,6 +527,13 @@ public sealed class DoctorRoutesTests
 
     private sealed class RecordingDoctorApplication : IDoctorHttpApplication
     {
+        private readonly bool evaluateSnapshot;
+
+        public RecordingDoctorApplication(bool evaluateSnapshot = false)
+        {
+            this.evaluateSnapshot = evaluateSnapshot;
+        }
+
         public int EvaluateCalls { get; private set; }
         public int StartCalls { get; private set; }
         public int StatusCalls { get; private set; }
@@ -494,7 +544,9 @@ public sealed class DoctorRoutesTests
         public DoctorResult Evaluate(DoctorFactSnapshot snapshot)
         {
             EvaluateCalls++;
-            return Result(DoctorResultCode.EvaluationCompleted);
+            return evaluateSnapshot
+                ? DoctorEvaluator.Evaluate(snapshot)
+                : Result(DoctorResultCode.EvaluationCompleted);
         }
 
         public DoctorResult Start(string sourceSurface, string? sourceAdapter, DateTimeOffset expiresAt)
