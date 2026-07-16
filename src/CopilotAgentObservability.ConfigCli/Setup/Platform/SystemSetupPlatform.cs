@@ -1734,7 +1734,7 @@ public sealed class SystemSetupPlatform : ISetupPlatform
                 !string.IsNullOrEmpty(baseUri.Query) ||
                 !string.IsNullOrEmpty(baseUri.Fragment) ||
                 !string.IsNullOrEmpty(baseUri.UserInfo) ||
-                path != "/health/live")
+                path is not ("/health/live" or "/health/ready"))
             {
                 return false;
             }
