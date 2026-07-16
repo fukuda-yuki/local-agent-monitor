@@ -22,17 +22,11 @@ enabled = true
 # root を含む同時アクティブスロット数
 max_concurrent_threads_per_session = 24
 
-# spawn_agent の model / reasoning_effort を露出
-expose_spawn_agent_model_overrides = true
-
 # agent_type / service_tier 等を隠さない
 hide_spawn_agent_metadata = false
 
 # collaboration.spawn_agent との名前衝突回避用
 tool_namespace = "agents"
 
-[plugins."computer-use@openai-bundled"]
-enabled = true
-
-[plugins."browser@openai-bundled"]
-enabled = true
+# spawn_agent の model / reasoning_effort を露出
+expose_spawn_agent_model_overrides = true
