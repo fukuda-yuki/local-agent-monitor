@@ -144,6 +144,7 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
 
         Assert.Empty(observed.ObservedKinds);
         Assert.Empty(observed.EvidenceRefs);
+        AssertUnattributedUnknown(observed);
     }
 
     [Fact]
@@ -153,9 +154,16 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         var cliVerification = Start(database.Path, "github-copilot-cli");
         var rawRecordId = CommitRaw(database.Path, "vscode-copilot-chat");
 
-        Assert.Empty(Observe(database.Path, cliVerification.VerificationId, "vscode", rawRecordId).ObservedKinds);
-        Assert.Empty(Observe(database.Path, cliVerification.VerificationId, "cli", rawRecordId).ObservedKinds);
-        Assert.Empty(Observe(database.Path, cliVerification.VerificationId, "cli", rawRecordId + 1).ObservedKinds);
+        var sourceMismatch = Observe(database.Path, cliVerification.VerificationId, "vscode", rawRecordId);
+        var clientKindMismatch = Observe(database.Path, cliVerification.VerificationId, "cli", rawRecordId);
+        var missingRaw = Observe(database.Path, cliVerification.VerificationId, "cli", rawRecordId + 1);
+
+        Assert.Empty(sourceMismatch.ObservedKinds);
+        Assert.Empty(clientKindMismatch.ObservedKinds);
+        Assert.Empty(missingRaw.ObservedKinds);
+        AssertUnattributedUnknown(sourceMismatch);
+        AssertUnattributedUnknown(clientKindMismatch);
+        AssertUnattributedUnknown(missingRaw);
     }
 
     [Fact]
@@ -170,6 +178,7 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
 
         Assert.Empty(observed.ObservedKinds);
         Assert.Empty(observed.EvidenceRefs);
+        AssertUnattributedUnknown(observed);
     }
 
     [Fact]
@@ -203,6 +212,7 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
 
         Assert.Empty(observed.ObservedKinds);
         Assert.Empty(observed.EvidenceRefs);
+        AssertUnattributedUnknown(observed);
     }
 
     [Fact]
@@ -217,8 +227,12 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         var rawRecordId = CommitRaw(database.Path, "vscode-copilot-chat");
         clock.UtcNow = Now.AddMinutes(2);
 
-        Assert.Empty(Observe(database.Path, expired.VerificationId, "vscode", rawRecordId, clock).ObservedKinds);
-        Assert.Empty(Observe(database.Path, cancelled.VerificationId, "vscode", rawRecordId, clock).ObservedKinds);
+        var expiredResult = Observe(database.Path, expired.VerificationId, "vscode", rawRecordId, clock);
+        var cancelledResult = Observe(database.Path, cancelled.VerificationId, "vscode", rawRecordId, clock);
+        Assert.Empty(expiredResult.ObservedKinds);
+        Assert.Empty(cancelledResult.ObservedKinds);
+        AssertUnattributedUnknown(expiredResult);
+        AssertUnattributedUnknown(cancelledResult);
     }
 
     [Fact]
@@ -395,6 +409,209 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         Assert.Equal(first.EvidenceRefs.Count, ReadCandidates(database.Path, verification.VerificationId).Count);
     }
 
+    [Fact]
+    public void Observe_TwoExactSessionsOnOneRawShareRawRefsButKeepBindingRefsDistinctAndCompletable()
+    {
+        using var database = TemporaryDatabase.Create();
+        const string traceId = "0123456789abcdef0123456789abcdef";
+        var rawRecordId = CommitRaw(database.Path, "vscode-copilot-chat", traceId);
+        CompleteProjection(database.Path, rawRecordId);
+        WriteSession(database.Path, "native-one", traceId, "vscode", "copilot-compatible-hook", Now.AddSeconds(3), "event-one");
+        WriteSession(database.Path, "native-two", traceId, "vscode", "copilot-compatible-hook", Now.AddSeconds(4), "event-two");
+        var firstVerification = Start(database.Path, "github-copilot-vscode");
+        var secondVerification = Start(database.Path, "github-copilot-vscode");
+
+        AssertPairCompletes(database.Path, firstVerification, rawRecordId, completeSecondSelection: false);
+        AssertPairCompletes(database.Path, secondVerification, rawRecordId, completeSecondSelection: true);
+    }
+
+    [Fact]
+    public void Observe_ProjectionDispositionAfterVerificationExpiryKeepsOnlyIngestAndRawWithExactTimes()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-vscode");
+        var rawRecordId = CommitRaw(database.Path, "vscode-copilot-chat");
+        SetDispositionUpdatedAt(database.Path, rawRecordId, "completed", Now.AddMinutes(6));
+
+        var observed = Observe(database.Path, verification.VerificationId, "vscode", rawRecordId);
+
+        Assert.Equal([DoctorEvidenceKind.Ingest, DoctorEvidenceKind.RawPersistence], observed.ObservedKinds);
+        Assert.Equal(ProjectionOutcome.Unknown, observed.Snapshot.Projection!.Outcome);
+        var rows = ReadCandidates(database.Path, verification.VerificationId);
+        Assert.All(rows, row => Assert.Equal(Now, row.ObservedAt));
+        Assert.DoesNotContain(rows, row => row.EvidenceKind == "projection");
+    }
+
+    [Theory]
+    [InlineData("vscode", "github-copilot-vscode", "vscode-copilot-chat", "vscode", "copilot-compatible-hook", -1, 3)]
+    [InlineData("cli", "github-copilot-cli", "copilot-cli", "copilot-cli", "copilot-compatible-hook", 301, 3)]
+    [InlineData("app-sdk", "github-copilot-app-sdk", "copilot-app-sdk", "copilot-sdk", "copilot-sdk-stream", -1, 0)]
+    [InlineData("app-sdk", "github-copilot-app-sdk", "copilot-app-sdk", "copilot-sdk", "copilot-sdk-stream", 301, 0)]
+    public void Observe_SessionEvidenceOutsideVerificationWindowCannotCreateBindingCandidates(
+        string target,
+        string sourceSurface,
+        string clientKind,
+        string nativeSurface,
+        string eventAdapter,
+        int sessionSecondsFromStart,
+        int expectedRawGateCount)
+    {
+        using var database = TemporaryDatabase.Create();
+        const string traceId = "0123456789abcdef0123456789abcdef";
+        var verification = Start(database.Path, sourceSurface);
+        var rawRecordId = CommitRaw(database.Path, clientKind, traceId);
+        CompleteProjection(database.Path, rawRecordId);
+        WriteSession(
+            database.Path,
+            "exact-native",
+            traceId,
+            nativeSurface,
+            eventAdapter,
+            Now.AddSeconds(sessionSecondsFromStart));
+
+        var observed = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, target, rawRecordId, new(nativeSurface, "exact-native")));
+
+        Assert.Equal(expectedRawGateCount, observed.ObservedKinds.Count);
+        Assert.DoesNotContain(DoctorEvidenceKind.ExactSessionBinding, observed.ObservedKinds);
+        Assert.DoesNotContain(DoctorEvidenceKind.CompletenessContent, observed.ObservedKinds);
+    }
+
+    [Fact]
+    public void Observe_MatchingTraceOnDifferentRunThanCorrectAdapterEventDoesNotBind()
+    {
+        using var database = TemporaryDatabase.Create();
+        const string traceId = "0123456789abcdef0123456789abcdef";
+        var verification = Start(database.Path, "github-copilot-vscode");
+        var rawRecordId = CommitRaw(database.Path, "vscode-copilot-chat", traceId);
+        CompleteProjection(database.Path, rawRecordId);
+        WriteSplitRunSession(database.Path, "exact-native", traceId);
+
+        var observed = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, "vscode", rawRecordId, new("vscode", "exact-native")));
+
+        Assert.Equal(
+            [DoctorEvidenceKind.Ingest, DoctorEvidenceKind.RawPersistence, DoctorEvidenceKind.Projection],
+            observed.ObservedKinds);
+        Assert.DoesNotContain(DoctorEvidenceKind.ExactSessionBinding, observed.ObservedKinds);
+        Assert.DoesNotContain(DoctorEvidenceKind.CompletenessContent, observed.ObservedKinds);
+    }
+
+    [Fact]
+    public void Observe_CandidateObservedAtUsesEachExactEvidenceTimestamp()
+    {
+        using var database = TemporaryDatabase.Create();
+        const string traceId = "0123456789abcdef0123456789abcdef";
+        var verification = Start(database.Path, "github-copilot-vscode");
+        var rawRecordId = CommitRaw(database.Path, "vscode-copilot-chat", traceId);
+        SetDispositionUpdatedAt(database.Path, rawRecordId, "completed", Now.AddSeconds(2));
+        WriteSession(
+            database.Path,
+            "exact-native",
+            traceId,
+            "vscode",
+            "copilot-compatible-hook",
+            Now.AddSeconds(3));
+
+        _ = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, "vscode", rawRecordId, new("vscode", "exact-native")));
+
+        var rows = ReadCandidates(database.Path, verification.VerificationId).ToDictionary(row => row.EvidenceKind);
+        Assert.Equal(Now, rows["ingest"].ObservedAt);
+        Assert.Equal(Now, rows["raw_persistence"].ObservedAt);
+        Assert.Equal(Now.AddSeconds(2), rows["projection"].ObservedAt);
+        Assert.Equal(Now.AddSeconds(3), rows["exact_session_binding"].ObservedAt);
+        Assert.Equal(Now.AddSeconds(3), rows["completeness_content"].ObservedAt);
+    }
+
+    [Fact]
+    public void Observe_RawExactlyAtVerificationExpiryIsExcludedWithoutPartialCandidates()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-vscode");
+        var rawRecordId = CommitRaw(
+            database.Path,
+            "vscode-copilot-chat",
+            receivedAt: verification.ExpiresAt);
+
+        var observed = Observe(database.Path, verification.VerificationId, "vscode", rawRecordId);
+
+        Assert.Empty(observed.ObservedKinds);
+        Assert.Empty(observed.EvidenceRefs);
+        Assert.Empty(ReadCandidates(database.Path, verification.VerificationId));
+        AssertUnattributedUnknown(observed);
+    }
+
+    [Fact]
+    public void Observe_DispositionExactlyAtVerificationExpiryIsExcludedWithoutProjectionLeakage()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-vscode");
+        var rawRecordId = CommitRaw(database.Path, "vscode-copilot-chat");
+        SetDispositionUpdatedAt(database.Path, rawRecordId, "completed", verification.ExpiresAt);
+
+        var observed = Observe(database.Path, verification.VerificationId, "vscode", rawRecordId);
+
+        Assert.Equal([DoctorEvidenceKind.Ingest, DoctorEvidenceKind.RawPersistence], observed.ObservedKinds);
+        Assert.Equal(ProjectionOutcome.Unknown, observed.Snapshot.Projection!.Outcome);
+        Assert.Equal(2, ReadCandidates(database.Path, verification.VerificationId).Count);
+        Assert.DoesNotContain(
+            ReadCandidates(database.Path, verification.VerificationId),
+            row => row.EvidenceKind == "projection");
+    }
+
+    [Theory]
+    [InlineData("vscode", "github-copilot-vscode", "vscode-copilot-chat", "vscode", "copilot-compatible-hook", 3)]
+    [InlineData("cli", "github-copilot-cli", "copilot-cli", "copilot-cli", "copilot-compatible-hook", 3)]
+    [InlineData("app-sdk", "github-copilot-app-sdk", "copilot-app-sdk", "copilot-sdk", "copilot-sdk-stream", 0)]
+    public void Observe_SessionExactlyAtVerificationExpiryCannotCreateBindingOrContent(
+        string target,
+        string sourceSurface,
+        string clientKind,
+        string nativeSurface,
+        string eventAdapter,
+        int expectedPersistedCount)
+    {
+        using var database = TemporaryDatabase.Create();
+        const string traceId = "0123456789abcdef0123456789abcdef";
+        var verification = Start(database.Path, sourceSurface);
+        var rawRecordId = CommitRaw(database.Path, clientKind, traceId);
+        CompleteProjection(database.Path, rawRecordId);
+        WriteSession(
+            database.Path,
+            "expiry-native",
+            traceId,
+            nativeSurface,
+            eventAdapter,
+            verification.ExpiresAt);
+
+        var observed = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, target, rawRecordId, new(nativeSurface, "expiry-native")));
+
+        Assert.DoesNotContain(DoctorEvidenceKind.ExactSessionBinding, observed.ObservedKinds);
+        Assert.DoesNotContain(DoctorEvidenceKind.CompletenessContent, observed.ObservedKinds);
+        Assert.Equal(expectedPersistedCount, ReadCandidates(database.Path, verification.VerificationId).Count);
+        Assert.True(observed.SessionUnbound);
+        if (target == "app-sdk")
+        {
+            Assert.Empty(observed.ObservedKinds);
+        }
+        else
+        {
+            Assert.Equal(
+                [DoctorEvidenceKind.Ingest, DoctorEvidenceKind.RawPersistence, DoctorEvidenceKind.Projection],
+                observed.ObservedKinds);
+        }
+    }
+
     private static GitHubCopilotDoctorEvidenceResult Observe(
         string databasePath,
         string verificationId,
@@ -481,13 +698,28 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
             current.Revision));
     }
 
+    private static void SetDispositionUpdatedAt(
+        string databasePath,
+        long rawRecordId,
+        string state,
+        DateTimeOffset updatedAt)
+    {
+        Execute(
+            databasePath,
+            $"UPDATE monitor_projection_dispositions SET state = '{state}', revision = revision + 1, updated_at = '{updatedAt:yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'}' WHERE raw_record_id = $raw_record_id;",
+            rawRecordId);
+    }
+
     private static void WriteSession(
         string databasePath,
         string nativeId,
         string traceId,
         string nativeSurface = "copilot-sdk",
-        string eventAdapter = "copilot-sdk-stream")
+        string eventAdapter = "copilot-sdk-stream",
+        DateTimeOffset? evidenceAt = null,
+        string sourceEventId = "event-1")
     {
+        var observedAt = evidenceAt ?? Now;
         var store = new SqliteSessionStore(databasePath, new AdjustableTimeProvider(Now));
         store.CreateSchema();
         var session = ObservedSession.Create(
@@ -495,31 +727,117 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
             SessionCompleteness.Full,
             repository: "must-not-be-used",
             workspace: "must-not-be-used",
-            Now,
-            Now.AddSeconds(1),
-            Now.AddSeconds(1),
+            observedAt,
+            observedAt,
+            observedAt,
             SessionRawRetentionState.Expiring);
         var surface = SessionWire.ParseSourceSurface(nativeSurface);
-        var native = new SessionNativeId(session.SessionId, surface, nativeId, SessionBindingKind.Native, Now);
+        var native = new SessionNativeId(session.SessionId, surface, nativeId, SessionBindingKind.Native, observedAt);
         var run = ObservedSessionRun.Create(session.SessionId, ObservedSessionStatus.Completed) with
         {
             SourceSurface = surface,
             TraceId = traceId,
+            StartedAt = observedAt,
+            EndedAt = observedAt,
         };
         var @event = ObservedSessionEvent.Create(
             session.SessionId,
             run.RunId,
             eventAdapter,
-            "event-1",
+            sourceEventId,
             "assistant.completed",
-            Now,
+            observedAt,
             SessionContentState.Available) with { SourceSurface = surface, TraceId = traceId };
         store.Write(new SessionWriteBatch(new SessionDetail(session, [native], [run], [@event]), []));
+    }
+
+    private static void WriteSplitRunSession(string databasePath, string nativeId, string traceId)
+    {
+        var store = new SqliteSessionStore(databasePath, new AdjustableTimeProvider(Now));
+        store.CreateSchema();
+        var session = ObservedSession.Create(
+            ObservedSessionStatus.Completed,
+            SessionCompleteness.Full,
+            null,
+            null,
+            Now,
+            Now.AddSeconds(2),
+            Now.AddSeconds(2),
+            SessionRawRetentionState.Expiring);
+        var native = new SessionNativeId(
+            session.SessionId,
+            SessionSourceSurface.VisualStudioCode,
+            nativeId,
+            SessionBindingKind.Native,
+            Now);
+        var traceRun = ObservedSessionRun.Create(session.SessionId, ObservedSessionStatus.Completed) with
+        {
+            SourceSurface = SessionSourceSurface.VisualStudioCode,
+            TraceId = traceId,
+        };
+        var differentRun = ObservedSessionRun.Create(session.SessionId, ObservedSessionStatus.Completed) with
+        {
+            SourceSurface = SessionSourceSurface.VisualStudioCode,
+            TraceId = "fedcba9876543210fedcba9876543210",
+        };
+        var @event = ObservedSessionEvent.Create(
+            session.SessionId,
+            differentRun.RunId,
+            "copilot-compatible-hook",
+            "split-run-event",
+            "assistant.completed",
+            Now.AddSeconds(2),
+            SessionContentState.Available) with
+        {
+            SourceSurface = SessionSourceSurface.VisualStudioCode,
+            TraceId = traceId,
+        };
+        store.Write(new SessionWriteBatch(
+            new SessionDetail(session, [native], [traceRun, differentRun], [@event]),
+            []));
+    }
+
+    private static void AssertPairCompletes(
+        string databasePath,
+        DoctorVerification verification,
+        long rawRecordId,
+        bool completeSecondSelection)
+    {
+        var first = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            databasePath,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, "vscode", rawRecordId, new("vscode", "native-one")));
+        var second = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            databasePath,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, "vscode", rawRecordId, new("vscode", "native-two")));
+
+        Assert.Equal(first.EvidenceRefs.Take(3), second.EvidenceRefs.Take(3));
+        Assert.NotEqual(first.EvidenceRefs[3], second.EvidenceRefs[3]);
+        Assert.NotEqual(first.EvidenceRefs[4], second.EvidenceRefs[4]);
+        Assert.Equal(7, ReadCandidates(databasePath, verification.VerificationId).Count);
+        var selected = completeSecondSelection ? second : first;
+        var completed = CreateDoctor(databasePath, new AdjustableTimeProvider(Now)).Complete(
+            verification.VerificationId,
+            verification.Revision,
+            WithReadyStaticFacts(selected.Snapshot),
+            selected.EvidenceRefs);
+        Assert.Equal(DoctorStateCode.FirstTraceReady, completed.Evaluation!.PrimaryState!.StateCode);
     }
 
     private static void AssertOpaqueReference(string reference)
     {
         Assert.Matches("^[a-z0-9_-]{1,128}$", reference);
+    }
+
+    private static void AssertUnattributedUnknown(GitHubCopilotDoctorEvidenceResult result)
+    {
+        Assert.False(result.SessionUnbound);
+        Assert.Equal(ExactSessionBindingRequirement.Unknown, result.Snapshot.ExactSessionBinding!.Requirement);
+        Assert.Equal(ExactSessionBindingOutcome.Unknown, result.Snapshot.ExactSessionBinding.Outcome);
+        Assert.Equal(DoctorCompleteness.Unknown, result.Snapshot.CompletenessAndContent!.Completeness);
+        Assert.Equal(ContentCaptureStatus.Unknown, result.Snapshot.CompletenessAndContent.ContentCapture);
+        Assert.Equal(RawAccessStatus.Unknown, result.Snapshot.CompletenessAndContent.RawAccess);
     }
 
     private static DoctorFactSnapshot WithReadyStaticFacts(DoctorFactSnapshot snapshot) => snapshot with
@@ -550,7 +868,23 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
             Assert.InRange(row.ObservedAt, verification.StartedAt, verification.ExpiresAt);
             Assert.Equal(verification.ExpiresAt, row.ExpiresAt);
             AssertOpaqueReference(row.EvidenceRef);
+            var candidateId = Guid.ParseExact(row.CandidateId, "D");
+            Assert.Equal(7, candidateId.Version);
+            Assert.Equal(row.ObservedAt, UuidV7Timestamp(candidateId));
         });
+    }
+
+    private static DateTimeOffset UuidV7Timestamp(Guid value)
+    {
+        var bytes = value.ToByteArray(bigEndian: true);
+        var unixMilliseconds =
+            ((long)bytes[0] << 40) |
+            ((long)bytes[1] << 32) |
+            ((long)bytes[2] << 24) |
+            ((long)bytes[3] << 16) |
+            ((long)bytes[4] << 8) |
+            bytes[5];
+        return DateTimeOffset.FromUnixTimeMilliseconds(unixMilliseconds);
     }
 
     private static IReadOnlyList<CandidateRow> ReadCandidates(string databasePath, string verificationId)
@@ -564,7 +898,7 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         using var command = connection.CreateCommand();
         command.CommandText =
             """
-            SELECT source_surface, source_adapter, evidence_class, evidence_kind, evidence_ref, observed_at, expires_at
+            SELECT candidate_id, source_surface, source_adapter, evidence_class, evidence_kind, evidence_ref, observed_at, expires_at
             FROM doctor_verification_evidence
             WHERE verification_id = $verification_id
             ORDER BY evidence_kind;
@@ -580,8 +914,9 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
                 reader.GetString(2),
                 reader.GetString(3),
                 reader.GetString(4),
-                DateTimeOffset.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind),
-                DateTimeOffset.Parse(reader.GetString(6), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+                reader.GetString(5),
+                DateTimeOffset.Parse(reader.GetString(6), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                DateTimeOffset.Parse(reader.GetString(7), null, System.Globalization.DateTimeStyles.RoundtripKind)));
         }
         return rows;
     }
@@ -607,6 +942,7 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
     }
 
     private sealed record CandidateRow(
+        string CandidateId,
         string SourceSurface,
         string SourceAdapter,
         string EvidenceClass,
