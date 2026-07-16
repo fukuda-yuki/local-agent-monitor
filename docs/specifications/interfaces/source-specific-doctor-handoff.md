@@ -292,9 +292,12 @@ and discoverable interface only.
 A concrete implementation:
 
 - is non-abstract;
+- has a parameterless constructor because this handoff is a stateless
+  identity/composition wrapper; source collection and stores are separate;
 - implements `IDoctorSourceHandoff`;
 - has one `DoctorSourceHandoffAttribute`;
 - exposes one of the three manifest-backed surface values above;
+- returns a runtime `SourceSurface` exactly equal to the attribute value;
 - returns `ExpectedSourceAdapter = null` for this v1 handoff; and
 - delegates direct, completion, and candidate composition to
   `DoctorSourceHandoffComposer`.
@@ -319,7 +322,9 @@ Doctor assembly.
 7. absence of source-specific Doctor enums in the core assembly;
 8. unique registrations limited to the three manifest-backed surfaces and kept
    outside the Doctor assembly; and
-9. three separately executable implementation gates:
+9. three separately executable implementation gates that construct the
+   registered wrapper and verify attribute/runtime surface equality plus null
+   expected adapter:
    - `GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore`;
    - `GitHubCopilotCliSourceHandoff_IsImplementedOutsideDoctorCore`;
    - `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore`.
