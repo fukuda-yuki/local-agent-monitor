@@ -8,6 +8,8 @@ public sealed class DoctorSourceHandoffContractTests
         "Source handoff produced an invalid Doctor fact snapshot.";
     private static readonly DateTimeOffset ObservedAt =
         DateTimeOffset.Parse("2026-07-16T00:00:00.0000000Z");
+    private static readonly string[] ExpectedSourceSurfaces =
+        ["claude-code", "github-copilot-cli", "github-copilot-vscode"];
 
     [Fact]
     public void DirectComposition_MapsFixedAuthorityAndPreservesObservations()
@@ -195,6 +197,18 @@ public sealed class DoctorSourceHandoffContractTests
     }
 
     [Fact]
+    public void SourceHandoffRegistrations_AreUniqueManifestBackedAndOutsideDoctorCore()
+    {
+        var doctorAssembly = typeof(DoctorFactSnapshot).Assembly;
+        var registrations = SourceHandoffRegistrations();
+        var surfaces = registrations.Select(registration => registration.SourceSurface).ToArray();
+
+        Assert.DoesNotContain(registrations, registration => registration.Type.Assembly == doctorAssembly);
+        Assert.Equal(surfaces.Length, surfaces.Distinct(StringComparer.Ordinal).Count());
+        Assert.All(surfaces, surface => Assert.Contains(surface, ExpectedSourceSurfaces));
+    }
+
+    [Fact]
     public void GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore() =>
         AssertSourceHandoff("github-copilot-vscode");
 
@@ -232,10 +246,7 @@ public sealed class DoctorSourceHandoffContractTests
 
     private static void AssertSourceHandoff(string expectedSourceSurface)
     {
-        var doctorAssembly = typeof(DoctorFactSnapshot).Assembly;
         var registrations = SourceHandoffRegistrations();
-
-        Assert.DoesNotContain(registrations, registration => registration.Type.Assembly == doctorAssembly);
         Assert.Single(registrations.Where(registration => string.Equals(
             registration.SourceSurface,
             expectedSourceSurface,
