@@ -160,24 +160,25 @@ The shared tests contain two groups.
 - persisted-completion composition copies the verification identity and has no
   caller observations;
 - invalid source identity, invalid verification identity, and unsafe observation
-  references are rejected by the existing validation contract;
+  references are rejected by the existing validation contract; and
 - the Doctor assembly still contains no source-specific Doctor enum.
 
 ### Intentional RED source-implementation tests
 
-The test assembly scans the Config CLI and Local Monitor production assemblies
-for concrete source handoff implementations. The baseline remains RED until
-Issues #103 and #104 provide implementations covering these manifest-backed
-surfaces:
+The test assembly scans the Doctor, Config CLI, and Local Monitor production
+assemblies for concrete source handoff implementations. Three separate tests
+remain RED until their owning Issue provides the corresponding implementation:
 
-- `github-copilot-vscode`;
-- `github-copilot-cli`;
-- `claude-code`.
+- #103: `GitHubCopilotVsCodeSourceHandoff_IsImplementedOutsideDoctorCore`;
+- #103: `GitHubCopilotCliSourceHandoff_IsImplementedOutsideDoctorCore`;
+- #104: `ClaudeCodeSourceHandoff_IsImplementedOutsideDoctorCore`.
 
-The test does not require a concrete class name or assembly location. A later
-implementation satisfies it by implementing the shared `IDoctorSourceHandoff`
-contract and exposing the exact surface identity. This permits #103 and #104 to
-work in separate worktrees without editing the shared test.
+The tests do not require a concrete class name or assembly location. A later
+implementation satisfies its owned row by implementing the shared
+`IDoctorSourceHandoff` contract and exposing the exact surface identity. The
+three-way split lets #103 and #104 work in separate worktrees and run their
+owned contract tests without editing or weakening the other Issue's expected
+surface.
 
 ## Shared implementation interface
 
@@ -215,10 +216,10 @@ dotnet build CopilotAgentObservability.slnx
 The intended G0-3 checkpoint is:
 
 - shared-boundary tests: GREEN;
-- exactly the manifest-backed source-implementation coverage test: RED because
-  #103/#104 implementations do not exist yet;
+- the two GitHub Copilot source-implementation tests: RED for #103;
+- the Claude Code source-implementation test: RED for #104;
 - no unrelated test failure or compile failure.
 
-Before later integration, #103 and #104 must turn their corresponding RED rows
-GREEN and the repository must run the pinned build, Playwright bootstrap, and
-full solution test commands.
+Before later integration, #103 and #104 must turn their owned rows GREEN and
+the repository must run the pinned build, Playwright bootstrap, and full
+solution test commands.
