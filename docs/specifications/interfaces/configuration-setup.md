@@ -1474,9 +1474,11 @@ three content keys on any source.
 Windows native selects at most one complete managed settings object in this
 exact tier order:
 
-1. `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`;
+1. the `Settings` string value under
+   `HKLM\SOFTWARE\Policies\ClaudeCode`;
 2. `C:\Program Files\ClaudeCode\managed-settings.json`;
-3. `HKCU\SOFTWARE\Policies\ClaudeCode\Settings`.
+3. the `Settings` string value under
+   `HKCU\SOFTWARE\Policies\ClaudeCode`.
 
 Once a higher tier object is present, there is no per-key merge or fallthrough
 to a lower tier. WSL2 observes only
