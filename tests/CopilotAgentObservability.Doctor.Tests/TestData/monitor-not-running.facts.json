@@ -1,0 +1,53 @@
+{
+  "schema_version": "doctor.facts.v1",
+  "source_surface": "github-copilot-vscode",
+  "expected_source_adapter": null,
+  "observed_at": "2026-07-16T01:02:03.0000000Z",
+  "verification_id": null,
+  "observations": [],
+  "install_and_source_version": {
+    "monitor_install": "installed",
+    "source_version": "supported",
+    "source_feature": "available"
+  },
+  "process_receiver_and_port": {
+    "monitor_process": "not_running",
+    "receiver_bind": "not_bound",
+    "port_owner": "none"
+  },
+  "source_effective_configuration": {
+    "endpoint_alignment": "match"
+  },
+  "endpoint_reachability": {
+    "reachability": "reachable"
+  },
+  "protocol_and_signal_compatibility": {
+    "protocol": "http_protobuf",
+    "trace_signal": "enabled"
+  },
+  "source_version_and_schema_diagnostics": {
+    "compatibility": "supported",
+    "schema": "matching"
+  },
+  "last_ingest": {
+    "outcome": "none"
+  },
+  "raw_persistence": {
+    "outcome": "not_persisted"
+  },
+  "projection": {
+    "outcome": "not_started"
+  },
+  "exact_session_binding": {
+    "requirement": "not_required",
+    "outcome": "not_applicable"
+  },
+  "completeness_and_content": {
+    "completeness": "full",
+    "content_capture": "enabled",
+    "raw_access": "available"
+  },
+  "restart_or_new_process": {
+    "requirement": "not_required"
+  }
+}

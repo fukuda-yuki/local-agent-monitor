@@ -28,6 +28,11 @@ internal static class CliApplication
             return RunSetupCommand(args, output, error, setupDispatcher);
         }
 
+        if (args[0] == "doctor")
+        {
+            return DoctorCli.Run(args[1..], output, error);
+        }
+
         switch (args[0])
         {
             case "list-collection-profiles":

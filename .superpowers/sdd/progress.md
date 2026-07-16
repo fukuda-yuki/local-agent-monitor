@@ -17,8 +17,14 @@
 - Task 1 canonical specification: implementation complete; initial independent
   review found five Important findings; all five were corrected; re-review PASS
   with 0 Critical, 0 Important, and 0 Minor findings.
-- Next action: commit Task 1, then dispatch Task 2 thin executable
-  cross-surface slice with TDD and independent review.
+- Task 1 commit: `287f0c302ccbd24b9cef91acb98747d8635319f7`.
+- Task 2 thin cross-surface slice: RED observed at real CLI dispatch; GREEN
+  direct/CLI/HTTP result equality; independent review found one Important and
+  one Minor; both corrected through a second RED/GREEN cycle; re-review PASS.
+  Root focused test passed 1/1 and root solution build passed with 0 warnings
+  and 0 errors.
+- Next action: commit Task 2, create isolated child worktrees from that commit,
+  and dispatch Tasks 3-5 in parallel before Task 6.
 
 ## Worker constraint
 

@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\CopilotAgentObservability.Doctor\CopilotAgentObservability.Doctor.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.Telemetry\CopilotAgentObservability.Telemetry.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </ItemGroup>

@@ -175,6 +175,7 @@ internal static class MonitorHost
         });
         app.UseStaticFiles();
         app.MapRazorPages();
+        DoctorRoutes.Map(app);
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;
