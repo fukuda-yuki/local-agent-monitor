@@ -46,13 +46,33 @@
   0 Critical, 0 Important, 0 Minor. The reviewer reran Doctor 216/216, Config
   CLI Doctor 152/152, and Local Monitor Doctor 49/49 and confirmed executable
   evaluate/start/status/cancel guidance, marker coverage, and evidence hygiene.
+- Task 8 commit: `b41a9a36024244cae08d4aebe7a0ab3762bd4c8d`.
+- Four independent final reviews covered security/data safety,
+  concurrency/migration/atomicity, specification/Issue contracts, and the whole
+  branch. Their initial union was four Important and two Minor findings.
+- One final fix set corrected advisory-only unknown semantics, unified evidence
+  reference safety, Doctor path-family no-store, optional HTTP context parity,
+  the security boundary cross-reference, and the latent ready-fixed store
+  adapter. Fix commit: `1d7822ac60e3e0331436b49973c72dffabe5e554`.
+- All four original reviewers re-reviewed the same fix diff and returned PASS:
+  0 Critical, 0 Important, 0 Minor.
+- Root final focused evidence: Doctor 232/232, Config CLI Doctor 159/159, Local
+  Monitor Doctor 66/66. On committed `1d7822a`, pinned build passed with 0
+  warnings/errors, Playwright bootstrap exited 0, and full solution passed
+  5,334/5,334 (Doctor 232 + LocalMonitor 1,459 + ConfigCli 3,643), with 0 failed
+  and 0 skipped.
+- One earlier fix-agent full run timed out in an unrelated unchanged setup-wrapper
+  test. The exact test passed 1/1 in isolation, no unrelated code changed, and
+  the exact pinned full command subsequently passed. Both results are preserved
+  in the final fix report.
 - Accepted handoff: #103/#104 source-specific candidate producers remain
   compile-shape and live-unverified; #105 proxy/UI is absent and unverified.
   Setup, evaluation, and verification start do not prove a first real trace.
   The feature branch is not integrated into `main`, and Issue #102 is not
   recorded as closed.
-- Next action: commit Task 8, run pinned validation, complete the four
-  whole-branch reviews, and make the separate integration/closure decision.
+- Feature-branch implementation and validation are complete. Next action is a
+  separate user-authorized main integration/closure decision; no push, PR, main
+  integration, external Issue closure, or live first trace is claimed here.
 
 ## Worker constraint
 
