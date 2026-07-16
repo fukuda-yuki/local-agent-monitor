@@ -7,8 +7,8 @@ Updated: 2026-07-16
 - Worktree: `C:\Users\mwam0\.codex\worktrees\8660\copilot-agent-observability`
 - Branch: `codex/issue-68-claude-guided-setup`
 - Start HEAD: `8940b34f4e031b894705682dc50c079a9ed5c180`
-- Current end HEAD: `109c30cb6d20f015e79f7e87acd953f584c4a874`
-- Feature-branch commit range: `8940b34f4e031b894705682dc50c079a9ed5c180..109c30cb6d20f015e79f7e87acd953f584c4a874`
+- Current end HEAD: `80c56cc44bd85914fd1e1597350e0a2d4c4a2fc8`
+- Feature-branch commit range: `8940b34f4e031b894705682dc50c079a9ed5c180..80c56cc44bd85914fd1e1597350e0a2d4c4a2fc8`
 - Main integration: not performed
 - Push, pull request, and external Issue closure: not performed
 
@@ -21,7 +21,7 @@ Updated: 2026-07-16
 | W2a settings/storage | Complete, committed | `/root/issue68_w2a_settings_storage` | `8be9f7fa` / `573267d8` | `8be9f7fa..573267d8` | `ClaudeSettingsDocumentTests` 17/17; `SetupStorageTests` 202/202; fixture bytes unchanged; `git diff --check` PASS | initial C0/I1/M1 remediated; independent re-review PASS C0/I0/M0 | W3 must materialize the arm through apply/status/rollback |
 | W2b detection/WSL2 | Complete, committed | `/root/issue68_w2b_detection_wsl` | `573267d8` / `42eaf495` | `573267d8..42eaf495` | shared `ClaudeCodeSetupAdapterTests` 80/80; production HTTP seam 2/2; existing liveness proxy 1/1; build PASS | initial success-path integration gap remediated; independent re-review PASS C0/I0/M0 | W3 must compose version/context/readiness and fixed codes |
 | W2c Agent SDK guidance | Complete, committed | `/root/issue68_w2c_sdk_guidance` | `42eaf495` / `109c30cb` | `42eaf495..109c30cb` | SDK guidance 4/4; shared `ClaudeCodeSetupAdapterTests` 80/80; build PASS | initial C0/I2/M0 remediated; independent re-review PASS C0/I0/M0 | W3 must integrate `app-sdk|all` and the closed guidance validator |
-| W3 adapter/composition | Pending | unassigned | pending | pending | pending | pending | `setup.v1` projection and #66 transaction |
+| W3 adapter/composition | Complete, committed | delegated implementation and remediation agents | `4e6ea1c` / `80c56cc4` | `4e6ea1c..80c56cc4` | required focused 110/110, 17/17, 8/8, 219/219; transaction evidence 8/8; ConfigCli 3,688/3,688 | initial C0/I3/M1 and first re-review C0/I1/M0 remediated; final re-review PASS C0/I0/M0 | none; Wave4 hardening remains separate |
 | W4 transaction/migration/release | Pending | unassigned | pending | pending | pending | pending | deterministic stale/concurrency and actual-v1 restart |
 | Final reviews | Pending | three independent reviewers | pending | pending | focused/full pending | requirements; security; transaction/migration | #102 merge-tree check pending |
 
@@ -37,8 +37,18 @@ Updated: 2026-07-16
 | W1 executable RED | Config `FullyQualifiedName~ClaudeConfigurationSetupIntegrationTests`; LocalMonitor `FullyQualifiedName~ClaudeSetup` | Config: 1 safe pre-dispatch transport PASS + 2 intended assertion RED; LocalMonitor direct/repository/Release transport PASS; no compile/process/package/parity failure |
 | W2 settings/storage | exact focused filters for `ClaudeSettingsDocumentTests` and `SetupStorageTests` | PASS, 17/17 and 202/202 |
 | W2 detection/readiness | exact focused filters for `ClaudeCodeSetupAdapterTests` and `SystemSetupHttpProbeClaudeTests` | PASS, 80/80 and 2/2 |
+| W3 required focused | exact requested filters for `ClaudeCodeSetupAdapterTests`, `ClaudeSettingsDocumentTests`, `ClaudeConfigurationSetupIntegrationTests`, and `SetupStorageTests` | PASS on final snapshot: 110/110, 17/17, 8/8, and 219/219 |
+| W3 recovery/rollback evidence | deterministic unknown/mixed SDK discriminator and 5/8-env mismatch tests plus existing recovery/rollback suites | PASS: new 8/8; existing recovery/rollback 418/418 |
+| W3 ConfigCli project full | `dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj` | PASS, 3,688/3,688, 0 failed/skipped, 112 seconds |
+| W3 bounded concurrent run | the same ConfigCli project command under a 180-second outer timeout while another worktree and reviewer tests were active | Inconclusive timeout; systematic diagnosis found no local residual testhost, and the isolated exact rerun above passed; not counted as success evidence |
 
 ## Review state
+
+Wave 3 independent review initially found target/cardinality binding, explicit
+Agent SDK content-variant persistence, WSL repository-only command provenance,
+and the app-sdk WSL flag boundary. Remediation re-review then found one shared
+recovery/rollback evidence gap. All findings were repaired with RED/GREEN tests;
+the final independent re-review is PASS C0/I0/M0. The W3 commit is `80c56cc4`.
 
 Wave 2 implementation re-reviews are PASS C0/I0/M0 for all three lanes. The W0 documentation's
 initial independent review found C0/I3/M1: ambiguous Claude readiness probing,
