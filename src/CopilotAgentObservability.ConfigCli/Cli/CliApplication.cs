@@ -8,7 +8,7 @@ internal static class CliApplication
 {
     public static int Run(string[] args, TextWriter output, TextWriter error)
     {
-        return Run(args, output, error, null);
+        return Run(args, output, error, setupDispatcher: null, doctorApplication: null);
     }
 
     public static int Run(
@@ -16,6 +16,16 @@ internal static class CliApplication
         TextWriter output,
         TextWriter error,
         Func<SetupOptions, SetupCommandResult>? setupDispatcher)
+    {
+        return Run(args, output, error, setupDispatcher, doctorApplication: null);
+    }
+
+    public static int Run(
+        string[] args,
+        TextWriter output,
+        TextWriter error,
+        Func<SetupOptions, SetupCommandResult>? setupDispatcher,
+        IDoctorCliApplication? doctorApplication)
     {
         if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
         {
@@ -30,7 +40,7 @@ internal static class CliApplication
 
         if (args[0] == "doctor")
         {
-            return DoctorCli.Run(args[1..], output, error);
+            return DoctorCli.Run(args[1..], output, error, doctorApplication);
         }
 
         switch (args[0])

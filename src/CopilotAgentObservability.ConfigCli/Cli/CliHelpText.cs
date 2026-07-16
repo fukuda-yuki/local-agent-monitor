@@ -25,6 +25,11 @@ internal static class CliHelpText
           config-cli setup apply --change-set <uuid-v7>
           config-cli setup rollback --change-set <uuid-v7>
           config-cli setup status [--adapter github-copilot]
+          config-cli doctor evaluate --input <file> [--json]
+          config-cli doctor verification start --database <file> --source-surface <value> [--source-adapter <value>] --expires-at <RFC3339> [--json]
+          config-cli doctor verification status --database <file> --verification-id <uuid-v7> [--json]
+          config-cli doctor verification complete --database <file> --verification-id <uuid-v7> --expected-revision <positive-int> --input <file> [--json]
+          config-cli doctor verification cancel --database <file> --verification-id <uuid-v7> --expected-revision <positive-int> [--json]
           config-cli ingest-raw <raw.json> --db <raw-store.db>
           config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]
           config-cli serve-raw-local-receiver [--db <raw-store.db>] [--url <loopback-http-url>]
