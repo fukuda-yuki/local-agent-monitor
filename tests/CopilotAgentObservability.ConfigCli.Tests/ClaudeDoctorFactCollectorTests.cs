@@ -16,7 +16,10 @@ public sealed class ClaudeDoctorFactCollectorTests
     private const string InvocationDirectory = "C:\\claude-project";
     private const string ManagedSettingsPath = "C:\\claude-managed.json";
     private const string TraceId = "0123456789abcdef0123456789abcdef";
+    private const string SecondTraceId = "fedcba9876543210fedcba9876543210";
     private const string SpanId = "0123456789abcdef";
+    private const string FirstSessionId = "00000000-0000-7000-8000-000000000001";
+    private const string SecondSessionId = "00000000-0000-7000-8000-000000000002";
 
     [Theory]
     [MemberData(nameof(LivenessCases))]
@@ -107,11 +110,36 @@ public sealed class ClaudeDoctorFactCollectorTests
     }
 
     [Theory]
+    [InlineData("https://127.0.0.1:4320")]
+    [InlineData("http://127.0.0.1:4320/path")]
+    [InlineData("http://192.168.0.1:4320")]
+    public void Collect_RejectsInvalidEndpointAtTheSetupBoundary(string invalidEndpoint)
+    {
+        using var database = new TestDatabase();
+        var platform = CreatePlatform(database, supportedVersion: true);
+        var collector = new ClaudeDoctorFactCollector(
+            platform,
+            new TestHttpProbe(SetupHttpProbeObservation.Refused),
+            platform.Clock,
+            InvocationDirectory,
+            ManagedSettingsPath);
+
+        var exception = Assert.Throws<ArgumentException>(
+            () => collector.Collect(database.Path, invalidEndpoint));
+
+        Assert.Equal("input", exception.ParamName);
+        Assert.DoesNotContain(platform.Operations, IsMutatingOperation);
+    }
+
+    [Theory]
     [InlineData("process")]
     [InlineData("managed")]
     [InlineData("settings")]
+    [InlineData("project")]
+    [InlineData("user")]
+    [InlineData("project-over-user")]
     [InlineData("absent")]
-    [InlineData("conflict")]
+    [InlineData("duplicate")]
     public void Collect_ResolvesOwnedValuesBySetupPrecedence(string source)
     {
         using var database = new TestDatabase();
@@ -129,7 +157,25 @@ public sealed class ClaudeDoctorFactCollectorTests
                     Path.Combine(InvocationDirectory, ".claude", "settings.local.json"),
                     Settings(("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ExpectedEndpoint)));
                 break;
-            case "conflict":
+            case "project":
+                platform.SeedFile(
+                    Path.Combine(InvocationDirectory, ".claude", "settings.json"),
+                    Settings(("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ExpectedEndpoint)));
+                break;
+            case "user":
+                platform.SeedFile(
+                    Path.Combine(platform.OperatingSystem.UserProfile, ".claude", "settings.json"),
+                    Settings(("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ExpectedEndpoint)));
+                break;
+            case "project-over-user":
+                platform.SeedFile(
+                    Path.Combine(InvocationDirectory, ".claude", "settings.json"),
+                    Settings(("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ExpectedEndpoint)));
+                platform.SeedFile(
+                    Path.Combine(platform.OperatingSystem.UserProfile, ".claude", "settings.json"),
+                    Settings(("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318")));
+                break;
+            case "duplicate":
                 platform.SeedFile(
                     Path.Combine(InvocationDirectory, ".claude", "settings.local.json"),
                     Encoding.UTF8.GetBytes("{\"env\":{\"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT\":\"" +
@@ -141,11 +187,96 @@ public sealed class ClaudeDoctorFactCollectorTests
 
         var expected = source switch
         {
-            "process" or "managed" or "settings" => ClaudeEndpointValueClassification.Match,
-            "conflict" => ClaudeEndpointValueClassification.Conflict,
+            "process" or "managed" or "settings" or "project" or "user" or "project-over-user" =>
+                ClaudeEndpointValueClassification.Match,
+            "duplicate" => ClaudeEndpointValueClassification.Unreadable,
             _ => ClaudeEndpointValueClassification.Absent,
         };
         Assert.Equal(expected, inputs.Endpoint);
+    }
+
+    [Theory]
+    [MemberData(nameof(ProtocolCases))]
+    public void Collect_ClassifiesProtocolBranches(
+        string source,
+        string? value,
+        int expected)
+    {
+        using var database = new TestDatabase();
+        var platform = CreatePlatform(database, supportedVersion: true);
+        if (source == "process")
+        {
+            platform.SeedProcessEnvironment("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", value);
+        }
+        else if (source == "unreadable")
+        {
+            platform.SeedFile(
+                Path.Combine(InvocationDirectory, ".claude", "settings.local.json"),
+                Encoding.UTF8.GetBytes("{"));
+        }
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(SetupHttpProbeObservation.Refused));
+
+        Assert.Equal((ClaudeProtocolValueClassification)expected, inputs.Protocol);
+    }
+
+    [Theory]
+    [MemberData(nameof(GateCases))]
+    public void Collect_ClassifiesSignalGateBranches(
+        string key,
+        string? value,
+        int expected)
+    {
+        using var database = new TestDatabase();
+        var platform = CreatePlatform(database, supportedVersion: true);
+        if (value is not null)
+        {
+            platform.SeedProcessEnvironment(key, value);
+        }
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(SetupHttpProbeObservation.Refused));
+
+        var actual = key == "CLAUDE_CODE_ENABLE_TELEMETRY"
+            ? inputs.TelemetryGate
+            : inputs.ExporterGate;
+        Assert.Equal((ClaudeGateValueClassification)expected, actual);
+    }
+
+    [Theory]
+    [MemberData(nameof(ContentGateCases))]
+    public void Collect_ClassifiesContentGateBranches(
+        string? key,
+        string? value,
+        int expected)
+    {
+        using var database = new TestDatabase();
+        var platform = CreatePlatform(database, supportedVersion: true);
+        if (key is not null && value is not null)
+        {
+            platform.SeedProcessEnvironment(key, value);
+        }
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(SetupHttpProbeObservation.Refused));
+
+        Assert.Equal((ClaudeEffectiveContentGate)expected, inputs.EffectiveContentGate);
+    }
+
+    [Fact]
+    public void Collect_UnreadableSettingsMakesOwnedValuesUnknown()
+    {
+        using var database = new TestDatabase();
+        var platform = CreatePlatform(database, supportedVersion: true);
+        platform.SeedFile(
+            Path.Combine(InvocationDirectory, ".claude", "settings.local.json"),
+            Encoding.UTF8.GetBytes("{"));
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(SetupHttpProbeObservation.Refused));
+
+        Assert.Equal(ClaudeEndpointValueClassification.Unreadable, inputs.Endpoint);
+        Assert.Equal(ClaudeProtocolValueClassification.Unreadable, inputs.Protocol);
+        Assert.Equal(ClaudeGateValueClassification.Unreadable, inputs.TelemetryGate);
+        Assert.Equal(ClaudeGateValueClassification.Unreadable, inputs.ExporterGate);
+        Assert.Equal(ClaudeEffectiveContentGate.Unreadable, inputs.EffectiveContentGate);
     }
 
     [Fact]
@@ -161,7 +292,9 @@ public sealed class ClaudeDoctorFactCollectorTests
             captureContentState: "available");
         database.CreateRuntimeState(sanitizedOnly: true);
         var platform = CreatePlatform(database, supportedVersion: true);
-        var before = File.ReadAllBytes(database.Path);
+        var before = SnapshotDatabaseFiles(database.Path);
+        var userEnvironmentBefore = SnapshotEnvironment(platform, userEnvironment: true);
+        var processEnvironmentBefore = SnapshotEnvironment(platform, userEnvironment: false);
         var operationsBefore = platform.Operations.Count;
         var paths = new SetupRuntimePaths(platform);
 
@@ -169,7 +302,9 @@ public sealed class ClaudeDoctorFactCollectorTests
 
         Assert.Equal(ClaudeSourceCompatibilityClassification.Drift, inputs.SourceCompatibility);
         Assert.Equal(ClaudeRuntimeRawAccessClassification.SanitizedOnly, inputs.RuntimeRawAccess);
-        Assert.Equal(before, File.ReadAllBytes(database.Path));
+        AssertDatabaseFilesUnchanged(before, database.Path);
+        Assert.Equal(userEnvironmentBefore, SnapshotEnvironment(platform, userEnvironment: true));
+        Assert.Equal(processEnvironmentBefore, SnapshotEnvironment(platform, userEnvironment: false));
         Assert.False(platform.FileSystem.FileExists(paths.OwnershipLedger));
         AssertNoCollectorWrites(platform, operationsBefore);
     }
@@ -197,8 +332,8 @@ public sealed class ClaudeDoctorFactCollectorTests
         database.InsertCandidate(
             verification,
             "exact_session_binding",
-            $"claude-otel-binding-{TraceId}-00000000-0000-7000-8000-000000000001");
-        database.InsertSession("00000000-0000-7000-8000-000000000001", "full");
+            $"claude-otel-binding-{TraceId}-{FirstSessionId}");
+        database.InsertSession(FirstSessionId, "full");
         var platform = CreatePlatform(database, supportedVersion: true);
 
         var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
@@ -212,6 +347,68 @@ public sealed class ClaudeDoctorFactCollectorTests
         Assert.True(window.ExactSessionBindingCandidateExists);
         Assert.Equal(ClaudeBoundSessionCompleteness.Full, window.BoundSessionCompleteness);
         Assert.Equal(ClaudeAgreedContentState.Available, window.AgreedContentState);
+    }
+
+    [Fact]
+    public void Collect_MultipleBoundSessionsReportsUnknownCompletenessAndContent()
+    {
+        using var database = new TestDatabase();
+        var verification = database.StartVerification();
+        database.InsertAcceptedRecord(Now.AddMinutes(1), ValidPayload());
+        database.InsertCandidate(verification, "projection", $"claude-otel-projection-{TraceId}-{SpanId}");
+        database.InsertCandidate(
+            verification,
+            "exact_session_binding",
+            $"claude-otel-binding-{TraceId}-{FirstSessionId}");
+        database.InsertCandidate(
+            verification,
+            "exact_session_binding",
+            $"claude-otel-binding-{SecondTraceId}-{SecondSessionId}");
+        database.InsertSession(FirstSessionId, "full");
+        database.InsertSession(SecondSessionId, "partial");
+        var platform = CreatePlatform(database, supportedVersion: true);
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
+        var window = Assert.IsType<ClaudeDoctorVerificationWindow>(inputs.VerificationWindow);
+        var snapshot = ClaudeDoctorFactMapper.Map(inputs, Now, verification.VerificationId);
+
+        Assert.True(window.ExactSessionBindingCandidateExists);
+        Assert.Equal(ClaudeBoundSessionCompleteness.Unavailable, window.BoundSessionCompleteness);
+        Assert.Equal(ClaudeAgreedContentState.Unreadable, window.AgreedContentState);
+        Assert.Equal(DoctorCompleteness.Unknown, snapshot.CompletenessAndContent!.Completeness);
+        Assert.Equal(ContentCaptureStatus.Unknown, snapshot.CompletenessAndContent.ContentCapture);
+    }
+
+    [Fact]
+    public void Collect_DatabaseReadFailureUsesUnreadableWindowAndMapsToPartialFacts()
+    {
+        using var database = new TestDatabase();
+        var verification = database.StartVerification();
+        var platform = CreatePlatform(database, supportedVersion: true);
+        platform.SeedProcessEnvironment("CLAUDE_CODE_ENABLE_TELEMETRY", "1");
+        platform.SeedProcessEnvironment("OTEL_TRACES_EXPORTER", "otlp");
+        platform.SeedProcessEnvironment("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf");
+        platform.SeedProcessEnvironment("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ExpectedEndpoint);
+        File.WriteAllBytes(database.Path, [0]);
+        var before = SnapshotDatabaseFiles(database.Path);
+        var operationsBefore = platform.Operations.Count;
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
+        var window = Assert.IsType<ClaudeDoctorVerificationWindow>(inputs.VerificationWindow);
+        var snapshot = ClaudeDoctorFactMapper.Map(inputs, Now, verification.VerificationId);
+        var result = DoctorEvaluator.Evaluate(snapshot);
+
+        Assert.Equal(ClaudeSourceCompatibilityClassification.Unreadable, inputs.SourceCompatibility);
+        Assert.Equal(ClaudeRuntimeRawAccessClassification.Unreadable, inputs.RuntimeRawAccess);
+        Assert.False(window.AcceptedIngestExists);
+        Assert.False(window.RawPersistenceCandidateExists);
+        Assert.Equal(ClaudeProjectionEvidence.NotStarted, window.ProjectionEvidence);
+        Assert.Equal(ClaudeAgreedContentState.Unreadable, window.AgreedContentState);
+        Assert.Equal(RawPersistenceOutcome.Unknown, snapshot.RawPersistence!.Outcome);
+        Assert.Equal(ProjectionOutcome.Unknown, snapshot.Projection!.Outcome);
+        Assert.Equal(DoctorResultCode.PartialFactSnapshot, result.Code);
+        AssertDatabaseFilesUnchanged(before, database.Path);
+        AssertNoCollectorWrites(platform, operationsBefore);
     }
 
     [Fact]
@@ -253,10 +450,29 @@ public sealed class ClaudeDoctorFactCollectorTests
     }
 
     [Theory]
+    [InlineData(-1, false)]
+    [InlineData(0, true)]
+    [InlineData(5, false)]
+    public void Collect_UsesVerificationWindowStartInclusiveAndExpiryExclusive(
+        int offsetMinutes,
+        bool expectedAccepted)
+    {
+        using var database = new TestDatabase();
+        var verification = database.StartVerification();
+        database.InsertAcceptedRecord(verification.StartedAt.AddMinutes(offsetMinutes), ValidPayload());
+        var platform = CreatePlatform(database, supportedVersion: true);
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(SetupHttpProbeObservation.Refused), verification);
+
+        Assert.Equal(expectedAccepted, Assert.IsType<ClaudeDoctorVerificationWindow>(inputs.VerificationWindow).AcceptedIngestExists);
+    }
+
+    [Theory]
     [InlineData("no-change", "NoAppliedChangeSet")]
     [InlineData("unreadable", "Unreadable")]
     [InlineData("applied-without-ingest", "AwaitingAcceptedIngest")]
     [InlineData("applied-with-ingest", "AcceptedIngestAfterApply")]
+    [InlineData("applied-with-clock-skewed-future-ingest", "AcceptedIngestAfterApply")]
     public void Collect_ClassifiesSetupLedgerReadOnly(
         string ledgerCase,
         string expected)
@@ -274,6 +490,10 @@ public sealed class ClaudeDoctorFactCollectorTests
             if (ledgerCase == "applied-with-ingest")
             {
                 database.InsertAcceptedRecord(Now, ValidPayload());
+            }
+            else if (ledgerCase == "applied-with-clock-skewed-future-ingest")
+            {
+                database.InsertAcceptedRecord(Now.AddDays(1), ValidPayload());
             }
         }
 
@@ -321,7 +541,35 @@ public sealed class ClaudeDoctorFactCollectorTests
             Encoding.UTF8.GetBytes("{\"status\":\"live\",\"extra\":true}"),
             true), (int)ClaudeLivenessProbeClassification.OtherForeign];
         yield return [SetupHttpProbeObservation.TimedOut, (int)ClaudeLivenessProbeClassification.OtherForeign];
+        yield return [SetupHttpProbeObservation.TransportFailure, (int)ClaudeLivenessProbeClassification.OtherForeign];
     }
+
+    public static TheoryData<string, string?, int> ProtocolCases => new()
+    {
+        { "process", "http/protobuf", (int)ClaudeProtocolValueClassification.HttpProtobuf },
+        { "process", "grpc", (int)ClaudeProtocolValueClassification.Different },
+        { "absent", null, (int)ClaudeProtocolValueClassification.Absent },
+        { "unreadable", null, (int)ClaudeProtocolValueClassification.Unreadable },
+    };
+
+    public static TheoryData<string, string?, int> GateCases => new()
+    {
+        { "CLAUDE_CODE_ENABLE_TELEMETRY", "1", (int)ClaudeGateValueClassification.Enabled },
+        { "CLAUDE_CODE_ENABLE_TELEMETRY", "off", (int)ClaudeGateValueClassification.Disabled },
+        { "CLAUDE_CODE_ENABLE_TELEMETRY", null, (int)ClaudeGateValueClassification.Absent },
+        { "OTEL_TRACES_EXPORTER", "otlp", (int)ClaudeGateValueClassification.Enabled },
+        { "OTEL_TRACES_EXPORTER", "console", (int)ClaudeGateValueClassification.Disabled },
+        { "OTEL_TRACES_EXPORTER", null, (int)ClaudeGateValueClassification.Absent },
+    };
+
+    public static TheoryData<string?, string?, int> ContentGateCases => new()
+    {
+        { null, null, (int)ClaudeEffectiveContentGate.Disabled },
+        { "OTEL_LOG_USER_PROMPTS", "1", (int)ClaudeEffectiveContentGate.Enabled },
+        { "OTEL_LOG_TOOL_DETAILS", "1", (int)ClaudeEffectiveContentGate.Enabled },
+        { "OTEL_LOG_TOOL_CONTENT", "1", (int)ClaudeEffectiveContentGate.Enabled },
+        { "OTEL_LOG_TOOL_CONTENT", "0", (int)ClaudeEffectiveContentGate.Disabled },
+    };
 
     private static readonly SetupHttpProbeObservation LiveResponse = new(
         SetupHttpProbeOutcome.Response,
@@ -417,11 +665,66 @@ public sealed class ClaudeDoctorFactCollectorTests
 
     private static void AssertNoCollectorWrites(SetupTestPlatform platform, int operationsBefore)
     {
-        Assert.DoesNotContain(platform.Operations.Skip(operationsBefore), operation =>
-            operation.StartsWith("file.write", StringComparison.Ordinal) ||
-            operation.StartsWith("file.delete", StringComparison.Ordinal) ||
-            operation.StartsWith("file.lock", StringComparison.Ordinal) ||
-            operation.StartsWith("directory.create", StringComparison.Ordinal));
+        Assert.DoesNotContain(platform.Operations.Skip(operationsBefore), IsMutatingOperation);
+    }
+
+    private static bool IsMutatingOperation(string operation) =>
+        operation.StartsWith("directory.create:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.write:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.write-new:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.try-write-new-flushed:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.flush:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.replace:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.move:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.delete:", StringComparison.Ordinal) ||
+        operation.StartsWith("file.lock:", StringComparison.Ordinal) ||
+        operation.StartsWith("environment.set:", StringComparison.Ordinal) ||
+        operation == "environment.notify";
+
+    private static IReadOnlyDictionary<string, byte[]?> SnapshotDatabaseFiles(string databasePath)
+    {
+        var paths = new[]
+        {
+            databasePath,
+            databasePath + "-wal",
+            databasePath + "-shm",
+            databasePath + "-journal",
+        };
+        return paths.ToDictionary(
+            path => path,
+            path => File.Exists(path) ? File.ReadAllBytes(path) : null,
+            StringComparer.Ordinal);
+    }
+
+    private static void AssertDatabaseFilesUnchanged(
+        IReadOnlyDictionary<string, byte[]?> before,
+        string databasePath)
+    {
+        var after = SnapshotDatabaseFiles(databasePath);
+        foreach (var path in before.Keys)
+        {
+            Assert.Equal(before[path], after[path]);
+        }
+    }
+
+    private static IReadOnlyDictionary<string, string?> SnapshotEnvironment(
+        SetupTestPlatform platform,
+        bool userEnvironment)
+    {
+        var keys = new[]
+        {
+            "CLAUDE_CODE_ENABLE_TELEMETRY",
+            "OTEL_TRACES_EXPORTER",
+            "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_LOG_USER_PROMPTS",
+            "OTEL_LOG_TOOL_DETAILS",
+            "OTEL_LOG_TOOL_CONTENT",
+        };
+        return keys.ToDictionary(
+            key => key,
+            key => userEnvironment ? platform.ReadUserEnvironment(key) : platform.ReadProcessEnvironment(key),
+            StringComparer.Ordinal);
     }
 
     private sealed class TestHttpProbe : ISetupHttpProbe

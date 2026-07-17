@@ -67,12 +67,11 @@ internal sealed class ClaudeDoctorFactCollector
         var databaseExists = ReadDatabasePresence(databasePath);
         var sourceVersion = ReadSourceVersion();
         var effective = ResolveEffectiveValues(origin);
-        var now = clock.UtcNow.ToUniversalTime();
 
         var database = databaseExists == true
-            ? ReadDatabase(databasePath, verification, now)
+            ? ReadDatabase(databasePath, verification)
             : DatabaseRead.Empty;
-        var setupLedger = ReadSetupLedger(databasePath, databaseExists, now);
+        var setupLedger = ReadSetupLedger(databasePath, databaseExists);
 
         return new ClaudeDoctorFactInputs(
             liveness,
@@ -204,11 +203,6 @@ internal sealed class ClaudeDoctorFactCollector
                 return new(null, true, key.Expected);
             }
 
-            if (source.State == SettingsState.Conflict)
-            {
-                return new(null, false, key.Expected, true);
-            }
-
             if (source.Values.TryGetValue(key.Key, out var value))
             {
                 return new(value, false, key.Expected);
@@ -315,6 +309,7 @@ internal sealed class ClaudeDoctorFactCollector
         try
         {
             var content = StrictUtf8.GetString(bytes);
+            _ = ClaudeSettingsDocument.Parse(content);
             using var document = JsonDocument.Parse(content, new JsonDocumentOptions
             {
                 AllowTrailingCommas = true,
@@ -337,12 +332,11 @@ internal sealed class ClaudeDoctorFactCollector
 
                     if (!values.TryAdd(property.Name, property.Value.GetString()!))
                     {
-                        return SettingsSource.Conflict;
+                        return SettingsSource.Unreadable;
                     }
                 }
             }
 
-            _ = ClaudeSettingsDocument.Parse(content);
             return new(SettingsState.Present, values);
         }
         catch (Exception)
@@ -353,8 +347,7 @@ internal sealed class ClaudeDoctorFactCollector
 
     private DatabaseRead ReadDatabase(
         string databasePath,
-        DoctorVerification? verification,
-        DateTimeOffset now)
+        DoctorVerification? verification)
     {
         try
         {
@@ -371,7 +364,7 @@ internal sealed class ClaudeDoctorFactCollector
             return new(
                 ClaudeSourceCompatibilityClassification.Unreadable,
                 ClaudeRuntimeRawAccessClassification.Unreadable,
-                verification is null ? null : EmptyWindow);
+                verification is null ? null : UnreadableWindow);
         }
     }
 
@@ -658,12 +651,39 @@ internal sealed class ClaudeDoctorFactCollector
             return (ClaudeBoundSessionCompleteness.Unavailable, ClaudeAgreedContentState.None);
         }
 
-        var completeness = bound
+        var chains = bound
+            .GroupBy(item => item.SessionId)
+            .ToArray();
+        if (chains.Length > 1)
+        {
+            return (ClaudeBoundSessionCompleteness.Unavailable, ClaudeAgreedContentState.Unreadable);
+        }
+
+        var chain = chains[0].ToArray();
+        var completeness = chain
             .Select(item => item.Completeness)
             .OrderByDescending(CompletenessRank)
             .First();
-        var content = ReadAgreedContentState(connection, bound[0].TraceId);
+        var content = ReadAgreedContentState(connection, chain.Select(item => item.TraceId));
         return (completeness, content);
+    }
+
+    private static ClaudeAgreedContentState ReadAgreedContentState(
+        SqliteConnection connection,
+        IEnumerable<string> traceIds)
+    {
+        var states = traceIds
+            .Distinct(StringComparer.Ordinal)
+            .Select(traceId => ReadAgreedContentState(connection, traceId))
+            .Where(state => state != ClaudeAgreedContentState.None)
+            .Distinct()
+            .ToArray();
+        return states.Length switch
+        {
+            0 => ClaudeAgreedContentState.None,
+            1 => states[0],
+            _ => ClaudeAgreedContentState.Unreadable,
+        };
     }
 
     private static ClaudeAgreedContentState ReadAgreedContentState(
@@ -703,8 +723,7 @@ internal sealed class ClaudeDoctorFactCollector
 
     private ClaudeSetupLedgerClassification ReadSetupLedger(
         string databasePath,
-        bool? databaseExists,
-        DateTimeOffset now)
+        bool? databaseExists)
     {
         SetupOwnershipLedger ledger;
         try
@@ -742,12 +761,10 @@ internal sealed class ClaudeDoctorFactCollector
             using var command = connection.CreateCommand();
             command.CommandText =
                 "SELECT EXISTS(SELECT 1 FROM raw_records r JOIN source_schema_observations o ON o.raw_record_id=r.id " +
-                "WHERE o.source_surface=$surface AND o.source_adapter=$adapter AND r.received_at >= $applied " +
-                "AND r.received_at <= $now);";
+                "WHERE o.source_surface=$surface AND o.source_adapter=$adapter AND r.received_at >= $applied);";
             Add(command, "$surface", SourceSurface);
             Add(command, "$adapter", SourceAdapter);
             Add(command, "$applied", Timestamp(applied.UpdatedAt));
-            Add(command, "$now", Timestamp(now));
             return Convert.ToInt32(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0
                 ? ClaudeSetupLedgerClassification.AcceptedIngestAfterApply
                 : ClaudeSetupLedgerClassification.AwaitingAcceptedIngest;
@@ -818,7 +835,7 @@ internal sealed class ClaudeDoctorFactCollector
         if (result.Options is null)
         {
             valid = false;
-            return input;
+            throw new ArgumentException("The monitor endpoint is invalid.", nameof(input));
         }
 
         valid = true;
@@ -986,7 +1003,7 @@ internal sealed class ClaudeDoctorFactCollector
     private static void Add(SqliteCommand command, string name, object? value) =>
         command.Parameters.AddWithValue(name, value ?? DBNull.Value);
 
-    private static readonly ClaudeDoctorVerificationWindow EmptyWindow = new(
+    private static readonly ClaudeDoctorVerificationWindow UnreadableWindow = new(
         false,
         false,
         false,
@@ -994,7 +1011,7 @@ internal sealed class ClaudeDoctorFactCollector
         ClaudeProjectionEvidence.NotStarted,
         false,
         ClaudeBoundSessionCompleteness.Unavailable,
-        ClaudeAgreedContentState.None);
+        ClaudeAgreedContentState.Unreadable);
 
     private sealed record OwnedKey(string Key, string? Expected);
 
@@ -1010,7 +1027,6 @@ internal sealed class ClaudeDoctorFactCollector
 
         public static SettingsSource Unreadable { get; } = new(SettingsState.Unreadable, new Dictionary<string, string>());
 
-        public static SettingsSource Conflict { get; } = new(SettingsState.Conflict, new Dictionary<string, string>());
     }
 
     private sealed record EffectiveValues(
@@ -1038,7 +1054,6 @@ internal sealed class ClaudeDoctorFactCollector
         Absent,
         Present,
         Unreadable,
-        Conflict,
     }
 
     private sealed class ProbePlatform(ISetupPlatform inner, ISetupHttpProbe httpProbe) : ISetupPlatform
