@@ -322,7 +322,9 @@ the shared monitor database recording its effective raw-access mode
 The first-trace fact collector reads it for the `raw_access` fact member and
 trusts it only when the liveness probe classifies monitor-live (the row then
 describes the currently running process). The row contains no paths, no
-endpoints, and no source-specific data. Adding the row follows the monitor
+endpoints, and no source-specific data. A failed startup upsert fails monitor
+startup, exactly like any other storage-initialization failure — a monitor
+that cannot write its own database must not present itself as running. Adding the row follows the monitor
 database's existing migration mechanism and is covered by migration tests from
 a committed prior-version database fixture.
 
