@@ -43,6 +43,8 @@ internal static class CliApplication
             return DoctorCli.Run(args[1..], output, error, doctorApplication);
         }
 
+        if (args[0] == "first-trace") return FirstTrace.FirstTraceCli.Run(args[1..], output, error);
+
         switch (args[0])
         {
             case "list-collection-profiles":
