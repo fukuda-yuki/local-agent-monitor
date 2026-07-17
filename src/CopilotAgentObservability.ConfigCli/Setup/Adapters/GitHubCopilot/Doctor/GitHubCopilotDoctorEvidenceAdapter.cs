@@ -442,14 +442,18 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
 
     private static bool HasExpectedRawProvenance(RawTelemetryRecord raw, Partition partition) =>
         partition.NativeSurface == SessionSourceSurface.CopilotCli
-            ? HasCanonicalCliProvenance(raw.PayloadJson)
-            : HasExactClientKind(raw.ResourceAttributesJson, partition.ClientKind);
+            ? HasCanonicalRawProvenance(raw, "service.name", "github-copilot", "github.copilot")
+            : HasCanonicalRawProvenance(raw, "client.kind", partition.ClientKind, requiredScopeName: null);
 
-    private static bool HasCanonicalCliProvenance(string payloadJson)
+    private static bool HasCanonicalRawProvenance(
+        RawTelemetryRecord raw,
+        string attributeName,
+        string expectedAttributeValue,
+        string? requiredScopeName)
     {
         try
         {
-            using var document = JsonDocument.Parse(payloadJson);
+            using var document = JsonDocument.Parse(raw.PayloadJson);
             if (!TryGetOptionalUniqueProperty(
                     document.RootElement,
                     "resourceSpans",
@@ -465,12 +469,16 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             foreach (var resourceSpan in resourceSpans.EnumerateArray())
             {
                 if (resourceSpan.ValueKind != JsonValueKind.Object ||
-                    !TryHasCanonicalCliService(resourceSpan, out var hasCanonicalService) ||
-                    !TryHasCanonicalCliScope(resourceSpan, out var hasCanonicalScope))
+                    !TryHasCanonicalResourceAttribute(
+                        resourceSpan,
+                        attributeName,
+                        expectedAttributeValue,
+                        out var hasCanonicalAttribute) ||
+                    !TryHasLinkedSpan(resourceSpan, raw.TraceId, requiredScopeName, out var hasLinkedSpan))
                 {
                     return false;
                 }
-                if (hasCanonicalService && hasCanonicalScope)
+                if (hasCanonicalAttribute && hasLinkedSpan)
                 {
                     matchingResourceSpans++;
                 }
@@ -483,9 +491,13 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         }
     }
 
-    private static bool TryHasCanonicalCliService(JsonElement resourceSpan, out bool hasCanonicalService)
+    private static bool TryHasCanonicalResourceAttribute(
+        JsonElement resourceSpan,
+        string attributeName,
+        string expectedAttributeValue,
+        out bool hasCanonicalAttribute)
     {
-        hasCanonicalService = false;
+        hasCanonicalAttribute = false;
         if (!TryGetOptionalUniqueProperty(resourceSpan, "resource", out var resource, out var hasResource))
         {
             return false;
@@ -508,7 +520,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             return false;
         }
 
-        var serviceNameCount = 0;
+        var relevantAttributeCount = 0;
         foreach (var attribute in attributes.EnumerateArray())
         {
             if (attribute.ValueKind != JsonValueKind.Object ||
@@ -518,12 +530,12 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             {
                 return false;
             }
-            if (!string.Equals(key.GetString(), "service.name", StringComparison.Ordinal))
+            if (!string.Equals(key.GetString(), attributeName, StringComparison.Ordinal))
             {
                 continue;
             }
-            serviceNameCount++;
-            if (serviceNameCount != 1 ||
+            relevantAttributeCount++;
+            if (relevantAttributeCount != 1 ||
                 !TryGetOptionalUniqueProperty(attribute, "value", out var value, out var hasValue) ||
                 !hasValue ||
                 value.ValueKind != JsonValueKind.Object ||
@@ -533,14 +545,21 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             {
                 return false;
             }
-            hasCanonicalService = string.Equals(stringValue.GetString(), "github-copilot", StringComparison.Ordinal);
+            hasCanonicalAttribute = string.Equals(
+                stringValue.GetString(),
+                expectedAttributeValue,
+                StringComparison.Ordinal);
         }
         return true;
     }
 
-    private static bool TryHasCanonicalCliScope(JsonElement resourceSpan, out bool hasCanonicalScope)
+    private static bool TryHasLinkedSpan(
+        JsonElement resourceSpan,
+        string? selectedTraceId,
+        string? requiredScopeName,
+        out bool hasLinkedSpan)
     {
-        hasCanonicalScope = false;
+        hasLinkedSpan = false;
         if (!TryGetOptionalUniqueProperty(resourceSpan, "scopeSpans", out var scopeSpans, out var hasScopeSpans))
         {
             return false;
@@ -560,32 +579,51 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                 !TryGetOptionalUniqueProperty(scopeSpan, "spans", out var spans, out var hasSpans) ||
                 !hasSpans ||
                 spans.ValueKind != JsonValueKind.Array ||
-                spans.EnumerateArray().Any(span => span.ValueKind != JsonValueKind.Object) ||
                 !TryGetOptionalUniqueProperty(scopeSpan, "scope", out var scope, out var hasScope))
             {
                 return false;
             }
-            if (!hasScope)
+
+            string? scopeName = null;
+            if (hasScope)
             {
-                continue;
+                if (scope.ValueKind != JsonValueKind.Object ||
+                    !TryGetOptionalUniqueProperty(scope, "name", out var name, out var hasName))
+                {
+                    return false;
+                }
+                if (hasName)
+                {
+                    if (name.ValueKind != JsonValueKind.String)
+                    {
+                        return false;
+                    }
+                    scopeName = name.GetString();
+                }
             }
-            if (scope.ValueKind != JsonValueKind.Object ||
-                !TryGetOptionalUniqueProperty(scope, "name", out var name, out var hasName))
+
+            var scopeHasLinkedSpan = false;
+            foreach (var span in spans.EnumerateArray())
             {
-                return false;
+                if (span.ValueKind != JsonValueKind.Object ||
+                    !TryGetOptionalUniqueProperty(span, "traceId", out var traceId, out var hasTraceId))
+                {
+                    return false;
+                }
+                if (hasTraceId && traceId.ValueKind != JsonValueKind.String)
+                {
+                    return false;
+                }
+                if (selectedTraceId is null ||
+                    hasTraceId && string.Equals(traceId.GetString(), selectedTraceId, StringComparison.Ordinal))
+                {
+                    scopeHasLinkedSpan = true;
+                }
             }
-            if (!hasName)
+            if (scopeHasLinkedSpan &&
+                (requiredScopeName is null || string.Equals(scopeName, requiredScopeName, StringComparison.Ordinal)))
             {
-                continue;
-            }
-            if (name.ValueKind != JsonValueKind.String)
-            {
-                return false;
-            }
-            if (string.Equals(name.GetString(), "github.copilot", StringComparison.Ordinal) &&
-                spans.GetArrayLength() > 0)
-            {
-                hasCanonicalScope = true;
+                hasLinkedSpan = true;
             }
         }
         return true;
@@ -617,26 +655,6 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             present = true;
         }
         return true;
-    }
-
-    private static bool HasExactClientKind(string? attributesJson, string expected)
-    {
-        if (attributesJson is null)
-        {
-            return false;
-        }
-        try
-        {
-            using var document = JsonDocument.Parse(attributesJson);
-            return document.RootElement.ValueKind == JsonValueKind.Object &&
-                document.RootElement.TryGetProperty("client.kind", out var value) &&
-                value.ValueKind == JsonValueKind.String &&
-                string.Equals(value.GetString(), expected, StringComparison.Ordinal);
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
     }
 
     private static string OpaqueReference(

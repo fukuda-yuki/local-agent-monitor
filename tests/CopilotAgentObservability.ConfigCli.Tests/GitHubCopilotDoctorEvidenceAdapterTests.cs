@@ -225,6 +225,77 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         AssertUnattributedUnknown(observed);
     }
 
+    [Theory]
+    [InlineData("vscode", "github-copilot-vscode", "vscode-copilot-chat", "vscode", "copilot-compatible-hook", "duplicate")]
+    [InlineData("vscode", "github-copilot-vscode", "vscode-copilot-chat", "vscode", "copilot-compatible-hook", "split")]
+    [InlineData("vscode", "github-copilot-vscode", "vscode-copilot-chat", "vscode", "copilot-compatible-hook", "no-spans")]
+    [InlineData("app-sdk", "github-copilot-app-sdk", "copilot-app-sdk", "copilot-sdk", "copilot-sdk-stream", "duplicate")]
+    [InlineData("app-sdk", "github-copilot-app-sdk", "copilot-app-sdk", "copilot-sdk", "copilot-sdk-stream", "split")]
+    [InlineData("app-sdk", "github-copilot-app-sdk", "copilot-app-sdk", "copilot-sdk", "copilot-sdk-stream", "no-spans")]
+    public void Observe_VsCodeAndAppSdkRejectStructurallyAmbiguousRawProvenance(
+        string target,
+        string sourceSurface,
+        string clientKind,
+        string nativeSurface,
+        string eventAdapter,
+        string payloadVariant)
+    {
+        using var database = TemporaryDatabase.Create();
+        const string traceId = "0123456789abcdef0123456789abcdef";
+        var verification = Start(database.Path, sourceSurface);
+        var rawRecordId = CommitStructuredClientKindRaw(
+            database.Path,
+            clientKind,
+            traceId,
+            payloadVariant);
+        WriteSession(database.Path, "exact-native", traceId, nativeSurface, eventAdapter);
+
+        var observed = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, target, rawRecordId, new(nativeSurface, "exact-native")));
+
+        Assert.Empty(observed.ObservedKinds);
+        Assert.Empty(observed.EvidenceRefs);
+        Assert.Empty(ReadCandidates(database.Path, verification.VerificationId));
+        AssertAllEvidenceUnknown(observed);
+    }
+
+    [Theory]
+    [InlineData("vscode", "github-copilot-vscode", "vscode-copilot-chat", "vscode", "copilot-compatible-hook")]
+    [InlineData("app-sdk", "github-copilot-app-sdk", "copilot-app-sdk", "copilot-sdk", "copilot-sdk-stream")]
+    public void Observe_VsCodeAndAppSdkAcceptExactClientKindInSpanBearingResourceGroup(
+        string target,
+        string sourceSurface,
+        string clientKind,
+        string nativeSurface,
+        string eventAdapter)
+    {
+        using var database = TemporaryDatabase.Create();
+        const string traceId = "0123456789abcdef0123456789abcdef";
+        var verification = Start(database.Path, sourceSurface);
+        var rawRecordId = CommitStructuredClientKindRaw(database.Path, clientKind, traceId, "matching-groups");
+        CompleteProjection(database.Path, rawRecordId);
+        WriteSession(database.Path, "exact-native", traceId, nativeSurface, eventAdapter);
+
+        var observed = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, target, rawRecordId, new(nativeSurface, "exact-native")));
+
+        Assert.Equal(
+            [
+                DoctorEvidenceKind.Ingest,
+                DoctorEvidenceKind.RawPersistence,
+                DoctorEvidenceKind.Projection,
+                DoctorEvidenceKind.ExactSessionBinding,
+                DoctorEvidenceKind.CompletenessContent,
+            ],
+            observed.ObservedKinds);
+        Assert.Equal(5, observed.EvidenceRefs.Count);
+        AssertCanonicalCandidates(database.Path, verification, observed.EvidenceRefs, expectedCount: 5);
+    }
+
     [Fact]
     public void Observe_RejectsMismatchedVerificationSourceAndMissingExactRows()
     {
@@ -757,6 +828,118 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
             .Commit(ValidatedIngestionBatch.Create(raw, observation)).RawRecordId;
     }
 
+    private static long CommitStructuredClientKindRaw(
+        string databasePath,
+        string clientKind,
+        string traceId,
+        string payloadVariant)
+    {
+        var payload = payloadVariant switch
+        {
+            "duplicate" => $$$"""
+                {"resourceSpans":[{
+                  "resource":{"attributes":[
+                    {"key":"client.kind","value":{"stringValue":"{{{clientKind}}}"}},
+                    {"key":"client.kind","value":{"stringValue":"{{{clientKind}}}"}}
+                  ]},
+                  "scopeSpans":[{"scope":{"name":"selected.scope"},"spans":[
+                    {"traceId":"{{{traceId}}}","spanId":"selected-span"}
+                  ]}]
+                }]}
+                """,
+            "split" => $$$"""
+                {"resourceSpans":[
+                  {
+                    "resource":{"attributes":[
+                      {"key":"client.kind","value":{"stringValue":"{{{clientKind}}}"}}
+                    ]},
+                    "scopeSpans":[{"scope":{"name":"canonical.scope"},"spans":[
+                      {"traceId":"fedcba9876543210fedcba9876543210","spanId":"canonical-span"}
+                    ]}]
+                  },
+                  {
+                    "resource":{"attributes":[]},
+                    "scopeSpans":[{"scope":{"name":"selected.scope"},"spans":[
+                      {"traceId":"{{{traceId}}}","spanId":"selected-span"}
+                    ]}]
+                  }
+                ]}
+                """,
+            "no-spans" => $$$"""
+                {"resourceSpans":[
+                  {
+                    "resource":{"attributes":[
+                      {"key":"client.kind","value":{"stringValue":"{{{clientKind}}}"}}
+                    ]},
+                    "scopeSpans":[{"scope":{"name":"canonical.scope"},"spans":[]}]
+                  },
+                  {
+                    "resource":{"attributes":[]},
+                    "scopeSpans":[{"scope":{"name":"selected.scope"},"spans":[
+                      {"traceId":"{{{traceId}}}","spanId":"selected-span"}
+                    ]}]
+                  }
+                ]}
+                """,
+            "matching-groups" => $$$"""
+                {"resourceSpans":[
+                  {
+                    "resource":{"attributes":[
+                      {"key":"client.kind","value":{"stringValue":"unrelated-client"}}
+                    ]},
+                    "scopeSpans":[{"scope":{"name":"unrelated.scope"},"spans":[
+                      {"traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","spanId":"unrelated-span"}
+                    ]}]
+                  },
+                  {
+                    "resource":{"attributes":[
+                      {"key":"client.kind","value":{"stringValue":"{{{clientKind}}}"}}
+                    ]},
+                    "scopeSpans":[{"scope":{"name":"selected.scope"},"spans":[
+                      {"traceId":"{{{traceId}}}","spanId":"selected-span"}
+                    ]}]
+                  },
+                  {
+                    "resource":{"attributes":[
+                      {"key":"client.kind","value":{"stringValue":"{{{clientKind}}}"}}
+                    ]},
+                    "scopeSpans":[{"scope":{"name":"second.matching.scope"},"spans":[
+                      {"traceId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","spanId":"second-matching-span"}
+                    ]}]
+                  }
+                ]}
+                """,
+            _ => throw new ArgumentOutOfRangeException(nameof(payloadVariant)),
+        };
+
+        var inventory = OtlpJsonStructuralWalker.Build(payload, Now);
+        var observation = SourceObservationBatchDraft.Create(
+            Guid.CreateVersion7().ToString("D"),
+            RawTelemetrySources.RawOtlp,
+            sourceApplicationVersion: null,
+            RawTelemetrySources.RawOtlp,
+            "1",
+            inventory,
+            SourceCompatibilityEvaluator.Assess(
+                RawTelemetrySources.RawOtlp,
+                sourceApplicationVersion: null,
+                inventory,
+                observedRecognizedCount: 1,
+                VerifiedSourceFingerprintRegistry.Create([], [], [])),
+            SourceCaptureContentState.Available,
+            Now);
+        var raw = new RawTelemetryRecord(
+            Id: null,
+            RawTelemetrySources.RawOtlp,
+            traceId,
+            Now,
+            $$"""{"client.kind":"{{clientKind}}"}""",
+            payload);
+        new SqliteSourceCompatibilityStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
+        return new SqliteIngestionCommitStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter)
+            .Commit(ValidatedIngestionBatch.Create(raw, observation)).RawRecordId;
+    }
+
     private static long CommitCliRaw(
         string databasePath,
         string? serviceName,
@@ -1038,6 +1221,18 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         Assert.Equal(DoctorCompleteness.Unknown, result.Snapshot.CompletenessAndContent!.Completeness);
         Assert.Equal(ContentCaptureStatus.Unknown, result.Snapshot.CompletenessAndContent.ContentCapture);
         Assert.Equal(RawAccessStatus.Unknown, result.Snapshot.CompletenessAndContent.RawAccess);
+    }
+
+    private static void AssertAllEvidenceUnknown(GitHubCopilotDoctorEvidenceResult result)
+    {
+        Assert.Equal(
+            SourceCompatibilityStatus.Unknown,
+            result.Snapshot.SourceVersionAndSchemaDiagnostics!.Compatibility);
+        Assert.Equal(SchemaStatus.Unknown, result.Snapshot.SourceVersionAndSchemaDiagnostics.Schema);
+        Assert.Equal(LastIngestOutcome.Unknown, result.Snapshot.LastIngest!.Outcome);
+        Assert.Equal(RawPersistenceOutcome.Unknown, result.Snapshot.RawPersistence!.Outcome);
+        Assert.Equal(ProjectionOutcome.Unknown, result.Snapshot.Projection!.Outcome);
+        AssertUnattributedUnknown(result);
     }
 
     private static DoctorFactSnapshot WithReadyStaticFacts(DoctorFactSnapshot snapshot) => snapshot with
