@@ -12,10 +12,10 @@ integration step. Trust this file plus `git log` over conversation memory.
 
 | Task | State | Commits | Focused tests | Full test | Review |
 | --- | --- | --- | --- | --- | --- |
-| T0 docs/specs/contract table | in_progress | — | n/a (docs) | — | pending self-review record |
+| T0 docs/specs/contract table | revised | b43ed58 + revision commit | n/a (docs) | — | Codex Luna xhigh read-only review #1: REVISE (1 Critical, 8 Important — all resolved in revision; log below); re-review pending |
 | T1 red cross-surface test | pending | — | — | — | — |
 | T2 fact mapper | pending | — | — | — | — |
-| T3 store reads | pending | — | — | — | — |
+| T3 store reads | done | 07f44c1 | Store 58/0, AppService 9/0, Migration 12/0 | solution 5554/0 by implementer | independent review pending (batch with T4) |
 | T4 binding rule + observer | pending | — | — | — | — |
 | T5 fact collector | pending | — | — | — | — |
 | T6 first-trace verbs + adapter | pending | — | — | — | — |
@@ -40,6 +40,12 @@ integration step. Trust this file plus `git log` over conversation memory.
   `docs/user-guide/local-monitor.md` (~L226), `scripts/local-monitor/README.md`
   (~L65). Consider a new `docs/decisions.md` entry at T9 (the #68 entry
   D-record correctly describes #68's own boundary and stays as history).
+- OPEN (T4/T5): the monitor runtime-state row is a monitor-DB schema addition
+  → implement via the existing monitor migration mechanism, with a committed
+  prior-version DB fixture migration test (monitor-side write lands with T4,
+  CLI read with T5).
+- OPEN (T6): internal atomic exclusive-start store operation (review finding
+  9) added to T6 scope.
 - OPEN (T-109): if the fix introduces a new persisted/user-visible
   `source_adapter` label or wire vocabulary, update
   `source-schema-drift-claude-code.md` / `exact-binding.md` first (spec-first
@@ -52,6 +58,39 @@ integration step. Trust this file plus `git log` over conversation memory.
 | --- | --- | --- | --- |
 | `docs/specifications/interfaces/configuration-setup.md` | T0 | Claude completion boundary + `run_first_trace_doctor` row activation | Claude-scoped rows only; no Copilot text touched |
 
-## Review findings log (Minor items for final review triage)
+## Review findings log
 
-- (none yet)
+T0 review #1 (Codex Luna xhigh, read-only, on b43ed58): VERDICT REVISE.
+Resolutions applied in the T0 revision commit:
+
+1. (Critical) begin pre-window evaluation would always hit
+   `partial_fact_snapshot` → begin now pins the Doctor contract's own
+   pre-trace family values (`none`/`not_persisted`/`not_started`/
+   `(not_required, not_applicable)`/completeness `unknown`), verified against
+   `DoctorTestSnapshots.ReadyNoRealTrace()` and `DoctorValidation`
+   cross-field rules.
+2. readiness probe cannot separate no-listener from foreign owner → the fact
+   collector performs its own `/health/live` probe with the setup contract's
+   three-way classification.
+3. higher-precedence observer insufficient for effective values → new
+   read-only effective-value resolver (setup precedence, per-key
+   effective/absent/conflict) pinned in the spec.
+4. no read path for DB path / raw-access mode → `--database` argument with
+   doctor-verb semantics; new source-neutral monitor runtime-state row for
+   `raw_access`, trusted only when the liveness probe is monitor-live.
+5. fixed `claude-code-otel` adapter vs raw-otlp exact binds → explicit v1
+   candidate-eligibility rule (recognized claude-code provenance only;
+   binding state stays valid; provenance never rewritten; documented
+   residual).
+6. valid-but-not-ready completion had no envelope code →
+   `first_trace_not_ready` (success=false, exit 3) added.
+7. trace-keyed chain selection could mix Sessions → session-keyed grouping
+   with explicit-selection on any ambiguity (incl. one trace claimed by two
+   Sessions).
+8. `--expires-at` default undefined → exactly 10 minutes from the Doctor
+   store clock at start.
+9. active-check + start race → internal atomic exclusive-start inside one
+   store transaction (spec'd under Internal store operations); adds a small
+   internal store write to T6 scope.
+
+Minor items for final review triage: (none yet)

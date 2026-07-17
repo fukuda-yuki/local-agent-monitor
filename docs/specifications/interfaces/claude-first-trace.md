@@ -28,12 +28,15 @@ verbs below. All verbs accept `--json`. Unknown or duplicate arguments are
 `invalid_arguments`.
 
 ```text
-first-trace begin  --adapter claude-code [--interaction <interactive-cli|print|agent-sdk>] [--expires-at <iso-8601-utc>] [--json]
-first-trace status   --verification-id <uuid-v7> [--json]
-first-trace complete --verification-id <uuid-v7> --expected-revision <n> [--evidence <ref>]... [--json]
-first-trace cancel   --verification-id <uuid-v7> --expected-revision <n> [--json]
+first-trace begin  --database <path> --adapter claude-code [--interaction <interactive-cli|print|agent-sdk>] [--expires-at <iso-8601-utc>] [--json]
+first-trace status   --database <path> --verification-id <uuid-v7> [--json]
+first-trace complete --database <path> --verification-id <uuid-v7> --expected-revision <n> [--evidence <ref>]... [--json]
+first-trace cancel   --database <path> --verification-id <uuid-v7> --expected-revision <n> [--json]
 ```
 
+- `--database` names the shared monitor SQLite database and has exactly the
+  semantics of the existing `doctor verification` verbs' `--database`
+  argument. No other path discovery exists.
 - `--adapter` selects the registered first-trace source adapter. v1 accepts
   only `claude-code`; anything else is `invalid_arguments`.
 - `--interaction` selects which bounded-interaction guidance variant is
@@ -41,7 +44,8 @@ first-trace cancel   --verification-id <uuid-v7> --expected-revision <n> [--json
   not change verification identity: all three variants share source surface
   `claude-code` and expected source adapter `claude-code-otel`.
 - `--expires-at` is passed through to Doctor verification start unchanged and
-  is bound by the Doctor contract's window rules.
+  is bound by the Doctor contract's window rules. When omitted, the window is
+  exactly 10 minutes from the Doctor store clock reading taken at start.
 - `status`, `complete`, and `cancel` derive the adapter from the stored
   verification's expected source; they do not take `--adapter`.
 
@@ -113,6 +117,7 @@ Rules:
 | `active_verification_exists` | begin: an active verification for the surface already exists; its id is returned | false | 3 |
 | `first_trace_status_reported` | status: verification and candidates reported | true | 0 |
 | `first_trace_completed` | complete: Doctor completion succeeded (`first_trace_ready`) | true | 0 |
+| `first_trace_not_ready` | complete: the Doctor evaluated the input as valid but not `first_trace_ready` (embedded result: success `evaluation_completed` with a non-ready primary state; the verification stays active) | false | 3 |
 | `first_trace_cancelled` | cancel: Doctor cancellation succeeded | true | 0 |
 | `explicit_evidence_selection_required` | complete: more than one distinct candidate chain exists and `--evidence` was not given | false | 3 |
 | `first_trace_doctor_failed` | the embedded `doctor.v1` result is a failure; it is authoritative | false | Doctor CLI mapping of the embedded code (2/3/4/5) |
@@ -140,16 +145,27 @@ adds no parallel failure vocabulary.
 
 ## `begin` behavior
 
-1. Collect the Claude fact snapshot read-only (mapping table below).
+1. Collect the Claude fact snapshot read-only (mapping table below), using
+   the fixed pre-window values for the pipeline families: `last_ingest.outcome
+   = none`, `raw_persistence.outcome = not_persisted`, `projection.outcome =
+   not_started`, `exact_session_binding = (not_required, not_applicable)`, and
+   `completeness_and_content.completeness = unknown`. These are the same
+   pre-trace values the Doctor contract's own `ready_no_real_trace` shape
+   uses, so a healthy environment evaluates to `ready_no_real_trace`, never to
+   `partial_fact_snapshot`, before any window exists.
 2. Evaluate with the frozen Doctor evaluator.
 3. If any blocking state applies: return `first_trace_blocked` with the
    evaluation embedded in `doctor`. Guidance may add copyable setup commands
    (for example `setup plan --adapter claude-code --target cli`), but the
    authoritative states and next actions are the embedded Doctor ones.
-4. If an active `claude-code` verification already exists:
-   `active_verification_exists` with that verification's id.
-5. Otherwise start a Doctor verification (surface `claude-code`, adapter
-   `claude-code-otel`) and return `first_trace_verification_started` with the
+4. Otherwise start a Doctor verification (surface `claude-code`, adapter
+   `claude-code-otel`). The active-check and the start execute atomically in
+   one store transaction (internal exclusive-start read/write, below): when an
+   active, non-expired `claude-code` verification already exists — including
+   one created by a concurrent `begin` — the command deterministically returns
+   `active_verification_exists` with that verification's id and creates
+   nothing. No retry, sleep, or best-effort pre-check is involved.
+5. On a successful start return `first_trace_verification_started` with the
    Doctor start result embedded, restart/new-shell guidance, and the
    bounded-interaction guidance for the selected interaction variant(s).
 
@@ -181,13 +197,17 @@ exactly as the Doctor contract defines them (read-time derived state).
 
 - With `--evidence` refs: pass them through to Doctor completion unchanged.
 - Without `--evidence`: group current non-expired `real_source` candidates
-  into chains. A chain is the set of candidates sharing one OTLP trace ID as
-  encoded in the evidence-ref grammar, plus the `completeness_content`
-  candidate whose session GUID appears in that chain's
-  `exact_session_binding` ref. If exactly one chain exists, select all of its
-  candidate refs deterministically. If more than one chain exists, return
-  `explicit_evidence_selection_required` with the candidate list; ordering or
-  recency never selects a chain.
+  into chains keyed on the exactly-bound Session. Each `exact_session_binding`
+  ref names one `(traceId, sessionGuid)` pair; a Session's chain is all
+  binding refs naming its GUID, every `ingest`/`raw_persistence`/`projection`
+  candidate whose trace ID appears in one of those binding refs, and the
+  Session's `completeness_content` candidate. Candidates whose trace ID
+  appears in no binding ref form one trace-keyed group per trace ID. Auto-
+  selection happens only when exactly one group exists in total; then all of
+  its refs are selected deterministically. If a trace ID is claimed by more
+  than one Session's binding refs, or more than one group exists, return
+  `explicit_evidence_selection_required` with the candidate list. Ordering or
+  recency never selects a group.
 - The completion fact snapshot carries no inline observations (the Doctor
   store constructs trusted observations from resolved candidates).
 
@@ -201,17 +221,17 @@ projection. Families whose inputs are unavailable are emitted as `null`
 
 | Family | Deterministic rule (v1, `claude-code`) |
 | --- | --- |
-| `install_and_source_version` | `monitor_install`: `installed` when the readiness probe succeeds or the monitor database exists at the configured path; `not_installed` when neither; `unknown` on read error. `source_version`: `supported` iff the Claude version detector reports a supported version (>= 2.1.207); `unsupported` on a detected lower version; `unknown` when undetectable. `source_feature`: mirrors `source_version` in v1 (`available` iff supported). |
-| `process_receiver_and_port` | From the bounded readiness probe classification: monitor-live -> `running`/`bound`/`monitor`; positive no-listener -> `not_running`/`not_bound`/`none`; foreign owner -> `not_running`/`not_bound`/`foreign`; any other transport failure -> all `unknown`. |
-| `source_effective_configuration` | `endpoint_alignment`: `match` iff the effective (post-precedence) `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` equals the canonical monitor origin plus `/v1/traces`; otherwise `mismatch`; `unknown` when precedence sources cannot be read. |
-| `endpoint_reachability` | `reachable` iff the bounded readiness probe classifies monitor-live; `unreachable` for no-listener/foreign/other probe failure; `unknown` when the probe cannot run. |
-| `protocol_and_signal_compatibility` | `protocol`: `http_protobuf` iff the effective trace protocol is `http/protobuf`; a different effective value is `mismatch`; unreadable is `unknown`. `trace_signal`: `enabled` iff effective `CLAUDE_CODE_ENABLE_TELEMETRY=1` and `OTEL_TRACES_EXPORTER=otlp`; explicitly off or absent is `disabled`; unreadable is `unknown`. |
+| `install_and_source_version` | `monitor_install`: `installed` when the bounded probe classifies monitor-live or the monitor database exists at the `--database` path; `not_installed` when neither; `unknown` on read error. `source_version`: `supported` iff the Claude version detector reports a supported version (>= 2.1.207); `unsupported` on a detected lower version; `unknown` when undetectable. `source_feature`: mirrors `source_version` in v1 (`available` iff supported). |
+| `process_receiver_and_port` | The fact collector performs its own bounded liveness probe (`GET <canonical-origin>/health/live`) applying exactly the classification the setup contract pins for its endpoint probe: HTTP 200 whose complete body is the single-property JSON object `"status":"live"` -> monitor-live -> `running`/`bound`/`monitor`; socket connection refused or an equivalent positive no-listener result -> `not_running`/`not_bound`/`none`; every other outcome (redirect, non-200, oversized or malformed body, timeout, other transport failure) -> `not_running`/`not_bound`/`foreign`. The probe cannot run at all (no canonical origin resolvable) -> all `unknown`. |
+| `source_effective_configuration` | `endpoint_alignment`: `match` iff the effective `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` equals the canonical monitor origin plus `/v1/traces`; otherwise (different value or absent) `mismatch`; `unknown` when a precedence source cannot be read. Effective values come from a first-trace read-only resolver that applies the setup contract's precedence (process environment > managed policy > local settings > project settings > user settings) and reports per-key effective value, absence, or conflict; the setup adapter's higher-precedence observer alone is not sufficient and setup components are reused read-only where they expose values. |
+| `endpoint_reachability` | `reachable` iff the bounded readiness probe (`GET <canonical-origin>/health/ready`, setup-contract semantics) succeeds; `unreachable` for no-listener/foreign/other probe failure; `unknown` when the probe cannot run. |
+| `protocol_and_signal_compatibility` | `protocol`: `http_protobuf` iff the effective trace protocol is `http/protobuf`; a different effective value is `mismatch`; unreadable is `unknown`. `trace_signal`: `enabled` iff effective `CLAUDE_CODE_ENABLE_TELEMETRY=1` and `OTEL_TRACES_EXPORTER=otlp`; explicitly off or absent is `disabled`; unreadable is `unknown`. Effective values come from the same read-only resolver as `source_effective_configuration`. |
 | `source_version_and_schema_diagnostics` | `compatibility`: `supported` iff the version detector reports supported and persisted claude-code source-compatibility rows (when present) report a known fingerprint; `unsupported_source_version` on a detected unsupported version or an incompatible fingerprint; `unknown` otherwise. `schema`: `drift_detected` iff claude-code rows report drift; `matching` when rows exist without drift; `unknown` when no rows exist. |
 | `last_ingest` | Over claude-code ingest records observed at or after the verification start: `accepted` if at least one accepted record exists; else `rejected` if at least one rejected record exists; else `none`. Without a verification window, `unknown`. |
 | `raw_persistence` | `persisted` iff at least one `raw_persistence` candidate exists for the verification; `not_persisted` when ingest was accepted but no raw row was committed; `unknown` without a window. |
 | `projection` | `completed` iff at least one `projection` candidate exists; `pending`/`failed` from the persisted projection state for accepted records; `not_started` when raw rows exist without projection activity; `unknown` without a window. |
-| `exact_session_binding` | `requirement` is always `required` for `claude-code`. `outcome`: `exact_bound` iff at least one `exact_session_binding` candidate exists; `unbound` when projection completed without one; `unknown` without a window. |
-| `completeness_and_content` | From the exactly-bound Session: `completeness` maps the Session completeness value verbatim (`unbound`/`partial`/`rich`/`full`). `content_capture`: agreed content state `available` or `redacted` -> `enabled`; `not_captured` -> `disabled`; `unsupported` -> `unsupported`; no agreement/rows -> `unknown`. `raw_access`: `sanitized_only` iff the monitor runs with sanitized-only raw access, else `available`; `unknown` when unreadable. |
+| `exact_session_binding` | Stage-dependent, matching the Doctor contract's own pre-trace shape: while no window record's projection has completed, `(not_required, not_applicable)`; once at least one window record's projection completed, `(required, exact_bound)` iff at least one `exact_session_binding` candidate exists, else `(required, unbound)`. Exact binding is always required for `claude-code` `first_trace_ready`; the pre-trace `not_required` value expresses only that nothing bindable exists yet. |
+| `completeness_and_content` | From the exactly-bound Session: `completeness` maps the Session completeness value verbatim (`unbound`/`partial`/`rich`/`full`); `unknown` while no Session is exactly bound. `content_capture`: agreed content state `available` or `redacted` -> `enabled`; `not_captured` -> `disabled`; `unsupported` -> `unsupported`; no agreement/rows -> from the effective content-gate settings (`enabled`/`disabled`); unreadable -> `unknown`. `raw_access`: taken from the monitor runtime-state row (below) only when the liveness probe classifies monitor-live; otherwise `unknown`. |
 | `restart_or_new_process` | `required` iff the setup ledger's most recent applied `claude-code` change set has no accepted claude-code ingest at or after its apply time; `not_required` when no applied change set exists or an accepted ingest follows the apply; `unknown` when the ledger cannot be read. |
 
 ## Claude candidate observer (Local Monitor side)
@@ -246,6 +266,14 @@ into Doctor evidence candidates through the existing internal
 - **Class.** The observer emits `real_source` candidates exclusively, and only
   from records the ingestion pipeline actually persisted. No synthetic-probe
   traffic is generated or observed by #104.
+- **Candidate eligibility (provenance).** Only records the ingestion pipeline
+  recognized and persisted as claude-code OTel traffic are candidate-eligible
+  in v1. A span that entered through the generic raw-OTLP path may still bind
+  exactly under the exact-binding contract (that Session state stays valid,
+  and provenance is never rewritten), but it produces no first-trace
+  candidates. This is a documented v1 residual: an environment whose records
+  are not recognized as claude-code cannot reach `first_trace_ready` and
+  surfaces its state through the version/schema diagnostics families instead.
 - **Evidence-ref grammar (closed).** `claude-otel-ingest-<traceId>-<spanId>`,
   `claude-otel-raw-<traceId>-<spanId>`,
   `claude-otel-projection-<traceId>-<spanId>`,
@@ -261,12 +289,27 @@ into Doctor evidence candidates through the existing internal
   Contention surfaces as the existing `doctor_store_busy` behavior — no
   retries or sleeps.
 
-### Internal store reads (not part of `doctor.v1`)
+### Internal store operations (not part of `doctor.v1`)
 
 `ListActive(source_surface, now)` and `ListCandidates(verification_id)` are
 internal, source-neutral reads on the SQLite Doctor store and application
-service. They are not CLI verbs, not HTTP routes, and not additions to the
-public Doctor store contract.
+service. An internal exclusive start — check for an active, non-expired
+verification of the same source surface and insert the new one inside a single
+store transaction — backs `begin`'s atomic `active_verification_exists`
+behavior. None of these are CLI verbs, HTTP routes, or additions to the public
+Doctor store contract, and none change the SQLite schema of the Doctor tables.
+
+### Monitor runtime-state row
+
+At startup the Local Monitor upserts one source-neutral runtime-state row into
+the shared monitor database recording its effective raw-access mode
+(`available` or `sanitized_only`, from `--sanitized-only`) and the write time.
+The first-trace fact collector reads it for the `raw_access` fact member and
+trusts it only when the liveness probe classifies monitor-live (the row then
+describes the currently running process). The row contains no paths, no
+endpoints, and no source-specific data. Adding the row follows the monitor
+database's existing migration mechanism and is covered by migration tests from
+a committed prior-version database fixture.
 
 ## Setup handoff
 

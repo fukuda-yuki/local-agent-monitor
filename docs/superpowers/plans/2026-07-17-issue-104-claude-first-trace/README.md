@@ -92,16 +92,16 @@ on the existing SQLite store behavior (`doctor_store_busy` on contention).
 | Family | Input source | Producer |
 | --- | --- | --- |
 | `install_and_source_version` | monitor readiness/database presence; `ClaudeCodeVersionDetector` (read-only) | fact collector |
-| `process_receiver_and_port` | bounded readiness probe classification (live / no-listener / foreign-owner) | fact collector |
-| `source_effective_configuration` | effective OTel endpoint after precedence (`ClaudeHigherPrecedenceObserver` + settings inspection, read-only) | fact collector |
-| `endpoint_reachability` | bounded readiness probe | fact collector |
-| `protocol_and_signal_compatibility` | effective `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / telemetry+exporter gates | fact collector |
+| `process_receiver_and_port` | first-trace bounded liveness probe (`/health/live`, setup-contract classification: live / positive no-listener / other=foreign) | fact collector |
+| `source_effective_configuration` | first-trace read-only effective-value resolver (setup precedence: env > managed > local > project > user; per-key effective/absent/conflict) | fact collector |
+| `endpoint_reachability` | bounded readiness probe (`/health/ready`) | fact collector |
+| `protocol_and_signal_compatibility` | same effective-value resolver (protocol + telemetry/exporter gates) | fact collector |
 | `source_version_and_schema_diagnostics` | version detector + source-compatibility fingerprint/drift rows | fact collector |
 | `last_ingest` | raw/source-compatibility rows in the verification window | fact collector (SQLite read) |
 | `raw_persistence` | `ListCandidates` kind `raw_persistence` / raw rows | fact collector |
 | `projection` | `ListCandidates` kind `projection` / projection state | fact collector |
-| `exact_session_binding` | `ListCandidates` kind `exact_session_binding` (Requirement=Required for claude-code) | fact collector |
-| `completeness_and_content` | bound-session completeness + content-state rows + `--sanitized-only` flag | fact collector |
+| `exact_session_binding` | `ListCandidates` kind `exact_session_binding`; stage-dependent: pre-projection `(not_required, not_applicable)`, then `(required, unbound/exact_bound)` | fact collector |
+| `completeness_and_content` | bound-session completeness + content-state rows + monitor runtime-state row (`raw_access`, trusted only when probe = monitor-live) | fact collector |
 | `restart_or_new_process` | setup ledger latest applied claude-code change set vs accepted ingest since apply | fact collector |
 
 ## Execution order
