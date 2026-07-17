@@ -66,8 +66,19 @@ public sealed class ClaudeDoctorCandidateObserverTests
     public void RunOnce_WithNoActiveVerificationIsANoop()
     {
         using var fixture = CreateFixture();
+        var first = fixture.StartVerification();
+        var second = fixture.StartVerification();
+
+        Assert.Equal(DoctorResultCode.VerificationCancelled, fixture.Application.Cancel(first.VerificationId, first.Revision).Code);
+        Assert.Equal(DoctorResultCode.VerificationCancelled, fixture.Application.Cancel(second.VerificationId, second.Revision).Code);
 
         fixture.Observer.RunOnce();
+
+        var active = fixture.Application.ListActive("claude-code", fixture.Time.UtcNow);
+        Assert.Equal(DoctorResultCode.VerificationActive, active.Code);
+        Assert.Empty(active.Verifications ?? []);
+        Assert.Empty(Candidates(fixture, first));
+        Assert.Empty(Candidates(fixture, second));
     }
 
     [Fact]
@@ -113,6 +124,12 @@ public sealed class ClaudeDoctorCandidateObserverTests
         Assert.DoesNotContain(candidates, candidate => candidate.EvidenceKind == DoctorEvidenceKind.ExactSessionBinding);
         Assert.DoesNotContain(candidates, candidate => candidate.EvidenceKind == DoctorEvidenceKind.CompletenessContent);
         Assert.All(candidates, candidate => Assert.True(DoctorValidation.IsValidEvidenceCandidate(candidate)));
+
+        var result = CompleteWithUnboundSession(fixture, verification, candidates);
+        Assert.Contains(result.Evaluation?.States ?? [], state => state.StateCode == DoctorStateCode.SessionUnbound);
+        Assert.DoesNotContain(result.Evaluation?.States ?? [], state => state.StateCode == DoctorStateCode.FirstTraceReady);
+        Assert.Equal(DoctorResultCode.EvaluationCompleted, result.Code);
+        Assert.Equal(DoctorVerificationState.Active, result.Verification?.State);
     }
 
     [Theory]
@@ -130,6 +147,12 @@ public sealed class ClaudeDoctorCandidateObserverTests
         var candidates = Candidates(fixture, verification);
         Assert.DoesNotContain(candidates, candidate => candidate.EvidenceKind == DoctorEvidenceKind.ExactSessionBinding);
         Assert.DoesNotContain(candidates, candidate => candidate.EvidenceKind == DoctorEvidenceKind.CompletenessContent);
+
+        var result = CompleteWithUnboundSession(fixture, verification, candidates);
+        Assert.Contains(result.Evaluation?.States ?? [], state => state.StateCode == DoctorStateCode.SessionUnbound);
+        Assert.DoesNotContain(result.Evaluation?.States ?? [], state => state.StateCode == DoctorStateCode.FirstTraceReady);
+        Assert.Equal(DoctorResultCode.EvaluationCompleted, result.Code);
+        Assert.Equal(DoctorVerificationState.Active, result.Verification?.State);
     }
 
     [Fact]
@@ -141,6 +164,22 @@ public sealed class ClaudeDoctorCandidateObserverTests
 
         fixture.Observer.RunOnce();
 
+        Assert.Empty(Candidates(fixture, verification));
+    }
+
+    [Fact]
+    public void RunOnce_RecordsAtOrAfterVerificationExpiryAreIgnoredWithoutStoreError()
+    {
+        using var fixture = CreateFixture();
+        var verification = fixture.StartVerification();
+        fixture.SeedOtel(Payload(TraceId, SpanId, NativeSessionMarker), verification.ExpiresAt);
+        fixture.SeedOtel(Payload(TraceId, SpanId, NativeSessionMarker), verification.ExpiresAt.AddSeconds(1));
+
+        var exception = Record.Exception(fixture.Observer.RunOnce);
+
+        Assert.Null(exception);
+        var candidates = fixture.Application.ListCandidates(verification.VerificationId);
+        Assert.Equal(DoctorResultCode.VerificationActive, candidates.Code);
         Assert.Empty(Candidates(fixture, verification));
     }
 
@@ -162,6 +201,52 @@ public sealed class ClaudeDoctorCandidateObserverTests
         DoctorVerification verification) =>
         fixture.Application.ListCandidates(verification.VerificationId).Candidates
         ?? throw new InvalidOperationException("Candidate read did not return a list.");
+
+    private static DoctorResult CompleteWithUnboundSession(
+        ObserverFixture fixture,
+        DoctorVerification verification,
+        IReadOnlyList<DoctorEvidenceCandidate> candidates)
+    {
+        var selected = candidates
+            .Where(candidate => candidate.EvidenceKind is
+                DoctorEvidenceKind.Ingest or
+                DoctorEvidenceKind.RawPersistence or
+                DoctorEvidenceKind.Projection)
+            .ToArray();
+        Assert.Equal(
+            new[]
+            {
+                DoctorEvidenceKind.Ingest,
+                DoctorEvidenceKind.RawPersistence,
+                DoctorEvidenceKind.Projection,
+            },
+            selected.Select(candidate => candidate.EvidenceKind).OrderBy(kind => kind));
+
+        var snapshot = DoctorTestSnapshots.ReadyNoRealTrace() with
+        {
+            SourceSurface = verification.ExpectedSourceSurface,
+            ExpectedSourceAdapter = verification.ExpectedSourceAdapter,
+            VerificationId = verification.VerificationId,
+            ObservedAt = fixture.Time.UtcNow,
+            Observations = [],
+            LastIngest = new LastIngestFacts(LastIngestOutcome.Accepted),
+            RawPersistence = new RawPersistenceFacts(RawPersistenceOutcome.Persisted),
+            Projection = new ProjectionFacts(ProjectionOutcome.Completed),
+            ExactSessionBinding = new ExactSessionBindingFacts(
+                ExactSessionBindingRequirement.Required,
+                ExactSessionBindingOutcome.Unbound),
+            CompletenessAndContent = new CompletenessAndContentFacts(
+                DoctorCompleteness.Unknown,
+                ContentCaptureStatus.Enabled,
+                RawAccessStatus.Available),
+        };
+
+        return fixture.Application.Complete(
+            verification.VerificationId,
+            verification.Revision,
+            snapshot,
+            selected.Select(candidate => candidate.EvidenceRef).ToArray());
+    }
 
     private static string Payload(string traceId, string spanId, string? sessionId)
     {

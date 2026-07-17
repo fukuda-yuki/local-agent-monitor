@@ -176,11 +176,13 @@ internal sealed class ClaudeDoctorCandidateObserver
             WHERE o.source_surface=$source_surface
               AND o.source_adapter=$source_adapter
               AND r.received_at >= $started_at
+              AND r.received_at < $expires_at
             ORDER BY r.received_at COLLATE BINARY,r.id;
             """;
         Add(command, "$source_surface", SourceSurface);
         Add(command, "$source_adapter", SourceAdapter);
         Add(command, "$started_at", Timestamp(verification.StartedAt));
+        Add(command, "$expires_at", Timestamp(verification.ExpiresAt));
 
         using var reader = command.ExecuteReader();
         var records = new List<ClaudeOtelRecord>();
