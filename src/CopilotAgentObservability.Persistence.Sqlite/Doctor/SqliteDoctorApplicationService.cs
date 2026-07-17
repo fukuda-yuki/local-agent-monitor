@@ -42,6 +42,16 @@ internal sealed class SqliteDoctorApplicationService
             ? Error(failure)
             : Project(store.Get(verificationId));
 
+    public DoctorStoreOutcome ListActive(string sourceSurface, DateTimeOffset now) =>
+        initializationFailure is { } failure
+            ? new(failure)
+            : store.ListActive(sourceSurface, now);
+
+    public DoctorStoreOutcome ListCandidates(string verificationId) =>
+        initializationFailure is { } failure
+            ? new(failure)
+            : store.ListCandidates(verificationId);
+
     public DoctorResult ObserveCandidate(DoctorEvidenceCandidate candidate) =>
         initializationFailure is { } failure
             ? Error(failure)

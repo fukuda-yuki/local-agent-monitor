@@ -18,6 +18,34 @@ public sealed class DoctorApplicationServiceTests
     }
 
     [Fact]
+    public void InternalReads_PassThroughActiveVerificationsAndCandidates()
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new DoctorTestTimeProvider(DoctorTestData.Now);
+        var application = SqliteDoctorApplicationService.Create(
+            new SqliteDoctorVerificationStore(database.Path, time));
+        var verification = Assert.IsType<DoctorVerification>(
+            application.Start("claude-code", "claude-code-otel", time.UtcNow.AddMinutes(5)).Verification);
+        var candidate = DoctorTestData.Candidate(
+            verification,
+            "receipt-round-trip",
+            evidenceKind: DoctorEvidenceKind.Projection,
+            sourceAdapter: verification.ExpectedSourceAdapter,
+            observedAt: time.UtcNow.AddSeconds(1),
+            expiresAt: time.UtcNow.AddMinutes(6));
+
+        Assert.Equal(DoctorResultCode.VerificationActive, application.ObserveCandidate(candidate).Code);
+
+        var active = application.ListActive(verification.ExpectedSourceSurface, time.UtcNow);
+        var candidates = application.ListCandidates(verification.VerificationId);
+
+        Assert.Equal(DoctorResultCode.VerificationActive, active.Code);
+        Assert.Equivalent(new[] { verification }, active.Verifications!, strict: true);
+        Assert.Equal(DoctorResultCode.VerificationActive, candidates.Code);
+        Assert.Equivalent(new[] { candidate }, candidates.Candidates!, strict: true);
+    }
+
+    [Fact]
     public void Complete_ResolvesTrustedCandidatesAndEvaluatesExactlyOnce()
     {
         using var database = new DoctorTestDatabase();

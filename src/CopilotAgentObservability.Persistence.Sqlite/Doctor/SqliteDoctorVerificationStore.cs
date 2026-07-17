@@ -167,6 +167,116 @@ internal sealed class SqliteDoctorVerificationStore
         }
     }
 
+    public DoctorStoreOutcome ListActive(string sourceSurface, DateTimeOffset now)
+    {
+        if (!DoctorStoreValidation.IsSourceToken(sourceSurface))
+        {
+            return Invalid();
+        }
+
+        try
+        {
+            using var connection = OpenConnection();
+            if (!DoctorSchemaV1.IsValid(connection, transaction: null))
+            {
+                return Unavailable();
+            }
+
+            var verificationIds = new List<string>();
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText =
+                    "SELECT verification_id FROM doctor_verifications WHERE state='active' AND expected_source_surface=$source COLLATE BINARY ORDER BY started_at COLLATE BINARY, verification_id COLLATE BINARY;";
+                Add(command, "$source", sourceSurface);
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    verificationIds.Add(reader.GetString(0));
+                }
+            }
+
+            var verifications = new List<DoctorVerification>(verificationIds.Count);
+            foreach (var verificationId in verificationIds)
+            {
+                var verification = ReadVerification(connection, transaction: null, verificationId);
+                if (verification is null)
+                {
+                    continue;
+                }
+                if (!string.Equals(verification.ExpectedSourceSurface, sourceSurface, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var projected = ProjectRead(verification, now);
+                if (projected.Code == DoctorResultCode.VerificationActive
+                    && projected.Verification is { State: DoctorVerificationState.Active } active)
+                {
+                    verifications.Add(active);
+                }
+            }
+
+            return new(
+                DoctorResultCode.VerificationActive,
+                Verifications: verifications
+                    .OrderBy(verification => verification.StartedAt)
+                    .ThenBy(verification => verification.VerificationId, StringComparer.Ordinal)
+                    .ToArray());
+        }
+        catch (SqliteException exception) when (IsBusy(exception))
+        {
+            return Busy();
+        }
+        catch (Exception)
+        {
+            return Unavailable();
+        }
+    }
+
+    public DoctorStoreOutcome ListCandidates(string verificationId)
+    {
+        if (!DoctorStoreValidation.IsCanonicalUuidV7(verificationId))
+        {
+            return Invalid();
+        }
+
+        try
+        {
+            using var connection = OpenConnection();
+            if (!DoctorSchemaV1.IsValid(connection, transaction: null))
+            {
+                return Unavailable();
+            }
+
+            var candidates = new List<DoctorEvidenceCandidate>();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "SELECT candidate_id,verification_id,source_surface,source_adapter,evidence_class,evidence_kind,evidence_ref,observed_at,expires_at FROM doctor_verification_evidence WHERE verification_id=$verification_id ORDER BY observed_at COLLATE BINARY, evidence_ref COLLATE BINARY, candidate_id COLLATE BINARY;";
+            Add(command, "$verification_id", verificationId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                candidates.Add(ParseCandidate(reader));
+            }
+
+            return new(
+                DoctorResultCode.VerificationActive,
+                Candidates: candidates
+                    .OrderBy(candidate => candidate.ObservedAt)
+                    .ThenBy(candidate => candidate.EvidenceRef, StringComparer.Ordinal)
+                    .ThenBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
+                    .ToArray());
+        }
+        catch (SqliteException exception) when (IsBusy(exception))
+        {
+            return Busy();
+        }
+        catch (Exception)
+        {
+            return Unavailable();
+        }
+    }
+
     public DoctorStoreOutcome ObserveCandidate(DoctorEvidenceCandidate candidate)
     {
         ArgumentNullException.ThrowIfNull(candidate);
@@ -578,6 +688,11 @@ internal sealed class SqliteDoctorVerificationStore
         {
             return null;
         }
+        return ParseCandidate(reader);
+    }
+
+    private static DoctorEvidenceCandidate ParseCandidate(SqliteDataReader reader)
+    {
         var candidate = new DoctorEvidenceCandidate(
             reader.GetString(0),
             reader.GetString(1),
