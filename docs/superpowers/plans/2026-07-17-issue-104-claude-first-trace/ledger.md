@@ -14,9 +14,9 @@ integration step. Trust this file plus `git log` over conversation memory.
 | --- | --- | --- | --- | --- | --- |
 | T0 docs/specs/contract table | revised | b43ed58 + revision commit | n/a (docs) | — | Codex Luna xhigh read-only review #1: REVISE (1 Critical, 8 Important — all resolved in revision; log below); re-review pending |
 | T1 red cross-surface test | pending | — | — | — | — |
-| T2 fact mapper | impl done, fix in progress | b6e5bbf | mapper 71/0; build clean | — | review #1 REVISE (1 Critical invalid cross-field combo reachable; Conflict→Mismatch wrong, spec pins Unknown; sweep not exhaustive); fix dispatched |
+| T2 fact mapper | done | b6e5bbf, d21fbb4 | mapper 73/0; build clean | — | review #1 REVISE (3 findings) → fixed in d21fbb4; re-review APPROVE (3/3, scope+purity confirmed) |
 | T3 store reads | done | 07f44c1 | Store 58/0, AppService 9/0, Migration 12/0 | solution 5554/0 by implementer | independent review pending (batch with T4) |
-| T4 binding rule + observer | done + fix | 6270a83, 1ed3e12, eb00ac5 | Observer 10/0, Doctor 252/0 after fix | implementer's full run timed out at 600s (gate reruns at T7/T9) | review #1 REVISE (4 findings) → all fixed in eb00ac5; re-review dispatched |
+| T4 binding rule + observer | done | 6270a83, 1ed3e12, eb00ac5 | Observer 10/0, Doctor 252/0 after fix | implementer's full run timed out at 600s (gate reruns at T7/T9) | re-review: 4/4 RESOLVED, scope confirmed; 1 [low] left to final triage (below) |
 | T5 fact collector | pending | — | — | — | — |
 | T6 first-trace verbs + adapter | pending | — | — | — | — |
 | T-109 projection defect fix | pending | — | — | — | — |
@@ -130,4 +130,10 @@ T3 review #1 (Codex Luna xhigh, read-only, on 07f44c1): VERDICT REVISE —
 (1) atomic exclusive start missing (moved from T6 scope into a T3 fix
 dispatch), (2) ListActive expiry boundary test missing. Fix dispatched.
 
-Minor items for final review triage: (none yet)
+Minor items for final review triage:
+
+- [low] T4 re-review NEW-1: the observer expiry-boundary test cannot
+  distinguish "record skipped before ObserveCandidate" from "candidate
+  rejected by the store" (both leave candidates empty) — behavior proven, red
+  strength weak; consider a call-count seam only if the final review deems it
+  worth the surface (ClaudeDoctorCandidateObserverTests.cs:178).

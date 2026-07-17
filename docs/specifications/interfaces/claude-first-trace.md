@@ -28,8 +28,8 @@ verbs below. All verbs accept `--json`. Unknown or duplicate arguments are
 `invalid_arguments`.
 
 ```text
-first-trace begin  --database <path> --adapter claude-code [--interaction <interactive-cli|print|agent-sdk>] [--expires-at <iso-8601-utc>] [--json]
-first-trace status   --database <path> --verification-id <uuid-v7> [--json]
+first-trace begin  --database <path> --adapter claude-code [--endpoint <loopback-http-url>] [--interaction <interactive-cli|print|agent-sdk>] [--expires-at <iso-8601-utc>] [--json]
+first-trace status   --database <path> --verification-id <uuid-v7> [--endpoint <loopback-http-url>] [--json]
 first-trace complete --database <path> --verification-id <uuid-v7> --expected-revision <n> [--evidence <ref>]... [--json]
 first-trace cancel   --database <path> --verification-id <uuid-v7> --expected-revision <n> [--json]
 ```
@@ -37,6 +37,9 @@ first-trace cancel   --database <path> --verification-id <uuid-v7> --expected-re
 - `--database` names the shared monitor SQLite database and has exactly the
   semantics of the existing `doctor verification` verbs' `--database`
   argument. No other path discovery exists.
+- `--endpoint` names the Local Monitor canonical loopback origin used for the
+  liveness/readiness probes and endpoint-alignment comparison, with exactly
+  the validation and default the setup contract's `--endpoint` option uses.
 - `--adapter` selects the registered first-trace source adapter. v1 accepts
   only `claude-code`; anything else is `invalid_arguments`.
 - `--interaction` selects which bounded-interaction guidance variant is
