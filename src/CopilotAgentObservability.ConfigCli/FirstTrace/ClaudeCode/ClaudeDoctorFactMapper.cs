@@ -96,8 +96,9 @@ internal static class ClaudeDoctorFactMapper
         endpoint switch
         {
             ClaudeEndpointValueClassification.Match => EndpointAlignmentStatus.Match,
-            ClaudeEndpointValueClassification.Different or ClaudeEndpointValueClassification.Absent or
-                ClaudeEndpointValueClassification.Conflict => EndpointAlignmentStatus.Mismatch,
+            ClaudeEndpointValueClassification.Different or ClaudeEndpointValueClassification.Absent =>
+                EndpointAlignmentStatus.Mismatch,
+            ClaudeEndpointValueClassification.Conflict => EndpointAlignmentStatus.Unknown,
             _ => EndpointAlignmentStatus.Unknown,
         };
 
@@ -230,7 +231,7 @@ internal static class ClaudeDoctorFactMapper
         binding.Outcome == ExactSessionBindingOutcome.ExactBound
             ? window!.BoundSessionCompleteness switch
             {
-                ClaudeBoundSessionCompleteness.Unbound => DoctorCompleteness.Unbound,
+                ClaudeBoundSessionCompleteness.Unbound => DoctorCompleteness.Unknown,
                 ClaudeBoundSessionCompleteness.Partial => DoctorCompleteness.Partial,
                 ClaudeBoundSessionCompleteness.Rich => DoctorCompleteness.Rich,
                 ClaudeBoundSessionCompleteness.Full => DoctorCompleteness.Full,

@@ -83,7 +83,6 @@ public sealed class ClaudeDoctorFactMapperTests
     [Theory]
     [InlineData((int)ClaudeEndpointValueClassification.Different)]
     [InlineData((int)ClaudeEndpointValueClassification.Absent)]
-    [InlineData((int)ClaudeEndpointValueClassification.Conflict)]
     public void Map_EndpointNotAligned_EvaluatesEndpointMismatch(
         int endpointValue)
     {
@@ -104,6 +103,18 @@ public sealed class ClaudeDoctorFactMapperTests
         });
 
         Assert.Equal(EndpointAlignmentStatus.Unknown, snapshot.SourceEffectiveConfiguration!.EndpointAlignment);
+    }
+
+    [Fact]
+    public void Map_EndpointConflict_EmitsUnknownAlignment()
+    {
+        var snapshot = Map(HealthyInputs() with
+        {
+            Endpoint = ClaudeEndpointValueClassification.Conflict,
+        });
+
+        Assert.Equal(EndpointAlignmentStatus.Unknown, snapshot.SourceEffectiveConfiguration!.EndpointAlignment);
+        Assert.Equal(DoctorResultCode.PartialFactSnapshot, DoctorEvaluator.Evaluate(snapshot).Code);
     }
 
     [Fact]
@@ -295,6 +306,24 @@ public sealed class ClaudeDoctorFactMapperTests
     }
 
     [Fact]
+    public void Map_ExactBindingWithUnboundSessionCompleteness_NormalizesCompletenessToUnknown()
+    {
+        var snapshot = Map(HealthyInputs(Window(
+            acceptedIngestExists: true,
+            rawPersistenceCandidateExists: true,
+            projectionCandidateExists: true,
+            exactSessionBindingCandidateExists: true,
+            boundSessionCompleteness: ClaudeBoundSessionCompleteness.Unbound)));
+
+        Assert.Equal(
+            ExactSessionBindingOutcome.ExactBound,
+            snapshot.ExactSessionBinding!.Outcome);
+        Assert.Equal(DoctorCompleteness.Unknown, snapshot.CompletenessAndContent!.Completeness);
+        Assert.True(DoctorValidation.IsValidFactSnapshot(snapshot));
+        AssertPrimaryState(DoctorEvaluator.Evaluate(snapshot), DoctorStateCode.ReadyNoRealTrace);
+    }
+
+    [Fact]
     public void Map_AppliedChangeSetWithoutPostApplyIngest_EvaluatesRestartRequired()
     {
         var result = Evaluate(HealthyInputs() with
@@ -373,6 +402,103 @@ public sealed class ClaudeDoctorFactMapperTests
     {
         var inputs = Assert.IsType<ClaudeDoctorFactInputs>(input);
         Assert.True(DoctorValidation.IsValidFactSnapshot(Map(inputs)));
+    }
+
+    [Fact]
+    public void Map_AllWindowStateCartesianCombinations_ProduceValidAndExpectedEvaluations()
+    {
+        var projectionStates = new[]
+        {
+            (
+                Name: "unknown",
+                AcceptedIngestExists: true,
+                RawPersistenceCandidateExists: false,
+                ProjectionCandidateExists: false,
+                ProjectionEvidence: ClaudeProjectionEvidence.NotStarted,
+                ExpectedCode: DoctorResultCode.PartialFactSnapshot,
+                ExpectedPrimary: (DoctorStateCode?)null),
+            (
+                Name: "not_started",
+                AcceptedIngestExists: true,
+                RawPersistenceCandidateExists: true,
+                ProjectionCandidateExists: false,
+                ProjectionEvidence: ClaudeProjectionEvidence.NotStarted,
+                ExpectedCode: DoctorResultCode.EvaluationCompleted,
+                ExpectedPrimary: (DoctorStateCode?)DoctorStateCode.RawPersistedProjectionPending),
+            (
+                Name: "pending",
+                AcceptedIngestExists: true,
+                RawPersistenceCandidateExists: true,
+                ProjectionCandidateExists: false,
+                ProjectionEvidence: ClaudeProjectionEvidence.Pending,
+                ExpectedCode: DoctorResultCode.EvaluationCompleted,
+                ExpectedPrimary: (DoctorStateCode?)DoctorStateCode.RawPersistedProjectionPending),
+            (
+                Name: "failed",
+                AcceptedIngestExists: true,
+                RawPersistenceCandidateExists: true,
+                ProjectionCandidateExists: false,
+                ProjectionEvidence: ClaudeProjectionEvidence.Failed,
+                ExpectedCode: DoctorResultCode.EvaluationCompleted,
+                ExpectedPrimary: (DoctorStateCode?)DoctorStateCode.ProjectionFailed),
+            (
+                Name: "completed",
+                AcceptedIngestExists: true,
+                RawPersistenceCandidateExists: true,
+                ProjectionCandidateExists: true,
+                ProjectionEvidence: ClaudeProjectionEvidence.NotStarted,
+                ExpectedCode: DoctorResultCode.EvaluationCompleted,
+                ExpectedPrimary: (DoctorStateCode?)DoctorStateCode.ReadyNoRealTrace),
+        };
+
+        foreach (var projectionState in projectionStates)
+        {
+            foreach (var exactSessionBindingCandidateExists in new[] { false, true })
+            {
+                foreach (var boundSessionCompleteness in Enum.GetValues<ClaudeBoundSessionCompleteness>())
+                {
+                    foreach (var agreedContentState in Enum.GetValues<ClaudeAgreedContentState>())
+                    {
+                        var inputs = HealthyInputs(Window(
+                            acceptedIngestExists: projectionState.AcceptedIngestExists,
+                            rawPersistenceCandidateExists: projectionState.RawPersistenceCandidateExists,
+                            projectionCandidateExists: projectionState.ProjectionCandidateExists,
+                            projectionEvidence: projectionState.ProjectionEvidence,
+                            exactSessionBindingCandidateExists: exactSessionBindingCandidateExists,
+                            boundSessionCompleteness: boundSessionCompleteness,
+                            agreedContentState: agreedContentState));
+                        var snapshot = Map(inputs);
+                        var result = DoctorEvaluator.Evaluate(snapshot);
+                        var caseName = $"{projectionState.Name}/binding={exactSessionBindingCandidateExists}/" +
+                            $"completeness={boundSessionCompleteness}/content={agreedContentState}";
+                        var expectedPrimary = projectionState.ExpectedPrimary;
+                        if (projectionState.Name == "completed" && !exactSessionBindingCandidateExists)
+                        {
+                            expectedPrimary = DoctorStateCode.SessionUnbound;
+                        }
+
+                        Assert.True(DoctorValidation.IsValidFactSnapshot(snapshot), caseName);
+                        Assert.NotEqual(DoctorResultCode.InvalidInput, result.Code);
+                        Assert.Equal(projectionState.ExpectedCode, result.Code);
+                        if (expectedPrimary is { } primary)
+                        {
+                            AssertPrimaryState(result, primary);
+                        }
+                        else
+                        {
+                            Assert.NotNull(result.Evaluation);
+                            Assert.Null(result.Evaluation!.PrimaryState);
+                        }
+                    }
+                }
+            }
+        }
+
+        var preWindowSnapshot = Map(HealthyInputs());
+        var preWindowResult = DoctorEvaluator.Evaluate(preWindowSnapshot);
+
+        Assert.True(DoctorValidation.IsValidFactSnapshot(preWindowSnapshot), "pre-window");
+        AssertPrimaryState(preWindowResult, DoctorStateCode.ReadyNoRealTrace);
     }
 
     [Fact]

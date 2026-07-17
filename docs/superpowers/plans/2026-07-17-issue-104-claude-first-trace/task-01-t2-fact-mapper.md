@@ -33,7 +33,7 @@
 
   Add one evaluator-backed test for each blocker/advisory branch required by the brief: endpoint mismatch, disabled signal, unsupported source version, foreign port owner, no listener, rejected ingest, raw-persisted projection pending, projection failed, completed unbound session, restart required, schema drift, disabled content, sanitized-only raw access, and non-live runtime row producing unknown raw access.
 
-  Add a representative matrix over no-window and window states, including accepted/rejected ingest, raw/projection/binding candidate presence, projection evidence, every bound completeness value, content agreement states, every runtime raw-access state, compatibility states, and ledger states. Assert every mapped snapshot passes `DoctorValidation.IsValidFactSnapshot`.
+  Keep the representative coverage for the remaining detector, resolver, runtime, and ledger inputs, and add a deterministic full Cartesian sweep over the window states: projection state (`unknown`, `not_started`, `pending`, `failed`, `completed`) x binding candidate state x every bound-session completeness value x every agreed content state, plus the pre-window shape. Assert every mapped snapshot passes `DoctorValidation.IsValidFactSnapshot` and that `DoctorEvaluator.Evaluate` returns the expected result class rather than `InvalidInput`.
 
   Add a same-input determinism test using equal timestamps and verification identity and assert the complete snapshots are equal.
 
@@ -83,7 +83,9 @@
 
 - [ ] **Step 3: Implement window and content rules**
 
-  With no window, emit exactly `last_ingest = none`, `raw_persistence = not_persisted`, `projection = not_started`, `exact_session_binding = (not_required, not_applicable)`, and completeness `unknown`. With a window, prioritize accepted ingest over rejected, derive raw persistence only from raw candidates or accepted-without-raw, derive projection completion from a projection candidate otherwise from persisted projection evidence, and transition binding to required only after projection completion. Map completeness only from an exact binding, map agreed content state before falling back to effective content-gate settings, and trust runtime raw access only for `MonitorLive`.
+  With no window, emit exactly `last_ingest = none`, `raw_persistence = not_persisted`, `projection = not_started`, `exact_session_binding = (not_required, not_applicable)`, and completeness `unknown`. With a window, prioritize accepted ingest over rejected, derive raw persistence only from raw candidates or accepted-without-raw, derive projection completion from a projection candidate otherwise from persisted projection evidence, and transition binding to required only after projection completion. Map completeness only from an exact binding, map agreed content state before falling back to effective content-gate settings, and trust runtime raw access only for `MonitorLive`. If an exact-bound input simultaneously claims `unbound` Session completeness, resolve the contradictory pair to `exact_bound` plus completeness `unknown`, preserving the binding evidence without claiming an invalid `unbound` completeness.
+
+  Endpoint resolver `Conflict` maps to `EndpointAlignmentStatus.Unknown`: a precedence winner is an effective value and therefore is not a conflict; only a conflict with no effective value remains unknown.
 
 - [ ] **Step 4: Run the focused test to verify GREEN**
 
@@ -112,4 +114,4 @@
 
 - [ ] **Step 3: Inspect the diff and commit**
 
-  Preserve the pre-existing `docs/superpowers/plans/2026-07-17-issue-104-claude-first-trace/ledger.md` change. Commit only the mapper plan and T2 files with a message beginning `Issue #104: feat(first-trace): ` and a body explaining that the 104-A contract pins the twelve-family mapping before orchestration exists.
+  Preserve the pre-existing `docs/superpowers/plans/2026-07-17-issue-104-claude-first-trace/ledger.md` change. Commit only the mapper plan and T2 files with a message beginning `Issue #104: fix(first-trace): ` and a body explaining that review proved an invalid cross-field snapshot was reachable and the conflict mapping contradicted the pinned rule.
