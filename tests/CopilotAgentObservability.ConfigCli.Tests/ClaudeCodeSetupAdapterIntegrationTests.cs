@@ -59,6 +59,23 @@ public sealed partial class ClaudeCodeSetupAdapterTests
     }
 
     [Fact]
+    public void AdapterRevalidate_ChangedCliApply_OrdersRestartBeforeFirstTraceHandoff()
+    {
+        var platform = ReadyWindowsPlatform("{}\n");
+        var adapter = CreateAdapter(platform);
+        var planned = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            new SetupAdapterRegistry([adapter]).Plan(Request("cli", includeContentCapture: false))).Value;
+        ScriptVersionAndReadiness(platform);
+
+        var result = adapter.Revalidate(planned.PrivatePlan, planned.PlannedChangeSet);
+
+        var success = Assert.IsType<SetupPlanSuccess<SetupRevalidation>>(result);
+        Assert.Equal(
+            [SetupCodes.RestartClaudeProcess, SetupCodes.RunFirstTraceDoctor],
+            success.NextActions);
+    }
+
+    [Fact]
     public void AdapterPlan_CliExplicitContentCapture_ManagesExactlyThreeAdditionalGates()
     {
         var platform = ReadyWindowsPlatform("{}\n");

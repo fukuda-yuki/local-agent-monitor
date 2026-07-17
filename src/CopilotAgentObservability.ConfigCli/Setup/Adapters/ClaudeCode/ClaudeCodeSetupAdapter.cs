@@ -175,10 +175,19 @@ internal sealed class ClaudeCodeSetupAdapter : ISetupAdapter
         var materialized = writablePlanTargets[0].Members.Any(member => member.Operation != SetupOperation.NoOp)
             ? new[] { new SetupMaterializedTarget(record.RecordId, cliPlan.DesiredBytes, SetupHash.File(true, cliPlan.DesiredBytes)) }
             : [];
+        var nextActions = ((SetupPlanSuccess<CliPlan>)result).NextActions.ToList();
+        if (materialized.Length > 0
+            && !nextActions.Contains(SetupCodes.RunFirstTraceDoctor, StringComparer.Ordinal))
+        {
+            var restartIndex = nextActions.IndexOf(SetupCodes.RestartClaudeProcess);
+            nextActions.Insert(
+                restartIndex < 0 ? nextActions.Count : restartIndex + 1,
+                SetupCodes.RunFirstTraceDoctor);
+        }
         return SetupPlanResult.Revalidated(
             materialized,
             ((SetupPlanSuccess<CliPlan>)result).Warnings,
-            ((SetupPlanSuccess<CliPlan>)result).NextActions);
+            nextActions);
     }
 
     private SetupPlanResult<CliPlan> PlanCli(
