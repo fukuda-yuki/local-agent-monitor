@@ -152,7 +152,9 @@ adds no parallel failure vocabulary.
    `completeness_and_content.completeness = unknown`. These are the same
    pre-trace values the Doctor contract's own `ready_no_real_trace` shape
    uses, so a healthy environment evaluates to `ready_no_real_trace`, never to
-   `partial_fact_snapshot`, before any window exists.
+   `partial_fact_snapshot`, before any window exists. (Unknown completeness
+   prevents a Doctor conclusion only when every other `first_trace_ready`
+   requirement is already met; with `last_ingest = none` it never does.)
 2. Evaluate with the frozen Doctor evaluator.
 3. If any blocking state applies: return `first_trace_blocked` with the
    evaluation embedded in `doctor`. Guidance may add copyable setup commands
@@ -164,7 +166,10 @@ adds no parallel failure vocabulary.
    active, non-expired `claude-code` verification already exists — including
    one created by a concurrent `begin` — the command deterministically returns
    `active_verification_exists` with that verification's id and creates
-   nothing. No retry, sleep, or best-effort pre-check is involved.
+   nothing. If more than one active verification exists (possible only through
+   the non-exclusive Doctor `start` verb), the one with the smallest
+   `(started_at, verification_id)` is returned. No retry, sleep, or
+   best-effort pre-check is involved.
 5. On a successful start return `first_trace_verification_started` with the
    Doctor start result embedded, restart/new-shell guidance, and the
    bounded-interaction guidance for the selected interaction variant(s).
@@ -198,16 +203,19 @@ exactly as the Doctor contract defines them (read-time derived state).
 - With `--evidence` refs: pass them through to Doctor completion unchanged.
 - Without `--evidence`: group current non-expired `real_source` candidates
   into chains keyed on the exactly-bound Session. Each `exact_session_binding`
-  ref names one `(traceId, sessionGuid)` pair; a Session's chain is all
-  binding refs naming its GUID, every `ingest`/`raw_persistence`/`projection`
-  candidate whose trace ID appears in one of those binding refs, and the
-  Session's `completeness_content` candidate. Candidates whose trace ID
-  appears in no binding ref form one trace-keyed group per trace ID. Auto-
-  selection happens only when exactly one group exists in total; then all of
-  its refs are selected deterministically. If a trace ID is claimed by more
-  than one Session's binding refs, or more than one group exists, return
-  `explicit_evidence_selection_required` with the candidate list. Ordering or
-  recency never selects a group.
+  ref names one `(traceId, sessionGuid)` pair, and the observer emits such a
+  ref only for a record of exactly that trace that exactly bound to exactly
+  that Session — so the grouping below reproduces persisted observer
+  decisions, never string proximity. A Session's chain is all binding refs
+  naming its GUID, every `ingest`/`raw_persistence`/`projection` candidate
+  whose trace ID appears in one of those binding refs, and the Session's
+  `completeness_content` candidate. Candidates whose trace ID appears in no
+  binding ref form one trace-keyed group per trace ID. Auto-selection happens
+  only when exactly one group exists in total; then all of its refs are
+  selected, ordered by ordinal comparison of the ref strings. If a trace ID is
+  claimed by more than one Session's binding refs, or more than one group
+  exists, return `explicit_evidence_selection_required` with the candidate
+  list. Ordering or recency never selects a group.
 - The completion fact snapshot carries no inline observations (the Doctor
   store constructs trusted observations from resolved candidates).
 
@@ -283,6 +291,10 @@ into Doctor evidence candidates through the existing internal
   Session identifier. Refs never contain native session IDs, paths, prompts,
   tool arguments/results, credentials, or PII, and must satisfy the Doctor
   contract's evidence-reference validation.
+- **Candidate timestamps.** A candidate's `observed_at` is the persisted
+  record timestamp that was compared against the verification window (never
+  the sweep's wall clock), and its `expires_at` equals the verification's
+  `expires_at`.
 - **Storage.** The Doctor verification tables and the ingestion pipeline
   tables live in the same monitor SQLite database; the ConfigCli process reads
   candidates from that database through the Doctor application service.
@@ -346,6 +358,9 @@ serialized envelope, candidate ref, log line, or committed fixture.
 - GitHub Copilot first-trace orchestration (#103) and the shared proxy/UI or
   Release ZIP closeout (#105).
 - Any change to `doctor.v1` / `doctor.facts.v1` vocabulary, precedence,
-  verification identity, HTTP routes, or SQLite schema.
+  verification identity, HTTP routes, or the SQLite schema of the Doctor
+  tables. (The monitor runtime-state row is a monitor-owned addition through
+  the monitor database's existing migration mechanism, not a Doctor-schema
+  change.)
 - Synthetic probe generation, historical backfill, remote collectors, Claude
   desktop, or claude.ai web.

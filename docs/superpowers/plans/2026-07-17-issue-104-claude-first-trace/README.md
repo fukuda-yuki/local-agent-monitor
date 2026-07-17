@@ -26,10 +26,13 @@ cross-layer contract table, and the execution/verification order.
   only from `ClaudeExactBindingRule` (extracted from
   `SqliteSessionOtelEnricher`), never from persisted `source_adapter` labels or
   `trace_id` continuity.
-- **D2 Store reads:** `ListActive(sourceSurface, now)` and
-  `ListCandidates(verificationId)` added to `SqliteDoctorVerificationStore` +
-  `SqliteDoctorApplicationService` only (source-neutral, reusable by #103). The
-  public `IDoctorVerificationStore` contract and SQLite schema are unchanged.
+- **D2 Store operations:** `ListActive(sourceSurface, now)`,
+  `ListCandidates(verificationId)`, and an atomic internal exclusive start
+  added to `SqliteDoctorVerificationStore` + `SqliteDoctorApplicationService`
+  only (source-neutral, reusable by #103). The public
+  `IDoctorVerificationStore` contract and the Doctor tables' SQLite schema are
+  unchanged; the separate monitor runtime-state row (raw-access fact input) is
+  a monitor-owned addition via the existing monitor migration mechanism.
 - **D3 Orchestration:** new source-neutral top-level CLI verb group
   `first-trace` (`begin`/`status`/`complete`/`cancel`) as a third
   application-level boundary beside `setup` and `doctor`. Claude-specific logic

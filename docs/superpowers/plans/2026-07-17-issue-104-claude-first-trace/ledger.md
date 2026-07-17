@@ -93,4 +93,27 @@ Resolutions applied in the T0 revision commit:
    store transaction (spec'd under Internal store operations); adds a small
    internal store write to T6 scope.
 
+T0 re-review (Codex Luna xhigh, read-only, on f012db9): VERDICT REVISE —
+2/9 not resolved + 1 new. Adjudication:
+
+- Finding 1 "still partial_fact_snapshot": REJECTED after code verification.
+  `DoctorEvaluator.UnknownPreventsConclusion` treats unknown completeness as
+  blocking only when `MeetsFirstTraceRequirementsExceptKnownContent` is true;
+  with `last_ingest = none` it is false, so the pre-window snapshot concludes
+  `ready_no_real_trace` (DoctorEvaluator.cs:146-149). A clarifying sentence
+  was added to the spec; no rule change.
+- Finding 4 schema-wording contradiction: ACCEPTED — Non-scope now says
+  "SQLite schema of the Doctor tables"; README D2 reworded; runtime-state row
+  is a monitor-owned migration.
+- Finding 7 chain-grouping soundness/ordering: ACCEPTED — spec now states the
+  grouping reproduces persisted observer decisions (binding refs are emitted
+  only for the exact record/trace/Session decision) and pins ordinal ref
+  ordering for auto-selection.
+- NEW-1 multiple actives: ACCEPTED — smallest `(started_at,
+  verification_id)` returned.
+
+T3 review #1 (Codex Luna xhigh, read-only, on 07f44c1): VERDICT REVISE —
+(1) atomic exclusive start missing (moved from T6 scope into a T3 fix
+dispatch), (2) ListActive expiry boundary test missing. Fix dispatched.
+
 Minor items for final review triage: (none yet)
