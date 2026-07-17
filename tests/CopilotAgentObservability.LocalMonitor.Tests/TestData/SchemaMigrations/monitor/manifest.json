@@ -66,6 +66,22 @@
         "spanRowId": 404,
         "spanId": "fixture-monitor-v4-span"
       }
+    },
+    {
+      "version": 5,
+      "file": "monitor-v5.sqlite",
+      "sourceCommit": "d21fbb429b8301a8a1bb14ea785a0e047edbd269",
+      "sha256": "d883cbf085d012eb0deae061c1baffcfb0f6b356f86d6a030dbff3ea2d021e33",
+      "gitStatusBefore": "",
+      "gitStatusAfter": "",
+      "sentinels": {
+        "rawRecordId": 501,
+        "ingestionId": 502,
+        "traceRowId": 503,
+        "traceId": "fixture-monitor-v5-trace",
+        "spanRowId": 504,
+        "spanId": "fixture-monitor-v5-span"
+      }
     }
   ]
 }

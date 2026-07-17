@@ -90,6 +90,12 @@ internal static class MonitorHost
         var compatibilityStore = testOptions?.SourceCompatibilityStore
             ?? new SqliteSourceCompatibilityStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         compatibilityStore.CreateSchema();
+        var runtimeStateStore = new SqliteMonitorRuntimeStateStore(
+            options.DatabasePath,
+            timeProvider,
+            RawTelemetryStoreConnectionOptions.MonitorWriter);
+        runtimeStateStore.CreateSchema();
+        runtimeStateStore.Upsert(options.SanitizedOnly);
         if (testOptions?.StartWriter ?? true)
         {
             var commitStore = testOptions?.IngestionCommitStore
