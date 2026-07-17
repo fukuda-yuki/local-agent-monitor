@@ -8,6 +8,7 @@ namespace CopilotAgentObservability.Doctor.Tests.Persistence;
 public sealed class DoctorMigrationTests
 {
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateMonitorSchemaFixtures/GenerateMonitorSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/monitor";
+    private const int CurrentMonitorSchemaVersion = SqliteSourceCompatibilityStore.MonitorSchemaVersion;
 
     public static TheoryData<int, string> HistoricalSchemas => new()
     {
@@ -33,7 +34,7 @@ public sealed class DoctorMigrationTests
 
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
-    public void HistoricalMonitorFixture_MigratesThroughV5ThenDoctorV1AndRestartsIdempotently(int version, string sourceCommit)
+    public void HistoricalMonitorFixture_MigratesThroughCurrentMonitorVersionThenDoctorV1AndRestartsIdempotently(int version, string sourceCommit)
     {
         var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "monitor");
         var manifestPath = Path.Combine(fixtureDirectory, "manifest.json");
@@ -70,7 +71,7 @@ public sealed class DoctorMigrationTests
         using (var firstRestart = database.Open())
         {
             AssertMigratedState(firstRestart, fixture.Sentinels);
-            AssertCurrentMonitorV5Schema(firstRestart);
+            AssertCurrentMonitorSchema(firstRestart);
             firstRestartRows = SnapshotDoctorRows(firstRestart);
         }
 
@@ -97,7 +98,7 @@ public sealed class DoctorMigrationTests
         using (var secondRestart = database.Open())
         {
             AssertMigratedState(secondRestart, fixture.Sentinels);
-            AssertCurrentMonitorV5Schema(secondRestart);
+            AssertCurrentMonitorSchema(secondRestart);
             Assert.Equal(firstRestartRows, SnapshotDoctorRows(secondRestart));
             Assert.Equal(
                 1L,
@@ -134,7 +135,7 @@ public sealed class DoctorMigrationTests
         using (var connection = database.Open())
         {
             before = SnapshotDatabase(connection);
-            Assert.Equal(5L, DoctorTestDatabase.Scalar(connection, "SELECT version FROM schema_version WHERE component='monitor';"));
+            Assert.Equal((long)CurrentMonitorSchemaVersion, DoctorTestDatabase.Scalar(connection, "SELECT version FROM schema_version WHERE component='monitor';"));
             Assert.Null(DoctorTestDatabase.Scalar(connection, "SELECT version FROM schema_version WHERE component='doctor';"));
         }
 
@@ -180,7 +181,7 @@ public sealed class DoctorMigrationTests
     private static void AssertMigratedState(SqliteConnection connection, FixtureSentinels sentinels)
     {
         Assert.Equal(
-            ["doctor|1", "monitor|5"],
+            ["doctor|1", $"monitor|{CurrentMonitorSchemaVersion}"],
             DoctorTestDatabase.Rows(connection, "SELECT component,version FROM schema_version ORDER BY component;"));
         Assert.Equal(sentinels.RawRecordId, DoctorTestDatabase.Scalar(connection, "SELECT id FROM raw_records WHERE id=$id;", ("$id", sentinels.RawRecordId)));
         Assert.Equal(sentinels.IngestionId, DoctorTestDatabase.Scalar(connection, "SELECT id FROM monitor_ingestions WHERE id=$id;", ("$id", sentinels.IngestionId)));
@@ -197,12 +198,12 @@ public sealed class DoctorMigrationTests
         }
         Assert.Equal("ok", DoctorTestDatabase.Scalar(connection, "PRAGMA integrity_check;"));
         Assert.Equal(2L, DoctorTestDatabase.Scalar(connection, "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('doctor_verifications','doctor_verification_evidence');"));
-        Assert.Equal(5L, DoctorTestDatabase.Scalar(connection, "SELECT version FROM schema_version WHERE component='monitor';"));
+        Assert.Equal((long)CurrentMonitorSchemaVersion, DoctorTestDatabase.Scalar(connection, "SELECT version FROM schema_version WHERE component='monitor';"));
         Assert.Equal(1L, DoctorTestDatabase.Scalar(connection, "SELECT version FROM schema_version WHERE component='doctor';"));
         Assert.True(DoctorSchemaV1.IsValid(connection, transaction: null));
     }
 
-    private static void AssertCurrentMonitorV5Schema(SqliteConnection connection)
+    private static void AssertCurrentMonitorSchema(SqliteConnection connection)
     {
         Assert.Equal(
             [
