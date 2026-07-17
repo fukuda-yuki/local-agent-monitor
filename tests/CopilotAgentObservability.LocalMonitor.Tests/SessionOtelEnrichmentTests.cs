@@ -86,6 +86,47 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Equal("exact_linked", projection.BindingState);
     }
 
+    [Theory]
+    [InlineData(SessionBindingKind.ExplicitResume)]
+    [InlineData(SessionBindingKind.ExplicitHandoff)]
+    public void ProcessNextBatch_ClaudeExplicitResumeAndHandoffRemainExactBindings(SessionBindingKind bindingKind)
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = PrepareClaudeFixture(temp.DatabasePath, ReadClaudeFixture());
+        var sessionId = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", bindingKind);
+
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1);
+
+        var detail = store.GetDetail(sessionId)!;
+        Assert.Single(detail.Events, item => item.SourceAdapter == "claude-code-otel");
+        Assert.Equal(bindingKind, Assert.Single(detail.NativeIds).BindingKind);
+        Assert.Equal(SessionCompleteness.Full, detail.Session.Completeness);
+    }
+
+    [Fact]
+    public void ProcessNextBatch_GenericPathStillUsesSharedTraceIdContinuity()
+    {
+        using var temp = new MonitorTempDirectory();
+        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var sessionId = Guid.CreateVersion7();
+        var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+        store.Write(new(new(
+            new ObservedSession(
+                sessionId, ObservedSessionStatus.Unknown, SessionCompleteness.Unbound,
+                null, null, null, null, now, SessionRawRetentionState.NotCaptured, now, now),
+            [],
+            [],
+            [Event(sessionId, "trace-context", "UserPromptSubmit", now) with { TraceId = "shared-trace-id" }]),
+            []));
+        InsertProjectedSpan(temp.DatabasePath, "shared-trace-id", "shared-span-1", null, "unrecognized-client", "generic-repo", now.AddSeconds(1));
+
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1);
+
+        Assert.Single(store.GetDetail(sessionId)!.Events, item => item.SourceEventId == "shared-trace-id/shared-span-1");
+    }
+
     [Fact]
     public void ProcessNextBatch_GenericPathWithoutHookSessionCreatesFreshUnboundSession()
     {
