@@ -14,9 +14,9 @@ integration step. Trust this file plus `git log` over conversation memory.
 | --- | --- | --- | --- | --- | --- |
 | T0 docs/specs/contract table | revised | b43ed58 + revision commit | n/a (docs) | — | Codex Luna xhigh read-only review #1: REVISE (1 Critical, 8 Important — all resolved in revision; log below); re-review pending |
 | T1 red cross-surface test | pending | — | — | — | — |
-| T2 fact mapper | pending | — | — | — | — |
+| T2 fact mapper | impl done, fix in progress | b6e5bbf | mapper 71/0; build clean | — | review #1 REVISE (1 Critical invalid cross-field combo reachable; Conflict→Mismatch wrong, spec pins Unknown; sweep not exhaustive); fix dispatched |
 | T3 store reads | done | 07f44c1 | Store 58/0, AppService 9/0, Migration 12/0 | solution 5554/0 by implementer | independent review pending (batch with T4) |
-| T4 binding rule + observer | pending | — | — | — | — |
+| T4 binding rule + observer | done + fix | 6270a83, 1ed3e12, eb00ac5 | Observer 10/0, Doctor 252/0 after fix | implementer's full run timed out at 600s (gate reruns at T7/T9) | review #1 REVISE (4 findings) → all fixed in eb00ac5; re-review dispatched |
 | T5 fact collector | pending | — | — | — | — |
 | T6 first-trace verbs + adapter | pending | — | — | — | — |
 | T-109 projection defect fix | pending | — | — | — | — |
@@ -57,6 +57,10 @@ integration step. Trust this file plus `git log` over conversation memory.
 | File | Task | Change | Source-neutral? |
 | --- | --- | --- | --- |
 | `docs/specifications/interfaces/configuration-setup.md` | T0 | Claude completion boundary + `run_first_trace_doctor` row activation | Claude-scoped rows only; no Copilot text touched |
+| `SqliteDoctorVerificationStore.cs` + `SqliteDoctorApplicationService.cs` | T3 | internal ListActive/ListCandidates/StartExclusive + DoctorStoreOutcome member | source-neutral; public contract/schema untouched |
+| `MonitorHost.cs` | T4 (1ed3e12) | 2 usings + testOptions-gated observer/worker registration (7 lines) | registration shape source-neutral; observer itself Claude-specific |
+| `Telemetry/Properties/AssemblyInfo.cs` | T4 (1ed3e12) | +1 InternalsVisibleTo(Doctor.Tests) | additive, source-neutral |
+| `SqliteSessionOtelEnricher.cs` | T4 (6270a83) | delegates binding decision to extracted ClaudeExactBindingRule; behavior pinned by tests first | Claude path only; generic/Copilot path untouched |
 
 ## Review findings log
 
@@ -111,6 +115,16 @@ T0 re-review (Codex Luna xhigh, read-only, on f012db9): VERDICT REVISE —
   ordering for auto-selection.
 - NEW-1 multiple actives: ACCEPTED — smallest `(started_at,
   verification_id)` returned.
+
+T4 review #1 (Codex Luna xhigh, read-only, on 6270a83+1ed3e12): VERDICT
+REVISE. Confirmed sound: extraction byte-identical (#109 untouched), observer
+uses only source_schema_observations recognition metadata (no otel-exact / no
+trace-id continuity), refs/timestamps/adapter/real_source/dedup/wiring/SQL
+compliant, busy aborts recompute safely. Fixes required: (1) skip records with
+received_at >= verification expires_at (would emit invalid candidates), (2)
+#109(a) regression must drive completion to session_unbound, (3) #109(b) must
+assert no exact_bound through the fact/completion path, (4) minor: no-active
+test lacks an assertion. Fix dispatch queued behind the running T2 writer.
 
 T3 review #1 (Codex Luna xhigh, read-only, on 07f44c1): VERDICT REVISE —
 (1) atomic exclusive start missing (moved from T6 scope into a T3 fix
