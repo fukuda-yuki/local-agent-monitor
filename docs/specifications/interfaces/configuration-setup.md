@@ -1582,11 +1582,13 @@ means only that guidance is available.
 
 ### Claude completion boundary
 
-A successful changed CLI target returns next action
-`restart_claude_process`; the target restart requirement is
-`restart_agent_process`. Setup verifies only static settings and endpoint
-reachability. It does not emit `run_first_trace_doctor`, wait for telemetry, or
-claim a first real trace. Issue #104 owns first-real-trace and Doctor mapping.
+A successful changed CLI target returns next actions
+`restart_claude_process` followed by `run_first_trace_doctor`; the target
+restart requirement is `restart_agent_process`. Setup verifies only static
+settings and endpoint reachability. It does not wait for telemetry or claim a
+first real trace: `run_first_trace_doctor` is a handoff to the first-trace
+orchestration flow (`claude-first-trace.md`), never telemetry evidence.
+Issue #104 owns first-real-trace and Doctor mapping.
 
 ## GitHub Copilot endpoint and error-state detection
 
@@ -1646,7 +1648,7 @@ The `next_actions` allowlist is also closed and exhaustive:
 | `start_local_monitor` | endpoint probe proves no listener |
 | `review_content_capture_warning` | explicit sensitive content capture was requested |
 | `review_cli_trace_protocol_override` | trace-specific protocol override blocks the requested global protocol |
-| `run_first_trace_doctor` | reserved for downstream first-trace work; Issue #68 never emits it and Claude handoff is Issue #104 |
+| `run_first_trace_doctor` | emitted only by the `claude-code` adapter for a successful changed CLI apply, after `restart_claude_process`; hands off to the first-trace flow (`claude-first-trace.md`). GitHub Copilot setup never emits it |
 | `rerun_requested_setup_command` | mandatory recovery completed instead of the requested command |
 
 ## Security and evidence rules
