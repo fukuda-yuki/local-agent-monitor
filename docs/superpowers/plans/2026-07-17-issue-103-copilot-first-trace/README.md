@@ -36,7 +36,7 @@ verification satisfies exact adapter equality.
 | Setup target | Doctor `source_surface` | Doctor `source_adapter` | Accepted underlying provenance |
 | --- | --- | --- | --- |
 | VS Code Copilot Chat | `github-copilot-vscode` | `github-copilot-doctor` | exact selected raw record with `client.kind=vscode-copilot-chat`; optional exact-linked Session surface `vscode` with actual adapter `copilot-compatible-hook` or exact OTel enrichment |
-| Copilot CLI | `github-copilot-cli` | `github-copilot-doctor` | exact selected raw record with `client.kind=copilot-cli`; optional exact-linked Session surface `copilot-cli` with actual adapter `copilot-compatible-hook` or exact OTel enrichment |
+| Copilot CLI | `github-copilot-cli` | `github-copilot-doctor` | exact selected raw record whose resource `service.name=github-copilot` and span-bearing instrumentation scope name is `github.copilot`, the documented CLI canonical pair; optional exact-linked Session surface `copilot-cli` with actual adapter `copilot-compatible-hook` or exact OTel enrichment; no global `client.kind` is required or inferred |
 | caller-managed App/SDK | `github-copilot-app-sdk` | `github-copilot-doctor` | explicit native Session selection on surface `copilot-sdk` / adapter `copilot-sdk-stream`, plus its exact-linked OTel raw record when ingest/persistence/projection are claimed |
 
 The composite capability labels containing `+` are registry descriptions, not

@@ -164,6 +164,14 @@ raw/Session identity, actual source adapter, and exact linkage needed by the
 claimed evidence kind. Capability-manifest composite adapter labels are not
 Doctor adapter tokens and capability declaration is not observed evidence.
 
+For Copilot CLI OTLP, the exact selected raw record is source-owned only when
+its resource `service.name` is the documented canonical `github-copilot` and
+at least one scope containing a span is named the documented canonical
+`github.copilot`. The #67 setup adapter does not set `OTEL_SERVICE_NAME` or
+`COPILOT_OTEL_SOURCE_NAME`; a different or missing value is therefore unknown
+provenance and produces no candidate. Copilot CLI does not require or infer a
+global `client.kind` resource attribute.
+
 Setup detect/plan/apply/no-op/rollback/status may populate only directly
 observed install/version, receiver/port, effective configuration, reachability,
 protocol/signal, and restart/new-process facts. Setup success and synthetic

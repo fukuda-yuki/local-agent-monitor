@@ -558,7 +558,13 @@ public sealed class GitHubCopilotDoctorOrchestratorTests
         new SqliteSourceCompatibilityStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
         var payload = "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"client.kind\",\"value\":{\"stringValue\":\""
             + clientKind
-            + "\"}}]},\"scopeSpans\":[{\"spans\":[{\"traceId\":\""
+            + "\"}}"
+            + (clientKind == "copilot-cli"
+                ? ",{\"key\":\"service.name\",\"value\":{\"stringValue\":\"github-copilot\"}}"
+                : string.Empty)
+            + "]},\"scopeSpans\":[{"
+            + (clientKind == "copilot-cli" ? "\"scope\":{\"name\":\"github.copilot\"}," : string.Empty)
+            + "\"spans\":[{\"traceId\":\""
             + TraceId
             + "\",\"spanId\":\"span\"}]}]}]}";
         var inventory = OtlpJsonStructuralWalker.Build(payload, Now);

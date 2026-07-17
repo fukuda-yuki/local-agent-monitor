@@ -11,6 +11,84 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 17, 1, 2, 3, TimeSpan.Zero);
 
+    [Fact]
+    public void Observe_CliAcceptsCanonicalServiceAndSpanBearingScopeWithoutClientKind()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        var rawRecordId = CommitCliRaw(
+            database.Path,
+            serviceName: "github-copilot",
+            scopeName: "github.copilot",
+            includeSpan: true,
+            includeUnrelatedSpanBearingScope: true);
+
+        var observed = Observe(database.Path, verification.VerificationId, "cli", rawRecordId);
+
+        Assert.Equal(
+            [DoctorEvidenceKind.Ingest, DoctorEvidenceKind.RawPersistence, DoctorEvidenceKind.Projection],
+            observed.ObservedKinds);
+        Assert.Equal(3, observed.EvidenceRefs.Count);
+        Assert.Equal(LastIngestOutcome.Accepted, observed.Snapshot.LastIngest!.Outcome);
+        Assert.Equal(RawPersistenceOutcome.Persisted, observed.Snapshot.RawPersistence!.Outcome);
+        Assert.Equal(ProjectionOutcome.NotStarted, observed.Snapshot.Projection!.Outcome);
+    }
+
+    [Fact]
+    public void Observe_CliRejectsCanonicalServiceAndScopeSplitAcrossResourceSpans()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        var rawRecordId = CommitCliRawWithSplitProvenance(database.Path);
+
+        var observed = Observe(database.Path, verification.VerificationId, "cli", rawRecordId);
+
+        Assert.Empty(observed.ObservedKinds);
+        Assert.Empty(observed.EvidenceRefs);
+        Assert.Empty(ReadCandidates(database.Path, verification.VerificationId));
+        AssertUnattributedUnknown(observed);
+    }
+
+    [Fact]
+    public void Observe_CliUsesOnlyExplicitSelectedRawId_WhenCanonicalDecoyExists()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        var selectedRawRecordId = CommitCliRaw(database.Path, "not-github-copilot", "github.copilot", includeSpan: true);
+        _ = CommitCliRaw(database.Path, "github-copilot", "github.copilot", includeSpan: true);
+
+        var observed = Observe(database.Path, verification.VerificationId, "cli", selectedRawRecordId);
+
+        Assert.Empty(observed.ObservedKinds);
+        Assert.Empty(observed.EvidenceRefs);
+        Assert.Empty(ReadCandidates(database.Path, verification.VerificationId));
+        AssertUnattributedUnknown(observed);
+    }
+
+    [Theory]
+    [InlineData(null, "github.copilot", true, null)]
+    [InlineData("not-github-copilot", "github.copilot", true, null)]
+    [InlineData("github-copilot", null, true, null)]
+    [InlineData("github-copilot", "not-github.copilot", true, null)]
+    [InlineData("github-copilot", "github.copilot", false, null)]
+    [InlineData(null, null, true, "copilot-cli")]
+    public void Observe_CliRejectsNoncanonicalSourceOwnedOtlpProvenance(
+        string? serviceName,
+        string? scopeName,
+        bool includeSpan,
+        string? clientKind)
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        var rawRecordId = CommitCliRaw(database.Path, serviceName, scopeName, includeSpan, clientKind);
+
+        var observed = Observe(database.Path, verification.VerificationId, "cli", rawRecordId);
+
+        Assert.Empty(observed.ObservedKinds);
+        Assert.Empty(observed.EvidenceRefs);
+        AssertUnattributedUnknown(observed);
+    }
+
     [Theory]
     [InlineData("vscode", "github-copilot-vscode", "vscode-copilot-chat", "vscode", "copilot-compatible-hook")]
     [InlineData("cli", "github-copilot-cli", "copilot-cli", "copilot-cli", "copilot-compatible-hook")]
@@ -643,7 +721,13 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         new SqliteSourceCompatibilityStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
         var payload = "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"client.kind\",\"value\":{\"stringValue\":\""
             + clientKind
-            + "\"}}]},\"scopeSpans\":[{\"spans\":[{\"traceId\":\""
+            + "\"}}"
+            + (clientKind == "copilot-cli"
+                ? ",{\"key\":\"service.name\",\"value\":{\"stringValue\":\"github-copilot\"}}"
+                : string.Empty)
+            + "]},\"scopeSpans\":[{"
+            + (clientKind == "copilot-cli" ? "\"scope\":{\"name\":\"github.copilot\"}," : string.Empty)
+            + "\"spans\":[{\"traceId\":\""
             + (traceId ?? "trace")
             + "\",\"spanId\":\"span\"}]}]}]}";
         var inventory = OtlpJsonStructuralWalker.Build(payload, observedAt);
@@ -669,6 +753,122 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
             observedAt,
             $$"""{"client.kind":"{{clientKind}}"}""",
             payload);
+        return new SqliteIngestionCommitStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter)
+            .Commit(ValidatedIngestionBatch.Create(raw, observation)).RawRecordId;
+    }
+
+    private static long CommitCliRaw(
+        string databasePath,
+        string? serviceName,
+        string? scopeName,
+        bool includeSpan,
+        string? clientKind = null,
+        bool includeUnrelatedSpanBearingScope = false)
+    {
+        var resourceAttributes = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (serviceName is not null)
+        {
+            resourceAttributes.Add("service.name", serviceName);
+        }
+        if (clientKind is not null)
+        {
+            resourceAttributes.Add("client.kind", clientKind);
+        }
+
+        var otlpAttributes = resourceAttributes.Select(attribute => new
+        {
+            key = attribute.Key,
+            value = new { stringValue = attribute.Value },
+        }).ToArray();
+        var scope = scopeName is null ? null : new { name = scopeName };
+        var spans = includeSpan
+            ? new[] { new { traceId = "trace", spanId = "span" } }
+            : [];
+        var scopeSpans = new List<object>();
+        if (includeUnrelatedSpanBearingScope)
+        {
+            scopeSpans.Add(new
+            {
+                scope = new { name = "unrelated.scope" },
+                spans = new[] { new { traceId = "unrelated-trace", spanId = "unrelated-span" } },
+            });
+        }
+        scopeSpans.Add(new { scope, spans });
+        var payload = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            resourceSpans = new[]
+            {
+                new
+                {
+                    resource = new { attributes = otlpAttributes },
+                    scopeSpans,
+                },
+            },
+        });
+        return CommitCliPayload(databasePath, resourceAttributes, payload);
+    }
+
+    private static long CommitCliRawWithSplitProvenance(string databasePath)
+    {
+        var payload = """
+            {
+              "resourceSpans": [
+                {
+                  "resource": { "attributes": [
+                    { "key": "service.name", "value": { "stringValue": "github-copilot" } }
+                  ] },
+                  "scopeSpans": [
+                    { "scope": { "name": "unrelated.scope" }, "spans": [
+                      { "traceId": "service-trace", "spanId": "service-span" }
+                    ] }
+                  ]
+                },
+                {
+                  "resource": { "attributes": [] },
+                  "scopeSpans": [
+                    { "scope": { "name": "github.copilot" }, "spans": [
+                      { "traceId": "scope-trace", "spanId": "scope-span" }
+                    ] }
+                  ]
+                }
+              ]
+            }
+            """;
+        return CommitCliPayload(
+            databasePath,
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["service.name"] = "github-copilot" },
+            payload);
+    }
+
+    private static long CommitCliPayload(
+        string databasePath,
+        IReadOnlyDictionary<string, string> resourceAttributes,
+        string payload)
+    {
+        var inventory = OtlpJsonStructuralWalker.Build(payload, Now);
+        var observation = SourceObservationBatchDraft.Create(
+            Guid.CreateVersion7().ToString("D"),
+            RawTelemetrySources.RawOtlp,
+            sourceApplicationVersion: null,
+            RawTelemetrySources.RawOtlp,
+            "1",
+            inventory,
+            SourceCompatibilityEvaluator.Assess(
+                RawTelemetrySources.RawOtlp,
+                sourceApplicationVersion: null,
+                inventory,
+                observedRecognizedCount: 1,
+                VerifiedSourceFingerprintRegistry.Create([], [], [])),
+            SourceCaptureContentState.Available,
+            Now);
+        var raw = new RawTelemetryRecord(
+            Id: null,
+            RawTelemetrySources.RawOtlp,
+            TraceId: "trace",
+            Now,
+            System.Text.Json.JsonSerializer.Serialize(resourceAttributes),
+            payload);
+        new SqliteSourceCompatibilityStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
         return new SqliteIngestionCommitStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter)
             .Commit(ValidatedIngestionBatch.Create(raw, observation)).RawRecordId;
     }

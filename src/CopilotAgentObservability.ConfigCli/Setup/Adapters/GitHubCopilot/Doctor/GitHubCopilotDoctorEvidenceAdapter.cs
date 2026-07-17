@@ -165,7 +165,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         var raw = rawStore.GetRawRecordById(selection.RawRecordId);
         if (raw is null || raw.ReceivedAt < verification.StartedAt || raw.ReceivedAt >= verification.ExpiresAt ||
             !string.Equals(raw.Source, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
-            !HasExactClientKind(raw.ResourceAttributesJson, partition.ClientKind))
+            !HasExpectedRawProvenance(raw, partition))
         {
             return empty;
         }
@@ -439,6 +439,185 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
 
     private static bool WithinVerificationWindow(DateTimeOffset observedAt, DoctorVerification verification) =>
         observedAt >= verification.StartedAt && observedAt < verification.ExpiresAt;
+
+    private static bool HasExpectedRawProvenance(RawTelemetryRecord raw, Partition partition) =>
+        partition.NativeSurface == SessionSourceSurface.CopilotCli
+            ? HasCanonicalCliProvenance(raw.PayloadJson)
+            : HasExactClientKind(raw.ResourceAttributesJson, partition.ClientKind);
+
+    private static bool HasCanonicalCliProvenance(string payloadJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            if (!TryGetOptionalUniqueProperty(
+                    document.RootElement,
+                    "resourceSpans",
+                    out var resourceSpans,
+                    out var hasResourceSpans) ||
+                !hasResourceSpans ||
+                resourceSpans.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            var matchingResourceSpans = 0;
+            foreach (var resourceSpan in resourceSpans.EnumerateArray())
+            {
+                if (resourceSpan.ValueKind != JsonValueKind.Object ||
+                    !TryHasCanonicalCliService(resourceSpan, out var hasCanonicalService) ||
+                    !TryHasCanonicalCliScope(resourceSpan, out var hasCanonicalScope))
+                {
+                    return false;
+                }
+                if (hasCanonicalService && hasCanonicalScope)
+                {
+                    matchingResourceSpans++;
+                }
+            }
+            return matchingResourceSpans > 0;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryHasCanonicalCliService(JsonElement resourceSpan, out bool hasCanonicalService)
+    {
+        hasCanonicalService = false;
+        if (!TryGetOptionalUniqueProperty(resourceSpan, "resource", out var resource, out var hasResource))
+        {
+            return false;
+        }
+        if (!hasResource)
+        {
+            return true;
+        }
+        if (resource.ValueKind != JsonValueKind.Object ||
+            !TryGetOptionalUniqueProperty(resource, "attributes", out var attributes, out var hasAttributes))
+        {
+            return false;
+        }
+        if (!hasAttributes)
+        {
+            return true;
+        }
+        if (attributes.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        var serviceNameCount = 0;
+        foreach (var attribute in attributes.EnumerateArray())
+        {
+            if (attribute.ValueKind != JsonValueKind.Object ||
+                !TryGetOptionalUniqueProperty(attribute, "key", out var key, out var hasKey) ||
+                !hasKey ||
+                key.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+            if (!string.Equals(key.GetString(), "service.name", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            serviceNameCount++;
+            if (serviceNameCount != 1 ||
+                !TryGetOptionalUniqueProperty(attribute, "value", out var value, out var hasValue) ||
+                !hasValue ||
+                value.ValueKind != JsonValueKind.Object ||
+                !TryGetOptionalUniqueProperty(value, "stringValue", out var stringValue, out var hasStringValue) ||
+                !hasStringValue ||
+                stringValue.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+            hasCanonicalService = string.Equals(stringValue.GetString(), "github-copilot", StringComparison.Ordinal);
+        }
+        return true;
+    }
+
+    private static bool TryHasCanonicalCliScope(JsonElement resourceSpan, out bool hasCanonicalScope)
+    {
+        hasCanonicalScope = false;
+        if (!TryGetOptionalUniqueProperty(resourceSpan, "scopeSpans", out var scopeSpans, out var hasScopeSpans))
+        {
+            return false;
+        }
+        if (!hasScopeSpans)
+        {
+            return true;
+        }
+        if (scopeSpans.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var scopeSpan in scopeSpans.EnumerateArray())
+        {
+            if (scopeSpan.ValueKind != JsonValueKind.Object ||
+                !TryGetOptionalUniqueProperty(scopeSpan, "spans", out var spans, out var hasSpans) ||
+                !hasSpans ||
+                spans.ValueKind != JsonValueKind.Array ||
+                spans.EnumerateArray().Any(span => span.ValueKind != JsonValueKind.Object) ||
+                !TryGetOptionalUniqueProperty(scopeSpan, "scope", out var scope, out var hasScope))
+            {
+                return false;
+            }
+            if (!hasScope)
+            {
+                continue;
+            }
+            if (scope.ValueKind != JsonValueKind.Object ||
+                !TryGetOptionalUniqueProperty(scope, "name", out var name, out var hasName))
+            {
+                return false;
+            }
+            if (!hasName)
+            {
+                continue;
+            }
+            if (name.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+            if (string.Equals(name.GetString(), "github.copilot", StringComparison.Ordinal) &&
+                spans.GetArrayLength() > 0)
+            {
+                hasCanonicalScope = true;
+            }
+        }
+        return true;
+    }
+
+    private static bool TryGetOptionalUniqueProperty(
+        JsonElement element,
+        string propertyName,
+        out JsonElement value,
+        out bool present)
+    {
+        value = default;
+        present = false;
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!string.Equals(property.Name, propertyName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            if (present)
+            {
+                return false;
+            }
+            value = property.Value;
+            present = true;
+        }
+        return true;
+    }
 
     private static bool HasExactClientKind(string? attributesJson, string expected)
     {
