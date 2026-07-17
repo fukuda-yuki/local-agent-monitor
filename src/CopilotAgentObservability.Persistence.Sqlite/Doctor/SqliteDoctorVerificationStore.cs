@@ -140,6 +140,76 @@ internal sealed class SqliteDoctorVerificationStore
         return InsertVerification(verification, DoctorResultCode.VerificationStarted);
     }
 
+    public DoctorStoreOutcome StartExclusive(string sourceSurface, string? sourceAdapter, DateTimeOffset expiresAt)
+    {
+        var now = UtcNow();
+        if (expiresAt.Offset != TimeSpan.Zero)
+        {
+            return Invalid();
+        }
+
+        var window = expiresAt - now;
+        if (!DoctorStoreValidation.IsSourceToken(sourceSurface)
+            || !DoctorStoreValidation.IsSourceToken(sourceAdapter, nullable: true)
+            || window < TimeSpan.FromMinutes(1)
+            || window > TimeSpan.FromMinutes(30))
+        {
+            return Invalid();
+        }
+
+        var verification = new DoctorVerification(
+            Guid.CreateVersion7(now).ToString("D"),
+            sourceSurface,
+            sourceAdapter,
+            DoctorVerificationState.Active,
+            Revision: 1,
+            StartedAt: now,
+            ExpiresAt: expiresAt,
+            CompletedAt: null,
+            CancelledAt: null,
+            AcceptedEvidenceRefs: []);
+        if (!IsValidNewVerification(verification))
+        {
+            return Invalid();
+        }
+
+        try
+        {
+            checkpoint?.Invoke("before-exclusive-transaction");
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            if (!DoctorSchemaV1.IsValid(connection, transaction))
+            {
+                transaction.Rollback();
+                return Unavailable();
+            }
+
+            var active = ReadActiveVerification(connection, transaction, sourceSurface, now);
+            if (active is not null)
+            {
+                transaction.Rollback();
+                return Active(active);
+            }
+
+            InsertVerification(connection, transaction, verification);
+            checkpoint?.Invoke("after-verification-insert");
+            transaction.Commit();
+            return new(DoctorResultCode.VerificationStarted, verification);
+        }
+        catch (SqliteException exception) when (IsBusy(exception))
+        {
+            return Busy();
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 19)
+        {
+            return Invalid();
+        }
+        catch (Exception)
+        {
+            return Unavailable();
+        }
+    }
+
     public DoctorStoreOutcome Get(string verificationId)
     {
         if (!DoctorStoreValidation.IsCanonicalUuidV7(verificationId))
@@ -539,21 +609,7 @@ internal sealed class SqliteDoctorVerificationStore
                 transaction.Rollback();
                 return Unavailable();
             }
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText =
-                """
-                INSERT INTO doctor_verifications(
-                    verification_id,expected_source_surface,expected_source_adapter,state,revision,
-                    started_at,expires_at,completed_at,cancelled_at)
-                VALUES($id,$source,$adapter,'active',1,$started,$expires,NULL,NULL);
-                """;
-            Add(command, "$id", verification.VerificationId);
-            Add(command, "$source", verification.ExpectedSourceSurface);
-            Add(command, "$adapter", verification.ExpectedSourceAdapter);
-            Add(command, "$started", Timestamp(verification.StartedAt));
-            Add(command, "$expires", Timestamp(verification.ExpiresAt));
-            command.ExecuteNonQuery();
+            InsertVerification(connection, transaction, verification);
             checkpoint?.Invoke("after-verification-insert");
             transaction.Commit();
             return new(successCode, verification);
@@ -570,6 +626,68 @@ internal sealed class SqliteDoctorVerificationStore
         {
             return Unavailable();
         }
+    }
+
+    private static void InsertVerification(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DoctorVerification verification)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            INSERT INTO doctor_verifications(
+                verification_id,expected_source_surface,expected_source_adapter,state,revision,
+                started_at,expires_at,completed_at,cancelled_at)
+            VALUES($id,$source,$adapter,'active',1,$started,$expires,NULL,NULL);
+            """;
+        Add(command, "$id", verification.VerificationId);
+        Add(command, "$source", verification.ExpectedSourceSurface);
+        Add(command, "$adapter", verification.ExpectedSourceAdapter);
+        Add(command, "$started", Timestamp(verification.StartedAt));
+        Add(command, "$expires", Timestamp(verification.ExpiresAt));
+        command.ExecuteNonQuery();
+    }
+
+    private static DoctorVerification? ReadActiveVerification(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sourceSurface,
+        DateTimeOffset now)
+    {
+        var verificationIds = new List<string>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText =
+                "SELECT verification_id FROM doctor_verifications WHERE state='active' AND expected_source_surface=$source COLLATE BINARY ORDER BY started_at COLLATE BINARY, verification_id COLLATE BINARY;";
+            Add(command, "$source", sourceSurface);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                verificationIds.Add(reader.GetString(0));
+            }
+        }
+
+        foreach (var verificationId in verificationIds)
+        {
+            var verification = ReadVerification(connection, transaction, verificationId);
+            if (verification is null
+                || !string.Equals(verification.ExpectedSourceSurface, sourceSurface, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var projected = ProjectRead(verification, now);
+            if (projected.Code == DoctorResultCode.VerificationActive
+                && projected.Verification is { State: DoctorVerificationState.Active } active)
+            {
+                return active;
+            }
+        }
+
+        return null;
     }
 
     private static DoctorStoreOutcome? CheckActiveTransition(

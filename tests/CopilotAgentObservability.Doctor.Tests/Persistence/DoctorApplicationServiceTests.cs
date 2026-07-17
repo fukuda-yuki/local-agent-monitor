@@ -46,6 +46,28 @@ public sealed class DoctorApplicationServiceTests
     }
 
     [Fact]
+    public void InternalExclusiveStart_PassesThroughStartedAndExistingOutcomes()
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new DoctorTestTimeProvider(DoctorTestData.Now);
+        var application = SqliteDoctorApplicationService.Create(
+            new SqliteDoctorVerificationStore(database.Path, time));
+
+        var started = application.StartExclusive(
+            "claude-code",
+            "claude-code-otel",
+            time.UtcNow.AddMinutes(5));
+        var existing = application.StartExclusive(
+            "claude-code",
+            "claude-code-otel",
+            time.UtcNow.AddMinutes(5));
+
+        Assert.Equal(DoctorResultCode.VerificationStarted, started.Code);
+        Assert.Equal(DoctorResultCode.VerificationActive, existing.Code);
+        Assert.Equivalent(started.Verification, existing.Verification, strict: true);
+    }
+
+    [Fact]
     public void Complete_ResolvesTrustedCandidatesAndEvaluatesExactlyOnce()
     {
         using var database = new DoctorTestDatabase();
