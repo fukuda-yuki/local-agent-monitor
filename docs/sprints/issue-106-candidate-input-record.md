@@ -49,8 +49,8 @@ observations and truncated marker references.
 - [x] `git merge-base --is-ancestor 196ca75 54d758a…` exited `0`.
 - [x] A clean detached validation worktree was created at exactly the candidate SHA (`.worktrees/issue-106-final-candidate`, `git rev-parse HEAD` = candidate).
 - [x] The clean validation worktree has empty `git status --porcelain` output.
-- [ ] A fresh disposable database was initialized after the worktree gate (performed at final-run start).
-- [ ] A fresh throwaway Hook configuration directory was initialized after the worktree gate (performed at final-run start).
+- [x] A fresh disposable database was initialized after the worktree gate (one per case, under the OS-temp disposable root, 2026-07-18 final run).
+- [x] A fresh throwaway Hook configuration directory was initialized after the worktree gate (case 2, removed by guarded cleanup).
 - [x] A replacement candidate would invalidate and discard all prior final-run results.
 - [x] Final classifications will be recorded only against this frozen SHA.
 
