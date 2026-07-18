@@ -429,8 +429,14 @@ evidence, because its gated-detail and ungated-category forms share one
 producer path and are indistinguishable at the receiver. `redacted` is not
 derivable on this surface because no explicit redaction signal is documented
 for it. A batch with no recognized Claude span keeps the surface's fixed state
-(`unsupported` for raw OTLP). Derivation inspects field presence only; content
-values are never copied out of the raw payload into the observation.
+(`unsupported` for raw OTLP). An interaction prompt is evidence only when the
+`user_prompt` attribute's `value.stringValue` is non-empty and not
+ordinal-equal to `<REDACTED>`. An exact `<REDACTED>` sentinel, an empty
+`value.stringValue`, an absent `user_prompt` or `value.stringValue`, a
+non-string value, or a `user_prompt_length` value without a qualifying
+`user_prompt` is `not_captured`. `redacted` remains underivable for Claude
+OTel v1. Values are inspected in place and never copied out of the raw payload
+into the observation.
 
 ## Diagnostics and UI
 
