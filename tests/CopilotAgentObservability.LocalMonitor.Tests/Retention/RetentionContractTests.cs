@@ -123,10 +123,17 @@ public sealed class RetentionContractTests
         Assert.Equal(RetentionSessionRouteOutcome.HostFallback, sanitized.RouteOutcome);
         Assert.Equal("{\"accepted\":false,\"error\":\"unsupported_endpoint\",\"message\":\"Only /v1/traces is supported.\"}"u8.ToArray(), sanitized.ErrorUtf8);
 
-        foreach (var condition in new[] { RetentionSessionV1Condition.NeverCapturedNotCaptured, RetentionSessionV1Condition.NeverCapturedRedacted, RetentionSessionV1Condition.NeverCapturedUnsupported })
+        var neverCaptured = new Dictionary<RetentionSessionV1Condition, string>
         {
-            var row = RetentionSessionV1Projection.Describe(condition);
+            [RetentionSessionV1Condition.NeverCapturedNotCaptured] = "not_captured",
+            [RetentionSessionV1Condition.NeverCapturedRedacted] = "redacted",
+            [RetentionSessionV1Condition.NeverCapturedUnsupported] = "unsupported"
+        };
+        foreach (var pair in neverCaptured)
+        {
+            var row = RetentionSessionV1Projection.Describe(pair.Key);
             Assert.True(row.HasEventDto); Assert.True(row.HasSessionDto);
+            Assert.Equal(pair.Value, row.EventContentState);
             Assert.Equal("not_captured", row.SessionRawRetentionState); Assert.Equal(404, row.StatusCode);
             Assert.Equal(RetentionSessionRouteOutcome.SessionNotFound, row.RouteOutcome);
         }
