@@ -124,6 +124,7 @@ public sealed class SourceCompatibilityIngestionTests
     }
 
     [Theory]
+    [InlineData(ClaudeInteractionWithUserPrompt, "available")]
     [InlineData(ClaudeInteractionWithRedactedUserPrompt, "not_captured")]
     [InlineData(ClaudeInteractionWithoutGatedField, "not_captured")]
     [InlineData(ForeignSpanOnly, "unsupported")]
@@ -155,6 +156,17 @@ public sealed class SourceCompatibilityIngestionTests
         var item = Assert.Single(tracesJson.RootElement.GetProperty("items").EnumerateArray());
         Assert.Equal(expectedContentState, item.GetProperty("content_state").GetString());
     }
+
+    private const string ClaudeInteractionWithUserPrompt = """
+        {"resourceSpans":[{"scopeSpans":[{"spans":[{
+          "traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId":"1111111111111111",
+          "name":"claude_code.interaction",
+          "startTimeUnixNano":"1000000000",
+          "endTimeUnixNano":"1500000000",
+          "attributes":[{"key":"user_prompt","value":{"stringValue":"synthetic-marker"}}]
+        }]}]}]}
+        """;
 
     private const string ClaudeInteractionWithRedactedUserPrompt = """
         {"resourceSpans":[{"scopeSpans":[{"spans":[{
