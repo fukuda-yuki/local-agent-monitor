@@ -2,15 +2,23 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public class ClaudeOtlpCaptureContentStateResolverTests
 {
-    [Fact]
-    public void Derive_InteractionSpanWithUserPromptAttribute_ReturnsAvailable()
+    [Theory]
+    [InlineData("""[{"key":"user_prompt","value":{"stringValue":"synthetic-marker"}}]""", SourceCaptureContentState.Available)]
+    [InlineData("""[{"key":"user_prompt","value":{"stringValue":"<REDACTED>"}}]""", SourceCaptureContentState.NotCaptured)]
+    [InlineData("""[{"key":"user_prompt","value":{"stringValue":""}}]""", SourceCaptureContentState.NotCaptured)]
+    [InlineData("""[{"key":"user_prompt","value":{"intValue":"16"}}]""", SourceCaptureContentState.NotCaptured)]
+    [InlineData("""[{"key":"user_prompt_length","value":{"intValue":"16"}}]""", SourceCaptureContentState.NotCaptured)]
+    [InlineData("""[{"key":"user_prompt","value":{"stringValue":"<redacted>"}}]""", SourceCaptureContentState.Available)]
+    public void Derive_InteractionSpanWithUserPromptEvidence_ReturnsExpectedState(
+        string attributesJson,
+        SourceCaptureContentState expectedState)
     {
-        var payload = Payload("""
+        var payload = Payload($$"""
             {"traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","spanId":"1111111111111111","name":"claude_code.interaction",
-             "attributes":[{"key":"user_prompt","value":{"stringValue":"synthetic-marker"}}]}
+             "attributes":{{attributesJson}}}
             """);
 
-        Assert.Equal(SourceCaptureContentState.Available, ClaudeOtlpCaptureContentStateResolver.Derive(payload));
+        Assert.Equal(expectedState, ClaudeOtlpCaptureContentStateResolver.Derive(payload));
     }
 
     [Fact]
