@@ -11,6 +11,7 @@ using CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode.AgentSdk;
 using CopilotAgentObservability.ConfigCli.Setup.Cli;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
+using CopilotAgentObservability.ConfigCli.Setup.Storage;
 using CopilotAgentObservability.Doctor.Tests.Persistence;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
@@ -34,6 +35,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     private const string NativeSessionMarker = "SYNTHETIC_NATIVE_SESSION_X";
     private const string PromptMarker = "SYNTHETIC_PROMPT_MARKER";
     private const string PathMarker = "SYNTHETIC_PATH_MARKER";
+    private const string TranscriptPathMarker = "SYNTHETIC_TRANSCRIPT_PATH";
+    private const string CwdMarker = "SYNTHETIC_WORKING_DIRECTORY";
     private const string TraceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string BaselineTraceId = "11111111111111111111111111111111";
     private const string SpanId = "bbbbbbbbbbbbbbbb";
@@ -51,10 +54,12 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         {
             PrepareBaselineDatabase(databasePath, time);
 
-            var setupPlatform = CreatePlatform(databasePath, endpoint: origin);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
+            var setupPlatform = CreatePlatform(databasePath, origin, monitorProbe);
             AssertChangedSetupHandoff(setupPlatform, origin);
 
-            var beginPlatform = CreatePlatform(databasePath, endpoint: origin);
+            var beginPlatform = CreateRestartedPlatform(setupPlatform, databasePath, origin, monitorProbe);
             var beginOrchestrator = CreateOrchestrator(beginPlatform, time);
             using var begin = RunFirstTrace(
                 beginOrchestrator,
@@ -68,9 +73,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             Assert.Equal("first_trace_verification_started", begin.RootElement.GetProperty("code").GetString());
             Assert.Equal("doctor.v1", begin.RootElement.GetProperty("doctor").GetProperty("schema_version").GetString());
             Assert.NotEmpty(begin.RootElement.GetProperty("guidance").EnumerateArray());
-            AssertNoSensitiveMarkers(begin.RootElement.GetRawText());
+            AssertBeginObservedSetupState(beginOrchestrator, databasePath, verificationId!, origin);
 
-            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
             await monitor.PostSessionStartAsync(NativeSessionMarker);
             await monitor.PostOtlpAsync(Payload(TraceId, NativeSessionMarker));
             await monitor.DrainAsync();
@@ -97,9 +101,9 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                     "^claude-otel-(ingest|raw|projection)-[0-9a-f]{32}-[0-9a-f]{16}$|^claude-otel-binding-[0-9a-f]{32}-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$|^claude-otel-completeness-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
                     evidenceRef);
             });
-            AssertNoSensitiveMarkers(status.RootElement.GetRawText());
+            AssertNoSensitiveMarkers(status.RootElement.GetProperty("candidates").GetRawText());
 
-            var completionPlatform = CreatePlatform(databasePath, endpoint: "http://127.0.0.1:4320");
+            var completionPlatform = CreatePlatform(databasePath, "http://127.0.0.1:4320", monitorProbe);
             var completionOrchestrator = CreateOrchestrator(completionPlatform, time);
             using var complete = RunFirstTrace(
                 completionOrchestrator,
@@ -114,7 +118,6 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             Assert.Equal(
                 "first_trace_ready",
                 complete.RootElement.GetProperty("doctor").GetProperty("evaluation").GetProperty("primary_state").GetProperty("state_code").GetString());
-            AssertNoSensitiveMarkers(complete.RootElement.GetRawText());
         }
         finally
         {
@@ -132,10 +135,12 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         try
         {
             PrepareBaselineDatabase(databasePath, time);
-            var setupPlatform = CreatePlatform(databasePath, endpoint: origin);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
+            var setupPlatform = CreatePlatform(databasePath, origin, monitorProbe);
             AssertChangedSetupHandoff(setupPlatform, origin);
 
-            var beginPlatform = CreatePlatform(databasePath, endpoint: origin);
+            var beginPlatform = CreateRestartedPlatform(setupPlatform, databasePath, origin, monitorProbe);
             var beginOrchestrator = CreateOrchestrator(beginPlatform, time);
             using var begin = RunFirstTrace(
                 beginOrchestrator,
@@ -147,13 +152,14 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             var verificationId = begin.RootElement.GetProperty("verification_id").GetString();
             Assert.NotNull(verificationId);
 
-            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            AssertBeginObservedSetupState(beginOrchestrator, databasePath, verificationId!, origin);
+
             await monitor.PostSessionStartAsync(NativeSessionMarker);
             await monitor.PostOtlpAsync(Payload(TraceId, sessionId: null));
             await monitor.DrainAsync();
             new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
 
-            var completionPlatform = CreatePlatform(databasePath, endpoint: "http://127.0.0.1:4320");
+            var completionPlatform = CreatePlatform(databasePath, "http://127.0.0.1:4320", monitorProbe);
             using var complete = RunFirstTrace(
                 CreateOrchestrator(completionPlatform, time),
                 [
@@ -163,6 +169,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 expectedExitCode: 3);
             Assert.Equal("first_trace_not_ready", complete.RootElement.GetProperty("code").GetString());
             Assert.Equal("evaluation_completed", complete.RootElement.GetProperty("doctor").GetProperty("code").GetString());
+            Assert.Equal("active", complete.RootElement.GetProperty("doctor").GetProperty("verification").GetProperty("state").GetString());
             var states = complete.RootElement.GetProperty("doctor").GetProperty("evaluation").GetProperty("states").EnumerateArray();
             Assert.Contains(states, state => state.GetProperty("state_code").GetString() == "session_unbound");
             Assert.DoesNotContain(states, state => state.GetProperty("state_code").GetString() == "first_trace_ready");
@@ -196,6 +203,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 dispatch);
         Assert.True(planExitCode == 0, $"exit={planExitCode}; stdout={planOutput}; stderr={planError}");
         Assert.Equal(string.Empty, planError.ToString());
+        AssertNoSensitiveMarkers(planOutput.ToString());
+        AssertNoSensitiveMarkers(planError.ToString());
         using var plan = JsonDocument.Parse(planOutput.ToString());
         var changeSetId = plan.RootElement.GetProperty("change_set_id").GetString();
         Assert.NotNull(changeSetId);
@@ -209,10 +218,47 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 dispatch);
         Assert.True(applyExitCode == 0, $"exit={applyExitCode}; stdout={applyOutput}; stderr={applyError}");
         Assert.Equal(string.Empty, applyError.ToString());
+        AssertNoSensitiveMarkers(applyOutput.ToString());
+        AssertNoSensitiveMarkers(applyError.ToString());
         using var apply = JsonDocument.Parse(applyOutput.ToString());
-            Assert.Equal(
-                [SetupCodes.RestartClaudeProcess, SetupCodes.RunFirstTraceDoctor],
-                apply.RootElement.GetProperty("next_actions").EnumerateArray().Select(item => item.GetString()!).ToArray());
+        Assert.True(apply.RootElement.GetProperty("success").GetBoolean());
+        Assert.Equal(SetupCodes.ApplySucceeded, apply.RootElement.GetProperty("code").GetString());
+        var cliTarget = Assert.Single(
+            apply.RootElement.GetProperty("targets").EnumerateArray(),
+            target => target.GetProperty("target_label").GetString() == "claude-code-user-settings");
+        Assert.Equal("json", cliTarget.GetProperty("target_kind").GetString());
+        Assert.NotEqual("no-op", cliTarget.GetProperty("operation").GetString());
+        Assert.True(cliTarget.GetProperty("rollback_available").GetBoolean());
+        Assert.Contains(
+            cliTarget.GetProperty("changes").EnumerateArray(),
+            change => change.GetProperty("operation").GetString() != "no-op");
+        Assert.Equal(
+            [SetupCodes.RestartClaudeProcess, SetupCodes.RunFirstTraceDoctor],
+            apply.RootElement.GetProperty("next_actions").EnumerateArray().Select(item => item.GetString()!).ToArray());
+    }
+
+    private static void AssertBeginObservedSetupState(
+        FirstTraceOrchestrator orchestrator,
+        string databasePath,
+        string verificationId,
+        string origin)
+    {
+        using var status = RunFirstTrace(
+            orchestrator,
+            [
+                "status", "--database", databasePath, "--verification-id", verificationId,
+                "--endpoint", origin, "--json",
+            ],
+            expectedExitCode: 0);
+        var preview = status.RootElement.GetProperty("evaluation_preview");
+        Assert.Equal("evaluation_completed", preview.GetProperty("code").GetString());
+        Assert.Equal(
+            "agent_restart_required",
+            preview.GetProperty("evaluation").GetProperty("primary_state").GetProperty("state_code").GetString());
+        Assert.DoesNotContain(
+            preview.GetProperty("evaluation").GetProperty("states").EnumerateArray(),
+            state => state.GetProperty("state_code").GetString() == "endpoint_mismatch");
+        AssertNoSensitiveMarkers(status.RootElement.GetProperty("candidates").GetRawText());
     }
 
     private static JsonDocument RunFirstTrace(
@@ -233,6 +279,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             Assert.NotEqual(string.Empty, error.ToString());
         }
 
+        AssertNoSensitiveMarkers(output.ToString());
+        AssertNoSensitiveMarkers(error.ToString());
         return JsonDocument.Parse(output.ToString());
     }
 
@@ -245,9 +293,12 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 platform.InvocationDirectory)],
             time);
 
-    private static TestSetupPlatform CreatePlatform(string databasePath, string endpoint)
+    private static TestSetupPlatform CreatePlatform(
+        string databasePath,
+        string endpoint,
+        ISetupHttpProbe httpProbe)
     {
-            var platform = new TestSetupPlatform(Now);
+        var platform = new TestSetupPlatform(Now, httpProbe);
         platform.SeedFile(databasePath, []);
         platform.SeedProcessEnvironment("CLAUDE_CODE_ENABLE_TELEMETRY", "1");
         platform.SeedProcessEnvironment("CLAUDE_CODE_ENHANCED_TELEMETRY_BETA", "1");
@@ -255,6 +306,17 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         platform.SeedProcessEnvironment("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf");
         platform.SeedProcessEnvironment("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint + "/v1/traces");
         return platform;
+    }
+
+    private static TestSetupPlatform CreateRestartedPlatform(
+        TestSetupPlatform appliedPlatform,
+        string databasePath,
+        string endpoint,
+        ISetupHttpProbe httpProbe)
+    {
+        var restarted = CreatePlatform(databasePath, endpoint, httpProbe);
+        appliedPlatform.CopyPersistedSetupStateTo(restarted);
+        return restarted;
     }
 
     private static void PrepareBaselineDatabase(string databasePath, TimeProvider time)
@@ -393,6 +455,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         Assert.DoesNotContain(NativeSessionMarker, envelopeJson, StringComparison.Ordinal);
         Assert.DoesNotContain(PromptMarker, envelopeJson, StringComparison.Ordinal);
         Assert.DoesNotContain(PathMarker, envelopeJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(TranscriptPathMarker, envelopeJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(CwdMarker, envelopeJson, StringComparison.Ordinal);
     }
 
     private static string CreateDirectory(string name)
@@ -449,6 +513,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 RawTelemetryStoreConnectionOptions.MonitorWriter);
             var sessionStore = new SqliteSessionStore(databasePath, time);
             var health = new MonitorHealthState();
+            health.SetProjectionWorkerRunning(true);
+            health.SetProjectionStatus(0, null);
             var app = MonitorHost.Build(
                 new MonitorOptions(databasePath, origin, false, MonitorOptions.DefaultMaxRequestBodyBytes),
                 new MonitorHostTestOptions
@@ -526,8 +592,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                         ["payload"] = new JsonObject
                         {
                             ["session_id"] = nativeSessionId,
-                            ["transcript_path"] = "SYNTHETIC_TRANSCRIPT_PATH",
-                            ["cwd"] = "SYNTHETIC_WORKING_DIRECTORY",
+                            ["transcript_path"] = TranscriptPathMarker,
+                            ["cwd"] = CwdMarker,
                             ["hook_event_name"] = "SessionStart",
                             ["source"] = "startup",
                         },
@@ -567,6 +633,55 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         }
     }
 
+    private sealed class RunningMonitorHttpProbe(HttpClient client) : ISetupHttpProbe
+    {
+        public SetupHttpProbeObservation Get(
+            string origin,
+            string path,
+            int totalBudgetMilliseconds,
+            int maxBodyBytes)
+        {
+            using var cancellation = new CancellationTokenSource(totalBudgetMilliseconds);
+            try
+            {
+                using var response = client.GetAsync(
+                        path,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        cancellation.Token)
+                    .GetAwaiter()
+                    .GetResult();
+                using var stream = response.Content.ReadAsStream(cancellation.Token);
+                var buffer = new byte[maxBodyBytes + 1];
+                var length = 0;
+                while (length < buffer.Length)
+                {
+                    var read = stream.Read(buffer, length, buffer.Length - length);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    length += read;
+                }
+
+                return new(
+                    SetupHttpProbeOutcome.Response,
+                    (int)response.StatusCode,
+                    response.Content.Headers.ContentLength,
+                    buffer[..length],
+                    length <= maxBodyBytes);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                return SetupHttpProbeObservation.TimedOut;
+            }
+            catch (HttpRequestException)
+            {
+                return SetupHttpProbeObservation.TransportFailure;
+            }
+        }
+    }
+
     private sealed class TestSetupPlatform : ISetupPlatform
     {
         private readonly Dictionary<string, byte[]> files = new(StringComparer.OrdinalIgnoreCase);
@@ -576,7 +691,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         private readonly HashSet<string> locks = new(StringComparer.OrdinalIgnoreCase);
         private long identifierSequence = 1;
 
-        public TestSetupPlatform(DateTimeOffset utcNow)
+        public TestSetupPlatform(DateTimeOffset utcNow, ISetupHttpProbe httpProbe)
         {
             InvocationDirectory = "C:\\Users\\first-trace";
             LocalApplicationData = "C:\\first-trace-local-app-data";
@@ -590,7 +705,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             OperatingSystem = new TestOperatingSystem();
             ProcessRunner = new TestProcessRunner();
             ManagedSettings = new TestManagedSettings();
-            HttpProbe = new TestHttpProbe();
+            HttpProbe = httpProbe;
             SeedDirectoryChain(InvocationDirectory);
             SeedDirectoryChain(OperatingSystem.UserProfile);
             SeedDirectoryChain(Path.Combine(OperatingSystem.UserProfile, ".claude"));
@@ -620,6 +735,23 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         }
 
         public void SeedProcessEnvironment(string name, string value) => processEnvironment[name] = value;
+
+        public void CopyPersistedSetupStateTo(TestSetupPlatform destination)
+        {
+            var settingsRoot = Path.Combine(OperatingSystem.UserProfile, ".claude");
+            var setupRoot = new SetupRuntimePaths(this).Root;
+            foreach (var file in files)
+            {
+                if (IsUnder(file.Key, settingsRoot) || IsUnder(file.Key, setupRoot))
+                {
+                    destination.SeedFile(file.Key, file.Value);
+                }
+            }
+        }
+
+        private static bool IsUnder(string path, string root) =>
+            string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
 
         private void SeedDirectoryChain(string directory)
         {
@@ -732,15 +864,5 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             public SetupManagedObservation Read(SetupManagedLocation location) => SetupManagedObservation.Absent;
         }
 
-        private sealed class TestHttpProbe : ISetupHttpProbe
-        {
-            private static readonly byte[] ReadyBody = Encoding.UTF8.GetBytes(
-                "{\"status\":\"ready\",\"checks\":{\"loopback_bound\":true,\"db_open\":true,\"migration_complete\":true,\"writer_running\":true,\"projection_worker_running\":true,\"ingestion_accepting\":true,\"projection_lag_seconds\":0,\"projection_backlog\":0,\"span_projection_lag_seconds\":0,\"span_projection_backlog\":0,\"projection_failure_count\":0},\"degraded_reasons\":[]}");
-
-            public SetupHttpProbeObservation Get(string origin, string path, int totalBudgetMilliseconds, int maxBodyBytes) =>
-                path == "/health/live"
-                    ? new(SetupHttpProbeOutcome.Response, 200, 18, Encoding.UTF8.GetBytes("{\"status\":\"live\"}"), true)
-                    : new(SetupHttpProbeOutcome.Response, 200, ReadyBody.Length, ReadyBody.ToArray(), true);
-        }
     }
 }
