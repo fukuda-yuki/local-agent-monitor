@@ -12,21 +12,46 @@ integration step. Trust this file plus `git log` over conversation memory.
 
 | Task | State | Commits | Focused tests | Full test | Review |
 | --- | --- | --- | --- | --- | --- |
-| T0 docs/specs/contract table | revised | b43ed58 + revision commit | n/a (docs) | — | Codex Luna xhigh read-only review #1: REVISE (1 Critical, 8 Important — all resolved in revision; log below); re-review pending |
-| T1 red cross-surface test | pending | — | — | — | — |
+| T0 docs/specs/contract table | complete | b43ed58, f012db9, 328e29d, 939e6f4, 5628323, 400a917, 8d6c669, f333d94 | n/a (docs) | — | Codex Luna xhigh review cycles resolved in the review log; contract remains normative and the T9 documentation closeout is complete |
+| T1 red cross-surface test | complete | 3700d6b, a1e5db2, 3576421, 5838cc4, 54d758a | cross-surface 7/7 at frozen candidate | — | Red-to-green acceptance evidence retained through T7/T8; the T9 documentation closeout is complete |
 | T2 fact mapper | done | b6e5bbf, d21fbb4 | mapper 73/0; build clean | — | review #1 REVISE (3 findings) → fixed in d21fbb4; re-review APPROVE (3/3, scope+purity confirmed) |
-| T3 store reads | done | 07f44c1 | Store 58/0, AppService 9/0, Migration 12/0 | solution 5554/0 by implementer | independent review pending (batch with T4) |
-| T4 binding rule + observer | done | 6270a83, 1ed3e12, eb00ac5 | Observer 10/0, Doctor 252/0 after fix | implementer's full run timed out at 600s (gate reruns at T7/T9) | re-review: 4/4 RESOLVED, scope confirmed; 1 [low] left to final triage (below) |
+| T3 store reads | complete | 07f44c1, cb2db6f, 7b0be26 | Store 58/0, AppService 9/0, migration 12/12; frozen Doctor suite 260/260 | frozen full rerun included in T9 evidence below | Luna xhigh review findings (atomic start and expiry boundary) resolved; the T9 documentation closeout is complete |
+| T4 binding rule + observer | complete | 6270a83, 1ed3e12, eb00ac5 | Observer 10/0, Doctor 252/0 after fix | frozen full rerun included in T9 evidence below | re-review: 4/4 RESOLVED, scope confirmed; the low-strength expiry-boundary assertion is accepted as a test-quality note (disposition below) |
 | T5 fact collector | done | 01f0e4a (orchestrator-committed; 97/97 re-verified), 9a78afe, 079686e | fact suite 127/0 | solution 5728/0 by fix-2 run | review #1 REVISE (7) → 9a78afe → re-review (3 remained) → 079686e → combined re-review APPROVE (A2/A6/A7, OpenReadOnly invariant confirmed) |
 | T6 first-trace verbs + handoff | done | e1a4a56, f640812, a83334f, 8d6c669 (spec.md), 7b0be26, 521b7d6 | FirstTrace 43/0, ConfigCli 4026/0, store 63/0 | solution 5727/0 + build + Playwright by implementer (pre-fix); post-fix full run at T7/T9 gates | review #1 REVISE (4 Imp + 2 Min) → fixes + orchestrator spec.md alignment → combined re-review APPROVE (B1-B5, Copilot path diff-free) |
 | T4b runtime-state row | done | 52e0e57, 112962e, ffd4ae2 | new 4/4, LM migration 102/102, fail-fast 1/1, DoctorMigration 12/12 after ffd4ae2 | — | review #1 REVISE (1 Important fail-fast unpinned) → spec pinned + test 112962e; regression: monitor v6 bump broke 12 Doctor.Tests migration expectations (brief omitted Doctor.Tests rerun — orchestrator error, logged), fixed in ffd4ae2 via production version constant |
-| T6 first-trace verbs + adapter | pending | — | — | — | — |
 | T-109 projection defect fix | done | 09978b8, c807c7a, 8f4b6b7, d062f48 | SPS 5/0, Enrich 19/0, MigrationFixture 72/0, LM 1476/0, Doctor 255/0 | per-suite full by implementer | review APPROVE (no findings; exact/explicit-only projection, legacy NULL degrade, v12 migration sound, wire unchanged). No backfill: reach-reason not reconstructible from persisted data |
-| T7 cross-surface green | fix done, re-review pending | 3700d6b, a1e5db2 | cross-surface 2/0, Doctor 255/0 | — | review #1 REVISE (5) → a1e5db2 (no production change needed: real probes + setup-state carry-over worked); re-review dispatched |
-| T8 104-E matrix | done (bounded privacy repair) | pending current commit | cross-surface 7/0; `git diff --check` clean | — | Terra high fresh read-only review: APPROVE; no production change |
-| T9 freeze + handoff | pending | — | — | — | — |
+| T7 cross-surface green | complete | 3700d6b, a1e5db2, 5838cc4, 6de19b6, 66b7bff | `ClaudeFirstTraceCrossSurfaceTests` 7/7; `FirstTraceCliTests` 37/37 | frozen full rerun included in T9 evidence below | Initial review REVISE findings were resolved; focused post-repair review found no further issue; the T9 documentation closeout is complete |
+| T8 104-E matrix | complete | 5799958, 3576421, a4ff479, 91e4802, f333d94, 5838cc4, 6de19b6, 66b7bff, 54d758a | matrix covered; cross-surface 7/7; `git diff --check` clean before T9 docs | frozen full rerun included in T9 evidence below | Terra high bounded privacy-evidence review APPROVE; the T9 documentation closeout is complete |
+| T9 freeze + handoff | complete | frozen product candidate `54d758a260f347cc31a3191d342ad509eb62d81f`; finalized documentation-only closeout | `MonitorOverviewPlaywrightTests.Overview_PeriodToggleAndLists_RespectSanitizedBoundary` (false/true) 2/2; validation evidence below | build/install/full-test evidence below | Terra high review #1 REVISE → re-review #2 REVISE → final re-review #3 APPROVE |
 
 ## Issue #104 repair log
+
+## Frozen product candidate validation
+
+All product code and tests were frozen at
+`54d758a260f347cc31a3191d342ad509eb62d81f`. The following evidence belongs to
+that candidate and predates this T9 documentation-only diff:
+
+- `dotnet build CopilotAgentObservability.slnx`: PASS, 0 warnings, 0 errors.
+- `pwsh scripts\test\install-playwright-chromium.ps1`: PASS.
+- The first `dotnet test CopilotAgentObservability.slnx` run was **FAIL only**
+  on one intermittent Local Monitor assertion:
+  `MonitorOverviewPlaywrightTests.Overview_PeriodToggleAndLists_RespectSanitizedBoundary(false)`;
+  Local Monitor was 1475/1476 while Doctor was 260/260 and ConfigCli was
+  4029/4029. The failing assertion was the request-list observation at line
+  80; the production UI showed the expected prompt label. That test and its
+  JavaScript were unchanged by Issue #104.
+- An exact rerun of `dotnet test CopilotAgentObservability.slnx` passed: Doctor 260/260, ConfigCli 4029/4029,
+  Local Monitor 1476/1476; 5765 total, 0 failed, 0 skipped.
+- The focused `MonitorOverviewPlaywrightTests.Overview_PeriodToggleAndLists_RespectSanitizedBoundary` diagnostic passed 2/2 (false/true cases).
+- Exact focused command: `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter "FullyQualifiedName~MonitorOverviewPlaywrightTests.Overview_PeriodToggleAndLists_RespectSanitizedBoundary" --no-restore`
+- `git diff --check` was clean before the T9 documentation changes.
+
+The first-run Playwright failure is retained as evidence, not converted into a
+product failure claim or silently omitted. The exact rerun is the validation
+result for the frozen candidate. No product code or test edit is permitted
+after the frozen SHA.
 
 - 2026-07-18 — Zero-candidate `first-trace complete` repair: the
   candidate-free path now retries a `partial_fact_snapshot` as a stateless
@@ -57,31 +82,38 @@ integration step. Trust this file plus `git log` over conversation memory.
 
 ## Open items / unverified inter-issue interfaces
 
-- OPEN: confirm at T4 that the Doctor verification tables and the ingestion
-  pipeline tables share one SQLite database file reachable from both the
-  LocalMonitor process (observer writes) and the ConfigCli process (reads);
-  record the actual path wiring here.
-- OPEN (#110, hand to #106): live producer behavior for `user_prompt` key when
-  `OTEL_LOG_USER_PROMPTS` is off — input conditions recorded in
-  `handoff-106.md` at T9.
-- OPEN (#103 collision watch): every collision-file edit is recorded below
-  with a source-neutrality note.
-- OPEN (T6): when `run_first_trace_doctor` emission lands, update the derived
-  user-facing docs that still say it is never emitted: `README.md` (~L178),
-  `docs/user-guide/local-monitor.md` (~L226), `scripts/local-monitor/README.md`
-  (~L65). Consider a new `docs/decisions.md` entry at T9 (the #68 entry
-  D-record correctly describes #68's own boundary and stays as history).
-- OPEN (T4/T5): the monitor runtime-state row is a monitor-DB schema addition
-  → implement via the existing monitor migration mechanism, with a committed
-  prior-version DB fixture migration test (monitor-side write lands with T4,
-  CLI read with T5).
-- OPEN (T6): internal atomic exclusive-start store operation (review finding
-  9) added to T6 scope.
-- OPEN (T-109): if the fix introduces a new persisted/user-visible
-  `source_adapter` label or wire vocabulary, update
-  `source-schema-drift-claude-code.md` / `exact-binding.md` first (spec-first
-  rule). The projection rule itself ("shared `trace_id` never projects
-  `exact_linked`") is already normative in `exact-binding.md`.
+Closed at the frozen candidate:
+
+- The Doctor verification tables, ingestion/projection tables, Session tables,
+  and monitor runtime-state store are wired to the same monitor database path;
+  `MonitorHost` constructs each store from `options.DatabasePath`, while the
+  ConfigCli Doctor application reads that same path through
+  `SqliteDoctorVerificationStore`.
+- The monitor runtime-state row and monitor schema revision 6 migration are
+  implemented and covered by the committed prior-version migration evidence.
+- The internal atomic exclusive-start operation and the expiry-boundary store
+  read are implemented and included in the T3/T7 validation evidence.
+- The #109 fix persists Session `match_kind`; it does not add a new
+  `source_adapter` value or public wire vocabulary. Existing
+  `exact-binding.md` rules remain authoritative, including the shared-trace
+  `exact_linked` prohibition.
+- Collision-file edits are recorded in the log below with their
+  source-neutrality decisions. The derived README, user guide, and local
+  monitor script guide already describe the current Claude handoff and were
+  not changed for T9.
+
+Still open and explicitly handed off:
+
+- **#110 → #106:** live Claude producer behavior when telemetry is enabled and
+  `OTEL_LOG_USER_PROMPTS` is off. #106 must run one interactive prompt and one
+  `claude -p` prompt, export the raw records, and record whether the
+  `user_prompt` key is present. This branch makes no live-producer claim.
+- **Future binding interface:** the complete provenance-bearing trace-context
+  DTO required for byte-equivalent trace-context binding is deferred in
+  Session v1. Trace-id-only evidence remains non-binding.
+- **T9 documentation closeout:** Terra high final re-review #3 approved this
+  documentation-only closeout. Main integration, live Claude execution, and
+  #106 result recording remain outside the completion claim for this branch.
 
 ## Collision-file edit log
 
@@ -168,3 +200,26 @@ Minor items for final review triage:
   rejected by the store" (both leave candidates empty) — behavior proven, red
   strength weak; consider a call-count seam only if the final review deems it
   worth the surface (ClaudeDoctorCandidateObserverTests.cs:178).
+
+T9 disposition: the low-strength expiry-boundary assertion is retained as a
+known test-quality note; the expiry behavior is covered by the observer suite
+and the frozen full validation. No product or test change is made in this
+documentation-only closeout.
+
+T9 Terra high review #1 (read-only, on the uncommitted documentation-only diff):
+VERDICT REVISE — the focused 2/2 evidence must name
+`MonitorOverviewPlaywrightTests.Overview_PeriodToggleAndLists_RespectSanitizedBoundary`
+(false/true cases), and the Three-surface settings matrix separator must have
+exactly five columns. These corrections are recorded above; Terra high re-review
+is pending. No final approval is claimed.
+
+T9 Terra high re-review #2 (read-only, on the uncommitted documentation-only
+diff): VERDICT REVISE — `docs/task.md` prematurely claimed “feature branch
+complete” while the handoff and ledger recorded `closeout-in-review`. The status
+correction is applied in this diff; final re-review remains pending. No approval
+is claimed.
+
+T9 Terra high final re-review #3 (read-only, on the corrected documentation-only
+diff): VERDICT APPROVE. The focused diagnostic, settings matrix, and review-state
+records are corrected. The frozen candidate validation evidence and the live
+Claude producer, #110, and main-integration exclusions are retained.

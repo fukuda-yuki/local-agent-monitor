@@ -74,7 +74,7 @@ cross-layer contract table, and the execution/verification order.
 
 ### Persisted candidate contract (cross-process: LocalMonitor writes, ConfigCli reads)
 
-| Evidence kind | Produced when (deterministic rule) | Evidence ref grammar | Consumer |
+| Evidence kind | Stage / deterministic rule | Evidence ref grammar | Consumer |
 | --- | --- | --- | --- |
 | `ingest` | accepted claude-code OTLP record committed after verification `StartedAt` | `claude-otel-ingest-<traceId>-<spanId>` | `first-trace status` listing; `complete` resolution; evaluator |
 | `raw_persistence` | raw telemetry row committed for that record | `claude-otel-raw-<traceId>-<spanId>` | same |
@@ -90,22 +90,37 @@ session IDs, paths, prompts, or PII. Dedup: existing
 `(verification_id, evidence_ref)` uniqueness. Cross-process concurrency relies
 on the existing SQLite store behavior (`doctor_store_busy` on contention).
 
-### Fact family producer table (summary; normative copy in the interface spec)
+### Fact family contract table (normative decision rules and consumers)
 
-| Family | Input source | Producer |
-| --- | --- | --- |
-| `install_and_source_version` | monitor readiness/database presence; `ClaudeCodeVersionDetector` (read-only) | fact collector |
-| `process_receiver_and_port` | first-trace bounded liveness probe (`/health/live`, setup-contract classification: live / positive no-listener / other=foreign) | fact collector |
-| `source_effective_configuration` | first-trace read-only effective-value resolver (setup precedence: env > managed > local > project > user; per-key effective/absent/conflict) | fact collector |
-| `endpoint_reachability` | bounded readiness probe (`/health/ready`) | fact collector |
-| `protocol_and_signal_compatibility` | same effective-value resolver (protocol + telemetry/exporter gates) | fact collector |
-| `source_version_and_schema_diagnostics` | version detector + source-compatibility fingerprint/drift rows | fact collector |
-| `last_ingest` | raw/source-compatibility rows in the verification window | fact collector (SQLite read) |
-| `raw_persistence` | `ListCandidates` kind `raw_persistence` / raw rows | fact collector |
-| `projection` | `ListCandidates` kind `projection` / projection state | fact collector |
-| `exact_session_binding` | `ListCandidates` kind `exact_session_binding`; stage-dependent: pre-projection `(not_required, not_applicable)`, then `(required, unbound/exact_bound)` | fact collector |
-| `completeness_and_content` | bound-session completeness + content-state rows + monitor runtime-state row (`raw_access`, trusted only when probe = monitor-live) | fact collector |
-| `restart_or_new_process` | setup ledger latest applied claude-code change set vs accepted ingest since apply | fact collector |
+The following table makes the producer/input, decision rule, and consumer
+boundary explicit. The decision rules are the v1 rules in
+`claude-first-trace.md`; this table does not add a second fact vocabulary.
+
+| Family | Producer / input | Deterministic decision rule (v1, `claude-code`) | Consumer |
+| --- | --- | --- | --- |
+| `install_and_source_version` | `ClaudeDoctorFactCollector` reads monitor readiness/database presence and reruns `ClaudeCodeVersionDetector` read-only. | `monitor_install`: `installed` when the bounded probe is monitor-live or the monitor database exists at `--database`; `not_installed` when neither; `unknown` on read error. `source_version`: `supported` iff the detector reports a supported version (>= 2.1.207); `unsupported` on a detected lower version; `unknown` when undetectable. `source_feature` mirrors `source_version` in v1 (`available` iff supported). | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; the resulting `doctor.v1` is embedded by `FirstTraceCli`. |
+| `process_receiver_and_port` | `ClaudeDoctorFactCollector` performs the bounded `GET <canonical-origin>/health/live` probe using the setup-contract classification. | HTTP 200 with the complete single-property JSON object `"status":"live"` is monitor-live → `running`/`bound`/`monitor`; connection refused or equivalent positive no-listener → `not_running`/`not_bound`/`none`; every other probe result → `not_running`/`not_bound`/`foreign`; an unresolvable canonical origin → all `unknown`. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `FirstTraceCli` reports the embedded result and next action. |
+| `source_effective_configuration` | `ClaudeDoctorFactCollector` uses the read-only effective-value resolver over process environment, managed policy, local settings, project settings, and user settings. | `endpoint_alignment`: `match` iff effective `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` equals the canonical monitor origin plus `/v1/traces`; different or absent → `mismatch`; unreadable source or unresolved precedence conflict → `unknown`. The resolver reports each key as effective, absent, or conflict using the setup precedence. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `FirstTraceCli` uses the result for `begin`/`status`. |
+| `endpoint_reachability` | `ClaudeDoctorFactCollector` performs the bounded `GET <canonical-origin>/health/ready` readiness probe. | `reachable` iff the setup-contract readiness probe succeeds; no-listener, foreign, or other probe failure → `unreachable`; probe cannot run → `unknown`. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `FirstTraceCli` exposes the authoritative `doctor.v1` outcome. |
+| `protocol_and_signal_compatibility` | `ClaudeDoctorFactCollector` reuses the same read-only effective-value resolver for trace protocol and telemetry/exporter gates. | `protocol`: `http_protobuf` iff effective trace protocol is `http/protobuf`; different → `mismatch`; unreadable → `unknown`. `trace_signal`: `enabled` iff effective `CLAUDE_CODE_ENABLE_TELEMETRY=1` and `OTEL_TRACES_EXPORTER=otlp`; explicitly off or absent → `disabled`; unreadable → `unknown`. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `FirstTraceCli` reports the embedded result without reinterpreting it. |
+| `source_version_and_schema_diagnostics` | `ClaudeDoctorFactCollector` combines the version detector with persisted Claude source-compatibility fingerprint/drift rows. | `compatibility`: `supported` iff the detected version is supported and present compatibility rows have a known fingerprint; unsupported version or incompatible fingerprint → `unsupported_source_version`; otherwise `unknown`. `schema`: `drift_detected` iff Claude rows report drift; `matching` when rows exist without drift; no rows → `unknown`. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `FirstTraceCli` returns the result and guidance. |
+| `last_ingest` | `ClaudeDoctorFactCollector` reads accepted/rejected Claude ingest rows at or after the verification start. | `accepted` if any accepted record exists; else `rejected` if any rejected record exists; else `none`. Without a verification window → `unknown`. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `first_trace.v1` carries the resulting Doctor state. |
+| `raw_persistence` | `ClaudeDoctorFactCollector` reads raw rows and `ListCandidates` entries of kind `raw_persistence`. | `persisted` iff at least one `raw_persistence` candidate exists; `not_persisted` when ingest was accepted but no raw row was committed; without a window → `unknown`. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `FirstTraceCli` lists the related candidates and embeds the result. |
+| `projection` | `ClaudeDoctorFactCollector` reads projected rows, persisted projection state, and `ListCandidates` entries of kind `projection`. | `completed` iff at least one `projection` candidate exists; `pending`/`failed` from persisted projection state for accepted records; `not_started` when raw rows exist without projection activity; without a window → `unknown`. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `FirstTraceCli` lists candidates and returns the embedded result. |
+| `exact_session_binding` | `ClaudeDoctorFactCollector` reads `ListCandidates` entries of kind `exact_session_binding`; it does not derive this family from `SourceProjectionState.BindingState`. | Before any window record has completed projection → `(not_required, not_applicable)`; after projection completion → `(required, exact_bound)` iff an exact-binding candidate exists, otherwise `(required, unbound)`. Exact binding is required for `first_trace_ready`; the pre-trace value only says that nothing bindable exists yet. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `FirstTraceCli` consumes the Doctor result. The candidate observer and exact-binding rule own candidate creation. |
+| `completeness_and_content` | `ClaudeDoctorFactCollector` reads the exactly-bound Session, content-state rows, effective content-gate settings, and the monitor runtime-state row for `raw_access`. | Bound-session completeness is copied as `unbound`/`partial`/`rich`/`full`, and is `unknown` while no Session is exactly bound. `available`/`redacted` content → `enabled`; `not_captured` → `disabled`; `unsupported` → `unsupported`; no agreement/rows → effective content-gate setting; unreadable → `unknown`. `raw_access` is trusted only when liveness is monitor-live. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `FirstTraceCli` embeds the result, while `SourceProjectionState` remains the monitor read model for its own Session fields. |
+| `restart_or_new_process` | `ClaudeDoctorFactCollector` compares the setup ledger's latest applied Claude change set with accepted Claude ingest since that apply. | `required` iff no accepted Claude ingest exists at or after the apply time; `not_required` when no applied change set exists or accepted ingest follows it; unreadable ledger → `unknown`. | `ClaudeDoctorFactMapper` → `DoctorEvaluator`; `FirstTraceCli` renders the authoritative next action. |
+
+### `first_trace.v1` ↔ `doctor.v1` ↔ `SourceProjectionState`
+
+| `first_trace.v1` member or stage | `doctor.v1` correspondence | `SourceProjectionState` correspondence | Boundary |
+| --- | --- | --- | --- |
+| `doctor` and `evaluation_preview` | An unmodified serialized `DoctorResult`; state, evidence, reason codes, and next actions come only from the frozen Doctor contract. | No direct replacement. The monitor projection is an input-side read model, not a second Doctor result. | `FirstTraceCli` embeds the Doctor result verbatim and never re-derives Doctor vocabulary. |
+| `candidates[]` with `ingest` or `raw_persistence` | Doctor evidence candidates resolved by the Doctor store during completion and represented by the corresponding evidence kinds. | No direct `SourceProjectionState` field; these stages come from persisted ingestion/raw rows. | Candidate refs are opaque and do not infer Session binding. |
+| `candidates[]` with `projection` | Doctor `projection` evidence candidate. | A projected span row is an input to building `SourceProjectionState`; projection completion is still decided from persisted pipeline state and candidates. | `SourceProjectionState` does not create or accept a Doctor candidate by itself. |
+| `candidates[]` with `exact_session_binding` and the `exact_session_binding` fact | Doctor evidence kind plus the fact member `(required, exact_bound)`; absence yields `(required, unbound)`. | `BindingState=exact_linked` is allowed only when the exact native-ID or explicit resume/handoff rule produced the exact link. Shared trace continuity remains `otel_only`/`hook_only`. | Neither a persisted adapter label nor `trace_id` continuity may promote the binding. |
+| `candidates[]` with `completeness_content` and the `completeness_and_content` fact | Doctor evidence kind plus the completeness/content fact family used by the evaluator. | The exactly-bound Session's `Completeness` and `ContentState` are the corresponding monitor read-model values. | The candidate exists only after exact binding, completeness at least `partial`, and agreed content state. |
+| Resulting `first_trace_ready` or non-ready Doctor state | The evaluator's fixed primary state and next action remain authoritative. | Monitor `BindingState`, `Completeness`, and `ContentState` remain observable projection fields and are not renamed into Doctor state. | `SourceProjectionState` is never used as the fact collector's exact-binding authority. |
 
 ## Execution order
 
