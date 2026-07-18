@@ -369,8 +369,11 @@ failed, stale, or unknown item is never projected readable.
 The expired route response remains byte-for-byte:
 
 ```json
-{ "error": "raw_content_expired", "content_state": "expired_pending_deletion" }
+{"error":"raw_content_expired","content_state":"expired_pending_deletion"}
 ```
+
+The UTF-8 body has no BOM and no trailing newline, matching the immutable
+kickoff implementation.
 
 ## Sanitized diagnostics
 
