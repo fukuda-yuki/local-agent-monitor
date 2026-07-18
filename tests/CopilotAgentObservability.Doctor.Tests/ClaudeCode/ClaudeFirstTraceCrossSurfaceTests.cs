@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -23,6 +22,8 @@ using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.Doctor.Tests.ClaudeCode;
@@ -50,12 +51,12 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     {
         var directory = CreateDirectory("claude-first-trace-no-op");
         var databasePath = Path.Combine(directory, "monitor.db");
-        var origin = ReserveLoopbackOrigin();
         var time = new DoctorTestTimeProvider(Now);
         try
         {
             PrepareBaselineDatabase(databasePath, time);
-            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, time);
+            var origin = monitor.Origin;
             var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
             var platform = CreatePlatform(databasePath, origin, monitorProbe);
             var orchestrator = CreateOrchestrator(platform, time);
@@ -82,12 +83,12 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     {
         var directory = CreateDirectory("claude-first-trace-post-rollback");
         var databasePath = Path.Combine(directory, "monitor.db");
-        var origin = ReserveLoopbackOrigin();
         var time = new DoctorTestTimeProvider(Now);
         try
         {
             PrepareBaselineDatabase(databasePath, time);
-            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, time);
+            var origin = monitor.Origin;
             var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
             var platform = CreatePlatform(databasePath, origin, monitorProbe);
             var changeSetId = AssertChangedSetupHandoff(platform, origin);
@@ -131,12 +132,12 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     {
         var directory = CreateDirectory("claude-first-trace-otel-only");
         var databasePath = Path.Combine(directory, "monitor.db");
-        var origin = ReserveLoopbackOrigin();
         var time = new DoctorTestTimeProvider(Now);
         try
         {
             PrepareBaselineDatabase(databasePath, time);
-            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, time);
+            var origin = monitor.Origin;
             var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
             var platform = CreatePlatform(databasePath, origin, monitorProbe);
             var orchestrator = CreateOrchestrator(platform, time);
@@ -158,7 +159,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 orchestrator,
                 [
                     "complete", "--database", databasePath, "--verification-id", verificationId!,
-                    "--expected-revision", "1", "--json",
+                    "--expected-revision", "1", "--endpoint", origin, "--json",
                 ],
                 expectedExitCode: 3);
             Assert.Equal("first_trace_not_ready", complete.RootElement.GetProperty("code").GetString());
@@ -177,12 +178,12 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     {
         var directory = CreateDirectory("claude-first-trace-projection-parity");
         var databasePath = Path.Combine(directory, "monitor.db");
-        var origin = ReserveLoopbackOrigin();
         var time = new DoctorTestTimeProvider(Now);
         try
         {
             PrepareBaselineDatabase(databasePath, time);
-            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, time);
+            var origin = monitor.Origin;
             var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
 
             var exactPlatform = CreatePlatform(databasePath, origin, monitorProbe);
@@ -194,9 +195,10 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
 
             using var exactComplete = CompleteVerification(
-                CreateOrchestrator(CreatePlatform(databasePath, "http://127.0.0.1:4320", monitorProbe), time),
+                CreateOrchestrator(CreatePlatform(databasePath, origin, monitorProbe), time),
                 databasePath,
                 exactVerificationId,
+                origin,
                 expectedExitCode: 0);
             Assert.Equal(
                 "first_trace_ready",
@@ -230,10 +232,10 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             Assert.NotEmpty(continuityEvidence);
             Assert.InRange(continuityEvidence.Length, 1, DoctorValidation.MaximumAcceptedEvidenceReferences);
             using var continuityComplete = RunFirstTrace(
-                CreateOrchestrator(CreatePlatform(databasePath, "http://127.0.0.1:4320", monitorProbe), time),
+                CreateOrchestrator(CreatePlatform(databasePath, origin, monitorProbe), time),
                 [
                     "complete", "--database", databasePath, "--verification-id", continuityVerificationId,
-                    "--expected-revision", "1", "--json",
+                    "--expected-revision", "1", "--endpoint", origin, "--json",
                     ..continuityEvidence.SelectMany(reference => new[] { "--evidence", reference }),
                 ],
                 expectedExitCode: 3);
@@ -247,7 +249,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             Assert.Equal("hook_only", continuityMonitor.RootElement.GetProperty("binding_state").GetString());
             Assert.NotEqual("exact_linked", continuityMonitor.RootElement.GetProperty("binding_state").GetString());
             using var continuityCancel = RunFirstTrace(
-                CreateOrchestrator(CreatePlatform(databasePath, "http://127.0.0.1:4320", monitorProbe), time),
+                CreateOrchestrator(CreatePlatform(databasePath, origin, monitorProbe), time),
                 [
                     "cancel", "--database", databasePath, "--verification-id", continuityVerificationId,
                     "--expected-revision", "1", "--json",
@@ -266,10 +268,11 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
 
             using var contentDisabledComplete = CompleteVerification(
                 CreateOrchestrator(
-                    CreatePlatformWithContentDisabled(databasePath, "http://127.0.0.1:4320", monitorProbe),
+                    CreatePlatformWithContentDisabled(databasePath, origin, monitorProbe),
                     time),
                 databasePath,
                 contentDisabledVerificationId,
+                origin,
                 expectedExitCode: 0);
             var contentDisabledStates = contentDisabledComplete.RootElement.GetProperty("doctor").GetProperty("evaluation")
                 .GetProperty("states").EnumerateArray().ToArray();
@@ -293,13 +296,13 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     {
         var directory = CreateDirectory("claude-first-trace-positive");
         var databasePath = Path.Combine(directory, "monitor.db");
-        var origin = ReserveLoopbackOrigin();
         var time = new DoctorTestTimeProvider(Now);
         try
         {
             PrepareBaselineDatabase(databasePath, time);
 
-            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, time);
+            var origin = monitor.Origin;
             var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
             var setupPlatform = CreatePlatform(databasePath, origin, monitorProbe);
             AssertChangedSetupHandoff(setupPlatform, origin);
@@ -348,13 +351,13 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             });
             AssertNoSensitiveMarkers(status.RootElement.GetProperty("candidates").GetRawText());
 
-            var completionPlatform = CreatePlatform(databasePath, "http://127.0.0.1:4320", monitorProbe);
+            var completionPlatform = CreatePlatform(databasePath, origin, monitorProbe);
             var completionOrchestrator = CreateOrchestrator(completionPlatform, time);
             using var complete = RunFirstTrace(
                 completionOrchestrator,
                 [
                     "complete", "--database", databasePath, "--verification-id", verificationId!,
-                    "--expected-revision", "1", "--json",
+                    "--expected-revision", "1", "--endpoint", origin, "--json",
                 ],
                 expectedExitCode: 0);
             Assert.Equal("first_trace_completed", complete.RootElement.GetProperty("code").GetString());
@@ -375,12 +378,12 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     {
         var directory = CreateDirectory("claude-first-trace-negative");
         var databasePath = Path.Combine(directory, "monitor.db");
-        var origin = ReserveLoopbackOrigin();
         var time = new DoctorTestTimeProvider(Now);
         try
         {
             PrepareBaselineDatabase(databasePath, time);
-            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, time);
+            var origin = monitor.Origin;
             var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
             var setupPlatform = CreatePlatform(databasePath, origin, monitorProbe);
             AssertChangedSetupHandoff(setupPlatform, origin);
@@ -404,12 +407,12 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             await monitor.DrainAsync();
             new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
 
-            var completionPlatform = CreatePlatform(databasePath, "http://127.0.0.1:4320", monitorProbe);
+            var completionPlatform = CreatePlatform(databasePath, origin, monitorProbe);
             using var complete = RunFirstTrace(
                 CreateOrchestrator(completionPlatform, time),
                 [
                     "complete", "--database", databasePath, "--verification-id", verificationId!,
-                    "--expected-revision", "1", "--json",
+                    "--expected-revision", "1", "--endpoint", origin, "--json",
                 ],
                 expectedExitCode: 3);
             Assert.Equal("first_trace_not_ready", complete.RootElement.GetProperty("code").GetString());
@@ -706,12 +709,13 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         FirstTraceOrchestrator orchestrator,
         string databasePath,
         string verificationId,
+        string origin,
         int expectedExitCode) =>
         RunFirstTrace(
             orchestrator,
             [
                 "complete", "--database", databasePath, "--verification-id", verificationId,
-                "--expected-revision", "1", "--json",
+                "--expected-revision", "1", "--endpoint", origin, "--json",
             ],
             expectedExitCode);
 
@@ -805,15 +809,6 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         return directory;
     }
 
-    private static string ReserveLoopbackOrigin()
-    {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return $"http://127.0.0.1:{port}";
-    }
-
     private sealed class RunningMonitor : IAsyncDisposable
     {
         private readonly WebApplication app;
@@ -826,6 +821,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         private RunningMonitor(
             WebApplication app,
             HttpClient client,
+            string origin,
             IngestionWriterWorker ingestionWorker,
             SessionEventWriterWorker sessionWorker,
             ProjectionWorker projectionWorker,
@@ -834,6 +830,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         {
             this.app = app;
             Client = client;
+            Origin = origin;
             this.ingestionWorker = ingestionWorker;
             this.sessionWorker = sessionWorker;
             this.projectionWorker = projectionWorker;
@@ -843,9 +840,10 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
 
         public HttpClient Client { get; }
 
+        public string Origin { get; }
+
         public static async Task<RunningMonitor> StartAsync(
             string databasePath,
-            string origin,
             TimeProvider time)
         {
             var queue = new IngestionQueue(time);
@@ -858,7 +856,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             health.SetProjectionWorkerRunning(true);
             health.SetProjectionStatus(0, null);
             var app = MonitorHost.Build(
-                new MonitorOptions(databasePath, origin, false, MonitorOptions.DefaultMaxRequestBodyBytes),
+                new MonitorOptions(databasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes),
                 new MonitorHostTestOptions
                 {
                     Queue = queue,
@@ -883,6 +881,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             try
             {
                 await app.StartAsync();
+                var origin = GetSingleBoundAddress(app);
                 var ingestionWorker = new IngestionWriterWorker(
                     queue,
                     new SqliteIngestionCommitStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter),
@@ -901,6 +900,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 return new(
                     app,
                     new HttpClient { BaseAddress = new Uri(origin) },
+                    origin,
                     ingestionWorker,
                     sessionWorker,
                     projectionWorker,
@@ -912,6 +912,19 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 await app.DisposeAsync();
                 throw;
             }
+        }
+
+        private static string GetSingleBoundAddress(WebApplication app)
+        {
+            var addresses = app.Services.GetRequiredService<IServer>()
+                .Features.Get<IServerAddressesFeature>()?
+                .Addresses
+                .ToArray();
+            Assert.NotNull(addresses);
+            var address = Assert.Single(addresses);
+            Assert.StartsWith("http://127.0.0.1:", address, StringComparison.Ordinal);
+            Assert.False(address.EndsWith(":0", StringComparison.Ordinal));
+            return address;
         }
 
         public async Task PostSessionStartAsync(string nativeSessionId)
@@ -990,7 +1003,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             try
             {
                 using var response = client.GetAsync(
-                        path,
+                        new Uri(new Uri(origin, UriKind.Absolute), path),
                         HttpCompletionOption.ResponseHeadersRead,
                         cancellation.Token)
                     .GetAwaiter()
