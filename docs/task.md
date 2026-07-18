@@ -69,6 +69,12 @@
 
 ## Open Follow-ups
 
+- **Issue #89 Raw retention cleanup (in progress):** catalog v1 contract,
+  immutable raw-read inventory, frozen Session v1 compatibility projection, and
+  persistence-neutral contract types are established first. Follow-on tasks own
+  catalog migration/read gates, worker, exact adapters, diagnostics, and final
+  corpus/closeout; pin/delete-now remains Issue #90.
+
 - **未対応の機能仕様・検証（未確認の検証フェーズ）**
   - Sprint18 スパンインスペクタの `SpanDetailExtractor` は実 VS Code Copilot Chat ペイロードのキー名が live 検証まで未確定のため defensive 抽出とし、整形抽出が空でも raw タブで代替できる。実ペイロードでの整形表示のライブ検証は人手ゲート（D043、既存 prompt extractor と同種の caveat）。
   - Sprint18 のプロンプト検索は server 側 TraceId 部分一致 + client 側の読み込み済み行 prompt label フィルタに限定（D042 C8）。全コーパスの prompt 全文検索（raw store 横断）は未対応の follow-up。

@@ -177,7 +177,8 @@ to Config CLI and no new Local Monitor route.
   session ID、explicit resume/handoff、exact trace context のみに限定し、
   repository / timestamp proximity は使わない。
 - raw content は secret-filter 後に metadata と分離して保存し、capture から
-  90 日で expiry。物理削除 / pin / delete-now は Issue #57 に残す。
+  90 日で expiry。Retention catalog v1 が item-level physical cleanup を所有し、
+  pin / delete-now は Issue #90 に残す。
 
 ### Candidate Pipeline
 
@@ -435,7 +436,7 @@ It must include expiry metadata and delete target paths, but automatic deletion 
 Issue #51 Session content is another local raw-bearing storage class. It is
 secret-filtered, stored separately from Session metadata, and expires for reads
 at `captured_at + 90 days`; expired reads report `expired_pending_deletion`.
-Automatic physical deletion remains Issue #57 scope.
+Retention catalog v1 owns irreversible denial and later physical cleanup.
 
 Doctor storage is sanitized local runtime metadata. It contains expected
 source/adapter tokens, UUIDv7 lifecycle/candidate identifiers, canonical UTC
@@ -478,3 +479,12 @@ Before shared or production use, define:
 - identity handling。
 - secret handling。
 - live operation。
+
+## Retention catalog v1
+
+Issue #89 adds a persistence-neutral retention contract and a later independent
+catalog component in the Local Monitor database. It owns raw-item lifecycle and
+physical cleanup; Session aggregate fields remain a frozen read projection and
+cannot authorize deletion of any other store. Catalog adapters are exact-owner
+components for the five closed store kinds, while safe summaries, projections,
+receipts, and tombstones remain outside the raw deletion registry.

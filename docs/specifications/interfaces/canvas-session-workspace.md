@@ -484,9 +484,14 @@ After expiry it returns `410` with:
 ```
 
 Raw content is secret-filtered before separate storage and receives
-`expires_at = captured_at + 90 days`. Expiry changes read behavior but does not
-physically delete the stored row. Automatic physical deletion, pin, and
-delete-now remain Issue #57 scope.
+`expires_at = captured_at + 90 days`. Retention catalog v1 is the read and
+physical-cleanup authority: every captured item has an exact catalog identity,
+and expiry irrevocably denies reads before it is queued for deletion. Session v1
+is a frozen lossy projection: `expiring` and `retained_by_policy` map to
+`expiring`; every denied catalog lifecycle maps to
+`expired_pending_deletion`; no captured item maps to `not_captured`. The route's
+existing enum, status codes, JSON property names, and exact UTF-8 404/410 bytes
+remain unchanged. Pin, unpin, and delete-now remain Issue #90 scope.
 
 ## OTel Enrichment
 

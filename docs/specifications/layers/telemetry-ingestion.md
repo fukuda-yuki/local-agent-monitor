@@ -550,6 +550,23 @@ raw-data, loopback/token, bounded-response, or `session.send()` contracts.
 
 ## Local Monitor Copilot Raw Analysis
 
+## Retention scheduling and active-operation exclusion
+
+Retention catalog v1 owns cleanup scheduling rather than the receiver or
+projection worker. Raw HTTP reads, monitor raw-projection loads, analysis
+tool-data loads, active analysis operations, Sensitive Bundle reads/resume/
+enumeration, and SDK directory operations must acquire the appropriate catalog
+access or operation lease before touching raw data. A deletion lease cannot
+claim an item while such a lease is active. Late writes revalidate the expected
+catalog revision and cannot recreate or re-enable a denied item.
+
+The worker has a durable bounded queue, not an in-memory source of truth. It
+promotes expired items idempotently, claims in expiry/item-id order, records
+fixed sanitized error codes and retry metadata, and recovers only the exact
+journaled source after restart. `deleting` remains forward-only after a delete
+intent. Worker status and later retention diagnostics never expose raw values,
+source IDs, private locators, paths, credentials, PII, or exception text.
+
 The Local Monitor may start a Copilot SDK raw analysis run for a selected trace
 in the normal raw-default posture. The raw-analysis feature itself does not add
 telemetry input and does not change existing sanitized `/api/monitor/*` or SSE

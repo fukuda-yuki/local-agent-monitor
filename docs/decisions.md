@@ -226,6 +226,15 @@ Status: Open
 - shared artifact access control。
 - live operation。
 
+## D063: Retention catalog is the raw cleanup authority
+
+Issue #89 adopts a single versioned catalog per Local Monitor database. Raw
+read availability and physical cleanup are item-level catalog decisions based
+on stable IDs, exact source references, and explicit ownership only. Existing
+Session workspace v1 remains a frozen compatibility projection; it does not
+become a cross-store deletion authority. This separates irreversible read denial
+from eventual physical removal and prevents heuristic/path-based cleanup.
+
 ## D017: Collection profile を public interface にする
 
 Status: Accepted

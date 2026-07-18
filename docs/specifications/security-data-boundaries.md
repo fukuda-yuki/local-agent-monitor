@@ -719,8 +719,10 @@ is secret-filtered before storage in `session_event_content` and receives
 raw-bearing and must enforce same-origin plus `Cache-Control: no-store`. It is
 absent under `--sanitized-only` (`404`). Expired content returns `410` with
 `{ "error": "raw_content_expired", "content_state":
-"expired_pending_deletion" }`; automatic physical deletion, pin, and
-delete-now remain Issue #57 scope. Raw Session content must not enter Canvas
+"expired_pending_deletion" }`; catalog v1 makes the denial irreversible before
+durable physical cleanup and retains only a catalog tombstone after deletion.
+The frozen v1 shape does not disclose a detailed lifecycle. Pin, unpin, and
+delete-now remain Issue #90 scope. Raw Session content must not enter Canvas
 actions, `session.send()` prompts, sanitized workspace reads, logs,
 repository-safe outputs, static artifacts, Issue/PR/docs, or CI artifacts.
 

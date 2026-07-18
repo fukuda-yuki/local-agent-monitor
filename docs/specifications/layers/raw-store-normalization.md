@@ -517,6 +517,54 @@ Raw analysis result markdown is local runtime data and must not be committed.
 Repository-safe summary output must be generated from allowlisted metadata and
 evidence references, not by copying arbitrary raw model output.
 
+## Retention catalog v1
+
+Issue #89 defines one separately versioned retention catalog in the same Local
+Monitor SQLite database as the Session, monitor raw, and analysis data. It is
+not an extension of `RawTelemetryStore.cs` and no source creates a parallel
+catalog. Catalog/source SQLite writes and deletes share a connection and
+transaction; file producers receive the catalog database by explicit injected
+configuration and fail closed before creating raw files when it is unavailable.
+
+The ownership key is exactly `(store_instance_id, store_kind, source_item_id)`.
+`item_id` is opaque and stable. The closed v1 store-kind registry is
+`session_event_content`, `raw_record`, `analysis_run_raw`, `sensitive_bundle`,
+and `analysis_sdk_directory`. The closed lifecycle is `expiring`,
+`retained_by_policy`, `expired_pending_deletion`, `deletion_queued`,
+`deleting`, `deleted`, and `deletion_failed`. `not_captured` and `mixed` are
+aggregate-only values and are never persisted item states. Inventory categories
+are `required_cleanup`, `retained_by_policy`, `not_applicable`, and `blocked`.
+
+`raw-default-90d` v1 applies to Session content, raw records, analysis raw, and
+SDK directories. `sensitive-bundle-7d` v1 applies only to Sensitive Bundles.
+Expiry is `captured_at + policy TTL`; Session timestamps are preserved exactly,
+raw records use valid `received_at`, analysis uses valid `requested_at`, Bundle
+uses its catalog reservation time, and SDK children use their owning analysis
+request time. Missing or invalid legacy authority is blocked and read denied;
+it is never replaced with current, import, restore, file, or reconciliation
+time.
+
+Reads require a matching readable catalog revision, exact source item, and an
+active read lease. Expiry first commits irreversible `read_denied_at`, then
+queues cleanup. A failed retry, restart, clock change, repair, or source absence
+never restores readability. Queueing is idempotent by `item_id`; scan/claim
+order is `expires_at ASC, item_id ASC`, with finite v1 limits (100 items, 30 s
+scan, 2 workers, 5 attempts). Deletion requires an exact source identity,
+adapter-owned ownership receipt, expected revision, and deletion lease. No
+repository, workspace, path, trace, timestamp proximity, or prompt similarity
+may identify a deletion target. SQLite source deletion and the `deleted`
+tombstone/receipt are atomic. File deletion is journaled, forward-only, and
+only mutates exact owned members after identity/marker/digest validation.
+
+The immutable Issue #89 kickoff and inventory base are both
+`11d6c587903f6ea97026d815f608231efea08d65`. The checked-in current-callsite
+inventory is [issue-89-raw-read-callsite-inventory.md](../../sprints/issue-89-raw-read-callsite-inventory.md).
+Sanitized projections, Session/Event metadata, safe summaries, receipts, and
+tombstones are retained outputs, not raw store kinds. Caller-owned input files,
+unimplemented receiver files, and external blobs are not cleanup targets. The
+final closeout corpus is `retention-closeout-corpus-v1`; it must classify every
+base-to-final raw-bearing creator and cannot treat future stores as covered.
+
 ## Validation
 
 Use synthetic fixtures for automated tests.

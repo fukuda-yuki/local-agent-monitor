@@ -192,11 +192,19 @@ emitting `4319`.
 ## Candidate Commands
 
 ```text
-config-cli generate-diagnosis-candidates <measurements.csv|measurements.json> [--raw <raw-store.db|raw-otlp.json>] [--include-sensitive-content] [--sensitive-output-dir <dir>] [--csv <output.csv>] [--json <output.json>]
+config-cli generate-diagnosis-candidates <measurements.csv|measurements.json> [--raw <raw-store.db|raw-otlp.json>] [--include-sensitive-content --retention-database <local-monitor.db> [--sensitive-output-dir <dir>]] [--csv <output.csv>] [--json <output.json>]
 config-cli generate-improvement-candidates <diagnosis-candidates.csv|diagnosis-candidates.json> [--csv <output.csv>] [--json <output.json>]
 config-cli generate-auto-decisions <improvement-candidates.csv|improvement-candidates.json> [--csv <output.csv>] [--json <output.json>]
 config-cli adapt-diagnosis-candidates <diagnosis-candidates.csv|diagnosis-candidates.json> <measurements.csv|measurements.json> [--csv <output.csv>] [--json <output.json>]
 ```
+
+`--include-sensitive-content` requires both `--raw` and
+`--retention-database`. `--retention-database` is the sole explicit catalog
+binding; it is never inferred from `--raw`, a cwd, or an output path, cannot be
+repeated, and is rejected without sensitive mode. `--sensitive-output-dir` is
+an optional parent and remains accepted but inert without sensitive mode. Before
+any raw read or output, the command opens and validates the named existing Local
+Monitor database; it does not create, discover, or fall back to a catalog.
 
 ## Human Review Commands
 
