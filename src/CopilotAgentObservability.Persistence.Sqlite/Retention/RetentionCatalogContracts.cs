@@ -125,3 +125,36 @@ public static class RetentionV1Constants
     public static TimeSpan WalMaintenanceRetryDelay => TimeSpan.FromMinutes(1);
     public static TimeSpan[] RetryDelays => [TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(30), TimeSpan.FromHours(2)];
 }
+
+public enum RetentionLeaseKind { Access, Operation }
+
+public sealed record RetentionOwnershipKey(string StoreInstanceId, RetentionStoreKind StoreKind, string SourceItemId);
+
+public sealed record RetentionCatalogItem(
+    string ItemId,
+    RetentionOwnershipKey OwnershipKey,
+    DateTimeOffset CapturedAt,
+    DateTimeOffset ExpiresAt,
+    RetentionItemLifecycle State,
+    long Revision,
+    DateTimeOffset? ReadDeniedAt);
+
+public sealed class RetentionMigrationBlockedException : InvalidOperationException
+{
+    public RetentionMigrationBlockedException() : base("retention_migration_blocked") { }
+}
+
+public sealed class RetentionReadLeaseHandle : IDisposable
+{
+    private readonly Action release;
+    internal RetentionReadLeaseHandle(string itemId, long revision, Action release)
+    {
+        ItemId = itemId;
+        Revision = revision;
+        this.release = release;
+    }
+
+    public string ItemId { get; }
+    public long Revision { get; }
+    public void Dispose() => release();
+}
