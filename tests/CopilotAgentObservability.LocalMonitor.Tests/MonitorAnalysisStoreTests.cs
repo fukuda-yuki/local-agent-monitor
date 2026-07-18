@@ -1,5 +1,6 @@
 using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -110,6 +111,66 @@ public class MonitorAnalysisStoreTests
         Assert.Equal("span-1", run.SpanId);
         Assert.Equal(MonitorAnalysisFocus.ToolUsage, run.Focus);
         Assert.Equal(MonitorAnalysisStatus.Queued, run.Status);
+        Assert.Equal(0, CountRetentionItems(temp.DatabasePath, result.RunId));
+    }
+
+    [Fact]
+    public void AppendEvent_AtomicallyCreatesAnalysisRawRetentionItem()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteMonitorAnalysisStore(temp.DatabasePath);
+        store.CreateSchema();
+        var requestedAt = DateTimeOffset.UtcNow;
+        var result = store.StartRun("trace-analysis", 42, "span-1", MonitorAnalysisFocus.ToolUsage, requestedAt);
+
+        store.AppendEvent(result.RunId, "progress", "raw local event", requestedAt.AddMinutes(1));
+
+        Assert.Equal(1, CountRetentionItems(temp.DatabasePath, result.RunId));
+    }
+
+    [Fact]
+    public async Task AppendEvent_ConcurrentFirstRawWritesCommitBothEventsAndOneCatalogItem()
+    {
+        using var temp = new MonitorTempDirectory();
+        var setup = new SqliteMonitorAnalysisStore(temp.DatabasePath);
+        setup.CreateSchema();
+        var requestedAt = DateTimeOffset.UtcNow;
+        var run = setup.StartRun("trace-analysis", 42, "span-1", MonitorAnalysisFocus.ToolUsage, requestedAt);
+
+        using var start = new Barrier(3);
+        var first = Task.Run(() =>
+        {
+            start.SignalAndWait();
+            new SqliteMonitorAnalysisStore(temp.DatabasePath).AppendEvent(run.RunId, "progress", "first raw event", requestedAt.AddMinutes(1));
+        });
+        var second = Task.Run(() =>
+        {
+            start.SignalAndWait();
+            new SqliteMonitorAnalysisStore(temp.DatabasePath).AppendEvent(run.RunId, "progress", "second raw event", requestedAt.AddMinutes(2));
+        });
+
+        start.SignalAndWait();
+        await Task.WhenAll(first, second);
+
+        Assert.Equal(2, CountEvents(temp.DatabasePath, run.RunId));
+        Assert.Equal(1, CountRetentionItems(temp.DatabasePath, run.RunId));
+    }
+
+    [Fact]
+    public void AppendEvent_SourceWriteFailureRollsBackEventAndCatalog()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteMonitorAnalysisStore(temp.DatabasePath, phase =>
+        {
+            if (phase == MonitorAnalysisStoreWritePhase.AfterSourceWrite) throw new InvalidOperationException("injected");
+        });
+        store.CreateSchema();
+        var result = store.StartRun("trace-analysis", 42, "span-1", MonitorAnalysisFocus.ToolUsage, DateTimeOffset.UtcNow);
+
+        Assert.Throws<InvalidOperationException>(() => store.AppendEvent(result.RunId, "progress", "raw local event", DateTimeOffset.UtcNow));
+
+        Assert.Equal(0, CountRetentionItems(temp.DatabasePath, result.RunId));
+        Assert.Equal(0, CountEvents(temp.DatabasePath, result.RunId));
     }
 
     [Fact]
@@ -118,22 +179,23 @@ public class MonitorAnalysisStoreTests
         using var temp = new MonitorTempDirectory();
         var store = new SqliteMonitorAnalysisStore(temp.DatabasePath);
         store.CreateSchema();
+        var requestedAt = DateTimeOffset.UtcNow;
         var result = store.StartRun(
             traceId: "trace-safe",
             rawRecordId: 7,
             spanId: null,
             focus: MonitorAnalysisFocus.Errors,
-            requestedAt: DateTimeOffset.UnixEpoch.AddMinutes(1));
+            requestedAt: requestedAt);
 
-        store.AppendEvent(result.RunId, "progress", "Copilot read raw prompt SECRET_PROMPT_TEXT_MARKER", DateTimeOffset.UnixEpoch.AddMinutes(2));
+        store.AppendEvent(result.RunId, "progress", "Copilot read raw prompt SECRET_PROMPT_TEXT_MARKER", requestedAt.AddMinutes(1));
         store.CompleteRun(
             result.RunId,
             "Copilot raw result mentions SECRET_PROMPT_TEXT_MARKER and leak-marker@example.com",
-            DateTimeOffset.UnixEpoch.AddMinutes(3));
+            requestedAt.AddMinutes(2));
 
         var run = store.GetRun(result.RunId);
         Assert.NotNull(run);
-        var summary = store.GenerateRepositorySafeSummary(result.RunId, DateTimeOffset.UnixEpoch.AddMinutes(4));
+        var summary = store.GenerateRepositorySafeSummary(result.RunId, requestedAt.AddMinutes(3));
 
         Assert.Equal(MonitorAnalysisStatus.Succeeded, run.Status);
         Assert.Contains("SECRET_PROMPT_TEXT_MARKER", run.ResultMarkdown);
@@ -142,5 +204,26 @@ public class MonitorAnalysisStoreTests
         Assert.Contains("trace-safe", summary.Markdown);
         Assert.Contains("raw record 7", summary.Markdown);
         Assert.Contains("errors", summary.Markdown);
+        Assert.Equal(1, CountRetentionItems(temp.DatabasePath, result.RunId));
+    }
+
+    private static int CountRetentionItems(string databasePath, long runId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM retention_items WHERE store_kind='analysis_run_raw' AND source_item_id=$run_id;";
+        command.Parameters.AddWithValue("$run_id", runId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static int CountEvents(string databasePath, long runId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM monitor_analysis_events WHERE run_id=$run_id;";
+        command.Parameters.AddWithValue("$run_id", runId);
+        return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }
 }

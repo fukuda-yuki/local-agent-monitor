@@ -9,8 +9,8 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SessionSchemaMigrationFixtureTests
 {
-    private const int CurrentSessionSchemaVersion = 12;
-    private const int MatchKindSchemaVersion = 12;
+    private const int CurrentSessionSchemaVersion = 13;
+    private const int MatchKindSchemaVersion = 13;
     private const string VersionTenUpgraderCommit = "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346";
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateSessionSchemaFixtures/GenerateSessionSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/session";
     private const string VersionFourLimitation = "Commit 601c2beb5cb528d1e87aba0fef150b65e1dbccc0 exposes no public proposal-apply persistence API; parameterized INSERTs populate proposal-apply rows only after its public CreateSchema, Write, and CreateImprovementProposal APIs create the schema and parent sentinels.";
@@ -27,6 +27,20 @@ public sealed class SessionSchemaMigrationFixtureTests
         [8] = "0966d9e4d84537343ccb9706a6e3d3e101d16612431d2edb4dfe3fe882555ea4",
         [9] = "0966d9e4d84537343ccb9706a6e3d3e101d16612431d2edb4dfe3fe882555ea4",
         [10] = "0966d9e4d84537343ccb9706a6e3d3e101d16612431d2edb4dfe3fe882555ea4",
+    };
+
+    private static readonly IReadOnlyDictionary<int, string> ExpectedV13SemanticSchemaHashes = new Dictionary<int, string>
+    {
+        [1] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
+        [2] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
+        [3] = "d1c4a765ab343d084c70825bb9f98f5cb45a1adfb98c6ab39c70c3a2cf15acbc",
+        [4] = "e3ee9fc95c983957eeed1c0553ab85a535ca64dc093b20924e35bf271e0adec7",
+        [5] = "c6fd6a6cddbedad3d1f7640ad12d6b60817095e741d2ec05418c642c02d04a0b",
+        [6] = "c6fd6a6cddbedad3d1f7640ad12d6b60817095e741d2ec05418c642c02d04a0b",
+        [7] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
+        [8] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
+        [9] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
+        [10] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
     };
 
     private static readonly string[] ExpectedV11Tables =
@@ -206,7 +220,7 @@ public sealed class SessionSchemaMigrationFixtureTests
     }
 
     [Theory]
-    [InlineData(12)]
+    [InlineData(14)]
     [InlineData(99)]
     public void Newer_version_real_fixture_is_rejected_without_schema_or_data_mutation(int newerVersion)
     {
@@ -646,6 +660,8 @@ public sealed class SessionSchemaMigrationFixtureTests
         AssertExpectedRow(connection, "session_event_content", sessionRowCount, D(
             ("event_id", S(eventId)), ("content_kind", S("fixture")), ("content_json", S($"{{\"fixture\":\"session-v{version}\"}}")),
             ("captured_at", S(at.AddSeconds(30))), ("expires_at", S(at.AddDays(90)))));
+        Assert.Throws<SqliteException>(() => Execute(connection,
+            "UPDATE session_event_content SET retention_owner_token=randomblob(32) WHERE event_id=(SELECT event_id FROM session_event_content LIMIT 1);"));
         AssertSingleRow(connection, "session_projection_state", D(
             ("projector_key", S(sentinels.ProjectorKey)), ("projection_cursor", I(1000 + version)),
             ("unsupported_event_version_count", I(10 + version)), ("updated_at", S(at.AddMinutes(1)))));
@@ -694,8 +710,8 @@ public sealed class SessionSchemaMigrationFixtureTests
         Assert.Equal(ExpectedV11Tables, ReadTableNames(connection));
         var semanticSnapshot = ReadSemanticSchemaSnapshot(connection);
         var actualHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(semanticSnapshot))).ToLowerInvariant();
-        Assert.True(string.Equals(ExpectedV11SemanticSchemaHashes[version], actualHash, StringComparison.Ordinal),
-            $"Session v{version}->v11 semantic schema hash was {actualHash}.{Environment.NewLine}{semanticSnapshot}");
+        Assert.True(string.Equals(ExpectedV13SemanticSchemaHashes[version], actualHash, StringComparison.Ordinal),
+            $"Session v{version}->v13 semantic schema hash was {actualHash}.");
         return new MigratedSnapshot(semanticSnapshot, ReadDatabaseRowSnapshot(connection));
     }
 
@@ -835,7 +851,17 @@ public sealed class SessionSchemaMigrationFixtureTests
         while (reader.Read())
         {
             var row = new SortedDictionary<string, string>(StringComparer.Ordinal);
-            for (var index = 0; index < reader.FieldCount; index++) row.Add(reader.GetName(index), Encode(reader, index));
+            for (var index = 0; index < reader.FieldCount; index++)
+            {
+                var name = reader.GetName(index);
+                if (table == "session_event_content" && name == "retention_owner_token")
+                {
+                    Assert.Equal(typeof(byte[]), reader.GetFieldType(index));
+                    Assert.Equal(32, reader.GetFieldValue<byte[]>(index).Length);
+                    continue;
+                }
+                row.Add(name, Encode(reader, index));
+            }
             rows.Add(row);
         }
         Assert.Equal(expectedCount, rows.Count);

@@ -2,10 +2,12 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class RawTelemetryRecordSql
 {
-    public static long Insert(SqliteConnection connection, SqliteTransaction? transaction, RawTelemetryRecord record)
+    public static long Insert(SqliteConnection connection, SqliteTransaction? transaction, RawTelemetryRecord record, byte[]? retentionOwnerToken = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(record);
+        retentionOwnerToken ??= System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        if (retentionOwnerToken.Length != 32) throw new ArgumentException("Retention owner token must be 32 bytes.", nameof(retentionOwnerToken));
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText =
@@ -16,7 +18,8 @@ internal static class RawTelemetryRecordSql
                 received_at,
                 resource_attributes_json,
                 payload_json,
-                schema_version
+                schema_version,
+                retention_owner_token
             )
             VALUES (
                 $source,
@@ -24,7 +27,8 @@ internal static class RawTelemetryRecordSql
                 $received_at,
                 $resource_attributes_json,
                 $payload_json,
-                $schema_version
+                $schema_version,
+                $retention_owner_token
             );
             SELECT last_insert_rowid();
             """;
@@ -34,6 +38,7 @@ internal static class RawTelemetryRecordSql
         Add(command, "$resource_attributes_json", record.ResourceAttributesJson);
         Add(command, "$payload_json", record.PayloadJson);
         Add(command, "$schema_version", record.SchemaVersion);
+        Add(command, "$retention_owner_token", retentionOwnerToken);
         return (long)command.ExecuteScalar()!;
     }
 

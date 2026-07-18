@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
 {
     private const int MaximumListLimit = 200;
-    public const int MonitorSchemaVersion = 6;
+    public const int MonitorSchemaVersion = MonitorSchemaMigrator.BaseSchemaVersion;
     private readonly string databasePath;
     private readonly RawTelemetryStoreConnectionOptions connectionOptions;
     private readonly Action<SqliteConnection, SqliteTransaction>? migrationCheckpoint;

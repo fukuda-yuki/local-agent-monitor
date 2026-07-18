@@ -1,4 +1,5 @@
 using System.Globalization;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using Microsoft.Data.Sqlite;
@@ -195,7 +196,7 @@ public sealed class SourceCompatibilityStoreTests
         using (var connection = Open(database.Path))
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "UPDATE schema_version SET version = 7 WHERE component = 'monitor';";
+            command.CommandText = "UPDATE schema_version SET version = 8 WHERE component = 'monitor';";
             command.ExecuteNonQuery();
         }
 
@@ -203,7 +204,7 @@ public sealed class SourceCompatibilityStoreTests
 
         Assert.Contains("newer", exception.Message, StringComparison.OrdinalIgnoreCase);
         using var verification = Open(database.Path);
-        Assert.Equal(7L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(8L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
     }
 
     [Fact]
@@ -216,16 +217,16 @@ public sealed class SourceCompatibilityStoreTests
         rawStore.CreateMonitorSchema();
 
         using var connection = Open(database.Path);
-        Assert.Equal(6L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(7L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "UPDATE schema_version SET version = 7 WHERE component = 'monitor';";
+            command.CommandText = "UPDATE schema_version SET version = 8 WHERE component = 'monitor';";
             command.ExecuteNonQuery();
         }
 
         rawStore.CreateMonitorSchema();
 
-        Assert.Equal(7L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(8L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
     }
 
     [Fact]
@@ -348,6 +349,46 @@ public sealed class SourceCompatibilityStoreTests
         Assert.Equal(1L, Scalar(verification, "SELECT COUNT(*) FROM raw_records;"));
         Assert.Equal(1L, Scalar(verification, "SELECT COUNT(*) FROM source_schema_observations;"));
         Assert.Equal(256L, Scalar(verification, "SELECT COUNT(*) FROM source_unknown_observations;"));
+    }
+
+    [Theory]
+    [InlineData("AfterRawRecordInsert")]
+    [InlineData("AfterCatalogRegistration")]
+    [InlineData("BeforeCommit")]
+    public void Commit_CheckpointFailureRollsBackRawCatalogAndSourceTogether(string phaseName)
+    {
+        var phase = Enum.Parse<IngestionCommitWritePhase>(phaseName, ignoreCase: false);
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        new RetentionCatalogStore(database.Path).CreateSchema();
+        var store = new SqliteIngestionCommitStore(database.Path, connectionOptions: null, actual =>
+        {
+            if (actual == phase) throw new InvalidOperationException("injected direct-ingestion failure");
+        });
+
+        Assert.Throws<InvalidOperationException>(() => store.Commit(CreateBatch("batch-atomic-" + phase, BuildOverflowInventory())));
+
+        using var connection = Open(database.Path);
+        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM raw_records;"));
+        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record';"));
+        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM source_schema_observations;"));
+        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM monitor_projection_dispositions;"));
+    }
+
+    [Fact]
+    public void Commit_RegistersExactRawReceiptAndReplayPreservesIds()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var store = new SqliteIngestionCommitStore(database.Path);
+        var batch = CreateBatch("batch-catalog-receipt", BuildOverflowInventory());
+
+        var committed = store.Commit(batch);
+        Assert.Equal(committed, store.Commit(batch));
+
+        using var connection = Open(database.Path);
+        Assert.Equal(1L, Scalar(connection, $"SELECT COUNT(*) FROM raw_records WHERE id={committed.RawRecordId.ToString(CultureInfo.InvariantCulture)} AND received_at='2026-07-12T00:00:00.0000000+00:00' AND length(retention_owner_token)=32;"));
+        Assert.Equal(1L, Scalar(connection, $"SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record' AND source_item_id='{committed.RawRecordId.ToString(CultureInfo.InvariantCulture)}' AND captured_at='2026-07-12T00:00:00.0000000+00:00';"));
     }
 
     [Fact]

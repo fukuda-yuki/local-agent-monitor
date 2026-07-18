@@ -86,7 +86,7 @@ public sealed class SqliteMonitorRuntimeStateStoreTests
     private static void AssertMigrationResult(string databasePath)
     {
         using var connection = Open(databasePath);
-        Assert.Equal(6L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(7L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
         Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'monitor_projection_dispositions';"));
         Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'monitor_runtime_state';"));
         Assert.Equal(501L, Scalar(connection, "SELECT id FROM raw_records WHERE id = 501;"));

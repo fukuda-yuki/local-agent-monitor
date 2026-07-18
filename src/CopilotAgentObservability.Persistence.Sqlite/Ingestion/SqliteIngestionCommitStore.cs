@@ -1,16 +1,28 @@
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
+
 namespace CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 
 internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
 {
     private readonly string databasePath;
     private readonly RawTelemetryStoreConnectionOptions connectionOptions;
+    private readonly Action<IngestionCommitWritePhase>? writeFailureInjector;
 
     public SqliteIngestionCommitStore(
         string databasePath,
         RawTelemetryStoreConnectionOptions? connectionOptions = null)
+        : this(databasePath, connectionOptions, writeFailureInjector: null)
+    {
+    }
+
+    internal SqliteIngestionCommitStore(
+        string databasePath,
+        RawTelemetryStoreConnectionOptions? connectionOptions,
+        Action<IngestionCommitWritePhase>? writeFailureInjector)
     {
         this.databasePath = databasePath;
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
+        this.writeFailureInjector = writeFailureInjector;
     }
 
     public CommittedIngestionIds Commit(ValidatedIngestionBatch batch)
@@ -26,13 +38,28 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
                 return existing;
             }
 
-            var rawRecordId = RawTelemetryRecordSql.Insert(connection, transaction, batch.RawRecord);
+            var catalog = new RetentionCatalogStore(databasePath);
+            try
+            {
+                catalog.InitializeForWrite(connection, transaction);
+            }
+            catch (RetentionMigrationBlockedException)
+            {
+                throw new IngestionCommitFailedException();
+            }
+
+            var ownerToken = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+            var rawRecordId = RawTelemetryRecordSql.Insert(connection, transaction, batch.RawRecord, ownerToken);
+            writeFailureInjector?.Invoke(IngestionCommitWritePhase.AfterRawRecordInsert);
+            catalog.RegisterRawRecord(connection, transaction, rawRecordId, batch.RawRecord.ReceivedAt, batch.RawRecord.SchemaVersion, ownerToken);
+            writeFailureInjector?.Invoke(IngestionCommitWritePhase.AfterCatalogRegistration);
             var observationId = SqliteSourceCompatibilityStore.InsertBatch(
                 connection,
                 transaction,
                 rawRecordId,
                 batch.Observation);
             InsertProjectionDisposition(connection, transaction, rawRecordId, batch.RawRecord.ReceivedAt);
+            writeFailureInjector?.Invoke(IngestionCommitWritePhase.BeforeCommit);
             transaction.Commit();
             return new CommittedIngestionIds(rawRecordId, observationId);
         }
@@ -108,4 +135,11 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
         }
         return connection;
     }
+}
+
+internal enum IngestionCommitWritePhase
+{
+    AfterRawRecordInsert,
+    AfterCatalogRegistration,
+    BeforeCommit,
 }

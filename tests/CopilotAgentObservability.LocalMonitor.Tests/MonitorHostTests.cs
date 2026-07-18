@@ -30,7 +30,7 @@ public class MonitorHostTests
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT version FROM schema_version WHERE component='session';";
-        Assert.Equal(12L, (long)command.ExecuteScalar()!);
+        Assert.Equal(13L, (long)command.ExecuteScalar()!);
     }
 
     [Fact]
@@ -42,7 +42,7 @@ public class MonitorHostTests
             connection.Open();
             using var command = connection.CreateCommand();
             // A database from a future schema version must not be opened by this host.
-            command.CommandText = "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 12);";
+            command.CommandText = "CREATE TABLE schema_version(component TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session', 14);";
             command.ExecuteNonQuery();
         }
 

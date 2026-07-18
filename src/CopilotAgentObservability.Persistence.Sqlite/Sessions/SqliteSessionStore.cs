@@ -1,5 +1,7 @@
 using CopilotAgentObservability.Telemetry.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
+using System.Security.Cryptography;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
@@ -15,7 +17,8 @@ public sealed class SqliteSessionStore : ISessionStore
 {
     private const int VersionTenSchemaVersion = 10;
     private const int VersionElevenSchemaVersion = 11;
-    private const int CurrentSchemaVersion = 12;
+    private const int VersionTwelveSchemaVersion = 12;
+    private const int CurrentSchemaVersion = 13;
     private const string SchemaVersionSql = """
         CREATE TABLE IF NOT EXISTS schema_version (
             component TEXT PRIMARY KEY,
@@ -70,12 +73,18 @@ public sealed class SqliteSessionStore : ISessionStore
         }
 
         using var connection = Open(enforceForeignKeys: false);
-        var preflightVersion = ReadSessionSchemaVersion(connection);
-        if (preflightVersion is < 1 or > CurrentSchemaVersion)
-            throw new InvalidOperationException("Unsupported Session schema version.");
-        ValidateExistingSchemaBeforeInitialization(connection, preflightVersion);
+        ValidateSchemaBeforeInitialization(connection);
         Execute(connection, "PRAGMA journal_mode=WAL;");
         using var transaction = connection.BeginTransaction();
+        InitializeSchema(connection, transaction);
+        transaction.Commit();
+    }
+
+    internal static void InitializeSchema(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = SchemaVersionSql;
@@ -210,11 +219,16 @@ public sealed class SqliteSessionStore : ISessionStore
         if (version is <= VersionElevenSchemaVersion)
         {
             MigrateToVersionTwelve(connection, transaction);
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionTwelveSchemaVersion} WHERE component='session';");
+        }
+
+        if (version is <= VersionTwelveSchemaVersion)
+        {
+            MigrateToVersionThirteen(connection, transaction);
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
 
         EnsureForeignKeysValid(connection, transaction);
-        transaction.Commit();
     }
 
     public void SaveProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision)
@@ -366,6 +380,12 @@ public sealed class SqliteSessionStore : ISessionStore
         writeCheckpoint?.Invoke("before-session-write");
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
+        RetentionCatalogStore? catalog = null;
+        if (TableExists(connection, transaction, "retention_component_versions"))
+        {
+            catalog = new RetentionCatalogStore(databasePath, timeProvider);
+            catalog.InitializeForWrite(connection, transaction);
+        }
         if (IsClaudeOtelReplay(connection, transaction, batch))
         {
             transaction.Commit();
@@ -428,13 +448,29 @@ public sealed class SqliteSessionStore : ISessionStore
         foreach (var content in batch.Content)
         {
             var eventId = canonicalEventIds[content.EventId];
+            var ownerToken = RandomNumberGenerator.GetBytes(32);
             Execute(connection, transaction, """
-                INSERT INTO session_event_content(event_id,content_kind,content_json,captured_at,expires_at)
-                VALUES($event_id,$content_kind,$content_json,$captured_at,$expires_at)
+                INSERT INTO session_event_content(event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token)
+                VALUES($event_id,$content_kind,$content_json,$captured_at,$expires_at,$retention_owner_token)
                 ON CONFLICT(event_id) DO NOTHING;
                 """,
                 ("$event_id", Id(eventId)), ("$content_kind", content.ContentKind), ("$content_json", content.ContentJson),
-                ("$captured_at", Timestamp(content.CapturedAt)), ("$expires_at", Timestamp(content.ExpiresAt)));
+                ("$captured_at", Timestamp(content.CapturedAt)), ("$expires_at", Timestamp(content.ExpiresAt)),
+                ("$retention_owner_token", ownerToken));
+
+            var source = ReadSessionContentForRegistration(connection, transaction, eventId);
+            if (source.ContentKind != content.ContentKind
+                || source.CapturedAt != content.CapturedAt
+                || source.ExpiresAt != content.ExpiresAt)
+            {
+                throw new InvalidOperationException("Session content capture conflict.");
+            }
+            writeCheckpoint?.Invoke("after-session-content-source");
+            if (catalog is not null)
+                catalog.RegisterSessionEventContent(connection, transaction, source.EventId, source.ContentKind,
+                    source.CapturedAt, source.ExpiresAt, source.SessionId, source.RunId, source.SourceAdapter,
+                    source.SourceEventId, source.OwnerToken);
+            writeCheckpoint?.Invoke("after-session-content-catalog");
         }
 
         transaction.Commit();
@@ -1453,6 +1489,14 @@ public sealed class SqliteSessionStore : ISessionStore
         return value is null ? null : Convert.ToInt32(value);
     }
 
+    internal static void ValidateSchemaBeforeInitialization(SqliteConnection connection)
+    {
+        var preflightVersion = ReadSessionSchemaVersion(connection);
+        if (preflightVersion is < 1 or > CurrentSchemaVersion)
+            throw new InvalidOperationException("Unsupported Session schema version.");
+        ValidateExistingSchemaBeforeInitialization(connection, preflightVersion);
+    }
+
     private static void ValidateExistingSchemaBeforeInitialization(SqliteConnection connection, int? version)
     {
         if (version is null) return;
@@ -1465,12 +1509,12 @@ public sealed class SqliteSessionStore : ISessionStore
                     && !IsNullableTextColumn(connection, null, "session_events", column))
                     throw new InvalidOperationException($"Invalid session_events.{column} migration column.");
         }
-        else
+        else if (version == VersionElevenSchemaVersion)
         {
             SessionSchemaV11Validator.Validate(
                 connection,
                 CreateCanonicalVersionTwelveSchema,
-                version == VersionElevenSchemaVersion ? VersionElevenSchemaVersion : CurrentSchemaVersion);
+                VersionElevenSchemaVersion);
         }
         EnsureForeignKeysValid(connection, null);
     }
@@ -1542,6 +1586,69 @@ public sealed class SqliteSessionStore : ISessionStore
     {
         AddMatchKindColumnForMigration(connection, transaction);
     }
+
+    internal static void MigrateToVersionThirteen(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        if (!TableExists(connection, transaction, "session_event_content"))
+        {
+            return;
+        }
+        if (ColumnExists(connection, transaction, "session_event_content", "retention_owner_token"))
+        {
+            EnsureSessionContentOwnerTokenTrigger(connection, transaction);
+            return;
+        }
+
+        Execute(connection, transaction, """
+            CREATE TABLE session_event_content_v13 (
+                event_id TEXT PRIMARY KEY,
+                content_kind TEXT NOT NULL,
+                content_json TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                retention_owner_token BLOB NOT NULL CHECK(typeof(retention_owner_token)='blob' AND length(retention_owner_token)=32),
+                FOREIGN KEY (event_id) REFERENCES session_events(event_id) ON DELETE CASCADE
+            );
+            INSERT INTO session_event_content_v13(event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token)
+            SELECT event_id,content_kind,content_json,captured_at,expires_at,randomblob(32) FROM session_event_content;
+            DROP TABLE session_event_content;
+            ALTER TABLE session_event_content_v13 RENAME TO session_event_content;
+            """);
+        EnsureSessionContentOwnerTokenTrigger(connection, transaction);
+    }
+
+    private static void EnsureSessionContentOwnerTokenTrigger(SqliteConnection connection, SqliteTransaction transaction) =>
+        Execute(connection, transaction, "CREATE TRIGGER IF NOT EXISTS retention_session_event_content_token_immutable BEFORE UPDATE OF retention_owner_token ON session_event_content WHEN NEW.retention_owner_token IS NOT OLD.retention_owner_token BEGIN SELECT RAISE(ABORT,'retention_owner_token_immutable'); END;");
+
+    private static bool ColumnExists(SqliteConnection connection, SqliteTransaction transaction, string table, string column)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"SELECT 1 FROM pragma_table_info('{table}') WHERE name=$column;";
+        Add(command, "$column", column);
+        return command.ExecuteScalar() is not null;
+    }
+
+    private static SessionContentRegistration ReadSessionContentForRegistration(SqliteConnection connection, SqliteTransaction transaction, Guid eventId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT c.event_id,c.content_kind,c.captured_at,c.expires_at,e.session_id,e.run_id,e.source_adapter,e.source_event_id,c.retention_owner_token
+            FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id
+            WHERE c.event_id=$event_id;
+            """;
+        Add(command, "$event_id", Id(eventId));
+        using var reader = command.ExecuteReader();
+        if (!reader.Read() || reader.GetFieldValue<byte[]>(8) is not { Length: 32 } token)
+            throw new InvalidOperationException("Session content capture conflict.");
+        return new(reader.GetString(0), reader.GetString(1), ParseTimestamp(reader.GetString(2)),
+            ParseTimestamp(reader.GetString(3)), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.GetString(6), reader.GetString(7), token);
+    }
+
+    private sealed record SessionContentRegistration(string EventId, string ContentKind, DateTimeOffset CapturedAt,
+        DateTimeOffset ExpiresAt, string SessionId, string? RunId, string SourceAdapter, string SourceEventId, byte[] OwnerToken);
 
     private static void AddMatchKindColumnForMigration(SqliteConnection connection, SqliteTransaction transaction)
     {
@@ -1644,6 +1751,8 @@ public sealed class SqliteSessionStore : ISessionStore
             var allowed = requiredColumns.ToHashSet(StringComparer.Ordinal);
             if (table == "session_events")
                 allowed.UnionWith(["source_application_version", "adapter_version", "schema_fingerprint", "normalization_version", "match_kind"]);
+            if (table == "session_event_content")
+                allowed.Add("retention_owner_token");
             if (Columns(connection, transaction, table).Except(allowed).Any()) return true;
         }
         return false;
@@ -1845,8 +1954,14 @@ public sealed class SqliteSessionStore : ISessionStore
             content_json TEXT NOT NULL,
             captured_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
+            retention_owner_token BLOB NOT NULL CHECK(typeof(retention_owner_token)='blob' AND length(retention_owner_token)=32),
             FOREIGN KEY (event_id) REFERENCES session_events(event_id) ON DELETE CASCADE
         );
+
+        CREATE TRIGGER IF NOT EXISTS retention_session_event_content_token_immutable
+        BEFORE UPDATE OF retention_owner_token ON session_event_content
+        WHEN NEW.retention_owner_token IS NOT OLD.retention_owner_token
+        BEGIN SELECT RAISE(ABORT,'retention_owner_token_immutable'); END;
 
         CREATE TABLE IF NOT EXISTS session_projection_state (
             projector_key TEXT PRIMARY KEY,

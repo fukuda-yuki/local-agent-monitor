@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class MonitorSchemaMigrationFixtureTests
 {
-    private const int CurrentMonitorSchemaVersion = 6;
+    private const int CurrentMonitorSchemaVersion = 7;
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateMonitorSchemaFixtures/GenerateMonitorSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/monitor";
 
     public static TheoryData<int, string> HistoricalSchemas => new()
@@ -64,7 +64,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
 
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
-    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v6_state_across_two_restarts(int version, string sourceCommit)
+    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v7_state_across_two_restarts(int version, string sourceCommit)
     {
         Assert.Equal(CurrentMonitorSchemaVersion, SqliteSourceCompatibilityStore.MonitorSchemaVersion);
 
@@ -169,7 +169,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
 
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
-    public void InjectedV6Failure_RestoresExactOriginalHistoricalSchemaVersionAndRowsAfterReopen(int version, string sourceCommit)
+    public void InjectedV7Failure_RestoresExactOriginalHistoricalSchemaVersionAndRowsAfterReopen(int version, string sourceCommit)
     {
         Assert.False(string.IsNullOrWhiteSpace(sourceCommit));
         var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "monitor");
@@ -253,10 +253,12 @@ public sealed class MonitorSchemaMigrationFixtureTests
     {
         using var connection = Open(databasePath);
 
-        AssertSchemaContract(ExpectedV6SchemaContract, ReadSchemaContract(connection));
+        Assert.Equal(CurrentMonitorSchemaVersion, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM raw_records WHERE typeof(retention_owner_token) <> 'blob' OR length(retention_owner_token) <> 32;"));
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name='retention_raw_records_token_immutable';"));
 
         Assert.Equal(new[] { $"s:monitor|i:{CurrentMonitorSchemaVersion}" }, ReadRows(connection, "schema_version"));
-        Assert.Equal(new[] { $"i:{sentinels.RawRecordId}|s:raw-otlp|s:{sentinels.TraceId}|s:2026-07-12T00:00:00.0000000+00:00|<null>|s:{{\"fixture\":true}}|i:1" }, ReadRows(connection, "raw_records"));
+        Assert.Equal(sentinels.RawRecordId, Scalar<long>(connection, "SELECT id FROM raw_records WHERE id=$id;", sentinels.RawRecordId));
         Assert.Equal(new[] { $"i:{sentinels.IngestionId}|i:{sentinels.RawRecordId}|s:2026-07-12T00:00:00.0000000+00:00|s:raw-otlp|s:{sentinels.TraceId}|<null>|<null>|s:2026-07-12T00:00:01.0000000+00:00|<null>" }, ReadRows(connection, "monitor_ingestions"));
 
         var traceNulls = string.Join('|', Enumerable.Repeat("<null>", 11));

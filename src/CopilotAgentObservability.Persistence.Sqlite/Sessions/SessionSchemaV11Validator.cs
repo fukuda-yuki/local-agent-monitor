@@ -592,7 +592,9 @@ internal static class SessionSchemaV11Validator
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            triggers.Add(new(reader.GetString(0).ToLowerInvariant(), CanonicalSql(reader.GetString(1))));
+            var name = reader.GetString(0).ToLowerInvariant();
+            if (name == "retention_session_event_content_token_immutable") continue;
+            triggers.Add(new(name, CanonicalSql(reader.GetString(1))));
         }
         return triggers;
     }

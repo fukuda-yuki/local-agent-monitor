@@ -2,7 +2,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class MonitorSchemaMigrator
 {
-    public const int BaseSchemaVersion = 4;
+    public const int BaseSchemaVersion = 7;
 
     public static void EnsureRawRecordsSchema(SqliteConnection connection, SqliteTransaction transaction)
     {
@@ -17,12 +17,14 @@ internal static class MonitorSchemaMigrator
                 received_at TEXT NOT NULL,
                 resource_attributes_json TEXT NULL,
                 payload_json TEXT NOT NULL,
-                schema_version INTEGER NOT NULL CHECK (schema_version = 1)
+                schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                retention_owner_token BLOB NOT NULL CHECK(typeof(retention_owner_token) = 'blob' AND length(retention_owner_token) = 32)
             );
             """);
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_raw_records_trace_id ON raw_records(trace_id);");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_raw_records_received_at ON raw_records(received_at);");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_raw_records_source ON raw_records(source);");
+        Execute(connection, transaction, "CREATE TRIGGER IF NOT EXISTS retention_raw_records_token_immutable BEFORE UPDATE OF retention_owner_token ON raw_records WHEN NEW.retention_owner_token IS NOT OLD.retention_owner_token BEGIN SELECT RAISE(ABORT,'retention_owner_token_immutable'); END;");
     }
 
     public static void ApplyBaseSchema(SqliteConnection connection, SqliteTransaction transaction)
@@ -142,9 +144,69 @@ internal static class MonitorSchemaMigrator
         AddColumnIfMissing(connection, transaction, "monitor_traces", "cache_creation_tokens", "INTEGER NULL");
         AddColumnIfMissing(connection, transaction, "monitor_traces", "trace_status", "TEXT NULL");
 
+        EnsureRawRecordsRetentionOwnerToken(connection, transaction);
+        EnsureAnalysisRetentionSchema(connection, transaction);
+
         if (ReadMonitorSchemaVersion(connection, transaction) is not { } currentVersion || currentVersion <= BaseSchemaVersion)
         {
             SetMonitorSchemaVersion(connection, transaction, BaseSchemaVersion);
+        }
+    }
+
+    private static void EnsureRawRecordsRetentionOwnerToken(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        if (!TableExists(connection, transaction, "raw_records") || ColumnExists(connection, transaction, "raw_records", "retention_owner_token"))
+        {
+            return;
+        }
+
+        Execute(connection, transaction, """
+            CREATE TABLE raw_records_v7 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL CHECK (source IN ('raw-otlp', 'collector-output', 'langfuse-export')),
+                trace_id TEXT NULL,
+                received_at TEXT NOT NULL,
+                resource_attributes_json TEXT NULL,
+                payload_json TEXT NOT NULL,
+                schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                retention_owner_token BLOB NOT NULL CHECK(typeof(retention_owner_token) = 'blob' AND length(retention_owner_token) = 32)
+            );
+            """);
+        Execute(connection, transaction, "INSERT INTO raw_records_v7(id,source,trace_id,received_at,resource_attributes_json,payload_json,schema_version,retention_owner_token) SELECT id,source,trace_id,received_at,resource_attributes_json,payload_json,schema_version,randomblob(32) FROM raw_records;");
+        Execute(connection, transaction, "DROP TABLE raw_records;");
+        Execute(connection, transaction, "ALTER TABLE raw_records_v7 RENAME TO raw_records;");
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_raw_records_trace_id ON raw_records(trace_id);");
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_raw_records_received_at ON raw_records(received_at);");
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_raw_records_source ON raw_records(source);");
+        Execute(connection, transaction, "CREATE TRIGGER retention_raw_records_token_immutable BEFORE UPDATE OF retention_owner_token ON raw_records WHEN NEW.retention_owner_token IS NOT OLD.retention_owner_token BEGIN SELECT RAISE(ABORT,'retention_owner_token_immutable'); END;");
+    }
+
+    public static void EnsureAnalysisRetentionSchema(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        if (!TableExists(connection, transaction, "monitor_analysis_runs")) return;
+        if (TableExists(connection, transaction, "monitor_analysis_events") && Exists(connection, transaction, "SELECT 1 FROM monitor_analysis_events e WHERE NOT EXISTS(SELECT 1 FROM monitor_analysis_runs r WHERE r.id=e.run_id);"))
+            throw new InvalidOperationException("Monitor analysis schema contains orphan events.");
+        if (ColumnExists(connection, transaction, "monitor_analysis_runs", "retention_owner_token")) return;
+
+        Execute(connection, transaction, """
+            CREATE TABLE monitor_analysis_runs_v7 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, trace_id TEXT NOT NULL, raw_record_id INTEGER NULL, span_id TEXT NULL,
+                focus TEXT NOT NULL, status TEXT NOT NULL, requested_at TEXT NOT NULL, started_at TEXT NULL, completed_at TEXT NULL,
+                result_markdown TEXT NULL, error_message TEXT NULL,
+                retention_owner_token BLOB NOT NULL CHECK(typeof(retention_owner_token)='blob' AND length(retention_owner_token)=32)
+            );
+            """);
+        Execute(connection, transaction, "INSERT INTO monitor_analysis_runs_v7(id,trace_id,raw_record_id,span_id,focus,status,requested_at,started_at,completed_at,result_markdown,error_message,retention_owner_token) SELECT id,trace_id,raw_record_id,span_id,focus,status,requested_at,started_at,completed_at,result_markdown,error_message,randomblob(32) FROM monitor_analysis_runs;");
+        if (TableExists(connection, transaction, "monitor_analysis_events")) Execute(connection, transaction, "ALTER TABLE monitor_analysis_events RENAME TO monitor_analysis_events_v7;");
+        Execute(connection, transaction, "DROP TABLE monitor_analysis_runs;");
+        Execute(connection, transaction, "ALTER TABLE monitor_analysis_runs_v7 RENAME TO monitor_analysis_runs;");
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_monitor_analysis_runs_trace_id ON monitor_analysis_runs(trace_id);");
+        Execute(connection, transaction, "CREATE TRIGGER retention_monitor_analysis_runs_token_immutable BEFORE UPDATE OF retention_owner_token ON monitor_analysis_runs WHEN NEW.retention_owner_token IS NOT OLD.retention_owner_token BEGIN SELECT RAISE(ABORT,'retention_owner_token_immutable'); END;");
+        if (TableExists(connection, transaction, "monitor_analysis_events_v7"))
+        {
+            Execute(connection, transaction, "CREATE TABLE monitor_analysis_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, event_type TEXT NOT NULL, message TEXT NOT NULL, occurred_at TEXT NOT NULL, FOREIGN KEY (run_id) REFERENCES monitor_analysis_runs(id) ON DELETE CASCADE);");
+            Execute(connection, transaction, "INSERT INTO monitor_analysis_events(id,run_id,event_type,message,occurred_at) SELECT id,run_id,event_type,message,occurred_at FROM monitor_analysis_events_v7;");
+            Execute(connection, transaction, "DROP TABLE monitor_analysis_events_v7;");
         }
     }
 
@@ -249,6 +311,36 @@ internal static class MonitorSchemaMigrator
         {
             Execute(connection, transaction, $"ALTER TABLE {table} ADD COLUMN {column} {columnDdl};");
         }
+    }
+
+    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string table)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=$name);";
+        command.Parameters.AddWithValue("$name", table);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+    }
+
+    private static bool ColumnExists(SqliteConnection connection, SqliteTransaction transaction, string table, string column)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"PRAGMA table_info({table});";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.Ordinal)) return true;
+        }
+        return false;
+    }
+
+    private static bool Exists(SqliteConnection connection, SqliteTransaction transaction, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        return command.ExecuteScalar() is not null;
     }
 
     private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql)

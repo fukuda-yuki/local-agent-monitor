@@ -1,14 +1,18 @@
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
+internal enum RawTelemetryStoreWritePhase { AfterSourceInsert, AfterCatalogRegistration }
+
 internal sealed partial class RawTelemetryStore
 {
     private readonly string databasePath;
     private readonly RawTelemetryStoreConnectionOptions connectionOptions;
+    private readonly Action<RawTelemetryStoreWritePhase>? writeFailureInjector;
 
-    public RawTelemetryStore(string databasePath, RawTelemetryStoreConnectionOptions? connectionOptions = null)
+    public RawTelemetryStore(string databasePath, RawTelemetryStoreConnectionOptions? connectionOptions = null, Action<RawTelemetryStoreWritePhase>? writeFailureInjector = null)
     {
         this.databasePath = databasePath;
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
+        this.writeFailureInjector = writeFailureInjector;
     }
 
     public const int MonitorSchemaVersion = MonitorSchemaMigrator.BaseSchemaVersion;
@@ -21,6 +25,7 @@ internal sealed partial class RawTelemetryStore
         ApplyWriteAheadLog(connection);
         using var transaction = connection.BeginTransaction();
         MonitorSchemaMigrator.EnsureRawRecordsSchema(connection, transaction);
+        new Retention.RetentionCatalogStore(databasePath).InitializeForWrite(connection, transaction);
         transaction.Commit();
     }
 
@@ -40,6 +45,7 @@ internal sealed partial class RawTelemetryStore
         ApplyWriteAheadLog(connection);
         using var transaction = connection.BeginTransaction();
         MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
+        new Retention.RetentionCatalogStore(databasePath).InitializeForWrite(connection, transaction);
         transaction.Commit();
     }
 
@@ -55,7 +61,17 @@ internal sealed partial class RawTelemetryStore
     public long Insert(RawTelemetryRecord record)
     {
         using var connection = OpenConnection();
-        return RawTelemetryRecordSql.Insert(connection, transaction: null, record);
+        using var transaction = connection.BeginTransaction();
+        var catalog = new Retention.RetentionCatalogStore(databasePath);
+        try { catalog.InitializeForWrite(connection, transaction); }
+        catch (SqliteException) { throw new Retention.RetentionMigrationBlockedException(); }
+        var ownerToken = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        var rawRecordId = RawTelemetryRecordSql.Insert(connection, transaction, record, ownerToken);
+        writeFailureInjector?.Invoke(RawTelemetryStoreWritePhase.AfterSourceInsert);
+        catalog.RegisterRawRecord(connection, transaction, rawRecordId, record.ReceivedAt, record.SchemaVersion, ownerToken);
+        writeFailureInjector?.Invoke(RawTelemetryStoreWritePhase.AfterCatalogRegistration);
+        transaction.Commit();
+        return rawRecordId;
     }
 
     public IReadOnlyList<RawTelemetryRecord> ListRecords()

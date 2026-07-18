@@ -247,8 +247,8 @@ public sealed class SessionOtelEnrichmentTests
         using var raw = connection.CreateCommand();
         raw.Transaction = transaction;
         raw.CommandText = """
-            INSERT INTO raw_records(source,trace_id,received_at,payload_json,schema_version)
-            VALUES('raw-otlp',$trace_id,$time,$payload,1);
+            INSERT INTO raw_records(source,trace_id,received_at,payload_json,schema_version,retention_owner_token)
+            VALUES('raw-otlp',$trace_id,$time,$payload,1,randomblob(32));
             """;
         raw.Parameters.AddWithValue("$trace_id", traceId);
         raw.Parameters.AddWithValue("$time", time.ToString("O"));

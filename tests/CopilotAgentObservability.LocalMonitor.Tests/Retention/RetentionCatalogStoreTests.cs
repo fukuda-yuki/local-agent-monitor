@@ -6,6 +6,57 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionCatalogStoreTests
 {
     [Fact]
+    public void CreateSchema_RebuildsRawSourceWithRequiredImmutableOwnerToken()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            new RetentionCatalogStore(path).CreateSchema();
+
+            var sql = Scalar<string>(path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='raw_records';");
+            Assert.Contains("retention_owner_token BLOB NOT NULL", sql, StringComparison.Ordinal);
+            Assert.Contains("length(retention_owner_token) = 32", sql, StringComparison.Ordinal);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM raw_records WHERE typeof(retention_owner_token) <> 'blob' OR length(retention_owner_token) <> 32;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public void CreateSchema_RebuildsSessionContentWithRequiredOwnerTokenAndContentKindReceiptBinding()
+    {
+        var path = CopyFixture("session", "session-v10.sqlite");
+        try
+        {
+            new RetentionCatalogStore(path).CreateSchema();
+
+            Assert.Equal(13L, Scalar<long>(path, "SELECT version FROM schema_version WHERE component='session';"));
+            var sql = Scalar<string>(path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='session_event_content';");
+            Assert.Contains("retention_owner_token BLOB NOT NULL", sql, StringComparison.Ordinal);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM session_event_content WHERE typeof(retention_owner_token) <> 'blob' OR length(retention_owner_token) <> 32;"));
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_items WHERE store_kind='session_event_content' AND ownership_receipt IS NULL;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public void CreateSchema_RebuildsAnalysisSourcesWithRequiredTokenAndForeignKey()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            CreateActualAnalysisRaw(path);
+            new RetentionCatalogStore(path).CreateSchema();
+
+            var runsSql = Scalar<string>(path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='monitor_analysis_runs';");
+            var eventsSql = Scalar<string>(path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='monitor_analysis_events';");
+            Assert.Contains("retention_owner_token BLOB NOT NULL", runsSql, StringComparison.Ordinal);
+            Assert.Contains("FOREIGN KEY (run_id) REFERENCES monitor_analysis_runs(id)", eventsSql, StringComparison.Ordinal);
+            Assert.Throws<SqliteException>(() => Execute(path, "INSERT INTO monitor_analysis_events(run_id,event_type,message,occurred_at) VALUES(999,'test','synthetic','2026-07-12T00:00:00.0000000+00:00');"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
     public void CreateSchema_BackfillsRealSessionFixtureAndTwoReopensKeepExactIdentity()
     {
         var path = CopyFixture("session", "session-v10.sqlite");
@@ -247,6 +298,35 @@ public sealed class RetentionCatalogStoreTests
     }
 
     [Fact]
+    public async Task ReadGate_DeletingRecoveryAfterRestartRequiresCurrentDeleteIntentAndReclaimsExpiredLease()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var time = new MutableTimeProvider(new DateTimeOffset(2026, 7, 12, 1, 0, 0, TimeSpan.Zero));
+            var initialized = new RetentionCatalogStore(path, time);
+            initialized.CreateSchema();
+            var key = RawKey(path, initialized);
+            var item = Assert.IsType<RetentionCatalogItem>(initialized.Find(key));
+            var now = time.GetUtcNow();
+            Execute(path, $"UPDATE retention_items SET state='deleting', read_denied_at='{now:O}', revision=revision+1 WHERE item_id='{item.ItemId}'; DELETE FROM raw_records WHERE id={key.SourceItemId};");
+            var deleting = Assert.IsType<RetentionCatalogItem>(initialized.Find(key));
+            Execute(path, $"INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation) VALUES('{deleting.ItemId}','deletion','expired-owner','{now.AddSeconds(-1):O}',9);");
+
+            var reopened = new RetentionCatalogStore(path, time);
+            Assert.Null(await reopened.TryAcquireAsync(key, deleting.Revision, RetentionLeaseKind.Deletion, now, CancellationToken.None));
+
+            Execute(path, $"INSERT INTO retention_delete_journal(item_id,intent_at,expected_revision) VALUES('{deleting.ItemId}','{now:O}',{deleting.Revision - 1});");
+            Assert.Null(await reopened.TryAcquireAsync(key, deleting.Revision, RetentionLeaseKind.Deletion, now, CancellationToken.None));
+
+            Execute(path, $"DELETE FROM retention_delete_journal; INSERT INTO retention_delete_journal(item_id,intent_at,expected_revision) VALUES('{deleting.ItemId}','{now:O}',{deleting.Revision});");
+            using var claim = Assert.IsType<RetentionReadLeaseHandle>(await reopened.TryAcquireAsync(key, deleting.Revision, RetentionLeaseKind.Deletion, now, CancellationToken.None));
+            Assert.Equal(10, claim.Generation);
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
     public void CreateSchema_RejectsInvalidJournalLeaseAndCoverageDomains()
     {
         var path = CopyFixture("monitor", "monitor-v5.sqlite");
@@ -257,7 +337,7 @@ public sealed class RetentionCatalogStoreTests
 
             Assert.Throws<SqliteException>(() => Execute(path, $"INSERT INTO retention_capture_journal(item_id,phase) VALUES('{itemId}','invalid');"));
             Assert.Throws<SqliteException>(() => Execute(path, $"INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at) VALUES('{itemId}','2026-07-12T00:00:00.0000000+00:00','2026-07-12T00:00:01.0000000+00:00');"));
-            Assert.Throws<SqliteException>(() => Execute(path, $"INSERT INTO retention_delete_journal(item_id,intent_at) VALUES('{itemId}',NULL);"));
+            Assert.Throws<SqliteException>(() => Execute(path, $"INSERT INTO retention_delete_journal(item_id,intent_at,expected_revision) VALUES('{itemId}',NULL,1);"));
             Assert.Throws<SqliteException>(() => Execute(path, $"INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation) VALUES('{itemId}','invalid','owner','2026-07-12T00:00:00.0000000+00:00',1);"));
             Assert.Throws<SqliteException>(() => Execute(path, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES('raw_record',0);"));
             Assert.Throws<SqliteException>(() => Execute(path, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES('invalid',1);"));
@@ -276,6 +356,35 @@ public sealed class RetentionCatalogStoreTests
             var exception = Assert.Throws<RetentionMigrationBlockedException>(() => new RetentionCatalogStore(path).CreateSchema());
             Assert.Equal("retention_migration_blocked", exception.Message);
             Assert.False(TableExists(path, "retention_items"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public void CreateSchema_PostBackfillSourceMismatchRollsBackThenRepairsAcrossTwoReopens()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var originalRawCount = Scalar<long>(path, "SELECT COUNT(*) FROM raw_records;");
+            var injected = new RetentionCatalogStore(path, backfillValidationCheckpoint: static (connection, transaction) =>
+            {
+                using var delete = connection.CreateCommand();
+                delete.Transaction = transaction;
+                delete.CommandText = "DELETE FROM raw_records WHERE id=(SELECT MIN(id) FROM raw_records);";
+                delete.ExecuteNonQuery();
+            });
+
+            Assert.Throws<RetentionMigrationBlockedException>(injected.CreateSchema);
+            Assert.Equal(5L, Scalar<long>(path, "SELECT version FROM schema_version WHERE component='monitor';"));
+            Assert.Equal(originalRawCount, Scalar<long>(path, "SELECT COUNT(*) FROM raw_records;"));
+            Assert.False(TableExists(path, "retention_items"));
+
+            var repaired = new RetentionCatalogStore(path);
+            repaired.CreateSchema();
+            repaired.CreateSchema();
+            Assert.Equal(originalRawCount, Scalar<long>(path, "SELECT COUNT(*) FROM raw_records;"));
+            Assert.Equal(originalRawCount, Scalar<long>(path, "SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record';"));
         }
         finally { Delete(path); }
     }

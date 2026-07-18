@@ -12,7 +12,7 @@ public sealed record MonitorRuntimeState(
 
 public sealed class SqliteMonitorRuntimeStateStore
 {
-    public const int MonitorSchemaVersion = 6;
+    public const int MonitorSchemaVersion = MonitorSchemaMigrator.BaseSchemaVersion;
 
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;

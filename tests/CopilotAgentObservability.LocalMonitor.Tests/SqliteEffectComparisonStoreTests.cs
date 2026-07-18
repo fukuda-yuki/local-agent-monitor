@@ -37,7 +37,7 @@ public sealed class SqliteEffectComparisonStoreTests
 
         using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
         verify.Open();
-        Assert.Equal(12L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(13L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(legacy.SessionId.ToString("D"), Text(verify, "SELECT session_id FROM sessions LIMIT 1;"));
         if (previousVersion >= 2) Assert.Equal("expected", Text(verify, "SELECT verdict FROM session_human_evaluation WHERE session_id=$session;", ("$session", legacy.SessionId.ToString("D"))));
         if (previousVersion >= 3) Assert.Equal("legacy", Text(verify, "SELECT title FROM improvement_proposals LIMIT 1;"));

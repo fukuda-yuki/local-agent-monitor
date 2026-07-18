@@ -1,5 +1,6 @@
 using System.Globalization;
 using CopilotAgentObservability.ConfigCli;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
@@ -39,6 +40,7 @@ public class RawTelemetryStoreTests
                 "resource_attributes_json",
                 "payload_json",
                 "schema_version",
+                "retention_owner_token",
             ],
             ReadColumnNames(connection));
         Assert.Equal(
@@ -64,6 +66,7 @@ public class RawTelemetryStoreTests
         Assert.Contains("source TEXT NOT NULL CHECK (source IN ('raw-otlp', 'collector-output', 'langfuse-export'))", createSql);
         Assert.Contains("payload_json TEXT NOT NULL", createSql);
         Assert.Contains("schema_version INTEGER NOT NULL CHECK (schema_version = 1)", createSql);
+        Assert.Contains("retention_owner_token BLOB NOT NULL", createSql);
     }
 
     [Fact]
@@ -146,6 +149,102 @@ public class RawTelemetryStoreTests
         var record = Assert.Single(store.ListRecords());
         Assert.Null(record.TraceId);
         Assert.Null(record.ResourceAttributesJson);
+    }
+
+    [Fact]
+    public void Insert_AtomicallyRegistersExactRawReceiptWithoutExposingOwnerToken()
+    {
+        using var tempDirectory = new TempDirectory();
+        var store = new RawTelemetryStore(tempDirectory.DatabasePath);
+        var receivedAt = new DateTimeOffset(2026, 7, 19, 1, 2, 3, TimeSpan.Zero);
+
+        store.CreateSchema();
+        var id = store.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "trace-1", receivedAt, null, "{}"));
+
+        using var connection = OpenConnection(tempDirectory.DatabasePath);
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM raw_records;"));
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record' AND source_item_id=$id AND captured_at=$received_at;", ("$id", id.ToString(CultureInfo.InvariantCulture)), ("$received_at", receivedAt.ToString("O", CultureInfo.InvariantCulture))));
+        Assert.Equal(32L, Scalar<long>(connection, "SELECT length(retention_owner_token) FROM raw_records WHERE id=$id;", ("$id", id)));
+        Assert.DoesNotContain("retention_owner_token", typeof(RawTelemetryRecord).GetProperties().Select(property => property.Name), StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Insert_SourceFailureLeavesCatalogEmpty()
+    {
+        using var tempDirectory = new TempDirectory();
+        var store = new RawTelemetryStore(tempDirectory.DatabasePath);
+        store.CreateSchema();
+
+        Assert.Throws<SqliteException>(() => store.Insert(new RawTelemetryRecord(null, "unknown", "trace-1", DateTimeOffset.UnixEpoch, null, "{}")));
+
+        using var connection = OpenConnection(tempDirectory.DatabasePath);
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM raw_records;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items;"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void Insert_InjectedFailureRollsBackSourceAndCatalog(int phaseValue)
+    {
+        using var tempDirectory = new TempDirectory();
+        var phase = (RawTelemetryStoreWritePhase)phaseValue;
+        var store = new RawTelemetryStore(tempDirectory.DatabasePath, writeFailureInjector: actual =>
+        {
+            if (actual == phase) throw new InvalidOperationException("synthetic write failure");
+        });
+        store.CreateSchema();
+
+        Assert.Throws<InvalidOperationException>(() => store.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "trace-1", DateTimeOffset.UnixEpoch, null, "{}")));
+
+        using var connection = OpenConnection(tempDirectory.DatabasePath);
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM raw_records;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items;"));
+    }
+
+    [Fact]
+    public void Insert_CatalogRegistrationFailureIsSanitizedAndRollsBack()
+    {
+        using var tempDirectory = new TempDirectory();
+        var store = new RawTelemetryStore(tempDirectory.DatabasePath);
+        store.CreateSchema();
+        using (var connection = OpenConnection(tempDirectory.DatabasePath))
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "CREATE TRIGGER reject_catalog BEFORE INSERT ON retention_items BEGIN SELECT RAISE(ABORT, 'raw-token-and-payload-must-not-leak'); END;";
+            command.ExecuteNonQuery();
+        }
+
+        var exception = Assert.Throws<RetentionMigrationBlockedException>(() => store.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "trace-1", DateTimeOffset.UnixEpoch, null, "raw-payload")));
+        Assert.Equal("retention_migration_blocked", exception.Message);
+        Assert.DoesNotContain("raw-token", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("raw-payload", exception.Message, StringComparison.Ordinal);
+
+        using var verification = OpenConnection(tempDirectory.DatabasePath);
+        Assert.Equal(0L, Scalar<long>(verification, "SELECT COUNT(*) FROM raw_records;"));
+        Assert.Equal(0L, Scalar<long>(verification, "SELECT COUNT(*) FROM retention_items;"));
+    }
+
+    [Fact]
+    public void CreateSchema_AfterRestartPreservesRawOwnerTokenAndReceipt()
+    {
+        using var tempDirectory = new TempDirectory();
+        var store = new RawTelemetryStore(tempDirectory.DatabasePath);
+        store.CreateSchema();
+        var id = store.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "trace-1", DateTimeOffset.UnixEpoch, null, "{}"));
+        byte[] token;
+        byte[] receipt;
+        using (var connection = OpenConnection(tempDirectory.DatabasePath))
+        {
+            token = ReadBlob(connection, "SELECT retention_owner_token FROM raw_records WHERE id=$id;", ("$id", id));
+            receipt = ReadBlob(connection, "SELECT ownership_receipt FROM retention_items WHERE store_kind='raw_record' AND source_item_id=$id;", ("$id", id.ToString(CultureInfo.InvariantCulture)));
+        }
+
+        new RawTelemetryStore(tempDirectory.DatabasePath).CreateSchema();
+
+        using var verification = OpenConnection(tempDirectory.DatabasePath);
+        Assert.Equal(token, ReadBlob(verification, "SELECT retention_owner_token FROM raw_records WHERE id=$id;", ("$id", id)));
+        Assert.Equal(receipt, ReadBlob(verification, "SELECT ownership_receipt FROM retention_items WHERE store_kind='raw_record' AND source_item_id=$id;", ("$id", id.ToString(CultureInfo.InvariantCulture))));
     }
 
     [Fact]
@@ -360,6 +459,22 @@ public class RawTelemetryStoreTests
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT version FROM schema_version WHERE component = 'monitor';";
         return (long)command.ExecuteScalar()!;
+    }
+
+    private static T Scalar<T>(SqliteConnection connection, string sql, params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value);
+        return (T)Convert.ChangeType(command.ExecuteScalar()!, typeof(T), CultureInfo.InvariantCulture);
+    }
+
+    private static byte[] ReadBlob(SqliteConnection connection, string sql, params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value);
+        return (byte[])command.ExecuteScalar()!;
     }
 
     private static int CountMonitorSchemaRows(SqliteConnection connection)

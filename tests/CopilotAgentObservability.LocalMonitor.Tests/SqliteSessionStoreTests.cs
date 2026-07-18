@@ -1,4 +1,5 @@
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
 
@@ -37,7 +38,7 @@ public sealed class SqliteSessionStoreTests
         new SqliteSessionStore(database.Path).CreateSchema();
         using (var migrated = database.Open())
         {
-            Assert.Equal(12L, Scalar<long>(migrated, "SELECT version FROM schema_version WHERE component='session';"));
+            Assert.Equal(13L, Scalar<long>(migrated, "SELECT version FROM schema_version WHERE component='session';"));
             Assert.Equal(proposalId.ToString("D"), Scalar<string>(migrated, "SELECT proposal_id FROM improvement_proposals;"));
         }
 
@@ -357,7 +358,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var connection = database.Open();
-        Assert.Equal(12L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
+        Assert.Equal(13L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
         Assert.Equal(
             new[] { "source_application_version", "adapter_version", "schema_fingerprint", "normalization_version" },
             ReadColumns(connection, "session_events").Where(column => column.EndsWith("version", StringComparison.Ordinal) || column == "schema_fingerprint"));
@@ -390,12 +391,12 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
-        using (var connection = database.Open()) Execute(connection, "UPDATE schema_version SET version=13 WHERE component='session';");
+        using (var connection = database.Open()) Execute(connection, "UPDATE schema_version SET version=14 WHERE component='session';");
 
         Assert.Throws<InvalidOperationException>(store.CreateSchema);
 
         using var verify = database.Open();
-        Assert.Equal(13L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(14L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(batch.Detail.Session.SessionId.ToString("D"), Scalar<string>(verify, "SELECT session_id FROM sessions;"));
         Assert.Equal(batch.Detail.Events[0].EventId.ToString("D"), Scalar<string>(verify, "SELECT event_id FROM session_events;"));
     }
@@ -416,7 +417,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(12L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(13L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_human_evaluation';"));
         Assert.NotNull(store.GetDetail(batch.Detail.Session.SessionId));
     }
@@ -470,7 +471,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(12L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(13L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         foreach (var table in new[] { "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence" })
         {
             Assert.Equal(1L, Scalar<long>(verify, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
@@ -508,6 +509,44 @@ public sealed class SqliteSessionStoreTests
         Assert.Equal(batch.Detail.NativeIds, detail.NativeIds);
         Assert.Equal(batch.Detail.Runs, detail.Runs);
         Assert.Equal(batch.Detail.Events, detail.Events);
+    }
+
+    [Fact]
+    public void Write_CapturesContentAndRetentionReceiptInOneTransaction()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        store.CreateSchema();
+        new RetentionCatalogStore(database.Path).CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.Parse("2026-07-11T01:00:00Z"));
+
+        store.Write(batch);
+
+        using var connection = database.Open();
+        Assert.Equal(13L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_event_content WHERE typeof(retention_owner_token)='blob' AND length(retention_owner_token)=32;"));
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=(SELECT event_id FROM session_event_content);"));
+    }
+
+    [Theory]
+    [InlineData("after-session-content-source")]
+    [InlineData("after-session-content-catalog")]
+    public void Write_CheckpointFailureRollsBackContentAndCatalogTogether(string checkpoint)
+    {
+        using var database = new SessionTestDatabase();
+        new SqliteSessionStore(database.Path).CreateSchema();
+        new RetentionCatalogStore(database.Path).CreateSchema();
+        var store = new SqliteSessionStore(database.Path, TimeProvider.System, point =>
+        {
+            if (point == checkpoint) throw new InvalidOperationException("injected");
+        });
+
+        Assert.Throws<InvalidOperationException>(() => store.Write(CreateBatch(DateTimeOffset.Parse("2026-07-11T01:00:00Z"))));
+        new RetentionCatalogStore(database.Path).CreateSchema();
+
+        using var connection = database.Open();
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_event_content;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='session_event_content';"));
     }
 
     [Fact]
@@ -1006,7 +1045,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(12L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(13L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT revision FROM improvement_proposals;"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM pragma_table_info('improvement_proposal_sessions') WHERE name='proposal_revision';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT proposal_revision FROM proposal_apply_drafts;"));

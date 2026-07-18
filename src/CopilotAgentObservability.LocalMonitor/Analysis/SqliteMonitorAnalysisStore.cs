@@ -1,6 +1,10 @@
 using Microsoft.Data.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Analysis;
+
+internal enum MonitorAnalysisStoreWritePhase { AfterSourceWrite, AfterCatalogRegistration, BeforeCommit }
 
 internal interface IMonitorAnalysisStore
 {
@@ -31,10 +35,12 @@ internal interface IMonitorAnalysisStore
 internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
 {
     private readonly string databasePath;
+    private readonly Action<MonitorAnalysisStoreWritePhase>? writeFailureInjector;
 
-    public SqliteMonitorAnalysisStore(string databasePath)
+    public SqliteMonitorAnalysisStore(string databasePath, Action<MonitorAnalysisStoreWritePhase>? writeFailureInjector = null)
     {
         this.databasePath = databasePath;
+        this.writeFailureInjector = writeFailureInjector;
     }
 
     public void CreateSchema()
@@ -42,8 +48,8 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         EnsureParentDirectory();
         new RawTelemetryStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateMonitorSchema();
         using var connection = OpenConnection();
-        ExecuteNonQuery(
-            connection,
+        using var transaction = connection.BeginTransaction();
+        ExecuteNonQuery(connection, transaction,
             """
             CREATE TABLE IF NOT EXISTS monitor_analysis_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,25 +62,24 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
                 started_at TEXT NULL,
                 completed_at TEXT NULL,
                 result_markdown TEXT NULL,
-                error_message TEXT NULL
+                error_message TEXT NULL,
+                retention_owner_token BLOB NOT NULL CHECK(typeof(retention_owner_token) = 'blob' AND length(retention_owner_token) = 32)
             );
             """);
-        ExecuteNonQuery(
-            connection,
+        ExecuteNonQuery(connection, transaction,
             "CREATE INDEX IF NOT EXISTS IX_monitor_analysis_runs_trace_id ON monitor_analysis_runs(trace_id);");
-        ExecuteNonQuery(
-            connection,
+        ExecuteNonQuery(connection, transaction,
             """
             CREATE TABLE IF NOT EXISTS monitor_analysis_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id INTEGER NOT NULL,
                 event_type TEXT NOT NULL,
                 message TEXT NOT NULL,
-                occurred_at TEXT NOT NULL
+                occurred_at TEXT NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES monitor_analysis_runs(id) ON DELETE CASCADE
             );
             """);
-        ExecuteNonQuery(
-            connection,
+        ExecuteNonQuery(connection, transaction,
             """
             CREATE TABLE IF NOT EXISTS monitor_analysis_safe_summaries (
                 run_id INTEGER PRIMARY KEY,
@@ -82,6 +87,8 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
                 generated_at TEXT NOT NULL
             );
             """);
+        new RetentionCatalogStore(databasePath).InitializeForWrite(connection, transaction);
+        transaction.Commit();
     }
 
     public MonitorAnalysisStartResult StartRun(
@@ -92,13 +99,15 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         DateTimeOffset requestedAt)
     {
         using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText =
             """
             INSERT INTO monitor_analysis_runs (
-                trace_id, raw_record_id, span_id, focus, status, requested_at
+                trace_id, raw_record_id, span_id, focus, status, requested_at, retention_owner_token
             ) VALUES (
-                $trace_id, $raw_record_id, $span_id, $focus, $status, $requested_at
+                $trace_id, $raw_record_id, $span_id, $focus, $status, $requested_at, $retention_owner_token
             );
             SELECT last_insert_rowid();
             """;
@@ -108,7 +117,9 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         AddParameter(command, "$focus", focus.ToWireValue());
         AddParameter(command, "$status", MonitorAnalysisStatus.Queued.ToWireValue());
         AddParameter(command, "$requested_at", FormatTimestamp(requestedAt));
+        AddParameter(command, "$retention_owner_token", System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
         var runId = (long)(long)command.ExecuteScalar()!;
+        transaction.Commit();
         return new MonitorAnalysisStartResult(runId);
     }
 
@@ -172,7 +183,15 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
     public void AppendEvent(long runId, string eventType, string message, DateTimeOffset occurredAt)
     {
         using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        var run = ReadRetentionRun(connection, transaction, runId);
+        var catalog = new RetentionCatalogStore(databasePath);
+        if (HasRawAggregate(connection, transaction, runId))
+        {
+            catalog.AssertAnalysisRunRawWritable(connection, transaction, run.Id, run.RequestedAt, run.RawRecordId, run.SpanId, run.OwnerToken);
+        }
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText =
             """
             INSERT INTO monitor_analysis_events (run_id, event_type, message, occurred_at)
@@ -183,12 +202,28 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         AddParameter(command, "$message", message);
         AddParameter(command, "$occurred_at", FormatTimestamp(occurredAt));
         command.ExecuteNonQuery();
+        writeFailureInjector?.Invoke(MonitorAnalysisStoreWritePhase.AfterSourceWrite);
+        if (!HasRawAggregate(connection, transaction, runId, excludeEvents: true))
+        {
+            catalog.RegisterAnalysisRunRaw(connection, transaction, run.Id, run.RequestedAt, run.RawRecordId, run.SpanId, run.OwnerToken);
+            writeFailureInjector?.Invoke(MonitorAnalysisStoreWritePhase.AfterCatalogRegistration);
+        }
+        writeFailureInjector?.Invoke(MonitorAnalysisStoreWritePhase.BeforeCommit);
+        transaction.Commit();
     }
 
     public void CompleteRun(long runId, string resultMarkdown, DateTimeOffset completedAt)
     {
         using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        var run = ReadRetentionRun(connection, transaction, runId);
+        var catalog = new RetentionCatalogStore(databasePath);
+        if (HasRawAggregate(connection, transaction, runId))
+        {
+            catalog.AssertAnalysisRunRawWritable(connection, transaction, run.Id, run.RequestedAt, run.RawRecordId, run.SpanId, run.OwnerToken);
+        }
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText =
             """
             UPDATE monitor_analysis_runs
@@ -200,6 +235,14 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         AddParameter(command, "$result_markdown", resultMarkdown);
         AddParameter(command, "$id", runId);
         command.ExecuteNonQuery();
+        writeFailureInjector?.Invoke(MonitorAnalysisStoreWritePhase.AfterSourceWrite);
+        if (!HasRawAggregate(connection, transaction, runId, excludeResult: true))
+        {
+            catalog.RegisterAnalysisRunRaw(connection, transaction, run.Id, run.RequestedAt, run.RawRecordId, run.SpanId, run.OwnerToken);
+            writeFailureInjector?.Invoke(MonitorAnalysisStoreWritePhase.AfterCatalogRegistration);
+        }
+        writeFailureInjector?.Invoke(MonitorAnalysisStoreWritePhase.BeforeCommit);
+        transaction.Commit();
     }
 
     public void FinishRun(long runId, MonitorAnalysisStatus status, string? message, DateTimeOffset completedAt)
@@ -211,7 +254,16 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         }
 
         using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        var run = ReadRetentionRun(connection, transaction, runId);
+        var catalog = new RetentionCatalogStore(databasePath);
+        var writesRawMessage = message is not null;
+        if (writesRawMessage && HasRawAggregate(connection, transaction, runId))
+        {
+            catalog.AssertAnalysisRunRawWritable(connection, transaction, run.Id, run.RequestedAt, run.RawRecordId, run.SpanId, run.OwnerToken);
+        }
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText =
             """
             UPDATE monitor_analysis_runs
@@ -223,6 +275,14 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         AddParameter(command, "$message", message);
         AddParameter(command, "$id", runId);
         command.ExecuteNonQuery();
+        writeFailureInjector?.Invoke(MonitorAnalysisStoreWritePhase.AfterSourceWrite);
+        if (writesRawMessage && !HasRawAggregate(connection, transaction, runId, excludeError: true))
+        {
+            catalog.RegisterAnalysisRunRaw(connection, transaction, run.Id, run.RequestedAt, run.RawRecordId, run.SpanId, run.OwnerToken);
+            writeFailureInjector?.Invoke(MonitorAnalysisStoreWritePhase.AfterCatalogRegistration);
+        }
+        writeFailureInjector?.Invoke(MonitorAnalysisStoreWritePhase.BeforeCommit);
+        transaction.Commit();
     }
 
     public MonitorAnalysisSafeSummary GenerateRepositorySafeSummary(long runId, DateTimeOffset generatedAt)
@@ -275,7 +335,45 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         }.ToString());
         connection.Open();
         ExecuteNonQuery(connection, "PRAGMA busy_timeout = 5000;");
+        ExecuteNonQuery(connection, "PRAGMA foreign_keys = ON;");
         return connection;
+    }
+
+    private static RetentionRun ReadRetentionRun(SqliteConnection connection, SqliteTransaction transaction, long runId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT id, requested_at, raw_record_id, span_id, retention_owner_token FROM monitor_analysis_runs WHERE id=$id;";
+        AddParameter(command, "$id", runId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read() || reader.IsDBNull(4) || reader.GetFieldValue<byte[]>(4) is not { Length: 32 } ownerToken)
+        {
+            throw new InvalidOperationException("analysis run is not writable.");
+        }
+
+        if (!DateTimeOffset.TryParseExact(reader.GetString(1), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var requestedAt))
+        {
+            throw new InvalidOperationException("analysis run is not writable.");
+        }
+
+        return new RetentionRun(reader.GetInt64(0), requestedAt, reader.IsDBNull(2) ? null : reader.GetInt64(2), reader.IsDBNull(3) ? null : reader.GetString(3), ownerToken);
+    }
+
+    private static bool HasRawAggregate(SqliteConnection connection, SqliteTransaction transaction, long runId, bool excludeEvents = false, bool excludeResult = false, bool excludeError = false)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT EXISTS(
+                SELECT 1 FROM monitor_analysis_runs r
+                WHERE r.id=$id
+                  AND ({(excludeResult ? "0" : "r.result_markdown IS NOT NULL")}
+                       OR {(excludeError ? "0" : "r.error_message IS NOT NULL")}
+                       OR {(excludeEvents ? "0" : "EXISTS(SELECT 1 FROM monitor_analysis_events e WHERE e.run_id=r.id)")})
+            );
+            """;
+        AddParameter(command, "$id", runId);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
     private static MonitorAnalysisRun ReadRun(SqliteDataReader reader)
@@ -322,8 +420,18 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         command.ExecuteNonQuery();
     }
 
+    private static void ExecuteNonQuery(SqliteConnection connection, SqliteTransaction transaction, string commandText)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = commandText;
+        command.ExecuteNonQuery();
+    }
+
     private static void AddParameter(SqliteCommand command, string name, object? value)
     {
         command.Parameters.AddWithValue(name, value ?? DBNull.Value);
     }
+
+    private sealed record RetentionRun(long Id, DateTimeOffset RequestedAt, long? RawRecordId, string? SpanId, byte[] OwnerToken);
 }
