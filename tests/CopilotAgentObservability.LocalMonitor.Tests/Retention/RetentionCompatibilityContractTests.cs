@@ -77,7 +77,7 @@ public sealed class RetentionCompatibilityContractTests
         Assert.Equal("no-store", readable.Headers.CacheControl?.ToString());
         using var readableJson = JsonDocument.Parse(await readable.Content.ReadAsStreamAsync());
         Assert.Equal(new[] { "captured_at", "content", "content_kind", "event_id", "expires_at" }, readableJson.RootElement.EnumerateObject().Select(p => p.Name).OrderBy(x => x).ToArray());
-        Assert.Equal("synthetic", readableJson.RootElement.GetProperty("content").GetString());
+        Assert.Equal("{\"message\":\"synthetic\"}", readableJson.RootElement.GetProperty("content").GetString());
 
         foreach (var id in new[] { uncapturedEvent!, Guid.CreateVersion7().ToString() })
         {
@@ -94,7 +94,7 @@ public sealed class RetentionCompatibilityContractTests
         Assert.Equal(HttpStatusCode.OK, metadata.StatusCode);
         using var absent = await sanitized.Client.GetAsync($"/sessions/{sessionId}/events/{readableEvent}/content");
         Assert.Equal(HttpStatusCode.NotFound, absent.StatusCode);
-        Assert.Null(absent.Content.Headers.ContentType);
+        Assert.Equal("application/json", absent.Content.Headers.ContentType?.MediaType);
     }
 
     private static Type RetentionType(string name) =>
