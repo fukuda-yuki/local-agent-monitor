@@ -418,12 +418,13 @@ fabricated as a source capture state.
 
 For raw OTLP trace ingestion, `capture_content_state` is derived per ingest
 batch rather than fixed. A batch containing at least one recognized
-`claude_code.*` span derives `available` when an allowed content-bearing gated
-field is present in the batch: the `user_prompt` attribute on
-`claude_code.interaction` (producer gate `OTEL_LOG_USER_PROMPTS=1`), a
-`tool.output` span event on `claude_code.tool` (producer gate
-`OTEL_LOG_TOOL_CONTENT=1`), or the `file_path` attribute on `claude_code.tool`
-(producer gate `OTEL_LOG_TOOL_DETAILS=1`); it derives `not_captured` otherwise.
+`claude_code.*` span derives `available` when the batch contains an allowed
+content-bearing gated signal: a qualifying interaction `user_prompt` whose
+`value.stringValue` is non-empty and not ordinal-equal to `<REDACTED>`
+(producer gate `OTEL_LOG_USER_PROMPTS=1`), a `tool.output` span event on
+`claude_code.tool` (producer gate `OTEL_LOG_TOOL_CONTENT=1`), or the
+`file_path` attribute on `claude_code.tool` (producer gate
+`OTEL_LOG_TOOL_DETAILS=1`); it derives `not_captured` otherwise.
 The `error` attribute on `claude_code.tool.execution` is never capture
 evidence, because its gated-detail and ungated-category forms share one
 producer path and are indistinguishable at the receiver. `redacted` is not
