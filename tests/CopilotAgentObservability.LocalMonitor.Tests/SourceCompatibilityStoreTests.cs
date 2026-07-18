@@ -229,7 +229,7 @@ public sealed class SourceCompatibilityStoreTests
     }
 
     [Fact]
-    public void CreateSchema_WhenSecondV5ObjectFails_RollsBackFirstObjectAndVersionStamp()
+    public void CreateSchema_WhenSecondV6ObjectFails_RollsBackFirstObjectAndVersionStamp()
     {
         using var database = new TestDatabase();
         new RawTelemetryStore(database.Path).CreateMonitorSchema();
@@ -249,7 +249,7 @@ public sealed class SourceCompatibilityStoreTests
     }
 
     [Fact]
-    public void CreateSchema_FocusedStoreOwnsSanitizedSourceTablesAndV5Stamp()
+    public void CreateSchema_FocusedStoreOwnsSanitizedSourceTablesAndV6Stamp()
     {
         using var database = new TestDatabase();
         new RawTelemetryStore(database.Path).CreateMonitorSchema();

@@ -30,7 +30,7 @@ public class MonitorHostTests
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT version FROM schema_version WHERE component='session';";
-        Assert.Equal(11L, (long)command.ExecuteScalar()!);
+        Assert.Equal(12L, (long)command.ExecuteScalar()!);
     }
 
     [Fact]
@@ -49,6 +49,38 @@ public class MonitorHostTests
         Assert.Throws<InvalidOperationException>(() => MonitorHost.Build(
             new MonitorOptions(tempDirectory.DatabasePath, "http://127.0.0.1:0", false, 31_457_280),
             new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false }));
+    }
+
+    [Fact]
+    public void Build_WhenRuntimeStateUpsertFails_FailsHostConstruction()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        new SqliteMonitorRuntimeStateStore(
+            tempDirectory.DatabasePath,
+            timeProvider: null,
+            RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
+
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = tempDirectory.DatabasePath, Pooling = false }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                CREATE TRIGGER fail_runtime_state_upsert
+                BEFORE INSERT ON monitor_runtime_state
+                BEGIN
+                    SELECT RAISE(FAIL, 'runtime-state-upsert failure');
+                END;
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        var exception = Assert.Throws<SqliteException>(() => MonitorHost.Build(
+            new MonitorOptions(tempDirectory.DatabasePath, "http://127.0.0.1:0", false, 31_457_280),
+            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false }));
+
+        Assert.Contains("runtime-state-upsert failure", exception.Message, StringComparison.Ordinal);
+        Assert.Null(new SqliteMonitorRuntimeStateStore(tempDirectory.DatabasePath).Get());
     }
 
     [Theory]

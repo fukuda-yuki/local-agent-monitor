@@ -1,5 +1,6 @@
 using System.Text.Encodings.Web;
 using CopilotAgentObservability.LocalMonitor.Analysis;
+using CopilotAgentObservability.LocalMonitor.Doctor.ClaudeCode;
 using CopilotAgentObservability.LocalMonitor.Events;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
@@ -8,6 +9,7 @@ using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.Doctor.ClaudeCode;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Diagnostics;
@@ -79,10 +81,21 @@ internal static class MonitorHost
         var doctorApplication = testOptions?.DoctorApplication
             ?? CreateDoctorApplication(options.DatabasePath, timeProvider, testOptions?.DoctorApplicationFactory);
         builder.Services.AddSingleton(doctorApplication);
+        if (testOptions is null)
+        {
+            var observer = new ClaudeDoctorCandidateObserver(options.DatabasePath, timeProvider);
+            builder.Services.AddHostedService(_ => new ClaudeDoctorCandidateWorker(observer));
+        }
 
         var compatibilityStore = testOptions?.SourceCompatibilityStore
             ?? new SqliteSourceCompatibilityStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         compatibilityStore.CreateSchema();
+        var runtimeStateStore = new SqliteMonitorRuntimeStateStore(
+            options.DatabasePath,
+            timeProvider,
+            RawTelemetryStoreConnectionOptions.MonitorWriter);
+        runtimeStateStore.CreateSchema();
+        runtimeStateStore.Upsert(options.SanitizedOnly);
         if (testOptions?.StartWriter ?? true)
         {
             var commitStore = testOptions?.IngestionCommitStore

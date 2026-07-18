@@ -33,6 +33,7 @@ var specifications = new[]
     new FixtureSpecification(2, "f91e195b549fa2bbfc51b3245dd3fb19fcc8759c"),
     new FixtureSpecification(3, "9ca613a97fd0611ccff1d84b35261b7346112eab"),
     new FixtureSpecification(4, "65ec872eb541b2023f55c32d32edebb9cf83818b"),
+    new FixtureSpecification(5, "d21fbb429b8301a8a1bb14ea785a0e047edbd269", UseSourceCompatibilitySchema: true),
 };
 
 var entries = new List<FixtureEntry>();
@@ -60,7 +61,9 @@ try
             var projectPath = Path.Combine(historicalWorktree, "src", "CopilotAgentObservability.Persistence.Sqlite", "CopilotAgentObservability.Persistence.Sqlite.csproj");
             Run("dotnet", repositoryRoot, "build", projectPath, "--configuration", "Release", "--artifacts-path", artifactsPath, "--nologo");
             var historicalAssembly = FindHistoricalAssembly(artifactsPath);
-            var loadContext = InvokeHistoricalCreateMonitorSchema(historicalAssembly, fixturePath);
+            var loadContext = specification.UseSourceCompatibilitySchema
+                ? InvokeHistoricalCreateSourceCompatibilitySchema(historicalAssembly, fixturePath)
+                : InvokeHistoricalCreateMonitorSchema(historicalAssembly, fixturePath);
             WaitForUnload(loadContext);
 
             var sentinels = InsertSentinels(fixturePath, specification.Version);
@@ -137,6 +140,25 @@ static WeakReference InvokeHistoricalCreateMonitorSchema(string assemblyPath, st
         var constructor = AssertSingle(storeType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic), candidate => candidate.GetParameters().Length == 2);
         var store = constructor.Invoke(new object?[] { fixturePath, null });
         storeType.GetMethod("CreateMonitorSchema", BindingFlags.Instance | BindingFlags.Public)!.Invoke(store, null);
+    }
+    finally
+    {
+        loadContext.Unload();
+    }
+    return new WeakReference(loadContext);
+}
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static WeakReference InvokeHistoricalCreateSourceCompatibilitySchema(string assemblyPath, string fixturePath)
+{
+    var loadContext = new HistoricalLoadContext(assemblyPath);
+    try
+    {
+        var assembly = loadContext.LoadFromAssemblyPath(assemblyPath);
+        var storeType = assembly.GetType("CopilotAgentObservability.Persistence.Sqlite.SqliteSourceCompatibilityStore", throwOnError: true)!;
+        var constructor = AssertSingle(storeType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic), candidate => candidate.GetParameters().Length == 2);
+        var store = constructor.Invoke(new object?[] { fixturePath, null });
+        storeType.GetMethod("CreateSchema", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(store, null);
     }
     finally
     {
@@ -263,7 +285,7 @@ sealed class HistoricalLoadContext(string assemblyPath) : AssemblyLoadContext(is
     }
 }
 
-sealed record FixtureSpecification(int Version, string SourceCommit);
+sealed record FixtureSpecification(int Version, string SourceCommit, bool UseSourceCompatibilitySchema = false);
 sealed record FixtureManifest(string Component, string GenerationCommand, string GitStatusCommand, IReadOnlyList<FixtureEntry> Fixtures);
 sealed record FixtureEntry(int Version, string File, string SourceCommit, string Sha256, string GitStatusBefore, string GitStatusAfter, FixtureSentinels Sentinels);
 sealed record FixtureSentinels(long RawRecordId, long IngestionId, long TraceRowId, string TraceId, long? SpanRowId, string? SpanId);

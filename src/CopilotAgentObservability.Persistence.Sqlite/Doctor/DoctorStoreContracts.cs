@@ -12,7 +12,8 @@ internal enum DoctorCompletionDecision
 internal sealed record DoctorStoreOutcome(
     DoctorResultCode Code,
     DoctorVerification? Verification = null,
-    IReadOnlyList<DoctorEvidenceCandidate>? Candidates = null)
+    IReadOnlyList<DoctorEvidenceCandidate>? Candidates = null,
+    IReadOnlyList<DoctorVerification>? Verifications = null)
 {
     public IReadOnlyList<DoctorEvidenceCandidate> ResolvedCandidates { get; } = Candidates ?? [];
 }

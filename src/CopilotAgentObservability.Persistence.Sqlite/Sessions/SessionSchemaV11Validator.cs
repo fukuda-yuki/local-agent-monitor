@@ -7,7 +7,7 @@ internal static class SessionSchemaV11Validator
 {
     private const string ValidationError = "Unsupported incomplete Session schema version 11.";
     private static readonly object ExpectedSchemasLock = new();
-    private static ExpectedSchemas? expectedSchemas;
+    private static readonly Dictionary<int, ExpectedSchemas> ExpectedSchemasByVersion = new();
 
     private static readonly string[] ReservedPrefixes =
     [
@@ -21,16 +21,17 @@ internal static class SessionSchemaV11Validator
 
     internal static void Validate(
         SqliteConnection connection,
-        Action<SqliteConnection> createCanonicalSchema)
+        Action<SqliteConnection> createCanonicalSchema,
+        int expectedVersion = 11)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(createCanonicalSchema);
 
         try
         {
-            var expected = GetExpectedSchemas(createCanonicalSchema);
+            var expected = GetExpectedSchemas(createCanonicalSchema, expectedVersion);
             if (!HasExactOwnedObjectSet(connection, expected.TableNames)
-                || !HasExactSessionVersionRow(connection))
+                || !HasExactSessionVersionRow(connection, expectedVersion))
             {
                 Reject();
             }
@@ -64,20 +65,25 @@ internal static class SessionSchemaV11Validator
         }
     }
 
-    private static ExpectedSchemas GetExpectedSchemas(Action<SqliteConnection> createCanonicalSchema)
+    private static ExpectedSchemas GetExpectedSchemas(Action<SqliteConnection> createCanonicalSchema, int expectedVersion)
     {
         lock (ExpectedSchemasLock)
         {
-            if (expectedSchemas is not null)
+            if (ExpectedSchemasByVersion.TryGetValue(expectedVersion, out var cached))
             {
-                return expectedSchemas;
+                return cached;
             }
 
             using var canonicalConnection = OpenMemoryDatabase();
             createCanonicalSchema(canonicalConnection);
-            var tableSql = ReadCreateTableStatements(canonicalConnection);
+            var tableSql = ReadCreateTableStatements(canonicalConnection)
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+            if (expectedVersion == 11)
+            {
+                tableSql["session_events"] = RemoveColumnDefinition(tableSql["session_events"], "match_kind");
+            }
             var tableNames = tableSql.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var canonical = ReadProfile(canonicalConnection, tableNames)
+            var canonical = BuildProfile(tableSql, expectedVersion)
                 ?? throw new InvalidOperationException("Unable to construct the canonical Session schema.");
 
             var versionThree = BuildDerivedProfile(
@@ -87,7 +93,8 @@ internal static class SessionSchemaV11Validator
                     ["improvement_proposals"] = "revision",
                     ["improvement_proposal_sessions"] = "proposal_revision",
                 },
-                historicalUpdatedAtDefault: false);
+                historicalUpdatedAtDefault: false,
+                expectedVersion: expectedVersion);
             var versionFour = BuildDerivedProfile(
                 tableSql,
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -97,7 +104,8 @@ internal static class SessionSchemaV11Validator
                     ["proposal_apply_drafts"] = "proposal_revision",
                     ["proposal_applies"] = "proposal_revision",
                 },
-                historicalUpdatedAtDefault: true);
+                historicalUpdatedAtDefault: true,
+                expectedVersion: expectedVersion);
             var versionsFiveAndSix = BuildDerivedProfile(
                 tableSql,
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -107,19 +115,35 @@ internal static class SessionSchemaV11Validator
                     ["proposal_apply_drafts"] = "proposal_revision",
                     ["proposal_applies"] = "proposal_revision",
                 },
-                historicalUpdatedAtDefault: false);
+                historicalUpdatedAtDefault: false,
+                expectedVersion: expectedVersion);
 
-            expectedSchemas = new(
+            var expected = new ExpectedSchemas(
                 tableNames,
                 [canonical, versionThree, versionFour, versionsFiveAndSix]);
-            return expectedSchemas;
+            ExpectedSchemasByVersion.Add(expectedVersion, expected);
+            return expected;
         }
+    }
+
+    private static DatabaseProfile? BuildProfile(
+        IReadOnlyDictionary<string, string> tableSql,
+        int schemaVersion)
+    {
+        using var connection = OpenMemoryDatabase();
+        foreach (var sql in tableSql.Values)
+        {
+            Execute(connection, sql);
+        }
+        Execute(connection, $"INSERT INTO schema_version(component,version) VALUES('session',{schemaVersion});");
+        return ReadProfile(connection, tableSql.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase));
     }
 
     private static DatabaseProfile BuildDerivedProfile(
         IReadOnlyDictionary<string, string> canonicalTableSql,
         IReadOnlyDictionary<string, string> appendedRevisionColumns,
-        bool historicalUpdatedAtDefault)
+        bool historicalUpdatedAtDefault,
+        int expectedVersion)
     {
         using var connection = OpenMemoryDatabase();
         foreach (var (table, canonicalSql) in canonicalTableSql)
@@ -139,7 +163,7 @@ internal static class SessionSchemaV11Validator
             }
             Execute(connection, sql);
         }
-        Execute(connection, "INSERT INTO schema_version(component,version) VALUES('session',11);");
+        Execute(connection, $"INSERT INTO schema_version(component,version) VALUES('session',{expectedVersion});");
 
         return ReadProfile(connection, canonicalTableSql.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("Unable to construct a supported Session schema profile.");
@@ -177,6 +201,20 @@ internal static class SessionSchemaV11Validator
             throw new InvalidOperationException($"Canonical Session DDL is missing {column}.");
         }
         definitions[index] = replacement;
+        return RecomposeCreateTable(sql, table, definitions);
+    }
+
+    private static string RemoveColumnDefinition(string sql, string column)
+    {
+        var table = ParseCreateTable(sql);
+        var definitions = table.Definitions.ToList();
+        var index = definitions.FindIndex(definition =>
+            string.Equals(ReadLeadingIdentifier(definition), column, StringComparison.OrdinalIgnoreCase));
+        if (index < 0)
+        {
+            throw new InvalidOperationException($"Canonical Session DDL is missing {column}.");
+        }
+        definitions.RemoveAt(index);
         return RecomposeCreateTable(sql, table, definitions);
     }
 
@@ -377,14 +415,14 @@ internal static class SessionSchemaV11Validator
     private static bool IsReservedName(string name) => ReservedPrefixes.Any(prefix =>
         name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
 
-    private static bool HasExactSessionVersionRow(SqliteConnection connection)
+    private static bool HasExactSessionVersionRow(SqliteConnection connection, int expectedVersion)
     {
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT version,typeof(version) FROM schema_version WHERE component='session';";
         using var reader = command.ExecuteReader();
         if (!reader.Read()
             || !reader.GetString(1).Equals("integer", StringComparison.Ordinal)
-            || reader.GetInt64(0) != 11)
+            || reader.GetInt64(0) != expectedVersion)
         {
             return false;
         }

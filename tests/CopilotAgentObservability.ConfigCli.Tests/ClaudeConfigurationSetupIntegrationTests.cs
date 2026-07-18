@@ -175,6 +175,41 @@ public sealed class ClaudeConfigurationSetupIntegrationTests
     }
 
     [Fact]
+    public void Composition_ChangedClaudeCliApplyEmitsHandoffButRollbackDoesNot()
+    {
+        var platform = new SetupTestPlatform(Timestamp);
+        SeedDirectoryChain(platform, "C:\\Users\\setup-test\\.claude");
+        platform.SeedFile("C:\\Users\\setup-test\\.claude\\settings.json", "{}\n"u8.ToArray());
+        ScriptReadyClaude(platform);
+        ScriptReadyClaude(platform);
+
+        var dispatch = SetupCompositionRoot.CreateSetupDispatch(
+            platform,
+            new FixedClaudeHookCommandProvider(
+                new ClaudeHookCommand("dotnet", ["run", "--no-build", "--project", "synthetic-monitor.csproj", "--"], ClaudeHookCommandMode.Repository)));
+        var planOptions = Assert.IsType<SetupOptions>(SetupOptions.Parse(
+        [
+            "setup", "plan", "--adapter", "claude-code", "--target", "cli",
+            "--endpoint", "http://127.0.0.1:4320",
+        ]).Options);
+
+        var plan = dispatch(planOptions);
+        var apply = dispatch(Assert.IsType<SetupOptions>(SetupOptions.Parse(
+            ["setup", "apply", "--change-set", plan.ChangeSetId!]).Options));
+
+        Assert.True(apply.Success, apply.Code);
+        Assert.Equal(
+            [SetupCodes.RestartClaudeProcess, SetupCodes.RunFirstTraceDoctor],
+            apply.NextActions);
+
+        var rollback = dispatch(Assert.IsType<SetupOptions>(SetupOptions.Parse(
+            ["setup", "rollback", "--change-set", plan.ChangeSetId!]).Options));
+
+        Assert.True(rollback.Success, rollback.Code);
+        Assert.DoesNotContain(SetupCodes.RunFirstTraceDoctor, rollback.NextActions);
+    }
+
+    [Fact]
     public async Task RepositorySetupWrapper_ForwardsClaudeWslOptInByteForByte()
     {
         var direct = await RunConfigCliAsync(DuplicateWslOptInActionArguments);

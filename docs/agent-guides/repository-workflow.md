@@ -82,9 +82,13 @@ real #66→#67 composition belong to executable in-process production
 composition with an injected trusted platform. Release validation must invoke
 the packaged `scripts/setup.ps1` with `dotnet` unavailable on child `PATH`; that
 proves packaged-executable selection, not isolated status/storage behavior.
-Static setup success does not prove telemetry receipt; Issue #69 owns that
-verification. `run_first_trace_doctor` is reserved for that handoff and is not
-emitted by current production setup results.
+Static setup success does not prove telemetry receipt. For the Claude adapter,
+a successful changed CLI apply emits `restart_claude_process` followed by
+`run_first_trace_doctor`, which hands the user to
+`first-trace begin --adapter claude-code`; it is guidance, not telemetry
+evidence. Already-correct no-op applies and rollback do not emit that changed-
+apply handoff. GitHub Copilot setup retains its existing first-trace ownership
+and does not emit the Claude-specific handoff.
 
 Focused Doctor validation uses the three owning test projects:
 

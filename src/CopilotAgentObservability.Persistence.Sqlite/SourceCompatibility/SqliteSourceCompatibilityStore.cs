@@ -105,6 +105,7 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
             transaction,
             "CREATE INDEX IF NOT EXISTS IX_source_unknown_observations_cursor ON source_unknown_observations(source_observation_id, id);");
         MonitorSchemaMigrator.EnsureProjectionDispositionSchema(connection, transaction);
+        MonitorSchemaMigrator.EnsureRuntimeStateSchema(connection, transaction);
         migrationCheckpoint?.Invoke(connection, transaction);
         MonitorSchemaMigrator.SetMonitorSchemaVersion(connection, transaction, MonitorSchemaVersion);
         transaction.Commit();

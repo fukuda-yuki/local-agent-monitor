@@ -73,6 +73,266 @@ public sealed class DoctorVerificationStoreTests
     }
 
     [Fact]
+    public void ListActive_ReturnsOnlyMatchingUnexpiredActiveVerificationsInDeterministicOrder()
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new DoctorTestTimeProvider(DoctorTestData.Now);
+        var store = NewStore(database, time);
+
+        var first = Start(store);
+        var expired = store.Start("github-copilot-vscode", "otel", TimeSpan.FromMinutes(1));
+        var expiredVerification = Assert.IsType<DoctorVerification>(expired.Verification);
+        time.UtcNow = DoctorTestData.Now.AddMinutes(1);
+        var second = Start(store);
+        time.UtcNow = DoctorTestData.Now.AddMinutes(2);
+        var third = Start(store);
+        var wrongSurface = Assert.IsType<DoctorVerification>(
+            store.Start("claude-code", "otel", TimeSpan.FromMinutes(5)).Verification);
+        var cancelled = Start(store);
+        Assert.Equal(DoctorResultCode.VerificationCancelled, store.Cancel(cancelled.VerificationId, 1).Code);
+        var completed = Start(store);
+        var completedCandidate = DoctorTestData.Candidate(completed, "completed-evidence");
+        Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(completedCandidate).Code);
+        Assert.Equal(
+            DoctorResultCode.VerificationCompleted,
+            store.Complete(
+                completed.VerificationId,
+                1,
+                completed.ExpectedSourceSurface,
+                completed.ExpectedSourceAdapter,
+                [completedCandidate.EvidenceRef],
+                _ => DoctorCompletionDecision.Ready).Code);
+
+        var result = store.ListActive("github-copilot-vscode", time.UtcNow);
+
+        Assert.Equal(DoctorResultCode.VerificationActive, result.Code);
+        Assert.Equal(
+            [first.VerificationId, second.VerificationId, third.VerificationId],
+            result.Verifications!.Select(verification => verification.VerificationId));
+        Assert.DoesNotContain(expiredVerification.VerificationId, result.Verifications!.Select(verification => verification.VerificationId));
+        Assert.DoesNotContain(wrongSurface.VerificationId, result.Verifications!.Select(verification => verification.VerificationId));
+        Assert.DoesNotContain(cancelled.VerificationId, result.Verifications!.Select(verification => verification.VerificationId));
+        Assert.DoesNotContain(completed.VerificationId, result.Verifications!.Select(verification => verification.VerificationId));
+    }
+
+    [Fact]
+    public void ListActive_EmptyResultIsSuccessful()
+    {
+        using var database = new DoctorTestDatabase();
+        var store = NewStore(database);
+
+        var result = store.ListActive("claude-code", DoctorTestData.Now);
+
+        Assert.Equal(DoctorResultCode.VerificationActive, result.Code);
+        Assert.Empty(result.Verifications!);
+    }
+
+    [Fact]
+    public void ListActive_AtExactExpiresAtBoundary_ExcludesActiveVerification()
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new DoctorTestTimeProvider(DoctorTestData.Now);
+        var store = NewStore(database, time);
+        var verification = Start(store);
+        time.UtcNow = verification.ExpiresAt;
+
+        var result = store.ListActive(verification.ExpectedSourceSurface, time.UtcNow);
+
+        Assert.Equal(DoctorResultCode.VerificationActive, result.Code);
+        Assert.Empty(result.Verifications!);
+    }
+
+    [Fact]
+    public void StartExclusive_MapsControlledWriteLockToBusyAndSequentialCallsReturnOneExistingVerification()
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new DoctorTestTimeProvider(DoctorTestData.Now);
+        var store = NewStore(database, time);
+        using var lockConnection = database.Open();
+        using var writeLock = lockConnection.BeginTransaction(deferred: false);
+
+        var lockedStore = new SqliteDoctorVerificationStore(
+            database.Path,
+            time,
+            busyTimeoutMilliseconds: 0);
+        var busy = lockedStore.StartExclusive(
+            "github-copilot-vscode",
+            "otel",
+            time.UtcNow.AddMinutes(5));
+
+        Assert.Equal(DoctorResultCode.DoctorStoreBusy, busy.Code);
+        Assert.Null(busy.Verification);
+        writeLock.Rollback();
+
+        var started = store.StartExclusive(
+            "github-copilot-vscode",
+            "otel",
+            time.UtcNow.AddMinutes(5));
+        var existing = store.StartExclusive(
+            "github-copilot-vscode",
+            "otel",
+            time.UtcNow.AddMinutes(5));
+
+        Assert.Equal(DoctorResultCode.VerificationStarted, started.Code);
+        Assert.Equal(DoctorResultCode.VerificationActive, existing.Code);
+        Assert.Equivalent(started.Verification, existing.Verification, strict: true);
+        using var connection = database.Open();
+        Assert.Equal(1L, DoctorTestDatabase.Scalar(connection, "SELECT count(*) FROM doctor_verifications;"));
+    }
+
+    [Fact]
+    public void StartExclusive_DefaultExpiryIsExactlyTenMinutesFromItsStoreClockReading()
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new AdvancingDoctorTestTimeProvider(DoctorTestData.Now, DoctorTestData.Now.AddSeconds(1));
+        var store = new SqliteDoctorVerificationStore(database.Path, time);
+        Assert.Equal(DoctorResultCode.VerificationActive, store.CreateSchema().Code);
+
+        var result = store.StartExclusive("github-copilot-vscode", "otel", expiresAt: null);
+
+        var verification = Assert.IsType<DoctorVerification>(result.Verification);
+        Assert.Equal(DoctorResultCode.VerificationStarted, result.Code);
+        Assert.Equal(TimeSpan.FromMinutes(10), verification.ExpiresAt - verification.StartedAt);
+        Assert.Equal(1, time.ReadCount);
+    }
+
+    [Fact]
+    public async Task StartExclusive_BarrierAllowsOneStartAndOneExistingResult()
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new DoctorTestTimeProvider(DoctorTestData.Now);
+        var baseStore = NewStore(database, time);
+        using var barrier = new Barrier(2);
+
+        SqliteDoctorVerificationStore RacingStore() => new(
+            database.Path,
+            time,
+            checkpoint: point =>
+            {
+                if (point == "before-exclusive-transaction")
+                {
+                    Assert.True(barrier.SignalAndWait(TimeSpan.FromSeconds(10)));
+                }
+            });
+
+        var results = await Task.WhenAll(
+            Task.Run(() => RacingStore().StartExclusive(
+                "github-copilot-vscode",
+                "otel",
+                time.UtcNow.AddMinutes(5))),
+            Task.Run(() => RacingStore().StartExclusive(
+                "github-copilot-vscode",
+                "otel",
+                time.UtcNow.AddMinutes(5))));
+
+        Assert.Single(results, result => result.Code == DoctorResultCode.VerificationStarted);
+        Assert.Single(results, result => result.Code == DoctorResultCode.VerificationActive);
+        Assert.Equivalent(
+            results.Single(result => result.Code == DoctorResultCode.VerificationStarted).Verification,
+            results.Single(result => result.Code == DoctorResultCode.VerificationActive).Verification,
+            strict: true);
+        Assert.Equal(
+            DoctorResultCode.VerificationActive,
+            baseStore.ListActive("github-copilot-vscode", time.UtcNow).Code);
+        using var connection = database.Open();
+        Assert.Equal(1L, DoctorTestDatabase.Scalar(connection, "SELECT count(*) FROM doctor_verifications;"));
+    }
+
+    [Fact]
+    public void StartExclusive_AtExactExpiresAtBoundaryDoesNotBlockNewVerification()
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new DoctorTestTimeProvider(DoctorTestData.Now);
+        var store = NewStore(database, time);
+        var expired = Assert.IsType<DoctorVerification>(
+            store.StartExclusive(
+                "github-copilot-vscode",
+                "otel",
+                time.UtcNow.AddMinutes(5)).Verification);
+        time.UtcNow = expired.ExpiresAt;
+
+        var started = store.StartExclusive(
+            "github-copilot-vscode",
+            "otel",
+            time.UtcNow.AddMinutes(5));
+
+        Assert.Equal(DoctorResultCode.VerificationStarted, started.Code);
+        Assert.NotEqual(expired.VerificationId, Assert.IsType<DoctorVerification>(started.Verification).VerificationId);
+    }
+
+    [Fact]
+    public void ListCandidates_ReturnsAllRowsIncludingExpiredInDeterministicOrderAndRoundTripsFields()
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new DoctorTestTimeProvider(DoctorTestData.Now);
+        var store = NewStore(database, time);
+        var verification = Start(store);
+        var expired = DoctorTestData.Candidate(
+            verification,
+            "expired",
+            evidenceClass: DoctorEvidenceClass.SyntheticProbe,
+            evidenceKind: DoctorEvidenceKind.Ingest,
+            observedAt: DoctorTestData.Now,
+            expiresAt: DoctorTestData.Now.AddMinutes(1));
+        var sameTimeLaterReference = DoctorTestData.Candidate(
+            verification,
+            "ref-z",
+            evidenceKind: DoctorEvidenceKind.RawPersistence,
+            observedAt: DoctorTestData.Now.AddMinutes(1),
+            expiresAt: DoctorTestData.Now.AddMinutes(6));
+        var sameTimeEarlierReference = DoctorTestData.Candidate(
+            verification,
+            "ref-a",
+            evidenceKind: DoctorEvidenceKind.Projection,
+            observedAt: DoctorTestData.Now.AddMinutes(1),
+            expiresAt: DoctorTestData.Now.AddMinutes(6));
+        var later = DoctorTestData.Candidate(
+            verification,
+            "later",
+            evidenceKind: DoctorEvidenceKind.ExactSessionBinding,
+            observedAt: DoctorTestData.Now.AddMinutes(2),
+            expiresAt: DoctorTestData.Now.AddMinutes(7));
+
+        foreach (var candidate in new[] { sameTimeLaterReference, later, expired, sameTimeEarlierReference })
+        {
+            Assert.Equal(DoctorResultCode.VerificationActive, store.ObserveCandidate(candidate).Code);
+        }
+        time.UtcNow = DoctorTestData.Now.AddMinutes(2);
+
+        var result = store.ListCandidates(verification.VerificationId);
+
+        Assert.Equal(DoctorResultCode.VerificationActive, result.Code);
+        Assert.Equal(
+            [expired, sameTimeEarlierReference, sameTimeLaterReference, later],
+            result.Candidates!);
+        Assert.Equal(DoctorVerificationState.Active, Assert.Single(store.ListActive(verification.ExpectedSourceSurface, time.UtcNow).Verifications!).State);
+
+        var empty = store.ListCandidates(Guid.CreateVersion7(time.UtcNow).ToString("D"));
+        Assert.Equal(DoctorResultCode.VerificationActive, empty.Code);
+        Assert.Empty(empty.Candidates!);
+    }
+
+    [Fact]
+    public void ListReads_MapControlledExclusiveLockToDoctorStoreBusy()
+    {
+        using var database = new DoctorTestDatabase();
+        var store = NewStore(database);
+        var verification = Start(store);
+        using var lockConnection = database.Open();
+        DoctorTestDatabase.Execute(lockConnection, "BEGIN EXCLUSIVE;");
+
+        var lockedStore = new SqliteDoctorVerificationStore(
+            database.Path,
+            new DoctorTestTimeProvider(DoctorTestData.Now),
+            busyTimeoutMilliseconds: 0);
+
+        Assert.Equal(DoctorResultCode.DoctorStoreBusy, lockedStore.ListActive(verification.ExpectedSourceSurface, DoctorTestData.Now).Code);
+        Assert.Equal(DoctorResultCode.DoctorStoreBusy, lockedStore.ListCandidates(verification.VerificationId).Code);
+
+        DoctorTestDatabase.Execute(lockConnection, "ROLLBACK;");
+    }
+
+    [Fact]
     public void StartAndObserveCandidate_EnforceBoundsSafetyAndMaximumCardinality()
     {
         using var database = new DoctorTestDatabase();
@@ -705,4 +965,16 @@ public sealed class DoctorVerificationStoreTests
                 "SELECT component,version FROM schema_version WHERE component='doctor';"))
             .Concat(DoctorTestDatabase.Rows(connection, "SELECT * FROM doctor_verifications ORDER BY verification_id;"))
             .Concat(DoctorTestDatabase.Rows(connection, "SELECT * FROM doctor_verification_evidence ORDER BY candidate_id;")));
+
+    private sealed class AdvancingDoctorTestTimeProvider(
+        DateTimeOffset first,
+        DateTimeOffset subsequent) : TimeProvider
+    {
+        private int reads;
+
+        public int ReadCount => reads;
+
+        public override DateTimeOffset GetUtcNow() =>
+            Interlocked.Increment(ref reads) == 1 ? first : subsequent;
+    }
 }

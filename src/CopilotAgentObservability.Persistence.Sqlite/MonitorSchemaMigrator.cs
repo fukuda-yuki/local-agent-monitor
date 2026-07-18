@@ -174,6 +174,20 @@ internal static class MonitorSchemaMigrator
             """);
     }
 
+    public static void EnsureRuntimeStateSchema(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        Execute(
+            connection,
+            transaction,
+            """
+            CREATE TABLE IF NOT EXISTS monitor_runtime_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                raw_access TEXT NOT NULL CHECK (raw_access IN ('available', 'sanitized_only')),
+                updated_at TEXT NOT NULL
+            );
+            """);
+    }
+
     public static long? ReadMonitorSchemaVersion(SqliteConnection connection, SqliteTransaction transaction)
     {
         using var tableCommand = connection.CreateCommand();

@@ -2167,3 +2167,22 @@ exclusive non-waiting lock.
 
 The complete command, settings, Hook, WSL2, storage, and evidence contract is
 [configuration setup](specifications/interfaces/configuration-setup.md).
+
+## D062: Claude changed setup apply hands off to first-trace Doctor
+
+Status: Accepted (2026-07-18). This decision supersedes only the stale
+`run_first_trace_doctor` emission sentence in D061; D061 remains the historical
+decision for the Issue #68 guided-setup boundary.
+
+The current Claude setup contract emits `restart_claude_process` followed by
+`run_first_trace_doctor` after a successful changed CLI apply. The latter is a
+handoff to `first-trace begin --adapter claude-code`; it is not telemetry
+evidence and does not assert that a first real trace exists. Already-correct
+no-op applies and rollback do not emit this changed-apply handoff.
+
+Issue #104 owns the source-neutral first-trace orchestration, Claude fact
+mapping, candidate observation, exact-binding firewall, deterministic matrix
+evidence, and frozen feature-branch candidate. Issue #106 owns live Claude
+producer execution, including the #110 check of whether `user_prompt` is
+present when telemetry is enabled and `OTEL_LOG_USER_PROMPTS` is off. A #104
+feature-branch closeout does not claim that live result or main integration.

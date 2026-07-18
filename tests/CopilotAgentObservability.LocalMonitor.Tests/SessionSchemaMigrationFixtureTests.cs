@@ -9,23 +9,24 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SessionSchemaMigrationFixtureTests
 {
-    private const int CurrentSessionSchemaVersion = 11;
+    private const int CurrentSessionSchemaVersion = 12;
+    private const int MatchKindSchemaVersion = 12;
     private const string VersionTenUpgraderCommit = "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346";
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateSessionSchemaFixtures/GenerateSessionSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/session";
     private const string VersionFourLimitation = "Commit 601c2beb5cb528d1e87aba0fef150b65e1dbccc0 exposes no public proposal-apply persistence API; parameterized INSERTs populate proposal-apply rows only after its public CreateSchema, Write, and CreateImprovementProposal APIs create the schema and parent sentinels.";
 
     private static readonly IReadOnlyDictionary<int, string> ExpectedV11SemanticSchemaHashes = new Dictionary<int, string>
     {
-        [1] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
-        [2] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
-        [3] = "e43eec292118ef9ddd70a106454cb9c85b0a3bbbf39e81538658b759743cb8d2",
-        [4] = "228832a6446f170c03351d5cff281492a78fd4a351fde4767c7d84957388cb65",
-        [5] = "26ca7752f24b880b65449c169f748ac649e26af9d8e0ebb3da30fa03778fbe5f",
-        [6] = "26ca7752f24b880b65449c169f748ac649e26af9d8e0ebb3da30fa03778fbe5f",
-        [7] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
-        [8] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
-        [9] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
-        [10] = "eda22a9505ee511f18a4dd811aa645ca90f2c82a3408ed6f29adfdc678eff5af",
+        [1] = "0966d9e4d84537343ccb9706a6e3d3e101d16612431d2edb4dfe3fe882555ea4",
+        [2] = "0966d9e4d84537343ccb9706a6e3d3e101d16612431d2edb4dfe3fe882555ea4",
+        [3] = "e95d3f39ba76fe302b1a7c8e2f899dd7dd6c25d6fcd141bf59496e7b153fddfe",
+        [4] = "9690ba6a62b6c606a040f3356be104339f238f3c8dc5e324df9e99ecedfcc1e3",
+        [5] = "6b1b8a7b283d16a488ddb82012796ff9c7a595f0f3d404633fb29970a8e1a3b9",
+        [6] = "6b1b8a7b283d16a488ddb82012796ff9c7a595f0f3d404633fb29970a8e1a3b9",
+        [7] = "0966d9e4d84537343ccb9706a6e3d3e101d16612431d2edb4dfe3fe882555ea4",
+        [8] = "0966d9e4d84537343ccb9706a6e3d3e101d16612431d2edb4dfe3fe882555ea4",
+        [9] = "0966d9e4d84537343ccb9706a6e3d3e101d16612431d2edb4dfe3fe882555ea4",
+        [10] = "0966d9e4d84537343ccb9706a6e3d3e101d16612431d2edb4dfe3fe882555ea4",
     };
 
     private static readonly string[] ExpectedV11Tables =
@@ -150,6 +151,57 @@ public sealed class SessionSchemaMigrationFixtureTests
         {
             SqliteConnection.ClearAllPools();
             File.Delete(migratedPath);
+        }
+    }
+
+    [Fact]
+    public void Prior_version_fixture_migrates_match_kind_with_legacy_null_and_is_idempotent()
+    {
+        var databasePath = CopyFixture("session-v10.sqlite");
+        string[] before;
+        try
+        {
+            using (var connection = Open(databasePath))
+            {
+                before =
+                [
+                    Scalar<string>(connection, "SELECT session_id FROM sessions;"),
+                    Scalar<string>(connection, "SELECT native_session_id FROM session_native_ids;"),
+                    Scalar<string>(connection, "SELECT event_id FROM session_events;"),
+                    Scalar<string>(connection, "SELECT source_event_id FROM session_events;"),
+                ];
+            }
+
+            new SqliteSessionStore(databasePath).CreateSchema();
+            string[] firstPass;
+            using (var connection = Open(databasePath))
+            {
+                Assert.Equal(MatchKindSchemaVersion, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component='session';"));
+                Assert.True(ColumnExists(connection, "session_events", "match_kind"));
+                Assert.Null(ScalarOrNull<string>(connection, "SELECT match_kind FROM session_events;", string.Empty));
+                firstPass =
+                [
+                    Scalar<string>(connection, "SELECT session_id FROM sessions;"),
+                    Scalar<string>(connection, "SELECT native_session_id FROM session_native_ids;"),
+                    Scalar<string>(connection, "SELECT event_id FROM session_events;"),
+                    Scalar<string>(connection, "SELECT source_event_id FROM session_events;"),
+                ];
+            }
+
+            new SqliteSessionStore(databasePath).CreateSchema();
+            using (var connection = Open(databasePath))
+            {
+                Assert.Equal(MatchKindSchemaVersion, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component='session';"));
+                Assert.Null(ScalarOrNull<string>(connection, "SELECT match_kind FROM session_events;", string.Empty));
+                Assert.Equal(firstPass, ReadSessionEventIdentity(connection));
+            }
+
+            Assert.Equal(before, firstPass);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
         }
     }
 
@@ -367,7 +419,7 @@ public sealed class SessionSchemaMigrationFixtureTests
     public void Exact_supported_whole_profile_from_real_fixture_is_accepted(string fixtureFile)
     {
         Assert.Equal(SupportedWholeProfileFixtureCount, SupportedWholeProfileFixtures.Count);
-        var databasePath = CreateStampedVersionElevenFixture(fixtureFile);
+        var databasePath = CreateStampedCurrentFixture(fixtureFile);
         try
         {
             var before = CapturePreflightSnapshot(databasePath);
@@ -420,8 +472,8 @@ public sealed class SessionSchemaMigrationFixtureTests
     [Fact]
     public void Exact_v5_profile_assembled_from_real_v4_lineage_is_accepted_by_schema_semantics()
     {
-        var databasePath = CreateStampedVersionElevenFixture("session-v4.sqlite");
-        var versionFivePath = CreateStampedVersionElevenFixture("session-v5.sqlite");
+        var databasePath = CreateStampedCurrentFixture("session-v4.sqlite");
+        var versionFivePath = CreateStampedCurrentFixture("session-v5.sqlite");
         try
         {
             string versionFiveDraftSql;
@@ -453,7 +505,7 @@ public sealed class SessionSchemaMigrationFixtureTests
     [InlineData("source_compat_test_state")]
     public void Unrelated_monitor_analysis_and_source_compatibility_objects_are_accepted(string table)
     {
-        var databasePath = CreateStampedVersionElevenFixture("session-v10.sqlite");
+        var databasePath = CreateStampedCurrentFixture("session-v10.sqlite");
         try
         {
             using (var connection = Open(databasePath))
@@ -474,7 +526,7 @@ public sealed class SessionSchemaMigrationFixtureTests
     [Fact]
     public void Commented_autoincrement_check_and_quoted_decoys_do_not_change_an_owned_table_profile()
     {
-        var databasePath = CreateStampedVersionElevenFixture("session-v10.sqlite");
+        var databasePath = CreateStampedCurrentFixture("session-v10.sqlite");
         try
         {
             RewriteTableSql(databasePath, "sessions", sql => ReplaceRequired(
@@ -590,7 +642,7 @@ public sealed class SessionSchemaMigrationFixtureTests
             ("event_id", S(eventId)), ("session_id", S(sessionId)), ("run_id", S(runId)), ("source_surface", S("copilot-sdk")),
             ("parent_event_id", N), ("trace_id", S($"fixture-trace-v{version}")), ("status", S("ok")), ("source_adapter", S("fixture-adapter")),
             ("source_event_id", S(sentinels.SourceEventId)), ("type", S("session.task_complete")), ("occurred_at", S(at.AddSeconds(30))), ("content_state", S("available")),
-            ("source_application_version", N), ("adapter_version", N), ("schema_fingerprint", N), ("normalization_version", N)));
+            ("source_application_version", N), ("adapter_version", N), ("schema_fingerprint", N), ("normalization_version", N), ("match_kind", N)));
         AssertExpectedRow(connection, "session_event_content", sessionRowCount, D(
             ("event_id", S(eventId)), ("content_kind", S("fixture")), ("content_json", S($"{{\"fixture\":\"session-v{version}\"}}")),
             ("captured_at", S(at.AddSeconds(30))), ("expires_at", S(at.AddDays(90)))));
@@ -670,7 +722,7 @@ public sealed class SessionSchemaMigrationFixtureTests
             ("event_id", S(eventId)), ("session_id", S(sessionId)), ("run_id", S(runId)), ("source_surface", S("copilot-sdk")),
             ("parent_event_id", N), ("trace_id", S($"fixture-trace-v{version}-secondary")), ("status", S("ok")), ("source_adapter", S("fixture-adapter")),
             ("source_event_id", S(sentinels.SecondarySourceEventId!)), ("type", S("session.task_complete")), ("occurred_at", S(secondaryAt.AddSeconds(30))), ("content_state", S("available")),
-            ("source_application_version", N), ("adapter_version", N), ("schema_fingerprint", N), ("normalization_version", N)));
+            ("source_application_version", N), ("adapter_version", N), ("schema_fingerprint", N), ("normalization_version", N), ("match_kind", N)));
         AssertExpectedRow(connection, "session_event_content", 2, D(
             ("event_id", S(eventId)), ("content_kind", S("fixture")), ("content_json", S($"{{\"fixture\":\"session-v{version}-secondary\"}}")),
             ("captured_at", S(secondaryAt.AddSeconds(30))), ("expires_at", S(secondaryAt.AddDays(90)))));
@@ -1209,6 +1261,14 @@ public sealed class SessionSchemaMigrationFixtureTests
 
     private static string CreateStampedVersionElevenFixture(string fixtureFile)
     {
+        var databasePath = CreateStampedCurrentFixture(fixtureFile);
+        using (var connection = Open(databasePath))
+            Execute(connection, "ALTER TABLE session_events DROP COLUMN match_kind; UPDATE schema_version SET version=11 WHERE component='session';");
+        return databasePath;
+    }
+
+    private static string CreateStampedCurrentFixture(string fixtureFile)
+    {
         var databasePath = CopyFixture(fixtureFile);
         new SqliteSessionStore(databasePath).CreateSchema();
         return databasePath;
@@ -1310,6 +1370,14 @@ public sealed class SessionSchemaMigrationFixtureTests
         var value = command.ExecuteScalar();
         return value is null or DBNull ? default : (T)Convert.ChangeType(value, typeof(T), CultureInfo.InvariantCulture);
     }
+
+    private static string[] ReadSessionEventIdentity(SqliteConnection connection) =>
+    [
+        Scalar<string>(connection, "SELECT session_id FROM sessions;"),
+        Scalar<string>(connection, "SELECT native_session_id FROM session_native_ids;"),
+        Scalar<string>(connection, "SELECT event_id FROM session_events;"),
+        Scalar<string>(connection, "SELECT source_event_id FROM session_events;"),
+    ];
 
     private static string Encode(SqliteDataReader reader, int index) => reader.GetFieldType(index) switch
     {

@@ -223,8 +223,10 @@ Copilot CLI を target ごとの `restart_requirement` と `next_actions` に従
 各 command は stdout に 1 個の `setup.v1` JSON を返します。`success: true` は
 設定ファイル／current-user environment の静的な検証結果であり、trace 到着の証拠では
 ありません。この setup command 自体は初回 trace の受信確認を行わず、確認は Issue #69
-へ引き継ぎます。`run_first_trace_doctor` はその handoff 用に予約された action 名ですが、
-現在の production setup result は返しません。
+へ引き継ぎます。Claude adapter の成功した変更 CLI apply は
+`restart_claude_process` に続けて `run_first_trace_doctor` を返し、
+`first-trace begin --adapter claude-code` へ handoff します。これは telemetry evidence
+ではありません。
 
 Release ZIP の wrapper は `app/config-cli/` の self-contained executable を直接使うため、
 .NET SDK / Runtime を必要としません。Repository wrapper と引数、stdout、exit code の

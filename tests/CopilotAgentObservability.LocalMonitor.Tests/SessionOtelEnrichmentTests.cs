@@ -87,6 +87,91 @@ public sealed class SessionOtelEnrichmentTests
     }
 
     [Fact]
+    public void ProcessNextBatch_GenericPathPreservesReachabilityCountsAndAdapterLabels()
+    {
+        using var temp = new MonitorTempDirectory();
+        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+        var exactSessionId = SeedClaudeSession(store, "GENERIC_EXACT_001", SessionBindingKind.Native);
+        var traceSessionId = Guid.CreateVersion7();
+        store.Write(new(new(
+            new ObservedSession(
+                traceSessionId, ObservedSessionStatus.Unknown, SessionCompleteness.Unbound,
+                null, null, null, null, now, SessionRawRetentionState.NotCaptured, now, now),
+            [],
+            [],
+            [Event(traceSessionId, "trace-context", "UserPromptSubmit", now) with { TraceId = "generic-shared-trace" }]),
+            []));
+        var conversationSessionId = SeedClaudeSession(store, "GENERIC_CONVERSATION_001", SessionBindingKind.Native);
+
+        InsertProjectedSpanWithPayload(
+            temp.DatabasePath,
+            "generic-exact-trace",
+            "generic-span-1",
+            "vscode-copilot-chat",
+            "generic-repo",
+            now.AddSeconds(1),
+            BuildOtelPayload("generic-exact-trace", "generic-span-1", "GENERIC_EXACT_001"));
+        InsertProjectedSpan(temp.DatabasePath, "generic-shared-trace", "generic-span-2", null, "vscode-copilot-chat", "generic-repo", now.AddSeconds(2));
+        InsertProjectedSpan(temp.DatabasePath, "generic-conversation-trace", "generic-span-3", "GENERIC_CONVERSATION_001", "vscode-copilot-chat", "generic-repo", now.AddSeconds(3));
+
+        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+
+        Assert.Equal(3, processed);
+        Assert.Equal(SessionMatchKind.ExactNative, Assert.Single(store.GetDetail(exactSessionId)!.Events, item => item.SourceAdapter == "otel-exact").MatchKind);
+        Assert.Equal(SessionMatchKind.TraceContinuity, Assert.Single(store.GetDetail(traceSessionId)!.Events, item => item.SourceAdapter == "otel-exact").MatchKind);
+        Assert.Equal(SessionMatchKind.ConversationId, Assert.Single(store.GetDetail(conversationSessionId)!.Events, item => item.SourceAdapter == "otel-exact").MatchKind);
+        Assert.Single(store.GetDetail(exactSessionId)!.Events, item => item.SourceAdapter == "otel-exact" && item.SourceEventId == "generic-exact-trace/generic-span-1");
+        Assert.Single(store.GetDetail(traceSessionId)!.Events, item => item.SourceAdapter == "otel-exact" && item.SourceEventId == "generic-shared-trace/generic-span-2");
+        Assert.Single(store.GetDetail(conversationSessionId)!.Events, item => item.SourceAdapter == "otel-exact" && item.SourceEventId == "generic-conversation-trace/generic-span-3");
+        Assert.Equal(3, store.ListMostRecent(10).SelectMany(session => store.GetDetail(session.SessionId)!.Events).Count(item => item.SourceAdapter == "otel-exact"));
+    }
+
+    [Theory]
+    [InlineData(SessionBindingKind.ExplicitResume)]
+    [InlineData(SessionBindingKind.ExplicitHandoff)]
+    public void ProcessNextBatch_ClaudeExplicitResumeAndHandoffRemainExactBindings(SessionBindingKind bindingKind)
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = PrepareClaudeFixture(temp.DatabasePath, ReadClaudeFixture());
+        var sessionId = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", bindingKind);
+
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1);
+
+        var detail = store.GetDetail(sessionId)!;
+        Assert.Single(detail.Events, item => item.SourceAdapter == "claude-code-otel");
+        Assert.Equal(bindingKind is SessionBindingKind.Native ? SessionMatchKind.ExactNative : SessionMatchKind.ExplicitLink, Assert.Single(detail.Events, item => item.SourceAdapter == "claude-code-otel").MatchKind);
+        Assert.Equal(bindingKind, Assert.Single(detail.NativeIds).BindingKind);
+        Assert.Equal(SessionCompleteness.Full, detail.Session.Completeness);
+    }
+
+    [Fact]
+    public void ProcessNextBatch_GenericPathStillUsesSharedTraceIdContinuity()
+    {
+        using var temp = new MonitorTempDirectory();
+        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var sessionId = Guid.CreateVersion7();
+        var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+        store.Write(new(new(
+            new ObservedSession(
+                sessionId, ObservedSessionStatus.Unknown, SessionCompleteness.Unbound,
+                null, null, null, null, now, SessionRawRetentionState.NotCaptured, now, now),
+            [],
+            [],
+            [Event(sessionId, "trace-context", "UserPromptSubmit", now) with { TraceId = "shared-trace-id" }]),
+            []));
+        InsertProjectedSpan(temp.DatabasePath, "shared-trace-id", "shared-span-1", null, "unrecognized-client", "generic-repo", now.AddSeconds(1));
+
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1);
+
+        Assert.Single(store.GetDetail(sessionId)!.Events, item => item.SourceEventId == "shared-trace-id/shared-span-1");
+    }
+
+    [Fact]
     public void ProcessNextBatch_GenericPathWithoutHookSessionCreatesFreshUnboundSession()
     {
         using var temp = new MonitorTempDirectory();

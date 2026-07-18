@@ -16,6 +16,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
         { 2, "f91e195b549fa2bbfc51b3245dd3fb19fcc8759c" },
         { 3, "9ca613a97fd0611ccff1d84b35261b7346112eab" },
         { 4, "65ec872eb541b2023f55c32d32edebb9cf83818b" },
+        { 5, "d21fbb429b8301a8a1bb14ea785a0e047edbd269" },
     };
 
     public static TheoryData<string> SemanticReaderDifferences => new()
@@ -91,6 +92,11 @@ public sealed class MonitorSchemaMigrationFixtureTests
         {
             using var readOnlyFixture = OpenReadOnly(fixturePath);
             AssertSchemaContract(ExpectedV4SchemaContract, ReadSchemaContract(readOnlyFixture));
+        }
+        else if (version == 5)
+        {
+            using var readOnlyFixture = OpenReadOnly(fixturePath);
+            AssertSchemaContract(ExpectedV5SchemaContract, ReadSchemaContract(readOnlyFixture));
         }
 
         var migratedPath = Path.Combine(Path.GetTempPath(), $"monitor-migration-{Guid.NewGuid():N}.sqlite");
@@ -222,8 +228,8 @@ public sealed class MonitorSchemaMigrationFixtureTests
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText =
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'monitor_projection_dispositions';";
-        Assert.Equal(1L, (long)command.ExecuteScalar()!);
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('monitor_projection_dispositions', 'monitor_runtime_state');";
+        Assert.Equal(2L, (long)command.ExecuteScalar()!);
         throw new InvalidOperationException("injected v6 migration failure");
     }
 
@@ -267,6 +273,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
             new[] { $"i:{sentinels.RawRecordId}|s:completed|i:1|s:2026-07-12T00:00:01.0000000+00:00" },
             ReadRows(connection, "monitor_projection_dispositions"));
         Assert.Equal("ok", Scalar<string>(connection, "PRAGMA integrity_check;"));
+        Assert.Empty(ReadRows(connection, "monitor_runtime_state"));
     }
 
     private static void AssertSchemaContract(SchemaContract expected, SchemaContract actual)
@@ -838,6 +845,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
         var tables = ExpectedV5SchemaContract.Tables.Concat(new[]
         {
             new TableListDefinition("main", "monitor_projection_dispositions", "table", 4, 0, 0),
+            new TableListDefinition("main", "monitor_runtime_state", "table", 3, 0, 0),
         }).OrderBy(table => table.Schema, StringComparer.Ordinal).ThenBy(table => table.Name, StringComparer.Ordinal).ToArray();
         var columns = ExpectedV5SchemaContract.Columns.Concat(new[]
         {
@@ -845,6 +853,9 @@ public sealed class MonitorSchemaMigrationFixtureTests
             C("monitor_projection_dispositions",1,"state","TEXT",notNull:1),
             C("monitor_projection_dispositions",2,"revision","INTEGER",notNull:1),
             C("monitor_projection_dispositions",3,"updated_at","TEXT",notNull:1),
+            C("monitor_runtime_state", 0, "id", "INTEGER", pk: 1),
+            C("monitor_runtime_state", 1, "raw_access", "TEXT", notNull: 1),
+            C("monitor_runtime_state", 2, "updated_at", "TEXT", notNull: 1),
         }).OrderBy(column => column.Table, StringComparer.Ordinal).ThenBy(column => column.Cid).ToArray();
         var tableSql = ExpectedV5SchemaContract.TableSql.Concat(new[]
         {
@@ -853,8 +864,14 @@ public sealed class MonitorSchemaMigrationFixtureTests
                 CanonicalExpression("state IN ('not_started','pending','completed','failed')"),
                 CanonicalExpression("revision > 0"),
             })),
+            new TableSqlDefinition("monitor_runtime_state", false, CheckSignature(new[]
+            {
+                CanonicalExpression("id = 1"),
+                CanonicalExpression("raw_access IN ('available', 'sanitized_only')"),
+            })),
         }).OrderBy(table => table.Table, StringComparer.Ordinal).ToArray();
-        return new SchemaContract(tables, columns, tableSql, ExpectedV5SchemaContract.Indexes, Array.Empty<ForeignKeyDefinition>(), Array.Empty<string>());
+        var indexes = ExpectedV5SchemaContract.Indexes.OrderBy(index => index.Table, StringComparer.Ordinal).ThenBy(index => index.SemanticSortKey, StringComparer.Ordinal).ToArray();
+        return new SchemaContract(tables, columns, tableSql, indexes, Array.Empty<ForeignKeyDefinition>(), Array.Empty<string>());
     }
 
     private static ColumnDefinition C(string table, int cid, string name, string type, int notNull = 0, string? defaultValue = null, int pk = 0, int hidden = 0) => new(table, cid, name, type, notNull, defaultValue, pk, hidden);

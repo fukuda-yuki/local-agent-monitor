@@ -62,9 +62,10 @@ The wrapper invokes the packaged self-contained Config CLI under
 `app/config-cli/`; no installed .NET SDK or runtime is required. Each invocation
 preserves the CLI exit code and emits exactly one `setup.v1` JSON result on
 stdout. Setup success verifies static configuration only. It does not prove a
-trace arrived; Issue #69 owns that verification. `run_first_trace_doctor` is a
-reserved action name for that handoff and is not emitted by current production
-setup results.
+trace arrived; Issue #69 owns that verification. A successful changed CLI apply
+by the Claude adapter emits `restart_claude_process` followed by
+`run_first_trace_doctor` as a handoff to
+`first-trace begin --adapter claude-code`; it is not telemetry evidence.
 
 Optional Copilot CLI / VS Code Session Hooks forwarding is a separate opt-in:
 

@@ -1,6 +1,5 @@
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
-using System.Text.Json;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
@@ -9,6 +8,7 @@ public sealed class SqliteSessionOtelEnricher
     public const string ProjectorKey = "session-otel-enrichment";
     private readonly string databasePath;
     private readonly ISessionStore store;
+    private readonly ClaudeExactBindingRule claudeExactBindingRule;
     private readonly TimeProvider timeProvider;
     private readonly Action<string>? checkpoint;
 
@@ -16,6 +16,7 @@ public sealed class SqliteSessionOtelEnricher
     {
         this.databasePath = databasePath;
         this.store = store;
+        claudeExactBindingRule = new(databasePath);
         this.timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -60,10 +61,19 @@ public sealed class SqliteSessionOtelEnricher
 
     private void Process(ProjectedSpan row)
     {
-        var claudeBoundSessionId = TryFindClaudeExactBinding(row);
+        var claudeBinding = row.PayloadJson is null
+            ? null
+            : claudeExactBindingRule.Resolve(row.PayloadJson, row.TraceId, row.SpanId);
         var traceSessionId = FindSessionByTraceId(row.TraceId);
         var conversationSessionId = string.IsNullOrEmpty(row.ConversationId) ? null : FindUnambiguousSessionByNativeId(row.ConversationId);
-        var sessionId = claudeBoundSessionId ?? traceSessionId ?? conversationSessionId ?? Guid.CreateVersion7();
+        var sessionId = claudeBinding?.SessionId ?? traceSessionId ?? conversationSessionId ?? Guid.CreateVersion7();
+        var matchKind = claudeBinding is not null
+            ? MatchKind(claudeBinding.BindingKind)
+            : traceSessionId == sessionId
+                ? SessionMatchKind.TraceContinuity
+                : conversationSessionId == sessionId
+                    ? SessionMatchKind.ConversationId
+                    : SessionMatchKind.None;
         var existing = store.GetDetail(sessionId);
         var confirmedSurface = ConfirmSurface(row.ClientKind);
         var eventId = Guid.CreateVersion7();
@@ -106,7 +116,8 @@ public sealed class SqliteSessionOtelEnricher
             ObservedSessionStatus.Unknown, occurredAt, null, null, null, null);
         var @event = new ObservedSessionEvent(
             eventId, sessionId, runId, confirmedSurface, null, row.TraceId, null,
-            "otel-exact", $"{row.TraceId}/{row.SpanId}", "otel.span", occurredAt, SessionContentState.NotCaptured);
+            "otel-exact", $"{row.TraceId}/{row.SpanId}", "otel.span", occurredAt, SessionContentState.NotCaptured,
+            MatchKind: matchKind);
         store.Write(new(new(session, nativeIds, [run], [@event]), []));
     }
 
@@ -115,17 +126,6 @@ public sealed class SqliteSessionOtelEnricher
     // promotion (gated only by ProjectedSpan.IsClaudeCode for ProcessClaude);
     // a span still labeled raw-otlp (or without an observation row at all)
     // binds here on byte-identical session.id evidence.
-    private Guid? TryFindClaudeExactBinding(ProjectedSpan row)
-    {
-        if (row.PayloadJson is null)
-        {
-            return null;
-        }
-
-        var claudeNativeSessionId = ReadExactClaudeNativeSessionId(row.PayloadJson, row.TraceId, row.SpanId);
-        return claudeNativeSessionId is null ? null : FindClaudeBinding(claudeNativeSessionId);
-    }
-
     private void ProcessClaude(ProjectedSpan row)
     {
         const string sourceAdapter = "claude-code-otel";
@@ -135,16 +135,21 @@ public sealed class SqliteSessionOtelEnricher
             return;
         }
 
-        var nativeSessionId = row.PayloadJson is null
+        var binding = row.PayloadJson is null
             ? null
-            : ReadExactClaudeNativeSessionId(row.PayloadJson, row.TraceId, row.SpanId);
-        var bindingSessionId = nativeSessionId is null ? null : FindClaudeBinding(nativeSessionId);
-        var sessionId = bindingSessionId ?? FindUnboundClaudeSessionByTraceId(row.TraceId) ?? Guid.CreateVersion7();
+            : claudeExactBindingRule.Resolve(row.PayloadJson, row.TraceId, row.SpanId);
+        var traceSessionId = FindUnboundClaudeSessionByTraceId(row.TraceId);
+        var sessionId = binding?.SessionId ?? traceSessionId ?? Guid.CreateVersion7();
+        var matchKind = binding is not null
+            ? MatchKind(binding.BindingKind)
+            : traceSessionId == sessionId
+                ? SessionMatchKind.TraceContinuity
+                : SessionMatchKind.None;
         var existing = store.GetDetail(sessionId);
         var occurredAt = row.StartTime ?? row.ProjectedAt;
         var lastSeenAt = row.EndTime ?? occurredAt;
         var now = timeProvider.GetUtcNow();
-        var completeness = bindingSessionId is null
+        var completeness = binding is null
             ? SessionCompleteness.Unbound
             : CalculateExactCompleteness(existing);
         var session = existing?.Session is { } current
@@ -197,7 +202,8 @@ public sealed class SqliteSessionOtelEnricher
             row.SourceApplicationVersion,
             row.AdapterVersion,
             row.SchemaFingerprint,
-            NormalizationVersion: null);
+            NormalizationVersion: null,
+            MatchKind: matchKind);
         checkpoint?.Invoke("before-claude-write");
         store.Write(new(new(session, [], [run], [@event]), []));
     }
@@ -222,31 +228,12 @@ public sealed class SqliteSessionOtelEnricher
             HasIngestGap: hasGap));
     }
 
-    private Guid? FindClaudeBinding(string nativeSessionId)
+    private static SessionMatchKind MatchKind(SessionBindingKind bindingKind) => bindingKind switch
     {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT n.session_id,n.binding_kind
-            FROM session_native_ids n JOIN sessions s ON s.session_id=n.session_id
-            WHERE n.source_surface='claude-code' AND n.native_session_id=$native_session_id COLLATE BINARY;
-            """;
-        command.Parameters.AddWithValue("$native_session_id", nativeSessionId);
-        using var reader = command.ExecuteReader();
-        if (!reader.Read())
-        {
-            return null;
-        }
-
-        var sessionId = Guid.Parse(reader.GetString(0));
-        var bindingKind = SessionWire.ParseBindingKind(reader.GetString(1));
-        if (reader.Read() || bindingKind is not (SessionBindingKind.Native or SessionBindingKind.ExplicitResume or SessionBindingKind.ExplicitHandoff))
-        {
-            return null;
-        }
-
-        return sessionId;
-    }
+        SessionBindingKind.Native => SessionMatchKind.ExactNative,
+        SessionBindingKind.ExplicitResume or SessionBindingKind.ExplicitHandoff => SessionMatchKind.ExplicitLink,
+        _ => throw new InvalidOperationException("Unsupported exact Claude binding kind."),
+    };
 
     private Guid? FindSessionBySourceIdentity(string sourceAdapter, string sourceEventId) =>
         FindUnambiguous(
@@ -283,52 +270,6 @@ public sealed class SqliteSessionOtelEnricher
             result = current;
         }
         return result;
-    }
-
-    private static string? ReadExactClaudeNativeSessionId(string payloadJson, string traceId, string spanId)
-    {
-        using var document = JsonDocument.Parse(payloadJson);
-        string? result = null;
-        var matchingSpanCount = 0;
-        foreach (var resourceSpan in OtlpSpanReader.EnumerateArrayProperty(document.RootElement, "resourceSpans"))
-        {
-            foreach (var scopeSpan in OtlpSpanReader.EnumerateArrayProperty(resourceSpan, "scopeSpans"))
-            {
-                foreach (var span in OtlpSpanReader.EnumerateArrayProperty(scopeSpan, "spans"))
-                {
-                    if (!string.Equals(OtlpSpanReader.ReadString(span, "traceId"), traceId, StringComparison.Ordinal)
-                        || !string.Equals(OtlpSpanReader.ReadString(span, "spanId"), spanId, StringComparison.Ordinal))
-                    {
-                        continue;
-                    }
-
-                    matchingSpanCount++;
-                    if (!span.TryGetProperty("attributes", out var attributes) || attributes.ValueKind != JsonValueKind.Array)
-                    {
-                        continue;
-                    }
-
-                    foreach (var attribute in attributes.EnumerateArray())
-                    {
-                        if (!string.Equals(OtlpSpanReader.ReadString(attribute, "key"), "session.id", StringComparison.Ordinal)
-                            || !attribute.TryGetProperty("value", out var value)
-                            || !value.TryGetProperty("stringValue", out var stringValue)
-                            || stringValue.ValueKind != JsonValueKind.String)
-                        {
-                            continue;
-                        }
-
-                        if (result is not null)
-                        {
-                            return null;
-                        }
-                        result = stringValue.GetString();
-                    }
-                }
-            }
-        }
-
-        return matchingSpanCount == 1 ? result : null;
     }
 
     private static ObservedSessionStatus ParseRunStatus(string? status) => status switch
