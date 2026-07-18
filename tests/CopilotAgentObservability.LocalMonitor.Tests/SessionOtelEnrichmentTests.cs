@@ -86,6 +86,46 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Equal("exact_linked", projection.BindingState);
     }
 
+    [Fact]
+    public void ProcessNextBatch_GenericPathPreservesReachabilityCountsAndAdapterLabels()
+    {
+        using var temp = new MonitorTempDirectory();
+        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
+        var exactSessionId = SeedClaudeSession(store, "GENERIC_EXACT_001", SessionBindingKind.Native);
+        var traceSessionId = Guid.CreateVersion7();
+        store.Write(new(new(
+            new ObservedSession(
+                traceSessionId, ObservedSessionStatus.Unknown, SessionCompleteness.Unbound,
+                null, null, null, null, now, SessionRawRetentionState.NotCaptured, now, now),
+            [],
+            [],
+            [Event(traceSessionId, "trace-context", "UserPromptSubmit", now) with { TraceId = "generic-shared-trace" }]),
+            []));
+        var conversationSessionId = SeedClaudeSession(store, "GENERIC_CONVERSATION_001", SessionBindingKind.Native);
+
+        InsertProjectedSpanWithPayload(
+            temp.DatabasePath,
+            "generic-exact-trace",
+            "generic-span-1",
+            "vscode-copilot-chat",
+            "generic-repo",
+            now.AddSeconds(1),
+            BuildOtelPayload("generic-exact-trace", "generic-span-1", "GENERIC_EXACT_001"));
+        InsertProjectedSpan(temp.DatabasePath, "generic-shared-trace", "generic-span-2", null, "vscode-copilot-chat", "generic-repo", now.AddSeconds(2));
+        InsertProjectedSpan(temp.DatabasePath, "generic-conversation-trace", "generic-span-3", "GENERIC_CONVERSATION_001", "vscode-copilot-chat", "generic-repo", now.AddSeconds(3));
+
+        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+
+        Assert.Equal(3, processed);
+        Assert.Single(store.GetDetail(exactSessionId)!.Events, item => item.SourceAdapter == "otel-exact" && item.SourceEventId == "generic-exact-trace/generic-span-1");
+        Assert.Single(store.GetDetail(traceSessionId)!.Events, item => item.SourceAdapter == "otel-exact" && item.SourceEventId == "generic-shared-trace/generic-span-2");
+        Assert.Single(store.GetDetail(conversationSessionId)!.Events, item => item.SourceAdapter == "otel-exact" && item.SourceEventId == "generic-conversation-trace/generic-span-3");
+        Assert.Equal(3, store.ListMostRecent(10).SelectMany(session => store.GetDetail(session.SessionId)!.Events).Count(item => item.SourceAdapter == "otel-exact"));
+    }
+
     [Theory]
     [InlineData(SessionBindingKind.ExplicitResume)]
     [InlineData(SessionBindingKind.ExplicitHandoff)]
