@@ -2,12 +2,34 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public class ClaudeOtlpCaptureContentStateResolverTests
 {
+    [Theory]
+    [InlineData("""[{"key":"user_prompt","value":{"stringValue":"synthetic-marker"}}]""", SourceCaptureContentState.Available)]
+    [InlineData("""[{"key":"user_prompt","value":{"stringValue":"<REDACTED>"}}]""", SourceCaptureContentState.NotCaptured)]
+    [InlineData("""[{"key":"user_prompt","value":{"stringValue":""}}]""", SourceCaptureContentState.NotCaptured)]
+    [InlineData("""[{"key":"user_prompt","value":{"intValue":"16"}}]""", SourceCaptureContentState.NotCaptured)]
+    [InlineData("""[{"key":"user_prompt_length","value":{"intValue":"16"}}]""", SourceCaptureContentState.NotCaptured)]
+    [InlineData("""[{"key":"user_prompt","value":{"stringValue":"<redacted>"}}]""", SourceCaptureContentState.Available)]
+    public void Derive_InteractionSpanWithUserPromptEvidence_ReturnsExpectedState(
+        string attributesJson,
+        SourceCaptureContentState expectedState)
+    {
+        var payload = Payload($$"""
+            {"traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","spanId":"1111111111111111","name":"claude_code.interaction",
+             "attributes":{{attributesJson}}}
+            """);
+
+        Assert.Equal(expectedState, ClaudeOtlpCaptureContentStateResolver.Derive(payload));
+    }
+
     [Fact]
-    public void Derive_InteractionSpanWithUserPromptAttribute_ReturnsAvailable()
+    public void Derive_InteractionSpanWithCapturedPromptAfterRedactedPrompt_ReturnsAvailable()
     {
         var payload = Payload("""
             {"traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","spanId":"1111111111111111","name":"claude_code.interaction",
-             "attributes":[{"key":"user_prompt","value":{"stringValue":"synthetic-marker"}}]}
+             "attributes":[
+               {"key":"user_prompt","value":{"stringValue":"<REDACTED>"}},
+               {"key":"user_prompt","value":{"stringValue":"synthetic-non-empty-content"}}
+             ]}
             """);
 
         Assert.Equal(SourceCaptureContentState.Available, ClaudeOtlpCaptureContentStateResolver.Derive(payload));

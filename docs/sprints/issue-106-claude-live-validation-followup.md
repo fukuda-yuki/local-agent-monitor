@@ -270,3 +270,33 @@ and every disposable database live under the OS-temp disposable root, which
 was removed by the guarded `cleanup.ps1` after the final leak scans (all
 scans exit `0`; the preparation-worktree repository output also scanned
 clean).
+
+## Issue #110 targeted live rerun — 2026-07-19
+
+This authorized targeted rerun records no sensitive arguments, prompt/tool
+payload content, raw producer/command output, marker value, trace/session
+identifier values, credentials, or expanded paths. It intentionally retains
+the high-level command surface, exit/status classification, and scan result as
+evidence. It exercised clean candidate `2c809f0` with Claude Code `2.1.214`
+on a disposable loopback Local Monitor and temporary state. The
+operator-authorization preflight passed.
+
+- A single controlled, gate-disabled `claude -p` interaction was ingested.
+  The producer exited `1`, classified as authentication; this is not a
+  successful producer run.
+- Raw-local inspection was limited to the exact documented gate-disabled
+  sentinel and the companion `user_prompt_length` attribute. No raw value was
+  copied into this record.
+- The sanitized projection reported `content_state=not_captured`, and saved
+  sanitized responses contained no runtime marker.
+- `scan-leaks.ps1` failed. After the authentication and leak-scan failures
+  were confirmed, interactive validation was not attempted.
+- Cleanup passed: the owned monitor process, listener, and disposable root no
+  longer remained.
+
+**Classification:** **blocked** — `BLOCKED_EXTERNAL`. The target
+gate-disabled behavior was observed, but the controlled producer authentication
+failure and failed leak scan leave the authorized rerun incomplete. This is not
+a pass, does not alter the interface specification, and does not establish
+main integration. Issue #110 remains open; Issue #105 remains blocked pending
+main/shared-branch integration and a complete authorized rerun.

@@ -743,6 +743,11 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             attributes.Add(Attribute("user_prompt", PromptMarker));
             attributes.Add(Attribute("path", PathMarker));
         }
+        else if (name == "claude_code.interaction")
+        {
+            attributes.Add(Attribute("user_prompt", "<REDACTED>"));
+            attributes.Add(Attribute("user_prompt_length", 16));
+        }
         if (sessionId is not null)
         {
             attributes.Add(Attribute("session.id", sessionId));

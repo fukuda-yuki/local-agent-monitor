@@ -4,12 +4,13 @@ namespace CopilotAgentObservability.Telemetry;
 
 /// <summary>
 /// Derives <see cref="SourceCaptureContentState"/> per raw OTLP ingest batch from
-/// field presence in the decoded payload, per the pinned rule in
+/// evidence in the decoded payload, per the pinned rule in
 /// docs/specifications/interfaces/source-schema-drift-claude-code.md. Only
 /// batches containing at least one recognized <c>claude_code.*</c> span carry
 /// derivable evidence; every other batch keeps the surface's fixed provider
 /// metadata state (the caller falls back on a <see langword="null"/> result).
-/// Inspects attribute/event key presence only — content values are never read.
+/// The producer's exact <c>&lt;REDACTED&gt;</c> prompt sentinel means
+/// <c>not_captured</c>, never <c>redacted</c>.
 /// </summary>
 public static class ClaudeOtlpCaptureContentStateResolver
 {
@@ -36,7 +37,7 @@ public static class ClaudeOtlpCaptureContentStateResolver
                     hasClaudeSpan = true;
 
                     if (string.Equals(name, "claude_code.interaction", StringComparison.Ordinal)
-                        && HasAttribute(span, "user_prompt"))
+                        && HasCapturedUserPrompt(span))
                     {
                         hasContentField = true;
                     }
@@ -56,6 +57,29 @@ public static class ClaudeOtlpCaptureContentStateResolver
         }
 
         return hasContentField ? SourceCaptureContentState.Available : SourceCaptureContentState.NotCaptured;
+    }
+
+    private static bool HasCapturedUserPrompt(JsonElement span)
+    {
+        foreach (var attribute in OtlpSpanReader.EnumerateArrayProperty(span, "attributes"))
+        {
+            if (!string.Equals(OtlpSpanReader.ReadString(attribute, "key"), "user_prompt", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (attribute.TryGetProperty("value", out var value)
+                && value.ValueKind == JsonValueKind.Object
+                && value.TryGetProperty("stringValue", out var stringValue)
+                && stringValue.ValueKind == JsonValueKind.String
+                && !stringValue.ValueEquals(ReadOnlySpan<char>.Empty)
+                && !stringValue.ValueEquals("<REDACTED>".AsSpan()))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool HasAttribute(JsonElement span, string key)
