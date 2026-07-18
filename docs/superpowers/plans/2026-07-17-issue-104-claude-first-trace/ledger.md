@@ -17,13 +17,13 @@ integration step. Trust this file plus `git log` over conversation memory.
 | T2 fact mapper | done | b6e5bbf, d21fbb4 | mapper 73/0; build clean | — | review #1 REVISE (3 findings) → fixed in d21fbb4; re-review APPROVE (3/3, scope+purity confirmed) |
 | T3 store reads | done | 07f44c1 | Store 58/0, AppService 9/0, Migration 12/0 | solution 5554/0 by implementer | independent review pending (batch with T4) |
 | T4 binding rule + observer | done | 6270a83, 1ed3e12, eb00ac5 | Observer 10/0, Doctor 252/0 after fix | implementer's full run timed out at 600s (gate reruns at T7/T9) | re-review: 4/4 RESOLVED, scope confirmed; 1 [low] left to final triage (below) |
-| T5 fact collector | fixes done, re-review pending | 01f0e4a (orchestrator-committed; 97/97 re-verified), 9a78afe, 079686e | fact suite 127/0 | solution 5728/0 by fix-2 run | review #1 REVISE (7) → fix 9a78afe (4/7) → re-review (2,6,7 remained) → fix-2 079686e implements reviewer's own resolutions (unreadable-window→Unknown/partial incl. mapper case, endpoint Different test, full no-write invariants); final confirmation batched into next review round |
-| T6 first-trace verbs + handoff | impl done, review in progress | e1a4a56, f640812, a83334f | FirstTrace 24/0, ConfigCli 4005/0 | solution 5727/0 + build + Playwright by implementer | review dispatched |
+| T5 fact collector | done | 01f0e4a (orchestrator-committed; 97/97 re-verified), 9a78afe, 079686e | fact suite 127/0 | solution 5728/0 by fix-2 run | review #1 REVISE (7) → 9a78afe → re-review (3 remained) → 079686e → combined re-review APPROVE (A2/A6/A7, OpenReadOnly invariant confirmed) |
+| T6 first-trace verbs + handoff | done | e1a4a56, f640812, a83334f, 8d6c669 (spec.md), 7b0be26, 521b7d6 | FirstTrace 43/0, ConfigCli 4026/0, store 63/0 | solution 5727/0 + build + Playwright by implementer (pre-fix); post-fix full run at T7/T9 gates | review #1 REVISE (4 Imp + 2 Min) → fixes + orchestrator spec.md alignment → combined re-review APPROVE (B1-B5, Copilot path diff-free) |
 | T4b runtime-state row | done | 52e0e57, 112962e, ffd4ae2 | new 4/4, LM migration 102/102, fail-fast 1/1, DoctorMigration 12/12 after ffd4ae2 | — | review #1 REVISE (1 Important fail-fast unpinned) → spec pinned + test 112962e; regression: monitor v6 bump broke 12 Doctor.Tests migration expectations (brief omitted Doctor.Tests rerun — orchestrator error, logged), fixed in ffd4ae2 via production version constant |
 | T6 first-trace verbs + adapter | pending | — | — | — | — |
-| T-109 projection defect fix | pending | — | — | — | — |
-| T7 cross-surface green | pending | — | — | — | — |
-| T8 104-E matrix | pending | — | — | — | — |
+| T-109 projection defect fix | done | 09978b8, c807c7a, 8f4b6b7, d062f48 | SPS 5/0, Enrich 19/0, MigrationFixture 72/0, LM 1476/0, Doctor 255/0 | per-suite full by implementer | review APPROVE (no findings; exact/explicit-only projection, legacy NULL degrade, v12 migration sound, wire unchanged). No backfill: reach-reason not reconstructible from persisted data |
+| T7 cross-surface green | fix done, re-review pending | 3700d6b, a1e5db2 | cross-surface 2/0, Doctor 255/0 | — | review #1 REVISE (5) → a1e5db2 (no production change needed: real probes + setup-state carry-over worked); re-review dispatched |
+| T8 104-E matrix | in progress | — | — | — | coverage-audit-first brief dispatched |
 | T9 freeze + handoff | pending | — | — | — | — |
 
 ## Open items / unverified inter-issue interfaces

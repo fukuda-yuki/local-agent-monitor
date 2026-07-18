@@ -219,6 +219,11 @@ exactly as the Doctor contract defines them (read-time derived state).
   claimed by more than one Session's binding refs, or more than one group
   exists, return `explicit_evidence_selection_required` with the candidate
   list. Ordering or recency never selects a group.
+- When no eligible candidate exists at all, `complete` performs no Doctor
+  completion (there is nothing to resolve): it returns
+  `first_trace_not_ready` with a fresh stateless evaluation embedded in
+  `doctor`, and the verification stays active. Doctor completion is only ever
+  invoked with at least one selected candidate ref.
 - The completion fact snapshot carries no inline observations (the Doctor
   store constructs trusted observations from resolved candidates).
 
