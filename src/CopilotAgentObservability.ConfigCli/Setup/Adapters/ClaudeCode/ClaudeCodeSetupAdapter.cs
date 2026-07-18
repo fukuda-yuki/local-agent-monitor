@@ -164,6 +164,8 @@ internal sealed class ClaudeCodeSetupAdapter : ISetupAdapter
 
         var cliPlan = ((SetupPlanSuccess<CliPlan>)result).Value;
         var record = cliPlan.Record;
+        var cliChanged = ((SetupPlanSuccess<CliPlan>)result).NextActions
+            .Contains(SetupCodes.RestartClaudeProcess, StringComparer.Ordinal);
         if (record.DesiredState is not SetupClaudeSettingsOwnedValuesDesiredState actual ||
             !string.Equals(actual.ExpectedStateHash, desired.ExpectedStateHash, StringComparison.Ordinal) ||
             !actual.OwnedEnv.SequenceEqual(desired.OwnedEnv) ||
@@ -176,7 +178,7 @@ internal sealed class ClaudeCodeSetupAdapter : ISetupAdapter
             ? new[] { new SetupMaterializedTarget(record.RecordId, cliPlan.DesiredBytes, SetupHash.File(true, cliPlan.DesiredBytes)) }
             : [];
         var nextActions = ((SetupPlanSuccess<CliPlan>)result).NextActions.ToList();
-        if (materialized.Length > 0
+        if (cliChanged
             && !nextActions.Contains(SetupCodes.RunFirstTraceDoctor, StringComparer.Ordinal))
         {
             var restartIndex = nextActions.IndexOf(SetupCodes.RestartClaudeProcess);

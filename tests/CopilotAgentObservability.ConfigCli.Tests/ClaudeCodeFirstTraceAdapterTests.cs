@@ -9,29 +9,90 @@ public sealed class ClaudeCodeFirstTraceAdapterTests
 {
     private static readonly DateTimeOffset Now =
         new(2026, 7, 18, 1, 2, 3, TimeSpan.Zero);
+    private static readonly string ExpectedAgentSdkGuidance =
+        "Caller-managed only. Merge, do not replace, the process environment and " +
+        "flush telemetry before a short-lived process exits.\n\nPython:\n" +
+        string.Join('\n',
+        [
+            "import os",
+            "from claude_agent_sdk import ClaudeAgentOptions",
+            string.Empty,
+            "options = ClaudeAgentOptions(env={",
+            "    **os.environ,",
+            "    \"CLAUDE_CODE_ENABLE_TELEMETRY\": \"1\",",
+            "    \"CLAUDE_CODE_ENHANCED_TELEMETRY_BETA\": \"1\",",
+            "    \"OTEL_TRACES_EXPORTER\": \"otlp\",",
+            "    \"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL\": \"http/protobuf\",",
+            "    \"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT\": \"<canonical-origin>/v1/traces\",",
+            "})",
+            string.Empty,
+            "# Flush telemetry before a short-lived process exits.",
+        ]) +
+        "\n\nTypeScript:\n" +
+        string.Join('\n',
+        [
+            "const options = {",
+            "  env: {",
+            "    ...process.env,",
+            "    CLAUDE_CODE_ENABLE_TELEMETRY: \"1\",",
+            "    CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: \"1\",",
+            "    OTEL_TRACES_EXPORTER: \"otlp\",",
+            "    OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: \"http/protobuf\",",
+            "    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: \"<canonical-origin>/v1/traces\",",
+            "  },",
+            "};",
+            string.Empty,
+            "// Pass options.env to the Agent SDK and flush telemetry before a short-lived process exits.",
+        ]) +
+        "\nfirst-trace never edits caller-owned configuration.";
 
     [Fact]
     public void Guidance_ProvidesAllVariantsWithoutSecretsOrContentCaptureCommands()
     {
-        var adapter = CreateAdapter();
+        var platform = new SetupTestPlatform(Now, userProfile: "C:\\Users\\guidance-user");
+        var adapter = new ClaudeCodeFirstTraceAdapter(platform);
 
         var guidance = adapter.GetGuidance(interaction: null, includeSetupPlan: true);
-        var commands = guidance
-            .Where(item => item.Command is not null)
-            .Select(item => item.Command!)
-            .ToArray();
-        var rendered = string.Join('\n', guidance.SelectMany(item => new[] { item.Text, item.Command ?? string.Empty }));
+        var guidanceText = string.Join('\n', guidance.SelectMany(item => new[] { item.Text, item.Command ?? string.Empty }));
+        var envelope = new FirstTraceEnvelope(
+            "begin",
+            Success: false,
+            FirstTraceCodes.Blocked,
+            adapter.AdapterId,
+            adapter.SourceSurface,
+            VerificationId: null,
+            Doctor: null,
+            EvaluationPreview: null,
+            guidance,
+            Candidates: [],
+            Truncated: false);
+        var serializedEnvelope = FirstTraceJson.Serialize(envelope);
 
         Assert.Equal(["common", "interactive-cli", "print", "agent-sdk"], guidance.Select(item => item.Interaction));
-        Assert.Contains("setup plan --adapter claude-code --target cli", commands);
-        Assert.Contains("claude", commands);
-        Assert.Contains("claude -p \"Reply with exactly: OK\"", commands);
-        Assert.DoesNotContain("OTEL_LOG_USER_PROMPTS", commands);
-        Assert.DoesNotContain("OTEL_LOG_TOOL_DETAILS", commands);
-        Assert.DoesNotContain("OTEL_LOG_TOOL_CONTENT", commands);
-        Assert.DoesNotContain("secret", rendered, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("password", rendered, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("authorization", rendered, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("setup plan --adapter claude-code --target cli", guidance.Select(item => item.Command));
+        Assert.Equal("claude", guidance.Single(item => item.Interaction == "interactive-cli").Command);
+        Assert.Equal("claude -p \"Reply with exactly: OK\"", guidance.Single(item => item.Interaction == "print").Command);
+        Assert.Equal(ExpectedAgentSdkGuidance, guidance.Single(item => item.Interaction == "agent-sdk").Text);
+
+        foreach (var forbidden in new[]
+        {
+            "guidance-secret-marker",
+            "prompt-content-marker",
+            "OTEL_LOG_USER_PROMPTS",
+            "OTEL_LOG_TOOL_DETAILS",
+            "OTEL_LOG_TOOL_CONTENT",
+            "C:\\Users\\guidance-user",
+            "C:\\Users\\setup-test",
+            "/home/",
+            "/tmp/",
+            "secret",
+            "password",
+            "authorization",
+        })
+        {
+            Assert.DoesNotContain(forbidden, guidanceText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(forbidden, serializedEnvelope, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     [Fact]

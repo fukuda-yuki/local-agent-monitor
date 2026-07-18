@@ -76,6 +76,28 @@ public sealed partial class ClaudeCodeSetupAdapterTests
     }
 
     [Fact]
+    public void AdapterRevalidate_GenuinelyNoOpCliApplyDoesNotEmitFirstTraceHandoff()
+    {
+        var initial = ReadyWindowsPlatform("{}\n");
+        var adapter = CreateAdapter(initial);
+        var planned = Assert.IsType<SetupPlanSuccess<SetupPlannedChangeSet>>(
+            new SetupAdapterRegistry([adapter]).Plan(Request("cli", includeContentCapture: false))).Value;
+        ScriptVersionAndReadiness(initial);
+        var desiredBytes = Assert.Single(
+            Assert.IsType<SetupPlanSuccess<SetupRevalidation>>(
+                adapter.Revalidate(planned.PrivatePlan, planned.PlannedChangeSet)).Value.MaterializedTargets).DesiredBytes.ToArray();
+
+        var noOp = ReadyWindowsPlatform(Encoding.UTF8.GetString(desiredBytes));
+        ScriptVersionAndReadiness(noOp);
+
+        var result = CreateAdapter(noOp).Revalidate(planned.PrivatePlan, planned.PlannedChangeSet);
+
+        var success = Assert.IsType<SetupPlanSuccess<SetupRevalidation>>(result);
+        Assert.DoesNotContain(SetupCodes.RunFirstTraceDoctor, success.NextActions);
+        Assert.Single(success.Value.MaterializedTargets);
+    }
+
+    [Fact]
     public void AdapterPlan_CliExplicitContentCapture_ManagesExactlyThreeAdditionalGates()
     {
         var platform = ReadyWindowsPlatform("{}\n");
