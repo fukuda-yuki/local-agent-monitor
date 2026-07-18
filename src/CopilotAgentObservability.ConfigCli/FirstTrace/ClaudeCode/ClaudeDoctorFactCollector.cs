@@ -444,6 +444,7 @@ internal sealed class ClaudeDoctorFactCollector
         var (completeness, content) = ReadBoundSession(connection, bindingCandidates);
 
         return new(
+            ClaudeDoctorVerificationWindowReadability.Readable,
             accepted,
             rejected,
             raw,
@@ -1004,6 +1005,7 @@ internal sealed class ClaudeDoctorFactCollector
         command.Parameters.AddWithValue(name, value ?? DBNull.Value);
 
     private static readonly ClaudeDoctorVerificationWindow UnreadableWindow = new(
+        ClaudeDoctorVerificationWindowReadability.Unreadable,
         false,
         false,
         false,

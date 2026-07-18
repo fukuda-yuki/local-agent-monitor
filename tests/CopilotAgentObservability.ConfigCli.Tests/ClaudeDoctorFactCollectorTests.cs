@@ -195,6 +195,20 @@ public sealed class ClaudeDoctorFactCollectorTests
         Assert.Equal(expected, inputs.Endpoint);
     }
 
+    [Fact]
+    public void Collect_ClassifiesPresentNonCanonicalEndpointAsDifferent()
+    {
+        using var database = new TestDatabase();
+        var platform = CreatePlatform(database, supportedVersion: true);
+        platform.SeedProcessEnvironment(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "http://127.0.0.1:4318/v1/traces");
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(SetupHttpProbeObservation.Refused));
+
+        Assert.Equal(ClaudeEndpointValueClassification.Different, inputs.Endpoint);
+    }
+
     [Theory]
     [MemberData(nameof(ProtocolCases))]
     public void Collect_ClassifiesProtocolBranches(
@@ -400,12 +414,20 @@ public sealed class ClaudeDoctorFactCollectorTests
 
         Assert.Equal(ClaudeSourceCompatibilityClassification.Unreadable, inputs.SourceCompatibility);
         Assert.Equal(ClaudeRuntimeRawAccessClassification.Unreadable, inputs.RuntimeRawAccess);
+        Assert.Equal(ClaudeDoctorVerificationWindowReadability.Unreadable, window.Readability);
         Assert.False(window.AcceptedIngestExists);
         Assert.False(window.RawPersistenceCandidateExists);
         Assert.Equal(ClaudeProjectionEvidence.NotStarted, window.ProjectionEvidence);
         Assert.Equal(ClaudeAgreedContentState.Unreadable, window.AgreedContentState);
+        Assert.Equal(LastIngestOutcome.Unknown, snapshot.LastIngest!.Outcome);
         Assert.Equal(RawPersistenceOutcome.Unknown, snapshot.RawPersistence!.Outcome);
         Assert.Equal(ProjectionOutcome.Unknown, snapshot.Projection!.Outcome);
+        Assert.Equal(
+            new ExactSessionBindingFacts(
+                ExactSessionBindingRequirement.Unknown,
+                ExactSessionBindingOutcome.Unknown),
+            snapshot.ExactSessionBinding);
+        Assert.Equal(DoctorCompleteness.Unknown, snapshot.CompletenessAndContent!.Completeness);
         Assert.Equal(DoctorResultCode.PartialFactSnapshot, result.Code);
         AssertDatabaseFilesUnchanged(before, database.Path);
         AssertNoCollectorWrites(platform, operationsBefore);
@@ -497,14 +519,17 @@ public sealed class ClaudeDoctorFactCollectorTests
             }
         }
 
+        var databaseBefore = SnapshotDatabaseFiles(database.Path);
+        var userEnvironmentBefore = SnapshotEnvironment(platform, userEnvironment: true);
+        var processEnvironmentBefore = SnapshotEnvironment(platform, userEnvironment: false);
+        var operationsBefore = platform.Operations.Count;
         var inputs = Collect(platform, database.Path, new TestHttpProbe(SetupHttpProbeObservation.Refused));
 
         Assert.Equal(Enum.Parse<ClaudeSetupLedgerClassification>(expected), inputs.SetupLedger);
-        Assert.DoesNotContain(platform.Operations, operation =>
-            operation.StartsWith("file.write", StringComparison.Ordinal) ||
-            operation.StartsWith("file.delete", StringComparison.Ordinal) ||
-            operation.StartsWith("file.lock", StringComparison.Ordinal) ||
-            operation.StartsWith("directory.create", StringComparison.Ordinal));
+        AssertDatabaseFilesUnchanged(databaseBefore, database.Path);
+        Assert.Equal(userEnvironmentBefore, SnapshotEnvironment(platform, userEnvironment: true));
+        Assert.Equal(processEnvironmentBefore, SnapshotEnvironment(platform, userEnvironment: false));
+        AssertNoCollectorWrites(platform, operationsBefore);
     }
 
     [Fact]

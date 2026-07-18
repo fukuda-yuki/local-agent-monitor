@@ -17,6 +17,7 @@ internal sealed record ClaudeDoctorFactInputs(
     ClaudeSetupLedgerClassification SetupLedger);
 
 internal sealed record ClaudeDoctorVerificationWindow(
+    ClaudeDoctorVerificationWindowReadability Readability,
     bool AcceptedIngestExists,
     bool RejectedIngestExists,
     bool RawPersistenceCandidateExists,
@@ -25,6 +26,12 @@ internal sealed record ClaudeDoctorVerificationWindow(
     bool ExactSessionBindingCandidateExists,
     ClaudeBoundSessionCompleteness BoundSessionCompleteness,
     ClaudeAgreedContentState AgreedContentState);
+
+internal enum ClaudeDoctorVerificationWindowReadability
+{
+    Readable,
+    Unreadable,
+}
 
 internal enum ClaudeLivenessProbeClassification
 {

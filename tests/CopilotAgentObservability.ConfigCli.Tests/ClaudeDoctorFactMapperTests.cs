@@ -410,6 +410,14 @@ public sealed class ClaudeDoctorFactMapperTests
         var projectionStates = new[]
         {
             (
+                Name: "unreadable",
+                AcceptedIngestExists: false,
+                RawPersistenceCandidateExists: false,
+                ProjectionCandidateExists: false,
+                ProjectionEvidence: ClaudeProjectionEvidence.NotStarted,
+                ExpectedCode: DoctorResultCode.PartialFactSnapshot,
+                ExpectedPrimary: (DoctorStateCode?)null),
+            (
                 Name: "unknown",
                 AcceptedIngestExists: true,
                 RawPersistenceCandidateExists: false,
@@ -460,6 +468,9 @@ public sealed class ClaudeDoctorFactMapperTests
                     foreach (var agreedContentState in Enum.GetValues<ClaudeAgreedContentState>())
                     {
                         var inputs = HealthyInputs(Window(
+                            readability: projectionState.Name == "unreadable"
+                                ? ClaudeDoctorVerificationWindowReadability.Unreadable
+                                : ClaudeDoctorVerificationWindowReadability.Readable,
                             acceptedIngestExists: projectionState.AcceptedIngestExists,
                             rawPersistenceCandidateExists: projectionState.RawPersistenceCandidateExists,
                             projectionCandidateExists: projectionState.ProjectionCandidateExists,
@@ -488,6 +499,19 @@ public sealed class ClaudeDoctorFactMapperTests
                         {
                             Assert.NotNull(result.Evaluation);
                             Assert.Null(result.Evaluation!.PrimaryState);
+                        }
+
+                        if (projectionState.Name == "unreadable")
+                        {
+                            Assert.Equal(LastIngestOutcome.Unknown, snapshot.LastIngest!.Outcome);
+                            Assert.Equal(RawPersistenceOutcome.Unknown, snapshot.RawPersistence!.Outcome);
+                            Assert.Equal(ProjectionOutcome.Unknown, snapshot.Projection!.Outcome);
+                            Assert.Equal(
+                                new ExactSessionBindingFacts(
+                                    ExactSessionBindingRequirement.Unknown,
+                                    ExactSessionBindingOutcome.Unknown),
+                                snapshot.ExactSessionBinding);
+                            Assert.Equal(DoctorCompleteness.Unknown, snapshot.CompletenessAndContent!.Completeness);
                         }
                     }
                 }
@@ -638,6 +662,7 @@ public sealed class ClaudeDoctorFactMapperTests
             ClaudeSetupLedgerClassification.NoAppliedChangeSet);
 
     private static ClaudeDoctorVerificationWindow Window(
+        ClaudeDoctorVerificationWindowReadability readability = ClaudeDoctorVerificationWindowReadability.Readable,
         bool acceptedIngestExists = false,
         bool rejectedIngestExists = false,
         bool rawPersistenceCandidateExists = false,
@@ -647,6 +672,7 @@ public sealed class ClaudeDoctorFactMapperTests
         ClaudeBoundSessionCompleteness boundSessionCompleteness = ClaudeBoundSessionCompleteness.Unavailable,
         ClaudeAgreedContentState agreedContentState = ClaudeAgreedContentState.None) =>
         new(
+            readability,
             acceptedIngestExists,
             rejectedIngestExists,
             rawPersistenceCandidateExists,

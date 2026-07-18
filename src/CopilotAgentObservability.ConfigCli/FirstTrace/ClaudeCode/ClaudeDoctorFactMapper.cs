@@ -170,6 +170,8 @@ internal static class ClaudeDoctorFactMapper
     private static LastIngestFacts MapLastIngest(ClaudeDoctorVerificationWindow? window) =>
         window is null
             ? new LastIngestFacts(LastIngestOutcome.None)
+            : window.Readability == ClaudeDoctorVerificationWindowReadability.Unreadable
+                ? new LastIngestFacts(LastIngestOutcome.Unknown)
             : new LastIngestFacts(
                 window.AcceptedIngestExists
                     ? LastIngestOutcome.Accepted
@@ -180,6 +182,8 @@ internal static class ClaudeDoctorFactMapper
     private static RawPersistenceFacts MapRawPersistence(ClaudeDoctorVerificationWindow? window) =>
         window is null
             ? new RawPersistenceFacts(RawPersistenceOutcome.NotPersisted)
+            : window.Readability == ClaudeDoctorVerificationWindowReadability.Unreadable
+                ? new RawPersistenceFacts(RawPersistenceOutcome.Unknown)
             : new RawPersistenceFacts(
                 window.RawPersistenceCandidateExists
                     ? RawPersistenceOutcome.Persisted
@@ -190,6 +194,8 @@ internal static class ClaudeDoctorFactMapper
     private static ProjectionFacts MapProjection(ClaudeDoctorVerificationWindow? window) =>
         window is null
             ? new ProjectionFacts(ProjectionOutcome.NotStarted)
+            : window.Readability == ClaudeDoctorVerificationWindowReadability.Unreadable
+                ? new ProjectionFacts(ProjectionOutcome.Unknown)
             : new ProjectionFacts(
                 window.ProjectionCandidateExists
                     ? ProjectionOutcome.Completed
@@ -206,7 +212,11 @@ internal static class ClaudeDoctorFactMapper
     private static ExactSessionBindingFacts MapBinding(
         ClaudeDoctorVerificationWindow? window,
         ProjectionFacts projection) =>
-        projection.Outcome == ProjectionOutcome.Completed
+        window?.Readability == ClaudeDoctorVerificationWindowReadability.Unreadable
+            ? new ExactSessionBindingFacts(
+                ExactSessionBindingRequirement.Unknown,
+                ExactSessionBindingOutcome.Unknown)
+        : projection.Outcome == ProjectionOutcome.Completed
             ? new ExactSessionBindingFacts(
                 ExactSessionBindingRequirement.Required,
                 window!.ExactSessionBindingCandidateExists
@@ -228,7 +238,9 @@ internal static class ClaudeDoctorFactMapper
     private static DoctorCompleteness MapCompleteness(
         ClaudeDoctorVerificationWindow? window,
         ExactSessionBindingFacts binding) =>
-        binding.Outcome == ExactSessionBindingOutcome.ExactBound
+        window?.Readability == ClaudeDoctorVerificationWindowReadability.Unreadable
+            ? DoctorCompleteness.Unknown
+        : binding.Outcome == ExactSessionBindingOutcome.ExactBound
             ? window!.BoundSessionCompleteness switch
             {
                 ClaudeBoundSessionCompleteness.Unbound => DoctorCompleteness.Unknown,
