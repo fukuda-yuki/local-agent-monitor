@@ -419,7 +419,7 @@ public sealed class SessionSchemaMigrationFixtureTests
     public void Exact_supported_whole_profile_from_real_fixture_is_accepted(string fixtureFile)
     {
         Assert.Equal(SupportedWholeProfileFixtureCount, SupportedWholeProfileFixtures.Count);
-        var databasePath = CreateStampedVersionElevenFixture(fixtureFile);
+        var databasePath = CreateStampedCurrentFixture(fixtureFile);
         try
         {
             var before = CapturePreflightSnapshot(databasePath);
@@ -472,8 +472,8 @@ public sealed class SessionSchemaMigrationFixtureTests
     [Fact]
     public void Exact_v5_profile_assembled_from_real_v4_lineage_is_accepted_by_schema_semantics()
     {
-        var databasePath = CreateStampedVersionElevenFixture("session-v4.sqlite");
-        var versionFivePath = CreateStampedVersionElevenFixture("session-v5.sqlite");
+        var databasePath = CreateStampedCurrentFixture("session-v4.sqlite");
+        var versionFivePath = CreateStampedCurrentFixture("session-v5.sqlite");
         try
         {
             string versionFiveDraftSql;
@@ -505,7 +505,7 @@ public sealed class SessionSchemaMigrationFixtureTests
     [InlineData("source_compat_test_state")]
     public void Unrelated_monitor_analysis_and_source_compatibility_objects_are_accepted(string table)
     {
-        var databasePath = CreateStampedVersionElevenFixture("session-v10.sqlite");
+        var databasePath = CreateStampedCurrentFixture("session-v10.sqlite");
         try
         {
             using (var connection = Open(databasePath))
@@ -526,7 +526,7 @@ public sealed class SessionSchemaMigrationFixtureTests
     [Fact]
     public void Commented_autoincrement_check_and_quoted_decoys_do_not_change_an_owned_table_profile()
     {
-        var databasePath = CreateStampedVersionElevenFixture("session-v10.sqlite");
+        var databasePath = CreateStampedCurrentFixture("session-v10.sqlite");
         try
         {
             RewriteTableSql(databasePath, "sessions", sql => ReplaceRequired(
@@ -1260,6 +1260,14 @@ public sealed class SessionSchemaMigrationFixtureTests
     }
 
     private static string CreateStampedVersionElevenFixture(string fixtureFile)
+    {
+        var databasePath = CreateStampedCurrentFixture(fixtureFile);
+        using (var connection = Open(databasePath))
+            Execute(connection, "ALTER TABLE session_events DROP COLUMN match_kind; UPDATE schema_version SET version=11 WHERE component='session';");
+        return databasePath;
+    }
+
+    private static string CreateStampedCurrentFixture(string fixtureFile)
     {
         var databasePath = CopyFixture(fixtureFile);
         new SqliteSessionStore(databasePath).CreateSchema();

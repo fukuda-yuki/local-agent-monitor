@@ -30,7 +30,7 @@ public class MonitorHostTests
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT version FROM schema_version WHERE component='session';";
-        Assert.Equal(11L, (long)command.ExecuteScalar()!);
+        Assert.Equal(12L, (long)command.ExecuteScalar()!);
     }
 
     [Fact]

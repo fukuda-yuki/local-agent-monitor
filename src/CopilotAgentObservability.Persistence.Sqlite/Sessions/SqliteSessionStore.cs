@@ -1643,7 +1643,7 @@ public sealed class SqliteSessionStore : ISessionStore
             if (!TableExists(connection, transaction, table)) continue;
             var allowed = requiredColumns.ToHashSet(StringComparer.Ordinal);
             if (table == "session_events")
-                allowed.UnionWith(["source_application_version", "adapter_version", "schema_fingerprint", "normalization_version"]);
+                allowed.UnionWith(["source_application_version", "adapter_version", "schema_fingerprint", "normalization_version", "match_kind"]);
             if (Columns(connection, transaction, table).Except(allowed).Any()) return true;
         }
         return false;
