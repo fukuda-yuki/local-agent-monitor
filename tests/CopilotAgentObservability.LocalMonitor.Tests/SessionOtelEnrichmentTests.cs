@@ -120,6 +120,9 @@ public sealed class SessionOtelEnrichmentTests
         var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
 
         Assert.Equal(3, processed);
+        Assert.Equal(SessionMatchKind.ExactNative, Assert.Single(store.GetDetail(exactSessionId)!.Events, item => item.SourceAdapter == "otel-exact").MatchKind);
+        Assert.Equal(SessionMatchKind.TraceContinuity, Assert.Single(store.GetDetail(traceSessionId)!.Events, item => item.SourceAdapter == "otel-exact").MatchKind);
+        Assert.Equal(SessionMatchKind.ConversationId, Assert.Single(store.GetDetail(conversationSessionId)!.Events, item => item.SourceAdapter == "otel-exact").MatchKind);
         Assert.Single(store.GetDetail(exactSessionId)!.Events, item => item.SourceAdapter == "otel-exact" && item.SourceEventId == "generic-exact-trace/generic-span-1");
         Assert.Single(store.GetDetail(traceSessionId)!.Events, item => item.SourceAdapter == "otel-exact" && item.SourceEventId == "generic-shared-trace/generic-span-2");
         Assert.Single(store.GetDetail(conversationSessionId)!.Events, item => item.SourceAdapter == "otel-exact" && item.SourceEventId == "generic-conversation-trace/generic-span-3");
@@ -139,6 +142,7 @@ public sealed class SessionOtelEnrichmentTests
 
         var detail = store.GetDetail(sessionId)!;
         Assert.Single(detail.Events, item => item.SourceAdapter == "claude-code-otel");
+        Assert.Equal(bindingKind is SessionBindingKind.Native ? SessionMatchKind.ExactNative : SessionMatchKind.ExplicitLink, Assert.Single(detail.Events, item => item.SourceAdapter == "claude-code-otel").MatchKind);
         Assert.Equal(bindingKind, Assert.Single(detail.NativeIds).BindingKind);
         Assert.Equal(SessionCompleteness.Full, detail.Session.Completeness);
     }

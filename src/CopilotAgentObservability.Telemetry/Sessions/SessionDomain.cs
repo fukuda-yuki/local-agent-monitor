@@ -5,6 +5,7 @@ public enum ObservedSessionStatus { Active, Completed, Failed, Unknown }
 public enum SessionSourceSurface { CopilotSdk, CopilotCli, VisualStudioCode, HookUnknown, ClaudeCode }
 public enum SessionSourceAdapter { CopilotSdkStream, CopilotCompatibleHook, ClaudeCodeOtel, ClaudeCodeHook }
 public enum SessionBindingKind { Native, ExplicitResume, ExplicitHandoff, TraceContext }
+public enum SessionMatchKind { ExactNative, ExplicitLink, TraceContinuity, ConversationId, None }
 public enum SessionContentState { Available, NotCaptured, Redacted, Unsupported, ExpiredPendingDeletion }
 public enum SessionRawRetentionState { Expiring, ExpiredPendingDeletion, NotCaptured }
 public enum ImprovementProposalStatus { Candidate, Recommended, Verified }
@@ -255,7 +256,8 @@ public sealed record ObservedSessionEvent(
     string? SourceApplicationVersion = null,
     string? AdapterVersion = null,
     string? SchemaFingerprint = null,
-    string? NormalizationVersion = null)
+    string? NormalizationVersion = null,
+    SessionMatchKind? MatchKind = null)
 {
     public static ObservedSessionEvent Create(
         Guid sessionId,

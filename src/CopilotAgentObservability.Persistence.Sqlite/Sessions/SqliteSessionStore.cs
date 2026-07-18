@@ -14,7 +14,8 @@ public sealed class SessionIdentityConflictException : InvalidOperationException
 public sealed class SqliteSessionStore : ISessionStore
 {
     private const int VersionTenSchemaVersion = 10;
-    private const int CurrentSchemaVersion = 11;
+    private const int VersionElevenSchemaVersion = 11;
+    private const int CurrentSchemaVersion = 12;
     private const string SchemaVersionSql = """
         CREATE TABLE IF NOT EXISTS schema_version (
             component TEXT PRIMARY KEY,
@@ -203,6 +204,12 @@ public sealed class SqliteSessionStore : ISessionStore
         if (version is <= VersionTenSchemaVersion)
         {
             MigrateToVersionEleven(connection, transaction, command);
+            Execute(connection, transaction, $"UPDATE schema_version SET version={VersionElevenSchemaVersion} WHERE component='session';");
+        }
+
+        if (version is <= VersionElevenSchemaVersion)
+        {
+            MigrateToVersionTwelve(connection, transaction);
             Execute(connection, transaction, $"UPDATE schema_version SET version={CurrentSchemaVersion} WHERE component='session';");
         }
 
@@ -404,8 +411,8 @@ public sealed class SqliteSessionStore : ISessionStore
                 ? canonicalParentEventId
                 : item.ParentEventId;
             Execute(connection, transaction, """
-                INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version)
-                VALUES($event_id,$session_id,$run_id,$source_surface,$parent_event_id,$trace_id,$status,$source_adapter,$source_event_id,$type,$occurred_at,$content_state,$source_application_version,$adapter_version,$schema_fingerprint,$normalization_version)
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version,match_kind)
+                VALUES($event_id,$session_id,$run_id,$source_surface,$parent_event_id,$trace_id,$status,$source_adapter,$source_event_id,$type,$occurred_at,$content_state,$source_application_version,$adapter_version,$schema_fingerprint,$normalization_version,$match_kind)
                 ON CONFLICT(source_adapter,source_event_id) DO NOTHING;
                 """,
                 ("$event_id", Id(eventId)), ("$session_id", Id(item.SessionId)), ("$run_id", item.RunId is null ? null : Id(item.RunId.Value)),
@@ -414,7 +421,8 @@ public sealed class SqliteSessionStore : ISessionStore
                 ("$source_adapter", item.SourceAdapter), ("$source_event_id", item.SourceEventId), ("$type", item.Type),
                 ("$occurred_at", Timestamp(item.OccurredAt)), ("$content_state", SessionWire.ToWire(item.ContentState)),
                 ("$source_application_version", item.SourceApplicationVersion), ("$adapter_version", item.AdapterVersion),
-                ("$schema_fingerprint", item.SchemaFingerprint), ("$normalization_version", item.NormalizationVersion));
+                ("$schema_fingerprint", item.SchemaFingerprint), ("$normalization_version", item.NormalizationVersion),
+                ("$match_kind", MatchKind(item.MatchKind)));
         }
 
         foreach (var content in batch.Content)
@@ -704,13 +712,13 @@ public sealed class SqliteSessionStore : ISessionStore
         var events = new List<ObservedSessionEvent>();
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "SELECT event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version FROM session_events WHERE session_id=$id ORDER BY occurred_at,event_id;";
+            command.CommandText = "SELECT event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version,match_kind FROM session_events WHERE session_id=$id ORDER BY occurred_at,event_id;";
             Add(command, "$id", Id(sessionId));
             using var reader = command.ExecuteReader();
             while (reader.Read()) events.Add(new(
                 Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), NullableGuid(reader, 2), NullableSurface(reader, 3), NullableGuid(reader, 4), NullableString(reader, 5), NullableString(reader, 6),
                 reader.GetString(7), reader.GetString(8), reader.GetString(9), ParseTimestamp(reader.GetString(10)), SessionWire.ParseContentState(reader.GetString(11)),
-                NullableString(reader, 12), NullableString(reader, 13), NullableString(reader, 14), NullableString(reader, 15)));
+                NullableString(reader, 12), NullableString(reader, 13), NullableString(reader, 14), NullableString(reader, 15), ParseMatchKind(reader, 16)));
         }
 
         return new(session, nativeIds, runs, events);
@@ -1380,6 +1388,28 @@ public sealed class SqliteSessionStore : ISessionStore
     };
     private static string Timestamp(DateTimeOffset value) => value.ToString("O");
     private static string? Timestamp(DateTimeOffset? value) => value?.ToString("O");
+    private static string? MatchKind(SessionMatchKind? value) => value switch
+    {
+        null => null,
+        SessionMatchKind.ExactNative => "exact_native",
+        SessionMatchKind.ExplicitLink => "explicit_link",
+        SessionMatchKind.TraceContinuity => "trace_continuity",
+        SessionMatchKind.ConversationId => "conversation_id",
+        SessionMatchKind.None => "none",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    private static SessionMatchKind? ParseMatchKind(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal)
+        ? null
+        : reader.GetString(ordinal) switch
+        {
+            "exact_native" => SessionMatchKind.ExactNative,
+            "explicit_link" => SessionMatchKind.ExplicitLink,
+            "trace_continuity" => SessionMatchKind.TraceContinuity,
+            "conversation_id" => SessionMatchKind.ConversationId,
+            "none" => SessionMatchKind.None,
+            _ => throw new InvalidOperationException("Unsupported Session event match kind."),
+        };
     private static DateTimeOffset ParseTimestamp(string value) => DateTimeOffset.Parse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
     private static DateTimeOffset? NullableTimestamp(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : ParseTimestamp(reader.GetString(ordinal));
     private static string? NullableString(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
@@ -1437,12 +1467,15 @@ public sealed class SqliteSessionStore : ISessionStore
         }
         else
         {
-            SessionSchemaV11Validator.Validate(connection, CreateCanonicalVersionElevenSchema);
+            SessionSchemaV11Validator.Validate(
+                connection,
+                CreateCanonicalVersionTwelveSchema,
+                version == VersionElevenSchemaVersion ? VersionElevenSchemaVersion : CurrentSchemaVersion);
         }
         EnsureForeignKeysValid(connection, null);
     }
 
-    private static void CreateCanonicalVersionElevenSchema(SqliteConnection connection)
+    private static void CreateCanonicalVersionTwelveSchema(SqliteConnection connection)
     {
         Execute(connection, SchemaVersionSql);
         Execute(connection, SchemaSql);
@@ -1503,6 +1536,29 @@ public sealed class SqliteSessionStore : ISessionStore
             DROP TABLE session_runs_v10;
             DROP TABLE session_native_ids_v10;
             """);
+    }
+
+    private static void MigrateToVersionTwelve(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        AddMatchKindColumnForMigration(connection, transaction);
+    }
+
+    private static void AddMatchKindColumnForMigration(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT type,\"notnull\",dflt_value FROM pragma_table_info('session_events') WHERE name='match_kind';";
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            reader.Close();
+            Execute(connection, transaction, "ALTER TABLE session_events ADD COLUMN match_kind TEXT NULL CHECK (match_kind IS NULL OR match_kind IN ('exact_native','explicit_link','trace_continuity','conversation_id','none'));");
+            return;
+        }
+        if (!string.Equals(reader.GetString(0), "TEXT", StringComparison.OrdinalIgnoreCase)
+            || reader.GetInt32(1) != 0
+            || !reader.IsDBNull(2))
+            throw new InvalidOperationException("Invalid session_events.match_kind migration column.");
     }
 
     private static void AddNullableTextColumnForMigration(SqliteConnection connection, SqliteTransaction transaction, string table, string column)
@@ -1775,6 +1831,7 @@ public sealed class SqliteSessionStore : ISessionStore
             adapter_version TEXT NULL,
             schema_fingerprint TEXT NULL,
             normalization_version TEXT NULL,
+            match_kind TEXT NULL CHECK (match_kind IS NULL OR match_kind IN ('exact_native','explicit_link','trace_continuity','conversation_id','none')),
             UNIQUE (source_adapter, source_event_id),
             UNIQUE (session_id, event_id),
             FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,

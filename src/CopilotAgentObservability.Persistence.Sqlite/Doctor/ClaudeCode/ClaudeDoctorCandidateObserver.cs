@@ -91,13 +91,13 @@ internal sealed class ClaudeDoctorCandidateObserver
                     $"claude-otel-raw-{identity}",
                     record.ReceivedAt);
 
-                var sessionId = exactBindingRule.Resolve(record.PayloadJson, span.TraceId!, span.SpanId!);
-                if (sessionId is null)
+                var binding = exactBindingRule.Resolve(record.PayloadJson, span.TraceId!, span.SpanId!);
+                if (binding is null)
                 {
                     continue;
                 }
 
-                var sessionGuid = sessionId.Value.ToString("D");
+                var sessionGuid = binding.SessionId.ToString("D");
                 Observe(
                     verification,
                     references,
@@ -105,7 +105,7 @@ internal sealed class ClaudeDoctorCandidateObserver
                     $"claude-otel-binding-{span.TraceId!}-{sessionGuid}",
                     record.ReceivedAt);
 
-                if (!HasPartialOrBetterCompleteness(sessionId.Value)
+                if (!HasPartialOrBetterCompleteness(binding.SessionId)
                     || ReadAgreedContentState(span.TraceId!) is null)
                 {
                     continue;

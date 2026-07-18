@@ -13,7 +13,7 @@ internal sealed class ClaudeExactBindingRule
         this.databasePath = databasePath;
     }
 
-    public Guid? Resolve(string? payloadJson, string traceId, string spanId)
+    public ClaudeExactBindingMatch? Resolve(string? payloadJson, string traceId, string spanId)
     {
         if (payloadJson is null)
         {
@@ -24,7 +24,7 @@ internal sealed class ClaudeExactBindingRule
         return nativeSessionId is null ? null : FindSession(nativeSessionId);
     }
 
-    private Guid? FindSession(string nativeSessionId)
+    private ClaudeExactBindingMatch? FindSession(string nativeSessionId)
     {
         using var connection = Open();
         using var command = connection.CreateCommand();
@@ -47,7 +47,7 @@ internal sealed class ClaudeExactBindingRule
             return null;
         }
 
-        return sessionId;
+        return new(sessionId, bindingKind);
     }
 
     private static string? ReadNativeSessionId(string payloadJson, string traceId, string spanId)
@@ -107,3 +107,5 @@ internal sealed class ClaudeExactBindingRule
         return connection;
     }
 }
+
+internal sealed record ClaudeExactBindingMatch(Guid SessionId, SessionBindingKind BindingKind);
