@@ -8,6 +8,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 internal static class RetentionOwnershipReceipt
 {
     private static readonly byte[] Domain = "copilot-agent-observability/retention-owner-receipt/v1"u8.ToArray();
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     internal static byte[] CreateSession(RetentionSessionOwnershipReceiptInput input)
     {
@@ -60,7 +61,12 @@ internal static class RetentionOwnershipReceipt
     {
         private readonly MemoryStream stream = new();
         internal CanonicalWriter(byte[] storeInstance, RetentionStoreKind kind) { Bytes(Domain); Bytes(storeInstance); Text(kind switch { RetentionStoreKind.SessionEventContent => "session_event_content", RetentionStoreKind.RawRecord => "raw_record", RetentionStoreKind.AnalysisRunRaw => "analysis_run_raw", _ => throw Invalid() }); }
-        internal void Text(string value) { if (value is null) throw Invalid(); Bytes(Encoding.UTF8.GetBytes(value)); }
+        internal void Text(string value)
+        {
+            if (value is null) throw Invalid();
+            try { Bytes(StrictUtf8.GetBytes(value)); }
+            catch (EncoderFallbackException) { throw Invalid(); }
+        }
         internal void OptionalText(string? value) { stream.WriteByte(value is null ? (byte)0 : (byte)1); if (value is not null) Text(value); }
         internal void Guid(string value) { var guid = System.Guid.ParseExact(value, "D"); Span<byte> bytes = stackalloc byte[16]; guid.TryWriteBytes(bytes, bigEndian: true, out _); Bytes(bytes); }
         internal void OptionalGuid(string? value) { stream.WriteByte(value is null ? (byte)0 : (byte)1); if (value is not null) Guid(value); }

@@ -65,6 +65,37 @@ public sealed class RetentionOwnershipReceiptTests
     }
 
     [Fact]
+    public void Create_RejectsUnpairedHighSurrogatesInEveryTextBearingInput() => AssertMalformedText(new string((char)0xD800, 1));
+
+    [Fact]
+    public void Create_RejectsUnpairedLowSurrogatesInEveryTextBearingInput() => AssertMalformedText(new string((char)0xDC00, 1));
+
+    private static void AssertMalformedText(string malformed)
+    {
+        var invalid = new Action[]
+        {
+            () => RetentionOwnershipReceipt.CreateSession(Session() with { Kind = malformed }),
+            () => RetentionOwnershipReceipt.CreateSession(Session() with { SourceAdapter = malformed }),
+            () => RetentionOwnershipReceipt.CreateSession(Session() with { SourceEventId = malformed }),
+            () => RetentionOwnershipReceipt.CreateRawRecord(Raw() with { ReceivedAtText = malformed }),
+            () => RetentionOwnershipReceipt.CreateAnalysisRun(Analysis() with { RequestedAtText = malformed }),
+            () => RetentionOwnershipReceipt.CreateAnalysisRun(Analysis() with { SpanId = malformed })
+        };
+        foreach (var action in invalid)
+        {
+            var error = Assert.Throws<ArgumentException>(action);
+            Assert.Equal("Invalid retention ownership receipt input.", error.Message);
+        }
+    }
+
+    [Fact]
+    public void Create_DoesNotTreatMalformedUtf16AsReplacementCharacter()
+    {
+        Assert.Throws<ArgumentException>(() => RetentionOwnershipReceipt.CreateSession(Session() with { Kind = new string((char)0xD800, 1) }));
+        Assert.NotEqual(RetentionOwnershipReceipt.CreateSession(Session()), RetentionOwnershipReceipt.CreateSession(Session() with { Kind = "\uFFFD" }));
+    }
+
+    [Fact]
     public void ReceiptApi_IsInternalAndCannotCarryRawOrPathData()
     {
         var assembly = typeof(RetentionOwnershipReceipt).Assembly;
