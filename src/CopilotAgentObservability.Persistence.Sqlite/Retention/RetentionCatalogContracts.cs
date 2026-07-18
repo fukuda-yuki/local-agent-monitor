@@ -46,7 +46,7 @@ public enum RetentionErrorCode
 public enum RetentionWorkerDiagnosticCode { RetryExhausted, AdapterCoverageMismatch }
 public enum RetentionCapturePhase { Reserved, Staging, PublishedPendingCatalog, Complete }
 public enum RetentionInventoryCategory { RequiredCleanup, RetainedByPolicy, NotApplicable, Blocked }
-public enum RetentionSessionV1Condition { NeverCaptured, ReadableExpiring, ReadableRetainedByPolicy, DeniedLifecycle, StaleMissingOrRepairBlocked, SelectedReadableWithDeniedSibling, SelectedDeniedWithReadableSibling, CapturedWithoutReadableSibling, UnknownSession, UnknownEvent, SanitizedOnly }
+public enum RetentionSessionV1Condition { NeverCaptured, NeverCapturedNotCaptured, NeverCapturedRedacted, NeverCapturedUnsupported, ReadableExpiring, ReadableRetainedByPolicy, DeniedLifecycle, StaleMissingOrRepairBlocked, SelectedReadableWithDeniedSibling, SelectedDeniedWithReadableSibling, CapturedWithoutReadableSibling, UnknownSession, UnknownEvent, UnknownEventWithExpiringSession, SanitizedOnly }
 public enum RetentionSessionRouteOutcome { Content, Expired, SessionNotFound, HostFallback }
 
 public sealed record RetentionItemSummary(
@@ -71,7 +71,7 @@ public sealed record RetentionSessionV1TableResult(string? EventContentState, st
 {
     public bool HasSessionDto => SessionRawRetentionState is not null;
     public bool HasEventDto => EventContentState is not null;
-    public RetentionSessionRouteOutcome RouteOutcome => RouteAbsent ? RetentionSessionRouteOutcome.HostFallback : StatusCode == 410 ? RetentionSessionRouteOutcome.Expired : HasSessionDto || HasEventDto ? RetentionSessionRouteOutcome.Content : RetentionSessionRouteOutcome.SessionNotFound;
+    public RetentionSessionRouteOutcome RouteOutcome => RouteAbsent ? RetentionSessionRouteOutcome.HostFallback : StatusCode == 410 ? RetentionSessionRouteOutcome.Expired : StatusCode == 404 ? RetentionSessionRouteOutcome.SessionNotFound : RetentionSessionRouteOutcome.Content;
 }
 
 public static class RetentionSessionV1Projection
@@ -96,9 +96,12 @@ public static class RetentionSessionV1Projection
 
     public static RetentionSessionV1TableResult Describe(RetentionSessionV1Condition condition) => condition switch
     {
-        RetentionSessionV1Condition.NeverCaptured => new("not_captured", "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
+        RetentionSessionV1Condition.NeverCaptured or RetentionSessionV1Condition.NeverCapturedNotCaptured => new("not_captured", "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
+        RetentionSessionV1Condition.NeverCapturedRedacted => new("redacted", "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
+        RetentionSessionV1Condition.NeverCapturedUnsupported => new("unsupported", "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
         RetentionSessionV1Condition.UnknownSession => new(null, null, 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
         RetentionSessionV1Condition.UnknownEvent => new(null, "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
+        RetentionSessionV1Condition.UnknownEventWithExpiringSession => new(null, "expiring", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
         RetentionSessionV1Condition.SanitizedOnly => new(null, null, 404, "application/json", "{\"accepted\":false,\"error\":\"unsupported_endpoint\",\"message\":\"Only /v1/traces is supported.\"}"u8.ToArray(), true),
         RetentionSessionV1Condition.ReadableExpiring or RetentionSessionV1Condition.ReadableRetainedByPolicy or RetentionSessionV1Condition.SelectedReadableWithDeniedSibling => new("available", "expiring", 200, "application/json", null, false),
         RetentionSessionV1Condition.SelectedDeniedWithReadableSibling => new("expired_pending_deletion", "expiring", 410, "application/json", ExpiredContentResponseUtf8, false),

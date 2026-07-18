@@ -82,12 +82,10 @@ public sealed class RetentionCompatibilityContractTests
         foreach (var id in new[] { uncapturedEvent!, Guid.CreateVersion7().ToString() })
         {
             using var missing = await host.Client.GetAsync($"/sessions/{sessionId}/events/{id}/content");
-            Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
-            Assert.Equal("application/json", missing.Content.Headers.ContentType?.MediaType);
-            Assert.Equal("{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), await missing.Content.ReadAsByteArrayAsync());
+            await AssertMappedNotFound(missing);
         }
         using var unknownSession = await host.Client.GetAsync($"/sessions/{Guid.CreateVersion7()}/events/{Guid.CreateVersion7()}/content");
-        Assert.Equal("{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), await unknownSession.Content.ReadAsByteArrayAsync());
+        await AssertMappedNotFound(unknownSession);
 
         await using var sanitized = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true);
         using var metadata = await sanitized.Client.GetAsync($"/api/session-workspace/sessions/{sessionId}");
@@ -113,4 +111,16 @@ public sealed class RetentionCompatibilityContractTests
     private static string Envelope() => """
         {"schema_version":1,"source_adapter":"copilot-compatible-hook","source_surface":"hook-unknown","native_session_id":"native-1","events":[{"source_event_id":"event-1","type":"UserPromptSubmit","occurred_at":"2026-07-11T00:00:00Z","payload":{"message":"synthetic"}}]}
         """;
+
+    private static async Task AssertMappedNotFound(HttpResponseMessage response)
+    {
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.ToString());
+        Assert.Null(response.Content.Headers.ContentType?.CharSet);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        var bytes = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal("{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), bytes);
+        Assert.DoesNotContain((byte)'\r', bytes); Assert.DoesNotContain((byte)'\n', bytes);
+        Assert.False(bytes.AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF }));
+    }
 }

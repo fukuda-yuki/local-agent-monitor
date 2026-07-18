@@ -122,6 +122,17 @@ public sealed class RetentionContractTests
         var sanitized = RetentionSessionV1Projection.Describe(RetentionSessionV1Condition.SanitizedOnly);
         Assert.Equal(RetentionSessionRouteOutcome.HostFallback, sanitized.RouteOutcome);
         Assert.Equal("{\"accepted\":false,\"error\":\"unsupported_endpoint\",\"message\":\"Only /v1/traces is supported.\"}"u8.ToArray(), sanitized.ErrorUtf8);
+
+        foreach (var condition in new[] { RetentionSessionV1Condition.NeverCapturedNotCaptured, RetentionSessionV1Condition.NeverCapturedRedacted, RetentionSessionV1Condition.NeverCapturedUnsupported })
+        {
+            var row = RetentionSessionV1Projection.Describe(condition);
+            Assert.True(row.HasEventDto); Assert.True(row.HasSessionDto);
+            Assert.Equal("not_captured", row.SessionRawRetentionState); Assert.Equal(404, row.StatusCode);
+            Assert.Equal(RetentionSessionRouteOutcome.SessionNotFound, row.RouteOutcome);
+        }
+        var unknownEvent = RetentionSessionV1Projection.Describe(RetentionSessionV1Condition.UnknownEventWithExpiringSession);
+        Assert.False(unknownEvent.HasEventDto); Assert.True(unknownEvent.HasSessionDto);
+        Assert.Equal("expiring", unknownEvent.SessionRawRetentionState); Assert.Equal(404, unknownEvent.StatusCode);
     }
 
     private static string[] EnumNames(string name) =>
