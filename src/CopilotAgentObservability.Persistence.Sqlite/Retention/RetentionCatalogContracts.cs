@@ -51,7 +51,7 @@ public enum RetentionSessionV1Condition { NeverCaptured, ReadableExpiring, Reada
 public sealed record RetentionItemSummary(
     string ItemId,
     RetentionStoreKind StoreKind,
-    string InventoryCategory,
+    RetentionInventoryCategory InventoryCategory,
     RetentionItemLifecycle State,
     string PolicyId,
     int PolicyVersion,
@@ -65,6 +65,8 @@ public sealed record RetentionItemSummary(
     bool RetryExhausted,
     RetentionErrorCode? ErrorCode,
     DateTimeOffset? RetryAt);
+
+public sealed record RetentionSessionV1TableResult(string? EventContentState, string? SessionRawRetentionState, int StatusCode, string? ContentType, byte[]? ErrorUtf8, bool RouteAbsent);
 
 public static class RetentionSessionV1Projection
 {
@@ -84,6 +86,14 @@ public static class RetentionSessionV1Projection
         RetentionSessionV1Condition.ReadableExpiring or RetentionSessionV1Condition.ReadableRetainedByPolicy or RetentionSessionV1Condition.ReadableAndDeniedSiblings => "expiring",
         RetentionSessionV1Condition.DeniedLifecycle or RetentionSessionV1Condition.StaleMissingOrRepairBlocked or RetentionSessionV1Condition.CapturedWithoutReadableSibling => "expired_pending_deletion",
         _ => "not_captured"
+    };
+
+    public static RetentionSessionV1TableResult Describe(RetentionSessionV1Condition condition) => condition switch
+    {
+        RetentionSessionV1Condition.NeverCaptured or RetentionSessionV1Condition.Unknown => new("not_captured", "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
+        RetentionSessionV1Condition.SanitizedOnly => new(null, null, 404, null, null, true),
+        RetentionSessionV1Condition.ReadableExpiring or RetentionSessionV1Condition.ReadableRetainedByPolicy or RetentionSessionV1Condition.ReadableAndDeniedSiblings => new("available", "expiring", 200, "application/json", null, false),
+        _ => new("expired_pending_deletion", "expired_pending_deletion", 410, "application/json", ExpiredContentResponseUtf8, false)
     };
 }
 

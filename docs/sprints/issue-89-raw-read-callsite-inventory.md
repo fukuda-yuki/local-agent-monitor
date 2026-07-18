@@ -17,6 +17,8 @@ This inventory is a bounded product-callsite inventory, not filesystem discovery
 | Sensitive Bundle path | `src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/SensitiveBundleWriter.cs:17-120` | `blocked` | Explicit catalog binding and exact owned `sensitive_bundle` lease required before read/resume/enumeration |
 | Caller-supplied raw OTLP file | Config CLI `--raw` input | `not_applicable` | Caller-owned; never catalog or delete |
 
+Additional concrete production raw reads discovered by the v1 audit: `RawTelemetryStore.ListRecords` (`RawTelemetryStore.cs:61-86`), `ListUnprocessedForProjection` (`:95-123`), and `ListUnprocessedForSpanProjection` (`:582-608`) each load `payload_json`/`resource_attributes_json` and require the exact `raw_record` access or projection lease. `MonitorHost` raw-record (`MonitorHost.cs:713-744`), span-detail (`:750-765`), and prompt-label (`:842-863`) routes each require the same exact readable `raw_record` lease and are `required_cleanup` consumers. `SqliteSessionStore.GetContent` (`SqliteSessionStore.cs:764-804`) and `SessionRoutes` raw-content route (`SessionRoutes.cs:366-397`) require the exact `session_event_content` access lease. `SqliteMonitorAnalysisStore` run/event raw-result reads (`:122-138`) require `analysis_run_raw` access. No direct production Sensitive Bundle or SDK directory reader has an exact catalog-owned artifact at this HEAD; those modes remain `blocked` rather than receiving a permissive lease.
+
 Safe monitor projections, Session/Event metadata, analysis safe summaries,
 catalog receipts, and tombstones are `retained_by_policy`; they never authorize
 raw reconstruction. There is no current receiver-created raw file or external

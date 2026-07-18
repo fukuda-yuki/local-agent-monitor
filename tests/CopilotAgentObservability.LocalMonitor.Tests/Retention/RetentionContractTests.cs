@@ -33,6 +33,7 @@ public sealed class RetentionContractTests
             },
             EnumNames("RetentionErrorCode"));
         Assert.Equal(new[] { "RetryExhausted", "AdapterCoverageMismatch" }, EnumNames("RetentionWorkerDiagnosticCode"));
+        Assert.Equal(new[] { "RequiredCleanup", "RetainedByPolicy", "NotApplicable", "Blocked" }, EnumNames("RetentionInventoryCategory"));
     }
 
     [Fact]
@@ -66,6 +67,22 @@ public sealed class RetentionContractTests
         Assert.Equal(5, constants.GetProperty("MaximumDeleteAttempts")!.GetValue(null));
         Assert.Equal(256, constants.GetProperty("MaximumFileMembers")!.GetValue(null));
         Assert.Equal(128L * 1024 * 1024, constants.GetProperty("MaximumFileBytes")!.GetValue(null));
+        Assert.Equal(100, constants.GetProperty("ClaimBatchLimit")!.GetValue(null));
+        Assert.Equal(2, constants.GetProperty("MaximumActiveDeletionWorkers")!.GetValue(null));
+        Assert.Equal(TimeSpan.FromSeconds(30), constants.GetProperty("ScanElapsedBudget")!.GetValue(null));
+        Assert.Equal(TimeSpan.FromSeconds(15), constants.GetProperty("WorkerWakeInterval")!.GetValue(null));
+        Assert.Equal(TimeSpan.FromMinutes(2), constants.GetProperty("LeaseDuration")!.GetValue(null));
+        Assert.Equal(TimeSpan.FromMinutes(1), constants.GetProperty("LeaseRenewalDeadline")!.GetValue(null));
+        Assert.Equal(TimeSpan.FromMinutes(2), constants.GetProperty("ActiveOperationQuiescenceBound")!.GetValue(null));
+        Assert.Equal(TimeSpan.FromMinutes(2), constants.GetProperty("ShutdownDrainBound")!.GetValue(null));
+        Assert.Equal(TimeSpan.FromMinutes(1), constants.GetProperty("WalMaintenanceRetryDelay")!.GetValue(null));
+        Assert.Equal(100, constants.GetProperty("StatusItemSummaryLimit")!.GetValue(null));
+    }
+
+    [Fact]
+    public void RetentionItemSummary_UsesClosedInventoryCategory()
+    {
+        Assert.Equal(RetentionType("RetentionInventoryCategory"), RetentionType("RetentionItemSummary").GetProperty("InventoryCategory")!.PropertyType);
     }
 
     [Fact]
