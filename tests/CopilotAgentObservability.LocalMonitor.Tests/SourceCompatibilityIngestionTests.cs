@@ -124,7 +124,7 @@ public sealed class SourceCompatibilityIngestionTests
     }
 
     [Theory]
-    [InlineData(ClaudeInteractionWithUserPrompt, "available")]
+    [InlineData(ClaudeInteractionWithRedactedUserPrompt, "not_captured")]
     [InlineData(ClaudeInteractionWithoutGatedField, "not_captured")]
     [InlineData(ForeignSpanOnly, "unsupported")]
     public async Task PostTraces_DerivesTraceContentStateFromClaudeSpanEvidence(string payload, string expectedContentState)
@@ -156,14 +156,17 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.Equal(expectedContentState, item.GetProperty("content_state").GetString());
     }
 
-    private const string ClaudeInteractionWithUserPrompt = """
+    private const string ClaudeInteractionWithRedactedUserPrompt = """
         {"resourceSpans":[{"scopeSpans":[{"spans":[{
           "traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "spanId":"1111111111111111",
           "name":"claude_code.interaction",
           "startTimeUnixNano":"1000000000",
           "endTimeUnixNano":"1500000000",
-          "attributes":[{"key":"user_prompt","value":{"stringValue":"synthetic-marker"}}]
+          "attributes":[
+            {"key":"user_prompt","value":{"stringValue":"<REDACTED>"}},
+            {"key":"user_prompt_length","value":{"intValue":"16"}}
+          ]
         }]}]}]}
         """;
 
