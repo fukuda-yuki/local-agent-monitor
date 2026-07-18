@@ -218,9 +218,13 @@ NAT fallback. Native macOS/Linux installation is outside Issue #68. The
 default plan preserves the three OTel content gates; the explicit content
 option manages all three together. The approved Hook set is installed by
 default and may capture raw prompt/tool content independently, so plans carry
-the fixed `claude_hooks_capture_raw_content` warning. Static setup does not
-emit `run_first_trace_doctor`; first real trace and Doctor integration remain
-Issue #104. The invocation directory is the only selected Claude project root:
+the fixed `claude_hooks_capture_raw_content` warning. A successful changed
+Claude CLI apply emits `restart_claude_process` followed by
+`run_first_trace_doctor` as a handoff to the `first-trace` orchestration
+(`docs/specifications/interfaces/claude-first-trace.md`); the handoff is
+guidance only and never claims telemetry arrived. First-real-trace
+verification itself belongs to the first-trace Doctor flow.
+The invocation directory is the only selected Claude project root:
 the adapter observes its exact local and project settings files without parent,
 child, Git-root, or `--add-dir` discovery. Managed env precedence is current
 process > one platform-selected managed object > local > project > user; the
