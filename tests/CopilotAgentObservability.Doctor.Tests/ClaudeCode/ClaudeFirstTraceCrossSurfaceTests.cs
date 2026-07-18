@@ -38,10 +38,255 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     private const string TranscriptPathMarker = "SYNTHETIC_TRANSCRIPT_PATH";
     private const string CwdMarker = "SYNTHETIC_WORKING_DIRECTORY";
     private const string TraceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string TraceContinuityTraceId = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    private const string ContentDisabledTraceId = "ffffffffffffffffffffffffffffffff";
     private const string BaselineTraceId = "11111111111111111111111111111111";
     private const string SpanId = "bbbbbbbbbbbbbbbb";
     private const string InteractionSpanId = "cccccccccccccccc";
     private const string ToolSpanId = "dddddddddddddddd";
+
+    [Fact]
+    public async Task AlreadyCorrectConfiguration_BeginReportsHealthyWithoutSetupApply()
+    {
+        var directory = CreateDirectory("claude-first-trace-no-op");
+        var databasePath = Path.Combine(directory, "monitor.db");
+        var origin = ReserveLoopbackOrigin();
+        var time = new DoctorTestTimeProvider(Now);
+        try
+        {
+            PrepareBaselineDatabase(databasePath, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
+            var platform = CreatePlatform(databasePath, origin, monitorProbe);
+            var orchestrator = CreateOrchestrator(platform, time);
+
+            using var begin = RunFirstTrace(
+                orchestrator,
+                [
+                    "begin", "--adapter", "claude-code", "--database", databasePath,
+                    "--endpoint", origin, "--json",
+                ],
+                expectedExitCode: 0);
+            Assert.Equal("first_trace_verification_started", begin.RootElement.GetProperty("code").GetString());
+            var verificationId = begin.RootElement.GetProperty("verification_id").GetString();
+            Assert.NotNull(verificationId);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RollbackThenBeginReportsRestoredEndpointAndSignalBlockersDeterministically()
+    {
+        var directory = CreateDirectory("claude-first-trace-post-rollback");
+        var databasePath = Path.Combine(directory, "monitor.db");
+        var origin = ReserveLoopbackOrigin();
+        var time = new DoctorTestTimeProvider(Now);
+        try
+        {
+            PrepareBaselineDatabase(databasePath, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
+            var platform = CreatePlatform(databasePath, origin, monitorProbe);
+            var changeSetId = AssertChangedSetupHandoff(platform, origin);
+
+            using var rollbackOutput = new StringWriter();
+            using var rollbackError = new StringWriter();
+            var rollbackExitCode = CliApplication.Run(
+                ["setup", "rollback", "--change-set", changeSetId],
+                rollbackOutput,
+                rollbackError,
+                SetupCompositionRoot.CreateSetupDispatch(platform));
+            Assert.Equal(0, rollbackExitCode);
+            Assert.Equal(string.Empty, rollbackError.ToString());
+            using var rollback = JsonDocument.Parse(rollbackOutput.ToString());
+            Assert.Equal(SetupCodes.RollbackSucceeded, rollback.RootElement.GetProperty("code").GetString());
+
+            platform.ClearProcessEnvironment();
+            using var begin = RunFirstTrace(
+                CreateOrchestrator(platform, time),
+                [
+                    "begin", "--adapter", "claude-code", "--database", databasePath,
+                    "--endpoint", origin, "--json",
+                ],
+                expectedExitCode: 3);
+            var states = begin.RootElement.GetProperty("doctor").GetProperty("evaluation")
+                .GetProperty("states").EnumerateArray()
+                .Select(state => state.GetProperty("state_code").GetString())
+                .ToArray();
+            Assert.Contains("endpoint_mismatch", states);
+            Assert.Contains("protocol_mismatch", states);
+            Assert.Contains("signal_disabled", states);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task OtelWithoutHookCompletesAsSessionUnbound()
+    {
+        var directory = CreateDirectory("claude-first-trace-otel-only");
+        var databasePath = Path.Combine(directory, "monitor.db");
+        var origin = ReserveLoopbackOrigin();
+        var time = new DoctorTestTimeProvider(Now);
+        try
+        {
+            PrepareBaselineDatabase(databasePath, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
+            var platform = CreatePlatform(databasePath, origin, monitorProbe);
+            var orchestrator = CreateOrchestrator(platform, time);
+            using var begin = RunFirstTrace(
+                orchestrator,
+                [
+                    "begin", "--adapter", "claude-code", "--database", databasePath,
+                    "--endpoint", origin, "--json",
+                ],
+                expectedExitCode: 0);
+            var verificationId = begin.RootElement.GetProperty("verification_id").GetString();
+            Assert.NotNull(verificationId);
+
+            await monitor.PostOtlpAsync(Payload(TraceId, NativeSessionMarker));
+            await monitor.DrainAsync();
+            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+
+            using var complete = RunFirstTrace(
+                orchestrator,
+                [
+                    "complete", "--database", databasePath, "--verification-id", verificationId!,
+                    "--expected-revision", "1", "--json",
+                ],
+                expectedExitCode: 3);
+            Assert.Equal("first_trace_not_ready", complete.RootElement.GetProperty("code").GetString());
+            Assert.Contains(
+                complete.RootElement.GetProperty("doctor").GetProperty("evaluation").GetProperty("states").EnumerateArray(),
+                state => state.GetProperty("state_code").GetString() == "session_unbound");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CliJsonAndMonitorProjectionStayParityAcrossBindingAndContentStates()
+    {
+        var directory = CreateDirectory("claude-first-trace-projection-parity");
+        var databasePath = Path.Combine(directory, "monitor.db");
+        var origin = ReserveLoopbackOrigin();
+        var time = new DoctorTestTimeProvider(Now);
+        try
+        {
+            PrepareBaselineDatabase(databasePath, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, origin, time);
+            var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
+
+            var exactPlatform = CreatePlatform(databasePath, origin, monitorProbe);
+            var exactOrchestrator = CreateOrchestrator(exactPlatform, time);
+            var exactVerificationId = BeginVerification(exactOrchestrator, databasePath, origin);
+            await monitor.PostSessionStartAsync(NativeSessionMarker);
+            await monitor.PostOtlpAsync(Payload(TraceId, NativeSessionMarker));
+            await monitor.DrainAsync();
+            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+
+            using var exactComplete = CompleteVerification(
+                CreateOrchestrator(CreatePlatform(databasePath, "http://127.0.0.1:4320", monitorProbe), time),
+                databasePath,
+                exactVerificationId,
+                expectedExitCode: 0);
+            Assert.Equal(
+                "first_trace_ready",
+                exactComplete.RootElement.GetProperty("doctor").GetProperty("evaluation")
+                    .GetProperty("primary_state").GetProperty("state_code").GetString());
+            using var exactMonitor = await ReadMonitorTraceAsync(monitor, TraceId);
+            Assert.Equal("exact_linked", exactMonitor.RootElement.GetProperty("binding_state").GetString());
+            Assert.Equal("available", exactMonitor.RootElement.GetProperty("content_state").GetString());
+
+            time.UtcNow = Now.AddSeconds(1);
+            var continuityPlatform = CreatePlatform(databasePath, origin, monitorProbe);
+            var continuityOrchestrator = CreateOrchestrator(continuityPlatform, time);
+            var continuityVerificationId = BeginVerification(continuityOrchestrator, databasePath, origin);
+            await monitor.PostSessionStartAsync("SYNTHETIC_TRACE_ONLY_SESSION");
+            await monitor.DrainAsync();
+            await monitor.PostOtlpAsync(Payload(TraceContinuityTraceId, sessionId: null));
+            await monitor.ProjectOnlyAsync();
+            AddTraceContinuityEvents(databasePath, time, TraceContinuityTraceId, "SYNTHETIC_TRACE_ONLY_SESSION");
+            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+
+            using var continuityStatus = RunFirstTrace(
+                continuityOrchestrator,
+                [
+                    "status", "--database", databasePath, "--verification-id", continuityVerificationId,
+                    "--endpoint", origin, "--json",
+                ],
+                expectedExitCode: 0);
+            var continuityEvidence = continuityStatus.RootElement.GetProperty("candidates").EnumerateArray()
+                .Select(candidate => candidate.GetProperty("evidence_ref").GetString()!)
+                .ToArray();
+            Assert.NotEmpty(continuityEvidence);
+            Assert.InRange(continuityEvidence.Length, 1, DoctorValidation.MaximumAcceptedEvidenceReferences);
+            using var continuityComplete = RunFirstTrace(
+                CreateOrchestrator(CreatePlatform(databasePath, "http://127.0.0.1:4320", monitorProbe), time),
+                [
+                    "complete", "--database", databasePath, "--verification-id", continuityVerificationId,
+                    "--expected-revision", "1", "--json",
+                    ..continuityEvidence.SelectMany(reference => new[] { "--evidence", reference }),
+                ],
+                expectedExitCode: 3);
+            Assert.True(
+                continuityComplete.RootElement.GetProperty("code").GetString() == "first_trace_not_ready",
+                continuityComplete.RootElement.GetRawText());
+            Assert.Contains(
+                continuityComplete.RootElement.GetProperty("doctor").GetProperty("evaluation").GetProperty("states").EnumerateArray(),
+                state => state.GetProperty("state_code").GetString() == "session_unbound");
+            using var continuityMonitor = await ReadMonitorTraceAsync(monitor, TraceContinuityTraceId);
+            Assert.Equal("hook_only", continuityMonitor.RootElement.GetProperty("binding_state").GetString());
+            Assert.NotEqual("exact_linked", continuityMonitor.RootElement.GetProperty("binding_state").GetString());
+            using var continuityCancel = RunFirstTrace(
+                CreateOrchestrator(CreatePlatform(databasePath, "http://127.0.0.1:4320", monitorProbe), time),
+                [
+                    "cancel", "--database", databasePath, "--verification-id", continuityVerificationId,
+                    "--expected-revision", "1", "--json",
+                ],
+                expectedExitCode: 0);
+
+            time.UtcNow = Now.AddSeconds(2);
+            var contentDisabledPlatform = CreatePlatform(databasePath, origin, monitorProbe);
+            contentDisabledPlatform.SeedProcessEnvironment("OTEL_LOG_TOOL_CONTENT", "0");
+            var contentDisabledOrchestrator = CreateOrchestrator(contentDisabledPlatform, time);
+            var contentDisabledVerificationId = BeginVerification(contentDisabledOrchestrator, databasePath, origin);
+            await monitor.PostSessionStartAsync("SYNTHETIC_CONTENT_DISABLED_SESSION");
+            await monitor.PostOtlpAsync(Payload(ContentDisabledTraceId, "SYNTHETIC_CONTENT_DISABLED_SESSION", includeContent: false));
+            await monitor.DrainAsync();
+            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+
+            using var contentDisabledComplete = CompleteVerification(
+                CreateOrchestrator(
+                    CreatePlatformWithContentDisabled(databasePath, "http://127.0.0.1:4320", monitorProbe),
+                    time),
+                databasePath,
+                contentDisabledVerificationId,
+                expectedExitCode: 0);
+            var contentDisabledStates = contentDisabledComplete.RootElement.GetProperty("doctor").GetProperty("evaluation")
+                .GetProperty("states").EnumerateArray().ToArray();
+            Assert.Contains(contentDisabledStates, state => state.GetProperty("state_code").GetString() == "content_capture_disabled");
+            Assert.Equal(
+                "first_trace_ready",
+                contentDisabledComplete.RootElement.GetProperty("doctor").GetProperty("evaluation")
+                    .GetProperty("primary_state").GetProperty("state_code").GetString());
+            using var contentDisabledMonitor = await ReadMonitorTraceAsync(monitor, ContentDisabledTraceId);
+            Assert.Equal("exact_linked", contentDisabledMonitor.RootElement.GetProperty("binding_state").GetString());
+            Assert.Equal("not_captured", contentDisabledMonitor.RootElement.GetProperty("content_state").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
 
     [Fact]
     public async Task SetupBeginRealMonitorStatusAndCompleteProveClaudeFirstTraceAcrossSurfaces()
@@ -181,7 +426,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         }
     }
 
-    private static void AssertChangedSetupHandoff(TestSetupPlatform platform, string origin)
+    private static string AssertChangedSetupHandoff(TestSetupPlatform platform, string origin)
     {
         var dispatch = SetupCompositionRoot.CreateSetupDispatch(
             platform,
@@ -235,6 +480,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         Assert.Equal(
             [SetupCodes.RestartClaudeProcess, SetupCodes.RunFirstTraceDoctor],
             apply.RootElement.GetProperty("next_actions").EnumerateArray().Select(item => item.GetString()!).ToArray());
+
+        return changeSetId!;
     }
 
     private static void AssertBeginObservedSetupState(
@@ -308,6 +555,16 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         return platform;
     }
 
+    private static TestSetupPlatform CreatePlatformWithContentDisabled(
+        string databasePath,
+        string endpoint,
+        ISetupHttpProbe httpProbe)
+    {
+        var platform = CreatePlatform(databasePath, endpoint, httpProbe);
+        platform.SeedProcessEnvironment("OTEL_LOG_TOOL_CONTENT", "0");
+        return platform;
+    }
+
     private static TestSetupPlatform CreateRestartedPlatform(
         TestSetupPlatform appliedPlatform,
         string databasePath,
@@ -349,13 +606,13 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             .Commit(ValidatedIngestionBatch.Create(record, observation));
     }
 
-    private static string Payload(string traceId, string? sessionId)
+    private static string Payload(string traceId, string? sessionId, bool includeContent = true)
     {
         var spans = new JsonArray
         {
-            Span(InteractionSpanId, "claude_code.interaction", traceId, sessionId, parentSpanId: null),
-            Span(SpanId, "claude_code.llm_request", traceId, sessionId, InteractionSpanId),
-            Span(ToolSpanId, "claude_code.tool", traceId, sessionId, InteractionSpanId),
+            Span(InteractionSpanId, "claude_code.interaction", traceId, sessionId, parentSpanId: null, includeContent: includeContent),
+            Span(SpanId, "claude_code.llm_request", traceId, sessionId, InteractionSpanId, includeContent: includeContent),
+            Span(ToolSpanId, "claude_code.tool", traceId, sessionId, InteractionSpanId, includeContent: includeContent),
         };
         return new JsonObject
         {
@@ -389,13 +646,15 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         string name,
         string traceId,
         string? sessionId,
-        string? parentSpanId)
+        string? parentSpanId,
+        bool includeContent = true)
     {
-        var attributes = new JsonArray
+        var attributes = new JsonArray();
+        if (includeContent)
         {
-            Attribute("user_prompt", PromptMarker),
-            Attribute("path", PathMarker),
-        };
+            attributes.Add(Attribute("user_prompt", PromptMarker));
+            attributes.Add(Attribute("path", PathMarker));
+        }
         if (sessionId is not null)
         {
             attributes.Add(Attribute("session.id", sessionId));
@@ -426,6 +685,86 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             span["parentSpanId"] = parentSpanId;
         }
         return span;
+    }
+
+    private static string BeginVerification(
+        FirstTraceOrchestrator orchestrator,
+        string databasePath,
+        string origin)
+    {
+        using var begin = RunFirstTrace(
+            orchestrator,
+            [
+                "begin", "--adapter", "claude-code", "--database", databasePath,
+                "--endpoint", origin, "--json",
+            ],
+            expectedExitCode: 0);
+        return begin.RootElement.GetProperty("verification_id").GetString()!;
+    }
+
+    private static JsonDocument CompleteVerification(
+        FirstTraceOrchestrator orchestrator,
+        string databasePath,
+        string verificationId,
+        int expectedExitCode) =>
+        RunFirstTrace(
+            orchestrator,
+            [
+                "complete", "--database", databasePath, "--verification-id", verificationId,
+                "--expected-revision", "1", "--json",
+            ],
+            expectedExitCode);
+
+    private static async Task<JsonDocument> ReadMonitorTraceAsync(RunningMonitor monitor, string traceId)
+    {
+        using var document = JsonDocument.Parse(await monitor.Client.GetStringAsync("/api/monitor/traces"));
+        var item = Assert.Single(
+            document.RootElement.GetProperty("items").EnumerateArray(),
+            candidate => candidate.GetProperty("trace_id").GetString() == traceId);
+        return JsonDocument.Parse(item.GetRawText());
+    }
+
+    private static void AddTraceContinuityEvents(
+        string databasePath,
+        TimeProvider time,
+        string traceId,
+        string nativeSessionId)
+    {
+        var store = new SqliteSessionStore(databasePath, time);
+        var detail = store.ListMostRecent(20)
+            .Select(summary => store.GetDetail(summary.SessionId))
+            .OfType<SessionDetail>()
+            .Single(item => item.NativeIds.Any(native => native.NativeSessionId == nativeSessionId));
+        var hookEvent = new ObservedSessionEvent(
+            Guid.CreateVersion7(),
+            detail.Session.SessionId,
+            null,
+            SessionSourceSurface.HookUnknown,
+            null,
+            traceId,
+            null,
+            "claude-code-hook",
+            $"synthetic-trace-context-{traceId}",
+            "UserPromptSubmit",
+            time.GetUtcNow(),
+            SessionContentState.NotCaptured);
+        var otelEvents = new[] { InteractionSpanId, SpanId, ToolSpanId }
+            .Select(spanId => new ObservedSessionEvent(
+                Guid.CreateVersion7(),
+                detail.Session.SessionId,
+                null,
+                SessionSourceSurface.ClaudeCode,
+                null,
+                traceId,
+                null,
+                "claude-code-otel",
+                $"{traceId}/{spanId}",
+                "otel.span",
+                time.GetUtcNow(),
+                SessionContentState.NotCaptured,
+                MatchKind: SessionMatchKind.TraceContinuity))
+            .ToArray();
+        store.Write(new SessionWriteBatch(detail with { Events = detail.Events.Append(hookEvent).Concat(otelEvents).ToArray() }, []));
     }
 
     private static JsonObject Attribute(string key, string value) => new()
@@ -482,6 +821,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         private readonly SessionEventWriterWorker sessionWorker;
         private readonly ProjectionWorker projectionWorker;
         private readonly SqliteSessionOtelEnricher enricher;
+        private readonly TimeProvider timeProvider;
 
         private RunningMonitor(
             WebApplication app,
@@ -489,7 +829,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             IngestionWriterWorker ingestionWorker,
             SessionEventWriterWorker sessionWorker,
             ProjectionWorker projectionWorker,
-            SqliteSessionOtelEnricher enricher)
+            SqliteSessionOtelEnricher enricher,
+            TimeProvider timeProvider)
         {
             this.app = app;
             Client = client;
@@ -497,6 +838,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             this.sessionWorker = sessionWorker;
             this.projectionWorker = projectionWorker;
             this.enricher = enricher;
+            this.timeProvider = timeProvider;
         }
 
         public HttpClient Client { get; }
@@ -562,7 +904,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                     ingestionWorker,
                     sessionWorker,
                     projectionWorker,
-                    enricher);
+                    enricher,
+                    time);
             }
             catch
             {
@@ -586,9 +929,9 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 {
                     new JsonObject
                     {
-                        ["source_event_id"] = "synthetic-session-start-event",
+                        ["source_event_id"] = $"synthetic-session-start-event-{nativeSessionId}",
                         ["type"] = "SessionStart",
-                        ["occurred_at"] = Now.ToString("O"),
+                        ["occurred_at"] = timeProvider.GetUtcNow().ToString("O"),
                         ["payload"] = new JsonObject
                         {
                             ["session_id"] = nativeSessionId,
@@ -622,6 +965,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             await projectionWorker.RunProjectionPassAsync();
             enricher.ProcessNextBatch();
         }
+
+        public Task ProjectOnlyAsync() => projectionWorker.RunProjectionPassAsync();
 
         public async ValueTask DisposeAsync()
         {
@@ -735,6 +1080,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         }
 
         public void SeedProcessEnvironment(string name, string value) => processEnvironment[name] = value;
+
+        public void ClearProcessEnvironment() => processEnvironment.Clear();
 
         public void CopyPersistedSetupStateTo(TestSetupPlatform destination)
         {

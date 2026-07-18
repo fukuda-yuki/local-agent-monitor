@@ -1,5 +1,6 @@
 using System.Text;
 using CopilotAgentObservability.ConfigCli.FirstTrace.ClaudeCode;
+using CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
 using CopilotAgentObservability.Doctor;
@@ -332,6 +333,40 @@ public sealed class ClaudeDoctorFactCollectorTests
         var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse));
 
         Assert.Equal(ClaudeRuntimeRawAccessClassification.Absent, inputs.RuntimeRawAccess);
+    }
+
+    [Fact]
+    public void Collect_Wsl2RepositoryWithRoutingOptInProducesMonitorFactsWithoutWindowsNativeMisclassification()
+    {
+        using var database = new TestDatabase();
+        var platform = CreatePlatform(database, supportedVersion: true, planningOs: SetupPlanningOs.Linux);
+        platform.SeedProcessEnvironment("WSL_DISTRO_NAME", "Ubuntu");
+        platform.ScriptProcess(
+            "uname",
+            ["-r"],
+            new(SetupProcessOutcome.Completed, 0, "6.6.0-microsoft-standard-WSL2"));
+        platform.ScriptProcess(
+            "uname",
+            ["-r"],
+            new(SetupProcessOutcome.Completed, 0, "6.6.0-microsoft-standard-WSL2"));
+        platform.SeedProcessEnvironment("CLAUDE_CODE_ENABLE_TELEMETRY", "1");
+        platform.SeedProcessEnvironment("OTEL_TRACES_EXPORTER", "otlp");
+        platform.SeedProcessEnvironment("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf");
+        platform.SeedProcessEnvironment("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ExpectedEndpoint);
+        var probe = new TestHttpProbe(LiveResponse);
+
+        var execution = ClaudeCodeExecutionContextDetector.Detect(platform, allowWsl2Routing: true);
+        var inputs = Collect(platform, database.Path, probe);
+        var snapshot = ClaudeDoctorFactMapper.Map(inputs, Now, null);
+
+        Assert.Equal(ClaudeCodeExecutionContext.Wsl2Repository, execution.Context);
+        Assert.Null(execution.FailureCode);
+        Assert.Equal(ClaudeLivenessProbeClassification.MonitorLive, inputs.LivenessProbe);
+        Assert.True(inputs.ReadinessProbeSucceeded);
+        Assert.Equal(ReachabilityStatus.Reachable, snapshot.EndpointReachability!.Reachability);
+        Assert.Equal(MonitorProcessStatus.Running, snapshot.ProcessReceiverAndPort!.MonitorProcess);
+        Assert.Equal(ReceiverBindStatus.Bound, snapshot.ProcessReceiverAndPort.ReceiverBind);
+        Assert.Equal(PortOwnerStatus.Monitor, snapshot.ProcessReceiverAndPort.PortOwner);
     }
 
     [Fact]
