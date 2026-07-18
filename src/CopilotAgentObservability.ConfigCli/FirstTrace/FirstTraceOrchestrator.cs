@@ -110,11 +110,10 @@ internal sealed class FirstTraceOrchestrator
                 Truncated: false);
         }
 
-        var expiresAt = request.ExpiresAt ?? UtcNow().AddMinutes(10);
         var start = applicationFactory(request.DatabasePath).StartExclusive(
             adapter.SourceSurface,
             adapter.ExpectedSourceAdapter,
-            expiresAt);
+            request.ExpiresAt);
         var doctor = StoreResult(start);
         if (start.Code == DoctorResultCode.VerificationActive)
         {
@@ -278,7 +277,10 @@ internal sealed class FirstTraceOrchestrator
         var endpoint = adapter.TryNormalizeEndpoint(null, out var normalizedEndpoint)
             ? normalizedEndpoint
             : string.Empty;
-        var snapshot = adapter.CollectFacts(request.DatabasePath, endpoint, verification);
+        var snapshot = adapter.CollectFacts(request.DatabasePath, endpoint, verification) with
+        {
+            Observations = [],
+        };
         var doctor = application.Complete(
             verification.VerificationId,
             request.ExpectedRevision!.Value,

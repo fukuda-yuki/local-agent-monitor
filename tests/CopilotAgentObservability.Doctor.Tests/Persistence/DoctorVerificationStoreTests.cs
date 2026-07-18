@@ -181,6 +181,22 @@ public sealed class DoctorVerificationStoreTests
     }
 
     [Fact]
+    public void StartExclusive_DefaultExpiryIsExactlyTenMinutesFromItsStoreClockReading()
+    {
+        using var database = new DoctorTestDatabase();
+        var time = new AdvancingDoctorTestTimeProvider(DoctorTestData.Now, DoctorTestData.Now.AddSeconds(1));
+        var store = new SqliteDoctorVerificationStore(database.Path, time);
+        Assert.Equal(DoctorResultCode.VerificationActive, store.CreateSchema().Code);
+
+        var result = store.StartExclusive("github-copilot-vscode", "otel", expiresAt: null);
+
+        var verification = Assert.IsType<DoctorVerification>(result.Verification);
+        Assert.Equal(DoctorResultCode.VerificationStarted, result.Code);
+        Assert.Equal(TimeSpan.FromMinutes(10), verification.ExpiresAt - verification.StartedAt);
+        Assert.Equal(1, time.ReadCount);
+    }
+
+    [Fact]
     public async Task StartExclusive_BarrierAllowsOneStartAndOneExistingResult()
     {
         using var database = new DoctorTestDatabase();
@@ -949,4 +965,16 @@ public sealed class DoctorVerificationStoreTests
                 "SELECT component,version FROM schema_version WHERE component='doctor';"))
             .Concat(DoctorTestDatabase.Rows(connection, "SELECT * FROM doctor_verifications ORDER BY verification_id;"))
             .Concat(DoctorTestDatabase.Rows(connection, "SELECT * FROM doctor_verification_evidence ORDER BY candidate_id;")));
+
+    private sealed class AdvancingDoctorTestTimeProvider(
+        DateTimeOffset first,
+        DateTimeOffset subsequent) : TimeProvider
+    {
+        private int reads;
+
+        public int ReadCount => reads;
+
+        public override DateTimeOffset GetUtcNow() =>
+            Interlocked.Increment(ref reads) == 1 ? first : subsequent;
+    }
 }

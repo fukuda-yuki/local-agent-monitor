@@ -33,6 +33,118 @@ public sealed class FirstTraceCliTests
     }
 
     [Fact]
+    public void Begin_DefaultExpiryUsesTheSingleStoreClockReading()
+    {
+        using var database = new TemporaryDatabase();
+        var adapter = new TestFirstTraceAdapter();
+        var time = new SteppingTimeProvider(Now, Now.AddSeconds(1));
+
+        var result = Run(
+            ["begin", "--database", database.Path, "--adapter", adapter.AdapterId, "--json"],
+            new FirstTraceOrchestrator([adapter], time));
+
+        Assert.Equal(0, result.ExitCode);
+        var verification = DoctorJson.DeserializeResult(
+            JsonDocument.Parse(result.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+        Assert.Equal(TimeSpan.FromMinutes(10), verification.ExpiresAt - verification.StartedAt);
+        Assert.Equal(1, time.ReadCount);
+    }
+
+    [Fact]
+    public void Begin_ExplicitExpiryPassesThroughUnchanged()
+    {
+        using var database = new TemporaryDatabase();
+        var adapter = new TestFirstTraceAdapter();
+        var explicitExpiry = Now.AddMinutes(5);
+
+        var result = Run(
+            [
+                "begin", "--database", database.Path, "--adapter", adapter.AdapterId,
+                "--expires-at", explicitExpiry.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", CultureInfo.InvariantCulture),
+                "--json",
+            ],
+            CreateOrchestrator(adapter));
+
+        Assert.Equal(0, result.ExitCode);
+        var verification = DoctorJson.DeserializeResult(
+            JsonDocument.Parse(result.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+        Assert.Equal(explicitExpiry, verification.ExpiresAt);
+        Assert.Equal(TimeSpan.FromMinutes(5), verification.ExpiresAt - verification.StartedAt);
+    }
+
+    [Theory]
+    [InlineData("verification-started", FirstTraceCodes.VerificationStarted, 0)]
+    [InlineData("blocked", FirstTraceCodes.Blocked, 3)]
+    [InlineData("active", FirstTraceCodes.ActiveVerificationExists, 3)]
+    [InlineData("status", FirstTraceCodes.StatusReported, 0)]
+    [InlineData("completed", FirstTraceCodes.Completed, 0)]
+    [InlineData("not-ready", FirstTraceCodes.NotReady, 3)]
+    [InlineData("cancelled", FirstTraceCodes.Cancelled, 0)]
+    [InlineData("explicit-selection", FirstTraceCodes.ExplicitEvidenceSelectionRequired, 3)]
+    [InlineData("doctor-failed", FirstTraceCodes.DoctorFailed, 4)]
+    [InlineData("invalid", FirstTraceCodes.InvalidArguments, 2)]
+    public void EnvelopeCodesUseClosedExitAndStderrMapping(
+        string scenario,
+        string expectedCode,
+        int expectedExitCode)
+    {
+        using var database = new TemporaryDatabase();
+        var adapter = new TestFirstTraceAdapter(
+            readyOnVerification: scenario is "completed" or "explicit-selection",
+            requireExplicitSelection: scenario == "explicit-selection",
+            monitorInstall: scenario == "blocked" ? MonitorInstallStatus.NotInstalled : MonitorInstallStatus.Installed);
+        var result = RunEnvelopeScenario(scenario, database.Path, adapter);
+
+        Assert.Equal(expectedExitCode, result.ExitCode);
+        Assert.Equal(expectedExitCode == 0 ? string.Empty : expectedCode + Environment.NewLine, result.Error);
+        Assert.Equal(expectedCode, JsonDocument.Parse(result.Output).RootElement.GetProperty("code").GetString());
+    }
+
+    [Theory]
+    [InlineData(DoctorResultCode.InvalidInput, 2)]
+    [InlineData(DoctorResultCode.EvaluationCompleted, 3)]
+    [InlineData(DoctorResultCode.VerificationStale, 4)]
+    [InlineData(DoctorResultCode.DoctorStoreBusy, 5)]
+    public void DoctorFailureUsesEveryDoctorCliExitMappingClass(
+        DoctorResultCode doctorCode,
+        int expectedExitCode)
+    {
+        using var database = new TemporaryDatabase();
+        var adapter = new TestFirstTraceAdapter();
+        var result = Run(
+            ["begin", "--database", database.Path, "--adapter", adapter.AdapterId, "--json"],
+            CreateOrchestrator(
+                adapter,
+                _ => new DoctorResult(
+                    DoctorSchemaVersions.ResultV1,
+                    Success: false,
+                    doctorCode,
+                    Evaluation: null,
+                    Verification: null)));
+
+        Assert.Equal(expectedExitCode, result.ExitCode);
+        Assert.Equal(FirstTraceCodes.DoctorFailed + Environment.NewLine, result.Error);
+        Assert.Equal(
+            FirstTraceCodes.DoctorFailed,
+            JsonDocument.Parse(result.Output).RootElement.GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public void Begin_ValidEndpointPassesThroughToAdapter()
+    {
+        using var database = new TemporaryDatabase();
+        var adapter = new TestFirstTraceAdapter();
+        const string endpoint = "http://127.0.0.1:4320";
+
+        var result = Run(
+            ["begin", "--database", database.Path, "--adapter", adapter.AdapterId, "--endpoint", endpoint, "--json"],
+            CreateOrchestrator(adapter));
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(endpoint, adapter.LastNormalizedEndpoint);
+    }
+
+    [Fact]
     public void Begin_WhenDoctorEvaluationBlocks_ReturnsGuidedBlockedEnvelope()
     {
         using var database = new TemporaryDatabase();
@@ -132,6 +244,10 @@ public sealed class FirstTraceCliTests
         var preview = document.RootElement.GetProperty("evaluation_preview");
         Assert.Equal("evaluation_completed", preview.GetProperty("code").GetString());
         Assert.Equal("first_trace_ready", preview.GetProperty("evaluation").GetProperty("primary_state").GetProperty("state_code").GetString());
+        var previewJson = preview.GetRawText();
+        Assert.Equal(
+            DoctorJson.SerializeResult(DoctorJson.DeserializeResult(previewJson)),
+            previewJson);
     }
 
     [Fact]
@@ -173,7 +289,55 @@ public sealed class FirstTraceCliTests
         Assert.Equal(3, result.ExitCode);
         var envelope = JsonDocument.Parse(result.Output).RootElement;
         Assert.Equal(FirstTraceCodes.NotReady, envelope.GetProperty("code").GetString());
+        var doctor = DoctorJson.DeserializeResult(envelope.GetProperty("doctor").GetRawText());
         Assert.Equal("evaluation_completed", envelope.GetProperty("doctor").GetProperty("code").GetString());
+        Assert.Equal(DoctorVerificationState.Active, doctor.Verification!.State);
+        Assert.Equal(1, doctor.Verification.Revision);
+    }
+
+    [Fact]
+    public void Complete_DoesNotPassAdapterSuppliedObservationsToDoctorCompletion()
+    {
+        using var database = new TemporaryDatabase();
+        var adapter = new TestFirstTraceAdapter(readyOnVerification: true, includeAdapterObservation: true);
+        DoctorFactSnapshot? completionSnapshot = null;
+        var result = Run(
+            ["begin", "--database", database.Path, "--adapter", adapter.AdapterId, "--json"],
+            CreateOrchestrator(
+                adapter,
+                snapshot =>
+                {
+                    if (snapshot.VerificationId is not null)
+                    {
+                        completionSnapshot = snapshot;
+                    }
+
+                    return DoctorEvaluator.Evaluate(snapshot);
+                }));
+        var verification = DoctorJson.DeserializeResult(
+            JsonDocument.Parse(result.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+        InsertReadyCandidates(database.Path, verification);
+
+        result = Run(
+            ["complete", "--database", database.Path, "--verification-id", verification.VerificationId, "--expected-revision", "1", "--json"],
+            CreateOrchestrator(
+                adapter,
+                snapshot =>
+                {
+                    if (snapshot.VerificationId is not null)
+                    {
+                        completionSnapshot = snapshot;
+                    }
+
+                    return DoctorEvaluator.Evaluate(snapshot);
+                }));
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(FirstTraceCodes.Completed, JsonDocument.Parse(result.Output).RootElement.GetProperty("code").GetString());
+        Assert.NotNull(completionSnapshot);
+        Assert.DoesNotContain(
+            completionSnapshot!.Observations,
+            observation => observation.EvidenceRef == "adapter-supplied-observation");
     }
 
     [Fact]
@@ -242,8 +406,100 @@ public sealed class FirstTraceCliTests
         Assert.Equal(FirstTraceCodes.Cancelled, JsonDocument.Parse(result.Output).RootElement.GetProperty("code").GetString());
     }
 
-    private static FirstTraceOrchestrator CreateOrchestrator(TestFirstTraceAdapter adapter) =>
-        new([adapter], new FixedTimeProvider(Now));
+    private static FirstTraceOrchestrator CreateOrchestrator(
+        TestFirstTraceAdapter adapter,
+        Func<DoctorFactSnapshot, DoctorResult>? evaluator = null)
+    {
+        var time = new FixedTimeProvider(Now);
+        return new(
+            [adapter],
+            time,
+            databasePath => SqliteDoctorApplicationService.Create(
+                new SqliteDoctorVerificationStore(databasePath, time),
+                evaluator));
+    }
+
+    private static CommandResult RunEnvelopeScenario(
+        string scenario,
+        string databasePath,
+        TestFirstTraceAdapter adapter)
+    {
+        var orchestrator = CreateOrchestrator(adapter);
+        var begin = new[] { "begin", "--database", databasePath, "--adapter", adapter.AdapterId, "--json" };
+        switch (scenario)
+        {
+            case "verification-started":
+                return Run(begin, orchestrator);
+            case "blocked":
+                return Run(begin, orchestrator);
+            case "active":
+                var store = new SqliteDoctorVerificationStore(databasePath, new FixedTimeProvider(Now));
+                Assert.Equal(DoctorResultCode.VerificationActive, store.CreateSchema().Code);
+                Assert.NotNull(store.Start(adapter.SourceSurface, adapter.ExpectedSourceAdapter, TimeSpan.FromMinutes(5)).Verification);
+                return Run(begin, orchestrator);
+            case "status":
+            {
+                var started = Run(begin, orchestrator);
+                var verification = DoctorJson.DeserializeResult(
+                    JsonDocument.Parse(started.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+                return Run(
+                    ["status", "--database", databasePath, "--verification-id", verification.VerificationId, "--json"],
+                    orchestrator);
+            }
+            case "completed":
+            {
+                var started = Run(begin, orchestrator);
+                var verification = DoctorJson.DeserializeResult(
+                    JsonDocument.Parse(started.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+                InsertReadyCandidates(databasePath, verification);
+                return Run(
+                    ["complete", "--database", databasePath, "--verification-id", verification.VerificationId, "--expected-revision", "1", "--json"],
+                    orchestrator);
+            }
+            case "not-ready":
+            {
+                var started = Run(begin, orchestrator);
+                var verification = DoctorJson.DeserializeResult(
+                    JsonDocument.Parse(started.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+                var candidate = InsertCandidate(databasePath, verification, "test-not-ready");
+                return Run(
+                    ["complete", "--database", databasePath, "--verification-id", verification.VerificationId, "--expected-revision", "1", "--evidence", candidate.EvidenceRef, "--json"],
+                    orchestrator);
+            }
+            case "cancelled":
+            {
+                var started = Run(begin, orchestrator);
+                var verification = DoctorJson.DeserializeResult(
+                    JsonDocument.Parse(started.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+                return Run(
+                    ["cancel", "--database", databasePath, "--verification-id", verification.VerificationId, "--expected-revision", "1", "--json"],
+                    orchestrator);
+            }
+            case "explicit-selection":
+            {
+                var started = Run(begin, orchestrator);
+                var verification = DoctorJson.DeserializeResult(
+                    JsonDocument.Parse(started.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+                InsertCandidate(databasePath, verification, "test-explicit-selection");
+                return Run(
+                    ["complete", "--database", databasePath, "--verification-id", verification.VerificationId, "--expected-revision", "1", "--json"],
+                    orchestrator);
+            }
+            case "doctor-failed":
+            {
+                var started = Run(begin, orchestrator);
+                var verification = DoctorJson.DeserializeResult(
+                    JsonDocument.Parse(started.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+                return Run(
+                    ["complete", "--database", databasePath, "--verification-id", verification.VerificationId, "--expected-revision", "2", "--evidence", "test-ref", "--json"],
+                    orchestrator);
+            }
+            case "invalid":
+                return Run(["begin", "--database", databasePath, "--json"], orchestrator);
+            default:
+                throw new ArgumentOutOfRangeException(nameof(scenario), scenario, null);
+        }
+    }
 
     private static CommandResult Run(string[] args, FirstTraceOrchestrator orchestrator)
     {
@@ -308,6 +564,18 @@ public sealed class FirstTraceCliTests
         public override DateTimeOffset GetUtcNow() => now;
     }
 
+    private sealed class SteppingTimeProvider(
+        DateTimeOffset first,
+        DateTimeOffset subsequent) : TimeProvider
+    {
+        private int reads;
+
+        public int ReadCount => reads;
+
+        public override DateTimeOffset GetUtcNow() =>
+            Interlocked.Increment(ref reads) == 1 ? first : subsequent;
+    }
+
     private sealed class TemporaryDatabase : IDisposable
     {
         public TemporaryDatabase()
@@ -336,13 +604,17 @@ public sealed class FirstTraceCliTests
         string expectedSourceAdapter = "test-otel",
         bool readyOnVerification = false,
         bool requireExplicitSelection = false,
-        MonitorInstallStatus monitorInstall = MonitorInstallStatus.Installed) : IFirstTraceSourceAdapter
+        MonitorInstallStatus monitorInstall = MonitorInstallStatus.Installed,
+        bool includeAdapterObservation = false) : IFirstTraceSourceAdapter
     {
         public string AdapterId { get; } = adapterId;
         public string SourceSurface { get; } = sourceSurface;
         public string ExpectedSourceAdapter { get; } = expectedSourceAdapter;
         private bool RequireExplicitSelection { get; } = requireExplicitSelection;
         private MonitorInstallStatus MonitorInstall { get; } = monitorInstall;
+        private bool IncludeAdapterObservation { get; } = includeAdapterObservation;
+
+        public string? LastNormalizedEndpoint { get; private set; }
 
         public bool TryNormalizeEndpoint(string? endpoint, out string normalizedEndpoint)
         {
@@ -353,13 +625,21 @@ public sealed class FirstTraceCliTests
         public bool IsValidInteraction(string? interaction) => interaction is null or "variant";
 
         public DoctorFactSnapshot CollectFacts(string databasePath, string normalizedEndpoint, DoctorVerification? verification) =>
-            new(
+            CaptureEndpoint(normalizedEndpoint, new(
                 DoctorSchemaVersions.FactsV1,
                 SourceSurface,
                 ExpectedSourceAdapter,
                 Now,
                 verification?.VerificationId,
-                [],
+                IncludeAdapterObservation && verification is not null
+                    ? [new DoctorObservation(
+                        SourceSurface,
+                        ExpectedSourceAdapter,
+                        DoctorEvidenceClass.RealSource,
+                        DoctorEvidenceKind.Ingest,
+                        "adapter-supplied-observation",
+                        Now)]
+                    : [],
                 new(MonitorInstall, SourceVersionStatus.Supported, SourceFeatureStatus.Available),
                 new(MonitorProcessStatus.Running, ReceiverBindStatus.Bound, PortOwnerStatus.Monitor),
                 new(EndpointAlignmentStatus.Match),
@@ -374,7 +654,13 @@ public sealed class FirstTraceCliTests
                 new(verification is null || !readyOnVerification ? DoctorCompleteness.Unknown : DoctorCompleteness.Full,
                     ContentCaptureStatus.Enabled,
                     RawAccessStatus.Available),
-                new(RestartRequirement.NotRequired));
+                new(RestartRequirement.NotRequired)));
+
+        private DoctorFactSnapshot CaptureEndpoint(string endpoint, DoctorFactSnapshot snapshot)
+        {
+            LastNormalizedEndpoint = endpoint;
+            return snapshot;
+        }
 
         public IReadOnlyList<FirstTraceGuidance> GetGuidance(string? interaction, bool includeSetupPlan) =>
             [new("common", "test guidance", includeSetupPlan ? "setup plan --adapter test-adapter --target cli" : null)];

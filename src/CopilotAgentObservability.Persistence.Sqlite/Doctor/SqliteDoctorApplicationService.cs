@@ -37,7 +37,7 @@ internal sealed class SqliteDoctorApplicationService
             ? Error(failure)
             : Project(store.Start(sourceSurface, sourceAdapter, expiresAt));
 
-    public DoctorStoreOutcome StartExclusive(string sourceSurface, string? sourceAdapter, DateTimeOffset expiresAt) =>
+    public DoctorStoreOutcome StartExclusive(string sourceSurface, string? sourceAdapter, DateTimeOffset? expiresAt) =>
         initializationFailure is { } failure
             ? new(failure)
             : store.StartExclusive(sourceSurface, sourceAdapter, expiresAt);

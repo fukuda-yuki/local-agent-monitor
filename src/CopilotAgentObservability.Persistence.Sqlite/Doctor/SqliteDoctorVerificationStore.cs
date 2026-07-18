@@ -140,15 +140,16 @@ internal sealed class SqliteDoctorVerificationStore
         return InsertVerification(verification, DoctorResultCode.VerificationStarted);
     }
 
-    public DoctorStoreOutcome StartExclusive(string sourceSurface, string? sourceAdapter, DateTimeOffset expiresAt)
+    public DoctorStoreOutcome StartExclusive(string sourceSurface, string? sourceAdapter, DateTimeOffset? expiresAt)
     {
         var now = UtcNow();
-        if (expiresAt.Offset != TimeSpan.Zero)
+        var effectiveExpiresAt = expiresAt ?? now.AddMinutes(10);
+        if (effectiveExpiresAt.Offset != TimeSpan.Zero)
         {
             return Invalid();
         }
 
-        var window = expiresAt - now;
+        var window = effectiveExpiresAt - now;
         if (!DoctorStoreValidation.IsSourceToken(sourceSurface)
             || !DoctorStoreValidation.IsSourceToken(sourceAdapter, nullable: true)
             || window < TimeSpan.FromMinutes(1)
@@ -164,7 +165,7 @@ internal sealed class SqliteDoctorVerificationStore
             DoctorVerificationState.Active,
             Revision: 1,
             StartedAt: now,
-            ExpiresAt: expiresAt,
+            ExpiresAt: effectiveExpiresAt,
             CompletedAt: null,
             CancelledAt: null,
             AcceptedEvidenceRefs: []);
