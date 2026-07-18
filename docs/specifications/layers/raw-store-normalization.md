@@ -527,6 +527,17 @@ transaction; file producers receive the catalog database by explicit injected
 configuration and fail closed before creating raw files when it is unavailable.
 
 The ownership key is exactly `(store_instance_id, store_kind, source_item_id)`.
+An internal 32-byte ownership receipt uses SHA-256 over length-framed binary
+UTF-8 domain `copilot-agent-observability/retention-owner-receipt/v1`, decoded
+lowercase 32-hex store instance ID, closed store kind, canonical source identity,
+authoritative timestamp text plus UTC ticks, store binding, and private 32-byte
+source token. It uses no delimiter concatenation, trimming, case folding, or
+normalization. Session binds canonical RFC4122/network-order event/session/run
+GUIDs, kind, capture/expiry pairs, adapter, and source event ID; raw binds
+positive record ID, received pair, and schema version; analysis binds positive
+run ID, requested pair, and explicit null markers for optional record ID/span.
+Comparison is fixed-time for exact 32-byte values. The primitive is not a raw
+hash and exposes no token, receipt, raw value, path, credential, or secret.
 `item_id` is opaque and stable. The closed v1 store-kind registry is
 `session_event_content`, `raw_record`, `analysis_run_raw`, `sensitive_bundle`,
 and `analysis_sdk_directory`. The closed lifecycle is `expiring`,
