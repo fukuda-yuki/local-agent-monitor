@@ -47,7 +47,7 @@ public enum RetentionWorkerDiagnosticCode { RetryExhausted, AdapterCoverageMisma
 public enum RetentionCapturePhase { Reserved, Staging, PublishedPendingCatalog, Complete }
 public enum RetentionInventoryCategory { RequiredCleanup, RetainedByPolicy, NotApplicable, Blocked }
 public enum RetentionSessionV1Condition { NeverCaptured, ReadableExpiring, ReadableRetainedByPolicy, DeniedLifecycle, StaleMissingOrRepairBlocked, SelectedReadableWithDeniedSibling, SelectedDeniedWithReadableSibling, CapturedWithoutReadableSibling, UnknownSession, UnknownEvent, SanitizedOnly }
-public enum RetentionSessionRouteOutcome { Content, SessionNotFound, RouteAbsent }
+public enum RetentionSessionRouteOutcome { Content, Expired, SessionNotFound, HostFallback }
 
 public sealed record RetentionItemSummary(
     string ItemId,
@@ -71,7 +71,7 @@ public sealed record RetentionSessionV1TableResult(string? EventContentState, st
 {
     public bool HasSessionDto => SessionRawRetentionState is not null;
     public bool HasEventDto => EventContentState is not null;
-    public RetentionSessionRouteOutcome RouteOutcome => RouteAbsent ? RetentionSessionRouteOutcome.RouteAbsent : HasSessionDto || HasEventDto ? RetentionSessionRouteOutcome.Content : RetentionSessionRouteOutcome.SessionNotFound;
+    public RetentionSessionRouteOutcome RouteOutcome => RouteAbsent ? RetentionSessionRouteOutcome.HostFallback : StatusCode == 410 ? RetentionSessionRouteOutcome.Expired : HasSessionDto || HasEventDto ? RetentionSessionRouteOutcome.Content : RetentionSessionRouteOutcome.SessionNotFound;
 }
 
 public static class RetentionSessionV1Projection
@@ -99,8 +99,9 @@ public static class RetentionSessionV1Projection
         RetentionSessionV1Condition.NeverCaptured => new("not_captured", "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
         RetentionSessionV1Condition.UnknownSession => new(null, null, 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
         RetentionSessionV1Condition.UnknownEvent => new(null, "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
-        RetentionSessionV1Condition.SanitizedOnly => new(null, null, 404, null, null, true),
+        RetentionSessionV1Condition.SanitizedOnly => new(null, null, 404, "application/json", "{\"accepted\":false,\"error\":\"unsupported_endpoint\",\"message\":\"Only /v1/traces is supported.\"}"u8.ToArray(), true),
         RetentionSessionV1Condition.ReadableExpiring or RetentionSessionV1Condition.ReadableRetainedByPolicy or RetentionSessionV1Condition.SelectedReadableWithDeniedSibling => new("available", "expiring", 200, "application/json", null, false),
+        RetentionSessionV1Condition.SelectedDeniedWithReadableSibling => new("expired_pending_deletion", "expiring", 410, "application/json", ExpiredContentResponseUtf8, false),
         _ => new("expired_pending_deletion", "expired_pending_deletion", 410, "application/json", ExpiredContentResponseUtf8, false)
     };
 }

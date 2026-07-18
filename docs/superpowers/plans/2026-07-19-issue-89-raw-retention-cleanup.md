@@ -288,7 +288,7 @@ deserialize this assertion. Use this normative table:
 | readable sibling plus any denied sibling | per-event exact state | `expiring` | selected event's own 200 or 410 behavior |
 | no readable sibling but any ever-captured/tombstoned item | `expired_pending_deletion` | `expired_pending_deletion` | exact 410 for captured event |
 | unknown Session/event | no DTO | no DTO | 404, `application/json`, exact not-found bytes above |
-| `--sanitized-only` | existing metadata behavior | existing metadata behavior | 404, no route body and no content type |
+| `--sanitized-only` | existing metadata behavior | existing metadata behavior | raw route is unregistered; same-host fallback is 404 `application/json` exact UTF-8 `{"accepted":false,"error":"unsupported_endpoint","message":"Only /v1/traces is supported."}`, no BOM/newline and no Cache-Control/ETag/Last-Modified |
 
 Bind every row to `SessionV1Projection_CoversEveryCanonicalCondition`; bind
 every byte-bearing 404/410 row to `ExpiredContentRoute_PreservesExactUtf8Bytes`.

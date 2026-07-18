@@ -1,5 +1,6 @@
 using System.Reflection;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 
@@ -107,10 +108,20 @@ public sealed class RetentionContractTests
     [Fact]
     public void SessionV1Table_DistinguishesUnknownAndSelectedSiblingOutcomes()
     {
-        var type = RetentionType("RetentionSessionV1TableResult");
-        Assert.NotNull(type.GetProperty("HasSessionDto"));
-        Assert.NotNull(type.GetProperty("HasEventDto"));
-        Assert.NotNull(type.GetProperty("RouteOutcome"));
+        var denied = RetentionSessionV1Projection.Describe(RetentionSessionV1Condition.SelectedDeniedWithReadableSibling);
+        Assert.True(denied.HasEventDto);
+        Assert.True(denied.HasSessionDto);
+        Assert.Equal("expired_pending_deletion", denied.EventContentState);
+        Assert.Equal("expiring", denied.SessionRawRetentionState);
+        Assert.Equal(410, denied.StatusCode);
+        Assert.Equal(RetentionSessionRouteOutcome.Expired, denied.RouteOutcome);
+
+        var unknown = RetentionSessionV1Projection.Describe(RetentionSessionV1Condition.UnknownSession);
+        Assert.False(unknown.HasEventDto); Assert.False(unknown.HasSessionDto);
+        Assert.Equal(RetentionSessionRouteOutcome.SessionNotFound, unknown.RouteOutcome);
+        var sanitized = RetentionSessionV1Projection.Describe(RetentionSessionV1Condition.SanitizedOnly);
+        Assert.Equal(RetentionSessionRouteOutcome.HostFallback, sanitized.RouteOutcome);
+        Assert.Equal("{\"accepted\":false,\"error\":\"unsupported_endpoint\",\"message\":\"Only /v1/traces is supported.\"}"u8.ToArray(), sanitized.ErrorUtf8);
     }
 
     private static string[] EnumNames(string name) =>

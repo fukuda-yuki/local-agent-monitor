@@ -94,7 +94,10 @@ public sealed class RetentionCompatibilityContractTests
         Assert.Equal(HttpStatusCode.OK, metadata.StatusCode);
         using var absent = await sanitized.Client.GetAsync($"/sessions/{sessionId}/events/{readableEvent}/content");
         Assert.Equal(HttpStatusCode.NotFound, absent.StatusCode);
-        Assert.Equal("application/json", absent.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("application/json", absent.Content.Headers.ContentType?.ToString());
+        Assert.Null(absent.Content.Headers.ContentType?.CharSet);
+        Assert.Equal("{\"accepted\":false,\"error\":\"unsupported_endpoint\",\"message\":\"Only /v1/traces is supported.\"}"u8.ToArray(), await absent.Content.ReadAsByteArrayAsync());
+        Assert.Null(absent.Headers.CacheControl); Assert.False(absent.Headers.Contains("ETag")); Assert.Null(absent.Content.Headers.LastModified);
     }
 
     private static Type RetentionType(string name) =>
