@@ -29,10 +29,10 @@ public sealed class RetentionContractTests
             {
                 "MigrationBlocked", "MissingTimestamp", "InvalidIdentity", "OwnershipMismatch",
                 "CaptureIncomplete", "LeaseConflict", "LeaseLost", "DeleteBusy", "DeletePermissionDenied",
-                "DeleteIoFailed", "UnexpectedSourceMissing", "RetryExhausted", "MaintenanceBusy",
-                "AdapterCoverageMismatch", "ItemLimitExceeded"
+                "DeleteIoFailed", "UnexpectedSourceMissing", "MaintenanceBusy", "ItemLimitExceeded"
             },
             EnumNames("RetentionErrorCode"));
+        Assert.Equal(new[] { "RetryExhausted", "AdapterCoverageMismatch" }, EnumNames("RetentionWorkerDiagnosticCode"));
     }
 
     [Fact]
@@ -48,6 +48,42 @@ public sealed class RetentionContractTests
         foreach (var lifecycle in new[] { "ExpiredPendingDeletion", "DeletionQueued", "Deleting", "Deleted", "DeletionFailed" })
         {
             Assert.Equal("expired_pending_deletion", Project(project!, lifecycle, true));
+        }
+    }
+
+    [Fact]
+    public void RetentionV1Constants_PinFinitePoliciesSchedulingAndDisposition()
+    {
+        var constants = RetentionType("RetentionV1Constants");
+        Assert.Equal(1, constants.GetProperty("CatalogSchemaVersion")!.GetValue(null));
+        Assert.Equal(1, constants.GetProperty("AdapterCoverageVersion")!.GetValue(null));
+        Assert.Equal("raw-default-90d", constants.GetProperty("RawDefaultPolicyId")!.GetValue(null));
+        Assert.Equal(TimeSpan.FromDays(90), constants.GetProperty("RawDefaultTtl")!.GetValue(null));
+        Assert.Equal("sensitive-bundle-7d", constants.GetProperty("SensitiveBundlePolicyId")!.GetValue(null));
+        Assert.Equal(TimeSpan.FromDays(7), constants.GetProperty("SensitiveBundleTtl")!.GetValue(null));
+        Assert.Equal(new[] { TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(30), TimeSpan.FromHours(2) }, (TimeSpan[])constants.GetProperty("RetryDelays")!.GetValue(null)!);
+        Assert.Equal(100, constants.GetProperty("ExpiryScanItemLimit")!.GetValue(null));
+        Assert.Equal(5, constants.GetProperty("MaximumDeleteAttempts")!.GetValue(null));
+        Assert.Equal(256, constants.GetProperty("MaximumFileMembers")!.GetValue(null));
+        Assert.Equal(128L * 1024 * 1024, constants.GetProperty("MaximumFileBytes")!.GetValue(null));
+    }
+
+    [Fact]
+    public void SessionV1Projection_CoversNormativeRouteConditions()
+    {
+        var conditionType = RetentionType("RetentionSessionV1Condition");
+        var projection = RetentionType("RetentionSessionV1Projection");
+        var project = projection.GetMethod("ProjectCondition")!;
+        var expected = new Dictionary<string, string>
+        {
+            ["NeverCaptured"] = "not_captured", ["ReadableExpiring"] = "expiring", ["ReadableRetainedByPolicy"] = "expiring",
+            ["DeniedLifecycle"] = "expired_pending_deletion", ["StaleMissingOrRepairBlocked"] = "expired_pending_deletion",
+            ["ReadableAndDeniedSiblings"] = "expiring", ["CapturedWithoutReadableSibling"] = "expired_pending_deletion",
+            ["Unknown"] = "not_captured", ["SanitizedOnly"] = "not_captured"
+        };
+        foreach (var pair in expected)
+        {
+            Assert.Equal(pair.Value, project.Invoke(null, [Enum.Parse(conditionType, pair.Key)])!);
         }
     }
 

@@ -39,11 +39,14 @@ public enum RetentionErrorCode
     DeletePermissionDenied,
     DeleteIoFailed,
     UnexpectedSourceMissing,
-    RetryExhausted,
     MaintenanceBusy,
-    AdapterCoverageMismatch,
     ItemLimitExceeded
 }
+
+public enum RetentionWorkerDiagnosticCode { RetryExhausted, AdapterCoverageMismatch }
+public enum RetentionCapturePhase { Reserved, Staging, PublishedPendingCatalog, Complete }
+public enum RetentionInventoryCategory { RequiredCleanup, RetainedByPolicy, NotApplicable, Blocked }
+public enum RetentionSessionV1Condition { NeverCaptured, ReadableExpiring, ReadableRetainedByPolicy, DeniedLifecycle, StaleMissingOrRepairBlocked, ReadableAndDeniedSiblings, CapturedWithoutReadableSibling, Unknown, SanitizedOnly }
 
 public sealed record RetentionItemSummary(
     string ItemId,
@@ -75,4 +78,28 @@ public static class RetentionSessionV1Projection
             : lifecycle is RetentionItemLifecycle.Expiring or RetentionItemLifecycle.RetainedByPolicy
                 ? "expiring"
                 : "expired_pending_deletion";
+
+    public static string ProjectCondition(RetentionSessionV1Condition condition) => condition switch
+    {
+        RetentionSessionV1Condition.ReadableExpiring or RetentionSessionV1Condition.ReadableRetainedByPolicy or RetentionSessionV1Condition.ReadableAndDeniedSiblings => "expiring",
+        RetentionSessionV1Condition.DeniedLifecycle or RetentionSessionV1Condition.StaleMissingOrRepairBlocked or RetentionSessionV1Condition.CapturedWithoutReadableSibling => "expired_pending_deletion",
+        _ => "not_captured"
+    };
+}
+
+public static class RetentionV1Constants
+{
+    public static int CatalogSchemaVersion => 1; public static int AdapterCoverageVersion => 1; public static int ExpiryScanItemLimit => 100; public static int ClaimBatchLimit => 100; public static int MaximumActiveDeletionWorkers => 2; public static int MaximumDeleteAttempts => 5; public static int MaximumFileMembers => 256; public static int StatusItemSummaryLimit => 100;
+    public static long MaximumFileBytes => 128L * 1024 * 1024;
+    public static string RawDefaultPolicyId => "raw-default-90d"; public static string SensitiveBundlePolicyId => "sensitive-bundle-7d";
+    public static TimeSpan RawDefaultTtl => TimeSpan.FromDays(90);
+    public static TimeSpan SensitiveBundleTtl => TimeSpan.FromDays(7);
+    public static TimeSpan ScanElapsedBudget => TimeSpan.FromSeconds(30);
+    public static TimeSpan WorkerWakeInterval => TimeSpan.FromSeconds(15);
+    public static TimeSpan LeaseDuration => TimeSpan.FromMinutes(2);
+    public static TimeSpan LeaseRenewalDeadline => TimeSpan.FromMinutes(1);
+    public static TimeSpan ActiveOperationQuiescenceBound => TimeSpan.FromMinutes(2);
+    public static TimeSpan ShutdownDrainBound => TimeSpan.FromMinutes(2);
+    public static TimeSpan WalMaintenanceRetryDelay => TimeSpan.FromMinutes(1);
+    public static TimeSpan[] RetryDelays => [TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(30), TimeSpan.FromHours(2)];
 }

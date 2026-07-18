@@ -534,6 +534,10 @@ and `analysis_sdk_directory`. The closed lifecycle is `expiring`,
 `deleting`, `deleted`, and `deletion_failed`. `not_captured` and `mixed` are
 aggregate-only values and are never persisted item states. Inventory categories
 are `required_cleanup`, `retained_by_policy`, `not_applicable`, and `blocked`.
+The later approved retention-status detail positively allowlists
+`inventory_category` on `RetentionItemSummary`; that detail is authoritative
+over earlier generic DTO wording and the field is a closed inventory category,
+never a locator or source identity.
 
 `raw-default-90d` v1 applies to Session content, raw records, analysis raw, and
 SDK directories. `sensitive-bundle-7d` v1 applies only to Sensitive Bundles.

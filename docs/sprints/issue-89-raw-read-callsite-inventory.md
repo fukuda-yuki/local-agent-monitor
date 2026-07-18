@@ -7,11 +7,14 @@ This inventory is a bounded product-callsite inventory, not filesystem discovery
 | --- | --- | --- | --- |
 | Session event content HTTP read | `src/CopilotAgentObservability.LocalMonitor/Sessions/SessionRoutes.cs` | `required_cleanup` | Exact `session_event_content` catalog item, readable revision, access lease |
 | Session content persistence/read | `src/CopilotAgentObservability.Persistence.Sqlite/Sessions/SqliteSessionStore.cs` | `required_cleanup` | Exact event ID/Session provenance and catalog transaction |
-| Monitor raw projection load | `src/CopilotAgentObservability.Persistence.Sqlite/RawTelemetryStore.cs` | `required_cleanup` | Exact `raw_record` item and projection access lease |
-| Monitor raw-detail/prompt/span reads | `src/CopilotAgentObservability.LocalMonitor` raw-bearing routes | `required_cleanup` | Exact `raw_record` item and access lease |
-| Analysis raw tool-data/result load | `src/CopilotAgentObservability.LocalMonitor/Analysis` | `required_cleanup` | Exact `analysis_run_raw` item and operation lease |
-| Active analysis SDK operation | `src/CopilotAgentObservability.LocalMonitor` analysis runner | `required_cleanup` | Exact `analysis_sdk_directory` item and operation lease |
-| Sensitive Bundle read/resume/enumeration | `src/CopilotAgentObservability.ConfigCli` candidate generation | `required_cleanup` | Explicit existing `--retention-database`, exact `sensitive_bundle` item, access/operation lease |
+| Monitor raw projection/read | `src/CopilotAgentObservability.Persistence.Sqlite/RawTelemetryStore.cs:531,553` | `required_cleanup` | Exact `raw_record` item and projection access lease |
+| Claude Doctor fact raw reader | `src/CopilotAgentObservability.ConfigCli/FirstTrace/ClaudeCode/ClaudeDoctorFactCollector.cs:503` | `required_cleanup` | Exact `raw_record` item and access lease |
+| Claude Doctor candidate raw reader | `src/CopilotAgentObservability.Persistence.Sqlite/Doctor/ClaudeCode/ClaudeDoctorCandidateObserver.cs:173` | `required_cleanup` | Exact `raw_record` item and access lease |
+| Session OTel enrichment raw reader | `src/CopilotAgentObservability.Persistence.Sqlite/Sessions/SqliteSessionOtelEnricher.cs:296` | `required_cleanup` | Exact `raw_record` item and access lease |
+| Analysis tool-data raw reader | `src/CopilotAgentObservability.LocalMonitor/Analysis/DotNetCopilotRawAnalysisRunner.cs:398,407` | `required_cleanup` | Exact `raw_record` and `analysis_run_raw` items plus operation lease |
+| Analysis result reader | `src/CopilotAgentObservability.LocalMonitor/Analysis/SqliteMonitorAnalysisStore.cs:122,138` | `required_cleanup` | Exact `analysis_run_raw` item and access lease |
+| Active analysis SDK directory | `src/CopilotAgentObservability.LocalMonitor/Analysis/DotNetCopilotRawAnalysisRunner.cs:79-84,268-304` | `blocked` | Future exact `analysis_sdk_directory` operation lease; no current ownership proof |
+| Sensitive Bundle path | `src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/SensitiveBundleWriter.cs:17-120` | `blocked` | Explicit catalog binding and exact owned `sensitive_bundle` lease required before read/resume/enumeration |
 | Caller-supplied raw OTLP file | Config CLI `--raw` input | `not_applicable` | Caller-owned; never catalog or delete |
 
 Safe monitor projections, Session/Event metadata, analysis safe summaries,
