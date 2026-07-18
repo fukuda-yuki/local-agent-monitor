@@ -111,7 +111,7 @@ public static class RetentionSessionV1Projection
 
 public static class RetentionV1Constants
 {
-    public static int CatalogSchemaVersion => 1; public static int AdapterCoverageVersion => 0; public static int ExpiryScanItemLimit => 100; public static int ClaimBatchLimit => 100; public static int MaximumActiveDeletionWorkers => 2; public static int MaximumDeleteAttempts => 5; public static int MaximumFileMembers => 256; public static int StatusItemSummaryLimit => 100;
+    public static int CatalogSchemaVersion => 1; public static int AdapterCoverageVersion => 1; public static int ExpiryScanItemLimit => 100; public static int ClaimBatchLimit => 100; public static int MaximumActiveDeletionWorkers => 2; public static int MaximumDeleteAttempts => 5; public static int MaximumFileMembers => 256; public static int StatusItemSummaryLimit => 100;
     public static long MaximumFileBytes => 128L * 1024 * 1024;
     public static string RawDefaultPolicyId => "raw-default-90d"; public static string SensitiveBundlePolicyId => "sensitive-bundle-7d";
     public static TimeSpan RawDefaultTtl => TimeSpan.FromDays(90);
