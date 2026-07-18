@@ -126,6 +126,11 @@ internal sealed class ClaudeCodeFirstTraceAdapter : IFirstTraceSourceAdapter
                 && string.Equals(candidate.SourceAdapter, ExpectedSourceAdapterToken, StringComparison.Ordinal)
                 && candidate.ExpiresAt > now)
             .ToArray();
+        if (current.Length == 0)
+        {
+            return FirstTraceEvidenceSelection.NoEligibleCandidates;
+        }
+
         var bindings = current
             .Where(candidate => candidate.EvidenceKind == DoctorEvidenceKind.ExactSessionBinding)
             .Select(candidate => TryParseBinding(candidate.EvidenceRef, out var binding)

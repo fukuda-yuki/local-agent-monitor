@@ -35,12 +35,15 @@ internal sealed record FirstTraceGuidance(
 
 internal sealed record FirstTraceEvidenceSelection(
     bool RequiresExplicitSelection,
-    IReadOnlyList<string> EvidenceRefs)
+    IReadOnlyList<string> EvidenceRefs,
+    bool HasEligibleCandidates)
 {
-    public static FirstTraceEvidenceSelection Explicit { get; } = new(true, []);
+    public static FirstTraceEvidenceSelection NoEligibleCandidates { get; } = new(false, [], false);
+
+    public static FirstTraceEvidenceSelection Explicit { get; } = new(true, [], true);
 
     public static FirstTraceEvidenceSelection Auto(IReadOnlyList<string> evidenceRefs) =>
-        new(false, evidenceRefs);
+        new(false, evidenceRefs, true);
 }
 
 internal record FirstTraceRequest(

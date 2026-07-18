@@ -229,7 +229,7 @@ internal sealed class FirstTraceOrchestrator
         }
 
         var adapter = ResolveAdapter(verification);
-        if (adapter is null)
+        if (adapter is null || !TryPrepare(adapter, request, requireInteraction: false, out var endpoint))
         {
             return DoctorFailure(
                 request.Command,
@@ -255,6 +255,30 @@ internal sealed class FirstTraceOrchestrator
         if (evidenceRefs.Count == 0)
         {
             var selection = adapter.SelectEvidence(candidates, UtcNow());
+            if (!selection.HasEligibleCandidates)
+            {
+                var freshSnapshot = adapter.CollectFacts(
+                    request.DatabasePath,
+                    endpoint,
+                    verification) with
+                {
+                    Observations = [],
+                };
+                var evaluation = application.Evaluate(freshSnapshot);
+                return new FirstTraceEnvelope(
+                    request.Command,
+                    Success: false,
+                    FirstTraceCodes.NotReady,
+                    adapter.AdapterId,
+                    adapter.SourceSurface,
+                    verification.VerificationId,
+                    evaluation,
+                    EvaluationPreview: null,
+                    Guidance: [],
+                    candidates,
+                    Truncated: false);
+            }
+
             if (selection.RequiresExplicitSelection)
             {
                 return new FirstTraceEnvelope(
@@ -274,9 +298,6 @@ internal sealed class FirstTraceOrchestrator
             evidenceRefs = selection.EvidenceRefs;
         }
 
-        var endpoint = adapter.TryNormalizeEndpoint(null, out var normalizedEndpoint)
-            ? normalizedEndpoint
-            : string.Empty;
         var snapshot = adapter.CollectFacts(request.DatabasePath, endpoint, verification) with
         {
             Observations = [],

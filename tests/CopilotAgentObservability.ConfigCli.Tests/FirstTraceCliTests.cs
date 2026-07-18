@@ -271,6 +271,52 @@ public sealed class FirstTraceCliTests
     }
 
     [Fact]
+    public void Complete_WithNoEligibleCandidatesReturnsNotReadyAndKeepsVerificationActive()
+    {
+        using var database = new TemporaryDatabase();
+        var adapter = new TestFirstTraceAdapter();
+        var orchestrator = CreateOrchestrator(adapter);
+        var begin = Run(
+            ["begin", "--database", database.Path, "--adapter", adapter.AdapterId, "--json"],
+            orchestrator);
+        var verification = DoctorJson.DeserializeResult(
+            JsonDocument.Parse(begin.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+
+        var result = Run(
+            [
+                "complete", "--database", database.Path, "--verification-id", verification.VerificationId,
+                "--expected-revision", "1", "--json",
+            ],
+            orchestrator);
+
+        Assert.Equal(3, result.ExitCode);
+        using var complete = JsonDocument.Parse(result.Output);
+        Assert.Equal(FirstTraceCodes.NotReady, complete.RootElement.GetProperty("code").GetString());
+        var doctorJson = complete.RootElement.GetProperty("doctor").GetRawText();
+        var doctor = DoctorJson.DeserializeResult(doctorJson);
+        Assert.Equal("doctor.v1", complete.RootElement.GetProperty("doctor").GetProperty("schema_version").GetString());
+        Assert.Equal(DoctorResultCode.EvaluationCompleted, doctor.Code);
+        Assert.True(doctor.Success);
+        var evaluation = Assert.IsType<DoctorEvaluation>(doctor.Evaluation);
+        Assert.Equal(DoctorStateCode.ReadyNoRealTrace, evaluation.PrimaryState!.StateCode);
+        Assert.Equal(DoctorJson.SerializeResult(doctor), doctorJson);
+
+        var status = Run(
+            [
+                "status", "--database", database.Path, "--verification-id", verification.VerificationId,
+                "--json",
+            ],
+            orchestrator);
+
+        Assert.Equal(0, status.ExitCode);
+        using var statusDocument = JsonDocument.Parse(status.Output);
+        Assert.Equal(FirstTraceCodes.StatusReported, statusDocument.RootElement.GetProperty("code").GetString());
+        Assert.Equal(
+            "active",
+            statusDocument.RootElement.GetProperty("doctor").GetProperty("verification").GetProperty("state").GetString());
+    }
+
+    [Fact]
     public void Complete_WithExplicitEvidencePassesItThroughAndReportsNotReady()
     {
         using var database = new TemporaryDatabase();
@@ -666,8 +712,10 @@ public sealed class FirstTraceCliTests
             [new("common", "test guidance", includeSetupPlan ? "setup plan --adapter test-adapter --target cli" : null)];
 
         public FirstTraceEvidenceSelection SelectEvidence(IReadOnlyList<DoctorEvidenceCandidate> candidates, DateTimeOffset now) =>
-            RequireExplicitSelection || candidates.Count == 0
-                ? FirstTraceEvidenceSelection.Explicit
+            candidates.Count == 0
+                ? FirstTraceEvidenceSelection.NoEligibleCandidates
+                : RequireExplicitSelection
+                    ? FirstTraceEvidenceSelection.Explicit
                 : FirstTraceEvidenceSelection.Auto(candidates.Select(candidate => candidate.EvidenceRef).OrderBy(value => value, StringComparer.Ordinal).ToArray());
     }
 }

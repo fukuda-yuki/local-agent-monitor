@@ -174,6 +174,81 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     }
 
     [Fact]
+    public async Task HookOnlyWithoutOtelCompletesAsNotReadyWithoutCandidates()
+    {
+        var directory = CreateDirectory("claude-first-trace-hook-only");
+        var databasePath = Path.Combine(directory, "monitor.db");
+        var time = new DoctorTestTimeProvider(Now);
+        try
+        {
+            PrepareBaselineDatabase(databasePath, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, time);
+            var origin = monitor.Origin;
+            var monitorProbe = new RunningMonitorHttpProbe(monitor.Client);
+            var platform = CreatePlatform(databasePath, origin, monitorProbe);
+            var orchestrator = CreateOrchestrator(platform, time);
+
+            var verificationId = BeginVerification(orchestrator, databasePath, origin);
+            await monitor.PostSessionStartAsync("SYNTHETIC_HOOK_ONLY_SESSION");
+            await monitor.DrainAsync();
+            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+
+            using var status = RunFirstTrace(
+                orchestrator,
+                [
+                    "status", "--database", databasePath, "--verification-id", verificationId,
+                    "--endpoint", origin, "--json",
+                ],
+                expectedExitCode: 0);
+            Assert.Empty(status.RootElement.GetProperty("candidates").EnumerateArray());
+            Assert.True(
+                status.RootElement.GetProperty("evaluation_preview").ValueKind != JsonValueKind.Null,
+                status.RootElement.GetRawText());
+            Assert.Equal(
+                "partial_fact_snapshot",
+                status.RootElement.GetProperty("evaluation_preview").GetProperty("code").GetString());
+            Assert.Equal(
+                ["raw_persistence", "projection", "completeness_and_content"],
+                status.RootElement.GetProperty("evaluation_preview").GetProperty("evaluation")
+                    .GetProperty("missing_fact_families")
+                    .EnumerateArray().Select(item => item.GetString()!).ToArray());
+
+            using var complete = RunFirstTrace(
+                orchestrator,
+                [
+                    "complete", "--database", databasePath, "--verification-id", verificationId,
+                    "--expected-revision", "1", "--endpoint", origin, "--json",
+                ],
+                expectedExitCode: 3);
+            Assert.Equal(FirstTraceCodes.NotReady, complete.RootElement.GetProperty("code").GetString());
+            Assert.Equal("doctor.v1", complete.RootElement.GetProperty("doctor").GetProperty("schema_version").GetString());
+            Assert.Equal("partial_fact_snapshot", complete.RootElement.GetProperty("doctor").GetProperty("code").GetString());
+            Assert.False(complete.RootElement.GetProperty("doctor").GetProperty("success").GetBoolean());
+            Assert.Equal(
+                ["raw_persistence", "projection", "completeness_and_content"],
+                complete.RootElement.GetProperty("doctor").GetProperty("evaluation")
+                    .GetProperty("missing_fact_families")
+                    .EnumerateArray().Select(item => item.GetString()!).ToArray());
+            Assert.Empty(complete.RootElement.GetProperty("candidates").EnumerateArray());
+
+            using var after = RunFirstTrace(
+                orchestrator,
+                [
+                    "status", "--database", databasePath, "--verification-id", verificationId,
+                    "--endpoint", origin, "--json",
+                ],
+                expectedExitCode: 0);
+            Assert.Equal(
+                "active",
+                after.RootElement.GetProperty("doctor").GetProperty("verification").GetProperty("state").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CliJsonAndMonitorProjectionStayParityAcrossBindingAndContentStates()
     {
         var directory = CreateDirectory("claude-first-trace-projection-parity");

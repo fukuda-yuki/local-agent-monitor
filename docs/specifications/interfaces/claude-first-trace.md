@@ -30,7 +30,7 @@ verbs below. All verbs accept `--json`. Unknown or duplicate arguments are
 ```text
 first-trace begin  --database <path> --adapter claude-code [--endpoint <loopback-http-url>] [--interaction <interactive-cli|print|agent-sdk>] [--expires-at <iso-8601-utc>] [--json]
 first-trace status   --database <path> --verification-id <uuid-v7> [--endpoint <loopback-http-url>] [--json]
-first-trace complete --database <path> --verification-id <uuid-v7> --expected-revision <n> [--evidence <ref>]... [--json]
+first-trace complete --database <path> --verification-id <uuid-v7> --expected-revision <n> [--endpoint <loopback-http-url>] [--evidence <ref>]... [--json]
 first-trace cancel   --database <path> --verification-id <uuid-v7> --expected-revision <n> [--json]
 ```
 
@@ -40,6 +40,8 @@ first-trace cancel   --database <path> --verification-id <uuid-v7> --expected-re
 - `--endpoint` names the Local Monitor canonical loopback origin used for the
   liveness/readiness probes and endpoint-alignment comparison, with exactly
   the validation and default the setup contract's `--endpoint` option uses.
+  `begin`, `status`, and `complete` accept it; `cancel` does not perform fact
+  collection and does not accept it.
 - `--adapter` selects the registered first-trace source adapter. v1 accepts
   only `claude-code`; anything else is `invalid_arguments`.
 - `--interaction` selects which bounded-interaction guidance variant is

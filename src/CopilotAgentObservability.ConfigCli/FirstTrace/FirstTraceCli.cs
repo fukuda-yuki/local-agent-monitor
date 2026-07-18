@@ -252,7 +252,7 @@ internal static class FirstTraceCli
                 1,
                 "complete",
                 ["--database", "--verification-id", "--expected-revision"],
-                ["--evidence"],
+                ["--endpoint", "--evidence"],
                 repeatEvidence: true,
                 out options),
             "cancel" => TryParseCommand(
