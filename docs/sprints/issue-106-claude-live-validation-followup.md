@@ -273,10 +273,12 @@ clean).
 
 ## Issue #110 targeted live rerun — 2026-07-19
 
-This authorized targeted rerun records no prompt/response values, marker text,
-trace or session identifiers, paths, credentials, command arguments/results,
-or producer output. It exercised clean candidate `2c809f0` with Claude Code
-`2.1.214` on a disposable loopback Local Monitor and temporary state. The
+This authorized targeted rerun records no sensitive arguments, prompt/tool
+payload content, raw producer/command output, marker value, trace/session
+identifier values, credentials, or expanded paths. It intentionally retains
+the high-level command surface, exit/status classification, and scan result as
+evidence. It exercised clean candidate `2c809f0` with Claude Code `2.1.214`
+on a disposable loopback Local Monitor and temporary state. The
 operator-authorization preflight passed.
 
 - A single controlled, gate-disabled `claude -p` interaction was ingested.
