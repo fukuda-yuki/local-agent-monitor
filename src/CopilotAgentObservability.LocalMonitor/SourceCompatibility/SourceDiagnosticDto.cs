@@ -138,7 +138,7 @@ internal static class SourceProjectionStateBuilder
 
     private static bool IsExactOtelEvent(ObservedSessionEvent eventItem) =>
         !string.IsNullOrWhiteSpace(eventItem.TraceId)
-        && eventItem.SourceAdapter is "claude-code-otel" or "otel-exact";
+        && eventItem.MatchKind is SessionMatchKind.ExactNative or SessionMatchKind.ExplicitLink;
 
     private static IReadOnlyList<string> CompletenessReasons(
         IReadOnlyList<SourceCompatibilityRow> observations,
