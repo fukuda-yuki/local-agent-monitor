@@ -300,3 +300,105 @@ failure and failed leak scan leave the authorized rerun incomplete. This is not
 a pass, does not alter the interface specification, and does not establish
 main integration. Issue #110 remains open; Issue #105 remains blocked pending
 main/shared-branch integration and a complete authorized rerun.
+
+## Issue #110 completed live rerun — 2026-07-19
+
+This rerun completes the targeted authorized rerun above. Producer
+authentication succeeded this session (the prior `BLOCKED_EXTERNAL`
+authentication failure did not reproduce). It exercised clean local `main`
+`502acd9` with Claude Code CLI `2.1.214 (Claude Code)` on a disposable,
+loopback-only Local Monitor and disposable temporary state, no reused
+operator process/database/Hook configuration. It records no raw prompt
+content, credentials, tool arguments/results, or expanded operator-specific
+paths; only exit codes, sanitized `content_state` values, presence/absence of
+the exact `<REDACTED>` sentinel, and `sha256:<first-12-hex-chars>` marker
+references are retained.
+
+### Environment
+
+| Field | Value |
+| --- | --- |
+| Local main / Monitor revision | `502acd9a47b9e79b8118463eac4edc521c8f237d` (`dotnet build CopilotAgentObservability.slnx` exit `0`) |
+| Claude Code CLI | `2.1.214 (Claude Code)` |
+| OS / execution boundary | Windows native shell; disposable Local Monitor process per case; disposable SQLite database per case; throwaway project directories under an OS-temp-rooted disposable root (`tmp/issue-106-validation`, gitignored) |
+| Loopback Monitor URL | `http://127.0.0.1:4324` |
+| OTLP endpoint / protocol | `/v1/traces`; `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`, per-signal trace endpoint |
+| Sanitized-only flag | `false` (raw-default mode, to permit the raw-local-only sentinel check) |
+| Preflight | `preflight.ps1 -OperatorAuthorized` — all seven checks `PASS`, `preflight_result: PASS`, exit `0` |
+| Content-enabled gate state | `OTEL_LOG_USER_PROMPTS=1`, case 1A only |
+| Gate-disabled state | `OTEL_LOG_USER_PROMPTS` unset, case 1B `-p` and 1B interactive |
+| Truncated marker references | 1A `sha256:06ca726e3901`; 1B `-p` `sha256:35b0f9535591`; 1B interactive `sha256:8859441dd361` |
+
+### Case 1A — gate-enabled `claude -p` (regression check)
+
+- `claude -p` exit `0`.
+- Raw-local-only check (`GET /traces/{rawRecordId}/raw`): the
+  `claude_code.interaction` span's `user_prompt` attribute key was present
+  and contained the runtime marker (`key_present_nonempty`, marker `MATCH`);
+  not copied into this record.
+- Sanitized `GET /api/monitor/traces` reported `content_state=available` for
+  this trace. Sanitized list/spans endpoints contained no marker.
+- **Result:** **passed** — the #107 `available` derivation still holds on
+  local `main`.
+
+### Case 1B — gate-disabled `claude -p` (#110)
+
+- `claude -p` exit `0`.
+- Raw-local-only check: the `claude_code.interaction` span carried a
+  `user_prompt` attribute with `stringValue` byte-equal to the literal
+  sentinel `<REDACTED>`, plus a sibling `user_prompt_length` integer
+  attribute (`key_present_nonempty`, sentinel value only, not the runtime
+  marker; the marker itself never appeared in this or any other raw
+  payload for this case).
+- Sanitized `GET /api/monitor/traces` reported **`content_state=not_captured`**
+  for this trace — the exact target behavior for this validation.
+- **Result:** **passed**.
+
+### Case 1B interactive — gate-disabled interactive session (#110)
+
+- Terminal automation for a genuine attended TTY session was not available
+  in this environment/toolset. As a documented scope substitution, the
+  interactive (non-`-p`) `claude` invocation was driven via piped stdin
+  (single marker line, then stdin EOF), which exercises the interactive
+  (non-print) code path and exited cleanly (exit `0`) without a real
+  terminal UI. This is **not** a claim of TTY-equivalent coverage; it is
+  recorded as a distinct, narrower observation than the prior session's
+  UI-automation-driven genuine TTY run.
+- Raw-local-only check: same `claude_code.interaction` shape as case 1B,
+  `user_prompt` `stringValue` byte-equal to `<REDACTED>`, sibling
+  `user_prompt_length` integer attribute present.
+- Sanitized `GET /api/monitor/traces` reported `content_state=not_captured`
+  for this trace.
+- **Result:** **passed**, with the TTY-substitution caveat above recorded as
+  unverified scope (genuine attended-TTY interactive coverage remains
+  unexercised this session).
+
+### Leak scans and cleanup
+
+- `scan-leaks.ps1` (repository-output scope: uncommitted diff + untracked
+  files; no `-LogDirectory` supplied after case 1A's own producer-output
+  capture file — which necessarily contained its own marker by design — was
+  removed rather than scanned, since that scope is for the Local Monitor's
+  own application logs, not a deliberately marker-bearing operator capture
+  file): `scan_result: PASS`, exit `0`, for case 1A, case 1B `-p`, and case
+  1B interactive.
+- `cleanup.ps1 -DisposableRoot tmp/issue-106-validation -Port 4324`:
+  `cleanup_result: PASS`, exit `0`. Verified after cleanup: the disposable
+  root no longer exists, no process remains bound to port `4324`, and
+  `git status --porcelain` is clean (no untracked files; `tmp/` is
+  gitignored throughout).
+
+### Classification
+
+| Case | Classification | Note |
+| --- | --- | --- |
+| Gate-enabled `claude -p` (regression) | **passed** | `content_state=available`, unchanged from the frozen-candidate final run |
+| Gate-disabled `claude -p` (#110) | **passed** | Raw sentinel `<REDACTED>` + `user_prompt_length` observed; sanitized `content_state=not_captured` |
+| Gate-disabled interactive (#110) | **passed**, scope caveat | Same sentinel/derivation confirmed; driven via non-TTY piped stdin, not an attended TTY session — recorded as narrower than full interactive coverage |
+
+Issue #110's target behavior — the producer's gate-disabled `<REDACTED>`
+placeholder deriving `content_state=not_captured` rather than `available` —
+is confirmed against the real producer and local `main` `502acd9`. The one
+unverified scope item is a genuine attended-TTY interactive session; no other
+requested check was skipped, softened, or blocked. No push, PR, or issue
+close was performed.
