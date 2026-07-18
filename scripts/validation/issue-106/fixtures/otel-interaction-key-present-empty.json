@@ -1,0 +1,32 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "claude-code" } },
+          { "key": "validation.marker", "value": { "stringValue": "MARKER-PLACEHOLDER" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "com.anthropic.claude_code", "version": "synthetic-106" },
+          "spans": [
+            {
+              "traceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "spanId": "bbbbbbbbbbbbbbbb",
+              "name": "claude_code.interaction",
+              "kind": 1,
+              "startTimeUnixNano": "2000000000",
+              "endTimeUnixNano": "2100000000",
+              "attributes": [
+                { "key": "session.id", "value": { "stringValue": "SYNTHETIC_SESSION_106" } },
+                { "key": "user_prompt", "value": { "stringValue": "" } }
+              ],
+              "status": { "code": 0 }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "UserPromptSubmit",
+  "session_id": "SYNTHETIC_NATIVE_SESSION_106",
+  "transcript_path": "/synthetic/issue-106/session.jsonl",
+  "cwd": "/synthetic/issue-106/project",
+  "prompt": "MARKER-PLACEHOLDER",
+  "prompt_id": "SYNTHETIC_PROMPT_106",
+  "permission_mode": "default"
+}
