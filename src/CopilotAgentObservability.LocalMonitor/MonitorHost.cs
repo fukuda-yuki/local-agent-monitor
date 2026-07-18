@@ -119,7 +119,7 @@ internal static class MonitorHost
         var sessionTimeProvider = timeProvider;
         ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, sessionTimeProvider);
         sessionStore.CreateSchema();
-        new RetentionCatalogStore(options.DatabasePath).CreateSchema();
+        new RetentionCatalogStore(options.DatabasePath, timeProvider).CreateSchema();
         builder.Services.AddSingleton(sessionStore);
         var proposalApplyRuntimePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!, "proposal-apply");
         var proposalApplyService = new ProposalApplyService(options.ApplyRoots ?? [], proposalApplyRuntimePath, sessionStore);

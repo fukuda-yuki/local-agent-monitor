@@ -111,7 +111,7 @@ public static class RetentionSessionV1Projection
 
 public static class RetentionV1Constants
 {
-    public static int CatalogSchemaVersion => 1; public static int AdapterCoverageVersion => 1; public static int ExpiryScanItemLimit => 100; public static int ClaimBatchLimit => 100; public static int MaximumActiveDeletionWorkers => 2; public static int MaximumDeleteAttempts => 5; public static int MaximumFileMembers => 256; public static int StatusItemSummaryLimit => 100;
+    public static int CatalogSchemaVersion => 1; public static int AdapterCoverageVersion => 0; public static int ExpiryScanItemLimit => 100; public static int ClaimBatchLimit => 100; public static int MaximumActiveDeletionWorkers => 2; public static int MaximumDeleteAttempts => 5; public static int MaximumFileMembers => 256; public static int StatusItemSummaryLimit => 100;
     public static long MaximumFileBytes => 128L * 1024 * 1024;
     public static string RawDefaultPolicyId => "raw-default-90d"; public static string SensitiveBundlePolicyId => "sensitive-bundle-7d";
     public static TimeSpan RawDefaultTtl => TimeSpan.FromDays(90);
@@ -126,7 +126,7 @@ public static class RetentionV1Constants
     public static TimeSpan[] RetryDelays => [TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(30), TimeSpan.FromHours(2)];
 }
 
-public enum RetentionLeaseKind { Access, Operation }
+public enum RetentionLeaseKind { Access, Operation, Deletion }
 
 public sealed record RetentionOwnershipKey(string StoreInstanceId, RetentionStoreKind StoreKind, string SourceItemId);
 
@@ -147,14 +147,16 @@ public sealed class RetentionMigrationBlockedException : InvalidOperationExcepti
 public sealed class RetentionReadLeaseHandle : IDisposable
 {
     private readonly Action release;
-    internal RetentionReadLeaseHandle(string itemId, long revision, Action release)
+    internal RetentionReadLeaseHandle(string itemId, long revision, long generation, Action release)
     {
         ItemId = itemId;
         Revision = revision;
+        Generation = generation;
         this.release = release;
     }
 
     public string ItemId { get; }
     public long Revision { get; }
+    public long Generation { get; }
     public void Dispose() => release();
 }

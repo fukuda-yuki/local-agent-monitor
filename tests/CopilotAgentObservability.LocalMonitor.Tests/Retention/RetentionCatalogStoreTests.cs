@@ -121,6 +121,80 @@ public sealed class RetentionCatalogStoreTests
     }
 
     [Fact]
+    public void CreateSchema_RejectsInvalidCatalogRowsWithoutChangingCommittedState()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var store = new RetentionCatalogStore(path); store.CreateSchema();
+            var before = Scalar<long>(path, "SELECT COUNT(*) FROM retention_items;");
+
+            Assert.Throws<SqliteException>(() => Execute(path, $"INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,owner_reference,captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version) VALUES('bad-fk','not-a-store','raw_record','1','1','2026-07-12T00:00:00.0000000+00:00','2026-10-10T00:00:00.0000000+00:00','raw-default-90d',1,'expiring',1,{RetentionV1Constants.AdapterCoverageVersion});"));
+            Assert.Throws<SqliteException>(() => Execute(path, $"INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,owner_reference,captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version) VALUES('bad-domain',(SELECT store_instance_id FROM retention_store_instances),'unknown','2','2','2026-07-12T00:00:00.0000000+00:00','2026-10-10T00:00:00.0000000+00:00','raw-default-90d',1,'expiring',1,{RetentionV1Constants.AdapterCoverageVersion});"));
+            Assert.Throws<SqliteException>(() => Execute(path, $"INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,owner_reference,captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version) VALUES('bad-null',(SELECT store_instance_id FROM retention_store_instances),'raw_record','3','3','2026-07-12T00:00:00.0000000+00:00',NULL,'raw-default-90d',1,'expiring',1,{RetentionV1Constants.AdapterCoverageVersion});"));
+
+            Assert.Equal(before, Scalar<long>(path, "SELECT COUNT(*) FROM retention_items;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public async Task ReadGate_ExpiredLeaseIsReclaimedWithNewGenerationAndStaleDisposeCannotReleaseIt()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var time = new MutableTimeProvider(new DateTimeOffset(2026, 7, 12, 1, 0, 0, TimeSpan.Zero));
+            var store = new RetentionCatalogStore(path, time); store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var first = Assert.IsType<RetentionReadLeaseHandle>(await store.TryAcquireAsync(key, item.Revision, RetentionLeaseKind.Access, time.GetUtcNow(), CancellationToken.None));
+
+            time.Advance(RetentionV1Constants.LeaseDuration);
+            var replacement = Assert.IsType<RetentionReadLeaseHandle>(await store.TryAcquireAsync(key, item.Revision, RetentionLeaseKind.Access, time.GetUtcNow(), CancellationToken.None));
+            Assert.True(replacement.Generation > first.Generation);
+            first.Dispose();
+
+            Assert.Null(await store.TryAcquireAsync(key, item.Revision, RetentionLeaseKind.Access, time.GetUtcNow(), CancellationToken.None));
+            replacement.Dispose();
+            Assert.NotNull(await store.TryAcquireAsync(key, item.Revision, RetentionLeaseKind.Access, time.GetUtcNow(), CancellationToken.None));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public void CreateSchema_AlreadyExpiredLegacyRowsAreDeniedAtInjectedStartupTime()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var now = new DateTimeOffset(2026, 10, 11, 0, 0, 0, TimeSpan.Zero);
+            new RetentionCatalogStore(path, new MutableTimeProvider(now)).CreateSchema();
+
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_items WHERE state <> 'expired_pending_deletion' OR read_denied_at <> '2026-10-11T00:00:00.0000000+00:00' OR queued_at <> '2026-10-11T00:00:00.0000000+00:00';"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public async Task ReadGate_MissingExactRawRecordFailsClosedWithoutGrantingLease()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var store = new RetentionCatalogStore(path); store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            Execute(path, "DELETE FROM raw_records WHERE id=(SELECT MIN(id) FROM raw_records);");
+
+            Assert.Null(await store.TryAcquireAsync(key, item.Revision, RetentionLeaseKind.Access, item.CapturedAt, CancellationToken.None));
+            Assert.Equal(RetentionItemLifecycle.DeletionFailed, Assert.IsType<RetentionCatalogItem>(store.Find(key)).State);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
     public void CreateSchema_NewerComponentVersionIsSanitizedAndAtomic()
     {
         var path = CopyFixture("monitor", "monitor-v5.sqlite");
@@ -149,7 +223,7 @@ public sealed class RetentionCatalogStoreTests
         INSERT INTO monitor_analysis_runs VALUES(7,'fixture-trace',1,NULL,'trace','completed','2026-07-12T01:02:03.0000000+00:00',NULL,NULL,'synthetic result',NULL);
         """);
     private static string CopyFixture(string component, string file) { var path = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", component, file); var copy = Path.Combine(Path.GetTempPath(), $"retention-{Guid.NewGuid():N}.sqlite"); File.Copy(path, copy); return copy; }
-    private static SqliteConnection Open(string path) { var c = new SqliteConnection($"Data Source={path};Pooling=False"); c.Open(); return c; }
+    private static SqliteConnection Open(string path) { var c = new SqliteConnection($"Data Source={path};Pooling=False"); c.Open(); using var q=c.CreateCommand();q.CommandText="PRAGMA foreign_keys=ON;";q.ExecuteNonQuery(); return c; }
     private static T Scalar<T>(string path, string sql) { using var c=Open(path);using var q=c.CreateCommand();q.CommandText=sql;return (T)Convert.ChangeType(q.ExecuteScalar()!,typeof(T)); }
     private static bool TableExists(string path, string name) { using var c=Open(path);using var q=c.CreateCommand();q.CommandText="SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=$name);";q.Parameters.AddWithValue("$name",name);return Convert.ToInt64(q.ExecuteScalar())==1; }
     private static void Execute(string path, string sql) { using var c=Open(path);using var q=c.CreateCommand();q.CommandText=sql;q.ExecuteNonQuery(); }
