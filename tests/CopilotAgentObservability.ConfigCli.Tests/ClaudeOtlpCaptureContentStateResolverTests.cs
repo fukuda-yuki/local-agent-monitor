@@ -22,6 +22,20 @@ public class ClaudeOtlpCaptureContentStateResolverTests
     }
 
     [Fact]
+    public void Derive_InteractionSpanWithCapturedPromptAfterRedactedPrompt_ReturnsAvailable()
+    {
+        var payload = Payload("""
+            {"traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","spanId":"1111111111111111","name":"claude_code.interaction",
+             "attributes":[
+               {"key":"user_prompt","value":{"stringValue":"<REDACTED>"}},
+               {"key":"user_prompt","value":{"stringValue":"synthetic-non-empty-content"}}
+             ]}
+            """);
+
+        Assert.Equal(SourceCaptureContentState.Available, ClaudeOtlpCaptureContentStateResolver.Derive(payload));
+    }
+
+    [Fact]
     public void Derive_RecognizedSpanWithoutGatedContentField_ReturnsNotCaptured()
     {
         var payload = Payload("""

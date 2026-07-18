@@ -68,12 +68,15 @@ public static class ClaudeOtlpCaptureContentStateResolver
                 continue;
             }
 
-            return attribute.TryGetProperty("value", out var value)
+            if (attribute.TryGetProperty("value", out var value)
                 && value.ValueKind == JsonValueKind.Object
                 && value.TryGetProperty("stringValue", out var stringValue)
                 && stringValue.ValueKind == JsonValueKind.String
                 && !stringValue.ValueEquals(ReadOnlySpan<char>.Empty)
-                && !stringValue.ValueEquals("<REDACTED>".AsSpan());
+                && !stringValue.ValueEquals("<REDACTED>".AsSpan()))
+            {
+                return true;
+            }
         }
 
         return false;

@@ -35,4 +35,3 @@ Doctor's `ContentCaptureStatus.Disabled` mapping. The repository validation
 suite remains the final automated gate. The existing #106 gate-disabled live
 harness is rerun when its external Claude surface and authorization are
 available; repository-safe evidence must contain no prompt body.
-

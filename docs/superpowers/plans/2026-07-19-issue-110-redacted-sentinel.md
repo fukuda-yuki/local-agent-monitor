@@ -141,4 +141,3 @@ Add an Issue #110 row or update the Issue #106 note in `docs/task.md` with the i
 - [ ] **Step 4: Close GitHub Issue #110 only after integration is remotely reachable**
 
 Post a concise comment containing the implementation commit, decision table, automated validation, live evidence status, security boundary, no-migration conclusion, and #105 dependency release. Close as completed only when the fix commit is reachable from the repository's shared branch; local-only work is not sufficient.
-
