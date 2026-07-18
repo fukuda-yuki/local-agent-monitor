@@ -477,6 +477,9 @@ An available content response has this shape:
 
 The route is same-origin, uses `Cache-Control: no-store`, and is absent under
 `--sanitized-only` (`404`). Unknown Session/Event content also returns `404`.
+Under `--sanitized-only` the raw route is unregistered: same-host fallback is
+the immutable `404` JSON `{"accepted":false,"error":"unsupported_endpoint","message":"Only /v1/traces is supported."}` with `application/json`, no BOM/newline,
+and no Cache-Control/ETag/Last-Modified. This is not a Session DTO response.
 After expiry it returns `410` with:
 
 ```json

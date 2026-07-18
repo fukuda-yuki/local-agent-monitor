@@ -46,7 +46,8 @@ public enum RetentionErrorCode
 public enum RetentionWorkerDiagnosticCode { RetryExhausted, AdapterCoverageMismatch }
 public enum RetentionCapturePhase { Reserved, Staging, PublishedPendingCatalog, Complete }
 public enum RetentionInventoryCategory { RequiredCleanup, RetainedByPolicy, NotApplicable, Blocked }
-public enum RetentionSessionV1Condition { NeverCaptured, ReadableExpiring, ReadableRetainedByPolicy, DeniedLifecycle, StaleMissingOrRepairBlocked, ReadableAndDeniedSiblings, CapturedWithoutReadableSibling, Unknown, SanitizedOnly }
+public enum RetentionSessionV1Condition { NeverCaptured, ReadableExpiring, ReadableRetainedByPolicy, DeniedLifecycle, StaleMissingOrRepairBlocked, SelectedReadableWithDeniedSibling, SelectedDeniedWithReadableSibling, CapturedWithoutReadableSibling, UnknownSession, UnknownEvent, SanitizedOnly }
+public enum RetentionSessionRouteOutcome { Content, SessionNotFound, RouteAbsent }
 
 public sealed record RetentionItemSummary(
     string ItemId,
@@ -66,7 +67,12 @@ public sealed record RetentionItemSummary(
     RetentionErrorCode? ErrorCode,
     DateTimeOffset? RetryAt);
 
-public sealed record RetentionSessionV1TableResult(string? EventContentState, string? SessionRawRetentionState, int StatusCode, string? ContentType, byte[]? ErrorUtf8, bool RouteAbsent);
+public sealed record RetentionSessionV1TableResult(string? EventContentState, string? SessionRawRetentionState, int StatusCode, string? ContentType, byte[]? ErrorUtf8, bool RouteAbsent)
+{
+    public bool HasSessionDto => SessionRawRetentionState is not null;
+    public bool HasEventDto => EventContentState is not null;
+    public RetentionSessionRouteOutcome RouteOutcome => RouteAbsent ? RetentionSessionRouteOutcome.RouteAbsent : HasSessionDto || HasEventDto ? RetentionSessionRouteOutcome.Content : RetentionSessionRouteOutcome.SessionNotFound;
+}
 
 public static class RetentionSessionV1Projection
 {
@@ -83,16 +89,18 @@ public static class RetentionSessionV1Projection
 
     public static string ProjectCondition(RetentionSessionV1Condition condition) => condition switch
     {
-        RetentionSessionV1Condition.ReadableExpiring or RetentionSessionV1Condition.ReadableRetainedByPolicy or RetentionSessionV1Condition.ReadableAndDeniedSiblings => "expiring",
+        RetentionSessionV1Condition.ReadableExpiring or RetentionSessionV1Condition.ReadableRetainedByPolicy or RetentionSessionV1Condition.SelectedReadableWithDeniedSibling or RetentionSessionV1Condition.SelectedDeniedWithReadableSibling => "expiring",
         RetentionSessionV1Condition.DeniedLifecycle or RetentionSessionV1Condition.StaleMissingOrRepairBlocked or RetentionSessionV1Condition.CapturedWithoutReadableSibling => "expired_pending_deletion",
         _ => "not_captured"
     };
 
     public static RetentionSessionV1TableResult Describe(RetentionSessionV1Condition condition) => condition switch
     {
-        RetentionSessionV1Condition.NeverCaptured or RetentionSessionV1Condition.Unknown => new("not_captured", "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
+        RetentionSessionV1Condition.NeverCaptured => new("not_captured", "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
+        RetentionSessionV1Condition.UnknownSession => new(null, null, 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
+        RetentionSessionV1Condition.UnknownEvent => new(null, "not_captured", 404, "application/json", "{\"error\":\"session_event_content_not_found\"}"u8.ToArray(), false),
         RetentionSessionV1Condition.SanitizedOnly => new(null, null, 404, null, null, true),
-        RetentionSessionV1Condition.ReadableExpiring or RetentionSessionV1Condition.ReadableRetainedByPolicy or RetentionSessionV1Condition.ReadableAndDeniedSiblings => new("available", "expiring", 200, "application/json", null, false),
+        RetentionSessionV1Condition.ReadableExpiring or RetentionSessionV1Condition.ReadableRetainedByPolicy or RetentionSessionV1Condition.SelectedReadableWithDeniedSibling => new("available", "expiring", 200, "application/json", null, false),
         _ => new("expired_pending_deletion", "expired_pending_deletion", 410, "application/json", ExpiredContentResponseUtf8, false)
     };
 }

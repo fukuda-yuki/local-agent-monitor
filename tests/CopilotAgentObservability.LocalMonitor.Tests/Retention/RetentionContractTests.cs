@@ -95,13 +95,22 @@ public sealed class RetentionContractTests
         {
             ["NeverCaptured"] = "not_captured", ["ReadableExpiring"] = "expiring", ["ReadableRetainedByPolicy"] = "expiring",
             ["DeniedLifecycle"] = "expired_pending_deletion", ["StaleMissingOrRepairBlocked"] = "expired_pending_deletion",
-            ["ReadableAndDeniedSiblings"] = "expiring", ["CapturedWithoutReadableSibling"] = "expired_pending_deletion",
-            ["Unknown"] = "not_captured", ["SanitizedOnly"] = "not_captured"
+            ["SelectedReadableWithDeniedSibling"] = "expiring", ["SelectedDeniedWithReadableSibling"] = "expiring", ["CapturedWithoutReadableSibling"] = "expired_pending_deletion",
+            ["UnknownSession"] = "not_captured", ["UnknownEvent"] = "not_captured", ["SanitizedOnly"] = "not_captured"
         };
         foreach (var pair in expected)
         {
             Assert.Equal(pair.Value, project.Invoke(null, [Enum.Parse(conditionType, pair.Key)])!);
         }
+    }
+
+    [Fact]
+    public void SessionV1Table_DistinguishesUnknownAndSelectedSiblingOutcomes()
+    {
+        var type = RetentionType("RetentionSessionV1TableResult");
+        Assert.NotNull(type.GetProperty("HasSessionDto"));
+        Assert.NotNull(type.GetProperty("HasEventDto"));
+        Assert.NotNull(type.GetProperty("RouteOutcome"));
     }
 
     private static string[] EnumNames(string name) =>
