@@ -317,6 +317,59 @@ public sealed class FirstTraceCliTests
     }
 
     [Fact]
+    public void Complete_WithNoEligibleCandidatesUsesStatelessPreWindowEvaluationWhenWindowIsPartial()
+    {
+        using var database = new TemporaryDatabase();
+        var adapter = new TestFirstTraceAdapter();
+        var orchestrator = CreateOrchestrator(
+            adapter,
+            snapshot => snapshot.VerificationId is null
+                ? DoctorEvaluator.Evaluate(snapshot)
+                : new DoctorResult(
+                    DoctorSchemaVersions.ResultV1,
+                    Success: false,
+                    DoctorResultCode.PartialFactSnapshot,
+                    new DoctorEvaluation(snapshot.SourceSurface, null, [], ["raw_persistence"]),
+                    Verification: null));
+        var begin = Run(
+            ["begin", "--database", database.Path, "--adapter", adapter.AdapterId, "--json"],
+            orchestrator);
+        var verification = DoctorJson.DeserializeResult(
+            JsonDocument.Parse(begin.Output).RootElement.GetProperty("doctor").GetRawText()).Verification!;
+
+        var result = Run(
+            [
+                "complete", "--database", database.Path, "--verification-id", verification.VerificationId,
+                "--expected-revision", "1", "--json",
+            ],
+            orchestrator);
+
+        Assert.Equal(3, result.ExitCode);
+        using var complete = JsonDocument.Parse(result.Output);
+        var doctor = complete.RootElement.GetProperty("doctor");
+        Assert.Equal(FirstTraceCodes.NotReady, complete.RootElement.GetProperty("code").GetString());
+        Assert.Equal("evaluation_completed", doctor.GetProperty("code").GetString());
+        Assert.True(doctor.GetProperty("success").GetBoolean());
+        Assert.Equal(
+            "ready_no_real_trace",
+            doctor.GetProperty("evaluation").GetProperty("primary_state").GetProperty("state_code").GetString());
+        Assert.Empty(complete.RootElement.GetProperty("candidates").EnumerateArray());
+
+        var status = Run(
+            [
+                "status", "--database", database.Path, "--verification-id", verification.VerificationId,
+                "--json",
+            ],
+            orchestrator);
+
+        Assert.Equal(0, status.ExitCode);
+        Assert.Equal(
+            "active",
+            JsonDocument.Parse(status.Output).RootElement.GetProperty("doctor")
+                .GetProperty("verification").GetProperty("state").GetString());
+    }
+
+    [Fact]
     public void Complete_WithExplicitEvidencePassesItThroughAndReportsNotReady()
     {
         using var database = new TemporaryDatabase();

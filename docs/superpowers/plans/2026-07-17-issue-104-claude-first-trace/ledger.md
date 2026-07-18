@@ -26,6 +26,18 @@ integration step. Trust this file plus `git log` over conversation memory.
 | T8 104-E matrix | in progress | — | — | — | coverage-audit-first brief dispatched |
 | T9 freeze + handoff | pending | — | — | — | — |
 
+## Issue #104 repair log
+
+- 2026-07-18 — Zero-candidate `first-trace complete` repair: the
+  candidate-free path now retries a `partial_fact_snapshot` as a stateless
+  pre-window evaluation, returns `first_trace_not_ready` only with successful
+  `evaluation_completed` and a non-ready primary state, and leaves the
+  verification active. No candidate is selected or synthesized. Regression
+  evidence: `dotnet test tests\CopilotAgentObservability.Doctor.Tests\CopilotAgentObservability.Doctor.Tests.csproj --filter FullyQualifiedName~ClaudeFirstTraceCrossSurfaceTests`
+  (7/7) and `dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~FirstTraceCliTests`
+  (37/37). Changed orchestrator and focused tests; broader privacy/T9 findings
+  remain out of scope.
+
 ## Open items / unverified inter-issue interfaces
 
 - OPEN: confirm at T4 that the Doctor verification tables and the ingestion

@@ -265,6 +265,28 @@ internal sealed class FirstTraceOrchestrator
                     Observations = [],
                 };
                 var evaluation = application.Evaluate(freshSnapshot);
+                if (evaluation.Code == DoctorResultCode.PartialFactSnapshot)
+                {
+                    freshSnapshot = adapter.CollectFacts(
+                        request.DatabasePath,
+                        endpoint,
+                        verification: null) with
+                    {
+                        Observations = [],
+                    };
+                    evaluation = application.Evaluate(freshSnapshot);
+                }
+
+                if (!evaluation.Success)
+                {
+                    return DoctorFailure(
+                        request.Command,
+                        adapter,
+                        adapter.SourceSurface,
+                        verification.VerificationId,
+                        evaluation);
+                }
+
                 return new FirstTraceEnvelope(
                     request.Command,
                     Success: false,

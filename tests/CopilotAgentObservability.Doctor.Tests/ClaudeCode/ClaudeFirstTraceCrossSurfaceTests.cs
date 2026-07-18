@@ -222,13 +222,12 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 expectedExitCode: 3);
             Assert.Equal(FirstTraceCodes.NotReady, complete.RootElement.GetProperty("code").GetString());
             Assert.Equal("doctor.v1", complete.RootElement.GetProperty("doctor").GetProperty("schema_version").GetString());
-            Assert.Equal("partial_fact_snapshot", complete.RootElement.GetProperty("doctor").GetProperty("code").GetString());
-            Assert.False(complete.RootElement.GetProperty("doctor").GetProperty("success").GetBoolean());
+            Assert.Equal("evaluation_completed", complete.RootElement.GetProperty("doctor").GetProperty("code").GetString());
+            Assert.True(complete.RootElement.GetProperty("doctor").GetProperty("success").GetBoolean());
             Assert.Equal(
-                ["raw_persistence", "projection", "completeness_and_content"],
+                "ready_no_real_trace",
                 complete.RootElement.GetProperty("doctor").GetProperty("evaluation")
-                    .GetProperty("missing_fact_families")
-                    .EnumerateArray().Select(item => item.GetString()!).ToArray());
+                    .GetProperty("primary_state").GetProperty("state_code").GetString());
             Assert.Empty(complete.RootElement.GetProperty("candidates").EnumerateArray());
 
             using var after = RunFirstTrace(
