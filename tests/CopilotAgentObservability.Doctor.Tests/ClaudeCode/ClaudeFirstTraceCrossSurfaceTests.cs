@@ -35,6 +35,13 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
 
     private const string NativeSessionMarker = "SYNTHETIC_NATIVE_SESSION_X";
     private const string PromptMarker = "SYNTHETIC_PROMPT_MARKER";
+    private const string ResponseMarker = "SYNTHETIC_RESPONSE_MARKER";
+    private const string ToolArgumentsMarker = "SYNTHETIC_TOOL_ARGUMENTS_MARKER";
+    private const string ToolResultsMarker = "SYNTHETIC_TOOL_RESULTS_MARKER";
+    private const string CredentialMarker = "SYNTHETIC_CREDENTIAL_MARKER";
+    private const string AuthorizationMarker = "SYNTHETIC_AUTHORIZATION_MARKER";
+    private const string PiiMarker = "SYNTHETIC_PII_MARKER";
+    private const string SensitiveLocalPathMarker = "SYNTHETIC_SENSITIVE_LOCAL_PATH";
     private const string PathMarker = "SYNTHETIC_PATH_MARKER";
     private const string TranscriptPathMarker = "SYNTHETIC_TRANSCRIPT_PATH";
     private const string CwdMarker = "SYNTHETIC_WORKING_DIRECTORY";
@@ -703,6 +710,10 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                         {
                             Attribute("service.name", "claude-code"),
                             Attribute("service.version", "2.1.207"),
+                            Attribute("api_key", CredentialMarker),
+                            Attribute("authorization.token", AuthorizationMarker),
+                            Attribute("user.email", PiiMarker),
+                            Attribute("workspace.name", SensitiveLocalPathMarker),
                         },
                     },
                     ["scopeSpans"] = new JsonArray
@@ -739,12 +750,15 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         if (name == "claude_code.llm_request")
         {
             attributes.Add(Attribute("gen_ai.request.model", "claude-synthetic-model"));
+            attributes.Add(Attribute("gen_ai.response.text", ResponseMarker));
             attributes.Add(Attribute("input_tokens", 11));
             attributes.Add(Attribute("output_tokens", 7));
         }
         if (name == "claude_code.tool")
         {
             attributes.Add(Attribute("tool_name", "synthetic_tool"));
+            attributes.Add(Attribute("gen_ai.tool.arguments", ToolArgumentsMarker));
+            attributes.Add(Attribute("gen_ai.tool.result", ToolResultsMarker));
         }
 
         var span = new JsonObject
@@ -871,6 +885,13 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     {
         Assert.DoesNotContain(NativeSessionMarker, envelopeJson, StringComparison.Ordinal);
         Assert.DoesNotContain(PromptMarker, envelopeJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(ResponseMarker, envelopeJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(ToolArgumentsMarker, envelopeJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(ToolResultsMarker, envelopeJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(CredentialMarker, envelopeJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(AuthorizationMarker, envelopeJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(PiiMarker, envelopeJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(SensitiveLocalPathMarker, envelopeJson, StringComparison.Ordinal);
         Assert.DoesNotContain(PathMarker, envelopeJson, StringComparison.Ordinal);
         Assert.DoesNotContain(TranscriptPathMarker, envelopeJson, StringComparison.Ordinal);
         Assert.DoesNotContain(CwdMarker, envelopeJson, StringComparison.Ordinal);

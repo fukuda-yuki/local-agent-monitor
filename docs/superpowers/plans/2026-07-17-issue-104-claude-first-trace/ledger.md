@@ -23,7 +23,7 @@ integration step. Trust this file plus `git log` over conversation memory.
 | T6 first-trace verbs + adapter | pending | — | — | — | — |
 | T-109 projection defect fix | done | 09978b8, c807c7a, 8f4b6b7, d062f48 | SPS 5/0, Enrich 19/0, MigrationFixture 72/0, LM 1476/0, Doctor 255/0 | per-suite full by implementer | review APPROVE (no findings; exact/explicit-only projection, legacy NULL degrade, v12 migration sound, wire unchanged). No backfill: reach-reason not reconstructible from persisted data |
 | T7 cross-surface green | fix done, re-review pending | 3700d6b, a1e5db2 | cross-surface 2/0, Doctor 255/0 | — | review #1 REVISE (5) → a1e5db2 (no production change needed: real probes + setup-state carry-over worked); re-review dispatched |
-| T8 104-E matrix | in progress | — | — | — | coverage-audit-first brief dispatched |
+| T8 104-E matrix | done (bounded privacy repair) | pending current commit | cross-surface 7/0; `git diff --check` clean | — | Terra high fresh read-only review: APPROVE; no production change |
 | T9 freeze + handoff | pending | — | — | — | — |
 
 ## Issue #104 repair log
@@ -37,6 +37,23 @@ integration step. Trust this file plus `git log` over conversation memory.
   (7/7) and `dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~FirstTraceCliTests`
   (37/37). Changed orchestrator and focused tests; broader privacy/T9 findings
   remain out of scope.
+
+- 2026-07-18 — T8 bounded privacy-evidence repair: the Claude cross-surface
+  OTLP fixture now injects synthetic response, tool-argument, tool-result,
+  credential, authorization, PII, and sensitive-local-path markers while
+  retaining the existing prompt, native-session, path, transcript-path, and
+  cwd markers. `AssertNoSensitiveMarkers` is exercised through the existing
+  first-trace stdout/stderr boundaries for begin/status/complete, including
+  guidance, candidates, previews, and the not-ready path; setup plan/apply and
+  the owning Local Monitor security tests remain separate evidence. No
+  production code changed and no marker was added to repository-safe output.
+  Validation: `dotnet test
+  tests\\CopilotAgentObservability.Doctor.Tests\\CopilotAgentObservability.Doctor.Tests.csproj
+  --filter FullyQualifiedName~ClaudeFirstTraceCrossSurfaceTests` — 7 passed,
+  0 failed, 0 skipped; `git diff --check` passed. Luna xhigh implementation
+  report: test-only, production unchanged. Terra high fresh read-only review:
+  APPROVE. Live Claude producer behavior remains unverified and is outside
+  this bounded repair.
 
 ## Open items / unverified inter-issue interfaces
 
