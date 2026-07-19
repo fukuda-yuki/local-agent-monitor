@@ -111,8 +111,10 @@ public sealed class SystemSetupHttpProbeClaudeTests
         var bodyBytes = Encoding.UTF8.GetBytes(body);
         var headers = Encoding.ASCII.GetBytes(
             $"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {bodyBytes.Length}\r\nConnection: close\r\n\r\n");
-        await stream.WriteAsync(headers, cancellationToken);
-        await stream.WriteAsync(bodyBytes, cancellationToken);
+        var response = new byte[headers.Length + bodyBytes.Length];
+        headers.CopyTo(response, 0);
+        bodyBytes.CopyTo(response, headers.Length);
+        await stream.WriteAsync(response, cancellationToken);
         return requestedPath;
     }
 
