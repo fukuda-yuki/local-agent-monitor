@@ -78,7 +78,7 @@ format is explicitly stated otherwise.
 | Field | Type and rule |
 | --- | --- |
 | `kind` | Required closed enum: `session` or `item` |
-| `id` | Required exact ID. For `session`, an existing local UUIDv7 Session ID. For `item`, the exact opaque #89 catalog `item_id` returned by an authoritative diagnostics read. It is never decoded, normalized, searched, or converted to a database key or path. |
+| `id` | Required exact ID. For `session`, an existing local Session ID validated as a canonical lowercase `D`-format `Guid`, byte-for-byte as used by the existing retention routes. UUIDv7 is how new Session IDs are generated and is not a validation constraint. For `item`, the exact opaque #89 catalog `item_id` returned by an authoritative diagnostics read. It is never decoded, normalized, searched, or converted to a database key or path. |
 
 The request body contains exactly one target object. Both kinds, missing or
 blank `id`, an invalid Session UUID, a second selector, or any repository,
@@ -304,6 +304,75 @@ An already-`deletion_queued` `delete_now` preview is actionable-idempotent:
 `mutation_allowed = true`, `rejection_code = null`, confirmation is allowed,
 and the committed result is `retention_delete_already_queued` without a second
 state transition.
+
+## Comment validation contract
+
+Comments use one closed, deterministic, case-insensitive forbidden registry.
+A URL is any substring matching RFC3986 scheme syntax
+`[A-Za-z][A-Za-z0-9+.-]*:` followed immediately by a non-space character, or
+containing `://` or `www.`. Credential markers are the substrings
+`password`, `passwd`, `pwd`, `secret`, `token`, `apikey`, `api_key`,
+`authorization`, `bearer`, and `credential`. Database-key markers are the
+substrings `rowid`, `primary key`, `primary_key`, and `autoincrement`, plus
+the opaque ID prefixes `rpv1_`, `rcid1_`, `rt90v1_`, `rid1_`, `rae1_`, and
+`rhc1_`. Path separators are `/` and `\`. A match is rejected; no marker is
+accepted only because it lacks a delimiter, and rejection is fail-closed.
+
+The same closed registry applies to the safe comment and the no-leak audit,
+preview, diagnostic, log, and repository-safe evidence surfaces. Raw bodies,
+prompt/response/tool content, credentials or secrets, absolute or relative
+paths, database primary keys, prompt-derived labels, private locators, full
+exceptions, PII, and confirmation token values remain forbidden as specified
+by the no-leak contract.
+
+## UI read model and UX contract
+
+The UI consumes the same authoritative application result as the API. It does
+not reconstruct state from the Session workspace shape, DOM text, URL
+parameters, source tables, or client-side timers.
+
+The Session target is the primary flow. From the Session workspace, the UI
+offers a non-destructive `Manage retention` action that loads the exact
+Session-target preview. The item target is available only from an explicit
+selection in the #89 retention diagnostics item list; there is no free-form
+item-ID input, approximate search, multi-Session selector, or path selector.
+
+Delete-now is never the visually primary action. It is a secondary destructive
+choice behind the retention details/confirmation step, has no default focus,
+and cannot be triggered by pressing Enter on the initial Session action.
+
+Before confirmation, the UI must re-display all of these sanitized values in
+the same confirmation surface: target kind and exact ID, operation and scope,
+exact item count and store-kind summary, current lifecycle/pin/delete state,
+pin removal for delete-now, exact deletion target set summary, original
+capture/expiry/policy summary, retained metadata/evidence impact, active
+cleanup conflicts, fixed backup non-purge warning, expected version, preview
+digest, and five-minute expiry. The UI never displays the token value as
+preview content; the token is held in memory only for the dedicated confirm
+request and is discarded after success, failure, navigation, or expiry.
+
+On `retention_confirmation_*`, `retention_preview_*`, empty, stale, conflict,
+or incompatible-state results, the UI discards the token, does not retry
+automatically, fetches a fresh status/preview, and re-displays the new
+sanitized values. It must not present the old operation as successful. After
+a committed result it shows the operation status, immediate read-denied state,
+queue handoff, audit reference, and the #89 physical worker status; it does
+not claim physical deletion at transaction commit.
+
+Accessibility is contractual: use a semantic labelled dialog, a visible
+destructive-action warning, keyboard focus placement and return, Escape
+cancellation, Enter only on the final explicit confirmation, labels and help
+text associated with reason/comment controls, a screen-reader live region for
+status/error changes, and text plus icon/state indicators rather than color
+alone. Focus never lands on a destructive command before the target and impact
+have been read.
+
+Client state may contain only the sanitized DTO fields, opaque IDs, fixed
+codes, digests, timestamps, and an in-memory confirmation token while the
+confirmation request is outstanding. It must not contain raw bodies,
+credentials, absolute/full paths, database primary keys, prompt-derived
+labels, private locators, full exceptions, or token values in persistent
+storage, URLs, analytics, logs, screenshots, or evidence.
 
 ## Digest and canonicalization
 
@@ -612,7 +681,7 @@ The first failing check returns exactly one code. The order is:
 
 | Order | Condition | Fixed code | Republish rule |
 | --- | --- | --- | --- |
-| `1` | Structural or cryptographic token validity, including format, digest, nonce, stored token hash, or a token invalidated by reissue | `retention_confirmation_invalid` | Discard token and create a new preview/key |
+| `1` | Structural or cryptographic token validity, including format, digest, nonce, stored token hash, or a token invalidated by confirmation-issue reissue | `retention_confirmation_invalid` | Discard token and create a new preview/key |
 | `2` | Token was committed by another request | `retention_confirmation_consumed` | Return stored mutation linkage/result when available; never issue a token; new preview/key for a new operation |
 | `3` | Confirmation token is past the exact five-minute expiry | `retention_confirmation_expired` | Create a new preview/key; issuance never extends expiry |
 | `4` | Submitted operation, scope, target kind, or target ID differs from binding | `retention_confirmation_binding_mismatch` | Create a new preview/key |
@@ -659,7 +728,7 @@ The complete diagnostic registry is:
 | `retention_preview_digest_mismatch` | CONFIRMATION-ISSUE-STAGE `409` | Supplied preview digest differs; confirmation issue only |
 | `retention_confirmation_generation_failed` | CONFIRMATION-ISSUE-STAGE `503` | Server nonce collision prevented safe issuance |
 | `retention_confirmation_consumed` | CONFIRMATION-ISSUE-STAGE `409` (also mutation-time check 2) | Token already committed; return stored linkage/result and never issue a new token |
-| `retention_confirmation_invalid` | COMMIT-STAGE `401` (mutation-time check 1) | Token format, full-token hash, nonce, or cryptographic validation invalid, including reissued token |
+| `retention_confirmation_invalid` | COMMIT-STAGE `401` (mutation-time check 1) | Token format, full-token hash, nonce, or cryptographic validation invalid, including a token invalidated by confirmation-issue reissue |
 | `retention_confirmation_expired` | COMMIT-STAGE `409` (mutation-time check 3) | Token past fixed expiry |
 | `retention_confirmation_binding_mismatch` | COMMIT-STAGE `409` (mutation-time check 4) | Token binding differs from confirmation request |
 | `retention_confirmation_target_changed` | COMMIT-STAGE `409` (mutation-time check 5) | Exact target item set digest changed |

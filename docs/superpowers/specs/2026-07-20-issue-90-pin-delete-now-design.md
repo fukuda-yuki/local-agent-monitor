@@ -115,7 +115,7 @@ matching, or client-inferred state cannot mutate anything.
 | Field | Type and rule |
 | --- | --- |
 | `kind` | Required closed enum: `session` or `item`. |
-| `id` | Required exact ID. For `session`, it is the existing local UUIDv7 Session ID. For `item`, it is the exact opaque #89 catalog `item_id` returned by an authoritative diagnostics read. It is never decoded, normalized, searched, or converted to a database key or path. |
+| `id` | Required exact ID. For `session`, it is an existing local Session ID validated as a canonical lowercase `D`-format `Guid`, byte-for-byte as used by the existing retention routes. UUIDv7 is how new Session IDs are generated and is not a validation constraint. For `item`, it is the exact opaque #89 catalog `item_id` returned by an authoritative diagnostics read. It is never decoded, normalized, searched, or converted to a database key or path. |
 
 The request body contains exactly one target object. A target with both kinds,
 missing `id`, blank `id`, an invalid Session UUID, or any second selector is
@@ -631,12 +631,21 @@ code.
 The audit store is append-only: events are never updated, overwritten, or
 deleted by retry, restart, cleanup, or a later pin/unpin/delete-now command.
 The only free-form field is the safe comment with the exact 256-scalar limit.
-The following are forbidden in comments and all other audit fields, preview
-fields, logs, diagnostics, and repository-safe evidence: raw bodies or raw
-prompt/response/tool content, credentials or secrets, absolute or relative
-paths, database primary keys, prompt-derived labels, private locators, full
-exceptions, PII, and confirmation token values. Rejection is fail-closed;
-these values are not redacted into a partially accepted audit event.
+The following closed, deterministic registry is applied case-insensitively to
+comments. A URL is any substring matching RFC3986 scheme syntax
+`[A-Za-z][A-Za-z0-9+.-]*:` followed immediately by a non-space character, or
+containing `://` or `www.`. Credential markers are the substrings
+`password`, `passwd`, `pwd`, `secret`, `token`, `apikey`, `api_key`,
+`authorization`, `bearer`, and `credential`. Database-key markers are the
+substrings `rowid`, `primary key`, `primary_key`, and `autoincrement`, plus
+the opaque ID prefixes `rpv1_`, `rcid1_`, `rt90v1_`, `rid1_`, `rae1_`, and
+`rhc1_`. Path separators are `/` and `\`. These classes are forbidden in
+comments and all other audit fields, preview fields, logs, diagnostics, and
+repository-safe evidence, along with raw bodies or raw prompt/response/tool
+content, credentials or secrets, absolute or relative paths, database primary
+keys, prompt-derived labels, private locators, full exceptions, PII, and
+confirmation token values. Rejection is fail-closed; these values are not
+redacted into a partially accepted audit event.
 
 ## Atomic mutation boundary and failure visibility
 
@@ -1112,10 +1121,14 @@ as follows:
     `retention_target_not_applicable` is deterministic only for an exact row
     outside the closed store-kind registry or rejected as a non-product-owned
     imported reference by #89 ownership validation.
-13. #90 records the mutation `operation_id` as its own correlation. A queued
+13. Session target ID validation is the existing canonical lowercase `D`-format
+    `Guid` validation byte-for-byte. UUIDv7 is how new Session IDs are
+    generated and is not a validation constraint, so legacy non-v7 Session IDs
+    remain operable.
+14. #90 records the mutation `operation_id` as its own correlation. A queued
     operation is observed through #89 item states; #90 adds no queue-request
     entity or queue request ID.
-14. `pin_state` is a derived projection of lifecycle state. 90-B stores no
+15. `pin_state` is a derived projection of lifecycle state. 90-B stores no
     second pin column.
 
 These choices are preparation for 90-A. Until canonical specification changes
