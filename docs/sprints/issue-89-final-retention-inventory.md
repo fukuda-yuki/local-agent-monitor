@@ -159,7 +159,10 @@ passed exactly as follows:
 | `dotnet test CopilotAgentObservability.slnx` | PASS; ConfigCli 4,257, Doctor 263, LocalMonitor 1,772; total 6,292; failed 0, skipped 0 |
 
 The independent F2 review passed for spec and code, with no blockers. The
-pre-close whole-issue audit found no implementation blockers. A final
-whole-Issue #89 review has not yet been run and is not claimed by this evidence.
-Issue #89 is therefore complete and close-ready; pin/delete-now remains the
-separate responsibility of Issue #90.
+pre-close whole-issue audit found no implementation blockers. The final
+whole-Issue #89 review at `74f9f6ee8076fe7282bab9565ebbbd4775e61dd0`
+independently reconciled the Issue, canonical specifications, complete commit
+range and diff, inventory, migration corpus, focused tests, and pinned full
+validation; spec compliance and code quality passed with no blockers. Issue
+#89 is complete and close-ready; pin/delete-now remains the separate
+responsibility of Issue #90.

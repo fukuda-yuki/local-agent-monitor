@@ -76,9 +76,10 @@
   repository-safe closeout evidence and full validation are pinned at
   `2549b1d94f2df0d06d092882aef636d2aec2ba3a` in
   [issue-89-final-retention-inventory.md](sprints/issue-89-final-retention-inventory.md).
-  The independent F2 spec/code review passed with no blockers, and the pre-close
-  whole-issue audit found no implementation blockers; a final whole-Issue #89
-  review is not yet claimed. Pin/delete-now remains Issue #90.
+  The independent F2 spec/code review passed with no blockers, the pre-close
+  audit found no implementation blockers, and the final whole-Issue review at
+  `74f9f6ee8076fe7282bab9565ebbbd4775e61dd0` passed spec and code review with
+  no blockers. Pin/delete-now remains Issue #90.
 
 - **未対応の機能仕様・検証（未確認の検証フェーズ）**
   - Sprint18 スパンインスペクタの `SpanDetailExtractor` は実 VS Code Copilot Chat ペイロードのキー名が live 検証まで未確定のため defensive 抽出とし、整形抽出が空でも raw タブで代替できる。実ペイロードでの整形表示のライブ検証は人手ゲート（D043、既存 prompt extractor と同種の caveat）。
