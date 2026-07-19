@@ -14,10 +14,16 @@ They do not define product behavior.
 Run these commands from the repository root.
 
 ```powershell
+pwsh scripts\agent\sync-claude-skills.ps1 -Check
 dotnet build CopilotAgentObservability.slnx
 pwsh scripts\test\install-playwright-chromium.ps1
 dotnet test CopilotAgentObservability.slnx
 ```
+
+The skill-mirror check verifies that shared Claude Code skills match their
+canonical `.agents/skills/` sources. Repair drift with
+`pwsh scripts\agent\sync-claude-skills.ps1`, review the generated diff, and
+restart validation from the first command.
 
 The Playwright install command is required because the solution test suite
 contains LocalMonitor browser smoke tests. The wrapper sets
@@ -145,7 +151,8 @@ Keep it short and practical; put detailed procedures in `docs/agent-guides/` and
 ## Repository Skills
 
 - Keep repository-scoped skills under `.agents/skills/`.
-- Keep `.claude/skills/` for Claude Code compatibility; when a shared skill exists in both locations, update both copies together.
+- Treat `.agents/skills/` as the canonical source for the shared `commit`, `seed-demo`, `spec-update`, `sprint-evidence`, and `validate` skills. Keep `.claude/skills/` as a generated Claude Code compatibility mirror; do not edit those five mirrored directories directly.
+- After changing a shared skill, run `pwsh scripts\agent\sync-claude-skills.ps1`, review the generated diff, and verify it with `pwsh scripts\agent\sync-claude-skills.ps1 -Check`.
 - Repository skills must encode repository-specific workflows or safety boundaries. Do not vendor general .NET, MSBuild, test, coverage, or migration skill catalogs under `.codex/skills/`; install them at user scope only for the task that needs them.
 - Implicit invocation is limited to `spec-update` and `validate`. Every other `.agents/skills/*` skill must set `policy.allow_implicit_invocation: false` in `agents/openai.yaml`.
 - Keep Aspire operations in the single `aspire-local-ops` skill while the AppHost has no resources. Do not recreate router/orchestration/monitoring variants.
