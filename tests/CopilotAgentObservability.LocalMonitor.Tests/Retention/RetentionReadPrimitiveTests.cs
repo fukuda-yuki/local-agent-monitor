@@ -214,6 +214,63 @@ public sealed class RetentionReadPrimitiveTests
         finally { Delete(path); }
     }
 
+    [Fact]
+    public async Task ReadAsync_SelectorNullAfterLeaseAcquisitionReleasesLeaseBeforeDenying()
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero);
+            var store = new RetentionCatalogStore(path, new MutableTimeProvider(now));
+            store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+
+            var result = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Access, item.CapturedAt, item.Revision),
+                static (_, _, _, _) => ValueTask.FromResult<string?>(null),
+                CancellationToken.None);
+
+            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Null(result.Lease);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public async Task ReadAsync_ExpiryAfterSelectorMaterializationReleasesLeaseBeforeDeletionCanAcquire()
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero);
+            var time = new MutableTimeProvider(now);
+            var store = new RetentionCatalogStore(path, time);
+            store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+
+            var result = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Operation, now, item.Revision),
+                (_, _, _, _) =>
+                {
+                    time.Advance(item.ExpiresAt - now);
+                    return ValueTask.FromResult<string?>("materialized-before-expiry-check");
+                },
+                CancellationToken.None);
+
+            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Null(result.Lease);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+            var queued = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            Execute(path, "UPDATE retention_items SET state='deletion_queued', revision=revision+1 WHERE item_id=$item_id;", ("$item_id", queued.ItemId));
+            var deletionQueued = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            using var deletion = Assert.IsType<RetentionReadLeaseHandle>(await store.TryAcquireAsync(key, deletionQueued.Revision, RetentionLeaseKind.Deletion, time.GetUtcNow(), CancellationToken.None));
+        }
+        finally { Delete(path); }
+    }
+
     private static string CopyFixture()
     {
         var source = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "monitor", "monitor-v5.sqlite");

@@ -232,11 +232,12 @@ public sealed class RetentionCatalogStore
             if (generation is null) { transaction.Commit(); return new(RetentionReadDisposition.Busy, null); }
             var leaseExpiry = now.Add(RetentionV1Constants.LeaseDuration) < item.ExpiresAt ? now.Add(RetentionV1Constants.LeaseDuration) : item.ExpiresAt;
             var token = SourceToken(connection, transaction, request.OwnershipKey);
-            if (token is null) { DenyInvalidSource(connection, transaction, item.ItemId, now, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
+            if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, owner, generation.Value); DenyInvalidSource(connection, transaction, item.ItemId, now, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
             var grant = new RetentionReadGrant(item.ItemId, item.Revision, owner, generation.Value, leaseExpiry, token);
             var value = await selector(connection, transaction, grant, cancellationToken).ConfigureAwait(false);
             if (value is null || timeProvider.GetUtcNow() >= item.ExpiresAt)
             {
+                ReleaseWithinTransaction(connection, transaction, item.ItemId, owner, generation.Value);
                 DenyForReadFailure(connection, transaction, item, timeProvider.GetUtcNow(), SourceReceiptProof.InvalidOrMismatched);
                 transaction.Commit();
                 return new(RetentionReadDisposition.Denied, null);
@@ -595,15 +596,17 @@ public sealed class RetentionCatalogStore
     private static void ReleaseWithinTransaction(SqliteConnection connection, SqliteTransaction transaction, IEnumerable<RetentionReadGrant> grants)
     {
         foreach (var grant in grants)
-        {
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = "DELETE FROM retention_leases WHERE item_id=$id AND owner=$owner AND generation=$generation;";
-            command.Parameters.AddWithValue("$id", grant.ItemId);
-            command.Parameters.AddWithValue("$owner", grant.LeaseOwner);
-            command.Parameters.AddWithValue("$generation", grant.LeaseGeneration);
-            command.ExecuteNonQuery();
-        }
+            ReleaseWithinTransaction(connection, transaction, grant.ItemId, grant.LeaseOwner, grant.LeaseGeneration);
+    }
+    private static void ReleaseWithinTransaction(SqliteConnection connection, SqliteTransaction transaction, string itemId, string owner, long generation)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "DELETE FROM retention_leases WHERE item_id=$id AND owner=$owner AND generation=$generation;";
+        command.Parameters.AddWithValue("$id", itemId);
+        command.Parameters.AddWithValue("$owner", owner);
+        command.Parameters.AddWithValue("$generation", generation);
+        command.ExecuteNonQuery();
     }
     private static byte[]? CatalogReceipt(SqliteConnection c, SqliteTransaction t, RetentionOwnershipKey key) { using var q=c.CreateCommand();q.Transaction=t;q.CommandText="SELECT ownership_receipt FROM retention_items WHERE store_instance_id=$store AND store_kind=$kind AND source_item_id=$source;";q.Parameters.AddWithValue("$store",key.StoreInstanceId);q.Parameters.AddWithValue("$kind",RetentionSchemaMigrator.Wire(key.StoreKind));q.Parameters.AddWithValue("$source",key.SourceItemId);return q.ExecuteScalar() is byte[] receipt && receipt.Length == 32 ? receipt : null; }
     private static bool HasMatchingDeleteIntent(SqliteConnection c, SqliteTransaction t, RetentionCatalogItem item) { using var q=c.CreateCommand();q.Transaction=t;q.CommandText="SELECT EXISTS(SELECT 1 FROM retention_delete_journal WHERE item_id=$id AND expected_revision=$revision);";q.Parameters.AddWithValue("$id",item.ItemId);q.Parameters.AddWithValue("$revision",item.Revision);return Convert.ToInt64(q.ExecuteScalar(),CultureInfo.InvariantCulture)==1; }
