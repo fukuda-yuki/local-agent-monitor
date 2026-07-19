@@ -308,7 +308,7 @@ public sealed class RetentionCatalogMigrationFixtureTests
         using var connection = Open(path);
         using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         using var objects = connection.CreateCommand();
-        objects.CommandText = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE 'retention_%' ORDER BY type,name;";
+        objects.CommandText = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE 'retention_%' AND tbl_name NOT LIKE 'retention_%' ORDER BY type,name;";
         using var objectReader = objects.ExecuteReader();
         var tables = new List<string>();
         while (objectReader.Read())

@@ -16,11 +16,20 @@ public sealed record RetentionDeleteContext(
     RetentionSourceIdentity SourceIdentity,
     RetentionPrivateLocatorHandle? PrivateLocator,
     int IntentCursor,
-    CancellationToken CancellationToken);
+    CancellationToken CancellationToken)
+{
+    public override string ToString() => nameof(RetentionDeleteContext);
+}
 
-public sealed record RetentionSourceIdentity(string SourceItemId, string OwnershipReceipt);
+public sealed record RetentionSourceIdentity(string SourceItemId, string OwnershipReceipt)
+{
+    public override string ToString() => nameof(RetentionSourceIdentity);
+}
 
-public sealed record RetentionPrivateLocatorHandle(string OpaqueHandle);
+public sealed record RetentionPrivateLocatorHandle(string OpaqueHandle)
+{
+    public override string ToString() => nameof(RetentionPrivateLocatorHandle);
+}
 
 public enum RetentionAdapterDisposition
 {

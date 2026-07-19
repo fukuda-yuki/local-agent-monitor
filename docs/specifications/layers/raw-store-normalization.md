@@ -571,6 +571,14 @@ may identify a deletion target. SQLite source deletion and the `deleted`
 tombstone/receipt are atomic. File deletion is journaled, forward-only, and
 only mutates exact owned members after identity/marker/digest validation.
 
+Before every cleanup batch mutates leases or item state, its `BEGIN IMMEDIATE`
+transaction verifies the exact five v1 adapter-coverage rows. A mismatch writes
+only the singleton `worker_error_code=retention_adapter_coverage_mismatch`,
+returns no work, and prevents channel/adapter dispatch; item, lease, journal,
+and tombstone state remains unchanged. The error remains diagnostic state after
+coverage is restored; a later eligible cycle may proceed. Per-claim coverage
+validation remains required as a stale external-caller fence.
+
 The shared read foundation is initialized explicitly for a newly owned database
 or adopted explicitly from an existing v1 catalog; ordinary reads never create
 or migrate a database. Adoption validates the catalog component version and

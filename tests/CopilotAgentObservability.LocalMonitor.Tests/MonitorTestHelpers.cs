@@ -13,15 +13,73 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 internal sealed class MutableTimeProvider : TimeProvider
 {
     private DateTimeOffset now;
+    private long timestamp;
+    private readonly object timerGate = new();
+    private readonly List<MutableTimer> timers = [];
 
     public MutableTimeProvider(DateTimeOffset start)
     {
         now = start;
     }
 
+    internal TimeSpan TimestampAdvancePerRead { get; set; }
+    internal Action? TimerCreated { get; set; }
+
     public override DateTimeOffset GetUtcNow() => now;
 
-    public void Advance(TimeSpan delta) => now += delta;
+    public override long GetTimestamp()
+    {
+        var current = timestamp;
+        timestamp += TimestampAdvancePerRead.Ticks;
+        return current;
+    }
+
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+    public void Advance(TimeSpan delta)
+    {
+        List<MutableTimer> due;
+        lock (timerGate)
+        {
+            now += delta;
+            due = timers.Where(timer => timer.IsDue(now)).ToList();
+        }
+        foreach (var timer in due) timer.Fire(now);
+    }
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+    {
+        var timer = new MutableTimer(this, callback, state, period);
+        lock (timerGate)
+        {
+            timer.Change(dueTime, period, now);
+            timers.Add(timer);
+        }
+        TimerCreated?.Invoke();
+        return timer;
+    }
+
+    private sealed class MutableTimer(MutableTimeProvider provider, TimerCallback callback, object? state, TimeSpan period) : ITimer
+    {
+        private DateTimeOffset? dueAt;
+        private bool disposed;
+
+        internal bool IsDue(DateTimeOffset current) => !disposed && dueAt is { } due && due <= current;
+        internal void Fire(DateTimeOffset current)
+        {
+            if (!IsDue(current)) return;
+            if (period > TimeSpan.Zero) dueAt = current + period; else dueAt = null;
+            callback(state);
+        }
+        public bool Change(TimeSpan dueTime, TimeSpan nextPeriod)
+        {
+            lock (provider.timerGate) { Change(dueTime, nextPeriod, provider.now); }
+            return true;
+        }
+        internal void Change(TimeSpan dueTime, TimeSpan nextPeriod, DateTimeOffset current) => dueAt = dueTime == Timeout.InfiniteTimeSpan ? null : current + dueTime;
+        public void Dispose() { lock (provider.timerGate) { disposed = true; dueAt = null; } }
+        public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+    }
 }
 
 internal static class MonitorTestHealth

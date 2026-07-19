@@ -169,6 +169,30 @@ public sealed class RetentionReadLeaseHandle : IDisposable
 internal enum RetentionReadDisposition { Granted, NotFound, Denied, Busy }
 internal enum RetentionReadKind { Access, Operation }
 
+internal enum RetentionWorkKind { Queued, IntentRecovery }
+internal readonly record struct RetentionWorkReference(string ItemId, long ExpectedRevision, RetentionWorkKind Kind);
+internal sealed record RetentionPreparedBatch(IReadOnlyList<RetentionWorkReference> Work, bool HitPromotionLimit, bool HitElapsedBudget, DateTimeOffset? NextEligibleAt, bool CoverageBlocked = false);
+internal readonly record struct RetentionDeleteFence(string ItemId, long ExpectedRevision, string LeaseOwner, long LeaseGeneration);
+internal enum RetentionClaimDisposition { Claimed, Quiescing, Contended, StaleNoOp, TerminalFailureRecorded, CoverageBlocked, CatalogBusy }
+internal sealed class RetentionDeletionClaim
+{
+    internal required RetentionDeleteFence Fence { get; init; }
+    internal required string StoreInstanceId { get; init; }
+    internal required RetentionStoreKind StoreKind { get; init; }
+    internal required RetentionSourceIdentity SourceIdentity { get; init; }
+    internal required RetentionPrivateLocatorHandle? PrivateLocator { get; init; }
+    internal required int IntentCursor { get; init; }
+    internal required bool HasCurrentIntent { get; init; }
+    internal required DateTimeOffset LeaseExpiresAt { get; init; }
+    public override string ToString() => nameof(RetentionDeletionClaim);
+}
+internal sealed record RetentionClaimResult(RetentionClaimDisposition Disposition, RetentionDeletionClaim? Claim, DateTimeOffset? QuiescenceRetryAt, RetentionErrorCode? FixedErrorCode);
+internal enum RetentionIntentDisposition { Committed, AlreadyCommitted, StaleNoOp, LeaseLost, AttemptLimitReached, TerminalFailureRecorded, CatalogBusy }
+internal sealed record RetentionIntentResult(RetentionIntentDisposition Disposition, int AttemptNumber, int IntentCursor);
+internal enum RetentionMutationDisposition { Applied, NoOpAlreadyFinalized, StaleNoOp, CatalogBusy }
+internal sealed record RetentionFailureResult(RetentionMutationDisposition Disposition, int AttemptNumber, DateTimeOffset? RetryAt, bool RetryExhausted);
+internal enum RetentionRenewalResult { Renewed, LeaseLost, CatalogBusy }
+
 internal sealed record RetentionReadRequest(
     RetentionOwnershipKey OwnershipKey,
     RetentionReadKind LeaseKind,
