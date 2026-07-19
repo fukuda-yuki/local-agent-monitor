@@ -9,6 +9,16 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionCatalogMigrationFixtureTests
 {
     private const string RetentionGenerationCommand = "dotnet run --project scripts/test/GenerateRetentionSchemaFixtures/GenerateRetentionSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/retention";
+    private static readonly string[] ReviewedSessionIdentities =
+    [
+        "session/session-v1.sqlite", "session/session-v2.sqlite", "session/session-v3.sqlite", "session/session-v4.sqlite",
+        "session/session-v5.sqlite", "session/session-v6.sqlite", "session/session-v7.sqlite", "session/session-v8.sqlite",
+        "session/session-v9.sqlite", "session/session-v10.sqlite", "session/session-v10-from-v4.sqlite",
+        "session/session-v10-from-v5.sqlite", "session/session-v10-from-v6.sqlite",
+    ];
+    private static readonly string[] ReviewedMonitorIdentities =
+    ["monitor/monitor-v1.sqlite", "monitor/monitor-v2.sqlite", "monitor/monitor-v3.sqlite", "monitor/monitor-v4.sqlite", "monitor/monitor-v5.sqlite"];
+    private static readonly string[] ReviewedRetentionIdentities = ["retention/retention-catalog-v1.sqlite"];
 
     [Fact]
     public void Committed_fixture_manifests_enumerate_every_reviewed_source_and_the_retention_catalog_v1_fixture()
@@ -18,8 +28,8 @@ public sealed class RetentionCatalogMigrationFixtureTests
         var monitor = ReadManifest(Path.Combine(schemaRoot, "monitor", "manifest.json"));
         var retention = ReadManifest(Path.Combine(schemaRoot, "retention", "manifest.json"));
 
-        Assert.Equal(13, session.Fixtures.Count);
-        Assert.Equal(5, monitor.Fixtures.Count);
+        Assert.Equal(ReviewedSessionIdentities.Length, session.Fixtures.Count);
+        Assert.Equal(ReviewedMonitorIdentities.Length, monitor.Fixtures.Count);
         var fixture = Assert.Single(retention.Fixtures);
         Assert.Equal("retention", retention.Component);
         Assert.Equal(RetentionGenerationCommand, retention.GenerationCommand);
@@ -32,12 +42,17 @@ public sealed class RetentionCatalogMigrationFixtureTests
         using (var fixtureConnection = Open(Path.Combine(schemaRoot, "retention", fixture.File)))
             Assert.Equal(fixture.IntegrityCheck, Scalar<string>(fixtureConnection, "PRAGMA integrity_check;"));
 
-        var identities = session.Fixtures.Select(entry => $"session/{entry.File}")
-            .Concat(monitor.Fixtures.Select(entry => $"monitor/{entry.File}"))
-            .Append($"retention/{fixture.File}")
-            .ToArray();
-        Assert.Equal(19, identities.Length);
-        Assert.Equal(19, identities.Distinct(StringComparer.Ordinal).Count());
+        var sessionIdentities = session.Fixtures.Select(entry => $"session/{entry.File}").ToArray();
+        var monitorIdentities = monitor.Fixtures.Select(entry => $"monitor/{entry.File}").ToArray();
+        var retentionIdentities = new[] { $"retention/{fixture.File}" };
+        Assert.Equal(ReviewedSessionIdentities, sessionIdentities);
+        Assert.Equal(ReviewedMonitorIdentities, monitorIdentities);
+        Assert.Equal(ReviewedRetentionIdentities, retentionIdentities);
+        Assert.Throws<Xunit.Sdk.EqualException>(() => Assert.Equal(ReviewedSessionIdentities, sessionIdentities.Append("session/session-v10-pseudo.sqlite")));
+
+        var identities = sessionIdentities.Concat(monitorIdentities).Concat(retentionIdentities).ToArray();
+        Assert.Equal(ReviewedSessionIdentities.Length + ReviewedMonitorIdentities.Length + ReviewedRetentionIdentities.Length, identities.Length);
+        Assert.Equal(identities.Length, identities.Distinct(StringComparer.Ordinal).Count());
 
         foreach (var identity in identities)
         {
@@ -50,6 +65,13 @@ public sealed class RetentionCatalogMigrationFixtureTests
                     : fixture;
             Assert.Equal(manifestEntry.Sha256, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant());
             if (ReferenceEquals(manifestEntry, fixture)) Assert.Equal(manifestEntry.ByteLength, new FileInfo(path).Length);
+            else
+            {
+                Assert.Matches("^[0-9a-f]{40}$", manifestEntry.SourceCommit!);
+                Assert.Equal(string.Empty, manifestEntry.GitStatusBefore);
+                Assert.Equal(string.Empty, manifestEntry.GitStatusAfter);
+                AssertSourceManifestEvidence(identity.StartsWith("session/", StringComparison.Ordinal) ? Path.Combine(schemaRoot, "session", "manifest.json") : Path.Combine(schemaRoot, "monitor", "manifest.json"), manifestEntry.File);
+            }
         }
     }
 
@@ -66,15 +88,17 @@ public sealed class RetentionCatalogMigrationFixtureTests
                 var sourceHash = Hash(copy);
                 var expectedCatalog = ReadExpectedCatalogRows(copy);
                 var sourceRows = ReadAuthoritativeSourceRows(copy);
+                var originalSourceDataSnapshot = CapturePreexistingSourceDataSnapshot(copy);
 
-                var firstSnapshot = InitializeThroughProductionMonitorStore(copy, sourceRows, expectedCatalog);
+                var firstSnapshot = InitializeThroughProductionMonitorStore(copy, sourceRows, expectedCatalog, originalSourceDataSnapshot, out var sourceSnapshot);
                 Assert.Equal(sourceHash, Hash(source.Path));
 
                 SqliteConnection.ClearAllPools();
 
-                var secondSnapshot = InitializeThroughProductionMonitorStore(copy, sourceRows, expectedCatalog);
+                var secondSnapshot = InitializeThroughProductionMonitorStore(copy, sourceRows, expectedCatalog, originalSourceDataSnapshot, out var secondSourceSnapshot);
                 Assert.Equal(firstSnapshot.StoreInstanceId, secondSnapshot.StoreInstanceId);
                 Assert.Equal(firstSnapshot.Items, secondSnapshot.Items);
+                Assert.Equal(sourceSnapshot, secondSourceSnapshot);
                 Assert.Equal(sourceHash, Hash(source.Path));
             }
             finally
@@ -169,6 +193,16 @@ public sealed class RetentionCatalogMigrationFixtureTests
         JsonSerializer.Deserialize<FixtureManifest>(File.ReadAllText(path), new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
         ?? throw new InvalidOperationException($"Fixture manifest could not be read: {path}");
 
+    private static void AssertSourceManifestEvidence(string manifestPath, string file)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        var fixture = document.RootElement.GetProperty("fixtures").EnumerateArray().Single(entry => entry.GetProperty("file").GetString() == file);
+        Assert.Equal(JsonValueKind.Object, fixture.GetProperty("sentinels").ValueKind);
+        Assert.True(fixture.GetProperty("sentinels").EnumerateObject().Any());
+        Assert.Matches("^[0-9a-f]{64}$", fixture.GetProperty("sha256").GetString()!);
+        Assert.Matches("^[0-9a-f]{40}$", fixture.GetProperty("sourceCommit").GetString()!);
+    }
+
     private static IEnumerable<FixtureSource> ReviewedFixtures(string schemaRoot)
     {
         foreach (var component in new[] { "session", "monitor", "retention" })
@@ -179,14 +213,19 @@ public sealed class RetentionCatalogMigrationFixtureTests
         }
     }
 
-    private static CatalogSnapshot InitializeThroughProductionMonitorStore(string path, IReadOnlyList<string> sourceRows, IReadOnlyList<ExpectedCatalogRow> expectedCatalog)
+    private static CatalogSnapshot InitializeThroughProductionMonitorStore(string path, IReadOnlyList<string> sourceRows, IReadOnlyList<ExpectedCatalogRow> expectedCatalog, SourceDataSnapshot originalSourceDataSnapshot, out string sourceSnapshot)
     {
         var context = File.Exists(path) && TableExists(path, "retention_component_versions")
             ? RetentionCatalogContext.AdoptExistingCatalogV1(path)
             : RetentionCatalogContext.InitializeNewOwnedDatabase(path);
         var store = new RawTelemetryStore(path, context);
+        Assert.Equal(originalSourceDataSnapshot.Digest, CapturePreexistingSourceDataSnapshot(path, originalSourceDataSnapshot.Tables));
+        sourceSnapshot = CaptureNonRetentionSourceSnapshot(path);
         store.CreateMonitorSchema();
-        return AssertMigrated(path, sourceRows, expectedCatalog);
+        var migrated = AssertMigrated(path, sourceRows, expectedCatalog);
+        Assert.Equal(originalSourceDataSnapshot.Digest, CapturePreexistingSourceDataSnapshot(path, originalSourceDataSnapshot.Tables));
+        Assert.Equal(sourceSnapshot, CaptureNonRetentionSourceSnapshot(path));
+        return migrated;
     }
 
     private static CatalogSnapshot AssertMigrated(string path, IReadOnlyList<string> sourceRows, IReadOnlyList<ExpectedCatalogRow> expectedCatalog)
@@ -264,6 +303,102 @@ public sealed class RetentionCatalogMigrationFixtureTests
         return rows;
     }
 
+    private static string CaptureNonRetentionSourceSnapshot(string path)
+    {
+        using var connection = Open(path);
+        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var objects = connection.CreateCommand();
+        objects.CommandText = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE 'retention_%' ORDER BY type,name;";
+        using var objectReader = objects.ExecuteReader();
+        var tables = new List<string>();
+        while (objectReader.Read())
+        {
+            AppendFrame(digest, objectReader.GetString(0));
+            AppendFrame(digest, objectReader.GetString(1));
+            AppendFrame(digest, objectReader.GetString(2));
+            AppendFrame(digest, objectReader.IsDBNull(3) ? null : objectReader.GetString(3));
+            if (string.Equals(objectReader.GetString(0), "table", StringComparison.Ordinal)) tables.Add(objectReader.GetString(1));
+        }
+        foreach (var table in tables)
+        {
+            using var rows = connection.CreateCommand();
+            rows.CommandText = $"SELECT * FROM {QuoteIdentifier(table)};";
+            using var reader = rows.ExecuteReader();
+            var rowDigests = new List<string>();
+            while (reader.Read())
+            {
+                using var rowDigest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++) AppendCell(rowDigest, reader, ordinal);
+                rowDigests.Add(Convert.ToHexString(rowDigest.GetHashAndReset()));
+            }
+            AppendFrame(digest, table);
+            foreach (var rowDigest in rowDigests.OrderBy(static value => value, StringComparer.Ordinal)) AppendFrame(digest, rowDigest);
+        }
+        return Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static SourceDataSnapshot CapturePreexistingSourceDataSnapshot(string path)
+    {
+        using var connection = Open(path);
+        using var tables = connection.CreateCommand();
+        tables.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'retention_%' AND name <> 'schema_version' ORDER BY name;";
+        using var tableReader = tables.ExecuteReader();
+        var tableColumns = new List<SourceTableShape>();
+        while (tableReader.Read())
+        {
+            var table = tableReader.GetString(0);
+            using var columns = connection.CreateCommand();
+            columns.CommandText = $"PRAGMA table_info({QuoteIdentifier(table)});";
+            using var columnReader = columns.ExecuteReader();
+            var names = new List<string>();
+            while (columnReader.Read()) names.Add(columnReader.GetString(1));
+            tableColumns.Add(new SourceTableShape(table, names.ToArray()));
+        }
+        return new SourceDataSnapshot(tableColumns, CapturePreexistingSourceDataSnapshot(path, tableColumns));
+    }
+
+    private static string CapturePreexistingSourceDataSnapshot(string path, IReadOnlyList<SourceTableShape> tableColumns)
+    {
+        using var connection = Open(path);
+        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var (table, columns) in tableColumns)
+        {
+            AppendFrame(digest, table);
+            foreach (var column in columns) AppendFrame(digest, column);
+            using var rows = connection.CreateCommand();
+            rows.CommandText = $"SELECT {string.Join(',', columns.Select(QuoteIdentifier))} FROM {QuoteIdentifier(table)};";
+            using var reader = rows.ExecuteReader();
+            var rowDigests = new List<string>();
+            while (reader.Read())
+            {
+                using var rowDigest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++) AppendCell(rowDigest, reader, ordinal);
+                rowDigests.Add(Convert.ToHexString(rowDigest.GetHashAndReset()));
+            }
+            foreach (var rowDigest in rowDigests.OrderBy(static value => value, StringComparer.Ordinal)) AppendFrame(digest, rowDigest);
+        }
+        return Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static void AppendCell(IncrementalHash digest, SqliteDataReader reader, int ordinal)
+    {
+        AppendFrame(digest, reader.GetName(ordinal));
+        AppendFrame(digest, reader.IsDBNull(ordinal) ? "null" : reader.GetFieldType(ordinal).FullName);
+        if (reader.IsDBNull(ordinal)) return;
+        switch (reader.GetValue(ordinal))
+        {
+            case byte[] bytes: AppendFrame(digest, bytes); break;
+            case string value: AppendFrame(digest, value); break;
+            case long value: AppendFrame(digest, BitConverter.GetBytes(value)); break;
+            case double value: AppendFrame(digest, BitConverter.GetBytes(value)); break;
+            default: AppendFrame(digest, Convert.ToString(reader.GetValue(ordinal), System.Globalization.CultureInfo.InvariantCulture)!); break;
+        }
+    }
+
+    private static void AppendFrame(IncrementalHash digest, string? value) => AppendFrame(digest, value is null ? [] : System.Text.Encoding.UTF8.GetBytes(value));
+    private static void AppendFrame(IncrementalHash digest, byte[] value) { digest.AppendData(BitConverter.GetBytes(value.Length)); digest.AppendData(value); }
+    private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+
     private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
     private static SqliteConnection Open(string path) { var connection = new SqliteConnection($"Data Source={path};Pooling=False"); connection.Open(); return connection; }
     private static bool TableExists(string path, string table) { using var connection = Open(path); return TableExists(connection, table); }
@@ -274,9 +409,11 @@ public sealed class RetentionCatalogMigrationFixtureTests
     private static void DeleteDatabaseFiles(string path) { foreach (var candidate in new[] { path, path + "-wal", path + "-shm" }) if (File.Exists(candidate)) File.Delete(candidate); }
 
     private sealed record FixtureManifest(string Component, string GenerationCommand, IReadOnlyList<FixtureEntry> Fixtures);
-    private sealed record FixtureEntry(string File, string Sha256, long ByteLength, string IntegrityCheck, FixtureSentinels Sentinels);
+    private sealed record FixtureEntry(string File, string Sha256, long ByteLength, string IntegrityCheck, FixtureSentinels Sentinels, string? SourceCommit = null, string? GitStatusBefore = null, string? GitStatusAfter = null);
     private sealed record FixtureSentinels(string StoreInstanceId, int CatalogSchemaVersion, int ItemCount);
     private sealed record FixtureSource(string Identity, string Path);
     private sealed record CatalogSnapshot(string StoreInstanceId, IReadOnlyList<string> Items);
     private sealed record ExpectedCatalogRow(string StoreKind, string SourceItemId, string CapturedAt, string ExpiresAt);
+    private sealed record SourceDataSnapshot(IReadOnlyList<SourceTableShape> Tables, string Digest);
+    private sealed record SourceTableShape(string Table, string[] Columns);
 }
