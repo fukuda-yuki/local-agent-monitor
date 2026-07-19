@@ -1,0 +1,5 @@
+interface:
+  display_name: Aspire local operations
+  short_description: Start, stop, and inspect the existing local AppHost.
+policy:
+  allow_implicit_invocation: false

@@ -142,6 +142,14 @@ Keep it short and practical; put detailed procedures in `docs/agent-guides/` and
 
 `.codex/rules/*.rules` is for command execution policy outside the sandbox, not for natural-language workflow guidance.
 
+## Repository Skills
+
+- Keep repository-scoped skills under `.agents/skills/`.
+- Keep `.claude/skills/` for Claude Code compatibility; when a shared skill exists in both locations, update both copies together.
+- Repository skills must encode repository-specific workflows or safety boundaries. Do not vendor general .NET, MSBuild, test, coverage, or migration skill catalogs under `.codex/skills/`; install them at user scope only for the task that needs them.
+- Implicit invocation is limited to `spec-update` and `validate`. Every other `.agents/skills/*` skill must set `policy.allow_implicit_invocation: false` in `agents/openai.yaml`.
+- Keep Aspire operations in the single `aspire-local-ops` skill while the AppHost has no resources. Do not recreate router/orchestration/monitoring variants.
+
 ## Subagent Requests
 
 Use subagents only when the user explicitly asks for subagent delegation and the active surface provides that capability.
