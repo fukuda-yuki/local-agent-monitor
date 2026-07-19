@@ -1,7 +1,6 @@
 ---
 name: sprint-evidence
 description: Scaffold a sprint milestone document (plan, review, handoff prompt, or live-validation evidence) under docs/sprints/ following the established repository format
-disable-model-invocation: true
 ---
 
 # Sprint Evidence / Handoff Document Scaffolding

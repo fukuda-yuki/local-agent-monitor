@@ -1,7 +1,6 @@
 ---
 name: seed-demo
 description: Use when the user wants to see the Local Ingestion Monitor UI with synthetic demo data — seeding demo traces, visually verifying UI changes, or preparing a demo/screenshot session
-disable-model-invocation: true
 ---
 
 # Seed Demo Data Into the Local Monitor

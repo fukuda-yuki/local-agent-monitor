@@ -1,6 +1,6 @@
 ---
 name: validate
-description: Run the pinned repository validation suite (solution build, Playwright Chromium install, solution tests, optional collector config check) and report results in the required format
+description: Run the pinned repository validation suite (Claude skill mirror check, solution build, Playwright Chromium install, solution tests, optional collector config check) and report results in the required format
 ---
 
 # Repository Validation Suite
@@ -11,14 +11,20 @@ commands when one fails — report the failure instead.
 
 ## Commands
 
-1. `dotnet build CopilotAgentObservability.slnx`
-2. `pwsh scripts\test\install-playwright-chromium.ps1`
+1. `pwsh scripts\agent\sync-claude-skills.ps1 -Check`
+   - Verifies that the shared `.claude/skills/` copies exactly match their
+     canonical `.agents/skills/` sources, excluding Codex-only
+     `agents/openai.yaml` metadata.
+   - To repair drift, run `pwsh scripts\agent\sync-claude-skills.ps1`, review
+     the generated diff, and rerun this validation from the beginning.
+2. `dotnet build CopilotAgentObservability.slnx`
+3. `pwsh scripts\test\install-playwright-chromium.ps1`
    - Required because the solution test suite contains LocalMonitor
      Playwright browser smoke tests. The wrapper sets
      `PLAYWRIGHT_BROWSERS_PATH` to `artifacts\playwright-browsers` when unset.
    - On Linux CI, pass `-WithDeps`.
-3. `dotnet test CopilotAgentObservability.slnx`
-4. Only when files under `infra\otel-collector\` changed:
+4. `dotnet test CopilotAgentObservability.slnx`
+5. Only when files under `infra\otel-collector\` changed:
 
    ```powershell
    $env:LANGFUSE_AUTH="dummy"

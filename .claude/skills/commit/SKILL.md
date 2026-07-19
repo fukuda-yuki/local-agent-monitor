@@ -1,7 +1,6 @@
 ---
 name: commit
 description: Create a local commit following the repository convention (work item name prefix + Conventional Commits), after validation and review are complete
-disable-model-invocation: true
 ---
 
 # Repository Commit
