@@ -578,7 +578,7 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         {
             while (reader.Read()) events.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2)));
         }
-        return new AnalysisRunRawSnapshot(result, error, events);
+        return new AnalysisRunRawSnapshot(result, error, events.AsReadOnly());
     }
 
     private static string FormatTimestamp(DateTimeOffset value) =>

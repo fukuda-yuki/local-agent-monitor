@@ -414,6 +414,24 @@ public class MonitorAnalysisStoreTests
     }
 
     [Fact]
+    public async Task AnalysisRawReader_EventsAreNotConsumerMutable()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        store.CreateSchema();
+        var requestedAt = DateTimeOffset.UnixEpoch.AddMinutes(1);
+        var run = store.StartRun("trace-analysis", 42, "span-1", MonitorAnalysisFocus.Errors, requestedAt);
+        _ = store.AppendEvent(run.RunId, run.OperationToken, null, "progress", "first raw event", requestedAt.AddMinutes(1));
+
+        var read = await store.ReadRawSnapshotAsync(run.RunId, CancellationToken.None);
+
+        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(read.Lease);
+        Assert.False(lease.Value.Events is IList<AnalysisRunRawEvent> { IsReadOnly: false });
+        Assert.Equal(new[] { "first raw event" }, lease.Value.Events.Select(@event => @event.Message));
+    }
+
+    [Fact]
     public void AnalysisStore_MetadataReadersNeverSelectRawFields()
     {
         var source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "CopilotAgentObservability.LocalMonitor", "Analysis", "SqliteMonitorAnalysisStore.cs"));
