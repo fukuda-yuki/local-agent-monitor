@@ -115,7 +115,7 @@ internal static class MonitorHost
         builder.Services.AddSingleton(summaryService);
         var overviewService = new MonitorOverviewService(projectionStore, testOptions?.TimeProvider);
         builder.Services.AddSingleton(overviewService);
-        var analysisStore = testOptions?.AnalysisStore ?? new SqliteMonitorAnalysisStore(options.DatabasePath);
+        var analysisStore = testOptions?.AnalysisStore ?? new SqliteMonitorAnalysisStore(options.DatabasePath, retentionContext, timeProvider);
         analysisStore.CreateSchema();
         builder.Services.AddSingleton(analysisStore);
         var sessionTimeProvider = timeProvider;
@@ -668,7 +668,8 @@ internal static class MonitorHost
                         Question: payload?.Question,
                         History: payload?.History
                             ?.Select(turn => new AnalysisHistoryTurn(turn.Question, turn.Answer))
-                            .ToList()),
+                            .ToList(),
+                        OperationToken: start.OperationToken),
                     context.RequestAborted);
                 context.Response.Headers["Cache-Control"] = "no-store";
                 await WriteJsonAsync(context, new
@@ -693,8 +694,16 @@ internal static class MonitorHost
                     return;
                 }
 
+                var rawRead = await analysisStore.ReadRawSnapshotAsync(runId, context.RequestAborted);
+                if (rawRead.Disposition != RetentionReadDisposition.Granted || rawRead.Lease is null)
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "analysis_run_not_found", "No analysis run exists for that trace.");
+                    return;
+                }
+
+                await using var rawLease = rawRead.Lease;
                 context.Response.Headers["Cache-Control"] = "no-store";
-                await WriteJsonAsync(context, ToRunDto(run, includeRawResult: true));
+                await WriteJsonAsync(context, ToRunDto(run, rawLease.Value));
             });
 
             app.MapGet("/traces/{traceId}/analysis/runs/{runId:long}/safe-summary", async (string traceId, long runId, HttpContext context) =>
@@ -1379,7 +1388,7 @@ internal static class MonitorHost
         return true;
     }
 
-    private static object ToRunDto(MonitorAnalysisRun run, bool includeRawResult) => new
+    private static object ToRunDto(MonitorAnalysisRun run, AnalysisRunRawSnapshot? rawSnapshot = null) => new
     {
         id = run.Id,
         trace_id = run.TraceId,
@@ -1390,8 +1399,8 @@ internal static class MonitorHost
         requested_at = run.RequestedAt,
         started_at = run.StartedAt,
         completed_at = run.CompletedAt,
-        result_markdown = includeRawResult ? run.ResultMarkdown : null,
-        error_message = run.ErrorMessage,
+        result_markdown = rawSnapshot?.ResultMarkdown,
+        error_message = rawSnapshot?.ErrorMessage,
     };
 
     /// <summary>

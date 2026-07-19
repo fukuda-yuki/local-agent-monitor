@@ -181,8 +181,70 @@ internal sealed record RetentionBatchReadResult<T>(RetentionReadDisposition Disp
 
 internal sealed class RetentionRevisionFence
 {
+    private static readonly byte[] SourceTokenBindingDomain = "copilot-agent-observability/retention-analysis-fence-source-binding/v1"u8.ToArray();
+    private readonly string? itemId;
+    private readonly string? storeInstanceId;
+    private readonly string? sourceItemId;
+    private readonly long revision;
+    private readonly byte[]? sourceTokenBindingDigest;
+    private readonly byte[]? operationToken;
+
     private RetentionRevisionFence() { }
+    private RetentionRevisionFence(string itemId, string storeInstanceId, long runId, long revision, byte[] sourceToken, byte[] operationToken)
+    {
+        this.itemId = itemId;
+        this.storeInstanceId = storeInstanceId;
+        sourceItemId = runId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        this.revision = revision;
+        sourceTokenBindingDigest = CreateSourceTokenBindingDigest(sourceToken);
+        this.operationToken = operationToken.ToArray();
+    }
     internal static RetentionRevisionFence Create() => new();
+
+    internal static RetentionRevisionFence CreateAnalysisRunRaw(
+        string itemId,
+        string storeInstanceId,
+        long runId,
+        long revision,
+        byte[] sourceToken,
+        byte[] operationToken) =>
+        new(itemId, storeInstanceId, runId, revision, sourceToken, operationToken);
+
+    internal bool MatchesAnalysisRunRaw(
+        string expectedItemId,
+        string expectedStoreInstanceId,
+        long expectedRunId,
+        long expectedRevision,
+        byte[] expectedSourceToken,
+        byte[] expectedOperationToken) =>
+        string.Equals(itemId, expectedItemId, StringComparison.Ordinal)
+        && string.Equals(storeInstanceId, expectedStoreInstanceId, StringComparison.Ordinal)
+        && string.Equals(sourceItemId, expectedRunId.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal)
+        && revision == expectedRevision
+        && sourceTokenBindingDigest is not null && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(sourceTokenBindingDigest, CreateSourceTokenBindingDigest(expectedSourceToken))
+        && operationToken is not null && operationToken.AsSpan().SequenceEqual(expectedOperationToken);
+
+    private static byte[] CreateSourceTokenBindingDigest(byte[] sourceToken)
+    {
+        if (sourceToken is not { Length: 32 }) throw new ArgumentException("Source token must be 32 bytes.", nameof(sourceToken));
+        using var stream = new MemoryStream();
+        WriteFrame(stream, SourceTokenBindingDomain);
+        WriteFrame(stream, sourceToken);
+        return System.Security.Cryptography.SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length));
+    }
+
+    private static void WriteFrame(Stream stream, ReadOnlySpan<byte> value)
+    {
+        Span<byte> length = stackalloc byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length, value.Length);
+        stream.Write(length);
+        stream.Write(value);
+    }
+}
+
+internal sealed class RetentionRevisionFenceRejectedException : InvalidOperationException
+{
+    internal RetentionRevisionFenceRejectedException() : base("The requested analysis raw write is no longer authorized.") { }
 }
 
 internal sealed class RetentionReadLease<T> : IAsyncDisposable

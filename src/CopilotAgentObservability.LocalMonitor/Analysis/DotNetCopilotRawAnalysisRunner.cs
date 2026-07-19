@@ -34,30 +34,36 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
 
     private async Task RunAsync(MonitorAnalysisContext context, CancellationToken cancellationToken)
     {
+        var operationToken = context.OperationToken ?? throw new InvalidOperationException("Analysis operation token is required.");
+        RetentionRevisionFence? fence = null;
         var startedAt = DateTimeOffset.UtcNow;
         analysisStore.MarkRunning(context.RunId, startedAt);
-        analysisStore.AppendEvent(context.RunId, "running", ".NET GitHub Copilot SDK analysis started.", startedAt);
+        fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "running", ".NET GitHub Copilot SDK analysis started.", startedAt);
 
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            analysisStore.AppendEvent(context.RunId, "sdk_phase", "loading_local_tool_data", DateTimeOffset.UtcNow);
+            fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "loading_local_tool_data", DateTimeOffset.UtcNow);
             await using var data = await MonitorAnalysisToolData.CreateAsync(projectionStore, context, cancellationToken);
-            var result = await RunCopilotSessionAsync(context, data, cancellationToken);
-            analysisStore.CompleteRun(context.RunId, result, DateTimeOffset.UtcNow);
+            var outcome = await RunCopilotSessionAsync(context, data, operationToken, fence, cancellationToken);
+            fence = analysisStore.CompleteRun(context.RunId, operationToken, outcome.Fence, outcome.Result, DateTimeOffset.UtcNow);
         }
         catch (OperationCanceledException)
         {
-            analysisStore.FinishRun(
+            _ = analysisStore.FinishRun(
                 context.RunId,
+                operationToken,
+                fence,
                 MonitorAnalysisStatus.Canceled,
                 "Analysis was canceled.",
                 DateTimeOffset.UtcNow);
         }
         catch (PersistenceBusyException)
         {
-            analysisStore.FinishRun(
+            _ = analysisStore.FinishRun(
                 context.RunId,
+                operationToken,
+                fence,
                 MonitorAnalysisStatus.Failed,
                 "The local monitor raw store is busy. Retry the analysis.",
                 DateTimeOffset.UtcNow);
@@ -65,18 +71,22 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         catch (Exception exception)
         {
             var message = SanitizedExceptionMessage(exception, configuration["CopilotAnalysis:Provider:ApiKey"]);
-            analysisStore.AppendEvent(context.RunId, "sdk_error", message, DateTimeOffset.UtcNow);
-            analysisStore.FinishRun(
+            fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_error", message, DateTimeOffset.UtcNow);
+            _ = analysisStore.FinishRun(
                 context.RunId,
+                operationToken,
+                fence,
                 MonitorAnalysisStatus.Failed,
                 message,
                 DateTimeOffset.UtcNow);
         }
     }
 
-    private async Task<string> RunCopilotSessionAsync(
+    private async Task<(string Result, RetentionRevisionFence Fence)> RunCopilotSessionAsync(
         MonitorAnalysisContext context,
         MonitorAnalysisToolData data,
+        MonitorAnalysisOperationToken operationToken,
+        RetentionRevisionFence fence,
         CancellationToken cancellationToken)
     {
         var settings = CopilotAnalysisSettings.From(configuration);
@@ -91,9 +101,9 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
             BaseDirectory = settings.BaseDirectory,
             WorkingDirectory = Directory.GetCurrentDirectory(),
         });
-        analysisStore.AppendEvent(context.RunId, "sdk_phase", "starting_client", DateTimeOffset.UtcNow);
+        fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "starting_client", DateTimeOffset.UtcNow);
         await client.StartAsync(cancellationToken);
-        analysisStore.AppendEvent(context.RunId, "sdk_phase", "creating_session", DateTimeOffset.UtcNow);
+        fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "creating_session", DateTimeOffset.UtcNow);
         await using var session = await client.CreateSessionAsync(new SessionConfig
         {
             Model = settings.Model,
@@ -142,17 +152,17 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
             }
         });
 
-        analysisStore.AppendEvent(context.RunId, "sdk_phase", "sending_message", DateTimeOffset.UtcNow);
+        fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "sending_message", DateTimeOffset.UtcNow);
         await session.SendAndWaitAsync(
             new MessageOptions { Prompt = BuildPrompt(context) },
             TimeSpan.FromSeconds(settings.TimeoutSeconds),
             cancellationToken);
         done.TrySetResult();
         await done.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
-        analysisStore.AppendEvent(context.RunId, "sdk_phase", "session_completed", DateTimeOffset.UtcNow);
-        return final.Length == 0
+        fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "session_completed", DateTimeOffset.UtcNow);
+        return (final.Length == 0
             ? "Copilot SDK analysis completed without a textual result."
-            : final.ToString();
+            : final.ToString(), fence);
     }
 
     private static AIFunction DefineTool(string name, string description, Func<string> tool) =>

@@ -335,7 +335,7 @@ public class MonitorAnalysisRouteTests
         // and no chat state is persisted server-side.
         using var temp = new MonitorTempDirectory();
         SeedProjectedTrace(temp);
-        var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath);
+        var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
         var runner = new CompletingAnalysisRunner(analysisStore);
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
@@ -514,7 +514,7 @@ public class MonitorAnalysisRouteTests
 
     private static Task<RunningMonitorHost> StartHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false)
     {
-        var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath);
+        var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
         return MonitorTestHost.StartAsync(
             temp,
             sanitizedOnly: sanitizedOnly,
@@ -544,6 +544,8 @@ public class MonitorAnalysisRouteTests
             analysisStore.MarkRunning(context.RunId, DateTimeOffset.UnixEpoch.AddMinutes(4));
             analysisStore.CompleteRun(
                 context.RunId,
+                Assert.IsType<MonitorAnalysisOperationToken>(context.OperationToken),
+                null,
                 "SECRET_PROMPT_TEXT_MARKER leak-marker@example.com",
                 DateTimeOffset.UnixEpoch.AddMinutes(5));
             return Task.CompletedTask;

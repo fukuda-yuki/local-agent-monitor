@@ -18,7 +18,7 @@ public class MonitorDrawerPlaywrightTests
     {
         using var temp = new MonitorTempDirectory();
         MonitorRichTrace.Seed(temp);
-        var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath);
+        var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
         var runner = new RecordingRunner(analysisStore);
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
@@ -109,6 +109,8 @@ public class MonitorDrawerPlaywrightTests
             analysisStore.MarkRunning(context.RunId, DateTimeOffset.UnixEpoch.AddMinutes(4));
             analysisStore.CompleteRun(
                 context.RunId,
+                Assert.IsType<MonitorAnalysisOperationToken>(context.OperationToken),
+                null,
                 $"FAKE_FINDINGS run {context.RunId}",
                 DateTimeOffset.UnixEpoch.AddMinutes(5));
             return Task.CompletedTask;

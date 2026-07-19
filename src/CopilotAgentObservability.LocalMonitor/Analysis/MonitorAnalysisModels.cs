@@ -21,7 +21,17 @@ internal enum MonitorAnalysisStatus
     TimedOut,
 }
 
-internal sealed record MonitorAnalysisStartResult(long RunId);
+internal sealed class MonitorAnalysisOperationToken
+{
+    private readonly byte[] value;
+
+    internal MonitorAnalysisOperationToken(byte[] value) => this.value = value.ToArray();
+
+    internal bool Matches(byte[] candidate) => value.AsSpan().SequenceEqual(candidate);
+    internal byte[] Copy() => value.ToArray();
+}
+
+internal sealed record MonitorAnalysisStartResult(long RunId, MonitorAnalysisOperationToken OperationToken);
 
 /// <summary>One prior Q&amp;A turn of the drawer chat, re-sent with each follow-up (history resend, D045).</summary>
 internal sealed record AnalysisHistoryTurn(
@@ -41,7 +51,8 @@ internal sealed record MonitorAnalysisContext(
     string? SpanId,
     MonitorAnalysisFocus Focus,
     string? Question = null,
-    IReadOnlyList<AnalysisHistoryTurn>? History = null);
+    IReadOnlyList<AnalysisHistoryTurn>? History = null,
+    MonitorAnalysisOperationToken? OperationToken = null);
 
 internal interface IMonitorAnalysisRunner
 {
@@ -57,9 +68,14 @@ internal sealed record MonitorAnalysisRun(
     MonitorAnalysisStatus Status,
     string RequestedAt,
     string? StartedAt,
-    string? CompletedAt,
+    string? CompletedAt);
+
+internal sealed record AnalysisRunRawEvent(string EventType, string Message, string OccurredAt);
+
+internal sealed record AnalysisRunRawSnapshot(
     string? ResultMarkdown,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    IReadOnlyList<AnalysisRunRawEvent> Events);
 
 internal sealed record MonitorAnalysisSafeSummary(
     long RunId,
