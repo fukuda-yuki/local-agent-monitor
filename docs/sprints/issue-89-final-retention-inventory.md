@@ -2,6 +2,7 @@
 
 Base SHA: `11d6c587903f6ea97026d815f608231efea08d65`.
 Implementation candidate SHA: `5c5540878a6731804084644d8a136be9ad748cf9`.
+Validation candidate SHA: `2549b1d94f2df0d06d092882aef636d2aec2ba3a`.
 
 This is the finite, repository-safe closeout inventory for that exact range. F2
 adds evidence and contracts only; it does not add a raw store, reader, creator,
@@ -138,3 +139,27 @@ retention catalog); all five safe file members are explicitly not applicable.
 This inventory is evidence for the implementation candidate only. It makes no
 claim about future raw stores, runtime data outside the synthetic corpus, live
 network validation, or the out-of-scope #90 mutation UI/API.
+
+## Pinned validation evidence
+
+The implementation candidate remains
+`5c5540878a6731804084644d8a136be9ad748cf9`. The validation candidate is
+`2549b1d94f2df0d06d092882aef636d2aec2ba3a`: commits after the implementation
+candidate add only finite corpus/inventory evidence, repository-safe closeout
+documentation, and contract tests. They add no production raw surface.
+
+At validation candidate
+`2549b1d94f2df0d06d092882aef636d2aec2ba3a`, the required repository commands
+passed exactly as follows:
+
+| Command | Result |
+| --- | --- |
+| `dotnet build CopilotAgentObservability.slnx` | PASS; 0 warnings, 0 errors |
+| `pwsh scripts\test\install-playwright-chromium.ps1` | PASS; exit 0 |
+| `dotnet test CopilotAgentObservability.slnx` | PASS; ConfigCli 4,257, Doctor 263, LocalMonitor 1,772; total 6,292; failed 0, skipped 0 |
+
+The independent F2 review passed for spec and code, with no blockers. The
+pre-close whole-issue audit found no implementation blockers. A final
+whole-Issue #89 review has not yet been run and is not claimed by this evidence.
+Issue #89 is therefore complete and close-ready; pin/delete-now remains the
+separate responsibility of Issue #90.

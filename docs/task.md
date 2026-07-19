@@ -69,13 +69,16 @@
 
 ## Open Follow-ups
 
-- **Issue #89 Raw retention cleanup (closeout validation):** catalog v1,
+- **Issue #89 Raw retention cleanup (complete / close-ready):** catalog v1,
   immutable raw-read inventory, frozen Session v1 compatibility projection,
   migration/read gates, worker, five exact adapters, and sanitized diagnostics
-  are implemented. The final candidate inventory and finite synthetic corpus
-  are recorded in [issue-89-final-retention-inventory.md](sprints/issue-89-final-retention-inventory.md);
-  remaining closeout work is the required full validation/review evidence.
-  Pin/delete-now remains Issue #90.
+  are complete. The implementation candidate is `5c5540878a6731804084644d8a136be9ad748cf9`;
+  repository-safe closeout evidence and full validation are pinned at
+  `2549b1d94f2df0d06d092882aef636d2aec2ba3a` in
+  [issue-89-final-retention-inventory.md](sprints/issue-89-final-retention-inventory.md).
+  The independent F2 spec/code review passed with no blockers, and the pre-close
+  whole-issue audit found no implementation blockers; a final whole-Issue #89
+  review is not yet claimed. Pin/delete-now remains Issue #90.
 
 - **未対応の機能仕様・検証（未確認の検証フェーズ）**
   - Sprint18 スパンインスペクタの `SpanDetailExtractor` は実 VS Code Copilot Chat ペイロードのキー名が live 検証まで未確定のため defensive 抽出とし、整形抽出が空でも raw タブで代替できる。実ペイロードでの整形表示のライブ検証は人手ゲート（D043、既存 prompt extractor と同種の caveat）。
