@@ -4,6 +4,7 @@ The shared Claude Code skills in this directory are generated from the canonical
 
 Do not edit these shared directories directly:
 
+- `aspire-local-ops`
 - `commit`
 - `seed-demo`
 - `spec-update`
@@ -22,4 +23,4 @@ Repository validation checks the mirror with:
 pwsh scripts\agent\sync-claude-skills.ps1 -Check
 ```
 
-Claude-specific skills may coexist in `.claude/skills/`; the synchronization script only owns the five shared directories listed above.
+Claude-specific skills may coexist in `.claude/skills/`; the synchronization script only owns the six shared directories listed above.
