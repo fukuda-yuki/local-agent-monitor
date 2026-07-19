@@ -77,6 +77,16 @@ public sealed class SqliteSessionStore : ISessionStore
         this.writeCheckpoint = writeCheckpoint ?? throw new ArgumentNullException(nameof(writeCheckpoint));
     }
 
+    internal SqliteSessionStore(
+        string databasePath,
+        RetentionCatalogContext retentionContext,
+        TimeProvider timeProvider,
+        Action<string> writeCheckpoint)
+        : this(databasePath, retentionContext, timeProvider)
+    {
+        this.writeCheckpoint = writeCheckpoint ?? throw new ArgumentNullException(nameof(writeCheckpoint));
+    }
+
     public void CreateSchema()
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(databasePath));

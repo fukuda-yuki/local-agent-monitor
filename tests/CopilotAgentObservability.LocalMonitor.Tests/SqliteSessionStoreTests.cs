@@ -7,11 +7,18 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SqliteSessionStoreTests
 {
+    private static SqliteSessionStore CreateRawStore(string databasePath, TimeProvider? timeProvider = null)
+    {
+        var clock = timeProvider ?? new SessionStoreTimeProvider(DateTimeOffset.UnixEpoch);
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(databasePath, clock);
+        return new SqliteSessionStore(databasePath, context, clock);
+    }
+
     [Fact]
     public void ObjectiveEvaluations_RejectNonVersionSevenReceiptIdentifiers()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "objective-v4");
         var full = batch with { Detail = batch.Detail with { Session = batch.Detail.Session with { Completeness = SessionCompleteness.Full } } };
@@ -55,7 +62,7 @@ public sealed class SqliteSessionStoreTests
     public void ObjectiveEvaluations_RequireNativeExactBindingAsWellAsTerminalFullScope()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "unbound-objective");
         var fullButUnbound = batch with
@@ -76,7 +83,7 @@ public sealed class SqliteSessionStoreTests
     public void ObjectiveEvaluations_PersistAcrossStoreRestartAndAreImmutable()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "objective");
         var full = batch with { Detail = batch.Detail with { Session = batch.Detail.Session with { Completeness = SessionCompleteness.Full } } };
@@ -96,7 +103,7 @@ public sealed class SqliteSessionStoreTests
     public void ImprovementProposals_PersistCandidateWithOpaqueReferences()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -114,7 +121,7 @@ public sealed class SqliteSessionStoreTests
     public void ImprovementProposals_GetByProposalIdReturnsOnlyTheRequestedProposal()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -134,7 +141,7 @@ public sealed class SqliteSessionStoreTests
     public void Promote_WhenAnySourceSessionAlreadyHasRecommendation_Throws()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "native-first");
         var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "native-second");
@@ -155,7 +162,7 @@ public sealed class SqliteSessionStoreTests
     public void ImprovementProposals_RejectVerifiedWrites()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -170,7 +177,7 @@ public sealed class SqliteSessionStoreTests
     public void ImprovementProposals_VerifiedProposalCannotBeChangedByCanvasStatusUpdates(ImprovementProposalStatus requestedStatus)
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "native-verified-first");
         var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "native-verified-second");
@@ -200,7 +207,7 @@ public sealed class SqliteSessionStoreTests
     public void ImprovementProposals_CreateAcceptsOnlyCandidateWithoutLifecycleTimestamps()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -215,7 +222,7 @@ public sealed class SqliteSessionStoreTests
     public void Promotion_RequiresTwoTerminalNativeSourceSessions()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -230,7 +237,7 @@ public sealed class SqliteSessionStoreTests
     public void Promotion_RequiresEvidenceFromTwoDistinctSourceSessions()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "native-first");
         var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "native-second");
@@ -250,7 +257,7 @@ public sealed class SqliteSessionStoreTests
     public void ImprovementProposals_RejectNonVersionSevenProposalId()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -263,7 +270,7 @@ public sealed class SqliteSessionStoreTests
     public void Promotion_RejectsEvidenceOutsideSourceSessions()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "native-first");
         var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "native-second");
@@ -290,7 +297,7 @@ public sealed class SqliteSessionStoreTests
     public void ImprovementProposals_InvalidWriteRollsBackWithoutPartialState()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -308,7 +315,7 @@ public sealed class SqliteSessionStoreTests
     public void ImprovementProposals_TransactionFailureRollsBackRootAndAssociations()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -326,7 +333,7 @@ public sealed class SqliteSessionStoreTests
     public void ImprovementProposals_RejectMalformedDomainValues()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -352,7 +359,7 @@ public sealed class SqliteSessionStoreTests
     public void CreateSchema_EmptyDatabaseCreatesSessionSchemaAndIsIdempotent()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
 
         store.CreateSchema();
         store.CreateSchema();
@@ -387,7 +394,7 @@ public sealed class SqliteSessionStoreTests
     public void CreateSchema_NewerSessionVersionPreservesCurrentSchemaAndRows()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -405,7 +412,7 @@ public sealed class SqliteSessionStoreTests
     public void CreateSchema_VersionOneDatabaseAddsHumanEvaluationTable()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.Parse("2026-07-11T00:00:00Z"));
         store.Write(batch);
@@ -426,7 +433,7 @@ public sealed class SqliteSessionStoreTests
     public void ProposalApply_rollback_linkage_is_durable_and_failure_keeps_applied_state()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -459,7 +466,7 @@ public sealed class SqliteSessionStoreTests
     public void CreateSchema_VersionTwoDatabaseAddsProposalTablesAndPreservesSessionRow()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.Parse("2026-07-11T00:00:00Z"));
         store.Write(batch);
@@ -483,7 +490,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_PersistsMetadataAndDuplicateSourceReplayIsIdempotent()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(lastSeenAt: DateTimeOffset.Parse("2026-07-11T01:00:00Z"));
 
@@ -515,7 +522,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_CapturesContentAndRetentionReceiptInOneTransaction()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         new RetentionCatalogStore(database.Path).CreateSchema();
         var batch = CreateBatch(DateTimeOffset.Parse("2026-07-11T01:00:00Z"));
@@ -535,8 +542,8 @@ public sealed class SqliteSessionStoreTests
     {
         using var database = new SessionTestDatabase();
         new SqliteSessionStore(database.Path).CreateSchema();
-        new RetentionCatalogStore(database.Path).CreateSchema();
-        var store = new SqliteSessionStore(database.Path, TimeProvider.System, point =>
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path);
+        var store = new SqliteSessionStore(database.Path, context, TimeProvider.System, point =>
         {
             if (point == checkpoint) throw new InvalidOperationException("injected");
         });
@@ -553,7 +560,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_RoundTripsClaudeProvenanceAndKeepsLegacyEventProvenanceNullAfterRestart()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var legacy = CreateBatch(DateTimeOffset.UnixEpoch, "legacy-native");
         var claude = CreateBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "claude-native");
@@ -603,7 +610,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_ChildRunMayBeListedBeforeNewParentRun()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         var parent = batch.Detail.Runs[0];
@@ -621,7 +628,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_ChildEventMayBeListedBeforeNewParentEvent()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         var parent = batch.Detail.Events[0];
@@ -646,7 +653,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_ChildMayReferenceReplayedParentByDifferentInputEventId()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var original = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(original);
@@ -682,7 +689,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_ParentCycleFailsDeterministicallyAndRollsBack(string relationship)
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         if (relationship == "run")
@@ -719,7 +726,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_InvalidChildRollsBackWholeBatch()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         batch = batch with
@@ -739,7 +746,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_DuplicateIdentityOwnedByAnotherSessionRejectsAndRollsBackBatch(string identity)
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var existing = CreateBatch(DateTimeOffset.UnixEpoch, "shared-native");
         store.Write(existing);
@@ -786,7 +793,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_BatchMembersMustBelongToAggregateSession(string member)
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         var otherSessionId = Guid.CreateVersion7();
@@ -811,7 +818,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_ExistingCrossSessionReferencesAreRejected(string reference)
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var first = CreateBatch(DateTimeOffset.UnixEpoch, "native-a");
         store.Write(first);
@@ -833,7 +840,7 @@ public sealed class SqliteSessionStoreTests
     public void Resolve_IsExactAndListIsMostRecentFirstWithLimit()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var older = CreateBatch(DateTimeOffset.Parse("2026-07-10T00:00:00Z"), "Native-A");
         var newer = CreateBatch(DateTimeOffset.Parse("2026-07-11T00:00:00Z"), "Native-B");
@@ -889,10 +896,21 @@ public sealed class SqliteSessionStoreTests
     }
 
     [Fact]
-    public void GetDetail_RemainsAvailableWithoutContentTable()
+    public void WriteRawContent_WithoutRetentionContextFailsClosedBeforeDatabaseMutation()
     {
         using var database = new SessionTestDatabase();
         var store = new SqliteSessionStore(database.Path);
+
+        Assert.Throws<RetentionCatalogUnavailableException>(() => store.Write(CreateBatch(DateTimeOffset.UnixEpoch)));
+
+        Assert.False(File.Exists(database.Path));
+    }
+
+    [Fact]
+    public void GetDetail_RemainsAvailableWithoutContentTable()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -911,7 +929,7 @@ public sealed class SqliteSessionStoreTests
     public void ProjectionState_GetAndUpsertRoundTripsAndUpdates()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         Assert.Null(store.GetProjectionState("otel-enricher"));
         var first = new SessionProjectionState("otel-enricher", null, 2, DateTimeOffset.Parse("2026-07-11T00:00:00Z"));
@@ -937,7 +955,7 @@ public sealed class SqliteSessionStoreTests
     public void Schema_RejectsEveryInvalidEnumColumn(string sql)
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         store.Write(CreateBatch(DateTimeOffset.UnixEpoch));
         using var connection = database.Open();
@@ -954,7 +972,7 @@ public sealed class SqliteSessionStoreTests
     public void Schema_RejectsNegativeCounts(string sql)
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         store.Write(CreateBatch(DateTimeOffset.UnixEpoch));
         using var connection = database.Open();
@@ -969,7 +987,7 @@ public sealed class SqliteSessionStoreTests
     public void Schema_RejectsCrossSessionRunAndEventOwnership(string sql)
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var first = CreateBatch(DateTimeOffset.UnixEpoch, "native-a");
         var second = CreateBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "native-b");
@@ -988,7 +1006,7 @@ public sealed class SqliteSessionStoreTests
     public void Write_StoresCanonicalLowercaseUuidText()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
@@ -1028,7 +1046,7 @@ public sealed class SqliteSessionStoreTests
     public void Improvement_proposal_revision_starts_at_one_and_increments_on_lifecycle_changes()
     {
         using var database = new SessionTestDatabase();
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
         var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "revision-a");
         var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "revision-b");
@@ -1056,7 +1074,7 @@ public sealed class SqliteSessionStoreTests
         var fixture = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "session", "session-v6.sqlite");
         File.Copy(fixture, database.Path);
 
-        var store = new SqliteSessionStore(database.Path);
+        var store = CreateRawStore(database.Path);
         store.CreateSchema();
 
         using var verify = database.Open();
@@ -1150,5 +1168,10 @@ public sealed class SqliteSessionStoreTests
         }
 
         public void Dispose() => Directory.Delete(directory, recursive: true);
+    }
+
+    private sealed class SessionStoreTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => value;
     }
 }
