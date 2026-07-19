@@ -571,6 +571,19 @@ may identify a deletion target. SQLite source deletion and the `deleted`
 tombstone/receipt are atomic. File deletion is journaled, forward-only, and
 only mutates exact owned members after identity/marker/digest validation.
 
+The shared read foundation is initialized explicitly for a newly owned database
+or adopted explicitly from an existing v1 catalog; ordinary reads never create
+or migrate a database. Adoption validates the catalog component version and
+database identity and reports only `retention_catalog_unavailable` on a missing
+or invalid catalog. A read holds one `BEGIN IMMEDIATE` SQLite transaction while
+it validates catalog state and receipt, creates its bounded access/operation
+lease, and fully materializes the selector result. The selector receives only
+an opaque capability that binds the exact ownership token, catalog item/revision,
+and lease owner/generation predicates. The transaction commits before a value
+is returned; a null selector result, expiry boundary, stale revision, or failed
+commit returns no value. SQLite busy/locked returns `busy` without changing
+lifecycle or error state.
+
 The immutable Issue #89 kickoff and inventory base are both
 `11d6c587903f6ea97026d815f608231efea08d65`. The checked-in current-callsite
 inventory is [issue-89-raw-read-callsite-inventory.md](../../sprints/issue-89-raw-read-callsite-inventory.md).

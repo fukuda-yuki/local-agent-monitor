@@ -144,6 +144,11 @@ public sealed class RetentionMigrationBlockedException : InvalidOperationExcepti
     public RetentionMigrationBlockedException() : base("retention_migration_blocked") { }
 }
 
+public sealed class RetentionCatalogUnavailableException : InvalidOperationException
+{
+    public RetentionCatalogUnavailableException() : base("retention_catalog_unavailable") { }
+}
+
 public sealed class RetentionReadLeaseHandle : IDisposable
 {
     private readonly Action release;
@@ -159,4 +164,39 @@ public sealed class RetentionReadLeaseHandle : IDisposable
     public long Revision { get; }
     public long Generation { get; }
     public void Dispose() => release();
+}
+
+internal enum RetentionReadDisposition { Granted, NotFound, Denied, Busy }
+internal enum RetentionReadKind { Access, Operation }
+
+internal sealed record RetentionReadRequest(
+    RetentionOwnershipKey OwnershipKey,
+    RetentionReadKind LeaseKind,
+    DateTimeOffset Now,
+    long? ExpectedRevision);
+
+internal sealed record RetentionReadResult<T>(RetentionReadDisposition Disposition, RetentionReadLease<T>? Lease);
+
+internal sealed class RetentionRevisionFence
+{
+    private RetentionRevisionFence() { }
+    internal static RetentionRevisionFence Create() => new();
+}
+
+internal sealed class RetentionReadLease<T> : IAsyncDisposable
+{
+    private readonly Func<ValueTask> release;
+    private int released;
+
+    internal RetentionReadLease(T value, RetentionRevisionFence revisionFence, Func<ValueTask> release)
+    {
+        Value = value;
+        RevisionFence = revisionFence;
+        this.release = release;
+    }
+
+    internal T Value { get; }
+    internal RetentionRevisionFence RevisionFence { get; }
+
+    public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
 }
