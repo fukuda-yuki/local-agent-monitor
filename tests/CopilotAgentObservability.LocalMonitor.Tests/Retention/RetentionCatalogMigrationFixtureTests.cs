@@ -234,6 +234,11 @@ public sealed class RetentionCatalogMigrationFixtureTests
         Assert.Equal("ok", Scalar<string>(connection, "PRAGMA integrity_check;"));
         Assert.Equal(sourceRows, ReadAuthoritativeSourceRows(connection));
         Assert.Equal(1L, Scalar<long>(connection, "SELECT version FROM retention_component_versions WHERE component='retention';"));
+        Assert.True(TableExists(connection, "retention_analysis_sdk_directory_reservations"));
+        Assert.True(ReadRows(connection, "SELECT name FROM sqlite_master WHERE type='index' AND name='IX_retention_analysis_sdk_directory_reservations_phase_updated';").Single() == "IX_retention_analysis_sdk_directory_reservations_phase_updated");
+        var sdkSql = Scalar<string>(connection, "SELECT sql FROM sqlite_master WHERE type='table' AND name='retention_analysis_sdk_directory_reservations';");
+        Assert.Contains("analysis_run_id INTEGER NOT NULL UNIQUE", sdkSql, StringComparison.Ordinal);
+        Assert.Contains("phase IN ('reserved','active','sealed')", sdkSql, StringComparison.Ordinal);
 
         var storeInstanceId = Scalar<string>(connection, "SELECT store_instance_id FROM retention_store_instances WHERE id=1;");
         var items = ReadRows(connection, "SELECT item_id || '|' || store_instance_id || '|' || store_kind || '|' || source_item_id || '|' || captured_at || '|' || expires_at || '|' || policy_id || '|' || revision FROM retention_items ORDER BY store_kind, source_item_id;");

@@ -135,7 +135,14 @@ internal static class MonitorHost
         {
             builder.Services.AddHostedService(_ => new SessionEventWriterWorker(sessionEventQueue, sessionEventNormalizer));
         }
-        var analysisRunner = testOptions?.AnalysisRunner ?? new DotNetCopilotRawAnalysisRunner(analysisStore, projectionStore, builder.Configuration);
+        var analysisRunner = testOptions?.AnalysisRunner
+            ?? new DotNetCopilotRawAnalysisRunner(
+                analysisStore,
+                projectionStore,
+                builder.Configuration,
+                new AnalysisSdkDirectoryOwner(new RetentionCatalogStore(retentionContext, timeProvider), timeProvider),
+                new CopilotAnalysisSdkExecutor(),
+                timeProvider);
         builder.Services.AddSingleton(analysisRunner);
 
         if (testOptions?.StartProjectionWorker ?? true)
@@ -657,7 +664,7 @@ internal static class MonitorHost
                     payload?.RawRecordId,
                     payload?.SpanId,
                     focus,
-                    DateTimeOffset.UtcNow);
+                    timeProvider.GetUtcNow());
                 await analysisRunner.StartAsync(
                     new MonitorAnalysisContext(
                         start.RunId,

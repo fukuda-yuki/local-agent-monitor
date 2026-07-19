@@ -13,6 +13,7 @@ public sealed partial class RetentionCatalogStore
     private readonly Func<SqliteConnection, CancellationToken, bool>? maintenanceProtocol;
     private readonly RetentionCatalogContext? context;
     private readonly Action<string>? fileCaptureCheckpoint;
+    private readonly Action<string>? analysisSdkDirectoryCheckpoint;
     public RetentionCatalogStore(string databasePath, TimeProvider? timeProvider = null) { this.databasePath = databasePath ?? throw new ArgumentNullException(nameof(databasePath)); this.timeProvider = timeProvider ?? TimeProvider.System; }
     internal RetentionCatalogStore(string databasePath, Action<SqliteConnection, SqliteTransaction> backfillValidationCheckpoint)
         : this(databasePath)
@@ -38,6 +39,8 @@ public sealed partial class RetentionCatalogStore
     }
     internal RetentionCatalogStore(RetentionCatalogContext context, TimeProvider timeProvider, Action<string> fileCaptureCheckpoint)
         : this(context, timeProvider) => this.fileCaptureCheckpoint = fileCaptureCheckpoint;
+    internal RetentionCatalogStore(RetentionCatalogContext context, TimeProvider timeProvider, Action<string> fileCaptureCheckpoint, Action<string> analysisSdkDirectoryCheckpoint)
+        : this(context, timeProvider) { this.fileCaptureCheckpoint = fileCaptureCheckpoint; this.analysisSdkDirectoryCheckpoint = analysisSdkDirectoryCheckpoint; }
 
     public void CreateSchema()
     {
@@ -746,7 +749,7 @@ public sealed partial class RetentionCatalogStore
         var kind=kindWire switch { "session_event_content"=>RetentionStoreKind.SessionEventContent,"raw_record"=>RetentionStoreKind.RawRecord,"analysis_run_raw"=>RetentionStoreKind.AnalysisRunRaw,"sensitive_bundle"=>RetentionStoreKind.SensitiveBundle,"analysis_sdk_directory"=>RetentionStoreKind.AnalysisSdkDirectory,_=>(RetentionStoreKind?)null };
         if(kind is null || !string.Equals(store,StoreId(c,t),StringComparison.Ordinal)) return SourceReceiptProof.InvalidIdentity;
         if(kind is RetentionStoreKind.SensitiveBundle) return ValidateSensitiveBundleFirstIntentEvidence(c,t,itemId,store,source,receipt);
-        if(kind is RetentionStoreKind.AnalysisSdkDirectory) return SourceReceiptProof.Match;
+        if(kind is RetentionStoreKind.AnalysisSdkDirectory) return ValidateAnalysisSdkDirectoryFirstIntentEvidence(c,t,itemId,store,source,receipt);
         return StrictSourceProof(c,t,new RetentionOwnershipKey(store,kind.Value,source));
     }
     private static SourceReceiptProof StrictSourceProof(SqliteConnection c, SqliteTransaction t, RetentionOwnershipKey key)

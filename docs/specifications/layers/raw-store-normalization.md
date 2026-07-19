@@ -608,6 +608,43 @@ unimplemented receiver files, and external blobs are not cleanup targets. The
 final closeout corpus is `retention-closeout-corpus-v1`; it must classify every
 base-to-final raw-bearing creator and cannot treat future stores as covered.
 
+### Analysis SDK directory capture and cleanup (D3)
+
+`CopilotAnalysis:BaseDirectory` is a configured parent, not an SDK-owned
+directory and not a cleanup target. For each analysis run, the catalog must,
+before any filesystem or SDK operation, reserve one opaque generated child
+directly below that exact canonical parent. The child is the only directory
+passed to the SDK. Its `analysis_sdk_directory` item uses the exact persisted
+owning `monitor_analysis_runs.requested_at` value as `captured_at`; no start,
+reservation, filesystem, recovery, or current time may replace it.
+
+The reservation binds the catalog instance, analysis run, exact requested-at
+text and UTC ticks, and private ownership token. Its private ownership marker
+is kind-bound to `analysis_sdk_directory` and that same binding; it is not a
+generic marker and cannot authorize another kind, run, parent, or child.
+Activation atomically creates the item and an operation lease after the
+marker-proven child is quiescent. The operation lease is held and renewed for
+the complete SDK use, including Session and Client disposal, and is released
+only after that use ends. A lost or unavailable lease prevents SDK use and
+later mutation.
+
+After quiescence and before deletion, the catalog snapshots only that exact
+owned child. The immutable snapshot and the first delete intent are one
+transaction. It contains at most 256 canonical child-relative members and at
+most 128 MiB of file content, with every file's exact size and digest and a
+persisted deletion order. Cleanup validates the marker and snapshot before
+each mutation, deletes snapshot files and directories in that order, deletes
+the marker last, then deletes the now-empty child last. It never enumerates,
+deletes, adopts, or otherwise mutates the configured parent, any sibling, or
+any non-snapshot member.
+
+Ownership/setup and SDK failures expose only the fixed sanitized messages
+`Local analysis ownership could not be established.` and `SDK analysis failed.`
+respectively. These messages and retention diagnostics must not disclose
+paths, raw data, ownership tokens, credentials, secrets, or exception text.
+Production composition of the five-adapter retention worker is D4 scope and is
+not implied or changed by this D3 directory-owner contract.
+
 ### Sensitive Bundle capture and cleanup
 
 A sensitive bundle is created only after the explicitly bound catalog has been

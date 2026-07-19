@@ -612,8 +612,18 @@ The SDK runner reads local configuration from `CopilotAnalysis:*`, including
 optional BYOK provider settings and `CopilotAnalysis:TimeoutSeconds` (positive
 integer; the send/wait execution timeout for one analysis run, default `60`,
 independent of the Canvas options timeout hints). It must set a writable SDK
-`BaseDirectory` instead of relying on runtime defaults, and it must not persist
-provider API keys or raw provider errors containing credentials.
+`BaseDirectory` instead of relying on runtime defaults. `CopilotAnalysis:BaseDirectory`
+is the configured parent only: a run must never give that parent directly to
+the SDK. Before any filesystem or SDK operation, the run reserves its
+catalog-owned opaque child under that exact parent as defined in
+[raw-store normalization](raw-store-normalization.md#analysis-sdk-directory-capture-and-cleanup-d3),
+and gives only that child to the SDK. The operation lease remains held and is
+renewed until both the SDK Session and Client have been disposed. The runner
+must not persist provider API keys or raw provider errors containing
+credentials. An ownership/setup failure records only the fixed message `Local
+analysis ownership could not be established.`; any other SDK failure records
+only `SDK analysis failed.`. Neither message, events, nor diagnostics may
+contain a local path, raw value, credential, secret, or exception text.
 
 ## Local Ingestion Monitor Windows Startup
 

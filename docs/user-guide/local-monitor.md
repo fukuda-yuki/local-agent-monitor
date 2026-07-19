@@ -756,9 +756,11 @@ dotnet user-secrets set "CopilotAnalysis:Provider:WireApi" "completions" --proje
 dotnet user-secrets set "CopilotAnalysis:Provider:ApiKey" "<api-key>" --project src\CopilotAgentObservability.LocalMonitor
 ```
 
-`CopilotAnalysis:BaseDirectory` を指定しない場合、Local Monitor は writable な
-temporary local directory を Copilot SDK runtime state として使います。API key は
-analysis events、UI、repository-safe summary には出力しません。
+`CopilotAnalysis:BaseDirectory` は Copilot SDK runtime state の writable な parent
+directory です。指定しない場合、Local Monitor は writable な temporary local parent
+directory を使います。Local Monitor は run ごとに opaque な SDK child directory を作成し、
+その child だけを SDK に渡します。cleanup は configured parent や sibling を対象にしません。
+API key は analysis events、UI、repository-safe summary には出力しません。
 
 `CopilotAnalysis:TimeoutSeconds`（既定 `60`）は 1 回の解析実行に許容する SDK
 send/wait タイムアウト秒です。実際の Copilot CLI トレースは raw payload が

@@ -1,11 +1,8 @@
-using System.ComponentModel;
 using System.Text;
-using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using GitHub.Copilot;
-using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 
 namespace CopilotAgentObservability.LocalMonitor.Analysis;
@@ -15,15 +12,32 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
     private readonly IMonitorAnalysisStore analysisStore;
     private readonly IMonitorProjectionStore projectionStore;
     private readonly IConfiguration configuration;
+    private readonly IAnalysisSdkDirectoryOwner directoryOwner;
+    private readonly ICopilotAnalysisSdkExecutor executor;
+    private readonly TimeProvider timeProvider;
 
     public DotNetCopilotRawAnalysisRunner(
         IMonitorAnalysisStore analysisStore,
         IMonitorProjectionStore projectionStore,
         IConfiguration configuration)
+        : this(analysisStore, projectionStore, configuration, new UnconfiguredDirectoryOwner(), new CopilotAnalysisSdkExecutor(), TimeProvider.System)
+    {
+    }
+
+    internal DotNetCopilotRawAnalysisRunner(
+        IMonitorAnalysisStore analysisStore,
+        IMonitorProjectionStore projectionStore,
+        IConfiguration configuration,
+        IAnalysisSdkDirectoryOwner directoryOwner,
+        ICopilotAnalysisSdkExecutor executor,
+        TimeProvider timeProvider)
     {
         this.analysisStore = analysisStore;
         this.projectionStore = projectionStore;
         this.configuration = configuration;
+        this.directoryOwner = directoryOwner;
+        this.executor = executor;
+        this.timeProvider = timeProvider;
     }
 
     public Task StartAsync(MonitorAnalysisContext context, CancellationToken cancellationToken)
@@ -32,21 +46,74 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         return Task.CompletedTask;
     }
 
-    private async Task RunAsync(MonitorAnalysisContext context, CancellationToken cancellationToken)
+    internal async Task RunAsync(MonitorAnalysisContext context, CancellationToken cancellationToken)
     {
         var operationToken = context.OperationToken ?? throw new InvalidOperationException("Analysis operation token is required.");
         RetentionRevisionFence? fence = null;
-        var startedAt = DateTimeOffset.UtcNow;
+        var startedAt = timeProvider.GetUtcNow();
         analysisStore.MarkRunning(context.RunId, startedAt);
         fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "running", ".NET GitHub Copilot SDK analysis started.", startedAt);
 
         try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "loading_local_tool_data", DateTimeOffset.UtcNow);
-            await using var data = await MonitorAnalysisToolData.CreateAsync(projectionStore, context, cancellationToken);
-            var outcome = await RunCopilotSessionAsync(context, data, operationToken, fence, cancellationToken);
-            fence = analysisStore.CompleteRun(context.RunId, operationToken, outcome.Fence, outcome.Result, DateTimeOffset.UtcNow);
+            var settings = CopilotAnalysisSettings.From(configuration);
+            if (!settings.Enabled) throw new InvalidOperationException("CopilotAnalysis is disabled by local configuration.");
+            var run = analysisStore.GetRun(context.RunId);
+            if (run is null || !MatchesContext(run, context))
+                throw new AnalysisOwnershipException();
+            if (!DateTimeOffset.TryParseExact(run.RequestedAt, "O", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var requestedAt)
+                || requestedAt.Offset != TimeSpan.Zero
+                || !string.Equals(run.RequestedAt, requestedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal))
+                throw new AnalysisOwnershipException();
+            IAnalysisSdkDirectoryScope scope;
+            try
+            {
+                scope = await directoryOwner.OpenAsync(context.RunId, requestedAt, settings.BaseDirectory, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                throw new AnalysisOwnershipException(exception);
+            }
+            Exception? primaryFailure = null;
+            string result;
+            try
+            {
+                using var leaseCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, scope.LeaseLostToken);
+                fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "loading_local_tool_data", timeProvider.GetUtcNow());
+                await using var data = await MonitorAnalysisToolData.CreateAsync(projectionStore, context, leaseCancellation.Token);
+                result = await executor.ExecuteAsync(scope.ChildDirectory, settings.ToExecutionSettings(), new CopilotAnalysisToolRequest(BuildPrompt(context), data), leaseCancellation.Token);
+            if (scope.IsLeaseLost) throw new AnalysisOwnershipException();
+            }
+            catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && (scope.IsLeaseLost || scope.LeaseLostToken.IsCancellationRequested))
+            {
+                primaryFailure = new AnalysisOwnershipException(exception);
+                throw primaryFailure;
+            }
+            catch (Exception exception)
+            {
+                primaryFailure = exception;
+                throw;
+            }
+            finally
+            {
+                try
+                {
+                    await scope.DisposeAsync();
+                }
+                catch when (primaryFailure is not null)
+                {
+                }
+                catch (Exception exception)
+                {
+                    throw new AnalysisOwnershipException(exception);
+                }
+            }
+            if (scope.IsLeaseLost) throw new AnalysisOwnershipException();
+            fence = analysisStore.CompleteRun(context.RunId, operationToken, fence, result, timeProvider.GetUtcNow());
         }
         catch (OperationCanceledException)
         {
@@ -56,7 +123,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 fence,
                 MonitorAnalysisStatus.Canceled,
                 "Analysis was canceled.",
-                DateTimeOffset.UtcNow);
+                timeProvider.GetUtcNow());
         }
         catch (PersistenceBusyException)
         {
@@ -66,114 +133,25 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 fence,
                 MonitorAnalysisStatus.Failed,
                 "The local monitor raw store is busy. Retry the analysis.",
-                DateTimeOffset.UtcNow);
+                timeProvider.GetUtcNow());
         }
-        catch (Exception exception)
+        catch (AnalysisOwnershipException)
         {
-            var message = SanitizedExceptionMessage(exception, configuration["CopilotAnalysis:Provider:ApiKey"]);
-            fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_error", message, DateTimeOffset.UtcNow);
+            _ = analysisStore.FinishRun(context.RunId, operationToken, fence, MonitorAnalysisStatus.Failed, "Local analysis ownership could not be established.", timeProvider.GetUtcNow());
+        }
+        catch (Exception)
+        {
+            const string message = "SDK analysis failed.";
+            fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_error", message, timeProvider.GetUtcNow());
             _ = analysisStore.FinishRun(
                 context.RunId,
                 operationToken,
                 fence,
                 MonitorAnalysisStatus.Failed,
                 message,
-                DateTimeOffset.UtcNow);
+                timeProvider.GetUtcNow());
         }
     }
-
-    private async Task<(string Result, RetentionRevisionFence Fence)> RunCopilotSessionAsync(
-        MonitorAnalysisContext context,
-        MonitorAnalysisToolData data,
-        MonitorAnalysisOperationToken operationToken,
-        RetentionRevisionFence fence,
-        CancellationToken cancellationToken)
-    {
-        var settings = CopilotAnalysisSettings.From(configuration);
-        if (!settings.Enabled)
-        {
-            throw new InvalidOperationException("CopilotAnalysis is disabled by local configuration.");
-        }
-
-        Directory.CreateDirectory(settings.BaseDirectory);
-        await using var client = new CopilotClient(new CopilotClientOptions
-        {
-            BaseDirectory = settings.BaseDirectory,
-            WorkingDirectory = Directory.GetCurrentDirectory(),
-        });
-        fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "starting_client", DateTimeOffset.UtcNow);
-        await client.StartAsync(cancellationToken);
-        fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "creating_session", DateTimeOffset.UtcNow);
-        await using var session = await client.CreateSessionAsync(new SessionConfig
-        {
-            Model = settings.Model,
-            Streaming = true,
-            OnPermissionRequest = PermissionHandler.ApproveAll,
-            Provider = settings.Provider,
-            Tools =
-            [
-                DefineTool("get_raw_trace", "Return the raw trace records for this Local Monitor analysis run.", () => Serialize(data.RawTrace)),
-                DefineTool("get_raw_record", "Return the selected raw record for this Local Monitor analysis run.", () => Serialize(data.RawRecord)),
-                DefineTool("get_raw_span_context", "Return the selected raw span context for this Local Monitor analysis run.", () => Serialize(data.RawSpanContext)),
-                DefineTool("get_trace_summary", "Return the sanitized trace summary for this Local Monitor analysis run.", () => Serialize(data.TraceSummary)),
-                DefineTool("get_trace_span_tree", "Return the sanitized span tree for this Local Monitor analysis run.", () => Serialize(data.TraceSpanTree)),
-                DefineTool("get_cache_summary", "Return the sanitized cache summary for this Local Monitor analysis run.", () => Serialize(data.CacheSummary)),
-                DefineTool("get_instruction_evidence", "Return deterministic, code-extracted instruction evidence (error spans, retry chains, turn tokens, user instruction, conversation metadata, and bounded conversation_context) for this Local Monitor analysis run.", () => Serialize(data.InstructionEvidence)),
-            ],
-            SystemMessage = new SystemMessageConfig
-            {
-                Mode = SystemMessageMode.Append,
-                Content = """
-                    You are analyzing a local Copilot/agent observability trace.
-                    You may inspect raw data through the provided tools. Your response is local runtime data and may mention raw-derived findings.
-                    Do not claim the response is repository-safe. Repository-safe export is generated separately by Local Monitor.
-                    """,
-            },
-        }, cancellationToken);
-
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var final = new StringBuilder();
-        using var subscription = session.On<SessionEvent>(evt =>
-        {
-            switch (evt)
-            {
-                case AssistantMessageDeltaEvent delta:
-                    final.Append(delta.Data.DeltaContent);
-                    break;
-                case AssistantMessageEvent message when final.Length == 0:
-                    final.Append(message.Data.Content);
-                    break;
-                case SessionIdleEvent:
-                    done.TrySetResult();
-                    break;
-                case SessionErrorEvent error:
-                    done.TrySetException(new InvalidOperationException(error.Data.Message));
-                    break;
-            }
-        });
-
-        fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "sending_message", DateTimeOffset.UtcNow);
-        await session.SendAndWaitAsync(
-            new MessageOptions { Prompt = BuildPrompt(context) },
-            TimeSpan.FromSeconds(settings.TimeoutSeconds),
-            cancellationToken);
-        done.TrySetResult();
-        await done.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
-        fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "session_completed", DateTimeOffset.UtcNow);
-        return (final.Length == 0
-            ? "Copilot SDK analysis completed without a textual result."
-            : final.ToString(), fence);
-    }
-
-    private static AIFunction DefineTool(string name, string description, Func<string> tool) =>
-        CopilotTool.DefineTool(
-            ([Description("No input is required for this run-scoped Local Monitor tool.")] string? _ = null) => tool(),
-            new CopilotToolOptions { SkipPermission = true },
-            new AIFunctionFactoryOptions
-            {
-                Name = name,
-                Description = description,
-            });
 
     /// <summary>
     /// Instruction-diagnosis prompt block (D046 + D047 + D048, prompt template v4):
@@ -257,35 +235,29 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         return builder.ToString().TrimEnd();
     }
 
-    private static string Serialize(object? value) =>
-        JsonSerializer.Serialize(value, new JsonSerializerOptions(JsonSerializerDefaults.Web)
-        {
-            WriteIndented = false,
-        });
+    private static bool MatchesContext(MonitorAnalysisRun run, MonitorAnalysisContext context) =>
+        string.Equals(run.TraceId, context.TraceId, StringComparison.Ordinal)
+        && run.RawRecordId == context.RawRecordId
+        && string.Equals(run.SpanId, context.SpanId, StringComparison.Ordinal)
+        && run.Focus == context.Focus;
 
-    private static string SanitizedExceptionMessage(Exception exception, string? apiKey)
-    {
-        var typeName = exception.GetType().Name;
-        var message = exception.Message;
-        if (string.IsNullOrWhiteSpace(message))
-        {
-            return $"{typeName}: SDK analysis failed.";
-        }
+}
 
-        message = message.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal);
-        if (!string.IsNullOrWhiteSpace(apiKey))
-        {
-            message = message.Replace(apiKey, "[redacted-api-key]", StringComparison.Ordinal);
-        }
+internal sealed class AnalysisOwnershipException : Exception
+{
+    public AnalysisOwnershipException() { }
+    public AnalysisOwnershipException(Exception innerException) : base(null, innerException) { }
+}
 
-        return message.Length > 500
-            ? $"{typeName}: {message[..500]}..."
-            : $"{typeName}: {message}";
-    }
+internal sealed class UnconfiguredDirectoryOwner : IAnalysisSdkDirectoryOwner
+{
+    public ValueTask<IAnalysisSdkDirectoryScope> OpenAsync(long runId, DateTimeOffset exactRequestedAt, string configuredParent, CancellationToken cancellationToken) =>
+        ValueTask.FromException<IAnalysisSdkDirectoryScope>(new AnalysisOwnershipException());
 }
 
 internal sealed record CopilotAnalysisSettings(bool Enabled, string Model, int TimeoutSeconds, string BaseDirectory, ProviderConfig? Provider)
 {
+    public CopilotAnalysisExecutionSettings ToExecutionSettings() => new(Model, TimeoutSeconds, Provider);
     public static CopilotAnalysisSettings From(IConfiguration configuration)
     {
         var section = configuration.GetSection("CopilotAnalysis");

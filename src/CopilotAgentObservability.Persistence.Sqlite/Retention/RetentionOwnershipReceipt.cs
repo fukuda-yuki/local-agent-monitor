@@ -40,6 +40,12 @@ internal static class RetentionOwnershipReceipt
         writer.Text(input.CaptureId); writer.Timestamp(input.ReservedAtText, input.ReservedAtUtcTicks); writer.Bytes(input.MarkerSha256); writer.Bytes(input.ManifestSha256); return writer.Finish(input.OwnerToken);
     }
 
+    internal static byte[] CreateAnalysisSdkDirectory(RetentionAnalysisSdkDirectoryOwnershipReceiptInput input)
+    {
+        if (!Valid(input, RetentionStoreKind.AnalysisSdkDirectory, out var writer) || !CanonicalCaptureId(input.CaptureId) || input.AnalysisRunId <= 0 || !Timestamp(input.RequestedAtText, input.RequestedAtUtcTicks) || input.MarkerSha256 is not { Length: 32 }) throw Invalid();
+        writer.Text(input.CaptureId); writer.Int64(input.AnalysisRunId); writer.Timestamp(input.RequestedAtText, input.RequestedAtUtcTicks); writer.Bytes(input.MarkerSha256); return writer.Finish(input.OwnerToken);
+    }
+
     internal static bool Matches(byte[] expected, byte[] actual) =>
         expected is { Length: 32 } && actual is { Length: 32 } && CryptographicOperations.FixedTimeEquals(expected, actual);
 
@@ -71,7 +77,7 @@ internal static class RetentionOwnershipReceipt
     private sealed class CanonicalWriter
     {
         private readonly MemoryStream stream = new();
-        internal CanonicalWriter(byte[] storeInstance, RetentionStoreKind kind) { Bytes(Domain); Bytes(storeInstance); Text(kind switch { RetentionStoreKind.SessionEventContent => "session_event_content", RetentionStoreKind.RawRecord => "raw_record", RetentionStoreKind.AnalysisRunRaw => "analysis_run_raw", RetentionStoreKind.SensitiveBundle => "sensitive_bundle", _ => throw Invalid() }); }
+        internal CanonicalWriter(byte[] storeInstance, RetentionStoreKind kind) { Bytes(Domain); Bytes(storeInstance); Text(kind switch { RetentionStoreKind.SessionEventContent => "session_event_content", RetentionStoreKind.RawRecord => "raw_record", RetentionStoreKind.AnalysisRunRaw => "analysis_run_raw", RetentionStoreKind.SensitiveBundle => "sensitive_bundle", RetentionStoreKind.AnalysisSdkDirectory => "analysis_sdk_directory", _ => throw Invalid() }); }
         internal void Text(string value)
         {
             if (value is null) throw Invalid();
@@ -101,3 +107,4 @@ internal sealed record RetentionRawRecordReceiptInput(
     byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);
 internal sealed record RetentionAnalysisRunOwnershipReceiptInput(string StoreInstanceId, long RunId, string RequestedAtText, long RequestedAtUtcTicks, long? RecordId, string? SpanId, byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);
 internal sealed record RetentionSensitiveBundleOwnershipReceiptInput(string StoreInstanceId, string CaptureId, string ReservedAtText, long ReservedAtUtcTicks, byte[] MarkerSha256, byte[] ManifestSha256, byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);
+internal sealed record RetentionAnalysisSdkDirectoryOwnershipReceiptInput(string StoreInstanceId, string CaptureId, long AnalysisRunId, string RequestedAtText, long RequestedAtUtcTicks, byte[] MarkerSha256, byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);
