@@ -28,4 +28,28 @@ public sealed class RetentionNoLeakTests
             foreach (var marker in forbidden)
                 Assert.DoesNotContain(marker, value.ToString(), StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void WorkerCarrierToStrings_AreTypeNamesOnly()
+    {
+        var work = new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionWorkReference("item-source", 1, CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionWorkKind.Queued);
+        var fence = new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionDeleteFence("item-source", 1, "owner-receipt", 1);
+        Assert.Equal("RetentionWorkReference", work.ToString());
+        Assert.Equal("RetentionDeleteFence", fence.ToString());
+    }
+
+    [Fact]
+    public void RetentionCarriers_DeclareOwnToStringGuards()
+    {
+        var types = new[]
+        {
+            typeof(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionWorkReference),
+            typeof(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionDeleteFence),
+            typeof(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionDeletionClaim),
+            typeof(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionDeleteContext),
+            typeof(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSourceIdentity),
+            typeof(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionPrivateLocatorHandle)
+        };
+        Assert.All(types, type => Assert.Equal(type, type.GetMethod(nameof(ToString), Type.EmptyTypes)!.DeclaringType));
+    }
 }

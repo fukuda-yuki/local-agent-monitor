@@ -79,6 +79,43 @@ public sealed class RetentionWorkerMaintenanceMatrixTests
         using var busy = NewFixture(); busy.Protocol.ThrowSqliteBusy = true; await busy.Store.RecordCleanCycleAsync(true, busy.Now, CancellationToken.None); Assert.False(await busy.Store.TryRunMaintenanceAsync(busy.Now, CancellationToken.None)); Assert.Equal(1, busy.Protocol.Calls); AssertBusyRetry(busy, busy.Now);
     }
 
+    [Fact]
+    public async Task LiveMaintenanceSingleton_FencesAccessOperationAndDeletionUntilItClears()
+    {
+        using var fixture = NewFixture(); AddQueuedRaw(fixture.Path, "fenced", fixture.Now);
+        var storeId = Scalar(fixture.Path, "SELECT store_instance_id FROM retention_store_instances WHERE id=1")!;
+        var source = Scalar(fixture.Path, "SELECT source_item_id FROM retention_items WHERE item_id='fenced'")!;
+        var key = new RetentionOwnershipKey(storeId, RetentionStoreKind.RawRecord, source);
+        await fixture.Store.RecordCleanCycleAsync(true, fixture.Now, CancellationToken.None);
+        fixture.Protocol.Block = true;
+        var maintenance = Task.Run(() => fixture.Store.TryRunMaintenanceAsync(fixture.Now, CancellationToken.None).AsTask());
+        fixture.Protocol.Entered.Wait();
+        var second = new RetentionCatalogStore(fixture.Path, fixture.Time);
+        var before = string.Join("|", Scalar(fixture.Path, "SELECT state || ':' || revision FROM retention_items WHERE item_id='fenced'"), Scalar(fixture.Path, "SELECT COUNT(*) FROM retention_leases"));
+        foreach (var kind in new[] { RetentionReadKind.Access, RetentionReadKind.Operation })
+        {
+            var result = await second.ReadAsync(new RetentionReadRequest(key, kind, fixture.Now, null), static (_, _, _, _) => ValueTask.FromResult<string?>("safe"), CancellationToken.None);
+            Assert.NotEqual(RetentionReadDisposition.Granted, result.Disposition); Assert.Null(result.Lease);
+        }
+        var claim = await second.TryClaimDeletionAsync(new("fenced", 1, RetentionWorkKind.Queued), "worker", fixture.Now, CancellationToken.None);
+        Assert.Equal(RetentionClaimDisposition.Contended, claim.Disposition); Assert.Equal(0L, Convert.ToInt64(Scalar(fixture.Path, "SELECT COUNT(*) FROM retention_leases")));
+        Assert.Equal(before, string.Join("|", Scalar(fixture.Path, "SELECT state || ':' || revision FROM retention_items WHERE item_id='fenced'"), Scalar(fixture.Path, "SELECT COUNT(*) FROM retention_leases")));
+        fixture.Protocol.Release.Set(); Assert.True(await maintenance);
+        Assert.Null(Scalar(fixture.Path, "SELECT maintenance_owner FROM retention_worker_state"));
+        var after = await second.TryClaimDeletionAsync(new("fenced", 1, RetentionWorkKind.Queued), "worker", fixture.Now, CancellationToken.None);
+        Assert.Equal(RetentionClaimDisposition.Claimed, after.Disposition);
+    }
+
+    [Fact]
+    public async Task ExpiredMaintenanceSingleton_IsReclaimableAtItsExactExpiry()
+    {
+        using var fixture = NewFixture(); AddQueuedRaw(fixture.Path, "expired-owner", fixture.Now);
+        Execute(fixture.Path, "UPDATE retention_worker_state SET maintenance_owner='expired',maintenance_lease_expires_at=$now,maintenance_generation=1 WHERE id=1", ("$now", fixture.Now.ToString("O")));
+        var second = new RetentionCatalogStore(fixture.Path, fixture.Time);
+        var claim = await second.TryClaimDeletionAsync(new("expired-owner", 1, RetentionWorkKind.Queued), "worker", fixture.Now, CancellationToken.None);
+        Assert.Equal(RetentionClaimDisposition.Claimed, claim.Disposition);
+    }
+
     private static RetentionCleanupCoordinator Coordinator(Fixture fixture) => new(fixture.Store, Registry(fixture.Result), fixture.Time);
     private static RetentionAdapterRegistry Registry(RetentionAdapterResult? rawResult) => new(new IRetentionDeletionAdapter[] { new Adapter(RetentionStoreKind.SessionEventContent), new Adapter(RetentionStoreKind.RawRecord, rawResult), new Adapter(RetentionStoreKind.AnalysisRunRaw), new Adapter(RetentionStoreKind.SensitiveBundle), new Adapter(RetentionStoreKind.AnalysisSdkDirectory) });
     private static Fixture NewFixture(RetentionAdapterResult? result = null, bool protocolResult = true, Action? checkpoint = null) { var path = Path.Combine(Path.GetTempPath(), $"retention-maintenance-matrix-{Guid.NewGuid():N}.db"); var now = new DateTimeOffset(2026, 7, 19, 0, 0, 0, TimeSpan.Zero); var time = new MutableTimeProvider(now); var protocol = new Protocol { Result = protocolResult }; var store = new RetentionCatalogStore(path, time, checkpoint, protocol.Run); store.CreateSchema(); Execute(path, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1)"); return new(path, now, time, store, protocol, result); }
@@ -91,6 +128,6 @@ public sealed class RetentionWorkerMaintenanceMatrixTests
     private static string? Scalar(string path, string sql) { using var c = new SqliteConnection($"Data Source={path};Pooling=False"); c.Open(); using var q = c.CreateCommand(); q.CommandText = sql; return q.ExecuteScalar() is { } value and not DBNull ? Convert.ToString(value) : null; }
     private static void Execute(string path, string sql, params (string Name, object Value)[] values) { using var c = new SqliteConnection($"Data Source={path};Pooling=False"); c.Open(); using var q = c.CreateCommand(); q.CommandText = sql; foreach (var (name, value) in values) q.Parameters.AddWithValue(name, value); q.ExecuteNonQuery(); }
     private sealed class Adapter(RetentionStoreKind kind, RetentionAdapterResult? result = null) : IRetentionDeletionAdapter { public RetentionStoreKind StoreKind => kind; public ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context) => ValueTask.FromResult(result ?? RetentionAdapterResult.Deleted); }
-    private sealed class Protocol { internal int Calls; internal bool Result; internal bool ThrowSqliteBusy; internal bool Run(SqliteConnection connection, CancellationToken cancellationToken) { Calls++; cancellationToken.ThrowIfCancellationRequested(); if (ThrowSqliteBusy) throw new SqliteException("sqlite busy", 5); return Result; } }
+    private sealed class Protocol { internal int Calls; internal bool Result; internal bool ThrowSqliteBusy; internal bool Block; internal readonly ManualResetEventSlim Entered = new(false); internal readonly ManualResetEventSlim Release = new(false); internal bool Run(SqliteConnection connection, CancellationToken cancellationToken) { Calls++; cancellationToken.ThrowIfCancellationRequested(); if (ThrowSqliteBusy) throw new SqliteException("sqlite busy", 5); if (Block) { Entered.Set(); Release.Wait(cancellationToken); } return Result; } }
     private sealed record Fixture(string Path, DateTimeOffset Now, MutableTimeProvider Time, RetentionCatalogStore Store, Protocol Protocol, RetentionAdapterResult? Result) : IDisposable { public void Dispose() { SqliteConnection.ClearAllPools(); foreach (var file in new[] { Path, Path + "-wal", Path + "-shm" }) if (File.Exists(file)) File.Delete(file); } }
 }

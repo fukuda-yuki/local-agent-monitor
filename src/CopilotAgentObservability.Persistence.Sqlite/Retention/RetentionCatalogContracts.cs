@@ -170,9 +170,15 @@ internal enum RetentionReadDisposition { Granted, NotFound, Denied, Busy }
 internal enum RetentionReadKind { Access, Operation }
 
 internal enum RetentionWorkKind { Queued, IntentRecovery }
-internal readonly record struct RetentionWorkReference(string ItemId, long ExpectedRevision, RetentionWorkKind Kind);
+internal readonly record struct RetentionWorkReference(string ItemId, long ExpectedRevision, RetentionWorkKind Kind)
+{
+    public override string ToString() => nameof(RetentionWorkReference);
+}
 internal sealed record RetentionPreparedBatch(IReadOnlyList<RetentionWorkReference> Work, bool HitPromotionLimit, bool HitElapsedBudget, DateTimeOffset? NextEligibleAt, bool CoverageBlocked = false);
-internal readonly record struct RetentionDeleteFence(string ItemId, long ExpectedRevision, string LeaseOwner, long LeaseGeneration);
+internal readonly record struct RetentionDeleteFence(string ItemId, long ExpectedRevision, string LeaseOwner, long LeaseGeneration)
+{
+    public override string ToString() => nameof(RetentionDeleteFence);
+}
 internal enum RetentionClaimDisposition { Claimed, Quiescing, Contended, StaleNoOp, TerminalFailureRecorded, CoverageBlocked, CatalogBusy }
 internal sealed class RetentionDeletionClaim
 {
