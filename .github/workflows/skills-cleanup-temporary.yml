@@ -1,4 +1,4 @@
-# Trigger after the workflow exists on the branch.
+# Temporary automation; remove after the cleanup commit lands on this branch.
 name: Temporary repository skill cleanup
 
 on:
@@ -7,6 +7,13 @@ on:
       - codex/skills-cleanup-20260719
     paths:
       - .github/workflows/skills-cleanup-temporary.yml
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
 
 permissions:
   contents: write
@@ -150,6 +157,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
+          if git diff --cached --quiet; then
+            echo "No cleanup changes remain."
+            exit 0
+          fi
           git commit \
             -m "Agent workflow: chore(skills): reduce repository skill surface" \
             -m "The repository carried broad .NET, MSBuild, test, migration, and overlapping Aspire skill catalogs that competed with its repository-specific guidance and could drift from upstream. Keep only the local workflows and safety boundaries that Codex needs here, preserve the Claude skill surface, and make low-frequency operations explicit-only."
