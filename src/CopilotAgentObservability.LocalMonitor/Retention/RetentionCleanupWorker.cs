@@ -34,7 +34,8 @@ internal sealed class RetentionCleanupWorker : IHostedService
         scanner.Cancel();
         var deadline = time.GetUtcNow() + RetentionV1Constants.ShutdownDrainBound;
         coordinator?.BeginDrain(deadline);
-        await Task.WhenAny(task, Task.Delay(RetentionV1Constants.ShutdownDrainBound, time)).ConfigureAwait(false);
+        var completed = await Task.WhenAny(task, Task.Delay(RetentionV1Constants.ShutdownDrainBound, time)).ConfigureAwait(false);
+        if (completed == task) await task.ConfigureAwait(false);
         drain?.Cancel();
     }
     Task IHostedService.StartAsync(CancellationToken cancellationToken) => StartAsync().AsTask();

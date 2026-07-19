@@ -199,6 +199,16 @@ public sealed class RetentionCleanupWorkerTests
     }
 
     [Fact]
+    public async Task StopAsync_ObservesCompletedWorkerFailure()
+    {
+        using var db=NewDb();var (store,_,_)=Setup(db.Path);var time=new FaultingTimerTimeProvider();var worker=new RetentionCleanupWorker(new RetentionCleanupCoordinator(store,Registry(new StrictAdapter(RetentionStoreKind.RawRecord)),time),time);
+
+        await worker.StartAsync();await time.WorkerWaitFaulted.Task;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>worker.StopAsync());
+    }
+
+    [Fact]
     public async Task SuccessfulBatch_CheckpointsWalOnce()
     {
         using var db=NewDb();var (store,time,item)=Setup(db.Path);AddQueuedItem(db.Path,"second",time.GetUtcNow());await new RetentionCleanupCoordinator(store,Registry(new StrictAdapter(RetentionStoreKind.RawRecord)),time).RunOneCycleAsync(CancellationToken.None,CancellationToken.None);
@@ -226,5 +236,17 @@ public sealed class RetentionCleanupWorkerTests
     private static RetentionAdapterRegistry Registry(StrictAdapter raw)=>new(new IRetentionDeletionAdapter[]{new StrictAdapter(RetentionStoreKind.SessionEventContent),raw,new StrictAdapter(RetentionStoreKind.AnalysisRunRaw),new StrictAdapter(RetentionStoreKind.SensitiveBundle),new StrictAdapter(RetentionStoreKind.AnalysisSdkDirectory)});
     private static string Text(string p,string sql,string id){return (string)Scalar(p,sql,id)!;}private static long Number(string p,string sql,string id)=>Convert.ToInt64(Scalar(p,sql,id));private static DateTimeOffset Date(string p,string sql,string id)=>DateTimeOffset.Parse((string)Scalar(p,sql,id)!);private static object? Scalar(string p,string sql,string? id=null){using var c=new SqliteConnection($"Data Source={p};Pooling=False");c.Open();using var q=c.CreateCommand();q.CommandText=sql;if(id is not null)q.Parameters.AddWithValue("$id",id);return q.ExecuteScalar();}private static void Exec(string p,string sql,string id,string now){using var c=new SqliteConnection($"Data Source={p};Pooling=False");c.Open();using var q=c.CreateCommand();q.CommandText=sql;q.Parameters.AddWithValue("$id",id);q.Parameters.AddWithValue("$now",now);q.ExecuteNonQuery();}private static void Execute(string p,string sql){using var c=new SqliteConnection($"Data Source={p};Pooling=False");c.Open();using var q=c.CreateCommand();q.CommandText=sql;q.ExecuteNonQuery();}private static void ExecuteAt(string p,string sql,string? id,DateTimeOffset at){using var c=new SqliteConnection($"Data Source={p};Pooling=False");c.Open();using var q=c.CreateCommand();q.CommandText=sql;if(id is not null)q.Parameters.AddWithValue("$id",id);q.Parameters.AddWithValue("$at",at.ToString("O"));q.ExecuteNonQuery();}private static async Task DrainAsync(){for(var i=0;i<8;i++)await Task.Yield();}
     private static TempDb NewDb()=>new(Path.Combine(Path.GetTempPath(),$"retention-worker-{Guid.NewGuid():N}.db"));private sealed class TempDb(string path):IDisposable{internal string Path=>path;public void Dispose(){SqliteConnection.ClearAllPools();foreach(var f in new[]{path,path+"-wal",path+"-shm"})if(File.Exists(f))File.Delete(f);}}
+    private sealed class FaultingTimerTimeProvider : TimeProvider
+    {
+        private int timers;
+        internal readonly TaskCompletionSource WorkerWaitFaulted=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override DateTimeOffset GetUtcNow()=>new(2026,7,19,0,0,0,TimeSpan.Zero);
+        public override ITimer CreateTimer(TimerCallback callback,object? state,TimeSpan dueTime,TimeSpan period)
+        {
+            if(Interlocked.Increment(ref timers)==2){WorkerWaitFaulted.TrySetResult();throw new InvalidOperationException("timer_failure");}
+            return new NoOpTimer();
+        }
+        private sealed class NoOpTimer : ITimer { public bool Change(TimeSpan dueTime,TimeSpan period)=>true;public void Dispose(){}public ValueTask DisposeAsync()=>ValueTask.CompletedTask; }
+    }
     private sealed class StrictAdapter(RetentionStoreKind kind,Task? gate=null,RetentionAdapterResult? result=null,bool ignoreCancellation=false):IRetentionDeletionAdapter{internal readonly TaskCompletionSource Entered=new(TaskCreationOptions.RunContinuationsAsynchronously);internal readonly TaskCompletionSource Completed=new(TaskCreationOptions.RunContinuationsAsynchronously);internal int Calls;public RetentionStoreKind StoreKind=>kind;public async ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context){Interlocked.Increment(ref Calls);Entered.TrySetResult();if(gate is not null){if(ignoreCancellation)await gate;else await gate.WaitAsync(context.CancellationToken);}Completed.TrySetResult();return result??RetentionAdapterResult.Deleted;}}
 }
