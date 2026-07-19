@@ -153,7 +153,7 @@ Keep it short and practical; put detailed procedures in `docs/agent-guides/` and
 ## Subagent Requests
 
 Use subagents only when the user explicitly asks for subagent delegation and the active surface provides that capability.
-When subagents are available, use `.agents/skills/codex-subagent-dispatch/SKILL.md`.
+When subagents are available, give each worker a self-contained mission card that names the scope, governing specifications, writable paths, validation commands, and required report.
 Otherwise continue in the main chat or provide a mission card the user can run elsewhere.
 
 ## Review Workflow
