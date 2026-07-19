@@ -472,29 +472,32 @@ public sealed class SourceCompatibilityIngestionTests
             OtlpProtobufTestPayload.StringField(100, marker),
             [0x0a, 0x80]);
         using var temp = new MonitorTempDirectory();
-        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        await using (var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
             StartProjectionWorker = false,
             UseUserSecrets = false,
-        });
-        using var content = new ByteArrayContent(payload);
-        content.Headers.ContentType = new MediaTypeHeaderValue("application/x-protobuf");
+        }))
+        {
+            using var content = new ByteArrayContent(payload);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/x-protobuf");
 
-        var response = await host.Client.PostAsync("/v1/traces", content);
+            var response = await host.Client.PostAsync("/v1/traces", content);
 
-        var responseBody = await response.Content.ReadAsStringAsync();
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Contains("invalid_payload", responseBody);
-        Assert.DoesNotContain(marker, responseBody, StringComparison.Ordinal);
-        Assert.Empty(temp.CreateRawStore().ListRecords());
-        var failure = Assert.Single(
-            new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
-        Assert.Null(failure.RawRecordId);
-        Assert.Null(failure.IngestBatchId);
-        Assert.Null(failure.SchemaFingerprint);
-        Assert.Null(failure.InventoryHash);
-        Assert.Equal(SourceCompatibilityState.AdapterFailure, failure.CompatibilityState);
-        Assert.Equal([SourceCompatibilityReasonCodes.AdapterParseFailure], failure.ReasonCodes);
+            var responseBody = await response.Content.ReadAsStringAsync();
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Contains("invalid_payload", responseBody);
+            Assert.DoesNotContain(marker, responseBody, StringComparison.Ordinal);
+            Assert.Empty(temp.CreateRawStore().ListRecords());
+            var failure = Assert.Single(
+                new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
+            Assert.Null(failure.RawRecordId);
+            Assert.Null(failure.IngestBatchId);
+            Assert.Null(failure.SchemaFingerprint);
+            Assert.Null(failure.InventoryHash);
+            Assert.Equal(SourceCompatibilityState.AdapterFailure, failure.CompatibilityState);
+            Assert.Equal([SourceCompatibilityReasonCodes.AdapterParseFailure], failure.ReasonCodes);
+        }
+
         Assert.DoesNotContain(marker, Encoding.UTF8.GetString(File.ReadAllBytes(temp.DatabasePath)), StringComparison.Ordinal);
     }
 
