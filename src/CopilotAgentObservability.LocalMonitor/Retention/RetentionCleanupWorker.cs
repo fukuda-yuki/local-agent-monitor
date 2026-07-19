@@ -1,8 +1,9 @@
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.Retention;
 
-internal sealed class RetentionCleanupWorker
+internal sealed class RetentionCleanupWorker : IHostedService
 {
     private readonly RetentionCleanupCoordinator? coordinator;
     private readonly TimeProvider time;
@@ -36,6 +37,8 @@ internal sealed class RetentionCleanupWorker
         await Task.WhenAny(task, Task.Delay(RetentionV1Constants.ShutdownDrainBound, time)).ConfigureAwait(false);
         drain?.Cancel();
     }
+    Task IHostedService.StartAsync(CancellationToken cancellationToken) => StartAsync().AsTask();
+    Task IHostedService.StopAsync(CancellationToken cancellationToken) => StopAsync();
     private async Task RunAsync(CancellationToken stopToken)
     {
         using var drainSource = new CancellationTokenSource();
@@ -49,20 +52,23 @@ internal sealed class RetentionCleanupWorker
             ScheduleDueWake(cycle.NextEligibleAt, ref scheduledDue, ref dueWake, ref dueWakeCancellation);
             while (!stopToken.IsCancellationRequested)
             {
-                using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(stopToken);
-                var policyWake = Task.Delay(RetentionV1Constants.WorkerWakeInterval, time, waitCancellation.Token);
-                var signalWake = wake.WaitAsync(waitCancellation.Token);
-                var dueOrNever = dueWake ?? Task.Delay(Timeout.InfiniteTimeSpan, time, waitCancellation.Token);
-                var completed = await Task.WhenAny(policyWake, signalWake, dueOrNever).ConfigureAwait(false);
-                if (signalWake.IsCompletedSuccessfully) completed = signalWake;
-                waitCancellation.Cancel();
-                if (stopToken.IsCancellationRequested) break;
-                if (completed == dueWake)
+                if (!cycle.ContinueImmediately)
                 {
-                    dueWakeCancellation?.Dispose();
-                    dueWakeCancellation = null;
-                    dueWake = null;
-                    scheduledDue = null;
+                    using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(stopToken);
+                    var policyWake = Task.Delay(RetentionV1Constants.WorkerWakeInterval, time, waitCancellation.Token);
+                    var signalWake = wake.WaitAsync(waitCancellation.Token);
+                    var dueOrNever = dueWake ?? Task.Delay(Timeout.InfiniteTimeSpan, time, waitCancellation.Token);
+                    var completed = await Task.WhenAny(policyWake, signalWake, dueOrNever).ConfigureAwait(false);
+                    if (signalWake.IsCompletedSuccessfully) completed = signalWake;
+                    waitCancellation.Cancel();
+                    if (stopToken.IsCancellationRequested) break;
+                    if (completed == dueWake)
+                    {
+                        dueWakeCancellation?.Dispose();
+                        dueWakeCancellation = null;
+                        dueWake = null;
+                        scheduledDue = null;
+                    }
                 }
                 cycle = await coordinator.RunOneCycleAsync(stopToken, drainSource.Token).ConfigureAwait(false);
                 ScheduleDueWake(cycle.NextEligibleAt, ref scheduledDue, ref dueWake, ref dueWakeCancellation);

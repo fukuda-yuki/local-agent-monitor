@@ -6,6 +6,7 @@ using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
+using CopilotAgentObservability.LocalMonitor.Retention;
 using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
@@ -160,6 +161,22 @@ internal static class MonitorHost
         if (testOptions?.StartSessionOtelEnrichment ?? true)
         {
             builder.Services.AddHostedService(_ => new SessionOtelEnrichmentWorker(sessionOtelEnricher, testOptions?.SessionOtelPollInterval));
+        }
+
+        var retentionCatalog = new RetentionCatalogStore(retentionContext, timeProvider);
+        var retentionAdapters = new RetentionAdapterRegistry([
+            new SessionEventContentRetentionAdapter(retentionCatalog),
+            new RawRecordRetentionAdapter(retentionCatalog),
+            new MonitorAnalysisRetentionAdapter(retentionCatalog),
+            new SensitiveBundleRetentionAdapter(retentionCatalog, timeProvider),
+            new AnalysisSdkDirectoryRetentionAdapter(retentionCatalog, timeProvider)
+        ]);
+        retentionCatalog.RegisterAdapterCoverage(retentionAdapters);
+        builder.Services.AddSingleton(retentionCatalog);
+        builder.Services.AddSingleton(retentionAdapters);
+        if (testOptions?.StartRetentionCleanupWorker ?? true)
+        {
+            builder.Services.AddHostedService(_ => new RetentionCleanupWorker(new RetentionCleanupCoordinator(retentionCatalog, retentionAdapters, timeProvider), timeProvider));
         }
 
         var app = builder.Build();
@@ -1652,6 +1669,8 @@ internal sealed class MonitorHostTestOptions
     public TimeSpan? SessionCommitTimeout { get; init; }
 
     public bool StartSessionOtelEnrichment { get; init; } = true;
+
+    public bool StartRetentionCleanupWorker { get; init; }
 
     public TimeSpan? SessionOtelPollInterval { get; init; }
 

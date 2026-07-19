@@ -193,6 +193,23 @@ public sealed partial class RetentionCatalogStore
 
     public string StoreInstanceId { get { using var connection = Open(); using var command = connection.CreateCommand(); command.CommandText = "SELECT store_instance_id FROM retention_store_instances WHERE id=1;"; return (string)command.ExecuteScalar()!; } }
 
+    internal void RegisterAdapterCoverage(RetentionAdapterRegistry registry)
+    {
+        ArgumentNullException.ThrowIfNull(registry);
+        using var connection = Open(); using var transaction = connection.BeginTransaction();
+        foreach (var kind in Enum.GetValues<RetentionStoreKind>())
+        {
+            _ = registry.Get(kind);
+            Exec(connection, transaction, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES($kind,$coverage) ON CONFLICT(store_kind) DO NOTHING;", ("$kind", (object?)RetentionSchemaMigrator.Wire(kind)), ("$coverage", registry.CoverageVersion));
+        }
+        if (!CoverageMatchesExactly(connection, transaction, registry.CoverageVersion))
+        {
+            transaction.Rollback();
+            throw new RetentionMigrationBlockedException();
+        }
+        transaction.Commit();
+    }
+
     public RetentionCatalogItem? Find(RetentionOwnershipKey key)
     {
         using var connection = Open(); using var command = connection.CreateCommand(); command.CommandText = "SELECT item_id,captured_at,expires_at,state,revision,read_denied_at FROM retention_items WHERE store_instance_id=$store AND store_kind=$kind AND source_item_id=$source;";
@@ -226,17 +243,34 @@ public sealed partial class RetentionCatalogStore
     internal ValueTask<RetentionPreparedBatch> PrepareCleanupBatchAsync(DateTimeOffset now, int promotionLimit, int claimLimit, TimeSpan elapsedBudget, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested(); using var c = Open(); using var t = c.BeginTransaction(deferred: false);
+        var nowText = Timestamp(now);
         if (!CoverageMatches(c, t))
         {
+            var coverageBlockedNextEligibleAt = NextEligibleAt(c, t, nowText);
             Exec(c, t, "UPDATE retention_worker_state SET worker_error_code='retention_adapter_coverage_mismatch' WHERE id=1 AND worker_error_code IS NOT 'retention_adapter_coverage_mismatch';");
             t.Commit();
-            return ValueTask.FromResult(new RetentionPreparedBatch([], false, false, null, CoverageBlocked: true));
+            return ValueTask.FromResult(new RetentionPreparedBatch([], false, false, coverageBlockedNextEligibleAt, CoverageBlocked: true));
         }
         var started = timeProvider.GetTimestamp();
-        var nowText = Timestamp(now);
         Exec(c,t,"DELETE FROM retention_leases WHERE lease_kind IN ('access','operation') AND expires_at <= $now;", ("$now",(object?)nowText));
-        var mutations = 0;
         var hitElapsedBudget = false;
+        var hitExpiryLimit = false;
+        using (var expiryCandidates = c.CreateCommand())
+        {
+            expiryCandidates.Transaction = t;
+            expiryCandidates.CommandText = "SELECT item_id,revision FROM retention_items WHERE state='expiring' AND expires_at<=$now AND read_denied_at IS NULL ORDER BY expires_at,item_id LIMIT $limit;";
+            expiryCandidates.Parameters.AddWithValue("$now", nowText); expiryCandidates.Parameters.AddWithValue("$limit", promotionLimit);
+            using var reader = expiryCandidates.ExecuteReader();
+            var rows = new List<(string Id, long Revision)>();
+            while (reader.Read()) rows.Add((reader.GetString(0), reader.GetInt64(1)));
+            foreach (var row in rows)
+            {
+                if (timeProvider.GetElapsedTime(started) >= elapsedBudget) { hitElapsedBudget = true; break; }
+                Exec(c, t, "UPDATE retention_items SET state='expired_pending_deletion',read_denied_at=$now,queued_at=$now,revision=revision+1 WHERE item_id=$id AND revision=$revision AND state='expiring' AND expires_at<=$now AND read_denied_at IS NULL;", ("$id", (object?)row.Id), ("$revision", row.Revision), ("$now", nowText));
+            }
+            hitExpiryLimit = rows.Count >= promotionLimit;
+        }
+        var mutations = 0;
         using (var candidates = c.CreateCommand())
         {
             candidates.Transaction = t;
@@ -257,7 +291,7 @@ public sealed partial class RetentionCatalogStore
         }
         var work = new List<RetentionWorkReference>(); using (var q=c.CreateCommand()) { q.Transaction=t; q.CommandText="SELECT i.item_id,i.revision,i.state FROM retention_items i WHERE i.state='deletion_queued' OR (i.state='deleting' AND EXISTS(SELECT 1 FROM retention_delete_journal j WHERE j.item_id=i.item_id AND j.expected_revision=i.revision) AND NOT EXISTS(SELECT 1 FROM retention_leases l WHERE l.item_id=i.item_id AND l.lease_kind='deletion' AND l.expires_at>$now)) ORDER BY i.expires_at,i.item_id LIMIT $limit;"; q.Parameters.AddWithValue("$now",nowText);q.Parameters.AddWithValue("$limit",claimLimit);using var r=q.ExecuteReader();while(r.Read())work.Add(new(r.GetString(0),r.GetInt64(1),r.GetString(2)=="deleting"?RetentionWorkKind.IntentRecovery:RetentionWorkKind.Queued)); }
         var nextEligibleAt = NextEligibleAt(c, t, nowText);
-        t.Commit(); return ValueTask.FromResult(new RetentionPreparedBatch(work, mutations >= promotionLimit, hitElapsedBudget, nextEligibleAt));
+        t.Commit(); return ValueTask.FromResult(new RetentionPreparedBatch(work, hitExpiryLimit || mutations >= promotionLimit, hitElapsedBudget, nextEligibleAt));
     }
 
     internal ValueTask<DateTimeOffset?> GetNextCleanupEligibilityAsync(DateTimeOffset now, CancellationToken cancellationToken)
@@ -760,11 +794,18 @@ public sealed partial class RetentionCatalogStore
         catch(SqliteException){return SourceReceiptProof.CatalogBusy;}
     }
     private static bool CoverageMatches(SqliteConnection c,SqliteTransaction t){using var q=c.CreateCommand();q.Transaction=t;q.CommandText="SELECT COUNT(*) FROM retention_adapter_coverage WHERE coverage_version=$coverage AND store_kind IN ('session_event_content','raw_record','analysis_run_raw','sensitive_bundle','analysis_sdk_directory');";q.Parameters.AddWithValue("$coverage",RetentionV1Constants.AdapterCoverageVersion);return Convert.ToInt64(q.ExecuteScalar(),CultureInfo.InvariantCulture)==5;}
+    private static bool CoverageMatchesExactly(SqliteConnection c, SqliteTransaction t, int coverageVersion)
+    {
+        using var q = c.CreateCommand(); q.Transaction = t;
+        q.CommandText = "SELECT COUNT(*) = 5 AND COUNT(CASE WHEN coverage_version=$coverage AND store_kind IN ('session_event_content','raw_record','analysis_run_raw','sensitive_bundle','analysis_sdk_directory') THEN 1 END) = 5 FROM retention_adapter_coverage;";
+        q.Parameters.AddWithValue("$coverage", coverageVersion);
+        return Convert.ToInt64(q.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+    }
     private static int JournalCursor(SqliteConnection c,SqliteTransaction t,string itemId){using var q=c.CreateCommand();q.Transaction=t;q.CommandText="SELECT durable_cursor FROM retention_delete_journal WHERE item_id=$id;";q.Parameters.AddWithValue("$id",itemId);var value=q.ExecuteScalar();return value is null or DBNull ? 0:int.TryParse(Convert.ToString(value,CultureInfo.InvariantCulture),out var cursor)?cursor:0;}
     private static DateTimeOffset? NextEligibleAt(SqliteConnection c, SqliteTransaction t, string now)
     {
         using var q=c.CreateCommand();q.Transaction=t;
-        q.CommandText="SELECT MIN(eligible_at) FROM (SELECT next_retry_at AS eligible_at FROM retention_items WHERE state='deletion_failed' AND retry_exhausted=0 AND read_denied_at IS NOT NULL AND next_retry_at>$now UNION ALL SELECT l.expires_at FROM retention_leases l JOIN retention_items i ON i.item_id=l.item_id WHERE i.state='deletion_queued' AND l.lease_kind IN ('access','operation') AND l.expires_at>$now UNION ALL SELECT l.expires_at FROM retention_leases l JOIN retention_items i ON i.item_id=l.item_id JOIN retention_delete_journal j ON j.item_id=i.item_id AND j.expected_revision=i.revision WHERE i.state='deleting' AND l.lease_kind='deletion' AND l.expires_at>$now UNION ALL SELECT maintenance_due_at FROM retention_worker_state WHERE id=1 AND maintenance_due_at>$now);";
+        q.CommandText="SELECT MIN(eligible_at) FROM (SELECT expires_at AS eligible_at FROM retention_items WHERE state='expiring' AND read_denied_at IS NULL AND expires_at>$now UNION ALL SELECT next_retry_at AS eligible_at FROM retention_items WHERE state='deletion_failed' AND retry_exhausted=0 AND read_denied_at IS NOT NULL AND next_retry_at>$now UNION ALL SELECT l.expires_at FROM retention_leases l JOIN retention_items i ON i.item_id=l.item_id WHERE i.state='deletion_queued' AND l.lease_kind IN ('access','operation') AND l.expires_at>$now UNION ALL SELECT l.expires_at FROM retention_leases l JOIN retention_items i ON i.item_id=l.item_id JOIN retention_delete_journal j ON j.item_id=i.item_id AND j.expected_revision=i.revision WHERE i.state='deleting' AND l.lease_kind='deletion' AND l.expires_at>$now UNION ALL SELECT maintenance_due_at FROM retention_worker_state WHERE id=1 AND maintenance_due_at>$now);";
         q.Parameters.AddWithValue("$now",now);var value=q.ExecuteScalar();return value is string timestamp?DateTimeOffset.Parse(timestamp,CultureInfo.InvariantCulture,DateTimeStyles.RoundtripKind):null;
     }
     private static bool Owns(SqliteConnection c,SqliteTransaction t,RetentionDeleteFence fence,DateTimeOffset now){using var q=c.CreateCommand();q.Transaction=t;q.CommandText="SELECT EXISTS(SELECT 1 FROM retention_items i JOIN retention_leases l ON l.item_id=i.item_id AND l.lease_kind='deletion' WHERE i.item_id=$id AND i.state='deleting' AND i.revision=$revision AND l.owner=$owner AND l.generation=$generation AND l.expires_at>$now);";q.Parameters.AddWithValue("$id",fence.ItemId);q.Parameters.AddWithValue("$revision",fence.ExpectedRevision);q.Parameters.AddWithValue("$owner",fence.LeaseOwner);q.Parameters.AddWithValue("$generation",fence.LeaseGeneration);q.Parameters.AddWithValue("$now",Timestamp(now));return Convert.ToInt64(q.ExecuteScalar(),CultureInfo.InvariantCulture)!=0;}

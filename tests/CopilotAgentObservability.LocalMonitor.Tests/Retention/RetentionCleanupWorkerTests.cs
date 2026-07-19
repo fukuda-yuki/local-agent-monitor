@@ -7,6 +7,72 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionCleanupWorkerTests
 {
     [Fact]
+    public async Task PrepareCleanupBatch_PromotesDueExpiringItemsAndWakesAtFutureExpiry()
+    {
+        using var db=NewDb();var (store,time,item)=Setup(db.Path);var now=time.GetUtcNow();var expiry=now+TimeSpan.FromMinutes(1);
+        ExecuteAt(db.Path,"UPDATE retention_items SET state='expiring',read_denied_at=NULL,queued_at=NULL,expires_at=$at WHERE item_id=$id",item,expiry);
+
+        var before=await store.PrepareCleanupBatchAsync(now,100,100,TimeSpan.FromSeconds(30),CancellationToken.None);
+
+        Assert.Empty(before.Work);
+        Assert.Equal(expiry,before.NextEligibleAt);
+        time.Advance(TimeSpan.FromMinutes(1));
+        var due=await store.PrepareCleanupBatchAsync(time.GetUtcNow(),100,100,TimeSpan.FromSeconds(30),CancellationToken.None);
+
+        Assert.Single(due.Work);
+        Assert.Equal("deletion_queued",Text(db.Path,"SELECT state FROM retention_items WHERE item_id=$id",item));
+        Assert.NotNull(Scalar(db.Path,"SELECT read_denied_at FROM retention_items WHERE item_id=$id",item));
+    }
+
+    [Fact]
+    public async Task PrepareCleanupBatch_MissingAdapterCoverageLeavesCleanupStateUnchanged()
+    {
+        using var db=NewDb();var (store,time,item)=Setup(db.Path);var now=time.GetUtcNow();
+        Execute(db.Path,"DELETE FROM retention_adapter_coverage;");
+        ExecuteAt(db.Path,"UPDATE retention_items SET state='expiring',read_denied_at=NULL,queued_at=NULL,expires_at=$at WHERE item_id=$id",item,now);
+        ExecuteAt(db.Path,"INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation) VALUES($id,'access','reader',$at,1)",item,now+TimeSpan.FromMinutes(1));
+        ExecuteAt(db.Path,"INSERT INTO retention_delete_journal(item_id,intent_at,expected_revision) VALUES($id,$at,1)",item,now);
+        ExecuteAt(db.Path,"INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at) VALUES($id,$at,$at)",item,now);
+
+        var batch=await store.PrepareCleanupBatchAsync(now,100,100,TimeSpan.FromSeconds(30),CancellationToken.None);
+
+        Assert.True(batch.CoverageBlocked);
+        Assert.Empty(batch.Work);
+        Assert.Equal("expiring",Text(db.Path,"SELECT state FROM retention_items WHERE item_id=$id",item));
+        Assert.IsType<DBNull>(Scalar(db.Path,"SELECT read_denied_at FROM retention_items WHERE item_id=$id",item));
+        Assert.Equal(1L,Number(db.Path,"SELECT revision FROM retention_items WHERE item_id=$id",item));
+        Assert.Equal(1L,Number(db.Path,"SELECT COUNT(*) FROM retention_leases WHERE item_id=$id",item));
+        Assert.Equal(1L,Number(db.Path,"SELECT COUNT(*) FROM retention_delete_journal WHERE item_id=$id",item));
+        Assert.Equal(1L,Number(db.Path,"SELECT COUNT(*) FROM retention_tombstones WHERE item_id=$id",item));
+        Assert.Equal(1L,Convert.ToInt64(Scalar(db.Path,"SELECT COUNT(*) FROM raw_records")));
+        Assert.Equal("retention_adapter_coverage_mismatch",Scalar(db.Path,"SELECT worker_error_code FROM retention_worker_state WHERE id=1"));
+    }
+
+    [Fact]
+    public async Task PrepareCleanupBatch_MissingAdapterCoverageReturnsFutureExpiryWithoutMutatingIt()
+    {
+        using var db=NewDb();var (store,time,item)=Setup(db.Path);var now=time.GetUtcNow();var expiry=now+TimeSpan.FromMinutes(1);
+        Execute(db.Path,"DELETE FROM retention_adapter_coverage;");
+        ExecuteAt(db.Path,"UPDATE retention_items SET state='expiring',read_denied_at=NULL,queued_at=NULL,expires_at=$at WHERE item_id=$id",item,expiry);
+        ExecuteAt(db.Path,"INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation) VALUES($id,'access','reader',$at,1)",item,now+TimeSpan.FromMinutes(2));
+        ExecuteAt(db.Path,"INSERT INTO retention_delete_journal(item_id,intent_at,expected_revision) VALUES($id,$at,1)",item,now);
+        ExecuteAt(db.Path,"INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at) VALUES($id,$at,$at)",item,now);
+
+        var batch=await store.PrepareCleanupBatchAsync(now,100,100,TimeSpan.FromSeconds(30),CancellationToken.None);
+
+        Assert.True(batch.CoverageBlocked);
+        Assert.Empty(batch.Work);
+        Assert.Equal(expiry,batch.NextEligibleAt);
+        Assert.Equal("expiring",Text(db.Path,"SELECT state FROM retention_items WHERE item_id=$id",item));
+        Assert.IsType<DBNull>(Scalar(db.Path,"SELECT read_denied_at FROM retention_items WHERE item_id=$id",item));
+        Assert.Equal(1L,Number(db.Path,"SELECT revision FROM retention_items WHERE item_id=$id",item));
+        Assert.Equal(1L,Number(db.Path,"SELECT COUNT(*) FROM retention_leases WHERE item_id=$id",item));
+        Assert.Equal(1L,Number(db.Path,"SELECT COUNT(*) FROM retention_delete_journal WHERE item_id=$id",item));
+        Assert.Equal(1L,Number(db.Path,"SELECT COUNT(*) FROM retention_tombstones WHERE item_id=$id",item));
+        Assert.Equal(1L,Convert.ToInt64(Scalar(db.Path,"SELECT COUNT(*) FROM raw_records")));
+    }
+
+    [Fact]
     public async Task PrepareCleanupBatch_ReturnsEarliestFutureEligibility()
     {
         using var db=NewDb();var (store,time,item)=Setup(db.Path);var now=time.GetUtcNow();
@@ -34,6 +100,29 @@ public sealed class RetentionCleanupWorkerTests
     }
 
     [Fact]
+    public async Task Coordinator_RequestsImmediateContinuationWhenClaimBatchIsFull()
+    {
+        using var db=NewDb();var (store,time,item)=Setup(db.Path);for(var index=0;index<RetentionV1Constants.ClaimBatchLimit;index++)AddQueuedItem(db.Path,$"more-{index}",time.GetUtcNow());
+
+        var cycle=await new RetentionCleanupCoordinator(store,Registry(new StrictAdapter(RetentionStoreKind.RawRecord)),time).RunOneCycleAsync(CancellationToken.None,CancellationToken.None);
+
+        Assert.True(cycle.ContinueImmediately);
+        Assert.Equal(RetentionV1Constants.ClaimBatchLimit,cycle.Dispatched);
+    }
+
+    [Fact]
+    public void RegisterAdapterCoverage_RejectsMismatchedExistingRowsWithoutOverwritingThem()
+    {
+        using var db=NewDb();var store=new RetentionCatalogStore(db.Path);store.CreateSchema();
+        Execute(db.Path,"PRAGMA ignore_check_constraints=ON; INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('raw_record',2);");
+
+        Assert.Throws<RetentionMigrationBlockedException>(() => store.RegisterAdapterCoverage(Registry(new StrictAdapter(RetentionStoreKind.RawRecord))));
+
+        Assert.Equal(1L,Convert.ToInt64(Scalar(db.Path,"SELECT COUNT(*) FROM retention_adapter_coverage")));
+        Assert.Equal(2L,Convert.ToInt64(Scalar(db.Path,"SELECT coverage_version FROM retention_adapter_coverage WHERE store_kind='raw_record'")));
+    }
+
+    [Fact]
     public async Task Worker_DueWakeRunsExactlyAtEarliestEligibility()
     {
         using var db=NewDb();var (store,time,item)=Setup(db.Path);var due=time.GetUtcNow()+TimeSpan.FromSeconds(5);
@@ -42,6 +131,20 @@ public sealed class RetentionCleanupWorkerTests
         await worker.StartAsync();await DrainAsync();Assert.Equal(0,adapter.Calls);
         time.Advance(TimeSpan.FromSeconds(4));await DrainAsync();Assert.Equal(0,adapter.Calls);
         time.Advance(TimeSpan.FromSeconds(1));await DrainAsync();Assert.Equal(1,adapter.Calls);
+        await adapter.Completed.Task;await worker.StopAsync();await DrainAsync();
+    }
+
+    [Fact]
+    public async Task Worker_DueWakePromotesExpiringItemAtItsExpiry()
+    {
+        using var db=NewDb();var (store,time,item)=Setup(db.Path);var due=time.GetUtcNow()+TimeSpan.FromSeconds(5);
+        ExecuteAt(db.Path,"UPDATE retention_items SET state='expiring',read_denied_at=NULL,queued_at=NULL,expires_at=$at WHERE item_id=$id",item,due);
+        var adapter=new StrictAdapter(RetentionStoreKind.RawRecord);var worker=new RetentionCleanupWorker(new RetentionCleanupCoordinator(store,Registry(adapter),time),time);
+
+        await worker.StartAsync();await DrainAsync();Assert.Equal(0,adapter.Calls);
+        time.Advance(TimeSpan.FromSeconds(5));await DrainAsync();
+
+        Assert.Equal(1,adapter.Calls);
         await adapter.Completed.Task;await worker.StopAsync();await DrainAsync();
     }
 

@@ -26,9 +26,9 @@ internal sealed class RetentionCleanupCoordinator
 
     private async ValueTask<RetentionCycleResult> RunCoreAsync(CancellationToken stopScanningToken, CancellationToken drainToken)
     {
-        if (catalog is null || adapters is null) return new(0, 0, false, false, null);
+        if (catalog is null || adapters is null) return new(0, 0, false, false, null, false);
         var batch = await catalog.PrepareCleanupBatchAsync(time.GetUtcNow(), RetentionV1Constants.ExpiryScanItemLimit, RetentionV1Constants.ClaimBatchLimit, RetentionV1Constants.ScanElapsedBudget, stopScanningToken).ConfigureAwait(false);
-        if (batch.CoverageBlocked) return new(0, 0, false, false, batch.NextEligibleAt);
+        if (batch.CoverageBlocked) return new(0, 0, false, false, batch.NextEligibleAt, false);
         var work = Channel.CreateBounded<RetentionWorkReference>(new BoundedChannelOptions(RetentionV1Constants.ClaimBatchLimit) { SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
         foreach (var candidate in batch.Work)
         {
@@ -69,7 +69,7 @@ internal sealed class RetentionCleanupCoordinator
             if (await catalog.IsMaintenanceDueAsync(time.GetUtcNow(), CancellationToken.None).ConfigureAwait(false))
                 await maintenance.RunAsync(time.GetUtcNow(), CancellationToken.None).ConfigureAwait(false);
         }
-        return new(batch.Work.Count, completed, clean, sqlite, await catalog.GetNextCleanupEligibilityAsync(time.GetUtcNow(), CancellationToken.None).ConfigureAwait(false));
+        return new(batch.Work.Count, completed, clean, sqlite, await catalog.GetNextCleanupEligibilityAsync(time.GetUtcNow(), CancellationToken.None).ConfigureAwait(false), batch.HitPromotionLimit || batch.HitElapsedBudget || batch.Work.Count >= RetentionV1Constants.ClaimBatchLimit);
     }
 
     private async ValueTask<(int Completed, bool Clean, bool SqliteCompletion, bool CoverageBlocked)> ProcessAsync(RetentionWorkReference work, CancellationToken stopScanningToken, CancellationToken drainToken)
@@ -158,4 +158,4 @@ internal sealed class RetentionCleanupCoordinator
     private static bool IsSqlite(RetentionStoreKind kind) => kind is RetentionStoreKind.SessionEventContent or RetentionStoreKind.RawRecord or RetentionStoreKind.AnalysisRunRaw;
 }
 
-internal sealed record RetentionCycleResult(int Dispatched, int Completed, bool Clean, bool QualifiedSqliteBatch, DateTimeOffset? NextEligibleAt);
+internal sealed record RetentionCycleResult(int Dispatched, int Completed, bool Clean, bool QualifiedSqliteBatch, DateTimeOffset? NextEligibleAt, bool ContinueImmediately);
