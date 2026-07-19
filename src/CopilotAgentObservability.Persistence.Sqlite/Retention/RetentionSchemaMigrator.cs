@@ -122,6 +122,115 @@ internal static class RetentionSchemaMigrator
         Execute(connection, transaction, "INSERT INTO retention_worker_state(id) VALUES(1) ON CONFLICT(id) DO NOTHING;");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_items_worker_order ON retention_items(state, expires_at, item_id);");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_leases_kind_expiry ON retention_leases(lease_kind, expires_at, item_id);");
+        Execute(connection, transaction, """
+            CREATE TABLE IF NOT EXISTS retention_mutation_previews (
+                preview_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+                target_kind TEXT NOT NULL CHECK(target_kind IN ('session','item')),
+                target_id TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK(operation IN ('pin','unpin','delete_now')),
+                scope TEXT NOT NULL CHECK(scope IN ('session_items','single_item')),
+                preview_json TEXT NOT NULL,
+                expected_state_version TEXT NOT NULL,
+                target_item_set_digest TEXT NOT NULL,
+                preview_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                rejection_code TEXT NULL
+            );
+            """);
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_previews_expiry ON retention_mutation_previews(expires_at, preview_id);");
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_previews_target ON retention_mutation_previews(target_kind, target_id, preview_id);");
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_previews_digest ON retention_mutation_previews(preview_digest, preview_id);");
+        Execute(connection, transaction, """
+            CREATE TABLE IF NOT EXISTS retention_confirmation_bindings (
+                confirmation_id TEXT PRIMARY KEY,
+                preview_id TEXT NOT NULL REFERENCES retention_mutation_previews(preview_id),
+                schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+                token_sha256 BLOB NOT NULL CHECK(typeof(token_sha256) = 'blob' AND length(token_sha256) = 32),
+                nonce BLOB NOT NULL CHECK(typeof(nonce) = 'blob' AND length(nonce) = 16),
+                target_kind TEXT NOT NULL CHECK(target_kind IN ('session','item')),
+                target_id TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK(operation IN ('pin','unpin','delete_now')),
+                scope TEXT NOT NULL CHECK(scope IN ('session_items','single_item')),
+                preview_digest TEXT NOT NULL,
+                expected_state_version TEXT NOT NULL,
+                target_item_set_digest TEXT NOT NULL,
+                active_conflict_snapshot TEXT NOT NULL,
+                conflict_version TEXT NOT NULL,
+                confirmation_expires_at TEXT NOT NULL,
+                workflow_idempotency_key TEXT NOT NULL,
+                reason_code TEXT NOT NULL,
+                comment_sha256 BLOB NULL CHECK(comment_sha256 IS NULL OR (typeof(comment_sha256) = 'blob' AND length(comment_sha256) = 32)),
+                created_at TEXT NOT NULL,
+                consumed_at TEXT NULL,
+                invalidated_at TEXT NULL,
+                operation_id TEXT NULL,
+                UNIQUE(nonce)
+            );
+            """);
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_confirmation_bindings_expiry ON retention_confirmation_bindings(confirmation_expires_at, confirmation_id);");
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_confirmation_bindings_preview ON retention_confirmation_bindings(preview_id, invalidated_at, consumed_at, confirmation_id);");
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_confirmation_bindings_token_hash ON retention_confirmation_bindings(token_sha256);");
+        Execute(connection, transaction, """
+            CREATE TABLE IF NOT EXISTS retention_mutation_idempotency (
+                key_digest BLOB NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+                step TEXT NOT NULL CHECK(step IN ('preview','confirmation_issue','mutation')),
+                request_fingerprint BLOB NOT NULL CHECK(typeof(request_fingerprint) = 'blob' AND length(request_fingerprint) = 32),
+                result_json TEXT NOT NULL,
+                completion_code TEXT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY(key_digest, step)
+            );
+            """);
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_idempotency_expiry ON retention_mutation_idempotency(expires_at, key_digest, step);");
+        Execute(connection, transaction, """
+            CREATE TABLE IF NOT EXISTS retention_operation_receipts (
+                operation_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+                result_code TEXT NOT NULL,
+                target_kind TEXT NOT NULL CHECK(target_kind IN ('session','item')),
+                target_id TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK(operation IN ('pin','unpin','delete_now')),
+                scope TEXT NOT NULL CHECK(scope IN ('session_items','single_item')),
+                target_item_count INTEGER NOT NULL CHECK(target_item_count >= 0),
+                result_json TEXT NOT NULL,
+                completion_code TEXT NOT NULL,
+                expected_version TEXT NOT NULL,
+                result_version TEXT NOT NULL,
+                target_item_set_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL
+            );
+            """);
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_operation_receipts_target ON retention_operation_receipts(target_kind, target_id, operation_id);");
+        Execute(connection, transaction, """
+            CREATE TABLE IF NOT EXISTS retention_audit_events (
+                event_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL,
+                event_type TEXT NOT NULL CHECK(event_type = 'retention_mutation'),
+                target_kind TEXT NOT NULL CHECK(target_kind IN ('session','item')),
+                target_id TEXT NOT NULL,
+                session_id TEXT NULL,
+                occurred_at TEXT NOT NULL,
+                actor_label TEXT NOT NULL CHECK(actor_label = 'local-user'),
+                operation TEXT NOT NULL CHECK(operation IN ('pin','unpin','delete_now')),
+                reason_code TEXT NOT NULL,
+                comment TEXT NULL,
+                previous_pin_state TEXT NOT NULL CHECK(previous_pin_state IN ('pinned','unpinned','not_applicable','mixed')),
+                new_pin_state TEXT NOT NULL CHECK(new_pin_state IN ('pinned','unpinned','not_applicable','mixed')),
+                previous_operation_state TEXT NOT NULL,
+                new_operation_state TEXT NOT NULL,
+                request_idempotency_key TEXT NOT NULL,
+                expected_version TEXT NOT NULL,
+                result_version TEXT NOT NULL,
+                target_item_set_digest TEXT NOT NULL,
+                completion_code TEXT NOT NULL,
+                error_code TEXT NULL
+            );
+            """);
+        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_audit_events_target ON retention_audit_events(target_kind, target_id, occurred_at, event_id);");
         Execute(connection, transaction, "INSERT INTO retention_component_versions(component,version) VALUES('retention',1) ON CONFLICT(component) DO NOTHING;");
         Execute(connection, transaction, "INSERT INTO retention_store_instances(id,store_instance_id) VALUES(1,lower(hex(randomblob(16)))) ON CONFLICT(id) DO NOTHING;");
         using (var version = connection.CreateCommand())
