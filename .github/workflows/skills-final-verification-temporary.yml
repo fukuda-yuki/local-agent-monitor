@@ -56,10 +56,15 @@ jobs:
 
           grep -Fq '## Repository Skills' AGENTS.md
           grep -Fq 'Implicit invocation is limited to `spec-update` and `validate`.' AGENTS.md
-          grep -Fq 'Keep `.claude/skills/` for Claude Code compatibility' AGENTS.md
+          grep -Fq 'Treat `.agents/skills/` as the canonical source' AGENTS.md
+          grep -Fq 'pwsh scripts\agent\sync-claude-skills.ps1 -Check' AGENTS.md
           ! grep -Fq '.agents/skills/codex-subagent-dispatch/SKILL.md' AGENTS.md
 
           git diff --check origin/main...HEAD
+
+      - name: Verify generated Claude skill mirror
+        shell: pwsh
+        run: pwsh scripts/agent/sync-claude-skills.ps1 -Check
 
       - name: Build solution
         shell: pwsh
