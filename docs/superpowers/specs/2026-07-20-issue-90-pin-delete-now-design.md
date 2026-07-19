@@ -763,10 +763,11 @@ The stage classification is normative and mutually exclusive:
   expired-preview read error) without entering commit. The consumed-binding
   result is owned by this class because it returns stored linkage and no new
   token; the mutation route may return that same code at mutation-time check 2.
-- `COMMIT-STAGE`: a valid bound token reaches mutation-time validation or the
-  durable mutation transaction. Outcomes are mutation HTTP `401`, `409`, or
-  `503`, or HTTP `200` for a committed success, no-op, actionable-idempotent
-  result, or replay.
+- `COMMIT-STAGE`: a token is presented to the mutation route and enters the
+  mutation-time evaluation sequence or the durable mutation transaction; the
+  presented token itself may prove structurally or cryptographically invalid
+  at check 1. Outcomes are mutation HTTP `401`, `409`, or `503`, or HTTP `200`
+  for a committed success, no-op, actionable-idempotent result, or replay.
 - `WARNING`: a fixed warning field attached to an otherwise successful result,
   not an HTTP failure.
 
@@ -780,7 +781,7 @@ class.
 | `400` | REQUEST-STAGE `retention_mutation_request_invalid`, `retention_idempotency_key_invalid`, or `retention_history_cursor_invalid`. |
 | `401` | COMMIT-STAGE `retention_confirmation_invalid` when the token cannot be structurally or cryptographically validated. |
 | `404` | REQUEST-STAGE `retention_target_not_found`, `retention_preview_not_found`, or `retention_operation_not_found`. |
-| `409` | REQUEST-STAGE `retention_idempotency_conflict` or `retention_idempotency_expired`; PREVIEW-STAGE confirmation-issue returns for `retention_target_not_applicable` and the fixed transition codes in the PREVIEW-STAGE table; CONFIRMATION-ISSUE-STAGE `retention_target_empty`, `retention_preview_expired`, or `retention_preview_digest_mismatch`; mutation-time check 2 `retention_confirmation_consumed`, followed by COMMIT-STAGE checks 3–9 in order: `retention_confirmation_expired`, `retention_confirmation_binding_mismatch`, `retention_confirmation_target_changed`, `retention_confirmation_pin_changed`, `retention_confirmation_retention_changed`, `retention_confirmation_conflict_changed`, and `retention_confirmation_version_changed`; or post-check COMMIT-STAGE `retention_pin_expired`. `retention_delete_already_queued` is the committed HTTP `200` exception. |
+| `409` | REQUEST-STAGE `retention_idempotency_conflict` or `retention_idempotency_expired`; PREVIEW-STAGE confirmation-issue returns for `retention_target_not_applicable` and the fixed transition codes in the PREVIEW-STAGE table; CONFIRMATION-ISSUE-STAGE `retention_target_empty`, `retention_preview_expired`, or `retention_preview_digest_mismatch`; the mutation-time token/drift codes returned at checks 2–9 of the single evaluation order pinned in the reject-and-republish table; or post-check COMMIT-STAGE `retention_pin_expired`. `retention_delete_already_queued` is the committed HTTP `200` exception. |
 | `413` | REQUEST-STAGE `retention_mutation_target_limit_exceeded`; no preview record is produced. |
 | `503` | REQUEST-STAGE inherited `retention_catalog_unavailable`; CONFIRMATION-ISSUE-STAGE `retention_confirmation_generation_failed`; or COMMIT-STAGE `retention_mutation_transaction_failed` or `retention_audit_write_failed`. |
 
@@ -796,7 +797,10 @@ and `no-store`.
 The following is the complete new #90 registry, plus the inherited
 `retention_catalog_unavailable` code used by these routes. Each code appears
 in exactly one reachability class in this table; a shared route is called out
-within that single class. The registry does not reuse a code from the #89
+within that single class. Mutation-time check numbers are references to the
+single evaluation order pinned in the reject-and-republish table, which is the
+only normative statement of that order. The registry does not reuse a code
+from the #89
 registry, including `retention_lease_conflict`,
 `retention_lease_lost`, `retention_unexpected_source_missing`, or
 `retention_item_limit_exceeded`.
@@ -804,7 +808,7 @@ registry, including `retention_lease_conflict`,
 | Code | Reachability class | Use |
 | --- | --- | --- |
 | `retention_mutation_request_invalid` | REQUEST-STAGE (preview/confirmation/mutation request) `400` | Invalid union, operation, scope, reason, comment, or body; the request produces no preview record. |
-| `retention_target_not_found` | REQUEST-STAGE (preview request) `404` | Exact Session or item target is absent, so no preview record is produced. |
+| `retention_target_not_found` | REQUEST-STAGE (preview request, item state read, history read) `404` | Exact Session or item target is absent. A preview request produces no preview record; the item state and history read routes return the same code for an unknown exact target. |
 | `retention_mutation_target_limit_exceeded` | REQUEST-STAGE (preview request) `413` | Exact Session target has more than 100 items; the preview request fails and produces no preview record. |
 | `retention_preview_not_found` | REQUEST-STAGE (preview read/confirmation issue) `404` | Preview ID is not present in the current catalog, so the request cannot address a preview record. |
 | `retention_idempotency_key_invalid` | REQUEST-STAGE (preview/confirmation/mutation request) `400` | Key format is not the exact 48-character `rid1_` format; the request produces no preview record. |
@@ -1011,7 +1015,7 @@ does not perform a lifecycle transition by itself.
 | C1 | Implement the catalog-only Session exact-link resolver and the one-code exclusion projection. | Exact `session | item` resolver using only the `session_event_content` -> `session_events.session_id` join; all other store kinds are item-target-only. | Positive event linkage; `missing_ownership_proof`; no-scan candidate projection; empty/all-excluded shape; fixed structural exclusions for foreign/unlinked/non-session rows; negative run/trace/path/time proximity. | Yes with C2 only if C1 writes resolver contracts in a separate domain file; otherwise sequential. |
 | C2 | Implement exact item-set collection, 100-item limit, store-kind summaries, capture/expiry/policy summaries, and retained-impact projection. | Sanitized `RetentionMutationPreviewResponse` read model with no raw/source locator. | Exact ordering, all seven lifecycle counts, 100-item boundary, 101-item REQUEST-STAGE `413` with no preview record, and no source key/path leakage. | No; depends on C1 and B2. |
 | C3 | Implement JCS SHA-256 preview/version/conflict digests and five-minute preview records, including state-bearing `rejection_code` in `preview_digest`. | Deterministic digest values and persisted preview ID/expiry. | Byte-identical digest under repeated reads; rejection-code changes alter the digest; property-order/locale differences do not alter it; expiry does not extend on re-read. | No; depends on C2. |
-| C4 | Implement confirmation issuance and all reject-and-republish checks. | Separate fresh/reissued token DTO, operation/scope/target echo checks, REQUEST-STAGE and PREVIEW-STAGE rejection handling, CONFIRMATION-ISSUE-STAGE handling, consumed-linkage handling, and exact route-specific confirmation error mapping. | REQUEST-STAGE missing-target/preview and idempotency errors; successful empty preview `200` followed by `retention_target_empty` issue `409`; PREVIEW-STAGE rejection `200`/issue `409`; digest mismatch; same-key byte-identical lost-response/restart reissue with old-token invalidation; consumed retry without reissue; and mutation-time checks in exact order 1 invalid, 2 consumed, 3 expired, 4 binding mismatch, 5 target changed, 6 pin changed, 7 retention changed, 8 conflict changed, 9 version changed, with first-failure-only assertion and nonce collision. | No; depends on B4 and C3. |
+| C4 | Implement confirmation issuance and all reject-and-republish checks. | Separate fresh/reissued token DTO, operation/scope/target echo checks, REQUEST-STAGE and PREVIEW-STAGE rejection handling, CONFIRMATION-ISSUE-STAGE handling, consumed-linkage handling, and exact route-specific confirmation error mapping. | REQUEST-STAGE missing-target/preview and idempotency errors; successful empty preview `200` followed by `retention_target_empty` issue `409`; PREVIEW-STAGE rejection `200`/issue `409`; digest mismatch; same-key byte-identical lost-response/restart reissue with old-token invalidation; consumed retry without reissue; and mutation-time checks asserted in the single evaluation order 1–9 pinned in the reject-and-republish table, with first-failure-only assertion and nonce collision. | No; depends on B4 and C3. |
 
 90-C deliverable: a deterministic preview and confirmation engine whose target
 boundary and digest are identical to the later commit boundary.
