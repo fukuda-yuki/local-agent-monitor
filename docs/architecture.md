@@ -431,7 +431,9 @@ Not allowed in repository:
 - sensitive bundle local path。
 
 Sensitive local output may be generated only by explicit opt-in commands.
-It must include expiry metadata and delete target paths, but automatic deletion is not implemented.
+Its retention metadata and deletion authority remain private to Retention catalog
+v1; automatic physical cleanup uses exact catalog ownership rather than paths
+carried in an output artifact.
 
 Issue #51 Session content is another local raw-bearing storage class. It is
 secret-filtered, stored separately from Session metadata, and expires for reads

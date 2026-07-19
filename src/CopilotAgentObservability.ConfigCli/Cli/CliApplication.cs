@@ -666,43 +666,84 @@ internal static class CliApplication
             return 1;
         }
 
+        var options = parseResult.Options!;
         try
         {
-            if (!File.Exists(parseResult.Options!.MeasurementsPath))
+            if (!File.Exists(options.MeasurementsPath))
             {
-                error.WriteLine($"error: measurements file not found: {parseResult.Options.MeasurementsPath}");
+                if (options.IncludeSensitiveContent)
+                {
+                    error.WriteLine("error: sensitive diagnosis generation failed.");
+                }
+                else
+                {
+                    error.WriteLine($"error: measurements file not found: {options.MeasurementsPath}");
+                }
                 return 1;
             }
 
-            if (parseResult.Options.RawInputPath is not null && !File.Exists(parseResult.Options.RawInputPath))
+            RetentionSensitiveBundleStore? retentionBundleStore = null;
+            if (options.IncludeSensitiveContent)
             {
-                error.WriteLine($"error: raw input file not found: {parseResult.Options.RawInputPath}");
+                var retentionContext = RetentionCatalogContext.AdoptExistingCatalogV1(options.RetentionDatabasePath!);
+                retentionBundleStore = new RetentionSensitiveBundleStore(new RetentionCatalogStore(retentionContext));
+            }
+
+            if (options.RawInputPath is not null && !File.Exists(options.RawInputPath))
+            {
+                if (options.IncludeSensitiveContent)
+                {
+                    error.WriteLine("error: sensitive diagnosis generation failed.");
+                }
+                else
+                {
+                    error.WriteLine($"error: raw input file not found: {options.RawInputPath}");
+                }
                 return 1;
             }
 
-            var measurements = DiagnosisCandidateMeasurementReader.Read(parseResult.Options.MeasurementsPath);
-            var rawEvidence = parseResult.Options.RawInputPath is null
+            var measurements = DiagnosisCandidateMeasurementReader.Read(options.MeasurementsPath);
+            var rawEvidence = options.RawInputPath is null
                 ? null
-                : RawEvidenceReader.Read(parseResult.Options.RawInputPath);
+                : RawEvidenceReader.Read(options.RawInputPath);
             var candidates = DiagnosisCandidateGenerator.Generate(
                 measurements,
                 rawEvidence,
-                parseResult.Options.IncludeSensitiveContent,
-                parseResult.Options.SensitiveOutputDir,
-                DateTimeOffset.UtcNow);
+                options.IncludeSensitiveContent,
+                options.SensitiveOutputDir,
+                retentionBundleStore);
 
-            if (parseResult.Options.CsvOutputPath is not null)
+            if (options.IncludeSensitiveContent)
             {
-                File.WriteAllText(parseResult.Options.CsvOutputPath, DiagnosisCandidateOutputWriter.WriteCsv(candidates), Encoding.UTF8);
+                var csv = options.CsvOutputPath is null ? null : new DiagnosisOutputPublication(options.CsvOutputPath, Encoding.UTF8.GetBytes(DiagnosisCandidateOutputWriter.WriteCsv(candidates)));
+                var json = options.JsonOutputPath is null ? null : new DiagnosisOutputPublication(options.JsonOutputPath, Encoding.UTF8.GetBytes(DiagnosisCandidateOutputWriter.WriteJson(candidates)));
+                new AtomicDiagnosisOutputPublisher().Publish(csv, json);
             }
-
-            if (parseResult.Options.JsonOutputPath is not null)
+            else
             {
-                File.WriteAllText(parseResult.Options.JsonOutputPath, DiagnosisCandidateOutputWriter.WriteJson(candidates), Encoding.UTF8);
+                if (options.CsvOutputPath is not null)
+                {
+                    File.WriteAllText(options.CsvOutputPath, DiagnosisCandidateOutputWriter.WriteCsv(candidates), Encoding.UTF8);
+                }
+
+                if (options.JsonOutputPath is not null)
+                {
+                    File.WriteAllText(options.JsonOutputPath, DiagnosisCandidateOutputWriter.WriteJson(candidates), Encoding.UTF8);
+                }
             }
 
             output.WriteLine($"Generated {candidates.Count} diagnosis candidate record(s).");
             return 0;
+        }
+        catch (RetentionCatalogUnavailableException)
+        {
+            error.WriteLine("error: retention_catalog_unavailable");
+            return 1;
+        }
+        catch (Exception) when (options.IncludeSensitiveContent)
+        {
+            error.WriteLine("error: sensitive diagnosis generation failed.");
+            return 1;
         }
         catch (FileNotFoundException exception)
         {

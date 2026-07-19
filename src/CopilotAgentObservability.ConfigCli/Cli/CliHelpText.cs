@@ -35,7 +35,7 @@ internal static class CliHelpText
           config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]
           config-cli serve-raw-local-receiver [--db <raw-store.db>] [--url <loopback-http-url>]
           config-cli aggregate-measurements <input.json> [--csv <output.csv>] [--json <output.json>]
-          config-cli generate-diagnosis-candidates <measurements.csv|measurements.json> [--raw <raw-store.db|raw-otlp.json>] [--include-sensitive-content] [--sensitive-output-dir <dir>] [--csv <output.csv>] [--json <output.json>]
+          config-cli generate-diagnosis-candidates <measurements.csv|measurements.json> [--raw <raw-store.db|raw-otlp.json>] [--include-sensitive-content --retention-database <local-monitor.db> [--sensitive-output-dir <dir>]] [--csv <output.csv>] [--json <output.json>]
           config-cli generate-improvement-candidates <diagnosis-candidates.csv|diagnosis-candidates.json> [--csv <output.csv>] [--json <output.json>]
           config-cli generate-auto-decisions <improvement-candidates.csv|improvement-candidates.json> [--csv <output.csv>] [--json <output.json>]
           config-cli generate-dashboard-dataset <measurements.csv|measurements.json> [--raw <raw-store.db|raw-otlp.json>] [--diagnosis-candidates <input.csv|input.json>] [--improvement-candidates <input.csv|input.json>] [--auto-decisions <input.csv|input.json>] [--time-bucket <day|hour|week>] [--csv-dir <output-dir>] [--json <output.json>]

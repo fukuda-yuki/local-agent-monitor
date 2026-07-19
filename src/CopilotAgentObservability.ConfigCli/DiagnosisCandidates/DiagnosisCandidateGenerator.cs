@@ -7,7 +7,7 @@ internal static class DiagnosisCandidateGenerator
         RawEvidenceIndex? rawEvidence,
         bool includeSensitiveContent,
         string? sensitiveOutputDir,
-        DateTimeOffset now)
+        RetentionSensitiveBundleStore? retentionBundleStore)
     {
         var drafts = new List<DiagnosisCandidateDraft>();
         foreach (var measurement in measurements)
@@ -115,7 +115,7 @@ internal static class DiagnosisCandidateGenerator
             .Select((draft, index) => new { Draft = draft, CandidateId = $"diagcand-{index + 1:0000}" })
             .ToArray();
 
-        SensitiveBundleWriteResult? bundle = null;
+        RetentionSensitiveBundleCaptureResult? bundle = null;
         if (includeSensitiveContent)
         {
             var candidatesWithFragments = candidateIds
@@ -124,7 +124,10 @@ internal static class DiagnosisCandidateGenerator
                 .ToArray();
             if (candidatesWithFragments.Length > 0)
             {
-                bundle = SensitiveBundleWriter.Write(candidatesWithFragments, rawEvidence?.SourceInputs ?? [], sensitiveOutputDir, now);
+                bundle = (retentionBundleStore ?? throw new InvalidOperationException()).Capture(
+                    candidatesWithFragments.Select(static candidate => new SensitiveBundlePlanCandidate(candidate.CandidateId, candidate.TraceId, candidate.Fragments)).ToArray(),
+                    rawEvidence?.SourceInputs ?? [],
+                    sensitiveOutputDir);
             }
         }
 
@@ -141,7 +144,7 @@ internal static class DiagnosisCandidateGenerator
                 && bundle.EntriesByCandidateId.ContainsKey(item.CandidateId))
             {
                 contentIncluded = true;
-                sensitiveBundlePath = bundle.BundlePath;
+                sensitiveBundlePath = bundle.FinalPath;
                 evidenceRef = bundle.EntriesByCandidateId[item.CandidateId].EvidenceRef;
             }
 

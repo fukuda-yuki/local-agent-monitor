@@ -608,6 +608,56 @@ unimplemented receiver files, and external blobs are not cleanup targets. The
 final closeout corpus is `retention-closeout-corpus-v1`; it must classify every
 base-to-final raw-bearing creator and cannot treat future stores as covered.
 
+### Sensitive Bundle capture and cleanup
+
+A sensitive bundle is created only after the explicitly bound catalog has been
+validated and the candidate set contains extractable sensitive fragments. Its
+capture lifecycle is `reserved` → `staging` → `published_pending_catalog` →
+`complete`. The catalog records an immutable, bounded capture plan before any
+bundle member is created; its authoritative capture time is the reservation
+time. `complete` is the only phase that creates the readable retention item.
+The final bundle is published only after every planned member has been written
+and verified. Completion is idempotent for the same plan and proof.
+
+Each plan has at most 256 members and at most 128 MiB of file content. It
+contains only canonical relative member names, the planned member kind, exact
+size and digest for every file, and a fixed deletion order. A private ownership
+marker binds the catalog instance, capture identity, authoritative reservation
+time, and private ownership token. Cleanup may delete only the exact final
+bundle whose marker and planned members still verify; it deletes members in the
+persisted order, with the ownership marker last, and deletes the now-empty
+bundle directory last. An unexpected, replaced, missing-before-progress, or
+reparse-bearing member, an unexpected extra member, or a stale lease is not
+adopted or deleted and transitions to the corresponding bounded failure or
+lease-lost result.
+
+Capture recovery is restart-safe and forward-only. It resumes a complete,
+owned staging or publish-pending capture; an empty reservation may be
+abandoned. An incomplete, collided, replaced, or otherwise unprovable capture
+is blocked without deleting the unproven material.
+
+When the explicitly configured sensitive-output path is itself a bundle written
+by the preceding v1 writer, migration examines that exact root only and never
+searches its parent or descendants for other bundles. Adoption requires the
+canonical v1 manifest, its exact self-delete target, the complete bounded
+evidence index, the seven-day created/expiry relation, no extra members, and no
+reparse point. Before filesystem mutation, the catalog reserves a generated
+child and journals the migration. The old root is moved through its exact
+sibling staging location into that child, the requested path is restored as the
+new bundle parent, and the legacy manifest is replaced by the non-disclosing
+current manifest before completion. Recovery deterministically resumes either
+rename window. The resulting item retains the original `created_at_utc` and
+`expires_at_utc`. A root with legacy bundle evidence that cannot satisfy these
+proofs is preserved and durably classified as an ownership blocker; it is never
+guessed, recursively scanned, or deleted.
+
+The final sensitive-bundle catalog item uses `sensitive-bundle-7d` v1 and is
+otherwise subject to the common irreversible read-denial, queue, lease, retry,
+and deletion-failure rules above. Capture, recovery, deletion diagnostics, and
+repository-safe evidence expose only bounded state/error information and
+opaque references; they never expose raw fragments, member names, source or
+delete locations, ownership tokens, or absolute/local paths.
+
 ## Validation
 
 Use synthetic fixtures for automated tests.

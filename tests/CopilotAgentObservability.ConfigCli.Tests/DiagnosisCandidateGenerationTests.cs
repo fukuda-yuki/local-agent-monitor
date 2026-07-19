@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CopilotAgentObservability.ConfigCli;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
@@ -110,6 +111,8 @@ public class DiagnosisCandidateGenerationTests
         var rawPath = WriteRawOtlp(tempDirectory.Path, "trace-raw");
         var outputPath = Path.Combine(tempDirectory.Path, "candidates.json");
         var bundlePath = Path.Combine(tempDirectory.Path, "bundle");
+        var retentionDatabasePath = Path.Combine(tempDirectory.Path, "local-monitor.db");
+        RetentionCatalogContext.InitializeNewOwnedDatabase(retentionDatabasePath);
 
         var exitCode = CliApplication.Run(
             [
@@ -118,6 +121,8 @@ public class DiagnosisCandidateGenerationTests
                 "--raw",
                 rawPath,
                 "--include-sensitive-content",
+                "--retention-database",
+                retentionDatabasePath,
                 "--sensitive-output-dir",
                 bundlePath,
                 "--json",
@@ -130,20 +135,22 @@ public class DiagnosisCandidateGenerationTests
         using var candidatesDocument = JsonDocument.Parse(File.ReadAllText(outputPath));
         var rows = candidatesDocument.RootElement.EnumerateArray().ToArray();
         Assert.All(rows, row => Assert.True(row.GetProperty("content_included").GetBoolean()));
-        Assert.All(rows, row => Assert.Equal(bundlePath, row.GetProperty("sensitive_bundle_path").GetString()));
-        Assert.All(rows, row => Assert.StartsWith("bundle:bundle:diagcand-", row.GetProperty("evidence_ref").GetString(), StringComparison.Ordinal));
+        var generatedBundlePath = Assert.IsType<string>(rows[0].GetProperty("sensitive_bundle_path").GetString());
+        Assert.StartsWith(Path.GetFullPath(bundlePath), generatedBundlePath, StringComparison.Ordinal);
+        Assert.All(rows, row => Assert.Equal(generatedBundlePath, row.GetProperty("sensitive_bundle_path").GetString()));
+        Assert.All(rows, row => Assert.StartsWith("bundle:", row.GetProperty("evidence_ref").GetString(), StringComparison.Ordinal));
         Assert.DoesNotContain("synthetic-sensitive-value", File.ReadAllText(outputPath));
 
-        using var manifestDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(bundlePath, "manifest.json")));
+        using var manifestDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(generatedBundlePath, "manifest.json")));
         var manifest = manifestDocument.RootElement;
         Assert.Equal(1, manifest.GetProperty("schema_version").GetInt32());
-        Assert.Equal("bundle", manifest.GetProperty("bundle_id").GetString());
+        var captureId = Assert.IsType<string>(manifest.GetProperty("bundle_id").GetString());
         Assert.True(manifest.GetProperty("content_included").GetBoolean());
         Assert.Equal(2, manifest.GetProperty("evidence_index").GetArrayLength());
-        Assert.Contains(bundlePath, manifest.GetProperty("delete_target_paths")[0].GetString());
+        Assert.False(manifest.TryGetProperty("delete_target_paths", out _));
         Assert.Equal("raw-otlp", manifest.GetProperty("source_inputs")[0].GetProperty("kind").GetString());
 
-        var evidencePath = Path.Combine(bundlePath, "evidence", "diagcand-0002.json");
+        var evidencePath = Path.Combine(generatedBundlePath, "evidence", "diagcand-0002.json");
         using var evidenceDocument = JsonDocument.Parse(File.ReadAllText(evidencePath));
         var evidence = evidenceDocument.RootElement;
         Assert.Equal(1, evidence.GetProperty("schema_version").GetInt32());
@@ -153,6 +160,7 @@ public class DiagnosisCandidateGenerationTests
         Assert.Equal("synthetic-sensitive-value", evidence.GetProperty("fragments")[0].GetProperty("value").GetString());
         Assert.Equal("synthetic prompt content should stay in bundle only", evidence.GetProperty("fragments")[1].GetProperty("value").GetString());
         Assert.Equal(64, evidence.GetProperty("fragments")[0].GetProperty("sha256").GetString()!.Length);
+        Assert.Equal($"bundle:{captureId}:diagcand-0002", evidence.GetProperty("evidence_ref").GetString());
     }
 
     [Fact]

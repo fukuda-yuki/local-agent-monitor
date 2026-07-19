@@ -12,6 +12,7 @@ public sealed partial class RetentionCatalogStore
     private readonly Action? maintenanceCheckpoint;
     private readonly Func<SqliteConnection, CancellationToken, bool>? maintenanceProtocol;
     private readonly RetentionCatalogContext? context;
+    private readonly Action<string>? fileCaptureCheckpoint;
     public RetentionCatalogStore(string databasePath, TimeProvider? timeProvider = null) { this.databasePath = databasePath ?? throw new ArgumentNullException(nameof(databasePath)); this.timeProvider = timeProvider ?? TimeProvider.System; }
     internal RetentionCatalogStore(string databasePath, Action<SqliteConnection, SqliteTransaction> backfillValidationCheckpoint)
         : this(databasePath)
@@ -35,6 +36,8 @@ public sealed partial class RetentionCatalogStore
         databasePath = context.DatabasePath;
         this.timeProvider = timeProvider ?? TimeProvider.System;
     }
+    internal RetentionCatalogStore(RetentionCatalogContext context, TimeProvider timeProvider, Action<string> fileCaptureCheckpoint)
+        : this(context, timeProvider) => this.fileCaptureCheckpoint = fileCaptureCheckpoint;
 
     public void CreateSchema()
     {
@@ -734,7 +737,7 @@ public sealed partial class RetentionCatalogStore
     {
         using var q=c.CreateCommand();q.Transaction=t;q.CommandText="SELECT durable_cursor,expected_revision FROM retention_delete_journal WHERE item_id=$id;";q.Parameters.AddWithValue("$id",itemId);using var r=q.ExecuteReader();return r.Read()?(r.GetInt32(0),r.GetInt64(1)):null;
     }
-    private static SourceReceiptProof ValidateFirstIntentEvidence(SqliteConnection c, SqliteTransaction t, string itemId)
+    private SourceReceiptProof ValidateFirstIntentEvidence(SqliteConnection c, SqliteTransaction t, string itemId)
     {
         using var q=c.CreateCommand();q.Transaction=t;q.CommandText="SELECT store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,adapter_coverage_version FROM retention_items WHERE item_id=$id;";q.Parameters.AddWithValue("$id",itemId);using var r=q.ExecuteReader();
         if(!r.Read()) return SourceReceiptProof.InvalidIdentity;
@@ -742,7 +745,8 @@ public sealed partial class RetentionCatalogStore
         if(receiptVersion!=1 || receipt.Length!=32 || coverage!=RetentionV1Constants.AdapterCoverageVersion || string.IsNullOrWhiteSpace(source)) return SourceReceiptProof.InvalidIdentity;
         var kind=kindWire switch { "session_event_content"=>RetentionStoreKind.SessionEventContent,"raw_record"=>RetentionStoreKind.RawRecord,"analysis_run_raw"=>RetentionStoreKind.AnalysisRunRaw,"sensitive_bundle"=>RetentionStoreKind.SensitiveBundle,"analysis_sdk_directory"=>RetentionStoreKind.AnalysisSdkDirectory,_=>(RetentionStoreKind?)null };
         if(kind is null || !string.Equals(store,StoreId(c,t),StringComparison.Ordinal)) return SourceReceiptProof.InvalidIdentity;
-        if(kind is RetentionStoreKind.SensitiveBundle or RetentionStoreKind.AnalysisSdkDirectory) return SourceReceiptProof.Match;
+        if(kind is RetentionStoreKind.SensitiveBundle) return ValidateSensitiveBundleFirstIntentEvidence(c,t,itemId,store,source,receipt);
+        if(kind is RetentionStoreKind.AnalysisSdkDirectory) return SourceReceiptProof.Match;
         return StrictSourceProof(c,t,new RetentionOwnershipKey(store,kind.Value,source));
     }
     private static SourceReceiptProof StrictSourceProof(SqliteConnection c, SqliteTransaction t, RetentionOwnershipKey key)

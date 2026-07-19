@@ -4,6 +4,7 @@ internal sealed record DiagnosisCandidateOptions(
     string MeasurementsPath,
     string? RawInputPath,
     bool IncludeSensitiveContent,
+    string? RetentionDatabasePath,
     string? SensitiveOutputDir,
     string? CsvOutputPath,
     string? JsonOutputPath)
@@ -22,6 +23,7 @@ internal sealed record DiagnosisCandidateOptions(
         }
 
         string? rawInputPath = null;
+        string? retentionDatabasePath = null;
         string? sensitiveOutputDir = null;
         string? csvOutputPath = null;
         string? jsonOutputPath = null;
@@ -42,6 +44,20 @@ internal sealed record DiagnosisCandidateOptions(
 
                 case "--include-sensitive-content":
                     includeSensitiveContent = true;
+                    break;
+
+                case "--retention-database":
+                    if (retentionDatabasePath is not null)
+                    {
+                        return new DiagnosisCandidateOptionsParseResult(null, "--retention-database may be specified only once.");
+                    }
+
+                    if (index + 1 >= args.Length || IsOption(args[index + 1]))
+                    {
+                        return new DiagnosisCandidateOptionsParseResult(null, "--retention-database requires a Local Monitor SQLite database path.");
+                    }
+
+                    retentionDatabasePath = args[++index];
                     break;
 
                 case "--sensitive-output-dir":
@@ -81,6 +97,16 @@ internal sealed record DiagnosisCandidateOptions(
             return new DiagnosisCandidateOptionsParseResult(null, "--include-sensitive-content requires --raw <raw-store.db|raw-otlp.json>.");
         }
 
+        if (!includeSensitiveContent && retentionDatabasePath is not null)
+        {
+            return new DiagnosisCandidateOptionsParseResult(null, "--retention-database is valid only with --include-sensitive-content.");
+        }
+
+        if (includeSensitiveContent && retentionDatabasePath is null)
+        {
+            return new DiagnosisCandidateOptionsParseResult(null, "--include-sensitive-content requires --retention-database <local-monitor.db>.");
+        }
+
         if (csvOutputPath is null && jsonOutputPath is null)
         {
             return new DiagnosisCandidateOptionsParseResult(null, "generate-diagnosis-candidates requires --csv, --json, or both.");
@@ -91,6 +117,7 @@ internal sealed record DiagnosisCandidateOptions(
                 measurementsPath,
                 rawInputPath,
                 includeSensitiveContent,
+                retentionDatabasePath,
                 sensitiveOutputDir,
                 csvOutputPath,
                 jsonOutputPath),

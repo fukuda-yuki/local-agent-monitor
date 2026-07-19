@@ -30,6 +30,16 @@ internal static class RetentionOwnershipReceipt
         writer.Int64(input.RunId); writer.Timestamp(input.RequestedAtText, input.RequestedAtUtcTicks); writer.OptionalPositive(input.RecordId); writer.OptionalText(input.SpanId); return writer.Finish(input.OwnerToken);
     }
 
+    internal static byte[] CreateSensitiveBundle(RetentionSensitiveBundleOwnershipReceiptInput input)
+    {
+        if (!Valid(input, RetentionStoreKind.SensitiveBundle, out var writer)
+            || !CanonicalCaptureId(input.CaptureId)
+            || !Timestamp(input.ReservedAtText, input.ReservedAtUtcTicks)
+            || input.MarkerSha256 is not { Length: 32 }
+            || input.ManifestSha256 is not { Length: 32 }) throw Invalid();
+        writer.Text(input.CaptureId); writer.Timestamp(input.ReservedAtText, input.ReservedAtUtcTicks); writer.Bytes(input.MarkerSha256); writer.Bytes(input.ManifestSha256); return writer.Finish(input.OwnerToken);
+    }
+
     internal static bool Matches(byte[] expected, byte[] actual) =>
         expected is { Length: 32 } && actual is { Length: 32 } && CryptographicOperations.FixedTimeEquals(expected, actual);
 
@@ -54,13 +64,14 @@ internal static class RetentionOwnershipReceipt
     private static bool Fail(out byte[] bytes) { bytes = []; return false; }
 
     private static bool CanonicalGuid(string? value) => value is not null && Guid.TryParseExact(value, "D", out var guid) && string.Equals(value, guid.ToString("D"), StringComparison.Ordinal);
+    private static bool CanonicalCaptureId(string? value) => value is { Length: 32 } && value.All(static character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
     private static bool Timestamp(string? text, long ticks) => text is not null && DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var value) && value.UtcDateTime.Ticks == ticks;
     private static ArgumentException Invalid() => new("Invalid retention ownership receipt input.");
 
     private sealed class CanonicalWriter
     {
         private readonly MemoryStream stream = new();
-        internal CanonicalWriter(byte[] storeInstance, RetentionStoreKind kind) { Bytes(Domain); Bytes(storeInstance); Text(kind switch { RetentionStoreKind.SessionEventContent => "session_event_content", RetentionStoreKind.RawRecord => "raw_record", RetentionStoreKind.AnalysisRunRaw => "analysis_run_raw", _ => throw Invalid() }); }
+        internal CanonicalWriter(byte[] storeInstance, RetentionStoreKind kind) { Bytes(Domain); Bytes(storeInstance); Text(kind switch { RetentionStoreKind.SessionEventContent => "session_event_content", RetentionStoreKind.RawRecord => "raw_record", RetentionStoreKind.AnalysisRunRaw => "analysis_run_raw", RetentionStoreKind.SensitiveBundle => "sensitive_bundle", _ => throw Invalid() }); }
         internal void Text(string value)
         {
             if (value is null) throw Invalid();
@@ -73,8 +84,8 @@ internal static class RetentionOwnershipReceipt
         internal void OptionalPositive(long? value) { stream.WriteByte(value.HasValue ? (byte)1 : (byte)0); if (value is not null) { if (value <= 0) throw Invalid(); Int64(value.Value); } }
         internal void Timestamp(string text, long ticks) { Text(text); Int64(ticks); }
         internal void Int64(long value) { Span<byte> bytes = stackalloc byte[8]; BinaryPrimitives.WriteInt64BigEndian(bytes, value); stream.Write(bytes); }
+        internal void Bytes(ReadOnlySpan<byte> value) { Span<byte> length = stackalloc byte[4]; BinaryPrimitives.WriteInt32BigEndian(length, value.Length); stream.Write(length); stream.Write(value); }
         internal byte[] Finish(byte[] token) { Bytes(token); return SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)); }
-        private void Bytes(ReadOnlySpan<byte> value) { Span<byte> length = stackalloc byte[4]; BinaryPrimitives.WriteInt32BigEndian(length, value.Length); stream.Write(length); stream.Write(value); }
     }
 }
 
@@ -89,3 +100,4 @@ internal sealed record RetentionRawRecordReceiptInput(
     int SchemaVersion,
     byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);
 internal sealed record RetentionAnalysisRunOwnershipReceiptInput(string StoreInstanceId, long RunId, string RequestedAtText, long RequestedAtUtcTicks, long? RecordId, string? SpanId, byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);
+internal sealed record RetentionSensitiveBundleOwnershipReceiptInput(string StoreInstanceId, string CaptureId, string ReservedAtText, long ReservedAtUtcTicks, byte[] MarkerSha256, byte[] ManifestSha256, byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);

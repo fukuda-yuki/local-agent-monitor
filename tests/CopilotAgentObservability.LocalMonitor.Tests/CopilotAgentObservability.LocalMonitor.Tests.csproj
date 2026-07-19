@@ -26,6 +26,7 @@
   <ItemGroup>
     <Compile Include="..\TestSupport\OtlpProtobufTestPayload.cs" Link="TestSupport\OtlpProtobufTestPayload.cs" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.LocalMonitor\CopilotAgentObservability.LocalMonitor.csproj" />
+    <ProjectReference Include="..\..\src\CopilotAgentObservability.ConfigCli\CopilotAgentObservability.ConfigCli.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.Telemetry\CopilotAgentObservability.Telemetry.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </ItemGroup>

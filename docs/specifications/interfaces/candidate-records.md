@@ -8,7 +8,7 @@ They are recommendation data only; they do not apply file changes, create commit
 Produced by:
 
 ```text
-config-cli generate-diagnosis-candidates <measurements.csv|measurements.json> [--raw <raw-store.db|raw-otlp.json>] [--include-sensitive-content] [--sensitive-output-dir <dir>] [--csv <output.csv>] [--json <output.json>]
+config-cli generate-diagnosis-candidates <measurements.csv|measurements.json> [--raw <raw-store.db|raw-otlp.json>] [--include-sensitive-content --retention-database <local-monitor.db> [--sensitive-output-dir <dir>]] [--csv <output.csv>] [--json <output.json>]
 ```
 
 CSV column order and JSON property names:
@@ -99,6 +99,10 @@ auto_decision_id,source_improvement_candidate_id,source_diagnosis_candidate_id,t
 
 Candidate records with a populated `sensitive_bundle_path` are local runtime artifacts.
 They are not repository-safe, even when the evidence body is stored outside the CSV or JSON.
+Sensitive extraction requires the explicitly bound retention catalog; the
+optional output directory does not itself grant retention or deletion
+authority. A completed bundle remains retained under its catalog policy even
+when CSV/JSON publication is rolled back or fails.
 
 Repository-safe sharing should use:
 
