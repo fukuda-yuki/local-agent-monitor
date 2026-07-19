@@ -1,0 +1,1 @@
+{"schema_version":1,"session_id":"018f0000-0000-7000-8000-000000000001","raw_retention_state":"mixed","readable_count":2,"read_denied_count":5,"lifecycle_counts":{"expiring":1,"retained_by_policy":1,"expired_pending_deletion":1,"deletion_queued":1,"deleting":1,"deleted":1,"deletion_failed":1}}

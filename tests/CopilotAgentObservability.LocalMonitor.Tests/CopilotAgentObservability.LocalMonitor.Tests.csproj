@@ -40,6 +40,7 @@
     <None Include="TestData\SchemaMigrations\monitor\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\SchemaMigrations\session\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\SchemaMigrations\retention\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\Retention\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
