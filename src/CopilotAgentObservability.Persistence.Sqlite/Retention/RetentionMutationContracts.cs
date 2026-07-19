@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 
@@ -82,6 +83,15 @@ public static class RetentionMutationTargetValidator
         if (target.Kind != RetentionMutationTargetKind.Item || Validate(target) is { IsValid: false }) throw new ArgumentException(RetentionMutationErrorCodes.RequestInvalid, nameof(target));
         return target.Id;
     }
+}
+
+public static class RetentionMutationSessionLinkage
+{
+    public static bool Qualifies(RetentionStoreKind storeKind, string? sourceItemId, string? joinedSessionId, string requestedSessionId) =>
+        storeKind == RetentionStoreKind.SessionEventContent
+        && !string.IsNullOrEmpty(sourceItemId)
+        && joinedSessionId is not null
+        && string.Equals(joinedSessionId, requestedSessionId, StringComparison.Ordinal);
 }
 
 public sealed record RetentionMutationPreviewRequest(
@@ -182,8 +192,12 @@ public static class RetentionMutationCompletionCodes
     public const string DeleteQueued = "retention_delete_queued";
     public const string DeleteAlreadyQueued = "retention_delete_already_queued";
     public const string DeleteNowSupersededPin = "retention_delete_now_superseded_pin";
-    public const string MutationReplayed = "retention_mutation_replayed";
     public static IReadOnlyList<string> All { get; } = [PinApplied, PinNoop, UnpinApplied, UnpinNoop, UnpinExpiredQueued, DeleteQueued, DeleteAlreadyQueued, DeleteNowSupersededPin];
+}
+
+public static class RetentionMutationResultCodes
+{
+    public const string Replayed = "retention_mutation_replayed";
 }
 
 public static class RetentionMutationExclusionCodes
@@ -247,7 +261,9 @@ public sealed record RetentionMutationErrorCodeEntry(
     string Code,
     RetentionMutationReachabilityClass Reachability,
     int? MutationTimeCheck,
-    int HttpStatus);
+    int? HttpStatus,
+    int? PreviewHttpStatus = null,
+    int? ConfirmationIssueHttpStatus = null);
 
 public static class RetentionMutationErrorCodeRegistry
 {
@@ -263,16 +279,16 @@ public static class RetentionMutationErrorCodeRegistry
         new(RetentionMutationErrorCodes.OperationNotFound, RetentionMutationReachabilityClass.RequestStage, null, 404),
         new(RetentionMutationErrorCodes.HistoryCursorInvalid, RetentionMutationReachabilityClass.RequestStage, null, 400),
         new(RetentionMutationErrorCodes.CatalogUnavailable, RetentionMutationReachabilityClass.RequestStage, null, 503),
-        new(RetentionMutationErrorCodes.TargetNotApplicable, RetentionMutationReachabilityClass.PreviewStage, null, 409),
-        new(RetentionMutationErrorCodes.PinReadDenied, RetentionMutationReachabilityClass.PreviewStage, null, 409),
-        new(RetentionMutationErrorCodes.PinDeleting, RetentionMutationReachabilityClass.PreviewStage, null, 409),
-        new(RetentionMutationErrorCodes.PinDeleted, RetentionMutationReachabilityClass.PreviewStage, null, 409),
-        new(RetentionMutationErrorCodes.UnpinReadDenied, RetentionMutationReachabilityClass.PreviewStage, null, 409),
-        new(RetentionMutationErrorCodes.UnpinDeleting, RetentionMutationReachabilityClass.PreviewStage, null, 409),
-        new(RetentionMutationErrorCodes.UnpinDeleted, RetentionMutationReachabilityClass.PreviewStage, null, 409),
-        new(RetentionMutationErrorCodes.DeleteAlreadyDeleting, RetentionMutationReachabilityClass.PreviewStage, null, 409),
-        new(RetentionMutationErrorCodes.DeleteAlreadyDeleted, RetentionMutationReachabilityClass.PreviewStage, null, 409),
-        new(RetentionMutationErrorCodes.DeleteFailed, RetentionMutationReachabilityClass.PreviewStage, null, 409),
+        new(RetentionMutationErrorCodes.TargetNotApplicable, RetentionMutationReachabilityClass.PreviewStage, null, 409, 200, 409),
+        new(RetentionMutationErrorCodes.PinReadDenied, RetentionMutationReachabilityClass.PreviewStage, null, 409, 200, 409),
+        new(RetentionMutationErrorCodes.PinDeleting, RetentionMutationReachabilityClass.PreviewStage, null, 409, 200, 409),
+        new(RetentionMutationErrorCodes.PinDeleted, RetentionMutationReachabilityClass.PreviewStage, null, 409, 200, 409),
+        new(RetentionMutationErrorCodes.UnpinReadDenied, RetentionMutationReachabilityClass.PreviewStage, null, 409, 200, 409),
+        new(RetentionMutationErrorCodes.UnpinDeleting, RetentionMutationReachabilityClass.PreviewStage, null, 409, 200, 409),
+        new(RetentionMutationErrorCodes.UnpinDeleted, RetentionMutationReachabilityClass.PreviewStage, null, 409, 200, 409),
+        new(RetentionMutationErrorCodes.DeleteAlreadyDeleting, RetentionMutationReachabilityClass.PreviewStage, null, 409, 200, 409),
+        new(RetentionMutationErrorCodes.DeleteAlreadyDeleted, RetentionMutationReachabilityClass.PreviewStage, null, 409, 200, 409),
+        new(RetentionMutationErrorCodes.DeleteFailed, RetentionMutationReachabilityClass.PreviewStage, null, 409, 200, 409),
         new(RetentionMutationErrorCodes.TargetEmpty, RetentionMutationReachabilityClass.ConfirmationIssueStage, null, 409),
         new(RetentionMutationErrorCodes.PreviewExpired, RetentionMutationReachabilityClass.ConfirmationIssueStage, null, 409),
         new(RetentionMutationErrorCodes.PreviewDigestMismatch, RetentionMutationReachabilityClass.ConfirmationIssueStage, null, 409),
@@ -300,9 +316,8 @@ public sealed record RetentionCommentValidationResult(bool IsValid, string? Norm
 
 public static class RetentionMutationCommentValidator
 {
-    private static readonly string[] CredentialMarkers = ["password", "passwd", "secret", "credential", "authorization", "bearer", "api_key", "api-key"];
-    private static readonly string[] DatabaseKeyMarkers = ["database_key", "database-key", "primary_key", "primary-key", "item_id", "item-id", "session_id", "session-id", "source_id", "source-id", "sqlite"];
-    private static readonly string[] TokenPrefixes = ["rpv1_", "rcid1_", "rt90v1_", "rid1_", "rae1_", "rhc1_"];
+    private static readonly string[] CredentialMarkers = ["password", "passwd", "pwd", "secret", "token", "apikey", "api_key", "authorization", "bearer", "credential"];
+    private static readonly string[] DatabaseKeyMarkers = ["rowid", "primary key", "primary_key", "autoincrement", "rpv1_", "rcid1_", "rt90v1_", "rid1_", "rae1_", "rhc1_"];
 
     public static RetentionCommentValidationResult Validate(string? comment)
     {
@@ -313,10 +328,11 @@ public static class RetentionMutationCommentValidator
         foreach (var rune in normalized.EnumerateRunes()) if (Rune.IsControl(rune)) return Invalid();
         if (normalized.Contains('\r') || normalized.Contains('\n') || normalized.Contains('/') || normalized.Contains('\\')) return Invalid();
         var lower = normalized.ToLowerInvariant();
-        if (lower.Contains("http://", StringComparison.Ordinal) || lower.Contains("https://", StringComparison.Ordinal) || lower.Contains("ftp://", StringComparison.Ordinal) || lower.Contains("www.", StringComparison.Ordinal)) return Invalid();
-        if (CredentialMarkers.Any(marker => lower.Contains(marker + "=", StringComparison.Ordinal) || lower.Contains(marker + ":", StringComparison.Ordinal))) return Invalid();
-        if (DatabaseKeyMarkers.Any(marker => lower.Contains(marker + "=", StringComparison.Ordinal) || lower.Contains(marker + ":", StringComparison.Ordinal))) return Invalid();
-        if (TokenPrefixes.Any(prefix => lower.Contains(prefix, StringComparison.Ordinal))) return Invalid();
+        if (Regex.IsMatch(normalized, @"[A-Za-z][A-Za-z0-9+.-]*:\S", RegexOptions.CultureInvariant)
+            || lower.Contains("://", StringComparison.Ordinal)
+            || lower.Contains("www.", StringComparison.Ordinal)) return Invalid();
+        if (CredentialMarkers.Any(marker => lower.Contains(marker, StringComparison.Ordinal))) return Invalid();
+        if (DatabaseKeyMarkers.Any(marker => lower.Contains(marker, StringComparison.Ordinal))) return Invalid();
         return new(true, normalized, null);
     }
 

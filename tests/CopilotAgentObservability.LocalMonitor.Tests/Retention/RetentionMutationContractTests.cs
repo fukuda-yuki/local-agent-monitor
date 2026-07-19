@@ -167,6 +167,35 @@ public sealed class RetentionMutationContractTests
     }
 
     [Fact]
+    public void UnpinExpiry_UsesSensitiveBundleSevenDayBoundary()
+    {
+        var expiry = CapturedAt.AddDays(7);
+        var item = new RetentionMutationItemState(
+            RetentionItemLifecycle.RetainedByPolicy,
+            CapturedAt,
+            CapturedAt.AddDays(90),
+            "sensitive-bundle-7d",
+            1,
+            4);
+
+        Assert.Equal(
+            RetentionMutationCompletionCodes.UnpinExpiredQueued,
+            RetentionMutationTransitions.EvaluateCommit(RetentionMutationOperation.Unpin, item, expiry).Code);
+        var expired = RetentionMutationTransitions.EvaluateCommit(RetentionMutationOperation.Unpin, item, expiry);
+        Assert.Equal(
+            [
+                RetentionItemLifecycle.Expiring,
+                RetentionItemLifecycle.ExpiredPendingDeletion,
+                RetentionItemLifecycle.DeletionQueued
+            ],
+            expired.StateSequence);
+        Assert.Equal(new(true, true, true, true), expired.Effects);
+        Assert.Equal(
+            RetentionMutationCompletionCodes.UnpinApplied,
+            RetentionMutationTransitions.EvaluateCommit(RetentionMutationOperation.Unpin, item, expiry.AddTicks(-1)).Code);
+    }
+
+    [Fact]
     public void Digests_UseStableJcsOrderingAndExactStateBearingInputs()
     {
         var first = new[]
@@ -192,28 +221,69 @@ public sealed class RetentionMutationContractTests
         var conflicts = new[] { new RetentionMutationConflictItem("a-item", "active_read_lease", 1) };
         Assert.StartsWith("v1-", RetentionMutationDigests.ConflictVersion(conflicts));
 
-        var fieldsA = new Dictionary<string, object?>(StringComparer.Ordinal)
+        var digestInput = CreatePreviewDigestInput();
+        var digestA = RetentionMutationDigests.PreviewDigest(digestInput);
+        Assert.StartsWith("sha256-", digestA);
+        Assert.Equal(digestA, RetentionMutationDigests.PreviewDigest(digestInput));
+        Assert.NotEqual(digestA, RetentionMutationDigests.PreviewDigest(digestInput with { RejectionCode = RetentionMutationErrorCodes.PinDeleted }));
+        Assert.NotEqual(digestA, RetentionMutationDigests.PreviewDigest(digestInput with
         {
-            ["z_field"] = 2,
-            ["a_field"] = "safe",
-            ["state"] = "expiring",
-            ["preview_id"] = "rpv1_ignored",
-            ["comments"] = "ignored"
-        };
-        var fieldsB = new Dictionary<string, object?>(StringComparer.Ordinal)
+            CurrentState = digestInput.CurrentState with { ReadableItemCount = digestInput.CurrentState.ReadableItemCount + 1 }
+        }));
+    }
+
+    [Fact]
+    public void PreviewDigest_UsesEveryTypedPinnedFieldAndExposesNoExcludedFields()
+    {
+        var input = CreatePreviewDigestInput();
+        var baseline = RetentionMutationDigests.PreviewDigest(input);
+        var changes = new (string Name, Func<RetentionPreviewDigestInput, RetentionPreviewDigestInput> Change)[]
         {
-            ["comments"] = "different ignored value",
-            ["state"] = "expiring",
-            ["a_field"] = "safe",
-            ["z_field"] = 2,
-            ["preview_id"] = "rpv1_other"
+            (nameof(RetentionPreviewDigestInput.SchemaVersion), value => value with { SchemaVersion = 2 }),
+            (nameof(RetentionPreviewDigestInput.Result), value => value with { Result = RetentionMutationPreviewResult.EmptyNotApplicable }),
+            (nameof(RetentionPreviewDigestInput.EmptyReason), value => value with { EmptyReason = RetentionMutationEmptyReason.AllCandidatesExcluded }),
+            (nameof(RetentionPreviewDigestInput.MutationAllowed), value => value with { MutationAllowed = false }),
+            (nameof(RetentionPreviewDigestInput.TargetKind), value => value with { TargetKind = RetentionMutationTargetKind.Item }),
+            (nameof(RetentionPreviewDigestInput.TargetId), value => value with { TargetId = "item-2" }),
+            (nameof(RetentionPreviewDigestInput.Operation), value => value with { Operation = RetentionMutationOperation.Unpin }),
+            (nameof(RetentionPreviewDigestInput.Scope), value => value with { Scope = RetentionMutationScope.SingleItem }),
+            (nameof(RetentionPreviewDigestInput.SourceState), value => value with { SourceState = RetentionMutationSourceState.Unknown }),
+            (nameof(RetentionPreviewDigestInput.SessionCompleteness), value => value with { SessionCompleteness = RetentionMutationSessionCompleteness.Partial }),
+            (nameof(RetentionPreviewDigestInput.ContentState), value => value with { ContentState = "expired_pending_deletion" }),
+            (nameof(RetentionPreviewDigestInput.CurrentState), value => value with { CurrentState = value.CurrentState with { ReadDeniedItemCount = 2 } }),
+            (nameof(RetentionPreviewDigestInput.TargetItems), value => value with { TargetItems = [value.TargetItems[0] with { ItemId = "item-2" }] }),
+            (nameof(RetentionPreviewDigestInput.TargetItemCount), value => value with { TargetItemCount = 2 }),
+            (nameof(RetentionPreviewDigestInput.StoreKindSummary), value => value with { StoreKindSummary = [value.StoreKindSummary[0] with { ItemCount = 2 }] }),
+            (nameof(RetentionPreviewDigestInput.ExcludedItemCount), value => value with { ExcludedItemCount = 2 }),
+            (nameof(RetentionPreviewDigestInput.ExcludedItemsByReason), value => value with { ExcludedItemsByReason = [value.ExcludedItemsByReason[0] with { ItemCount = 2 }] }),
+            (nameof(RetentionPreviewDigestInput.CaptureExpiryPolicySummary), value => value with { CaptureExpiryPolicySummary = [value.CaptureExpiryPolicySummary[0] with { ItemCount = 2 }] }),
+            (nameof(RetentionPreviewDigestInput.RetainedMetadataImpact), value => value with { RetainedMetadataImpact = value.RetainedMetadataImpact with { SafeSummaryRetainedCount = 3 } }),
+            (nameof(RetentionPreviewDigestInput.ActiveCleanupExclusionConflicts), value => value with { ActiveCleanupExclusionConflicts = [value.ActiveCleanupExclusionConflicts[0] with { ItemCount = 2 }] }),
+            (nameof(RetentionPreviewDigestInput.BackupNonPurgeWarningCode), value => value with { BackupNonPurgeWarningCode = "retention_backup_not_purged_changed" }),
+            (nameof(RetentionPreviewDigestInput.RejectionCode), value => value with { RejectionCode = RetentionMutationErrorCodes.PinDeleted }),
+            (nameof(RetentionPreviewDigestInput.ExpectedStateVersion), value => value with { ExpectedStateVersion = "v1-changed" }),
+            (nameof(RetentionPreviewDigestInput.TargetItemSetDigest), value => value with { TargetItemSetDigest = "sha256-changed" })
         };
-        var digestA = RetentionMutationDigests.PreviewDigest(new(fieldsA, "v1-state", firstDigest, null));
-        var digestB = RetentionMutationDigests.PreviewDigest(new(fieldsB, "v1-state", firstDigest, null));
-        Assert.Equal(digestA, digestB);
-        Assert.NotEqual(digestA, RetentionMutationDigests.PreviewDigest(new(fieldsA, "v1-state", firstDigest, RetentionMutationErrorCodes.PinDeleted)));
-        var changedFields = new Dictionary<string, object?>(fieldsA, StringComparer.Ordinal) { ["state"] = "retained_by_policy" };
-        Assert.NotEqual(digestA, RetentionMutationDigests.PreviewDigest(new(changedFields, "v1-state", firstDigest, null)));
+
+        Assert.Equal(24, changes.Length);
+        foreach (var (name, change) in changes)
+            Assert.True(baseline != RetentionMutationDigests.PreviewDigest(change(input)), name);
+
+        Assert.Equal(
+            [
+                "SchemaVersion", "Result", "EmptyReason", "MutationAllowed", "TargetKind", "TargetId",
+                "Operation", "Scope", "SourceState", "SessionCompleteness", "ContentState", "CurrentState",
+                "TargetItems", "TargetItemCount", "StoreKindSummary", "ExcludedItemCount", "ExcludedItemsByReason",
+                "CaptureExpiryPolicySummary", "RetainedMetadataImpact", "ActiveCleanupExclusionConflicts",
+                "BackupNonPurgeWarningCode", "RejectionCode", "ExpectedStateVersion", "TargetItemSetDigest"
+            ],
+            typeof(RetentionPreviewDigestInput).GetProperties().Select(static property => property.Name));
+        var properties = typeof(RetentionPreviewDigestInput).GetProperties().Select(static property => property.Name).ToArray();
+        Assert.DoesNotContain("PreviewId", properties);
+        Assert.DoesNotContain("PreviewDigest", properties);
+        Assert.DoesNotContain("ConfirmationExpiresAt", properties);
+        Assert.DoesNotContain("Comment", properties);
+        Assert.DoesNotContain("Comments", properties);
     }
 
     [Fact]
@@ -228,7 +298,7 @@ public sealed class RetentionMutationContractTests
         var workflowKey = RetentionMutationIdentifiers.CreateWorkflowKey(secret);
         var token = RetentionMutationToken.Create(nonce, secret);
 
-        Assert.Equal(27, previewId.Length);
+        Assert.Equal(RetentionMutationIdentifierFormats.PreviewIdLength, previewId.Length);
         Assert.Equal(28, confirmationId.Length);
         Assert.Equal(27, auditId.Length);
         Assert.Equal(27, cursor.Length);
@@ -259,6 +329,34 @@ public sealed class RetentionMutationContractTests
         Assert.False(RetentionMutationToken.TryParse(token.Replace('_', '-'), out _));
         Assert.Throws<ArgumentException>(() => RetentionMutationIdentifiers.CreatePreviewId(new byte[15]));
         Assert.Throws<ArgumentException>(() => RetentionMutationToken.Create(nonce, new byte[31]));
+    }
+
+    [Fact]
+    public void Identifiers_RejectWrongPrefixLengthPaddingAlphabetAndNonAsciiVectors()
+    {
+        var nonce = Enumerable.Repeat((byte)0x11, 16).ToArray();
+        var secret = Enumerable.Repeat((byte)0x22, 32).ToArray();
+        var previewId = RetentionMutationIdentifiers.CreatePreviewId(nonce);
+        var workflowKey = RetentionMutationIdentifiers.CreateWorkflowKey(secret);
+        var token = RetentionMutationToken.Create(nonce, secret);
+
+        Assert.False(RetentionMutationIdentifiers.TryParsePreviewId("wrong_" + previewId[RetentionMutationIdentifierFormats.PreviewIdPrefix.Length..], out _));
+        Assert.False(RetentionMutationIdentifiers.TryParsePreviewId(previewId[..^1], out _));
+        Assert.False(RetentionMutationIdentifiers.TryParsePreviewId(previewId[..^1] + "=", out _));
+        Assert.False(RetentionMutationIdentifiers.TryParsePreviewId(previewId[..^1] + "!", out _));
+        Assert.False(RetentionMutationIdentifiers.TryParsePreviewId(previewId + "é", out _));
+
+        Assert.False(RetentionMutationIdentifiers.IsValidWorkflowKey("wrong_" + workflowKey[RetentionMutationIdentifierFormats.WorkflowKeyPrefix.Length..]));
+        Assert.False(RetentionMutationIdentifiers.IsValidWorkflowKey(workflowKey[..^1]));
+        Assert.False(RetentionMutationIdentifiers.IsValidWorkflowKey(workflowKey[..^1] + "="));
+        Assert.False(RetentionMutationIdentifiers.IsValidWorkflowKey(workflowKey[..^1] + "!"));
+        Assert.False(RetentionMutationIdentifiers.IsValidWorkflowKey(workflowKey + "é"));
+
+        Assert.False(RetentionMutationToken.TryParse("wrong_" + token[RetentionMutationIdentifierFormats.ConfirmationTokenPrefix.Length..], out _));
+        Assert.False(RetentionMutationToken.TryParse(token[..^1], out _));
+        Assert.False(RetentionMutationToken.TryParse(token[..^1] + "=", out _));
+        Assert.False(RetentionMutationToken.TryParse(token[..^1] + "!", out _));
+        Assert.False(RetentionMutationToken.TryParse(token + "é", out _));
     }
 
     [Fact]
@@ -335,6 +433,42 @@ public sealed class RetentionMutationContractTests
     }
 
     [Fact]
+    public void MutationEvaluation_AllNineFailuresReturnCheckOne()
+    {
+        var result = RetentionMutationEvaluationOrder.Evaluate(new RetentionMutationEvaluationInput
+        {
+            TokenValid = false,
+            TokenConsumed = true,
+            TokenUnexpired = false,
+            BindingMatches = false,
+            TargetSetMatches = false,
+            PinVectorMatches = false,
+            RetentionMatches = false,
+            ConflictMatches = false,
+            VersionMatches = false
+        });
+
+        Assert.Equal(RetentionMutationEvaluationCheck.TokenValidity, result.FailedCheck);
+        Assert.Equal(RetentionMutationErrorCodes.ConfirmationInvalid, result.Code);
+        Assert.Equal([RetentionMutationEvaluationCheck.TokenValidity], result.FailedChecks);
+    }
+
+    [Fact]
+    public void MutationEvaluation_ChecksFiveSixAndNineFailuresReturnCheckFive()
+    {
+        var result = RetentionMutationEvaluationOrder.Evaluate(new RetentionMutationEvaluationInput
+        {
+            TargetSetMatches = false,
+            PinVectorMatches = false,
+            VersionMatches = false
+        });
+
+        Assert.Equal(RetentionMutationEvaluationCheck.TargetSet, result.FailedCheck);
+        Assert.Equal(RetentionMutationErrorCodes.ConfirmationTargetChanged, result.Code);
+        Assert.Equal([RetentionMutationEvaluationCheck.TargetSet], result.FailedChecks);
+    }
+
+    [Fact]
     public void CommentValidation_NormalizesNfcAndRejectsForbiddenClasses()
     {
         Assert.True(RetentionMutationCommentValidator.Validate(null).IsValid);
@@ -345,15 +479,191 @@ public sealed class RetentionMutationContractTests
         Assert.True(RetentionMutationCommentValidator.Validate(new string('a', 256)).IsValid);
         foreach (var invalid in new[]
         {
-            "line\nfeed", "line\rreturn", "control\u0001", "https://example.test", "C:\\temp\\file",
-            "secret=synthetic", "password: synthetic", "database_key=synthetic", "rt90v1_abc_def"
+            "line\nfeed", "line\rreturn", "control\u0001", "https://example.test", "mailto:user@example.test", "www.example.test", "scheme://value", "C:\\temp\\file",
+            "password", "passwd", "PWD", "secret=synthetic", "token", "apikey", "api_key", "authorization", "bearer", "credential", "password: synthetic", "rowid", "primary key", "primary_key", "autoincrement",
+            "rpv1_abc", "rcid1_abc", "rt90v1_abc", "rid1_abc", "rae1_abc", "rhc1_abc"
         })
         {
             Assert.False(RetentionMutationCommentValidator.Validate(invalid).IsValid, invalid);
         }
+        Assert.True(RetentionMutationCommentValidator.Validate("Benign review note").IsValid);
+        Assert.True(RetentionMutationCommentValidator.Validate("See item note twelve").IsValid);
         Assert.False(RetentionMutationCommentValidator.Validate(new string('a', 257)).IsValid);
         Assert.False(RetentionMutationCommentValidator.Validate(string.Concat(Enumerable.Repeat("🙂", 257))).IsValid);
     }
+
+    [Fact]
+    public void SessionLinkage_OnlyExactSessionEventContentJoinQualifies()
+    {
+        const string requestedSessionId = "018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071";
+
+        Assert.True(RetentionMutationSessionLinkage.Qualifies(
+            RetentionStoreKind.SessionEventContent,
+            "event-1",
+            requestedSessionId,
+            requestedSessionId));
+        Assert.False(RetentionMutationSessionLinkage.Qualifies(
+            RetentionStoreKind.SessionEventContent,
+            "event-1",
+            requestedSessionId.ToUpperInvariant(),
+            requestedSessionId));
+        Assert.False(RetentionMutationSessionLinkage.Qualifies(
+            RetentionStoreKind.SessionEventContent,
+            "event-1",
+            null,
+            requestedSessionId));
+        Assert.False(RetentionMutationSessionLinkage.Qualifies(
+            RetentionStoreKind.SessionEventContent,
+            null,
+            requestedSessionId,
+            requestedSessionId));
+
+        foreach (var (storeKind, sourceItemId) in new[]
+        {
+            (RetentionStoreKind.RawRecord, "run-1"),
+            (RetentionStoreKind.AnalysisRunRaw, "trace-1"),
+            (RetentionStoreKind.SensitiveBundle, "evidence-1"),
+            (RetentionStoreKind.AnalysisSdkDirectory, "native-1"),
+            (RetentionStoreKind.RawRecord, "C:\\capture\\item"),
+            (RetentionStoreKind.RawRecord, "2026-07-20T12:00:00.0000000Z")
+        })
+        {
+            Assert.False(RetentionMutationSessionLinkage.Qualifies(storeKind, sourceItemId, requestedSessionId, requestedSessionId));
+        }
+    }
+
+    [Fact]
+    public void DomainDtoContracts_ExposeEveryPinnedMutationPropertyRoster()
+    {
+        AssertDtoProperties<RetentionMutationTarget>("Kind", "Id");
+        AssertDtoProperties<RetentionMutationPreviewRequest>("Target", "Operation", "Scope", "ReasonCode", "Comment");
+        AssertDtoProperties<RetentionMutationConfirmRequest>("ConfirmationToken", "Operation", "Scope", "TargetKind", "TargetId");
+        AssertDtoProperties<RetentionPreviewItem>("ItemId", "StoreKind", "State", "PinState", "DeleteState", "CapturedAt", "ExpiresAt", "PolicyId", "PolicyVersion", "ReadDeniedAt", "QueuedAt", "Revision", "RetryExhausted", "ErrorCode");
+        AssertDtoProperties<RetentionMutationPreviewResponse>("SchemaVersion", "Result", "EmptyReason", "MutationAllowed", "PreviewId", "TargetKind", "TargetId", "Operation", "Scope", "SourceState", "SessionCompleteness", "ContentState", "CurrentState", "TargetItems", "TargetItemCount", "StoreKindSummary", "ExcludedItemCount", "ExcludedItemsByReason", "CaptureExpiryPolicySummary", "RetainedMetadataImpact", "ActiveCleanupExclusionConflicts", "BackupNonPurgeWarningCode", "ExpectedStateVersion", "TargetItemSetDigest", "PreviewDigest", "ConfirmationExpiresAt", "RejectionCode");
+        AssertDtoProperties<RetentionMutationLifecycleCounts>("Expiring", "RetainedByPolicy", "ExpiredPendingDeletion", "DeletionQueued", "Deleting", "Deleted", "DeletionFailed");
+        AssertDtoProperties<RetentionCurrentStateSummary>("ReadableItemCount", "ReadDeniedItemCount", "PinnedItemCount", "UnpinnedItemCount", "LifecycleCounts");
+        AssertDtoProperties<RetentionStoreKindSummary>("StoreKind", "ItemCount", "ReadableCount", "ReadDeniedCount");
+        AssertDtoProperties<RetentionExclusionSummary>("ReasonCode", "ItemCount");
+        AssertDtoProperties<RetentionCaptureExpiryPolicySummary>("PolicyId", "PolicyVersion", "ItemCount", "CapturedAtMin", "CapturedAtMax", "OriginalExpiresAtMin", "OriginalExpiresAtMax");
+        AssertDtoProperties<RetentionRetainedImpact>("RawContentWillBeDeleted", "SessionMetadataRetained", "EventMetadataRetainedCount", "SafeSummaryRetainedCount", "EvidenceReferenceRetainedCount");
+        AssertDtoProperties<RetentionActiveConflictSummary>("ConflictCode", "ItemCount", "ConflictVersion");
+        AssertDtoProperties<RetentionConfirmationIssueRequest>("PreviewId", "PreviewDigest");
+        AssertDtoProperties<RetentionConfirmationIssueResponse>("SchemaVersion", "ConfirmationId", "ConfirmationToken", "ConfirmationExpiresAt");
+        AssertDtoProperties<RetentionMutationResult>("SchemaVersion", "OperationId", "ResultCode", "TargetKind", "TargetId", "Operation", "Scope", "TargetItemCount", "PinState", "LifecycleCounts", "ReadDenied", "AuditEventId", "ExpectedVersion", "ResultVersion", "BackupNonPurgeWarningCode", "IdempotentReplay", "CreatedAt", "CompletedAt");
+        AssertDtoProperties<RetentionMutationStatusResponse>("SchemaVersion", "OperationId", "Operation", "TargetKind", "TargetId", "Status", "ResultCode", "LifecycleCounts", "ReadDenied", "AuditEventId", "IdempotentReplay", "CreatedAt", "CompletedAt", "BackupNonPurgeWarningCode");
+        AssertDtoProperties<RetentionItemStateResponse>("SchemaVersion", "ItemId", "StoreKind", "State", "PinState", "DeleteState", "PolicyId", "PolicyVersion", "CapturedAt", "ExpiresAt", "ReadDeniedAt", "QueuedAt", "DeletionStartedAt", "DeletedAt", "AttemptCount", "RetryExhausted", "ErrorCode", "RetryAt", "Revision", "SessionId");
+        AssertDtoProperties<RetentionAuditEvent>("EventId", "OperationId", "EventType", "TargetKind", "TargetId", "SessionId", "OccurredAt", "ActorLabel", "Operation", "ReasonCode", "Comment", "PreviousPinState", "NewPinState", "PreviousOperationState", "NewOperationState", "RequestIdempotencyKey", "ExpectedVersion", "ResultVersion", "TargetItemSetDigest", "CompletionCode", "ErrorCode");
+        AssertDtoProperties<RetentionHistoryResponse>("SchemaVersion", "TargetKind", "TargetId", "Events", "NextCursor");
+    }
+
+    [Fact]
+    public void ErrorRegistry_CoversEveryCodeWithCanonicalReachabilityAndHttpMapping()
+    {
+        var expected = new Dictionary<string, (RetentionMutationReachabilityClass Reachability, int? HttpStatus, int? PreviewHttpStatus, int? ConfirmationIssueHttpStatus)>
+        {
+            [RetentionMutationErrorCodes.RequestInvalid] = (RetentionMutationReachabilityClass.RequestStage, 400, null, null),
+            [RetentionMutationErrorCodes.TargetNotFound] = (RetentionMutationReachabilityClass.RequestStage, 404, null, null),
+            [RetentionMutationErrorCodes.TargetLimitExceeded] = (RetentionMutationReachabilityClass.RequestStage, 413, null, null),
+            [RetentionMutationErrorCodes.PreviewNotFound] = (RetentionMutationReachabilityClass.RequestStage, 404, null, null),
+            [RetentionMutationErrorCodes.IdempotencyKeyInvalid] = (RetentionMutationReachabilityClass.RequestStage, 400, null, null),
+            [RetentionMutationErrorCodes.IdempotencyConflict] = (RetentionMutationReachabilityClass.RequestStage, 409, null, null),
+            [RetentionMutationErrorCodes.IdempotencyExpired] = (RetentionMutationReachabilityClass.RequestStage, 409, null, null),
+            [RetentionMutationErrorCodes.OperationNotFound] = (RetentionMutationReachabilityClass.RequestStage, 404, null, null),
+            [RetentionMutationErrorCodes.HistoryCursorInvalid] = (RetentionMutationReachabilityClass.RequestStage, 400, null, null),
+            [RetentionMutationErrorCodes.CatalogUnavailable] = (RetentionMutationReachabilityClass.RequestStage, 503, null, null),
+            [RetentionMutationErrorCodes.TargetNotApplicable] = (RetentionMutationReachabilityClass.PreviewStage, 409, 200, 409),
+            [RetentionMutationErrorCodes.PinReadDenied] = (RetentionMutationReachabilityClass.PreviewStage, 409, 200, 409),
+            [RetentionMutationErrorCodes.PinDeleting] = (RetentionMutationReachabilityClass.PreviewStage, 409, 200, 409),
+            [RetentionMutationErrorCodes.PinDeleted] = (RetentionMutationReachabilityClass.PreviewStage, 409, 200, 409),
+            [RetentionMutationErrorCodes.UnpinReadDenied] = (RetentionMutationReachabilityClass.PreviewStage, 409, 200, 409),
+            [RetentionMutationErrorCodes.UnpinDeleting] = (RetentionMutationReachabilityClass.PreviewStage, 409, 200, 409),
+            [RetentionMutationErrorCodes.UnpinDeleted] = (RetentionMutationReachabilityClass.PreviewStage, 409, 200, 409),
+            [RetentionMutationErrorCodes.DeleteAlreadyDeleting] = (RetentionMutationReachabilityClass.PreviewStage, 409, 200, 409),
+            [RetentionMutationErrorCodes.DeleteAlreadyDeleted] = (RetentionMutationReachabilityClass.PreviewStage, 409, 200, 409),
+            [RetentionMutationErrorCodes.DeleteFailed] = (RetentionMutationReachabilityClass.PreviewStage, 409, 200, 409),
+            [RetentionMutationErrorCodes.TargetEmpty] = (RetentionMutationReachabilityClass.ConfirmationIssueStage, 409, null, null),
+            [RetentionMutationErrorCodes.PreviewExpired] = (RetentionMutationReachabilityClass.ConfirmationIssueStage, 409, null, null),
+            [RetentionMutationErrorCodes.PreviewDigestMismatch] = (RetentionMutationReachabilityClass.ConfirmationIssueStage, 409, null, null),
+            [RetentionMutationErrorCodes.ConfirmationGenerationFailed] = (RetentionMutationReachabilityClass.ConfirmationIssueStage, 503, null, null),
+            [RetentionMutationErrorCodes.ConfirmationConsumed] = (RetentionMutationReachabilityClass.ConfirmationIssueStage, 409, null, null),
+            [RetentionMutationErrorCodes.ConfirmationInvalid] = (RetentionMutationReachabilityClass.CommitStage, 401, null, null),
+            [RetentionMutationErrorCodes.ConfirmationExpired] = (RetentionMutationReachabilityClass.CommitStage, 409, null, null),
+            [RetentionMutationErrorCodes.ConfirmationBindingMismatch] = (RetentionMutationReachabilityClass.CommitStage, 409, null, null),
+            [RetentionMutationErrorCodes.ConfirmationTargetChanged] = (RetentionMutationReachabilityClass.CommitStage, 409, null, null),
+            [RetentionMutationErrorCodes.ConfirmationPinChanged] = (RetentionMutationReachabilityClass.CommitStage, 409, null, null),
+            [RetentionMutationErrorCodes.ConfirmationRetentionChanged] = (RetentionMutationReachabilityClass.CommitStage, 409, null, null),
+            [RetentionMutationErrorCodes.ConfirmationConflictChanged] = (RetentionMutationReachabilityClass.CommitStage, 409, null, null),
+            [RetentionMutationErrorCodes.ConfirmationVersionChanged] = (RetentionMutationReachabilityClass.CommitStage, 409, null, null),
+            [RetentionMutationErrorCodes.PinExpired] = (RetentionMutationReachabilityClass.CommitStage, 409, null, null),
+            [RetentionMutationErrorCodes.MutationTransactionFailed] = (RetentionMutationReachabilityClass.CommitStage, 503, null, null),
+            [RetentionMutationErrorCodes.AuditWriteFailed] = (RetentionMutationReachabilityClass.CommitStage, 503, null, null),
+            [RetentionMutationErrorCodes.DeleteAlreadyQueued] = (RetentionMutationReachabilityClass.CommitStage, 200, null, null),
+            [RetentionMutationErrorCodes.BackupNotPurged] = (RetentionMutationReachabilityClass.Warning, 200, null, null)
+        };
+
+        Assert.Equal(expected.Count, RetentionMutationErrorCodeRegistry.All.Count);
+        Assert.Equal(expected.Count, RetentionMutationErrorCodeRegistry.All.Select(static entry => entry.Code).Distinct(StringComparer.Ordinal).Count());
+        foreach (var entry in RetentionMutationErrorCodeRegistry.All)
+        {
+            Assert.True(expected.TryGetValue(entry.Code, out var mapping), entry.Code);
+            Assert.True(mapping.Reachability == entry.Reachability, entry.Code);
+            Assert.True(mapping.HttpStatus == entry.HttpStatus, entry.Code);
+            Assert.True(mapping.PreviewHttpStatus == entry.PreviewHttpStatus, entry.Code);
+            Assert.True(mapping.ConfirmationIssueHttpStatus == entry.ConfirmationIssueHttpStatus, entry.Code);
+            Assert.Same(entry, RetentionMutationErrorCodeRegistry.Get(entry.Code));
+        }
+    }
+
+    private static RetentionPreviewDigestInput CreatePreviewDigestInput() => new(
+        SchemaVersion: 1,
+        Result: RetentionMutationPreviewResult.Actionable,
+        EmptyReason: null,
+        MutationAllowed: true,
+        TargetKind: RetentionMutationTargetKind.Session,
+        TargetId: "018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071",
+        Operation: RetentionMutationOperation.Pin,
+        Scope: RetentionMutationScope.SessionItems,
+        SourceState: RetentionMutationSourceState.Available,
+        SessionCompleteness: RetentionMutationSessionCompleteness.Full,
+        ContentState: "available",
+        CurrentState: new(
+            1,
+            0,
+            1,
+            0,
+            new(1, 0, 0, 0, 0, 0, 0)),
+        TargetItems:
+        [
+            new(
+                "item-1",
+                RetentionStoreKind.SessionEventContent,
+                RetentionItemLifecycle.Expiring,
+                RetentionPinState.Unpinned,
+                RetentionDeleteState.NotRequested,
+                CapturedAt,
+                CapturedAt.AddDays(90),
+                "raw-default-90d",
+                1,
+                null,
+                null,
+                1,
+                false,
+                null)
+        ],
+        TargetItemCount: 1,
+        StoreKindSummary: [new(RetentionStoreKind.SessionEventContent, 1, 1, 0)],
+        ExcludedItemCount: 0,
+        ExcludedItemsByReason: [new(RetentionMutationExclusionCodes.MissingOwnershipProof, 0)],
+        CaptureExpiryPolicySummary: [new("raw-default-90d", 1, 1, CapturedAt, CapturedAt, CapturedAt.AddDays(90), CapturedAt.AddDays(90))],
+        RetainedMetadataImpact: new(false, true, 1, 2, 3),
+        ActiveCleanupExclusionConflicts: [new(RetentionMutationConflictCodes.ActiveReadLease, 1, "v1-conflict")],
+        BackupNonPurgeWarningCode: RetentionMutationConstants.BackupWarningCode,
+        RejectionCode: null,
+        ExpectedStateVersion: "v1-state",
+        TargetItemSetDigest: "sha256-item-set");
+
+    private static void AssertDtoProperties<T>(params string[] expected) =>
+        Assert.Equal(expected, typeof(T).GetProperties().Select(static property => property.Name));
 
     [Fact]
     public void Registries_AreClosedAndReachabilityAnnotated()
@@ -367,6 +677,8 @@ public sealed class RetentionMutationContractTests
         Assert.Equal(1, RetentionMutationErrorCodeRegistry.Get(RetentionMutationErrorCodes.ConfirmationInvalid).MutationTimeCheck);
         Assert.Equal(9, RetentionMutationErrorCodeRegistry.Get(RetentionMutationErrorCodes.ConfirmationVersionChanged).MutationTimeCheck);
         Assert.Equal(RetentionMutationReachabilityClass.Warning, RetentionMutationErrorCodeRegistry.Get(RetentionMutationErrorCodes.BackupNotPurged).Reachability);
+        Assert.Equal("retention_mutation_replayed", RetentionMutationResultCodes.Replayed);
+        Assert.DoesNotContain(RetentionMutationResultCodes.Replayed, RetentionMutationCompletionCodes.All);
     }
 
     [Fact]

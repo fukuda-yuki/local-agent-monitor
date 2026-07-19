@@ -7,7 +7,31 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 public sealed record RetentionMutationDigestItem(string ItemId, RetentionStoreKind StoreKind);
 public sealed record RetentionMutationExpectedStateItem(string ItemId, long Revision, RetentionPinState PinState, RetentionItemLifecycle State);
 public sealed record RetentionMutationConflictItem(string ItemId, string ConflictCode, long LeaseGeneration);
-public sealed record RetentionPreviewDigestInput(IReadOnlyDictionary<string, object?> PreviewFields, string ExpectedStateVersion, string TargetItemSetDigest, string? RejectionCode);
+public sealed record RetentionPreviewDigestInput(
+    int SchemaVersion,
+    RetentionMutationPreviewResult Result,
+    RetentionMutationEmptyReason? EmptyReason,
+    bool MutationAllowed,
+    RetentionMutationTargetKind TargetKind,
+    string TargetId,
+    RetentionMutationOperation Operation,
+    RetentionMutationScope Scope,
+    RetentionMutationSourceState? SourceState,
+    RetentionMutationSessionCompleteness? SessionCompleteness,
+    string? ContentState,
+    RetentionCurrentStateSummary CurrentState,
+    IReadOnlyList<RetentionPreviewItem> TargetItems,
+    int TargetItemCount,
+    IReadOnlyList<RetentionStoreKindSummary> StoreKindSummary,
+    int ExcludedItemCount,
+    IReadOnlyList<RetentionExclusionSummary> ExcludedItemsByReason,
+    IReadOnlyList<RetentionCaptureExpiryPolicySummary> CaptureExpiryPolicySummary,
+    RetentionRetainedImpact RetainedMetadataImpact,
+    IReadOnlyList<RetentionActiveConflictSummary> ActiveCleanupExclusionConflicts,
+    string? BackupNonPurgeWarningCode,
+    string? RejectionCode,
+    string ExpectedStateVersion,
+    string TargetItemSetDigest);
 
 public static class RetentionMutationDigests
 {
@@ -66,17 +90,170 @@ public static class RetentionMutationDigests
     public static string PreviewDigest(RetentionPreviewDigestInput input)
     {
         ArgumentNullException.ThrowIfNull(input);
-        ArgumentNullException.ThrowIfNull(input.PreviewFields);
-        var fields = new Dictionary<string, object?>(StringComparer.Ordinal);
-        foreach (var pair in input.PreviewFields)
-            if (!IsExcludedPreviewField(pair.Key)) fields[pair.Key] = pair.Value;
-        fields["expected_state_version"] = input.ExpectedStateVersion;
-        fields["target_item_set_digest"] = input.TargetItemSetDigest;
-        fields["rejection_code"] = input.RejectionCode;
-        return HashPrefixed(RetentionMutationJcs.Canonicalize(fields), "sha256-");
+        return HashPrefixed(RetentionMutationJcs.Canonicalize(PreviewDigestObject(input)), "sha256-");
     }
 
-    public static string Canonicalize(IReadOnlyDictionary<string, object?> value) => RetentionMutationJcs.Canonicalize(value);
+    private static object PreviewDigestObject(RetentionPreviewDigestInput input) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["schema_version"] = input.SchemaVersion,
+        ["result"] = PreviewResult(input.Result),
+        ["empty_reason"] = EmptyReason(input.EmptyReason),
+        ["mutation_allowed"] = input.MutationAllowed,
+        ["target_kind"] = RetentionMutationWire.TargetKind(input.TargetKind),
+        ["target_id"] = input.TargetId,
+        ["operation"] = RetentionMutationWire.Operation(input.Operation),
+        ["scope"] = RetentionMutationWire.Scope(input.Scope),
+        ["source_state"] = SourceState(input.SourceState),
+        ["session_completeness"] = SessionCompleteness(input.SessionCompleteness),
+        ["content_state"] = input.ContentState,
+        ["current_state"] = CurrentState(input.CurrentState),
+        ["target_items"] = input.TargetItems.Select(static item => PreviewItem(item)).Cast<object?>().ToArray(),
+        ["target_item_count"] = input.TargetItemCount,
+        ["store_kind_summary"] = input.StoreKindSummary.Select(static item => StoreKindSummary(item)).Cast<object?>().ToArray(),
+        ["excluded_item_count"] = input.ExcludedItemCount,
+        ["excluded_items_by_reason"] = input.ExcludedItemsByReason.Select(static item => ExclusionSummary(item)).Cast<object?>().ToArray(),
+        ["capture_expiry_policy_summary"] = input.CaptureExpiryPolicySummary.Select(static item => CaptureExpiryPolicySummary(item)).Cast<object?>().ToArray(),
+        ["retained_metadata_impact"] = RetainedImpact(input.RetainedMetadataImpact),
+        ["active_cleanup_exclusion_conflicts"] = input.ActiveCleanupExclusionConflicts.Select(static item => ActiveConflictSummary(item)).Cast<object?>().ToArray(),
+        ["backup_non_purge_warning_code"] = input.BackupNonPurgeWarningCode,
+        ["rejection_code"] = input.RejectionCode,
+        ["expected_state_version"] = input.ExpectedStateVersion,
+        ["target_item_set_digest"] = input.TargetItemSetDigest
+    };
+
+    private static object CurrentState(RetentionCurrentStateSummary value) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["readable_item_count"] = value.ReadableItemCount,
+        ["read_denied_item_count"] = value.ReadDeniedItemCount,
+        ["pinned_item_count"] = value.PinnedItemCount,
+        ["unpinned_item_count"] = value.UnpinnedItemCount,
+        ["lifecycle_counts"] = LifecycleCounts(value.LifecycleCounts)
+    };
+
+    private static object LifecycleCounts(RetentionMutationLifecycleCounts value) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["expiring"] = value.Expiring,
+        ["retained_by_policy"] = value.RetainedByPolicy,
+        ["expired_pending_deletion"] = value.ExpiredPendingDeletion,
+        ["deletion_queued"] = value.DeletionQueued,
+        ["deleting"] = value.Deleting,
+        ["deleted"] = value.Deleted,
+        ["deletion_failed"] = value.DeletionFailed
+    };
+
+    private static object PreviewItem(RetentionPreviewItem value) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["item_id"] = value.ItemId,
+        ["store_kind"] = StoreKind(value.StoreKind),
+        ["state"] = Lifecycle(value.State),
+        ["pin_state"] = PinState(value.PinState),
+        ["delete_state"] = RetentionMutationWire.DeleteState(value.DeleteState),
+        ["captured_at"] = value.CapturedAt,
+        ["expires_at"] = value.ExpiresAt,
+        ["policy_id"] = value.PolicyId,
+        ["policy_version"] = value.PolicyVersion,
+        ["read_denied_at"] = value.ReadDeniedAt,
+        ["queued_at"] = value.QueuedAt,
+        ["revision"] = value.Revision,
+        ["retry_exhausted"] = value.RetryExhausted,
+        ["error_code"] = ErrorCode(value.ErrorCode)
+    };
+
+    private static object StoreKindSummary(RetentionStoreKindSummary value) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["store_kind"] = StoreKind(value.StoreKind),
+        ["item_count"] = value.ItemCount,
+        ["readable_count"] = value.ReadableCount,
+        ["read_denied_count"] = value.ReadDeniedCount
+    };
+
+    private static object ExclusionSummary(RetentionExclusionSummary value) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["reason_code"] = value.ReasonCode,
+        ["item_count"] = value.ItemCount
+    };
+
+    private static object CaptureExpiryPolicySummary(RetentionCaptureExpiryPolicySummary value) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["policy_id"] = value.PolicyId,
+        ["policy_version"] = value.PolicyVersion,
+        ["item_count"] = value.ItemCount,
+        ["captured_at_min"] = value.CapturedAtMin,
+        ["captured_at_max"] = value.CapturedAtMax,
+        ["original_expires_at_min"] = value.OriginalExpiresAtMin,
+        ["original_expires_at_max"] = value.OriginalExpiresAtMax
+    };
+
+    private static object RetainedImpact(RetentionRetainedImpact value) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["raw_content_will_be_deleted"] = value.RawContentWillBeDeleted,
+        ["session_metadata_retained"] = value.SessionMetadataRetained,
+        ["event_metadata_retained_count"] = value.EventMetadataRetainedCount,
+        ["safe_summary_retained_count"] = value.SafeSummaryRetainedCount,
+        ["evidence_reference_retained_count"] = value.EvidenceReferenceRetainedCount
+    };
+
+    private static object ActiveConflictSummary(RetentionActiveConflictSummary value) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["conflict_code"] = value.ConflictCode,
+        ["item_count"] = value.ItemCount,
+        ["conflict_version"] = value.ConflictVersion
+    };
+
+    private static string PreviewResult(RetentionMutationPreviewResult value) => value switch
+    {
+        RetentionMutationPreviewResult.Actionable => "actionable",
+        RetentionMutationPreviewResult.EmptyNotApplicable => "empty_not_applicable",
+        _ => throw new ArgumentOutOfRangeException(nameof(value))
+    };
+
+    private static string? EmptyReason(RetentionMutationEmptyReason? value) => value switch
+    {
+        null => null,
+        RetentionMutationEmptyReason.NoExactOwnedItems => "no_exact_owned_items",
+        RetentionMutationEmptyReason.AllCandidatesExcluded => "all_candidates_excluded",
+        _ => throw new ArgumentOutOfRangeException(nameof(value))
+    };
+
+    private static string? SourceState(RetentionMutationSourceState? value) => value switch
+    {
+        null => null,
+        RetentionMutationSourceState.Available => "available",
+        RetentionMutationSourceState.NotCaptured => "not_captured",
+        RetentionMutationSourceState.Redacted => "redacted",
+        RetentionMutationSourceState.Unsupported => "unsupported",
+        RetentionMutationSourceState.Unknown => "unknown",
+        _ => throw new ArgumentOutOfRangeException(nameof(value))
+    };
+
+    private static string? SessionCompleteness(RetentionMutationSessionCompleteness? value) => value switch
+    {
+        null => null,
+        RetentionMutationSessionCompleteness.Unbound => "unbound",
+        RetentionMutationSessionCompleteness.Partial => "partial",
+        RetentionMutationSessionCompleteness.Rich => "rich",
+        RetentionMutationSessionCompleteness.Full => "full",
+        _ => throw new ArgumentOutOfRangeException(nameof(value))
+    };
+
+    private static string? ErrorCode(RetentionErrorCode? value) => value switch
+    {
+        null => null,
+        RetentionErrorCode.MigrationBlocked => "retention_migration_blocked",
+        RetentionErrorCode.MissingTimestamp => "retention_missing_timestamp",
+        RetentionErrorCode.InvalidIdentity => "retention_invalid_identity",
+        RetentionErrorCode.OwnershipMismatch => "retention_ownership_mismatch",
+        RetentionErrorCode.CaptureIncomplete => "retention_capture_incomplete",
+        RetentionErrorCode.LeaseConflict => "retention_lease_conflict",
+        RetentionErrorCode.LeaseLost => "retention_lease_lost",
+        RetentionErrorCode.DeleteBusy => "retention_delete_busy",
+        RetentionErrorCode.DeletePermissionDenied => "retention_delete_permission_denied",
+        RetentionErrorCode.DeleteIoFailed => "retention_delete_io_failed",
+        RetentionErrorCode.UnexpectedSourceMissing => "retention_unexpected_source_missing",
+        RetentionErrorCode.MaintenanceBusy => "retention_maintenance_busy",
+        RetentionErrorCode.ItemLimitExceeded => "retention_item_limit_exceeded",
+        _ => throw new ArgumentOutOfRangeException(nameof(value))
+    };
 
     internal static string StoreKind(RetentionStoreKind kind) => kind switch
     {
@@ -109,14 +286,12 @@ public static class RetentionMutationDigests
         _ => throw new ArgumentOutOfRangeException(nameof(state))
     };
 
-    private static bool IsExcludedPreviewField(string key) => key is "preview_id" or "preview_digest" or "confirmation_expires_at" or "comment" or "comments";
-
     private static string HashPrefixed(string canonical, string prefix) => prefix + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
 }
 
-public static class RetentionMutationJcs
+internal static class RetentionMutationJcs
 {
-    public static string Canonicalize(object? value)
+    internal static string Canonicalize(object? value)
     {
         var builder = new StringBuilder();
         Write(builder, value);

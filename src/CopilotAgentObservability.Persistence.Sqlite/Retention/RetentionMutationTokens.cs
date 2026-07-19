@@ -15,7 +15,7 @@ public static class RetentionMutationIdentifierFormats
     public const int SecretByteLength = 32;
     public const int NonceTextLength = 22;
     public const int SecretTextLength = 43;
-    public const int PreviewIdLength = 28;
+    public const int PreviewIdLength = 27;
     public const int WorkflowKeyLength = 48;
     public const int ConfirmationTokenLength = 73;
 }
