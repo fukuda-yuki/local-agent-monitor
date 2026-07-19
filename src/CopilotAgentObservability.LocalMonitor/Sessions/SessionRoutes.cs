@@ -373,19 +373,30 @@ internal static class SessionRoutes
                     return;
                 }
                 if (!Guid.TryParseExact(sessionId, "D", out var sessionGuid)
-                    || !Guid.TryParseExact(eventId, "D", out var eventGuid)
-                    || store.GetContent(sessionGuid, eventGuid) is not { } lookup)
+                    || !Guid.TryParseExact(eventId, "D", out var eventGuid))
                 {
                     await Failure(context, 404, "session_event_content_not_found");
                     return;
                 }
-                if (lookup.State == SessionContentState.ExpiredPendingDeletion)
+                var read = await store.ReadContentAsync(sessionGuid, eventGuid, context.RequestAborted);
+                if (read.Disposition == SessionContentReadDisposition.NotFound)
+                {
+                    await Failure(context, 404, "session_event_content_not_found");
+                    return;
+                }
+                if (read.Disposition == SessionContentReadDisposition.Busy)
+                {
+                    await Failure(context, 503, "session_store_busy");
+                    return;
+                }
+                if (read.Disposition == SessionContentReadDisposition.Denied)
                 {
                     context.Response.StatusCode = 410;
                     await JsonBody(context, new { error = "raw_content_expired", content_state = "expired_pending_deletion" });
                     return;
                 }
-                var content = lookup.Content!;
+                await using var lease = read.Lease!;
+                var content = lease.Content;
                 await Json(context, new
                 {
                     event_id = content.EventId,

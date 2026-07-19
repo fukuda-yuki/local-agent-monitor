@@ -847,30 +847,45 @@ public sealed class SqliteSessionStoreTests
     }
 
     [Fact]
-    public void GetContent_UsesSessionAndEventKeysAndExpiresAtExactBoundary()
+    public async Task ReadContentAsync_UsesSessionAndEventKeysAndExpiresAtExactBoundary()
     {
         using var database = new SessionTestDatabase();
         var now = DateTimeOffset.Parse("2026-07-11T00:00:00Z");
         var time = new MutableTimeProvider(now);
-        var store = new SqliteSessionStore(database.Path, time);
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path, time);
+        var store = new SqliteSessionStore(database.Path, context, time);
         store.CreateSchema();
         var batch = CreateBatch(now);
         store.Write(batch);
         var sessionId = batch.Detail.Session.SessionId;
         var eventId = batch.Detail.Events[0].EventId;
 
-        var available = store.GetContent(sessionId, eventId);
-        Assert.Equal(SessionContentState.Available, available?.State);
-        Assert.Equal(batch.Content[0], available?.Content);
-        Assert.Null(store.GetContent(Guid.CreateVersion7(), eventId));
-        Assert.Null(store.GetContent(sessionId, Guid.CreateVersion7()));
+        var available = await store.ReadContentAsync(sessionId, eventId, CancellationToken.None);
+        Assert.Equal(SessionContentReadDisposition.Granted, available.Disposition);
+        await using var lease = available.Lease!;
+        Assert.Equal(batch.Content[0], lease.Content);
+        Assert.Equal(SessionContentReadDisposition.NotFound, (await store.ReadContentAsync(Guid.CreateVersion7(), eventId, CancellationToken.None)).Disposition);
+        Assert.Equal(SessionContentReadDisposition.NotFound, (await store.ReadContentAsync(sessionId, Guid.CreateVersion7(), CancellationToken.None)).Disposition);
 
         time.Advance(TimeSpan.FromDays(90));
-        var expired = store.GetContent(sessionId, eventId);
-        Assert.Equal(SessionContentState.ExpiredPendingDeletion, expired?.State);
-        Assert.Null(expired?.Content);
+        var expired = await store.ReadContentAsync(sessionId, eventId, CancellationToken.None);
+        Assert.Equal(SessionContentReadDisposition.Denied, expired.Disposition);
         using var connection = database.Open();
         Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_event_content;"));
+    }
+
+    [Fact]
+    public async Task ReadContentAsync_WithoutRetentionContextFailsClosedBeforeDatabaseAccess()
+    {
+        using var database = new SessionTestDatabase();
+        File.Delete(database.Path);
+        var store = new SqliteSessionStore(database.Path);
+
+        var result = await store.ReadContentAsync(Guid.CreateVersion7(), Guid.CreateVersion7(), CancellationToken.None);
+
+        Assert.Equal(SessionContentReadDisposition.Denied, result.Disposition);
+        Assert.Null(result.Lease);
+        Assert.False(File.Exists(database.Path));
     }
 
     [Fact]

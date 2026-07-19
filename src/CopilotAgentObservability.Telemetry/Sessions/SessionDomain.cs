@@ -298,7 +298,25 @@ public sealed record SessionDetail(
 
 public sealed record SessionWriteBatch(SessionDetail Detail, IReadOnlyList<SessionEventContent> Content);
 
-public sealed record SessionContentLookup(SessionContentState State, SessionEventContent? Content);
+public enum SessionContentReadDisposition { Granted, NotFound, Denied, Busy }
+
+public sealed class SessionContentReadLease : IAsyncDisposable
+{
+    private readonly Func<ValueTask> release;
+    private int released;
+
+    public SessionContentReadLease(SessionEventContent content, Func<ValueTask> release)
+    {
+        Content = content ?? throw new ArgumentNullException(nameof(content));
+        this.release = release ?? throw new ArgumentNullException(nameof(release));
+    }
+
+    public SessionEventContent Content { get; }
+
+    public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
+}
+
+public sealed record SessionContentReadResult(SessionContentReadDisposition Disposition, SessionContentReadLease? Lease);
 
 public sealed record SessionHumanEvaluation(Guid SessionId, string Verdict, DateTimeOffset RecordedAt);
 
@@ -363,7 +381,7 @@ public interface ISessionStore
     EffectReceipt RecordEffectComparison(EffectComparisonRequest request, DateTimeOffset recordedAt);
     IReadOnlyList<EffectReceipt> ListEffectReceipts(Guid proposalId);
     EffectComparisonDetail? GetEffectComparison(Guid comparisonId);
-    SessionContentLookup? GetContent(Guid sessionId, Guid eventId);
+    ValueTask<SessionContentReadResult> ReadContentAsync(Guid sessionId, Guid eventId, CancellationToken cancellationToken);
     SessionRawRetentionState GetRawRetentionState(Guid sessionId);
     SessionProjectionState? GetProjectionState(string projectorKey);
     void UpsertProjectionState(SessionProjectionState state);

@@ -30,6 +30,7 @@ public sealed class SqliteSessionStore : ISessionStore
     private readonly TimeProvider timeProvider;
     private readonly Action<string>? comparisonCheckpoint;
     private readonly Action<string>? writeCheckpoint;
+    private readonly RetentionCatalogContext? retentionContext;
     private readonly int busyTimeoutMilliseconds = 5000;
 
     public SqliteSessionStore(string databasePath, TimeProvider? timeProvider = null)
@@ -37,6 +38,18 @@ public sealed class SqliteSessionStore : ISessionStore
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.databasePath = databasePath;
         this.timeProvider = timeProvider ?? TimeProvider.System;
+    }
+
+    public SqliteSessionStore(string databasePath, RetentionCatalogContext retentionContext, TimeProvider? timeProvider = null)
+        : this(databasePath, timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(retentionContext);
+        if (!string.Equals(Path.GetFullPath(databasePath), retentionContext.DatabasePath, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Retention catalog context belongs to a different database.", nameof(retentionContext));
+        }
+
+        this.retentionContext = retentionContext;
     }
 
     internal SqliteSessionStore(string databasePath, Action<string> comparisonCheckpoint)
@@ -377,15 +390,15 @@ public sealed class SqliteSessionStore : ISessionStore
     public void Write(SessionWriteBatch batch)
     {
         ArgumentNullException.ThrowIfNull(batch);
+        if (batch.Content.Count != 0 && retentionContext is null)
+        {
+            throw new RetentionCatalogUnavailableException();
+        }
         writeCheckpoint?.Invoke("before-session-write");
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
-        RetentionCatalogStore? catalog = null;
-        if (TableExists(connection, transaction, "retention_component_versions"))
-        {
-            catalog = new RetentionCatalogStore(databasePath, timeProvider);
-            catalog.InitializeForWrite(connection, transaction);
-        }
+        RetentionCatalogStore? catalog = retentionContext is null ? null : new RetentionCatalogStore(retentionContext, timeProvider);
+        if (catalog is not null) catalog.InitializeForWrite(connection, transaction);
         if (IsClaudeOtelReplay(connection, transaction, batch))
         {
             transaction.Commit();
@@ -797,48 +810,94 @@ public sealed class SqliteSessionStore : ISessionStore
         command.ExecuteNonQuery();
     }
 
-    public SessionContentLookup? GetContent(Guid sessionId, Guid eventId)
+    public async ValueTask<SessionContentReadResult> ReadContentAsync(Guid sessionId, Guid eventId, CancellationToken cancellationToken)
     {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT c.event_id,c.content_kind,c.content_json,c.captured_at,c.expires_at
-            FROM session_event_content c
-            JOIN session_events e ON e.event_id=c.event_id
-            WHERE e.session_id=$session_id AND e.event_id=$event_id;
-            """;
-        Add(command, "$session_id", Id(sessionId));
-        Add(command, "$event_id", Id(eventId));
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return null;
-        var content = new SessionEventContent(
-            Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2),
-            ParseTimestamp(reader.GetString(3)), ParseTimestamp(reader.GetString(4)));
-        return content.ExpiresAt > timeProvider.GetUtcNow()
-            ? new(SessionContentState.Available, content)
-            : new(SessionContentState.ExpiredPendingDeletion, null);
+        if (retentionContext is null)
+        {
+            return new(SessionContentReadDisposition.Denied, null);
+        }
+        var detail = GetDetail(sessionId);
+        if (detail is null || !detail.Events.Any(item => item.EventId == eventId))
+        {
+            return new(SessionContentReadDisposition.NotFound, null);
+        }
+
+        var catalog = new RetentionCatalogStore(retentionContext, timeProvider);
+        var request = new RetentionReadRequest(
+            new(retentionContext.StoreInstanceId, RetentionStoreKind.SessionEventContent, Id(eventId)),
+            RetentionReadKind.Access,
+            timeProvider.GetUtcNow(),
+            ExpectedRevision: null);
+        var result = await catalog.ReadAsync(request, async (connection, transaction, grant, token) =>
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT c.event_id,c.content_kind,c.content_json,c.captured_at,c.expires_at
+                FROM session_event_content c
+                JOIN session_events e ON e.event_id=c.event_id
+                JOIN retention_items i ON i.item_id=$retention_read_item_id
+                    AND i.store_instance_id=$retention_store_instance_id
+                    AND i.store_kind='session_event_content'
+                    AND i.source_item_id=c.event_id
+                    AND i.revision=$retention_read_revision
+                JOIN retention_leases l ON l.item_id=i.item_id
+                    AND l.lease_kind='access'
+                    AND l.owner=$retention_read_lease_owner
+                    AND l.generation=$retention_read_lease_generation
+                    AND l.expires_at=$retention_read_lease_expires_at
+                WHERE c.event_id=$event_id AND e.session_id=$session_id
+                    AND c.retention_owner_token=$retention_read_source_token;
+                """;
+            Add(command, "$event_id", Id(eventId));
+            Add(command, "$session_id", Id(sessionId));
+            Add(command, "$retention_store_instance_id", retentionContext.StoreInstanceId);
+            grant.BindSelectorCapability(command);
+            using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+            if (!await reader.ReadAsync(token).ConfigureAwait(false)) return null;
+            return new SessionEventContent(Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2), ParseTimestamp(reader.GetString(3)), ParseTimestamp(reader.GetString(4)));
+        }, cancellationToken).ConfigureAwait(false);
+
+        return result.Disposition switch
+        {
+            RetentionReadDisposition.Granted => new(SessionContentReadDisposition.Granted, new SessionContentReadLease(result.Lease!.Value, result.Lease.DisposeAsync)),
+            RetentionReadDisposition.NotFound => new(SessionContentReadDisposition.NotFound, null),
+            RetentionReadDisposition.Busy => new(SessionContentReadDisposition.Busy, null),
+            _ => new(SessionContentReadDisposition.Denied, null),
+        };
     }
 
     public SessionRawRetentionState GetRawRetentionState(Guid sessionId)
     {
+        if (retentionContext is null)
+        {
+            return SessionRawRetentionState.NotCaptured;
+        }
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT CASE
               WHEN EXISTS (
-                SELECT 1 FROM session_event_content c
-                JOIN session_events e ON e.event_id=c.event_id
-                WHERE e.session_id=$session_id AND c.expires_at > $now
+                SELECT 1 FROM retention_items i
+                JOIN session_events e ON e.event_id=i.source_item_id
+                WHERE e.session_id=$session_id
+                  AND i.store_instance_id=$store_instance_id
+                  AND i.store_kind='session_event_content'
+                  AND i.state IN ('expiring','retained_by_policy')
+                  AND i.read_denied_at IS NULL AND i.expires_at > $now
               ) THEN 'expiring'
               WHEN EXISTS (
-                SELECT 1 FROM session_event_content c
-                JOIN session_events e ON e.event_id=c.event_id
+                SELECT 1 FROM retention_items i
+                JOIN session_events e ON e.event_id=i.source_item_id
                 WHERE e.session_id=$session_id
+                  AND i.store_instance_id=$store_instance_id
+                  AND i.store_kind='session_event_content'
               ) THEN 'expired_pending_deletion'
               ELSE 'not_captured'
             END;
             """;
         Add(command, "$session_id", Id(sessionId));
+        Add(command, "$store_instance_id", retentionContext.StoreInstanceId);
         Add(command, "$now", Timestamp(timeProvider.GetUtcNow()));
         return SessionWire.ParseRawRetentionState((string)command.ExecuteScalar()!);
     }
