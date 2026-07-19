@@ -1,0 +1,18 @@
+{
+  "component": "retention",
+  "generationCommand": "dotnet run --project scripts/test/GenerateRetentionSchemaFixtures/GenerateRetentionSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/retention",
+  "gitStatusCommand": "git status --porcelain",
+  "fixtures": [
+    {
+      "file": "retention-catalog-v1.sqlite",
+      "sha256": "fe7a1c9d26c9bcf8c00d0bfddca0bed19dc862b9a9f86aef4bdf44cac8962b11",
+      "byteLength": 151552,
+      "integrityCheck": "ok",
+      "sentinels": {
+        "storeInstanceId": "00000000000000000000000000000089",
+        "catalogSchemaVersion": 1,
+        "itemCount": 0
+      }
+    }
+  ]
+}
