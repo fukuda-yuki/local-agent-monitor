@@ -1,0 +1,1576 @@
+{
+  "baseSha": "11d6c587903f6ea97026d815f608231efea08d65",
+  "candidateSha": "5c5540878a6731804084644d8a136be9ad748cf9",
+  "pathEntries": [
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/Cli/CliApplication.cs",
+      "contracts": [
+        {
+          "storeKind": "caller_output",
+          "classification": "not_applicable",
+          "identity": "retention control record owned by CliApplication.cs",
+          "timestampAuthority": "catalog lifecycle revision or sanitized status snapshot timestamp",
+          "policyOrBoundary": "retained control metadata; never authorizes raw reconstruction or deletion",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/Cli/CliHelpText.cs",
+      "contracts": [
+        {
+          "storeKind": "non_raw_surface",
+          "classification": "not_applicable",
+          "identity": "CliHelpText.cs renders/help-defines no raw retention boundary",
+          "timestampAuthority": "no retention timestamp: non-raw presentation or metadata surface",
+          "policyOrBoundary": "does not read, create, lease, retain, or delete raw/sensitive content",
+          "adapter": null,
+          "testEvidence": "RetentionNoLeakTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/DashboardDataset/DashboardRawOperationReader.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/AtomicDiagnosisOutputPublisher.cs",
+      "contracts": [
+        {
+          "storeKind": "caller_output",
+          "classification": "not_applicable",
+          "identity": "retention control record owned by AtomicDiagnosisOutputPublisher.cs",
+          "timestampAuthority": "catalog lifecycle revision or sanitized status snapshot timestamp",
+          "policyOrBoundary": "retained control metadata; never authorizes raw reconstruction or deletion",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/DiagnosisCandidateGenerator.cs",
+      "contracts": [
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/DiagnosisCandidateOptions.cs",
+      "contracts": [
+        {
+          "storeKind": "caller_output",
+          "classification": "not_applicable",
+          "identity": "retention control record owned by DiagnosisCandidateOptions.cs",
+          "timestampAuthority": "catalog lifecycle revision or sanitized status snapshot timestamp",
+          "policyOrBoundary": "retained control metadata; never authorizes raw reconstruction or deletion",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/RawEvidenceReader.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/RetentionSensitiveBundleStore.cs",
+      "contracts": [
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/SensitiveBundlePlanBuilder.cs",
+      "contracts": [
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/DiagnosisCandidates/SensitiveBundleWriter.cs",
+      "contracts": [
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/FirstTrace/ClaudeCode/ClaudeDoctorFactCollector.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/Properties/AssemblyInfo.cs",
+      "contracts": [
+        {
+          "storeKind": "non_raw_surface",
+          "classification": "not_applicable",
+          "identity": "AssemblyInfo.cs renders/help-defines no raw retention boundary",
+          "timestampAuthority": "no retention timestamp: non-raw presentation or metadata surface",
+          "policyOrBoundary": "does not read, create, lease, retain, or delete raw/sensitive content",
+          "adapter": null,
+          "testEvidence": "RetentionNoLeakTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/RawLocalReceiver/RawLocalReceiverHandler.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/RawTelemetry/RawNormalizationInputReader.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/RawTelemetry/RawStoreLeaseReader.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.ConfigCli/Setup/Adapters/GitHubCopilot/Doctor/GitHubCopilotDoctorEvidenceAdapter.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Analysis/AnalysisSdkDirectoryOwner.cs",
+      "contracts": [
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Analysis/CopilotAnalysisSdkExecutor.cs",
+      "contracts": [
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Analysis/DotNetCopilotRawAnalysisRunner.cs",
+      "contracts": [
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "MonitorAnalysisRetentionAdapterTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Analysis/IAnalysisSdkDirectoryOwner.cs",
+      "contracts": [
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Analysis/MonitorAnalysisModels.cs",
+      "contracts": [
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Analysis/SqliteMonitorAnalysisStore.cs",
+      "contracts": [
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "MonitorAnalysisRetentionAdapterTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/MonitorHost.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "MonitorAnalysisRetentionAdapterTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Pages/Index.cshtml.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Pages/TraceDetail.cshtml",
+      "contracts": [
+        {
+          "storeKind": "non_raw_surface",
+          "classification": "not_applicable",
+          "identity": "TraceDetail.cshtml renders/help-defines no raw retention boundary",
+          "timestampAuthority": "no retention timestamp: non-raw presentation or metadata surface",
+          "policyOrBoundary": "does not read, create, lease, retain, or delete raw/sensitive content",
+          "adapter": null,
+          "testEvidence": "RetentionNoLeakTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Pages/TraceDetail.cshtml.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Pages/Traces.cshtml.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Projection/IMonitorProjectionStore.cs",
+      "contracts": [
+        {
+          "storeKind": "non_raw_surface",
+          "classification": "not_applicable",
+          "identity": "IMonitorProjectionStore.cs renders/help-defines no raw retention boundary",
+          "timestampAuthority": "no retention timestamp: non-raw presentation or metadata surface",
+          "policyOrBoundary": "does not read, create, lease, retain, or delete raw/sensitive content",
+          "adapter": null,
+          "testEvidence": "RetentionNoLeakTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Projection/ProjectionWorker.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Retention/AnalysisSdkDirectoryRetentionAdapter.cs",
+      "contracts": [
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Retention/MonitorAnalysisRetentionAdapter.cs",
+      "contracts": [
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "MonitorAnalysisRetentionAdapterTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Retention/RetentionCleanupCoordinator.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "RetentionCleanupWorkerTests.cs;RetentionWorkerRaceTests.cs;RetentionWorkerFenceMatrixTests.cs;RetentionCompositionTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RetentionCleanupWorkerTests.cs;RetentionWorkerRaceTests.cs;RetentionWorkerFenceMatrixTests.cs;RetentionCompositionTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "RetentionCleanupWorkerTests.cs;RetentionWorkerRaceTests.cs;RetentionWorkerFenceMatrixTests.cs;RetentionCompositionTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "RetentionCleanupWorkerTests.cs;RetentionWorkerRaceTests.cs;RetentionWorkerFenceMatrixTests.cs;RetentionCompositionTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "RetentionCleanupWorkerTests.cs;RetentionWorkerRaceTests.cs;RetentionWorkerFenceMatrixTests.cs;RetentionCompositionTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Retention/RetentionCleanupWorker.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "RetentionCleanupWorkerTests.cs;RetentionWorkerRaceTests.cs;RetentionWorkerFenceMatrixTests.cs;RetentionCompositionTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RetentionCleanupWorkerTests.cs;RetentionWorkerRaceTests.cs;RetentionWorkerFenceMatrixTests.cs;RetentionCompositionTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "RetentionCleanupWorkerTests.cs;RetentionWorkerRaceTests.cs;RetentionWorkerFenceMatrixTests.cs;RetentionCompositionTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "RetentionCleanupWorkerTests.cs;RetentionWorkerRaceTests.cs;RetentionWorkerFenceMatrixTests.cs;RetentionCompositionTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "RetentionCleanupWorkerTests.cs;RetentionWorkerRaceTests.cs;RetentionWorkerFenceMatrixTests.cs;RetentionCompositionTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Retention/RetentionSqliteMaintenance.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "RetentionWorkerMaintenanceMatrixTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RetentionWorkerMaintenanceMatrixTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "RetentionWorkerMaintenanceMatrixTests.cs;AtomicSqliteCompletionCoordinatorTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Retention/RetentionStatusModels.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "sanitized aggregate retention status DTO and item-summary allowlist",
+          "timestampAuthority": "streamed status snapshot timestamp and catalog lifecycle revision",
+          "policyOrBoundary": "sanitized aggregate diagnostics only; no raw identity, locator, or reconstruction",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs;RetentionNoLeakTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Retention/RetentionStatusRoutes.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "sanitized retention status HTTP projection and streaming timestamp validation",
+          "timestampAuthority": "response snapshot timestamp validated from catalog status query",
+          "policyOrBoundary": "safe status route only; excludes raw records, receipts, paths, and PII",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs;RetentionNoLeakTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Retention/RetentionWorkerPolicy.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "retention control record owned by RetentionWorkerPolicy.cs",
+          "timestampAuthority": "catalog lifecycle revision or sanitized status snapshot timestamp",
+          "policyOrBoundary": "retained control metadata; never authorizes raw reconstruction or deletion",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Retention/SensitiveBundleRetentionAdapter.cs",
+      "contracts": [
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/Sessions/SessionRoutes.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "SessionEventContentRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/wwwroot/monitor-error-mode.js",
+      "contracts": [
+        {
+          "storeKind": "non_raw_surface",
+          "classification": "not_applicable",
+          "identity": "monitor-error-mode.js renders/help-defines no raw retention boundary",
+          "timestampAuthority": "no retention timestamp: non-raw presentation or metadata surface",
+          "policyOrBoundary": "does not read, create, lease, retain, or delete raw/sensitive content",
+          "adapter": null,
+          "testEvidence": "RetentionNoLeakTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/wwwroot/monitor-inspector.js",
+      "contracts": [
+        {
+          "storeKind": "non_raw_surface",
+          "classification": "not_applicable",
+          "identity": "monitor-inspector.js renders/help-defines no raw retention boundary",
+          "timestampAuthority": "no retention timestamp: non-raw presentation or metadata surface",
+          "policyOrBoundary": "does not read, create, lease, retain, or delete raw/sensitive content",
+          "adapter": null,
+          "testEvidence": "RetentionNoLeakTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.LocalMonitor/wwwroot/monitor-span-detail.js",
+      "contracts": [
+        {
+          "storeKind": "non_raw_surface",
+          "classification": "not_applicable",
+          "identity": "monitor-span-detail.js renders/help-defines no raw retention boundary",
+          "timestampAuthority": "no retention timestamp: non-raw presentation or metadata surface",
+          "policyOrBoundary": "does not read, create, lease, retain, or delete raw/sensitive content",
+          "adapter": null,
+          "testEvidence": "RetentionNoLeakTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Doctor/ClaudeCode/ClaudeDoctorCandidateObserver.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Ingestion/SqliteIngestionCommitStore.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/MonitorRuntimeStateStore.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "retention control record owned by MonitorRuntimeStateStore.cs",
+          "timestampAuthority": "catalog lifecycle revision or sanitized status snapshot timestamp",
+          "policyOrBoundary": "retained control metadata; never authorizes raw reconstruction or deletion",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/MonitorSchemaMigrator.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "retained_by_policy",
+          "identity": "retention control record owned by MonitorSchemaMigrator.cs",
+          "timestampAuthority": "catalog lifecycle revision or sanitized status snapshot timestamp",
+          "policyOrBoundary": "retained control metadata; never authorizes raw reconstruction or deletion",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/RawTelemetryRecordSql.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/RawTelemetryStore.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/IRetentionDeletionAdapter.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "SessionEventContentRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "MonitorAnalysisRetentionAdapterTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RawRecordRetentionAdapter.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionAdapterRegistry.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "SessionEventContentRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "MonitorAnalysisRetentionAdapterTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionAnalysisSdkDirectoryOwnershipMarker.cs",
+      "contracts": [
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionCatalogContext.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "injected catalog instance identity and SQLite transaction context",
+          "timestampAuthority": "catalog instance initialization time and transaction revision",
+          "policyOrBoundary": "composition boundary requires explicit catalog context; no fallback catalog",
+          "adapter": null,
+          "testEvidence": "RetentionCatalogStoreTests.cs;RetentionCompositionTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionCatalogContracts.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "closed lifecycle/store-kind contract and revision/lease DTO boundary",
+          "timestampAuthority": "catalog revision and lease expiry are authoritative timestamps",
+          "policyOrBoundary": "closed seven-state contract; does not carry raw bytes or locators",
+          "adapter": null,
+          "testEvidence": "RetentionLifecycleIntegrationTests.cs;RetentionAdapterRegistryTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionCatalogStore.AnalysisSdkDirectory.cs",
+      "contracts": [
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionCatalogStore.FileCapture.cs",
+      "contracts": [
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionCatalogStore.FileDeletion.cs",
+      "contracts": [
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionCatalogStore.SqliteDeletion.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "SessionEventContentRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "MonitorAnalysisRetentionAdapterTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionCatalogStore.Status.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "retention control record owned by RetentionCatalogStore.Status.cs",
+          "timestampAuthority": "catalog lifecycle revision or sanitized status snapshot timestamp",
+          "policyOrBoundary": "retained control metadata; never authorizes raw reconstruction or deletion",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionCatalogStore.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "SessionEventContentRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "MonitorAnalysisRetentionAdapterTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionFileCaptureContracts.cs",
+      "contracts": [
+        {
+          "storeKind": "sensitive_bundle",
+          "classification": "required_cleanup",
+          "identity": "reservation ID, kind-bound owner marker, bounded plan/digests, forward-only journal",
+          "timestampAuthority": "reservation timestamp; sensitive-bundle-7d",
+          "policyOrBoundary": "kind-bound marker, bounded plan/digests and journal; sensitive-bundle-7d",
+          "adapter": "SensitiveBundleRetentionAdapter",
+          "testEvidence": "SensitiveBundleRetentionAdapterTests.cs;SensitiveBundleDeletionCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_sdk_directory",
+          "classification": "required_cleanup",
+          "identity": "analysis-run binding, generated direct child, requested_at pair, kind-bound owner marker",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "AnalysisSdkDirectoryRetentionAdapter",
+          "testEvidence": "AnalysisSdkDirectoryRetentionTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionOwnershipReceipt.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "framed exact owner fields plus private 32-byte source token receipt primitive",
+          "timestampAuthority": "receipt is derived from authoritative owner timestamp fields, never raw payload time",
+          "policyOrBoundary": "persistence-neutral fixed-time receipt comparison; no locator, raw, secret, or deletion authority",
+          "adapter": null,
+          "testEvidence": "RetentionOwnershipReceiptTests.cs;RetentionFirstIntentProofTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionReadGate.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "RetentionReadPrimitiveTests.cs;SessionEventContentRetentionAdapterTests.cs;MonitorAnalysisRetentionAdapterTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RetentionReadPrimitiveTests.cs;SessionEventContentRetentionAdapterTests.cs;MonitorAnalysisRetentionAdapterTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "RetentionReadPrimitiveTests.cs;SessionEventContentRetentionAdapterTests.cs;MonitorAnalysisRetentionAdapterTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionReadGrant.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "RetentionReadPrimitiveTests.cs;SessionEventContentRetentionAdapterTests.cs;MonitorAnalysisRetentionAdapterTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RetentionReadPrimitiveTests.cs;SessionEventContentRetentionAdapterTests.cs;MonitorAnalysisRetentionAdapterTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "RetentionReadPrimitiveTests.cs;SessionEventContentRetentionAdapterTests.cs;MonitorAnalysisRetentionAdapterTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionSchemaMigrator.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "retention component schema-version and migration checkpoint",
+          "timestampAuthority": "schema migration version is authoritative at catalog initialization",
+          "policyOrBoundary": "additive catalog schema migration only; no raw response materialization",
+          "adapter": null,
+          "testEvidence": "RetentionCatalogMigrationFixtureTests.cs;RetentionFileCaptureSchemaTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionSqliteDeletionContracts.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "SessionEventContentRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "analysis_run_raw",
+          "classification": "required_cleanup",
+          "identity": "positive analysis run ID, requested_at pair, nullable raw-record/span markers, ownership receipt",
+          "timestampAuthority": "requested_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "MonitorAnalysisRetentionAdapter",
+          "testEvidence": "MonitorAnalysisRetentionAdapterTests.cs;AnalysisSdkDirectoryCatalogTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Retention/SessionEventContentRetentionAdapter.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "SessionEventContentRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Sessions/SessionSchemaV11Validator.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "Session v11 schema validator for exact Session-content catalog bridge",
+          "timestampAuthority": "schema-version row and captured_at column validation time",
+          "policyOrBoundary": "validation/migration boundary only; no runtime content read",
+          "adapter": null,
+          "testEvidence": "SessionSchemaMigrationFixtureTests.cs;RetentionCatalogMigrationFixtureTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Sessions/SqliteSessionOtelEnricher.cs",
+      "contracts": [
+        {
+          "storeKind": "raw_record",
+          "classification": "required_cleanup",
+          "identity": "positive raw_record ID, received_at text/ticks, schema version, ownership receipt",
+          "timestampAuthority": "received_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "RawRecordRetentionAdapter",
+          "testEvidence": "RawRecordRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/Sessions/SqliteSessionStore.cs",
+      "contracts": [
+        {
+          "storeKind": "session_event_content",
+          "classification": "required_cleanup",
+          "identity": "canonical event/session GUIDs, source event ID, captured_at pair, ownership receipt",
+          "timestampAuthority": "captured_at; raw-default-90d",
+          "policyOrBoundary": "exact catalog receipt, revision, lease, and store-specific adapter; raw-default-90d",
+          "adapter": "SessionEventContentRetentionAdapter",
+          "testEvidence": "SessionEventContentRetentionAdapterTests.cs;RetentionReadPrimitiveTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        },
+        {
+          "storeKind": "session_event_content",
+          "classification": "retained_by_policy",
+          "identity": "retention control record owned by SqliteSessionStore.cs",
+          "timestampAuthority": "catalog lifecycle revision or sanitized status snapshot timestamp",
+          "policyOrBoundary": "retained control metadata; never authorizes raw reconstruction or deletion",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Persistence.Sqlite/SourceCompatibility/SqliteSourceCompatibilityStore.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "source-compatibility schema upgrade state and projection disposition metadata",
+          "timestampAuthority": "monitor schema-version transaction timestamp",
+          "policyOrBoundary": "schema compatibility metadata only; never raw payload projection",
+          "adapter": null,
+          "testEvidence": "MonitorSchemaMigrationFixtureTests.cs;RetentionCatalogMigrationFixtureTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    },
+    {
+      "path": "src/CopilotAgentObservability.Telemetry/Sessions/SessionDomain.cs",
+      "contracts": [
+        {
+          "storeKind": "catalog_metadata",
+          "classification": "retained_by_policy",
+          "identity": "retention control record owned by SessionDomain.cs",
+          "timestampAuthority": "catalog lifecycle revision or sanitized status snapshot timestamp",
+          "policyOrBoundary": "retained control metadata; never authorizes raw reconstruction or deletion",
+          "adapter": null,
+          "testEvidence": "RetentionStatusRouteTests.cs",
+          "gateBypass": false,
+          "unregisteredCreator": false
+        }
+      ]
+    }
+  ]
+}

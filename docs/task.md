@@ -69,11 +69,13 @@
 
 ## Open Follow-ups
 
-- **Issue #89 Raw retention cleanup (in progress):** catalog v1 contract,
-  immutable raw-read inventory, frozen Session v1 compatibility projection, and
-  persistence-neutral contract types are established first. Follow-on tasks own
-  catalog migration/read gates, worker, exact adapters, diagnostics, and final
-  corpus/closeout; pin/delete-now remains Issue #90.
+- **Issue #89 Raw retention cleanup (closeout validation):** catalog v1,
+  immutable raw-read inventory, frozen Session v1 compatibility projection,
+  migration/read gates, worker, five exact adapters, and sanitized diagnostics
+  are implemented. The final candidate inventory and finite synthetic corpus
+  are recorded in [issue-89-final-retention-inventory.md](sprints/issue-89-final-retention-inventory.md);
+  remaining closeout work is the required full validation/review evidence.
+  Pin/delete-now remains Issue #90.
 
 - **未対応の機能仕様・検証（未確認の検証フェーズ）**
   - Sprint18 スパンインスペクタの `SpanDetailExtractor` は実 VS Code Copilot Chat ペイロードのキー名が live 検証まで未確定のため defensive 抽出とし、整形抽出が空でも raw タブで代替できる。実ペイロードでの整形表示のライブ検証は人手ゲート（D043、既存 prompt extractor と同種の caveat）。
