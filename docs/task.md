@@ -21,6 +21,7 @@
 
 | Area | 状態 | 概要 |
 | --- | --- | --- |
+| User-controlled retention mutation (Issue #90) | **実装中（90-A contract approved）** | Approved Issue #90 contract has been promoted to the canonical retention mutation interface and supporting specifications. Implementation proceeds over the Issue #89 catalog with exact Session/item targeting, preview and confirmation, atomic idempotency/audit, and #89 worker handoff. |
 | First-trace Doctor core (Issue #102) | **完了（local main 統合済み）** | [First-Trace Doctor interface](specifications/interfaces/first-trace-doctor.md) と D060 に従い、12 fact family / 20 fixed state を純粋・決定的に評価する共有 `doctor.v1` domain、Config CLI の evaluate + verification 4 command、Local Monitor の対応する 5 route、transactional/restart-safe な SQLite Doctor v1 lifecycle を実装した。focused validation は Doctor 232/232、Config CLI Doctor 159/159、Local Monitor Doctor 66/66、統合前 full solution は 5,334/5,334（0 fail/skip）で成功した。#103/#104 の source-specific candidate producer は compile-shape のみで live 未検証、#105 の proxy/UI は未実装であり、setup、evaluation、verification start の成功だけでは first real trace を保証しない。 |
 | Claude Code guided setup (Issue #68) | **完了（local main 統合済み）** | D061 と [Configuration setup interface](specifications/interfaces/configuration-setup.md) に従い、Issue #66 の ownership ledger / transaction に `claude-code` adapter を追加した。interactive CLI と `claude -p` の user settings、明示 opt-in WSL2 loopback routing、mapper 対応済み全 Hook、content gate opt-in、Python/TypeScript Agent SDK guidance を対象とする。HTTP/proxy/UI、first real trace / Doctor（#104）、native macOS/Linux installer は対象外。feature branch の focused/full validation、Release ZIP、security / concurrency / migration / Issue間契約 evidence は [Sprint24 ledger](sprints/sprint24-claude-code-guided-setup/ledger.md) に記録した。 |
 | Claude Code first-trace orchestration (Issue #104) | **完了（local main 統合済み）** | [Claude first-trace interface](specifications/interfaces/claude-first-trace.md) に従い、Claude guided setup から source-neutral `first-trace` / `doctor.v1`、実ソース候補観測、exact Session binding、T8 cross-surface/matrix evidence までを frozen candidate `54d758a260f347cc31a3191d342ad509eb62d81f`（branch `claude/issue-104-implementation-447584`）へ実装した。build、Playwright bootstrap、first-run intermittent failure の記録、exact full rerun 5,765/5,765 を含む validation evidence は plan ledger に記録した。local main へは merge `70206ce` で統合済み。実 Claude producer の live execution と #110 の `user_prompt` key 観測は #106 が実施した（下行参照）。 |
@@ -79,7 +80,8 @@
   The independent F2 spec/code review passed with no blockers, the pre-close
   audit found no implementation blockers, and the final whole-Issue review at
   `74f9f6ee8076fe7282bab9565ebbbd4775e61dd0` passed spec and code review with
-  no blockers. Pin/delete-now remains Issue #90.
+  no blockers. Issue #90 is in progress; its 90-A contract is approved and
+  promoted to the canonical specifications.
 
 - **未対応の機能仕様・検証（未確認の検証フェーズ）**
   - Sprint18 スパンインスペクタの `SpanDetailExtractor` は実 VS Code Copilot Chat ペイロードのキー名が live 検証まで未確定のため defensive 抽出とし、整形抽出が空でも raw タブで代替できる。実ペイロードでの整形表示のライブ検証は人手ゲート（D043、既存 prompt extractor と同種の caveat）。

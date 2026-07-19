@@ -1621,8 +1621,8 @@ raw boundary、Issue #45 `session.send()` behavior、Issue #49 Agent ownership �
   raw content read は same-origin/no-store、`--sanitized-only` で `404`、expiry 後
   `410` / `expired_pending_deletion`。
 - raw content は secret-filter 後に分離保存し、
-  `expires_at = captured_at + 90 days`。automatic physical deletion / pin /
-  delete-now は Issue #57。
+  `expires_at = captured_at + 90 days`。automatic physical deletion は Issue
+  #89、user-controlled pin / unpin / delete-now は Issue #90。
 - installed Local Monitor の `hook-forward --endpoint <loopback-url>
   --timeout-ms 250` は stdin JSON 1件を読み、invalid/network/timeout でも常に
   exit 0、stdout/stderr 無出力、Hook decision に影響しない。CLI/VS Code は同じ
@@ -2195,3 +2195,29 @@ evidence, and frozen feature-branch candidate. Issue #106 owns live Claude
 producer execution, including the #110 check of whether `user_prompt` is
 present when telemetry is enabled and `OTEL_LOG_USER_PROMPTS` is off. A #104
 feature-branch closeout does not claim that live result or main integration.
+
+## D063: Issue #90 user-controlled retention mutation uses the #89 catalog
+
+Status: Accepted (2026-07-20)
+
+Issue #90 adds one user-controlled mutation slice for `pin`, `unpin`, and
+`delete_now` over the existing Issue #89 retention catalog. It does not create
+a parallel lifecycle state machine, catalog, worker, queue entity, or physical
+deletion path. The Local Monitor retention mutation application service owns
+exact target resolution, deterministic preview, explicit confirmation,
+idempotency, and append-only audit; the existing #89 worker owns physical
+deletion.
+
+- Session targets are restricted in v1 to the exact
+  `session_event_content.source_item_id -> session_events.event_id` join whose
+  persisted `session_id` equals the requested Session ID and passes the #89
+  ownership proof. All other store kinds are item-target-only. Repository,
+  workspace, trace, path, timestamp, prompt, proximity, and query matching
+  never select a mutation target.
+- `delete_now` supersedes a pinned item only through one preview and a bound
+  explicit confirmation. The confirmed transaction clears the derived pin
+  through the existing `retained_by_policy -> expiring` seam and then executes
+  only the sequential #89 forward transitions to `deletion_queued`; it never
+  introduces a new lifecycle edge or performs a separate unpin round trip.
+
+The complete public contract is [retention mutation](specifications/interfaces/retention-mutation.md).

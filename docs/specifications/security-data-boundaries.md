@@ -670,6 +670,40 @@ Route boundary:
   keys must not be logged, stored in analysis events/results, exposed in UI, or
   included in repository-safe summaries.
 
+## Issue #90 Retention Mutation No-Leak Boundary
+
+The versioned `/api/retention/v1/*` surface is a sanitized local-user
+mutation/read surface over the #89 catalog. Preview, confirmation, mutation,
+status, item, and history responses use `Cache-Control: no-store`. The
+following are forbidden in preview content, confirmation/audit content, logs,
+history DTOs, cursors, screenshots/evidence, committed fixtures, and
+repository-safe handoff material:
+
+- raw bodies, prompt/response content, system content, tool arguments/results,
+  or raw payload fragments;
+- credentials, secrets, authorization material, or confirmation token values;
+- absolute or relative paths, private locators, filesystem names, database
+  primary keys, or source-row identifiers;
+- prompt-derived labels, user-entered identifying text, PII, full exceptions,
+  provider text, or rejected request values.
+
+Only opaque retention item IDs, existing local Session IDs, fixed store kinds,
+fixed lifecycle/error/completion codes, safe digests, and sanitized timestamps
+may identify data in these DTOs. The confirmation token is permitted only in
+the dedicated confirmation-issue response and the immediately following
+mutation request body; it is never a preview, audit, history, log, cursor, or
+evidence value. Persistence stores only SHA-256 over the exact full ASCII token
+string; the plaintext token, nonce/secret material, and token value are never
+persisted or logged.
+
+The actor label is the server-derived fixed value `local-user`; the client
+cannot provide, override, or cause the current OS user name to appear in an
+audit event or response. The exact `rid1_...` workflow idempotency key is not a
+secret credential and is the explicit exception: it is stored and returned
+only in the persisted audit/history read model. It is never logged and is not
+emitted by any other DTO, diagnostic, screenshot, evidence record, or
+repository-safe output.
+
 ## Session Workspace Boundary
 
 Issue #51 Session ingestion remains inside the installed Local Monitor's

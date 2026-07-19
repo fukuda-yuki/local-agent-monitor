@@ -180,6 +180,15 @@ to Config CLI and no new Local Monitor route.
   90 日で expiry。Retention catalog v1 が item-level physical cleanup を所有し、
   pin / delete-now は Issue #90 に残す。
 
+### Retention Mutation Application Service
+
+- The Local Monitor contains the Issue #90 retention mutation application
+  service and its versioned `/api/retention/v1/*` API surface.
+- It resolves exact Session/item targets through the #89 catalog, owns preview,
+  confirmation, idempotency, and append-only audit orchestration, and hands
+  physical deletion to the existing #89 worker. It adds no parallel lifecycle,
+  queue entity, or deletion path.
+
 ### Candidate Pipeline
 
 Trace 由来の deterministic pipeline は以下を生成する。

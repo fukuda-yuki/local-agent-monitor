@@ -405,8 +405,8 @@ thresholds, units, configuration names, and HTTP status mapping remain unchanged
 
 Raw event content receives `expires_at = captured_at + 90 days`. Expiry changes
 the content read to `410` / `expired_pending_deletion`; the row remains stored.
-Automatic physical deletion, pin, and delete-now are Issue #57 scope. The full
-write/read shape is defined in
+Automatic physical deletion is Issue #89 scope; user-controlled pin, unpin, and
+delete-now are Issue #90 scope. The full write/read shape is defined in
 [Canvas Session workspace](../interfaces/canvas-session-workspace.md).
 
 ### Source capability semantic contract v1
@@ -525,6 +525,40 @@ not an extension of `RawTelemetryStore.cs` and no source creates a parallel
 catalog. Catalog/source SQLite writes and deletes share a connection and
 transaction; file producers receive the catalog database by explicit injected
 configuration and fail closed before creating raw files when it is unavailable.
+
+### Issue #90 lifecycle interaction
+
+Issue #90 uses the existing catalog policy seam and adds no lifecycle edge,
+parallel state machine, worker, queue entity, or physical-delete path. `pin`
+changes `expiring` to `retained_by_policy`; `unpin` changes the derived pin
+state back through the same seam. `pin_state` is derived from lifecycle state:
+`retained_by_policy` is `pinned`, and every other represented catalog item is
+`unpinned`; 90-B stores no second pin column.
+
+The mutation application service separates `PREVIEW-STAGE` rejections from
+`COMMIT-STAGE` outcomes. Preview is deterministic and read-only. A confirmed
+mutation evaluates the exact target set again and commits all allowed changes
+or none. For an expired-at-unpin result, the service recalculates expiry from
+the original `captured_at`, recorded `policy_id`, and recorded
+`policy_version`; it never starts a new TTL. It irreversibly denies reads and
+executes the allowed #89 transitions sequentially inside one `BEGIN IMMEDIATE`
+transaction: `retained_by_policy -> expiring` when the item is pinned, then
+`expiring -> expired_pending_deletion`, then
+`expired_pending_deletion -> deletion_queued`. An expiring item uses the final
+two transitions. Delete-now uses the same guarded sequence, including the pin
+seam when needed. Each executed transition increments the item revision exactly
+once, and the result version is calculated from the final revisions. An item
+already in `deletion_queued` is an actionable idempotent result with no second
+transition.
+
+The 90-B persistence deliverables are restart-safe preview records,
+confirmation bindings with only the SHA-256 hash of the full token, per-step
+workflow idempotency rows, operation/result receipts, and append-only audit
+events. State, read denial, sequential #89 transitions, confirmation
+consumption, idempotency result, operation correlation, and audit are one
+all-or-none durable transaction. The existing #89 worker alone performs later
+physical deletion; worker or adapter failure is observed through the existing
+item state and retry metadata and cannot restore readability.
 
 The ownership key is exactly `(store_instance_id, store_kind, source_item_id)`.
 An internal 32-byte ownership receipt uses SHA-256 over length-framed binary

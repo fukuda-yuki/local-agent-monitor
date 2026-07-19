@@ -496,6 +496,16 @@ is a frozen lossy projection: `expiring` and `retained_by_policy` map to
 existing enum, status codes, JSON property names, and exact UTF-8 404/410 bytes
 remain unchanged. Pin, unpin, and delete-now remain Issue #90 scope.
 
+## Issue #90 Compatibility Note
+
+Issue #90 adds no field, enum, status code, or route change to workspace v1.
+Its catalog projection maps readable unpinned `expiring` and readable pinned
+`retained_by_policy` items to the existing available/expiring projection;
+workspace v1 does not reveal pin state. A confirmed `delete_now` immediately
+projects the selected denied content through the exact existing `410` contract
+after the atomic catalog commit, before the #89 worker performs physical
+deletion. The existing workspace v1 response bytes remain frozen.
+
 ## OTel Enrichment
 
 OTel enrichment runs after the existing monitor projection and uses a dedicated
