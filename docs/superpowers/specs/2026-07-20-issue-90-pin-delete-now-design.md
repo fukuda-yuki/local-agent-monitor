@@ -1130,6 +1130,18 @@ as follows:
     entity or queue request ID.
 15. `pin_state` is a derived projection of lifecycle state. 90-B stores no
     second pin column.
+16. The comment forbidden-content classes are pinned as a closed deterministic
+    registry rather than open-ended prose: the URL class is any substring
+    matching the RFC 3986 scheme pattern (one ASCII letter, then letters,
+    digits, `+`, `.`, or `-`, then `:` followed by a non-space character), any
+    `://` substring, or any case-insensitive `www.` substring; credential
+    markers are the case-insensitive substrings `password`, `passwd`, `pwd`,
+    `secret`, `token`, `apikey`, `api_key`, `authorization`, `bearer`, and
+    `credential`; database-key markers are the case-insensitive substrings
+    `rowid`, `primary key`, `primary_key`, and `autoincrement` plus the opaque
+    ID prefixes `rpv1_`, `rcid1_`, `rt90v1_`, `rid1_`, `rae1_`, and `rhc1_`;
+    path separators are `/` and `\`. Validation is fail-closed: a matching
+    comment is rejected, never partially accepted or redacted.
 
 These choices are preparation for 90-A. Until canonical specification changes
 are approved, the current canonical documents remain the implementation
