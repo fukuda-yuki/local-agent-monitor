@@ -66,14 +66,15 @@ The following values are new Issue #90 decisions:
 | Exclusion reason registry | Exactly `missing_ownership_proof` for computable per-item counts; structural exclusions are fixed statements, not counted codes. |
 | Store-kind summary | At most the five #89 store kinds, ordered by the closed registry order in the #89 design. |
 | Active-conflict registry | Exactly `active_read_lease`, `active_operation_lease`, `active_deletion_lease`, and `active_delete_intent`. |
-| Confirmation lifetime | Exactly 5 minutes from preview creation. Issuing a token never extends the preview expiry. |
+| Confirmation lifetime | Exactly 5 minutes from preview creation. Issuing or reissuing a token never extends the preview expiry. |
 | Preview ID | `rpv1_` plus 22 unpadded base64url characters encoding 16 server-random bytes. |
 | Confirmation ID | `rcid1_` plus 22 unpadded base64url characters encoding 16 server-random bytes. |
 | Confirmation token | `rt90v1_` plus 22 unpadded base64url nonce characters, `_`, and 43 unpadded base64url secret characters. |
 | Server nonce | Exactly 16 cryptographically secure random bytes per issued token; a collision is rejected rather than retried. |
-| Token secret | Exactly 32 cryptographically secure random bytes; the plaintext token/secret is never persisted, and the persisted token hash is SHA-256 over the exact full ASCII token string. |
+| Token secret | Exactly 32 cryptographically secure random bytes; the plaintext token/secret is never persisted, the persisted token hash is SHA-256 over the exact full ASCII token string, and at most one unconsumed token exists for a preview. |
 | Idempotency key | `rid1_` plus 43 unpadded base64url characters encoding 32 client-generated random bytes; total length is 48 ASCII characters. One client-generated workflow key is shared by preview, confirmation issue, and mutation; records are still separated by step. |
 | Idempotency lifetime | 365 days from first durable record creation; after expiry the key is permanently rejected and never reused. |
+| Confirmation-issue retry exception | A same-key, byte-identical `confirmation_issue` retry atomically invalidates any prior unconsumed token for that preview and issues a fresh token and `confirmation_id` with a new nonce/secret and stored hash. The original preview expiry remains fixed; a consumed token returns the stored mutation linkage under `retention_confirmation_consumed` and never issues another token. |
 | Pin-state source of truth | `pin_state` is derived: `pinned` iff lifecycle state is `retained_by_policy`; otherwise a represented catalog item is `unpinned`. 90-B stores no second pin column. |
 | Comment | Null or 1–256 Unicode scalar values, NFC-normalized, with no control character, CR/LF, URL, path separator, credential marker, database-key marker, or token value. |
 | Actor label | Server-derived fixed value `local-user`; the client cannot supply or override it. |
@@ -200,7 +201,11 @@ mutation success.
 An unknown Session is a `404` `retention_target_not_found`, not an empty
 Session. An exact item with a denied, deleting, deleted, or otherwise
 incompatible state is not an empty target; it receives an actionable preview
-with `mutation_allowed = false` and its fixed precondition code.
+with `mutation_allowed = false` and its fixed precondition code. A
+`delete_now` preview over an already-`deletion_queued` item is instead
+actionable-idempotent: it has `mutation_allowed = true`, `rejection_code =
+null`, can issue a confirmation, and commits the
+`retention_delete_already_queued` result without a second state transition.
 
 ## State model and transition/precondition matrix
 
@@ -209,48 +214,79 @@ with `mutation_allowed = false` and its fixed precondition code.
 expiry as historical metadata while automatic expiry is disabled. It does not
 create a new policy or TTL. `expiring` is the unpinned/readable state.
 
-The tables below are the complete mutation contract. A Session command is
-atomic across all selected items: every item must be allowed or an explicit
-idempotent case for that operation. One rejected item prevents partial
-application to the other items.
+The tables below are the complete mutation contract, split by reachability
+stage. A Session command is atomic across all selected items: every item must
+be allowed or an explicit idempotent case for that operation. One rejected item
+prevents partial application to the other items. The effect columns are, in
+order, token consumed / audit / idempotency / state change.
 
-| Operation | Current state | Preconditions and result | New state / derived pin state | Token / idempotency / audit / state |
+### PREVIEW-STAGE rejections
+
+These are lifecycle states that the preview rejects before a token can exist.
+The preview returns HTTP `200` with `mutation_allowed = false` and the row's
+fixed `rejection_code`. A confirmation-issue attempt against that preview
+returns HTTP `409` with the same code; no confirmation token exists, so the
+mutation route cannot reach these rows.
+
+| Operation | Preview current state | Fixed `rejection_code` | Preview / confirmation-issue result | Token consumed / audit / idempotency / state change |
 | --- | --- | --- | --- | --- |
-| `pin` | `expiring` | Exact target, revision, and readable catalog proof match. | `retained_by_policy`; derived pin `pinned`; automatic expiry stops; revision increments. | Yes / Yes / Yes / Yes |
-| `pin` | `retained_by_policy` | Idempotent no-op; original policy/capture values remain unchanged. | `retained_by_policy`; derived pin `pinned`; revision unchanged. | Yes / Yes / Yes / No |
-| `pin` | `expired_pending_deletion` or `deletion_queued` or `deletion_failed` | Reject read-denied content with `retention_pin_read_denied`; never restore readability. | Unchanged. | No / Yes (fixed rejection result) / No / No |
-| `pin` | `deleting` | Reject with `retention_pin_deleting`; the #89 lease and forward cursor remain authoritative. | Unchanged. | No / Yes (fixed rejection result) / No / No |
-| `pin` | `deleted` | Reject with `retention_pin_deleted`; tombstone remains terminal. | Unchanged. | No / Yes (fixed rejection result) / No / No |
-| `pin` | `expiring` but `expires_at <= now` at commit | Purely reject with `retention_pin_expired` (HTTP 409). Leave the item `expiring`; the #89 own scan performs denial/queueing on its normal path. | Unchanged; derived pin `unpinned`. | No / Yes (fixed rejection result) / No / No |
-| `unpin` | `retained_by_policy` and original policy expiry is in the future | Recalculate `expires_at = original captured_at + recorded policy/version TTL`; do not use unpin time. | `expiring`; derived pin `unpinned`; revision increments. | Yes / Yes / Yes / Yes |
-| `unpin` | `retained_by_policy` and recalculated expiry `<= now` | Directly set irreversible read denial and transition to #89 `deletion_queued` in the same transaction. No readable interval is created. | `deletion_queued`; derived pin `unpinned`; completion `retention_unpin_expired_queued`. | Yes / Yes / Yes / Yes |
-| `unpin` | `expiring` and `expires_at > now` | Idempotent no-op; no TTL reset and no revision change. | `expiring`; derived pin `unpinned`. | Yes / Yes / Yes / No |
-| `unpin` | `expiring` and `expires_at <= now` | Apply #89 expiry/read-denial and transition to `deletion_queued` directly rather than returning readable. | `deletion_queued`; derived pin `unpinned`; completion `retention_unpin_expired_queued`. | Yes / Yes / Yes / Yes |
-| `unpin` | `expired_pending_deletion` or `deletion_queued` or `deletion_failed` | Reject with `retention_unpin_read_denied`; no retry or resurrection is created by #90. | Unchanged. | No / Yes (fixed rejection result) / No / No |
-| `unpin` | `deleting` | Reject with `retention_unpin_deleting`; #89 forward recovery continues. | Unchanged. | No / Yes (fixed rejection result) / No / No |
-| `unpin` | `deleted` | Reject with `retention_unpin_deleted`; tombstone remains terminal. | Unchanged. | No / Yes (fixed rejection result) / No / No |
-| `delete_now` | `expiring` | Confirmed explicit deletion sets read denial and transitions to #89 `deletion_queued`. | `deletion_queued`; derived pin `unpinned`; completion `retention_delete_queued`. | Yes / Yes / Yes / Yes |
-| `delete_now` | `retained_by_policy` | Confirmed explicit deletion atomically clears the derived pin, sets read denial, and transitions to #89 `deletion_queued`. No separate unpin round-trip is allowed. | `deletion_queued`; derived pin `unpinned`; completion `retention_delete_now_superseded_pin`. | Yes / Yes / Yes / Yes |
-| `delete_now` | `expired_pending_deletion` | Confirmed explicit deletion completes the existing #89 forward handoff to `deletion_queued`. | `deletion_queued`; derived pin `unpinned`; completion `retention_delete_queued`. | Yes / Yes / Yes / Yes |
-| `delete_now` | `deletion_queued` | Idempotent already-queued result after a matching confirmation; no second state transition or queue entity. | Unchanged; completion `retention_delete_already_queued`. | Yes / Yes / Yes / No |
-| `delete_now` | `deleting` | Reject with `retention_delete_already_deleting`; the existing #89 lease/cursor is not touched. | Unchanged. | No / Yes (fixed rejection result) / No / No |
-| `delete_now` | `deleted` | Reject with `retention_delete_already_deleted`; no resurrection or second receipt. | Unchanged. | No / Yes (fixed rejection result) / No / No |
-| `delete_now` | `deletion_failed` | Reject with `retention_delete_failed`; only the #89 retry eligibility path can requeue the item. | Unchanged. | No / Yes (fixed rejection result) / No / No |
+| `pin` | `expired_pending_deletion`, `deletion_queued`, or `deletion_failed` | `retention_pin_read_denied` | `200` preview rejection / `409` confirmation-issue rejection | No token / No / Yes (fixed rejection result) / No |
+| `pin` | `deleting` | `retention_pin_deleting` | `200` preview rejection / `409` confirmation-issue rejection | No token / No / Yes (fixed rejection result) / No |
+| `pin` | `deleted` | `retention_pin_deleted` | `200` preview rejection / `409` confirmation-issue rejection | No token / No / Yes (fixed rejection result) / No |
+| `unpin` | `expired_pending_deletion`, `deletion_queued`, or `deletion_failed` | `retention_unpin_read_denied` | `200` preview rejection / `409` confirmation-issue rejection | No token / No / Yes (fixed rejection result) / No |
+| `unpin` | `deleting` | `retention_unpin_deleting` | `200` preview rejection / `409` confirmation-issue rejection | No token / No / Yes (fixed rejection result) / No |
+| `unpin` | `deleted` | `retention_unpin_deleted` | `200` preview rejection / `409` confirmation-issue rejection | No token / No / Yes (fixed rejection result) / No |
+| `delete_now` | `deleting` | `retention_delete_already_deleting` | `200` preview rejection / `409` confirmation-issue rejection | No token / No / Yes (fixed rejection result) / No |
+| `delete_now` | `deleted` | `retention_delete_already_deleted` | `200` preview rejection / `409` confirmation-issue rejection | No token / No / Yes (fixed rejection result) / No |
+| `delete_now` | `deletion_failed` | `retention_delete_failed` | `200` preview rejection / `409` confirmation-issue rejection | No token / No / Yes (fixed rejection result) / No |
 
-`deletion_queued` in the table means the existing #89 item-state transition;
-there is no #89 queue-request entity, outbox row, or queue request ID. #90
+### COMMIT-STAGE outcomes
+
+These rows are reachable only with a valid bound token issued from a preview
+with `rejection_code = null`. Committed successes and no-ops are shown with
+their completion codes. A state drift after issuance is checked first by the
+binding/version/conflict checks and returns the appropriate
+`retention_confirmation_*_changed` code; it never falls through to a
+transition code in this table.
+
+| Operation | Commit current state | Preconditions and result | New state / derived pin state | Completion / token consumed / audit / idempotency / state change |
+| --- | --- | --- | --- | --- |
+| `pin` | `expiring` | Exact target, revision, and readable catalog proof match. | `retained_by_policy`; derived pin `pinned`; automatic expiry stops; revision increments. | `retention_pin_applied` / Yes / Yes / Yes / Yes |
+| `pin` | `retained_by_policy` | Idempotent no-op; original policy/capture values remain unchanged. | `retained_by_policy`; derived pin `pinned`; revision unchanged. | `retention_pin_noop` / Yes / Yes / Yes / No |
+| `pin` | `expiring` but `expires_at <= now` at commit | Clock-only race: pure rejection with `retention_pin_expired` (HTTP `409`). Leave the item `expiring`; the #89 own scan performs denial/queueing on its normal path. | Unchanged; derived pin `unpinned`. | Rejection / No / No / Yes (fixed rejection result) / No |
+| `unpin` | `retained_by_policy` and original policy expiry is in the future | Recalculate `expires_at = original captured_at + recorded policy/version TTL`; do not use unpin time. | `expiring`; derived pin `unpinned`; revision increments. | `retention_unpin_applied` / Yes / Yes / Yes / Yes |
+| `unpin` | `retained_by_policy` and recalculated expiry `<= now` | Execute the allowed #89 transitions sequentially and atomically: `retained_by_policy -> expiring` (pin seam), then `expiring -> expired_pending_deletion`, then `expired_pending_deletion -> deletion_queued`. No readable interval is created. | `deletion_queued`; derived pin `unpinned`. | `retention_unpin_expired_queued` / Yes / Yes / Yes / Yes |
+| `unpin` | `expiring` and `expires_at > now` | Idempotent no-op; no TTL reset and no revision change. | `expiring`; derived pin `unpinned`. | `retention_unpin_noop` / Yes / Yes / Yes / No |
+| `unpin` | `expiring` and `expires_at <= now` | Execute the allowed #89 transitions sequentially and atomically: `expiring -> expired_pending_deletion -> deletion_queued`; do not return the item to a readable state. | `deletion_queued`; derived pin `unpinned`. | `retention_unpin_expired_queued` / Yes / Yes / Yes / Yes |
+| `delete_now` | `expiring` | Execute the allowed #89 transitions sequentially and atomically: `expiring -> expired_pending_deletion -> deletion_queued`, with irreversible read denial. | `deletion_queued`; derived pin `unpinned`. | `retention_delete_queued` / Yes / Yes / Yes / Yes |
+| `delete_now` | `retained_by_policy` | Clear the derived pin through the allowed seam, then execute the allowed #89 transitions sequentially and atomically: `retained_by_policy -> expiring -> expired_pending_deletion -> deletion_queued`. No separate unpin round-trip is allowed. | `deletion_queued`; derived pin `unpinned`. | `retention_delete_now_superseded_pin` / Yes / Yes / Yes / Yes |
+| `delete_now` | `expired_pending_deletion` | Complete the allowed #89 forward handoff atomically: `expired_pending_deletion -> deletion_queued`. | `deletion_queued`; derived pin `unpinned`. | `retention_delete_queued` / Yes / Yes / Yes / Yes |
+| `delete_now` | `deletion_queued` | The preview already showed this state as actionable-idempotent. Confirmed result is idempotent; no second state transition or queue entity. | Unchanged; derived pin `unpinned`. | `retention_delete_already_queued` / Yes / Yes / Yes / No |
+
+Whenever a commit row ends in `deletion_queued`, that label means the final
+state after only these #89-allowed guarded transitions, never a new direct
+#90 lifecycle edge. For a pinned item the sequence is
+`retained_by_policy -> expiring` (the pin seam), then
+`expiring -> expired_pending_deletion`, then
+`expired_pending_deletion -> deletion_queued`; for an expiring item it is the
+last two steps. Each executed transition increments the item revision exactly
+once, and `result_version` is computed from the final revisions. These
+sequential updates occur inside the one `BEGIN IMMEDIATE` transaction, as in
+the existing #89 practice of advancing multiple guarded steps atomically.
+There is no #89 queue-request entity, outbox row, or queue request ID. #90
 never jumps directly to `deleted`, cancels `deleting`, or creates another
 cleanup worker. Pin, unpin, and delete-now do not operate on `not_captured` or
 `mixed`, because those are not persisted item states.
 
-Every row assumes a structurally valid, bound confirmation token. A pure
-precondition rejection stores its fixed error response in the mutation-step
-idempotency record but does not consume the token, write audit, or change item
-state. The unpin-expired rows are the intentional asymmetry: they are committed
-successes with token consumption, idempotency, audit, and state transition.
-The pin expiry race is a pure rejection; it leaves the item expiring for the
-#89 scan to handle, allocates no `operation_id`, and exposes only its fixed
-HTTP error plus stored mutation-step rejection result.
+For a PREVIEW-STAGE row, there is no token to consume and no mutation audit or
+state change; only the fixed preview/confirmation-issue rejection result is
+idempotently stored. For a COMMIT-STAGE pure precondition rejection, the token
+is not consumed and no audit or state change occurs, while the mutation-step
+rejection result is stored. The unpin-expired rows are committed successes,
+not preview rejections. The pin expiry race is the only commit-time transition
+rejection and leaves the item expiring for the #89 scan, allocates no
+`operation_id`, and exposes only its fixed HTTP error plus stored mutation-step
+rejection result.
 
 ## Deterministic preview contract
 
@@ -395,10 +431,10 @@ rt90v1_<base64url-no-padding-16-byte-nonce>_<base64url-no-padding-32-byte-secret
 The server generates the nonce and secret with its cryptographically secure
 random source. It checks the 16-byte nonce for an existing active nonce in the
 same catalog; a collision returns `retention_confirmation_generation_failed`
-and no token is issued. The stored token value is only SHA-256 over the exact
-full ASCII token string bytes, including the `rt90v1_` prefix and both
-separators. The server never logs, hashes into a diagnostic, or persists the
-plaintext token or secret by itself.
+and no token is issued. The persisted token representation is only SHA-256
+over the exact full ASCII token string bytes, including the `rt90v1_` prefix
+and both separators. The server never logs, hashes into a diagnostic, or
+persists the plaintext token or secret by itself.
 
 The token binds exactly these fields:
 
@@ -414,18 +450,36 @@ The token binds exactly these fields:
 10. the exact workflow `Idempotency-Key` value shared by all three POST steps;
 11. the selected `reason_code` and SHA-256 digest of the normalized comment.
 
-The token is single-consumption. The catalog marks it consumed in the same
-durable transaction as the mutation, mutation-step idempotency result, audit
-event, and any #89 `deletion_queued` item-state transition. A transaction
-rollback leaves the token unconsumed. A committed result followed by a lost
-response is recovered through the same workflow key and mutation step; the
-token itself is then rejected as consumed.
+The token is single-consumption, and at most one unconsumed token binding
+exists for a preview at any time. Every successful issue or reissue atomically
+enforces that singleton binding. The catalog marks a token consumed in the
+same durable transaction as the mutation, mutation-step idempotency result,
+audit event, and any #89 `deletion_queued` item-state transition. A transaction
+rollback leaves the token unconsumed.
+
+A same-key, byte-identical `confirmation_issue` retry is the single exception
+to exact-result replay. Because the plaintext token/secret is not persisted,
+the exact token response cannot be reconstructed after a lost response or
+restart. The retry therefore atomically invalidates any prior unconsumed token
+binding for that preview, generates a fresh nonce and secret, stores the new
+full-token hash and `confirmation_id`, and returns a fresh token. This
+reissue-with-invalidation preserves the at-most-one-consumable-token rule. It
+reuses the original preview's `confirmation_expires_at`; it never extends the
+five-minute window. If the prior token was already consumed, the retry returns
+the stored mutation linkage under `retention_confirmation_consumed` and never
+issues a new token or confirmation ID.
+
+A token invalidated by this reissue is no longer an active binding and is
+rejected as `retention_confirmation_invalid`; only the fresh response token
+can be committed. A committed mutation response followed by a lost response
+is still recovered through the same workflow key and mutation step, as an
+exact stored mutation result, and the consumed token is not reissued.
 
 The closed reject-and-republish registry is:
 
 | Condition | Fixed code | Republish rule |
 | --- | --- | --- |
-| Token format, digest, nonce, or stored token hash is invalid | `retention_confirmation_invalid` | Discard the token and create a new preview/key. |
+| Token format, digest, nonce, or stored token hash is invalid, including a token invalidated by confirmation-issue reissue | `retention_confirmation_invalid` | Discard the token and create a new preview/key. |
 | Preview ID or stored preview cannot be found | `retention_preview_not_found` | Create a new preview/key. |
 | Preview or confirmation is past the exact five-minute expiry | `retention_confirmation_expired` or `retention_preview_expired` | Create a new preview/key; issuance never extends expiry. |
 | Submitted operation, scope, target kind, or target ID does not equal the binding | `retention_confirmation_binding_mismatch` | Create a new preview/key. |
@@ -434,15 +488,23 @@ The closed reject-and-republish registry is:
 | Retention state, policy, captured-at basis, or expiry changed | `retention_confirmation_retention_changed` | Create a new preview/key. |
 | Any expected catalog/pin/revision vector changed | `retention_confirmation_version_changed` | Create a new preview/key. |
 | An active cleanup conflict was added, removed, or changed | `retention_confirmation_conflict_changed` | Create a new preview/key. |
-| Token was committed by another request | `retention_confirmation_consumed` | Use the stored idempotency result if the same key is available; otherwise create a new preview/key. |
+| Token was committed by another request | `retention_confirmation_consumed` | Return the stored mutation linkage/result when available; never issue a new token for the consumed binding. A new preview/key is required for a new operation. |
 
-These are the only token validation outcomes. A precondition rejection after
-successful binding uses the transition error code in the mutation registry;
-it never silently changes the target or republishes a token.
+These are the only token validation outcomes. After successful binding, only
+the clock-only `retention_pin_expired` race can produce a transition rejection
+at commit; all other state drift is reported by the appropriate
+`retention_confirmation_*_changed` code before the transition matrix is
+evaluated. No failure silently changes the target or republishes a token.
 
 The confirmation-issue route validates the supplied `preview_digest` against
 the stored preview before issuing a token. A mismatch is exactly
 `retention_preview_digest_mismatch` and is never emitted by the mutation route.
+When the stored preview has a non-null `rejection_code`, the issue attempt
+returns HTTP `409` with that same preview-stage code and issues no token. When
+the preview is eligible, the same-key, byte-identical retry rule above applies:
+an unconsumed binding is invalidated and reissued with a fresh token, while a
+consumed binding returns its stored mutation linkage under
+`retention_confirmation_consumed`.
 On the mutation route, a structurally malformed or cryptographically invalid
 token is exactly `retention_confirmation_invalid`; the operation/scope/target
 echo fields below make a valid-token binding mismatch a separate reachable
@@ -459,10 +521,11 @@ Sessions, processes, or users.
 The catalog stores durable idempotency rows keyed by
 `(SHA-256(exact ASCII Idempotency-Key bytes), step)`, where `step` is exactly
 `preview`, `confirmation_issue`, or `mutation`. Each row contains the request
-fingerprint, step-specific result (success or fixed rejection), created time,
-expiry time, and completion code. The workflow key's 365-day lifetime begins
-with its first durable step record; expiry leaves a non-reusable tombstone for
-the key and returns `retention_idempotency_expired` for every step.
+fingerprint, step-specific result metadata (success or fixed rejection),
+created time, expiry time, and completion code. Result metadata never contains
+the plaintext token. The workflow key's 365-day lifetime begins with its first
+durable step record; expiry leaves a non-reusable tombstone for the key and
+returns `retention_idempotency_expired` for every step.
 
 For idempotency comparison, the canonical request bytes are the JCS UTF-8
 bytes of the validated request body after the pinned NFC comment normalization:
@@ -474,10 +537,19 @@ bytes of the validated request body after the pinned NFC comment normalization:
 
 The same workflow key plus the same step plus byte-identical canonical request
 returns the exact stored result without another state transition or audit
-event. The same workflow key plus the same step plus any different canonical
-request returns `retention_idempotency_conflict`. Different steps sharing the
-same workflow key are never compared and never conflict. A fresh workflow
-after a stale/expired/conflict rejection uses a new key.
+event, except for the single `confirmation_issue` replay rule. For that step,
+the request is still accepted as the same idempotent request, but a prior
+unconsumed binding is atomically invalidated and a fresh token and
+`confirmation_id` are issued with a new nonce/secret and stored hash. The
+original preview expiry is reused. If the prior binding was consumed, the
+stored mutation linkage is returned under `retention_confirmation_consumed`
+and no token is issued. This exception is required because hash-only token
+persistence cannot reconstruct the plaintext response after a lost response
+or restart, and invalidation preserves at most one consumable token per
+preview. The same workflow key plus the same step plus any different
+canonical request returns `retention_idempotency_conflict`. Different steps
+sharing the same workflow key are never compared and never conflict. A fresh
+workflow after a stale/expired/conflict rejection uses a new key.
 
 The token binding field named `workflow_idempotency_key` means the exact full
 ASCII `Idempotency-Key` header string used for the workflow. Persistence may
@@ -561,15 +633,25 @@ of the following or none of them. #90 does not add an outbox entity for the
 
 1. the expected-revision check for every exact target item;
 2. the pin state and lifecycle mutation, including the `retained_by_policy`
-   to `expiring` unpin seam;
+   to `expiring` pin seam and only the #89-allowed sequential forward steps;
 3. the original-capture/policy-based expiry recalculation;
-4. irreversible `read_denied_at` and the #89 forward item-state transition to
+4. irreversible `read_denied_at` and the #89 forward item-state transitions to
    `deletion_queued` for an expired-at-unpin or delete-now result;
 5. the #90 `operation_id` and the exact count/state transitions correlated to
    that operation; #89 physical progress remains its item states;
 6. confirmation-token consumption;
 7. the idempotency row and exact result DTO;
 8. the append-only audit event.
+
+The #90 mutation transaction never creates a new lifecycle edge. For an
+expired unpin or delete-now, it executes the guarded #89 transitions
+sequentially inside this one `BEGIN IMMEDIATE` transaction: a pinned item uses
+`retained_by_policy -> expiring` (the seam), then
+`expiring -> expired_pending_deletion`, then
+`expired_pending_deletion -> deletion_queued`; an expiring item uses the last
+two steps. Each executed transition increments the revision once, and
+`result_version` is calculated from the final revisions. This matches the
+existing #89 practice of advancing multiple guarded steps atomically.
 
 For a Session target, all selected items are checked and committed in the same
 transaction. There is no partial pin, unpin, or delete-now result. SQLite
@@ -606,10 +688,14 @@ The #90 mutation/read surface is:
 | `GET /api/retention/v1/mutations/{operationId}` | Exact opaque operation ID. | `RetentionMutationStatusResponse`. |
 
 `RetentionConfirmationIssueRequest` has exactly `preview_id` and
-`preview_digest`. `RetentionConfirmationIssueResponse` has exactly
-`schema_version`, `confirmation_id`, `confirmation_token`, and
-`confirmation_expires_at`. `RetentionMutationConfirmRequest` has exactly
-`confirmation_token`, `operation`, `scope`, `target_kind`, and `target_id`.
+`preview_digest`. A successful fresh or reissued
+`RetentionConfirmationIssueResponse` has exactly `schema_version`,
+`confirmation_id`, `confirmation_token`, and `confirmation_expires_at`; a
+consumed-preview retry returns the stored mutation linkage under
+`retention_confirmation_consumed` and is not a token response. No response
+ever persists or replays the plaintext token. `RetentionMutationConfirmRequest`
+has exactly `confirmation_token`, `operation`, `scope`, `target_kind`, and
+`target_id`.
 The latter four are explicit echoes of the intended command and are checked
 against the token binding; they are not client-authoritative target selectors.
 
@@ -650,14 +736,25 @@ ID is exposed or persisted by #90.
 
 ### HTTP status mapping
 
+The stage classification is normative: PREVIEW-STAGE rejection codes are
+returned by the preview as HTTP `200` with `mutation_allowed = false`, and by
+confirmation issue as HTTP `409` with no token. COMMIT-STAGE codes require a
+valid bound token; they are either mutation-time HTTP `409` outcomes, such as
+the clock-only `retention_pin_expired` race and confirmation binding/version
+failures, or HTTP `200` committed success/no-op/already-queued/replay results.
+The consumed-binding class is the one explicit cross-route case: a consumed
+preview retry or a token committed by another request returns HTTP `409`
+`retention_confirmation_consumed` and resolves to the stored mutation
+linkage, never a new token.
+
 | HTTP status | Conditions |
 | --- | --- |
-| `200` | Read, preview, confirmation issue, committed mutation, no-op mutation, already-queued result, or idempotent replay. A committed delete-now response means read denial and durable queue handoff, not physical completion. |
+| `200` | Read; every preview, including a PREVIEW-STAGE rejection; fresh or reissued confirmation issue; COMMIT-STAGE committed success, no-op, actionable-idempotent `retention_delete_already_queued` result, or idempotent mutation replay. A committed delete-now response means read denial and durable queue handoff, not physical completion. |
 | `400` | `retention_mutation_request_invalid`, `retention_idempotency_key_invalid`, or `retention_history_cursor_invalid`. |
 | `401` | `retention_confirmation_invalid` when the token cannot be structurally or cryptographically validated. |
 | `404` | `retention_target_not_found`, `retention_preview_not_found`, or `retention_operation_not_found`. |
-| `409` | Any stale/expired/consumed/binding/precondition/idempotency conflict code, including confirmation-issue `retention_preview_digest_mismatch`, except the committed `retention_delete_already_queued` result, plus `retention_target_empty` or `retention_target_not_applicable`. |
-| `413` | `retention_mutation_target_limit_exceeded`. |
+| `409` | Confirmation-issue PREVIEW-STAGE/empty/expiry conflicts (`retention_target_empty`, `retention_target_not_applicable`, `retention_preview_expired`, and the fixed transition codes in the PREVIEW-STAGE table); confirmation-issue `retention_preview_digest_mismatch`; the consumed-binding `retention_confirmation_consumed`; workflow-key conflicts; or COMMIT-STAGE `retention_confirmation_expired`, `retention_confirmation_binding_mismatch`, `retention_confirmation_target_changed`, `retention_confirmation_pin_changed`, `retention_confirmation_retention_changed`, `retention_confirmation_version_changed`, `retention_confirmation_conflict_changed`, or `retention_pin_expired`. `retention_delete_already_queued` is the committed HTTP `200` exception. |
+| `413` | PREVIEW-STAGE `retention_mutation_target_limit_exceeded`. |
 | `503` | `retention_confirmation_generation_failed`, `retention_mutation_transaction_failed`, `retention_audit_write_failed`, or inherited `retention_catalog_unavailable`. |
 
 All error bodies are the exact one-property JSON shape
@@ -669,50 +766,52 @@ and `no-store`.
 
 ### New mutation diagnostic/error registry
 
-The following is the complete new #90 registry. It does not reuse a code from
-the #89 registry, including `retention_lease_conflict`,
+The following is the complete new #90 registry. Each code appears in exactly
+one reachability class in this table; a shared route is called out within that
+single class. The registry does not reuse a code from the #89 registry,
+including `retention_lease_conflict`,
 `retention_lease_lost`, `retention_unexpected_source_missing`, or
 `retention_item_limit_exceeded`.
 
-| Code | Use |
-| --- | --- |
-| `retention_mutation_request_invalid` | Invalid union, operation, scope, reason, comment, or body. |
-| `retention_target_not_found` | Exact Session or item target is absent. |
-| `retention_target_empty` | Confirmation requested for an explicit empty/not-applicable target. |
-| `retention_target_not_applicable` | The exact catalog row exists, but its `store_kind` is outside the closed five-kind v1 registry or #89 ownership validation identifies it as a non-product-owned imported reference. This is a deterministic catalog-row validation, not a scan. |
-| `retention_mutation_target_limit_exceeded` | Exact Session target has more than 100 items. |
-| `retention_preview_not_found` | Preview ID is not present in the current catalog. |
-| `retention_preview_expired` | Preview read/issuance is past its five-minute expiry. |
-| `retention_preview_digest_mismatch` | Confirmation-issue route only: supplied preview digest does not match the persisted preview. |
-| `retention_confirmation_generation_failed` | Server nonce collision prevented safe token issuance. |
-| `retention_confirmation_invalid` | Mutation route only: confirmation token format, full-token hash, nonce, or cryptographic validation is invalid. |
-| `retention_confirmation_expired` | Confirmation token is past its fixed expiry. |
-| `retention_confirmation_consumed` | Confirmation token was already committed. |
-| `retention_confirmation_binding_mismatch` | Token binding does not match the confirmation request. |
-| `retention_confirmation_target_changed` | Exact target item set digest changed. |
-| `retention_confirmation_pin_changed` | Pin state changed after preview. |
-| `retention_confirmation_retention_changed` | Retention policy, captured-at basis, or expiry changed. |
-| `retention_confirmation_version_changed` | Expected catalog/revision vector changed. |
-| `retention_confirmation_conflict_changed` | Active cleanup conflict snapshot changed. |
-| `retention_idempotency_key_invalid` | Key format is not the exact 48-character `rid1_` format. |
-| `retention_idempotency_conflict` | Same workflow key and same step were submitted for a different canonical request; different steps never conflict. |
-| `retention_idempotency_expired` | The 365-day key lifetime has ended; key reuse is forbidden. |
-| `retention_pin_read_denied` | Pin attempted on an already denied lifecycle. |
-| `retention_pin_deleting` | Pin attempted while #89 is deleting. |
-| `retention_pin_deleted` | Pin attempted on a deleted tombstone. |
-| `retention_pin_expired` | Expiry won a pin race at commit. |
-| `retention_unpin_read_denied` | Unpin attempted on an already denied lifecycle. |
-| `retention_unpin_deleting` | Unpin attempted while #89 is deleting. |
-| `retention_unpin_deleted` | Unpin attempted on a deleted tombstone. |
-| `retention_delete_already_queued` | Delete-now is already durably queued. |
-| `retention_delete_already_deleting` | Delete-now is already in #89 deletion. |
-| `retention_delete_already_deleted` | Delete-now targets a terminal deleted tombstone. |
-| `retention_delete_failed` | Delete-now targets an item in #89 `deletion_failed`; #89 retry rules remain authoritative. |
-| `retention_mutation_transaction_failed` | Durable mutation transaction rolled back or could not commit. |
-| `retention_audit_write_failed` | Required append-only audit write prevented commit. |
-| `retention_backup_not_purged` | Fixed warning shown for every actionable preview/result; no backup purge is promised. |
-| `retention_operation_not_found` | Mutation operation ID is absent. |
-| `retention_history_cursor_invalid` | History cursor is malformed or not valid for the requested target. |
+| Code | Reachability class | Use |
+| --- | --- | --- |
+| `retention_mutation_request_invalid` | INPUT `400` | Invalid union, operation, scope, reason, comment, or body. |
+| `retention_target_not_found` | READ `404` | Exact Session or item target is absent. |
+| `retention_target_empty` | PREVIEW/CONFIRMATION-ISSUE `409` | Confirmation requested for an explicit empty/not-applicable target. |
+| `retention_target_not_applicable` | PREVIEW-STAGE (`200` preview / `409` issue) | The exact catalog row exists, but its `store_kind` is outside the closed five-kind v1 registry or #89 ownership validation identifies it as a non-product-owned imported reference. This is a deterministic catalog-row validation, not a scan. |
+| `retention_mutation_target_limit_exceeded` | PREVIEW-STAGE `413` | Exact Session target has more than 100 items. |
+| `retention_preview_not_found` | READ/CONFIRMATION-ISSUE `404` | Preview ID is not present in the current catalog. |
+| `retention_preview_expired` | PREVIEW/CONFIRMATION-ISSUE `409` | Preview read/issuance is past its five-minute expiry. |
+| `retention_preview_digest_mismatch` | CONFIRMATION-ISSUE `409` | Confirmation-issue route only: supplied preview digest does not match the persisted preview. |
+| `retention_confirmation_generation_failed` | CONFIRMATION-ISSUE `503` | Server nonce collision prevented safe token issuance. |
+| `retention_confirmation_invalid` | COMMIT-STAGE `401` | Mutation route only: confirmation token format, full-token hash, nonce, or cryptographic validation is invalid, including a token invalidated by reissue. |
+| `retention_confirmation_expired` | COMMIT-STAGE `409` | Confirmation token is past its fixed expiry. |
+| `retention_confirmation_consumed` | CONSUMED-BINDING `409` | A confirmation-issue retry or mutation request found a token already committed; return the stored mutation linkage/result and never issue a new token. |
+| `retention_confirmation_binding_mismatch` | COMMIT-STAGE `409` | Token binding does not match the confirmation request. |
+| `retention_confirmation_target_changed` | COMMIT-STAGE `409` | Exact target item set digest changed after issuance. |
+| `retention_confirmation_pin_changed` | COMMIT-STAGE `409` | Pin state changed after issuance. |
+| `retention_confirmation_retention_changed` | COMMIT-STAGE `409` | Retention policy, captured-at basis, or expiry changed after issuance. |
+| `retention_confirmation_version_changed` | COMMIT-STAGE `409` | Expected catalog/revision vector changed after issuance. |
+| `retention_confirmation_conflict_changed` | COMMIT-STAGE `409` | Active cleanup conflict snapshot changed after issuance. |
+| `retention_idempotency_key_invalid` | INPUT `400` | Key format is not the exact 48-character `rid1_` format. |
+| `retention_idempotency_conflict` | WORKFLOW-IDEMPOTENCY `409` | Same workflow key and same step were submitted for a different canonical request; different steps never conflict. |
+| `retention_idempotency_expired` | WORKFLOW-IDEMPOTENCY `409` | The 365-day key lifetime has ended; key reuse is forbidden. |
+| `retention_pin_read_denied` | PREVIEW-STAGE (`200` preview / `409` issue) | Pin attempted on an already denied lifecycle. |
+| `retention_pin_deleting` | PREVIEW-STAGE (`200` preview / `409` issue) | Pin attempted while #89 is deleting. |
+| `retention_pin_deleted` | PREVIEW-STAGE (`200` preview / `409` issue) | Pin attempted on a deleted tombstone. |
+| `retention_pin_expired` | COMMIT-STAGE `409` | Expiry won a clock-only pin race at commit. |
+| `retention_unpin_read_denied` | PREVIEW-STAGE (`200` preview / `409` issue) | Unpin attempted on an already denied lifecycle. |
+| `retention_unpin_deleting` | PREVIEW-STAGE (`200` preview / `409` issue) | Unpin attempted while #89 is deleting. |
+| `retention_unpin_deleted` | PREVIEW-STAGE (`200` preview / `409` issue) | Unpin attempted on a deleted tombstone. |
+| `retention_delete_already_queued` | COMMIT-STAGE `200` | Delete-now is already durably queued and was shown as actionable-idempotent by the preview. |
+| `retention_delete_already_deleting` | PREVIEW-STAGE (`200` preview / `409` issue) | Delete-now is already in #89 deletion. |
+| `retention_delete_already_deleted` | PREVIEW-STAGE (`200` preview / `409` issue) | Delete-now targets a terminal deleted tombstone. |
+| `retention_delete_failed` | PREVIEW-STAGE (`200` preview / `409` issue) | Delete-now targets an item in #89 `deletion_failed`; #89 retry rules remain authoritative. |
+| `retention_mutation_transaction_failed` | COMMIT-STAGE `503` | Durable mutation transaction rolled back or could not commit. |
+| `retention_audit_write_failed` | COMMIT-STAGE `503` | Required append-only audit write prevented commit. |
+| `retention_backup_not_purged` | RESULT-WARNING `200` | Fixed warning shown for every actionable preview/result; no backup purge is promised. |
+| `retention_operation_not_found` | READ `404` | Mutation operation ID is absent. |
+| `retention_history_cursor_invalid` | HISTORY `400` | History cursor is malformed or not valid for the requested target. |
 
 `retention_backup_not_purged` is a warning field, not a failure status. The
 #89 codes remain available only where their existing catalog/worker contracts
@@ -862,7 +961,7 @@ are committed.
 
 | Order | Task | Deliverable | Test focus | File-disjoint and parallel? |
 | --- | --- | --- | --- | --- |
-| A1 | Add the domain contract layer and failing-first domain/contract tests, then the minimal GREEN implementation. | Reviewed target/linkage, derived pin, transition, DTO/digest, error, workflow-idempotency, and side-effect contracts. | RED before implementation; identical GREEN run after the minimal domain implementation; no persistence/API dependency. | No; required predecessor for 90-B. |
+| A1 | Add the domain contract layer and failing-first domain/contract tests, then the minimal GREEN implementation. | Reviewed target/linkage, derived pin, PREVIEW-STAGE versus COMMIT-STAGE transition reachability, DTO/digest, error, workflow-idempotency, confirmation-issue replay exception, and side-effect contracts. | RED before implementation; identical GREEN run after the minimal domain implementation; cover preview `200` rejection plus confirmation-issue `409`, commit-time clock races and actionable-idempotent queue result, changed-state codes, effect columns, and hash-only replay constraints; no persistence/API dependency. | No; required predecessor for 90-B. |
 
 ### 90-B — Persistence, versioning, and audit
 
@@ -870,8 +969,8 @@ are committed.
 | --- | --- | --- | --- | --- |
 | B1 | Add the additive v1 mutation schema for preview records, confirmation bindings, per-step idempotency rows, operation receipts, and audit events. Derive `pin_state` from lifecycle state; do not store a second pin column or a #89 queue-request entity. | Restart-safe catalog tables/indexes with exact version fields and no source-table duplication. | Migration from a fresh and populated #89 catalog; injected migration rollback; exact schema version; derived pin state after restart. | No; schema owner must complete before B2–B4. |
 | B2 | Implement exact target-set version vectors, target-set digests, and optimistic CAS persistence. | Stable `expected_version`/`result_version` materialization for 1–100 items. | Same revision rejects stale writes; concurrent writers cannot partially commit. | No; depends on B1. |
-| B3 | Implement per-step workflow-key idempotency and append-only audit repositories with closed reason/comment/completion validation. | Durable `(key_digest, step)` lookup, exact result replay, operation correlation, and exact `RetentionAuditEvent` rows. | Same-step same-result, same-step different-request conflict, cross-step shared-key success, 365-day expiry tombstone, comment forbidden-input rejection, append-only enforcement, no-leak output. | No; shares B1 tables and B2 version records. |
-| B4 | Implement confirmation binding/full-token hash storage and single-consumption persistence. | Hash-only records using SHA-256 of the exact full ASCII token string, with exact five-minute expiry and nonce collision behavior. | Format/nonce/full-token-hash validation, rollback leaves token unconsumed, commit consumes once, restart preserves consumption. | No; depends on B1–B3. |
+| B3 | Implement per-step workflow-key idempotency and append-only audit repositories with closed reason/comment/completion validation. | Durable `(key_digest, step)` lookup, exact result replay except for the confirmation-issue reissue/invalidation exception, operation correlation, and exact `RetentionAuditEvent` rows. | Same-step same-result, same-step different-request conflict, cross-step shared-key success, same-key byte-identical confirmation-issue lost-response/restart reissue, consumed retry returning stored mutation linkage, 365-day expiry tombstone, comment forbidden-input rejection, append-only enforcement, no-leak output. | No; shares B1 tables and B2 version records. |
+| B4 | Implement confirmation binding/full-token hash storage and single-consumption persistence. | Hash-only records using SHA-256 of the exact full ASCII token string, one unconsumed binding per preview, atomic invalidation/reissue with a fresh nonce/secret and `confirmation_id`, exact five-minute preview-bound expiry, and nonce collision behavior. | Format/nonce/full-token-hash validation including superseded tokens, rollback leaves token unconsumed, commit consumes once, reissue leaves only the fresh binding consumable, consumed retry returns stored mutation linkage, and restart preserves consumption. | No; depends on B1–B3. |
 
 90-B deliverable: restart-safe mutation/audit/confirmation persistence that
 does not perform a lifecycle transition by itself.
@@ -883,7 +982,7 @@ does not perform a lifecycle transition by itself.
 | C1 | Implement the catalog-only Session exact-link resolver and the one-code exclusion projection. | Exact `session | item` resolver using only the `session_event_content` -> `session_events.session_id` join; all other store kinds are item-target-only. | Positive event linkage; `missing_ownership_proof`; no-scan candidate projection; empty/all-excluded shape; fixed structural exclusions for foreign/unlinked/non-session rows; negative run/trace/path/time proximity. | Yes with C2 only if C1 writes resolver contracts in a separate domain file; otherwise sequential. |
 | C2 | Implement exact item-set collection, 100-item limit, store-kind summaries, capture/expiry/policy summaries, and retained-impact projection. | Sanitized `RetentionMutationPreviewResponse` read model with no raw/source locator. | Exact ordering, all seven lifecycle counts, 100-item boundary, 101-item fail-closed result, no source key/path leakage. | No; depends on C1 and B2. |
 | C3 | Implement JCS SHA-256 preview/version/conflict digests and five-minute preview records, including state-bearing `rejection_code` in `preview_digest`. | Deterministic digest values and persisted preview ID/expiry. | Byte-identical digest under repeated reads; rejection-code changes alter the digest; property-order/locale differences do not alter it; expiry does not extend on re-read. | No; depends on C2. |
-| C4 | Implement confirmation issuance and all reject-and-republish checks. | Separate token issuance DTO, operation/scope/target echo checks, and exact route-specific confirmation error mapping. | Preview-issue digest mismatch, target/item-set/pin/retention/version/conflict changes, operation/scope/target binding mismatch, expiry, invalid full-token hash, consumption, and nonce collision. | No; depends on B4 and C3. |
+| C4 | Implement confirmation issuance and all reject-and-republish checks. | Separate fresh/reissued token DTO, operation/scope/target echo checks, PREVIEW-STAGE rejection handling, consumed-linkage handling, and exact route-specific confirmation error mapping. | Preview rejection `200`/issue `409`, digest mismatch, same-key byte-identical lost-response/restart reissue with old-token invalidation, consumed retry without reissue, target/item-set/pin/retention/version/conflict changes, operation/scope/target binding mismatch, expiry, invalid full-token hash, and nonce collision. | No; depends on B4 and C3. |
 
 90-C deliverable: a deterministic preview and confirmation engine whose target
 boundary and digest are identical to the later commit boundary.
@@ -892,10 +991,10 @@ boundary and digest are identical to the later commit boundary.
 
 | Order | Task | Deliverable | Test focus | File-disjoint and parallel? |
 | --- | --- | --- | --- | --- |
-| D1 | Implement `pin` apply/no-op and state preconditions. | `expiring -> retained_by_policy` seam with read-safe idempotent pin. | Pin all seven states, pin no-op, read-denied/deleting/deleted rejection, expiry race. | No; shared mutation orchestrator. |
-| D2 | Implement `unpin` recalculation and direct expiry queue handoff. | Original `captured_at` + recorded policy/version calculation with no TTL reset. | Future expiry, already-expired unpin, `expiring` no-op, denied/deleting/deleted rejection, original timestamp preservation. | No; depends on D1’s CAS and shared orchestrator. |
-| D3 | Implement delete-now supersession and #89 `deletion_queued` item-state transitions correlated by #90 `operation_id`. | Atomic derived-pin clear/read denial/queue transition for retained items and idempotent already-queued result; no queue-request entity. | Delete-now from expiring/retained/expired-pending/queued/deleting/deleted/failed; no second state transition; no resurrection. | No; depends on D1–D2 and #89 queue contract. |
-| D4 | Close the transaction boundary and result replay behavior. | One all-or-none transaction for state, denial, token, per-step idempotency, audit, and operation correlation, with no outbox entity. | Injected failure at each write; pure pin-race rejection has no state/token/audit mutation; no partial state/result/audit; lost response replay; restart and two-writer race. | No; depends on D1–D3. |
+| D1 | Implement `pin` apply/no-op and state preconditions. | `expiring -> retained_by_policy` seam with read-safe idempotent pin. | Pin all seven states with denied/deleting/deleted/failed cases rejected at preview, pin no-op, and the expiry race reachable only at commit. | No; shared mutation orchestrator. |
+| D2 | Implement `unpin` recalculation and the #89 sequential expiry queue handoff. | Original `captured_at` + recorded policy/version calculation with no TTL reset; expired unpin executes `expiring -> expired_pending_deletion -> deletion_queued`, or the pinned seam first, inside one transaction. | Future expiry, already-expired unpin, `expiring` no-op, denied/deleting/deleted/failed preview rejection, original timestamp preservation, one revision increment per executed transition, and final-revision `result_version`. | No; depends on D1’s CAS and shared orchestrator. |
+| D3 | Implement delete-now supersession and #89 sequential `deletion_queued` item-state transitions correlated by #90 `operation_id`. | Atomic pinned sequence `retained_by_policy -> expiring -> expired_pending_deletion -> deletion_queued`, expiring sequence `expiring -> expired_pending_deletion -> deletion_queued`, expired-pending handoff, and actionable-idempotent already-queued result; no new lifecycle edge or queue-request entity. | Delete-now preview rejection versus commit outcomes for every state; one revision increment per executed transition, final-revision `result_version`, no second state transition, and no resurrection. | No; depends on D1–D2 and #89 queue contract. |
+| D4 | Close the transaction boundary and result replay behavior. | One all-or-none transaction for state, denial, sequential #89 lifecycle steps, token, per-step idempotency, audit, and operation correlation, with no outbox entity. | Injected failure at each write; pure pin-race rejection has no state/token/audit mutation; no partial state/result/audit; mutation lost-response replay; confirmation-issue lost-response/restart reissue with old-token invalidation; restart and two-writer race. | No; depends on D1–D3. |
 
 90-D deliverable: lifecycle-consistent mutation orchestration with durable
 queue handoff and no direct source deletion.
@@ -904,10 +1003,10 @@ queue handoff and no direct source deletion.
 
 | Order | Task | Deliverable | Test focus | File-disjoint and parallel? |
 | --- | --- | --- | --- | --- |
-| E1 | Add exact API DTOs, routes, HTTP/error mapping, CSRF/same-origin/no-store controls. | The route list and response fields in this document, including mutation echo fields and no workspace v1 changes. | JSON shape, fixed #89 status bytes, invalid/empty/stale/expired/conflict handling, route-specific digest/token errors, no-leak headers/body. | No; establishes the shared application/API contract. |
+| E1 | Add exact API DTOs, routes, HTTP/error mapping, CSRF/same-origin/no-store controls. | The route list and response fields in this document, including mutation echo fields and no workspace v1 changes. | JSON shape, fixed #89 status bytes, `200` preview rejection versus `409` confirmation-issue rejection, fresh/reissued confirmation response, consumed linkage without a new token, mutation-time `401`/`409`/`200` mapping, invalid/empty/stale/expired/conflict handling, route-specific digest/token errors, and no-leak headers/body. | No; establishes the shared application/API contract. |
 | E2 | Add current item, fixed #89 status, operation status, and cursor-paged history projections. | Existing status route/DTO remains the fixed 100-item window with no `limit` query; new history uses 100-entry pages and fixed order/cursor behavior. | First/last cursor pages, duplicate/skip prevention, empty history, unknown target, 100/101 boundaries, byte-identical existing status projection. | Yes with E3 after E1 DTOs are frozen; separate API read files. |
 | E3 | Add the UI authoritative read model and Session-primary mutation flow. | Preview/confirmation/status UI with item target only from diagnostics selection. | Re-display rules, delete-now secondary action, in-memory token only, no client raw/path state. | Yes with E2 after E1 DTOs are frozen; separate UI files. |
-| E4 | Add Playwright interaction and accessibility coverage. | Browser evidence for Session/item happy/error/status flows. | Keyboard/focus/screen-reader labels, stale/expired/empty/conflict errors, immediate read denial, backup warning, no token/raw/path leakage. | No; depends on E2 and E3. |
+| E4 | Add Playwright interaction and accessibility coverage. | Browser evidence for Session/item happy/error/status flows. | Keyboard/focus/screen-reader labels, PREVIEW-STAGE rejection display, confirmation-issue `409`, fresh/reissued token handling, consumed linkage without reissue, stale/expired/empty/conflict errors, immediate read denial, backup warning, no token/raw/path leakage. | No; depends on E2 and E3. |
 
 90-E deliverable: one safe API/UI surface over the same application result.
 
@@ -915,7 +1014,7 @@ queue handoff and no direct source deletion.
 
 | Order | Task | Deliverable | Test focus | File-disjoint and parallel? |
 | --- | --- | --- | --- | --- |
-| F1 | Run the lifecycle integration matrix and record operation/audit/queue-state evidence. | Repository-safe integration evidence for pin -> expiry suppression -> unpin -> #89 item-state queue and pinned Session -> delete-now. | Exact Session/item targets, empty target, already deleted, worker failure, restart, operation correlation, and physical completion through #89 only. | Yes with F2 after E4; separate test/evidence files. |
+| F1 | Run the lifecycle integration matrix and record operation/audit/queue-state evidence. | Repository-safe integration evidence for pin -> expiry suppression -> unpin -> #89 sequential item-state queue and pinned Session -> delete-now through the same sequential path. | Exact Session/item targets, PREVIEW-STAGE versus COMMIT-STAGE reachability, empty target, already deleted, worker failure, restart, operation correlation, one revision per #89 step, final `result_version`, and physical completion through #89 only. | Yes with F2 after E4; separate test/evidence files. |
 | F2 | Run the security/no-leak matrix and inspect all response/log/evidence surfaces. | Repository-safe no-leak evidence with synthetic markers only. | Raw/body/path/credential/database-key/prompt-label/token injection; loopback/Host/same-origin/CSRF/no-store controls. | Yes with F1 after E4; separate security tests. |
 | F3 | Record #91 security rows and #88 tombstone/non-purge handoff. | Stable consumer handoff containing only opaque IDs, fixed codes, digests, and references. | Handoff schema/allowlist and no backup inventory claim. | No; depends on F1 and F2. |
 | F4 | Run the pinned repository validation sequence. | Build, Playwright bootstrap, full test result, and exact unverified scope. | `dotnet build CopilotAgentObservability.slnx`; `pwsh scripts/test/install-playwright-chromium.ps1`; `dotnet test CopilotAgentObservability.slnx`. | No; final sequential closeout. |
@@ -943,12 +1042,15 @@ as follows:
 4. A pin preserves the original policy-derived expiry as inactive historical
    metadata. Unpin recalculates from the original capture/policy record and
    never resets the clock.
-5. An expired unpin commits read denial plus the #89 `deletion_queued` state
-   transition. The pin expiry race is deliberately different: it is a pure
+5. An expired unpin commits read denial plus the allowed sequential #89
+   transitions to `deletion_queued`: a pinned item uses the seam and then the
+   two forward steps, while an expiring item uses the two forward steps. The
+   pin expiry race is deliberately different: it is a pure
    `retention_pin_expired` rejection that leaves the item expiring for the #89
    scan, with no token consumption or audit and only a stored rejection result.
-   Delete-now on `deletion_queued` is a confirmed idempotent result; deleting,
-   deleted, or failed follows the explicit rejection rows.
+   Delete-now on `deletion_queued` is actionable at preview and a confirmed
+   idempotent result; deleting, deleted, or failed follows the PREVIEW-STAGE
+   rejection rows.
 6. `local-user` is the v1 actor label. The current OS user name is not placed
    in an audit event or response.
 7. The existing #89 `/status` route and DTO remain byte-identical with a fixed
@@ -958,9 +1060,13 @@ as follows:
    inferred backup inventory. Backup deletion remains outside #90.
 9. One client-generated workflow key is shared by preview, confirmation issue,
    and mutation. Idempotency rows are keyed by key digest plus step; replay
-   requires the same step and byte-identical canonical request, while different
-   steps never conflict. The token binding field is the exact full ASCII
-   workflow key, even when lookup uses its digest.
+   requires the same step and byte-identical canonical request, except that a
+   same-key byte-identical `confirmation_issue` retry invalidates any prior
+   unconsumed token and issues a fresh token/`confirmation_id` with the same
+   preview-bound expiry. A consumed confirmation retry returns the stored
+   mutation linkage under `retention_confirmation_consumed` and never issues a
+   token. Different steps never conflict. The token binding field is the exact
+   full ASCII workflow key, even when lookup uses its digest.
 10. Token verification hashes the exact full ASCII `rt90v1_...` token string,
     not the 32-byte secret alone.
 11. `preview_digest` includes the state-bearing `rejection_code` and excludes
