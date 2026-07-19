@@ -6,12 +6,14 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
 {
     private readonly string databasePath;
     private readonly RawTelemetryStoreConnectionOptions connectionOptions;
+    private readonly TimeProvider timeProvider;
     private readonly Action<IngestionCommitWritePhase>? writeFailureInjector;
 
     public SqliteIngestionCommitStore(
         string databasePath,
-        RawTelemetryStoreConnectionOptions? connectionOptions = null)
-        : this(databasePath, connectionOptions, writeFailureInjector: null)
+        RawTelemetryStoreConnectionOptions? connectionOptions = null,
+        TimeProvider? timeProvider = null)
+        : this(databasePath, connectionOptions, timeProvider, writeFailureInjector: null)
     {
     }
 
@@ -19,9 +21,19 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
         string databasePath,
         RawTelemetryStoreConnectionOptions? connectionOptions,
         Action<IngestionCommitWritePhase>? writeFailureInjector)
+        : this(databasePath, connectionOptions, timeProvider: null, writeFailureInjector)
+    {
+    }
+
+    internal SqliteIngestionCommitStore(
+        string databasePath,
+        RawTelemetryStoreConnectionOptions? connectionOptions,
+        TimeProvider? timeProvider,
+        Action<IngestionCommitWritePhase>? writeFailureInjector)
     {
         this.databasePath = databasePath;
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
+        this.timeProvider = timeProvider ?? TimeProvider.System;
         this.writeFailureInjector = writeFailureInjector;
     }
 
@@ -38,7 +50,7 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
                 return existing;
             }
 
-            var catalog = new RetentionCatalogStore(databasePath);
+            var catalog = new RetentionCatalogStore(databasePath, timeProvider);
             try
             {
                 catalog.InitializeForWrite(connection, transaction);

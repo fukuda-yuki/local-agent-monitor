@@ -4,7 +4,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -83,6 +85,7 @@ public class TraceFidelityRegressionTests
             ObservedAt);
 
         using var temp = new MonitorTempDirectory();
+        _ = temp.RetentionContext;
         var compatibilityStore = new SqliteSourceCompatibilityStore(
             temp.DatabasePath,
             RawTelemetryStoreConnectionOptions.MonitorWriter);
@@ -93,9 +96,15 @@ public class TraceFidelityRegressionTests
             .Commit(ValidatedIngestionBatch.Create(rawRecord, observation));
         var projectionStore = new RawTelemetryStoreProjectionStore(new RawTelemetryStore(
             temp.DatabasePath,
-            RawTelemetryStoreConnectionOptions.MonitorWriter));
+            temp.RetentionContext,
+            connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter));
 
-        var persistedRaw = Assert.IsType<RawTelemetryRecord>(projectionStore.GetRawRecordById(committed.RawRecordId));
+        var rawResult = await projectionStore.GetRawRecordByIdAsync(committed.RawRecordId, RetentionReadKind.Access, CancellationToken.None);
+        RawTelemetryRecord persistedRaw;
+        await using (var rawLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(rawResult.Lease))
+        {
+            persistedRaw = rawLease.Value;
+        }
         var persistedObservation = Assert.IsType<SourceCompatibilityRow>(
             compatibilityStore.GetByRawRecordId(committed.RawRecordId));
         Assert.Equal(committed.ObservationId, persistedObservation.Id);
@@ -109,7 +118,9 @@ public class TraceFidelityRegressionTests
             .RunProjectionPassAsync();
 
         var traceId = Assert.IsType<string>(persistedRaw.TraceId);
-        Assert.Single(projectionStore.ListRawRecordsByTraceId(traceId, limit: 10));
+        var traceRawResult = await projectionStore.ListRawRecordsByTraceIdAsync(traceId, limit: 10, RetentionReadKind.Access, CancellationToken.None);
+        await using var traceRawLease = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(traceRawResult.Lease);
+        Assert.Single(traceRawLease.Value);
         var trace = Assert.IsType<MonitorTraceRow>(projectionStore.GetMonitorTrace(traceId));
         var spans = projectionStore.GetSpansForTrace(traceId);
         var graph = AgentExecutionGraphBuilder.Build(spans);

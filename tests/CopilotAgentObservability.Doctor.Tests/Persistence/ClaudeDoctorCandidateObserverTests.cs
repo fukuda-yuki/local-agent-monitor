@@ -1,6 +1,7 @@
 using CopilotAgentObservability.Persistence.Sqlite.Doctor.ClaudeCode;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry;
 using CopilotAgentObservability.Telemetry.Sessions;
 using System.Text.Json.Nodes;
@@ -187,13 +188,14 @@ public sealed class ClaudeDoctorCandidateObserverTests
     {
         var database = new DoctorTestDatabase();
         var time = new DoctorTestTimeProvider(Start);
-        new RawTelemetryStore(database.Path, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateMonitorSchema();
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path, time);
+        new RawTelemetryStore(database.Path, retentionContext, time, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateMonitorSchema();
         new SqliteSourceCompatibilityStore(database.Path, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
         var sessionStore = new SqliteSessionStore(database.Path, time);
         sessionStore.CreateSchema();
         var application = SqliteDoctorApplicationService.Create(
             new SqliteDoctorVerificationStore(database.Path, time));
-        return new ObserverFixture(database, time, sessionStore, application, new ClaudeDoctorCandidateObserver(database.Path, application, time));
+        return new ObserverFixture(database, time, sessionStore, application, new ClaudeDoctorCandidateObserver(database.Path, application, new RawTelemetryStore(database.Path, retentionContext, time), time));
     }
 
     private static IReadOnlyList<DoctorEvidenceCandidate> Candidates(

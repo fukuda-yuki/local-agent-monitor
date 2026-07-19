@@ -53,7 +53,14 @@ public class MonitorOverviewPlaywrightTests
         Assert.Contains("status=error", errorHref);
 
         // Period toggle refetches the sanitized overview endpoint for 7d.
+        var promptLabelRequest = sanitizedOnly
+            ? null
+            : page.WaitForRequestAsync(request => request.Url.Contains("/traces/trace-ov/prompt-label", StringComparison.Ordinal));
         await page.Locator("#period-toggle .period-btn[data-period='7d']").ClickAsync();
+        if (promptLabelRequest is not null)
+        {
+            await promptLabelRequest;
+        }
         await Expect(page.Locator("#period-toggle .period-btn[data-period='7d']")).ToHaveClassAsync(new System.Text.RegularExpressions.Regex("active"));
         await Expect(page.Locator("#kpi-tokens-label")).ToHaveTextAsync("7日のトークン（実消費）");
         // The seeded trace is recent, so the 7d window includes its tokens.
@@ -84,9 +91,9 @@ public class MonitorOverviewPlaywrightTests
     /// <summary>One chat trace received a minute ago (inside every period window): 1000 input / 200 output with cache usage and a prompt marker.</summary>
     private static void SeedRecentTrace(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
-        var receivedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var receivedAt = temp.TimeProvider.GetUtcNow().AddMinutes(-1);
         var record = new RawTelemetryRecord(
             Id: null,
             Source: RawTelemetrySources.RawOtlp,

@@ -177,6 +177,8 @@ internal sealed record RetentionReadRequest(
 
 internal sealed record RetentionReadResult<T>(RetentionReadDisposition Disposition, RetentionReadLease<T>? Lease);
 
+internal sealed record RetentionBatchReadResult<T>(RetentionReadDisposition Disposition, RetentionBatchReadLease<T>? Lease);
+
 internal sealed class RetentionRevisionFence
 {
     private RetentionRevisionFence() { }
@@ -198,5 +200,22 @@ internal sealed class RetentionReadLease<T> : IAsyncDisposable
     internal T Value { get; }
     internal RetentionRevisionFence RevisionFence { get; }
 
+    public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
+}
+
+internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
+{
+    private readonly Func<ValueTask> release;
+    private int released;
+
+    internal RetentionBatchReadLease(T value, RetentionRevisionFence revisionFence, Func<ValueTask> release)
+    {
+        Value = value;
+        RevisionFence = revisionFence;
+        this.release = release;
+    }
+
+    internal T Value { get; }
+    internal RetentionRevisionFence RevisionFence { get; }
     public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
 }

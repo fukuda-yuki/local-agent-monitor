@@ -1,6 +1,7 @@
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
@@ -34,7 +35,7 @@ public sealed class IndexModel : PageModel
 
     internal bool RawAvailable { get; private set; }
 
-    public IActionResult OnGet()
+    public async Task<IActionResult> OnGetAsync()
     {
         var store = HttpContext.RequestServices.GetRequiredService<IMonitorProjectionStore>();
         var options = HttpContext.RequestServices.GetRequiredService<MonitorOptions>();
@@ -70,7 +71,7 @@ public sealed class IndexModel : PageModel
 
         if (RawAvailable)
         {
-            PopulatePrompts(store);
+            await PopulatePromptsAsync(store, HttpContext.RequestAborted);
         }
 
         return Page();
@@ -80,7 +81,7 @@ public sealed class IndexModel : PageModel
     internal string? PromptFor(string? traceId) =>
         traceId is not null && promptByTraceId.TryGetValue(traceId, out var prompt) ? prompt : null;
 
-    private void PopulatePrompts(IMonitorProjectionStore store)
+    private async Task PopulatePromptsAsync(IMonitorProjectionStore store, CancellationToken cancellationToken)
     {
         var traceIds = TopTraces
             .Select(trace => trace.TraceId)
@@ -90,20 +91,11 @@ public sealed class IndexModel : PageModel
 
         foreach (var traceId in traceIds)
         {
-            string? prompt = null;
-            try
-            {
-                var records = store.ListRawRecordsByTraceId(traceId, MonitorPromptExtractor.RecordScanLimit);
-                prompt = MonitorPromptExtractor.ExtractFirstPromptLabel(
-                    records.Select(record => record.PayloadJson),
-                    traceId);
-            }
-            catch (PersistenceBusyException)
-            {
-                // Best-effort label only; on a busy store the view falls back to the TraceId.
-            }
-
-            promptByTraceId[traceId] = prompt;
+            var result = await store.ListRawRecordsByTraceIdAsync(traceId, MonitorPromptExtractor.RecordScanLimit, RetentionReadKind.Access, cancellationToken);
+            if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
+            if (result.Lease is null) { promptByTraceId[traceId] = null; continue; }
+            await using var lease = result.Lease;
+            promptByTraceId[traceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(lease.Value.Select(record => record.PayloadJson), traceId);
         }
     }
 

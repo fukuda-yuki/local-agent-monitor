@@ -110,7 +110,7 @@ public class MonitorTraceRollupCacheStatusTests
     public void ApplySpanProjection_WritesCacheAndStatusColumns_ReadableFromTraceRows()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
 
         var record = new RawTelemetryRecord(
@@ -141,7 +141,7 @@ public class MonitorTraceRollupCacheStatusTests
     public void TraceRowsWithoutSpanProjection_KeepNullCacheAndStatus()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
 
         var record = new RawTelemetryRecord(

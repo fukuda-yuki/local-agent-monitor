@@ -1,5 +1,6 @@
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry;
 using Microsoft.Data.Sqlite;
 
@@ -14,7 +15,7 @@ namespace CopilotAgentObservability.LocalMonitor.Projection;
 /// </summary>
 internal interface IMonitorProjectionStore
 {
-    IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit);
+    ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken);
 
     bool ApplyProjection(
         long rawRecordId,
@@ -39,7 +40,7 @@ internal interface IMonitorProjectionStore
 
     MonitorProjectionStatus GetProjectionStatus();
 
-    IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit);
+    ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken);
 
     bool ApplySpanProjection(
         long rawRecordId,
@@ -58,9 +59,11 @@ internal interface IMonitorProjectionStore
 
     IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId);
 
-    RawTelemetryRecord? GetRawRecordById(long id);
+    ValueTask<RetentionReadResult<RawTelemetryRecord>> GetRawRecordByIdAsync(long id, RetentionReadKind readKind, CancellationToken cancellationToken);
 
-    IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit);
+    ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadRawRecordsAsync(IReadOnlyList<long> ids, RetentionReadKind readKind, CancellationToken cancellationToken);
+
+    ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRawRecordsByTraceIdAsync(string traceId, int limit, RetentionReadKind readKind, CancellationToken cancellationToken);
 
     MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive);
 
@@ -88,8 +91,8 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
         this.store = store;
     }
 
-    public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit) =>
-        Guard(() => store.ListUnprocessedForProjection(limit));
+    public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken) =>
+        GuardAsync(() => store.ListUnprocessedForProjectionAsync(limit, RetentionReadKind.Operation, cancellationToken));
 
     public bool ApplyProjection(
         long rawRecordId,
@@ -126,8 +129,8 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
     public MonitorProjectionStatus GetProjectionStatus() =>
         Guard(store.GetProjectionStatus);
 
-    public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) =>
-        Guard(() => store.ListUnprocessedForSpanProjection(limit));
+    public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken) =>
+        GuardAsync(() => store.ListUnprocessedForSpanProjectionAsync(limit, RetentionReadKind.Operation, cancellationToken));
 
     public bool ApplySpanProjection(
         long rawRecordId,
@@ -153,11 +156,14 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
     public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) =>
         Guard(() => store.GetSpansForTrace(traceId));
 
-    public RawTelemetryRecord? GetRawRecordById(long id) =>
-        Guard(() => store.GetRawRecordById(id));
+    public ValueTask<RetentionReadResult<RawTelemetryRecord>> GetRawRecordByIdAsync(long id, RetentionReadKind readKind, CancellationToken cancellationToken) =>
+        GuardAsync(() => store.GetRawRecordByIdAsync(id, readKind, cancellationToken));
 
-    public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) =>
-        Guard(() => store.ListRawRecordsByTraceId(traceId, limit));
+    public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadRawRecordsAsync(IReadOnlyList<long> ids, RetentionReadKind readKind, CancellationToken cancellationToken) =>
+        GuardAsync(() => store.ReadRawRecordsAsync(ids, readKind, cancellationToken));
+
+    public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRawRecordsByTraceIdAsync(string traceId, int limit, RetentionReadKind readKind, CancellationToken cancellationToken) =>
+        GuardAsync(() => store.ListRawRecordsByTraceIdAsync(traceId, limit, readKind, cancellationToken));
 
     public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
         Guard(() => store.GetPeriodSummary(startInclusive, endExclusive));
@@ -188,6 +194,18 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
         try
         {
             return operation();
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            throw new PersistenceBusyException();
+        }
+    }
+
+    private static async ValueTask<T> GuardAsync<T>(Func<ValueTask<T>> operation)
+    {
+        try
+        {
+            return await operation().ConfigureAwait(false);
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {

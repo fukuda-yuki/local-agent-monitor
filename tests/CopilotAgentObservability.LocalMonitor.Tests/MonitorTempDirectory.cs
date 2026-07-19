@@ -2,16 +2,28 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 internal sealed class MonitorTempDirectory : IDisposable
 {
+    private CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogContext? retentionContext;
+
     public MonitorTempDirectory()
     {
         Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"local-monitor-{Guid.NewGuid():N}");
         Directory.CreateDirectory(Path);
         DatabasePath = System.IO.Path.Combine(Path, "raw-store.db");
+        TimeProvider = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
     }
 
     public string Path { get; }
 
     public string DatabasePath { get; }
+
+    public TimeProvider TimeProvider { get; set; }
+
+    public CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogContext RetentionContext =>
+        retentionContext ??= CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogContext.InitializeNewOwnedDatabase(DatabasePath, TimeProvider);
+
+    public CopilotAgentObservability.Persistence.Sqlite.RawTelemetryStore CreateRawStore(
+        CopilotAgentObservability.Persistence.Sqlite.RawTelemetryStoreConnectionOptions? connectionOptions = null) =>
+        new(DatabasePath, RetentionContext, TimeProvider, connectionOptions);
 
     public void Dispose()
     {

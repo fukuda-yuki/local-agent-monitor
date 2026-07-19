@@ -10,7 +10,7 @@ public class MonitorSummaryEndpointTests
     public async Task Summary_EmptyStore_ReturnsZeroCountAndNullHighlights()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
 
@@ -30,7 +30,7 @@ public class MonitorSummaryEndpointTests
     public async Task Summary_MultiModelMultiClientKind_SubtotalsReconcileWithTraceCount()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         InsertAndProject(store, "trace-1", TraceJson("trace-1", "vscode-copilot-chat", "gpt-4o"), minute: 1);
         InsertAndProject(store, "trace-2", TraceJson("trace-2", "vscode-copilot-chat", "gpt-4.1"), minute: 2);
@@ -55,7 +55,7 @@ public class MonitorSummaryEndpointTests
     public async Task Summary_TraceWithErrors_AppearsAsErrorTrace()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         InsertAndProjectSpans(store, "trace-err", ErrorSpanJson);
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
@@ -71,7 +71,7 @@ public class MonitorSummaryEndpointTests
     public async Task Summary_HighlightTraceObjectsExposeRepositoryMetadata()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         InsertAndProject(store, "trace-repo-summary", RepositoryMetadataJson, minute: 1);
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
@@ -88,7 +88,7 @@ public class MonitorSummaryEndpointTests
     public async Task Summary_NullModelAndClientKind_GroupIntoUnknownBucket()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         InsertAndProject(store, "trace-unknown", NoAttributeTraceJson("trace-unknown"), minute: 1);
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
@@ -110,7 +110,7 @@ public class MonitorSummaryEndpointTests
     public async Task Summary_RejectsInvalidLimitWith400(string path)
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
 
@@ -124,7 +124,7 @@ public class MonitorSummaryEndpointTests
     public async Task Summary_OmittedLimit_DefaultsTo50()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
 
@@ -137,7 +137,7 @@ public class MonitorSummaryEndpointTests
     public async Task Summary_NeverReturnsRawContentOrPii()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         InsertAndProjectSpans(store, "trace-pii", RawAndPiiJson);
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
@@ -295,7 +295,7 @@ public class MonitorSummaryEndpointTests
         """;
 
     /// <summary>Minimal in-memory <see cref="IMonitorProjectionStore"/> for unit-testing <see cref="MonitorSummaryService"/> directly, without a SQLite-backed store.</summary>
-    private sealed class FakeProjectionStore : IMonitorProjectionStore
+    private sealed class FakeProjectionStore : ProjectionStoreTestDouble
     {
         private readonly IReadOnlyList<MonitorTraceRow> traces;
 
@@ -306,52 +306,52 @@ public class MonitorSummaryEndpointTests
 
         public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit) => [];
 
-        public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) => false;
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) => false;
 
-        public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => null;
+        public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => null;
 
-        public bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
+        public override bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
 
-        public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
+        public override bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
 
-        public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) => false;
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) => false;
 
-        public MonitorProjectionStatus GetProjectionStatus() => new(0, null);
+        public override MonitorProjectionStatus GetProjectionStatus() => new(0, null);
 
         public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) => [];
 
-        public bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) => false;
+        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) => false;
 
-        public MonitorProjectionStatus GetSpanProjectionStatus() => new(0, null);
+        public override MonitorProjectionStatus GetSpanProjectionStatus() => new(0, null);
 
-        public MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) => new([], false);
+        public override MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) => new([], false);
 
-        public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) => new(traces, false);
+        public override MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) => new(traces, false);
 
-        public MonitorTraceRow? GetMonitorTrace(string traceId) => traces.FirstOrDefault(t => t.TraceId == traceId);
+        public override MonitorTraceRow? GetMonitorTrace(string traceId) => traces.FirstOrDefault(t => t.TraceId == traceId);
 
-        public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) => new([], false);
+        public override MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) => new([], false);
 
-        public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) => [];
+        public override IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) => [];
 
         public RawTelemetryRecord? GetRawRecordById(long id) => null;
 
         public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) => [];
 
-        public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) => new(0, 0, 0, 0, 0, 0, 0, 0);
+        public override MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) => new(0, 0, 0, 0, 0, 0, 0, 0);
 
-        public IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) => [];
+        public override IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) => [];
 
-        public IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) => [];
+        public override IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) => [];
 
-        public IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) => [];
+        public override IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) => [];
 
-        public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => traces.ToList();
+        public override IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => traces.ToList();
 
-        public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => new([], 0, 0);
+        public override MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => new([], 0, 0);
 
-        public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) => null;
+        public override MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) => null;
 
-        public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) => [];
+        public override IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) => [];
     }
 }

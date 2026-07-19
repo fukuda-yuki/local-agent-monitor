@@ -1,6 +1,8 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -285,15 +287,30 @@ public class MonitorSecurityBoundaryTests
     {
         using var temp = new MonitorTempDirectory();
 
-        await using (var first = await StartLiveHostAsync(temp))
+        await using (var first = await StartLiveHostAsync(temp, startProjectionWorker: false))
         {
             var response = await first.Client.PostAsync("/v1/traces", JsonContent(ValidTraceJson()));
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            Assert.Equal(1, await WaitForIngestionProjectionCountAsync(first, expected: 1));
         }
 
-        await using var second = await StartLiveHostAsync(temp);
-        Assert.Equal(1, await WaitForIngestionProjectionCountAsync(second, expected: 1));
+        var firstStore = temp.CreateRawStore();
+        var rawRecord = Assert.Single(firstStore.ListRecords());
+        Assert.Equal(ProjectionDispositionState.NotStarted, firstStore.GetProjectionDisposition(rawRecord.Id!.Value)!.State);
+
+        var projectionStore = new ProjectionStatusSignalStore(
+            new RawTelemetryStoreProjectionStore(temp.CreateRawStore()));
+        await using var second = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: new MonitorHostTestOptions
+            {
+                ProjectionStore = projectionStore,
+                ProjectionPollInterval = TimeSpan.FromMilliseconds(50),
+            });
+        await projectionStore.InitialTraceProjectionStatusRead.Task;
+        var ingestions = await second.Client.GetStringAsync("/api/monitor/ingestions?limit=200");
+        using var document = JsonDocument.Parse(ingestions);
+        Assert.Equal(1, document.RootElement.GetProperty("items").GetArrayLength());
+        Assert.Equal(ProjectionDispositionState.Completed, firstStore.GetProjectionDisposition(rawRecord.Id.Value)!.State);
 
         var ready = await second.Client.GetAsync("/health/ready");
         Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
@@ -433,7 +450,7 @@ public class MonitorSecurityBoundaryTests
 
     private static long SeedSensitiveProjectedRecord(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var record = new RawTelemetryRecord(
             Id: null,
@@ -486,11 +503,58 @@ public class MonitorSecurityBoundaryTests
             testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
     }
 
-    private static Task<RunningMonitorHost> StartLiveHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false) =>
+    private static Task<RunningMonitorHost> StartLiveHostAsync(
+        MonitorTempDirectory temp,
+        bool sanitizedOnly = false,
+        bool startProjectionWorker = true) =>
         MonitorTestHost.StartAsync(
             temp,
             sanitizedOnly: sanitizedOnly,
-            testOptions: new MonitorHostTestOptions { ProjectionPollInterval = TimeSpan.FromMilliseconds(50) });
+            testOptions: new MonitorHostTestOptions
+            {
+                StartProjectionWorker = startProjectionWorker,
+                ProjectionPollInterval = TimeSpan.FromMilliseconds(50),
+            });
+
+    private sealed class ProjectionStatusSignalStore(IMonitorProjectionStore inner) : ProjectionStoreTestDouble
+    {
+        public TaskCompletionSource InitialTraceProjectionStatusRead { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken) =>
+            inner.ListUnprocessedForProjectionAsync(limit, cancellationToken);
+
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) =>
+            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
+
+        public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => inner.GetProjectionDisposition(rawRecordId);
+
+        public override bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
+            inner.TryBeginProjection(rawRecordId, expectedRevision, updatedAt);
+
+        public override bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
+            inner.RecordProjectionFailure(rawRecordId, expectedRevision, updatedAt);
+
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) =>
+            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision);
+
+        public override MonitorProjectionStatus GetProjectionStatus()
+        {
+            var status = inner.GetProjectionStatus();
+            InitialTraceProjectionStatusRead.TrySetResult();
+            return status;
+        }
+
+        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken) =>
+            inner.ListUnprocessedForSpanProjectionAsync(limit, cancellationToken);
+
+        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) =>
+            inner.ApplySpanProjection(rawRecordId, spans, projectedAt);
+
+        public override MonitorProjectionStatus GetSpanProjectionStatus() => inner.GetSpanProjectionStatus();
+
+        public override MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) =>
+            inner.ListMonitorIngestions(afterRawRecordId, limit);
+    }
 
     private static StringContent JsonContent(string json) => new(json, Encoding.UTF8, "application/json");
 
@@ -530,7 +594,7 @@ public class MonitorSecurityBoundaryTests
 
     private static long SeedSanitizationProbeTrace(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var record = new RawTelemetryRecord(
             Id: null,

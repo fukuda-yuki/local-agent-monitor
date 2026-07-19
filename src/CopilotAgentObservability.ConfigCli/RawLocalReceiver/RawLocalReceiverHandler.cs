@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.ConfigCli;
 
@@ -38,7 +39,8 @@ internal static class RawLocalReceiverHandler
             var decodedPayload = OtlpTracePayloadDecoder.DecodeTracePayload(request.ContentType, request.Body);
             OtlpTracePayloadDecoder.EnsurePayloadContainsSpan(decodedPayload.PayloadJson);
             var record = RawOtlpIngestor.CreateRecordFromPayloadJson(decodedPayload.PayloadJson, request.ReceivedAt);
-            var store = new RawTelemetryStore(request.DatabasePath);
+            var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(request.DatabasePath);
+            var store = new RawTelemetryStore(request.DatabasePath, retentionContext);
             store.CreateSchema();
             var rawRecordId = store.Insert(record);
             return Success(rawRecordId);

@@ -28,7 +28,7 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.True(rawRecordId > 0);
         Assert.True(observationId > 0);
 
-        var raw = Assert.Single(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        var raw = Assert.Single(temp.CreateRawStore().ListRecords());
         var compatibilityStore = new SqliteSourceCompatibilityStore(temp.DatabasePath);
         var observation = Assert.Single(compatibilityStore.List(after: null, limit: 200));
         Assert.Equal(rawRecordId, raw.Id);
@@ -101,7 +101,7 @@ public sealed class SourceCompatibilityIngestionTests
         var response = await host.Client.PostAsync("/v1/traces", content);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var rawStore = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var rawStore = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         var raw = Assert.Single(rawStore.ListRecords());
         Assert.DoesNotContain(marker, raw.PayloadJson, StringComparison.Ordinal);
         var observation = Assert.Single(
@@ -140,7 +140,7 @@ public sealed class SourceCompatibilityIngestionTests
         var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        var rawStore = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var rawStore = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         var projectionStore = new RawTelemetryStoreProjectionStore(rawStore);
         var health = new MonitorHealthState();
         health.MarkMigrationComplete();
@@ -301,7 +301,7 @@ public sealed class SourceCompatibilityIngestionTests
         });
         var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var rawStore = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var rawStore = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         var projectionStore = new RawTelemetryStoreProjectionStore(rawStore);
         var health = new MonitorHealthState();
         health.MarkMigrationComplete();
@@ -368,7 +368,7 @@ public sealed class SourceCompatibilityIngestionTests
         var response = await host.Client.PostAsync("/v1/traces", JsonContent("""{"resourceSpans":[]}"""));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Single(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        Assert.Single(temp.CreateRawStore().ListRecords());
         var observation = Assert.Single(new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
         Assert.Equal(SourceCompatibilityState.UnsupportedSourceVersion, observation.CompatibilityState);
         Assert.Equal([SourceCompatibilityReasonCodes.UnsupportedSourceVersion], observation.ReasonCodes);
@@ -396,7 +396,7 @@ public sealed class SourceCompatibilityIngestionTests
         var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var raw = Assert.Single(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        var raw = Assert.Single(temp.CreateRawStore().ListRecords());
         Assert.Equal(payload, raw.PayloadJson);
         Assert.Contains(marker, raw.PayloadJson, StringComparison.Ordinal);
         Assert.Null(raw.TraceId);
@@ -421,7 +421,7 @@ public sealed class SourceCompatibilityIngestionTests
         var response = await host.Client.PostAsync("/v1/traces", JsonContent("[]"));
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Empty(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        Assert.Empty(temp.CreateRawStore().ListRecords());
         var failure = Assert.Single(
             new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
         Assert.Null(failure.RawRecordId);
@@ -448,7 +448,7 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Contains("invalid_payload", responseBody);
         Assert.DoesNotContain(marker, responseBody, StringComparison.Ordinal);
-        Assert.Empty(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        Assert.Empty(temp.CreateRawStore().ListRecords());
         var failure = Assert.Single(new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
         Assert.Null(failure.RawRecordId);
         Assert.Null(failure.IngestBatchId);
@@ -486,7 +486,7 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Contains("invalid_payload", responseBody);
         Assert.DoesNotContain(marker, responseBody, StringComparison.Ordinal);
-        Assert.Empty(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        Assert.Empty(temp.CreateRawStore().ListRecords());
         var failure = Assert.Single(
             new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
         Assert.Null(failure.RawRecordId);
@@ -516,7 +516,7 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
         Assert.Contains("internal_error", responseBody);
         Assert.DoesNotContain(marker, responseBody, StringComparison.Ordinal);
-        Assert.Empty(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        Assert.Empty(temp.CreateRawStore().ListRecords());
         var failure = Assert.Single(new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
         Assert.Null(failure.RawRecordId);
         Assert.Null(failure.IngestBatchId);

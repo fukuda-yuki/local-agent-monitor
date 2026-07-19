@@ -1,6 +1,7 @@
 using CopilotAgentObservability.LocalMonitor.Events;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry;
 using Microsoft.Extensions.Hosting;
 
@@ -59,7 +60,7 @@ internal sealed class ProjectionWorker : BackgroundService
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                RunProjectionPass(stoppingToken);
+                await RunProjectionPassAsync(stoppingToken).ConfigureAwait(false);
 
                 try
                 {
@@ -83,11 +84,10 @@ internal sealed class ProjectionWorker : BackgroundService
     /// </summary>
     internal Task RunProjectionPassAsync(CancellationToken cancellationToken = default)
     {
-        RunProjectionPass(cancellationToken);
-        return Task.CompletedTask;
+        return RunProjectionPassAsyncCore(cancellationToken);
     }
 
-    private void RunProjectionPass(CancellationToken cancellationToken)
+    private async Task RunProjectionPassAsyncCore(CancellationToken cancellationToken)
     {
         // The ingestion writer owns the additive migration; do not project until
         // the projection tables exist, so worker start order is not relied upon.
@@ -98,73 +98,95 @@ internal sealed class ProjectionWorker : BackgroundService
 
         try
         {
-            var records = store.ListUnprocessedForProjection(BatchSize);
-            var anyProjected = false;
-            foreach (var record in records)
+            var recordsResult = await store.ListUnprocessedForProjectionAsync(BatchSize, cancellationToken).ConfigureAwait(false);
+            if (recordsResult.Disposition == RetentionReadDisposition.Busy)
             {
-                if (cancellationToken.IsCancellationRequested)
+                throw new PersistenceBusyException();
+            }
+            if (recordsResult.Lease is null)
+            {
+                return;
+            }
+            var anyProjected = false;
+            await using (var recordsLease = recordsResult.Lease)
+            {
+                var records = recordsLease.Value;
+                foreach (var record in records)
                 {
-                    break;
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    int? ownedProjectionRevision = null;
+                    try
+                    {
+                        var rawRecordId = record.Id!.Value;
+                        ValidateProjectionDisposition(rawRecordId);
+                        var disposition = store.GetProjectionDisposition(rawRecordId);
+                        if (disposition is not null)
+                        {
+                            if (disposition.State is not (ProjectionDispositionState.NotStarted or ProjectionDispositionState.Pending or ProjectionDispositionState.Failed) ||
+                                !store.TryBeginProjection(rawRecordId, disposition.Revision, timeProvider.GetUtcNow()))
+                            {
+                                continue;
+                            }
+                            ownedProjectionRevision = disposition.Revision + 1;
+                        }
+                        var projection = MonitorProjectionBuilder.Build(CreateProjectionInput(record));
+                        var projected = ownedProjectionRevision is { } expectedRevision
+                            ? store.ApplyProjection(
+                                rawRecordId,
+                                record.Source,
+                                record.ReceivedAt,
+                                projection,
+                                timeProvider.GetUtcNow(),
+                                expectedRevision)
+                            : store.ApplyProjection(
+                                rawRecordId,
+                                record.Source,
+                                record.ReceivedAt,
+                                projection,
+                                timeProvider.GetUtcNow());
+                        if (projected)
+                        {
+                            anyProjected = true;
+                        }
+                    }
+                    catch (PersistenceBusyException)
+                    {
+                        // DB busy: stop this pass; this record and the rest retry next cycle.
+                        break;
+                    }
+                    catch (Exception)
+                    {
+                        // Non-busy projection failure: keep the raw record, record the
+                        // failure, and continue with the next record.
+                        var rawRecordId = record.Id!.Value;
+                        if (ownedProjectionRevision is { } expectedRevision)
+                        {
+                            store.RecordProjectionFailure(rawRecordId, expectedRevision, timeProvider.GetUtcNow());
+                        }
+                        health.RecordProjectionFailure();
+                    }
                 }
 
-                int? ownedProjectionRevision = null;
-                try
-                {
-                    var rawRecordId = record.Id!.Value;
-                    ValidateProjectionDisposition(rawRecordId);
-                    var disposition = store.GetProjectionDisposition(rawRecordId);
-                    if (disposition is not null)
-                    {
-                        if (disposition.State is not (ProjectionDispositionState.NotStarted or ProjectionDispositionState.Pending or ProjectionDispositionState.Failed) ||
-                            !store.TryBeginProjection(rawRecordId, disposition.Revision, timeProvider.GetUtcNow()))
-                        {
-                            continue;
-                        }
-                        ownedProjectionRevision = disposition.Revision + 1;
-                    }
-                    var projection = MonitorProjectionBuilder.Build(CreateProjectionInput(record));
-                    var projected = ownedProjectionRevision is { } expectedRevision
-                        ? store.ApplyProjection(
-                            rawRecordId,
-                            record.Source,
-                            record.ReceivedAt,
-                            projection,
-                            timeProvider.GetUtcNow(),
-                            expectedRevision)
-                        : store.ApplyProjection(
-                            rawRecordId,
-                            record.Source,
-                            record.ReceivedAt,
-                            projection,
-                            timeProvider.GetUtcNow());
-                    if (projected)
-                    {
-                        anyProjected = true;
-                    }
-                }
-                catch (PersistenceBusyException)
-                {
-                    // DB busy: stop this pass; this record and the rest retry next cycle.
-                    break;
-                }
-                catch (Exception)
-                {
-                    // Non-busy projection failure: keep the raw record, record the
-                    // failure, and continue with the next record.
-                    var rawRecordId = record.Id!.Value;
-                    if (ownedProjectionRevision is { } expectedRevision)
-                    {
-                        store.RecordProjectionFailure(rawRecordId, expectedRevision, timeProvider.GetUtcNow());
-                    }
-                    health.RecordProjectionFailure();
-                }
+                var status = store.GetProjectionStatus();
+                health.SetProjectionStatus(status.Backlog, status.OldestUnprocessedReceivedAt);
             }
 
-            var status = store.GetProjectionStatus();
-            health.SetProjectionStatus(status.Backlog, status.OldestUnprocessedReceivedAt);
-
             // Phase 2: span projection (runs after trace projection in the same pass).
-            var spanRecords = store.ListUnprocessedForSpanProjection(BatchSize);
+            var spanRecordsResult = await store.ListUnprocessedForSpanProjectionAsync(BatchSize, cancellationToken).ConfigureAwait(false);
+            if (spanRecordsResult.Disposition == RetentionReadDisposition.Busy)
+            {
+                throw new PersistenceBusyException();
+            }
+            if (spanRecordsResult.Lease is null)
+            {
+                return;
+            }
+            await using var spanRecordsLease = spanRecordsResult.Lease;
+            var spanRecords = spanRecordsLease.Value;
             foreach (var record in spanRecords)
             {
                 if (cancellationToken.IsCancellationRequested)

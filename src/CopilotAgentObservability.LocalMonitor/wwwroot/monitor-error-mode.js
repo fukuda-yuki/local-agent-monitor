@@ -191,13 +191,10 @@
 
   async function loadErrorMessage(spanId, target) {
     try {
-      const resp = await fetch(`/traces/${encodeURIComponent(traceId)}/spans/${encodeURIComponent(spanId)}/detail`, { cache: "no-store" });
-      if (!resp.ok) {
-        target.textContent = "例外メッセージを取得できませんでした。";
-        return;
-      }
-      const detail = await resp.json();
-      target.textContent = detail.error_message ?? "例外メッセージは記録されていません。";
+      const detail = await window.caoLoadSpanDetail(spanId);
+      target.textContent = detail
+        ? detail.error_message ?? "例外メッセージは記録されていません。"
+        : "例外メッセージを取得できませんでした。";
     } catch {
       target.textContent = "例外メッセージを取得できませんでした。";
     }

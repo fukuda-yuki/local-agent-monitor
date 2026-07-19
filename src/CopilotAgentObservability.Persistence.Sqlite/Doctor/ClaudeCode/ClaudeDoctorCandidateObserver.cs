@@ -1,5 +1,6 @@
 using CopilotAgentObservability.Doctor;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry;
 using Microsoft.Data.Sqlite;
 using System.Globalization;
@@ -18,12 +19,14 @@ internal sealed class ClaudeDoctorCandidateObserver
     private readonly SqliteDoctorApplicationService doctorApplication;
     private readonly ClaudeExactBindingRule exactBindingRule;
     private readonly TimeProvider timeProvider;
+    private readonly RawTelemetryStore rawStore;
 
-    public ClaudeDoctorCandidateObserver(string databasePath, TimeProvider? timeProvider = null)
+    public ClaudeDoctorCandidateObserver(string databasePath, RetentionCatalogContext retentionContext, TimeProvider? timeProvider = null)
         : this(
             databasePath,
             SqliteDoctorApplicationService.Create(
                 new SqliteDoctorVerificationStore(databasePath, timeProvider)),
+            new RawTelemetryStore(databasePath, retentionContext),
             timeProvider)
     {
     }
@@ -31,12 +34,14 @@ internal sealed class ClaudeDoctorCandidateObserver
     internal ClaudeDoctorCandidateObserver(
         string databasePath,
         SqliteDoctorApplicationService doctorApplication,
+        RawTelemetryStore rawStore,
         TimeProvider? timeProvider = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(doctorApplication);
         this.databasePath = databasePath;
         this.doctorApplication = doctorApplication;
+        this.rawStore = rawStore ?? throw new ArgumentNullException(nameof(rawStore));
         exactBindingRule = new(databasePath);
         this.timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -65,8 +70,43 @@ internal sealed class ClaudeDoctorCandidateObserver
     {
         var references = new HashSet<string>(StringComparer.Ordinal);
         var completenessReferences = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var record in ReadEligibleRecords(verification))
+        var candidates = ReadEligibleRecords(verification);
+        var rawResult = rawStore.ReadRawRecordsAsync(
+            candidates.Select(candidate => candidate.RawRecordId).ToArray(),
+            RetentionReadKind.Operation,
+            CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        if (rawResult.Disposition != RetentionReadDisposition.Granted || rawResult.Lease is null)
         {
+            return;
+        }
+
+        try
+        {
+            var recordsById = rawResult.Lease.Value
+                .Where(record => record.Id is not null)
+                .ToDictionary(record => record.Id!.Value);
+            foreach (var candidate in candidates)
+            {
+                if (!recordsById.TryGetValue(candidate.RawRecordId, out var raw))
+                {
+                    return;
+                }
+
+                ObserveRecord(verification, references, completenessReferences, new ClaudeOtelRecord(raw.Id!.Value, candidate.ReceivedAt, raw.PayloadJson));
+            }
+        }
+        finally
+        {
+            rawResult.Lease.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+    }
+
+    private void ObserveRecord(
+        DoctorVerification verification,
+        ISet<string> references,
+        ISet<string> completenessReferences,
+        ClaudeOtelRecord record)
+    {
             var spans = ReadPayloadSpans(record.PayloadJson);
             var projectedSpans = ReadProjectedSpans(record.RawRecordId);
 
@@ -138,7 +178,6 @@ internal sealed class ClaudeDoctorCandidateObserver
                     $"claude-otel-projection-{identity}",
                     record.ReceivedAt);
             }
-        }
     }
 
     private void Observe(
@@ -165,12 +204,12 @@ internal sealed class ClaudeDoctorCandidateObserver
             verification.ExpiresAt));
     }
 
-    private IReadOnlyList<ClaudeOtelRecord> ReadEligibleRecords(DoctorVerification verification)
+    private IReadOnlyList<ClaudeOtelCandidate> ReadEligibleRecords(DoctorVerification verification)
     {
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT r.id,r.received_at,r.payload_json
+            SELECT r.id,r.received_at
             FROM raw_records r
             JOIN source_schema_observations o ON o.raw_record_id=r.id
             WHERE o.source_surface=$source_surface
@@ -185,13 +224,12 @@ internal sealed class ClaudeDoctorCandidateObserver
         Add(command, "$expires_at", Timestamp(verification.ExpiresAt));
 
         using var reader = command.ExecuteReader();
-        var records = new List<ClaudeOtelRecord>();
+        var records = new List<ClaudeOtelCandidate>();
         while (reader.Read())
         {
             records.Add(new(
                 reader.GetInt64(0),
-                ParseTimestamp(reader.GetString(1)),
-                reader.GetString(2)));
+                ParseTimestamp(reader.GetString(1))));
         }
 
         return records;
@@ -307,6 +345,8 @@ internal sealed class ClaudeDoctorCandidateObserver
 
     private static DateTimeOffset ParseTimestamp(string value) =>
         DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+
+    private sealed record ClaudeOtelCandidate(long RawRecordId, DateTimeOffset ReceivedAt);
 
     private sealed record ClaudeOtelRecord(long RawRecordId, DateTimeOffset ReceivedAt, string PayloadJson);
 

@@ -9,6 +9,7 @@ using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
 using CopilotAgentObservability.Doctor;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry;
 
 namespace CopilotAgentObservability.ConfigCli.FirstTrace.ClaudeCode;
@@ -356,7 +357,10 @@ internal sealed class ClaudeDoctorFactCollector
             var runtime = ReadRuntimeRawAccess(connection);
             var window = verification is null
                 ? null
-                : ReadWindow(connection, verification);
+                : ReadWindow(
+                    connection,
+                    new RawTelemetryStore(databasePath, RetentionCatalogContext.AdoptExistingCatalogV1(databasePath)),
+                    verification);
             return new(compatibility, runtime, window);
         }
         catch (Exception)
@@ -430,29 +434,54 @@ internal sealed class ClaudeDoctorFactCollector
 
     private ClaudeDoctorVerificationWindow ReadWindow(
         SqliteConnection connection,
+        RawTelemetryStore rawStore,
         DoctorVerification verification)
     {
         var candidates = ReadCandidates(connection, verification.VerificationId);
-        var records = ReadEligibleRecords(connection, verification);
-        var accepted = records.Count != 0;
-        var rejected = ReadRejectedIngestExists(connection, verification);
-        var raw = candidates.Any(candidate => candidate.EvidenceKind == DoctorEvidenceKind.RawPersistence);
-        var projection = candidates.Any(candidate => candidate.EvidenceKind == DoctorEvidenceKind.Projection);
-        var bindingCandidates = candidates
-            .Where(candidate => candidate.EvidenceKind == DoctorEvidenceKind.ExactSessionBinding)
-            .ToArray();
-        var (completeness, content) = ReadBoundSession(connection, bindingCandidates);
+        var eligible = ReadEligibleRecords(connection, verification);
+        var rawResult = rawStore.ReadRawRecordsAsync(
+            eligible.Select(record => record.Id).ToArray(),
+            RetentionReadKind.Operation,
+            CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        if (rawResult.Disposition != RetentionReadDisposition.Granted || rawResult.Lease is null)
+        {
+            return UnreadableWindow;
+        }
 
-        return new(
-            ClaudeDoctorVerificationWindowReadability.Readable,
-            accepted,
-            rejected,
-            raw,
-            projection,
-            projection ? ClaudeProjectionEvidence.NotStarted : ReadProjectionEvidence(connection, records, candidates),
-            bindingCandidates.Length != 0,
-            completeness,
-            content);
+        try
+        {
+            var rawById = rawResult.Lease.Value
+                .Where(record => record.Id is not null)
+                .ToDictionary(record => record.Id!.Value);
+            if (eligible.Any(item => !rawById.ContainsKey(item.Id)))
+            {
+                return UnreadableWindow;
+            }
+            var records = eligible.Select(item => new WindowRecord(item.Id, item.ReceivedAt, rawById[item.Id].PayloadJson)).ToArray();
+            var accepted = records.Length != 0;
+            var rejected = ReadRejectedIngestExists(connection, verification);
+            var raw = candidates.Any(candidate => candidate.EvidenceKind == DoctorEvidenceKind.RawPersistence);
+            var projection = candidates.Any(candidate => candidate.EvidenceKind == DoctorEvidenceKind.Projection);
+            var bindingCandidates = candidates
+                .Where(candidate => candidate.EvidenceKind == DoctorEvidenceKind.ExactSessionBinding)
+                .ToArray();
+            var (completeness, content) = ReadBoundSession(connection, bindingCandidates);
+
+            return new(
+                ClaudeDoctorVerificationWindowReadability.Readable,
+                accepted,
+                rejected,
+                raw,
+                projection,
+                projection ? ClaudeProjectionEvidence.NotStarted : ReadProjectionEvidence(connection, records, candidates),
+                bindingCandidates.Length != 0,
+                completeness,
+                content);
+        }
+        finally
+        {
+            rawResult.Lease.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
     }
 
     private IReadOnlyList<DoctorEvidenceCandidate> ReadCandidates(
@@ -489,7 +518,7 @@ internal sealed class ClaudeDoctorFactCollector
         return candidates;
     }
 
-    private IReadOnlyList<WindowRecord> ReadEligibleRecords(
+    private IReadOnlyList<WindowRecordMetadata> ReadEligibleRecords(
         SqliteConnection connection,
         DoctorVerification verification)
     {
@@ -500,7 +529,7 @@ internal sealed class ClaudeDoctorFactCollector
 
         using var command = connection.CreateCommand();
         command.CommandText =
-            "SELECT r.id,r.received_at,r.payload_json FROM raw_records r " +
+            "SELECT r.id,r.received_at FROM raw_records r " +
             "JOIN source_schema_observations o ON o.raw_record_id=r.id " +
             "WHERE o.source_surface=$surface AND o.source_adapter=$adapter " +
             "AND r.received_at >= $started_at AND r.received_at < $expires_at " +
@@ -510,10 +539,10 @@ internal sealed class ClaudeDoctorFactCollector
         Add(command, "$started_at", Timestamp(verification.StartedAt));
         Add(command, "$expires_at", Timestamp(verification.ExpiresAt));
         using var reader = command.ExecuteReader();
-        var records = new List<WindowRecord>();
+        var records = new List<WindowRecordMetadata>();
         while (reader.Read())
         {
-            records.Add(new(reader.GetInt64(0), ParseTimestamp(reader.GetString(1)), reader.GetString(2)));
+            records.Add(new(reader.GetInt64(0), ParseTimestamp(reader.GetString(1))));
         }
 
         return records;
@@ -1039,6 +1068,8 @@ internal sealed class ClaudeDoctorFactCollector
         ClaudeEffectiveContentGate ContentGate);
 
     private sealed record WindowRecord(long Id, DateTimeOffset ReceivedAt, string PayloadJson);
+
+    private sealed record WindowRecordMetadata(long Id, DateTimeOffset ReceivedAt);
 
     private sealed record DatabaseRead(
         ClaudeSourceCompatibilityClassification SourceCompatibility,

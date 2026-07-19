@@ -28,7 +28,7 @@ public sealed class SourceCompatibilityStoreTests
 
         var result = new SqliteIngestionCommitStore(database.Path).Commit(batch);
 
-        var raw = Assert.Single(new RawTelemetryStore(database.Path).ListRecords());
+        var raw = Assert.Single(database.CreateRawStore().ListRecords());
         Assert.Equal(result.RawRecordId, raw.Id);
 
         var observation = Assert.Single(new SqliteSourceCompatibilityStore(database.Path).List(after: null, limit: 200));
@@ -212,7 +212,7 @@ public sealed class SourceCompatibilityStoreTests
     {
         using var database = new TestDatabase();
         new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
-        var rawStore = new RawTelemetryStore(database.Path);
+        var rawStore = database.CreateRawStore();
 
         rawStore.CreateMonitorSchema();
 
@@ -233,7 +233,7 @@ public sealed class SourceCompatibilityStoreTests
     public void CreateSchema_WhenSecondV6ObjectFails_RollsBackFirstObjectAndVersionStamp()
     {
         using var database = new TestDatabase();
-        new RawTelemetryStore(database.Path).CreateMonitorSchema();
+        database.CreateRawStore().CreateMonitorSchema();
         using (var connection = Open(database.Path))
         using (var command = connection.CreateCommand())
         {
@@ -253,7 +253,7 @@ public sealed class SourceCompatibilityStoreTests
     public void CreateSchema_FocusedStoreOwnsSanitizedSourceTablesAndV6Stamp()
     {
         using var database = new TestDatabase();
-        new RawTelemetryStore(database.Path).CreateMonitorSchema();
+        database.CreateRawStore().CreateMonitorSchema();
         using var connection = Open(database.Path);
 
         Assert.Empty(Columns(connection, "source_schema_observations"));
@@ -571,6 +571,16 @@ public sealed class SourceCompatibilityStoreTests
         }
 
         public string Path { get; }
+
+        public TimeProvider TimeProvider { get; } = global::System.TimeProvider.System;
+
+        public RetentionCatalogContext RetentionContext =>
+            retentionContext ??= RetentionCatalogContext.InitializeNewOwnedDatabase(Path, TimeProvider);
+
+        private RetentionCatalogContext? retentionContext;
+
+        public RawTelemetryStore CreateRawStore(RawTelemetryStoreConnectionOptions? connectionOptions = null) =>
+            new(Path, RetentionContext, TimeProvider, connectionOptions);
 
         public void Dispose()
         {

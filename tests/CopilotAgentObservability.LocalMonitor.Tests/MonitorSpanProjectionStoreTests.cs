@@ -21,7 +21,7 @@ public class MonitorSpanProjectionStoreTests
         BuildV1Database(temp.DatabasePath, out var rawRecordId, out var traceId, MultiSpanPayload(traceId: "upg-1"));
 
         // Open a v2 store on the same DB — this runs the migration.
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
 
         // Verify schema_version = 4 (Sprint18 D044).
@@ -307,7 +307,7 @@ public class MonitorSpanProjectionStoreTests
 
     private static RawTelemetryStore NewStore(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         return store;
     }

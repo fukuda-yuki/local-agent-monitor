@@ -4,6 +4,7 @@ using CopilotAgentObservability.ConfigCli.Setup.Adapters.ClaudeCode;
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.ConfigCli.Setup.Storage;
 using CopilotAgentObservability.Doctor;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
@@ -843,6 +844,7 @@ public sealed class ClaudeDoctorFactCollectorTests
                 "cao-claude-facts-" + Interlocked.Increment(ref nextDirectory));
             Directory.CreateDirectory(DirectoryPath);
             Path = System.IO.Path.Combine(DirectoryPath, "monitor.sqlite");
+            RetentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(Path, TimeProvider.System);
             new SqliteSourceCompatibilityStore(Path).CreateSchema();
             Assert.Equal(
                 DoctorResultCode.VerificationActive,
@@ -858,6 +860,8 @@ public sealed class ClaudeDoctorFactCollectorTests
 
         public string Path { get; }
 
+        public RetentionCatalogContext RetentionContext { get; }
+
         public DoctorVerification StartVerification()
         {
             var store = new SqliteDoctorVerificationStore(
@@ -872,7 +876,7 @@ public sealed class ClaudeDoctorFactCollectorTests
 
         public long InsertAcceptedRecord(DateTimeOffset receivedAt, string payload)
         {
-            var id = new RawTelemetryStore(Path).Insert(new(
+            var id = new RawTelemetryStore(Path, RetentionContext).Insert(new(
                 null,
                 "raw-otlp",
                 TraceId,

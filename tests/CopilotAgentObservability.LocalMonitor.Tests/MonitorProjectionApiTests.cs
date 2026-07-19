@@ -232,7 +232,7 @@ public class MonitorProjectionApiTests
 
     private static IReadOnlyList<long> SeedIngestions(MonitorTempDirectory temp, params string[] traceIds)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var ids = new List<long>();
         var minute = 1;
@@ -246,14 +246,14 @@ public class MonitorProjectionApiTests
 
     private static void SeedRawAndProject(MonitorTempDirectory temp, string traceId, string payloadJson)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         InsertAndProject(store, traceId, payloadJson, minute: 1);
     }
 
     private static void SeedRawAndProjectSpans(MonitorTempDirectory temp, string traceId, string payloadJson)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var record = new RawTelemetryRecord(
             Id: null,

@@ -329,13 +329,13 @@ public class MonitorUiTests
 
     private static void EnsureSchema(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
     }
 
     private static long SeedRawWithSensitiveMarkers(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var record = new RawTelemetryRecord(
             Id: null,

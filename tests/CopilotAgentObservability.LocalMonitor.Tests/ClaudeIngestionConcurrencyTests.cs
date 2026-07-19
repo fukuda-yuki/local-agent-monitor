@@ -1,5 +1,6 @@
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -16,7 +17,7 @@ public sealed class ClaudeIngestionConcurrencyTests
     public async Task DuplicateHookRequestsQueuedTogetherCommitOneSourceIdentity()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new SqliteSessionStore(temp.DatabasePath);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext);
         store.CreateSchema();
         var queue = new SessionEventQueue(capacity: 2);
         var worker = new SessionEventWriterWorker(
@@ -40,7 +41,7 @@ public sealed class ClaudeIngestionConcurrencyTests
     public void ConflictingClaudeSourceIdentityThrowsTypedConflictAndRollsBackWholeBatch()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new SqliteSessionStore(temp.DatabasePath);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext);
         store.CreateSchema();
         var first = ClaudeBatch(Guid.CreateVersion7(), "native-a", "shared-source-id");
         store.Write(first);
@@ -63,7 +64,7 @@ public sealed class ClaudeIngestionConcurrencyTests
     public void CompetingOwnerClaudeOtelIdentityThrowsTypedConflictInsteadOfSilentReplay()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new SqliteSessionStore(temp.DatabasePath);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext);
         store.CreateSchema();
         var owner = ClaudeBatch(Guid.CreateVersion7(), "otel-owner-a", "shared-otel-id", "claude-code-otel");
         store.Write(owner);
@@ -81,7 +82,7 @@ public sealed class ClaudeIngestionConcurrencyTests
     public async Task BarrierRaceBetweenDifferentOwnersHasOneTypedConflictAndNoPartialLoser()
     {
         using var temp = new MonitorTempDirectory();
-        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
+        new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext).CreateSchema();
         using var beforeWrite = new Barrier(participantCount: 2);
         Action<string> checkpoint = name =>
         {
@@ -90,8 +91,8 @@ public sealed class ClaudeIngestionConcurrencyTests
                 beforeWrite.SignalAndWait();
             }
         };
-        var firstStore = new SqliteSessionStore(temp.DatabasePath, new FixedTimeProvider(ObservedAt), checkpoint);
-        var secondStore = new SqliteSessionStore(temp.DatabasePath, new FixedTimeProvider(ObservedAt), checkpoint);
+        var firstStore = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, new FixedTimeProvider(ObservedAt), checkpoint);
+        var secondStore = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, new FixedTimeProvider(ObservedAt), checkpoint);
         var first = ClaudeBatch(Guid.CreateVersion7(), "racing-native-a", "racing-source-id");
         var second = ClaudeBatch(Guid.CreateVersion7(), "racing-native-b", "racing-source-id");
 
@@ -112,9 +113,9 @@ public sealed class ClaudeIngestionConcurrencyTests
     public async Task ControlledWriteLockReturnsBusyWithoutPartialHookRows()
     {
         using var temp = new MonitorTempDirectory();
-        var schemaStore = new SqliteSessionStore(temp.DatabasePath);
+        var schemaStore = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext);
         schemaStore.CreateSchema();
-        var store = new SqliteSessionStore(temp.DatabasePath, busyTimeoutMilliseconds: 0);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext);
         using var blocker = Open(temp.DatabasePath);
         using var blockingTransaction = blocker.BeginTransaction(deferred: false);
         var queue = new SessionEventQueue(capacity: 1);
@@ -144,7 +145,7 @@ public sealed class ClaudeIngestionConcurrencyTests
     public async Task TriggerFailureReturnsFailedAndRollsBackWholeHookBatch()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new SqliteSessionStore(temp.DatabasePath);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext);
         store.CreateSchema();
         using (var connection = Open(temp.DatabasePath))
         using (var command = connection.CreateCommand())
@@ -187,29 +188,31 @@ public sealed class ClaudeIngestionConcurrencyTests
     }
 
     [Fact]
-    public async Task StaleConcurrentClaudeOtelReadsCommitSourceIdentityOnceAndAdvanceCursor()
+    public async Task OperationLeaseContentionReturnsBusyWithoutMutationThenReplayCommitsOnce()
     {
         using var temp = new MonitorTempDirectory();
         var store = PrepareClaudeOtelFixture(temp.DatabasePath);
-        using var beforeWrite = new Barrier(participantCount: 2);
-        Action<string> checkpoint = name =>
-        {
-            if (name == "before-claude-write")
-            {
-                beforeWrite.SignalAndWait();
-            }
-        };
-        var first = new SqliteSessionOtelEnricher(
-            temp.DatabasePath, store, new FixedTimeProvider(ObservedAt), checkpoint);
-        var second = new SqliteSessionOtelEnricher(
-            temp.DatabasePath, store, new FixedTimeProvider(ObservedAt), checkpoint);
-
-        var results = await Task.WhenAll(
-            Task.Run(() => first.ProcessNextBatch(1)),
-            Task.Run(() => second.ProcessNextBatch(1)));
-
-        Assert.Equal([1, 1], results);
         using var connection = Open(temp.DatabasePath);
+        var rawRecordId = Scalar(connection, "SELECT raw_record_id FROM monitor_spans ORDER BY id LIMIT 1;");
+        temp.TimeProvider = new FixedTimeProvider(ObservedAt);
+        var rawStore = temp.CreateRawStore();
+        var held = await rawStore.ReadRawRecordsAsync([rawRecordId], RetentionReadKind.Operation, CancellationToken.None);
+        Assert.Equal(RetentionReadDisposition.Granted, held.Disposition);
+
+        await using (Assert.IsAssignableFrom<IAsyncDisposable>(held.Lease))
+        {
+            var blocked = new SqliteSessionOtelEnricher(
+                temp.DatabasePath, store, temp.RetentionContext, new FixedTimeProvider(ObservedAt));
+
+            Assert.Equal(0, blocked.ProcessNextBatch(1));
+            Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM session_events WHERE source_adapter='claude-code-otel';"));
+            Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM session_runs;"));
+            Assert.Null(store.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey));
+        }
+
+        var replay = new SqliteSessionOtelEnricher(
+            temp.DatabasePath, store, temp.RetentionContext, new FixedTimeProvider(ObservedAt));
+        Assert.Equal(1, replay.ProcessNextBatch(1));
         Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM session_events WHERE source_adapter='claude-code-otel';"));
         Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM session_runs;"));
         Assert.Equal(1L, store.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey)!.ProjectionCursor);
@@ -220,7 +223,7 @@ public sealed class ClaudeIngestionConcurrencyTests
     {
         using var temp = new MonitorTempDirectory();
         var store = PrepareClaudeOtelFixture(temp.DatabasePath);
-        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, new FixedTimeProvider(ObservedAt));
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, new FixedTimeProvider(ObservedAt));
         Assert.Equal(1, enricher.ProcessNextBatch(1));
         store.UpsertProjectionState(new(SqliteSessionOtelEnricher.ProjectorKey, 0, 0, ObservedAt));
 
@@ -233,34 +236,20 @@ public sealed class ClaudeIngestionConcurrencyTests
     }
 
     [Fact]
-    public async Task StaleHookReadAfterOtelCommitPreservesMonotonicOwnerStateAndBothEvents()
+    public async Task HookCommitAfterOtelCommitPreservesMonotonicOwnerStateAndBothEvents()
     {
         using var temp = new MonitorTempDirectory();
         var store = PrepareClaudeOtelFixture(temp.DatabasePath);
         var sessionId = SeedExactClaudeOwner(store, "SYNTHETIC_SESSION_001");
-        var checkpointEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var releaseHook = new ManualResetEventSlim(initialState: false);
-        var hookStore = new SqliteSessionStore(
-            temp.DatabasePath,
-            new FixedTimeProvider(ObservedAt),
-            name =>
-            {
-                if (name == "before-session-write")
-                {
-                    checkpointEntered.TrySetResult();
-                    releaseHook.Wait();
-                }
-            });
+        var hookStore = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, new FixedTimeProvider(ObservedAt));
         var queue = new SessionEventQueue(capacity: 1);
         var worker = new SessionEventWriterWorker(queue, new SessionEventNormalizer(hookStore, new FixedTimeProvider(ObservedAt)));
-        Assert.True(queue.TryEnqueue(ClaudeEnvelope("stale-hook", "SYNTHETIC_SESSION_001"), out var request));
-        await worker.StartAsync(CancellationToken.None);
-        await checkpointEntered.Task;
 
         Assert.Equal(1, new SqliteSessionOtelEnricher(
-            temp.DatabasePath, store, new FixedTimeProvider(ObservedAt.AddMinutes(1))).ProcessNextBatch(1));
+            temp.DatabasePath, store, temp.RetentionContext, new FixedTimeProvider(ObservedAt.AddMinutes(1))).ProcessNextBatch(1));
         var afterOtel = Assert.IsType<SessionDetail>(store.GetDetail(sessionId));
-        releaseHook.Set();
+        Assert.True(queue.TryEnqueue(ClaudeEnvelope("hook-after-otel", "SYNTHETIC_SESSION_001"), out var request));
+        await worker.StartAsync(CancellationToken.None);
         Assert.Equal(SessionEventCommitStatus.Committed, await request!.Completion);
         await worker.StopAsync(CancellationToken.None);
 
@@ -268,7 +257,7 @@ public sealed class ClaudeIngestionConcurrencyTests
         Assert.Equal(SessionCompleteness.Full, final.Session.Completeness);
         Assert.True(final.Session.LastSeenAt >= afterOtel.Session.LastSeenAt);
         Assert.Single(final.Events, item => item.SourceAdapter == "claude-code-otel");
-        Assert.Single(final.Events, item => item.SourceAdapter == "claude-code-hook" && item.SourceEventId == "stale-hook");
+        Assert.Single(final.Events, item => item.SourceAdapter == "claude-code-hook" && item.SourceEventId == "hook-after-otel");
         Assert.Equal(1L, store.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey)!.ProjectionCursor);
     }
 
@@ -287,7 +276,7 @@ public sealed class ClaudeIngestionConcurrencyTests
                 """;
             command.ExecuteNonQuery();
         }
-        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, new FixedTimeProvider(ObservedAt));
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, new FixedTimeProvider(ObservedAt));
 
         Assert.Throws<SqliteException>(() => enricher.ProcessNextBatch(1));
 

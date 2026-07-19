@@ -18,7 +18,7 @@ public class MonitorShellPlaywrightTests
     public async Task Shell_SidebarNavAndStatusPopover_WorkWithoutRawFetches(bool sanitizedOnly)
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var time = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
         await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: new MonitorHostTestOptions

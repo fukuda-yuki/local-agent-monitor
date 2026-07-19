@@ -56,7 +56,7 @@ internal static class MonitorRichTrace
 
     public static long Seed(MonitorTempDirectory temp, bool unrecovered = false)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var payload = unrecovered
             ? Payload.Replace("__TERMINAL__", TerminalErrorSpan)
@@ -180,7 +180,9 @@ internal static class MonitorTestHost
             MaxRequestBodyBytes: maxRequestBodyBytes,
             ingestionStallThresholdSeconds,
             projectionLagThresholdSeconds);
-        var app = testOptions is null ? MonitorHost.Build(options) : MonitorHost.Build(options, testOptions);
+        testOptions ??= new MonitorHostTestOptions();
+        testOptions.TimeProvider ??= temp.TimeProvider;
+        var app = MonitorHost.Build(options, testOptions);
         await app.StartAsync();
 
         var url = GetSingleBoundAddress(app);

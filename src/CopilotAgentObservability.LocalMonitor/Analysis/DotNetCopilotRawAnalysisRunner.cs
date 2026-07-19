@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using GitHub.Copilot;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
@@ -41,7 +42,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         {
             cancellationToken.ThrowIfCancellationRequested();
             analysisStore.AppendEvent(context.RunId, "sdk_phase", "loading_local_tool_data", DateTimeOffset.UtcNow);
-            var data = MonitorAnalysisToolData.Create(projectionStore, context);
+            await using var data = await MonitorAnalysisToolData.CreateAsync(projectionStore, context, cancellationToken);
             var result = await RunCopilotSessionAsync(context, data, cancellationToken);
             analysisStore.CompleteRun(context.RunId, result, DateTimeOffset.UtcNow);
         }
@@ -51,6 +52,14 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 context.RunId,
                 MonitorAnalysisStatus.Canceled,
                 "Analysis was canceled.",
+                DateTimeOffset.UtcNow);
+        }
+        catch (PersistenceBusyException)
+        {
+            analysisStore.FinishRun(
+                context.RunId,
+                MonitorAnalysisStatus.Failed,
+                "The local monitor raw store is busy. Retry the analysis.",
                 DateTimeOffset.UtcNow);
         }
         catch (Exception exception)
@@ -336,27 +345,49 @@ internal sealed record CopilotAnalysisSettings(bool Enabled, string Model, int T
     }
 }
 
-internal sealed record MonitorAnalysisToolData(
-    object RawTrace,
-    object? RawRecord,
-    object? RawSpanContext,
-    object? TraceSummary,
-    object TraceSpanTree,
-    object CacheSummary,
-    InstructionEvidence InstructionEvidence)
+internal sealed class MonitorAnalysisToolData : IAsyncDisposable
 {
+    private readonly RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>? rawLease;
+
+    private MonitorAnalysisToolData(
+        object rawTrace,
+        object? rawRecord,
+        object? rawSpanContext,
+        object? traceSummary,
+        object traceSpanTree,
+        object cacheSummary,
+        InstructionEvidence instructionEvidence,
+        RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>? rawLease)
+    {
+        RawTrace = rawTrace;
+        RawRecord = rawRecord;
+        RawSpanContext = rawSpanContext;
+        TraceSummary = traceSummary;
+        TraceSpanTree = traceSpanTree;
+        CacheSummary = cacheSummary;
+        InstructionEvidence = instructionEvidence;
+        this.rawLease = rawLease;
+    }
+
+    public object RawTrace { get; }
+    public object? RawRecord { get; }
+    public object? RawSpanContext { get; }
+    public object? TraceSummary { get; }
+    public object TraceSpanTree { get; }
+    public object CacheSummary { get; }
+    public InstructionEvidence InstructionEvidence { get; }
+
+    public ValueTask DisposeAsync() => rawLease?.DisposeAsync() ?? ValueTask.CompletedTask;
+
     private const int RawRecordLimit = 50;
     private const int ConversationContextSiblingRadius = 2;
 
-    public static MonitorAnalysisToolData Create(
+    public static async ValueTask<MonitorAnalysisToolData> CreateAsync(
         IMonitorProjectionStore projectionStore,
-        MonitorAnalysisContext context)
+        MonitorAnalysisContext context,
+        CancellationToken cancellationToken)
     {
-        var rawRecords = projectionStore.ListRawRecordsByTraceId(context.TraceId, limit: RawRecordLimit);
         var spans = projectionStore.GetSpansForTrace(context.TraceId);
-        var selectedRawRecord = context.RawRecordId is { } rawRecordId
-            ? projectionStore.GetRawRecordById(rawRecordId)
-            : null;
         var selectedSpan = string.IsNullOrWhiteSpace(context.SpanId)
             ? null
             : spans.FirstOrDefault(row => string.Equals(row.SpanId, context.SpanId, StringComparison.Ordinal));
@@ -374,93 +405,146 @@ internal sealed record MonitorAnalysisToolData(
             ? Array.Empty<MonitorConversationTraceRow>()
             : projectionStore.ListConversationTraces(conversationId);
         var conversationTraceInputs = BuildConversationTraceInputs(
-            projectionStore,
             context.TraceId,
             spans,
-            rawRecords,
-            conversationTraces);
-        var instructionEvidence = InstructionEvidenceExtractor.Extract(
-            context.TraceId,
-            spans,
-            rawRecords,
             conversationTraces,
+            projectionStore);
+        var rawRecordIds = CollectRawRecordIds(
+            spans,
+            context.RawRecordId,
+            selectedSpan,
             conversationTraceInputs);
+        var rawResult = await projectionStore.ReadRawRecordsAsync(rawRecordIds, RetentionReadKind.Operation, cancellationToken);
+        if (rawResult.Disposition == RetentionReadDisposition.Busy)
+        {
+            throw new PersistenceBusyException();
+        }
 
-        return new MonitorAnalysisToolData(
-            RawTrace: new
-            {
-                trace_id = context.TraceId,
-                raw_records = rawRecords.Select(record => new
+        var rawLease = rawResult.Lease;
+        try
+        {
+            var rawRecordsById = (rawLease?.Value ?? [])
+                .Where(record => record.Id is not null)
+                .ToDictionary(record => record.Id!.Value);
+            var rawRecords = spans
+                .Select(span => span.RawRecordId)
+                .Distinct()
+                .Order()
+                .Take(RawRecordLimit)
+                .Where(rawRecordsById.ContainsKey)
+                .Select(id => rawRecordsById[id])
+                .ToArray();
+            var selectedRawRecord = context.RawRecordId is { } rawRecordId && rawRecordsById.TryGetValue(rawRecordId, out var selected)
+                ? selected
+                : null;
+            var selectedSpanRawRecord = selectedSpan is not null && rawRecordsById.TryGetValue(selectedSpan.RawRecordId, out var selectedSpanRaw)
+                ? selectedSpanRaw
+                : null;
+            var materializedConversationInputs = conversationTraceInputs
+                .Select(input => input with
                 {
-                    raw_record_id = record.Id,
-                    source = record.Source,
-                    received_at = record.ReceivedAt,
-                    payload_json = record.PayloadJson,
-                }),
-            },
-            RawRecord: selectedRawRecord is null ? null : new
-            {
-                raw_record_id = selectedRawRecord.Id,
-                source = selectedRawRecord.Source,
-                trace_id = selectedRawRecord.TraceId,
-                received_at = selectedRawRecord.ReceivedAt,
-                payload_json = selectedRawRecord.PayloadJson,
-            },
-            RawSpanContext: selectedSpan is null ? null : new
-            {
-                trace_id = context.TraceId,
-                span_id = selectedSpan.SpanId,
-                raw_record = projectionStore.GetRawRecordById(selectedSpan.RawRecordId)?.PayloadJson,
-            },
-            TraceSummary: trace is null ? null : new
-            {
-                trace_id = trace.TraceId,
-                span_count = trace.SpanCount,
-                tool_call_count = trace.ToolCallCount,
-                error_count = trace.ErrorCount,
-                duration_ms = trace.DurationMs,
-                input_tokens = trace.InputTokens,
-                output_tokens = trace.OutputTokens,
-                total_tokens = trace.TotalTokens,
-                primary_model = trace.PrimaryModel,
-            },
-            TraceSpanTree: new
-            {
-                trace_id = context.TraceId,
-                span_count = spans.Count,
-                spans = spans.Select(span => new
+                    RawRecords = input.Spans
+                        .Select(span => span.RawRecordId)
+                        .Distinct()
+                        .Order()
+                        .Take(RawRecordLimit)
+                        .Where(rawRecordsById.ContainsKey)
+                        .Select(id => rawRecordsById[id])
+                        .ToArray(),
+                })
+                .ToArray();
+            var instructionEvidence = InstructionEvidenceExtractor.Extract(
+                context.TraceId,
+                spans,
+                rawRecords,
+                conversationTraces,
+                materializedConversationInputs);
+
+            return new MonitorAnalysisToolData(
+                new
                 {
-                    span_id = span.SpanId,
-                    parent_span_id = span.ParentSpanId,
-                    operation = span.Operation,
-                    category = span.Category,
-                    tool_name = span.ToolName,
-                    status = span.Status,
-                    duration_ms = span.DurationMs,
-                }),
-            },
-            CacheSummary: new
-            {
-                trace_id = context.TraceId,
-                turn_count = turns.Count,
-                totals = new
-                {
-                    input_tokens = turns.Sum(span => span.InputTokens ?? 0),
-                    output_tokens = turns.Sum(span => span.OutputTokens ?? 0),
-                    total_tokens = turns.Sum(span => span.TotalTokens ?? 0),
-                    cache_read_tokens = turns.Sum(span => span.CacheReadTokens ?? 0),
-                    cache_creation_tokens = turns.Sum(span => span.CacheCreationTokens ?? 0),
+                    trace_id = context.TraceId,
+                    raw_records = rawRecords.Select(record => new
+                    {
+                        raw_record_id = record.Id,
+                        source = record.Source,
+                        received_at = record.ReceivedAt,
+                        payload_json = record.PayloadJson,
+                    }),
                 },
-            },
-            InstructionEvidence: instructionEvidence);
+                selectedRawRecord is null ? null : new
+                {
+                    raw_record_id = selectedRawRecord.Id,
+                    source = selectedRawRecord.Source,
+                    trace_id = selectedRawRecord.TraceId,
+                    received_at = selectedRawRecord.ReceivedAt,
+                    payload_json = selectedRawRecord.PayloadJson,
+                },
+                selectedSpan is null ? null : new
+                {
+                    trace_id = context.TraceId,
+                    span_id = selectedSpan.SpanId,
+                    raw_record = selectedSpanRawRecord?.PayloadJson,
+                },
+                trace is null ? null : new
+                {
+                    trace_id = trace.TraceId,
+                    span_count = trace.SpanCount,
+                    tool_call_count = trace.ToolCallCount,
+                    error_count = trace.ErrorCount,
+                    duration_ms = trace.DurationMs,
+                    input_tokens = trace.InputTokens,
+                    output_tokens = trace.OutputTokens,
+                    total_tokens = trace.TotalTokens,
+                    primary_model = trace.PrimaryModel,
+                },
+                new
+                {
+                    trace_id = context.TraceId,
+                    span_count = spans.Count,
+                    spans = spans.Select(span => new
+                    {
+                        span_id = span.SpanId,
+                        parent_span_id = span.ParentSpanId,
+                        operation = span.Operation,
+                        category = span.Category,
+                        tool_name = span.ToolName,
+                        status = span.Status,
+                        duration_ms = span.DurationMs,
+                    }),
+                },
+                new
+                {
+                    trace_id = context.TraceId,
+                    turn_count = turns.Count,
+                    totals = new
+                    {
+                        input_tokens = turns.Sum(span => span.InputTokens ?? 0),
+                        output_tokens = turns.Sum(span => span.OutputTokens ?? 0),
+                        total_tokens = turns.Sum(span => span.TotalTokens ?? 0),
+                        cache_read_tokens = turns.Sum(span => span.CacheReadTokens ?? 0),
+                        cache_creation_tokens = turns.Sum(span => span.CacheCreationTokens ?? 0),
+                    },
+                },
+                instructionEvidence,
+                rawLease);
+        }
+        catch
+        {
+            if (rawLease is not null)
+            {
+                await rawLease.DisposeAsync();
+            }
+
+            throw;
+        }
     }
 
     private static IReadOnlyList<InstructionEvidenceConversationTraceInput> BuildConversationTraceInputs(
-        IMonitorProjectionStore projectionStore,
         string analyzedTraceId,
         IReadOnlyList<MonitorSpanRow> analyzedSpans,
-        IReadOnlyList<RawTelemetryRecord> analyzedRawRecords,
-        IReadOnlyList<MonitorConversationTraceRow> conversationTraces)
+        IReadOnlyList<MonitorConversationTraceRow> conversationTraces,
+        IMonitorProjectionStore projectionStore)
     {
         if (conversationTraces.Count == 0)
         {
@@ -492,19 +576,28 @@ internal sealed record MonitorAnalysisToolData(
             var spans = isAnalyzedTrace
                 ? analyzedSpans
                 : projectionStore.GetSpansForTrace(trace.TraceId);
-            var rawRecords = isAnalyzedTrace
-                ? analyzedRawRecords
-                : projectionStore.ListRawRecordsByTraceId(trace.TraceId, RawRecordLimit);
-
             inputs.Add(new InstructionEvidenceConversationTraceInput(
                 TraceId: trace.TraceId,
                 RelativePosition: index - analyzedIndex,
                 IsAnalyzedTrace: isAnalyzedTrace,
                 FirstStartTime: trace.FirstStartTime,
                 Spans: spans,
-                RawRecords: rawRecords));
+                RawRecords: []));
         }
 
         return inputs;
     }
+
+    private static IReadOnlyList<long> CollectRawRecordIds(
+        IReadOnlyList<MonitorSpanRow> spans,
+        long? selectedRawRecordId,
+        MonitorSpanRow? selectedSpan,
+        IReadOnlyList<InstructionEvidenceConversationTraceInput> conversationTraceInputs) =>
+        spans.Select(span => span.RawRecordId)
+            .Concat(selectedRawRecordId is { } rawRecordId ? [rawRecordId] : [])
+            .Concat(selectedSpan is null ? [] : [selectedSpan.RawRecordId])
+            .Concat(conversationTraceInputs.SelectMany(input => input.Spans.Select(span => span.RawRecordId)))
+            .Distinct()
+            .Order()
+            .ToArray();
 }

@@ -103,13 +103,10 @@
     let detail = null;
     let state = "unavailable";
     try {
-      const resp = await fetch(`/traces/${encodeURIComponent(traceId)}/spans/${encodeURIComponent(spanId)}/detail`, { cache: "no-store" });
-      if (resp.ok) {
-        const parsed = await resp.json();
-        if (parsed && typeof parsed === "object") {
-          detail = parsed;
-          state = "success";
-        }
+      const parsed = await window.caoLoadSpanDetail(spanId);
+      if (parsed) {
+        detail = parsed;
+        state = "success";
       }
     } catch {
       state = "unavailable";

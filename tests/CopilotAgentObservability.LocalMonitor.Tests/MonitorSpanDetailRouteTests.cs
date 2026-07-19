@@ -128,7 +128,7 @@ public class MonitorSpanDetailRouteTests
 
     private static void Seed(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var record = new RawTelemetryRecord(
             Id: null,

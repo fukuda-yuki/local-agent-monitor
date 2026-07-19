@@ -27,11 +27,16 @@ internal static partial class RawEvidenceReader
 
         if (IsRawStorePath(rawInputPath))
         {
-            foreach (var record in new RawTelemetryStore(rawInputPath).ListRecords())
+            RawStoreLeaseReader.ReadAll(rawInputPath, records =>
             {
-                using var document = JsonDocument.Parse(record.PayloadJson);
-                AddRawOtlpEvidence(document.RootElement, rawInputPath, $"db-record={record.Id?.ToString(CultureInfo.InvariantCulture) ?? "unknown"}", matches);
-            }
+                foreach (var record in records)
+                {
+                    using var document = JsonDocument.Parse(record.PayloadJson);
+                    AddRawOtlpEvidence(document.RootElement, rawInputPath, $"db-record={record.Id?.ToString(CultureInfo.InvariantCulture) ?? "unknown"}", matches);
+                }
+
+                return 0;
+            });
 
             sourceInputs.Add(new SensitiveBundleSourceInput(rawInputPath, ComputeSha256(rawInputPath), "raw-store"));
         }

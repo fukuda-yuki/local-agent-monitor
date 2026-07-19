@@ -603,7 +603,7 @@ public class AgentExecutionGraphEndpointTests
 
     private static long Seed(MonitorTempDirectory temp, string traceId, string payload)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var record = new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, traceId, DateTimeOffset.UnixEpoch, null, payload);
         var id = store.Insert(record);
@@ -666,33 +666,33 @@ public class AgentExecutionGraphEndpointTests
         ]}]}]}
         """.Replace("__TRACE__", traceId, StringComparison.Ordinal);
 
-    private sealed class BusyProjectionStore : IMonitorProjectionStore
+    private sealed class BusyProjectionStore : ProjectionStoreTestDouble
     {
         public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit) => throw new NotSupportedException();
-        public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) => throw new NotSupportedException();
-        public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => throw new NotSupportedException();
-        public bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => throw new NotSupportedException();
-        public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => throw new NotSupportedException();
-        public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) => throw new NotSupportedException();
-        public MonitorProjectionStatus GetProjectionStatus() => throw new NotSupportedException();
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) => throw new NotSupportedException();
+        public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => throw new NotSupportedException();
+        public override bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => throw new NotSupportedException();
+        public override bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => throw new NotSupportedException();
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) => throw new NotSupportedException();
+        public override MonitorProjectionStatus GetProjectionStatus() => throw new NotSupportedException();
         public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) => throw new NotSupportedException();
-        public bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) => throw new NotSupportedException();
-        public MonitorProjectionStatus GetSpanProjectionStatus() => throw new NotSupportedException();
-        public MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) => throw new NotSupportedException();
-        public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) => throw new NotSupportedException();
-        public MonitorTraceRow? GetMonitorTrace(string traceId) => throw new PersistenceBusyException();
-        public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) => throw new NotSupportedException();
-        public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) => throw new NotSupportedException();
+        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) => throw new NotSupportedException();
+        public override MonitorProjectionStatus GetSpanProjectionStatus() => throw new NotSupportedException();
+        public override MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) => throw new NotSupportedException();
+        public override MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) => throw new NotSupportedException();
+        public override MonitorTraceRow? GetMonitorTrace(string traceId) => throw new PersistenceBusyException();
+        public override MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) => throw new NotSupportedException();
+        public override IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) => throw new NotSupportedException();
         public RawTelemetryRecord? GetRawRecordById(long id) => throw new NotSupportedException();
         public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) => throw new NotSupportedException();
-        public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) => throw new NotSupportedException();
-        public IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) => throw new NotSupportedException();
-        public IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) => throw new NotSupportedException();
-        public IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) => throw new NotSupportedException();
-        public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => throw new NotSupportedException();
-        public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => throw new NotSupportedException();
-        public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) => throw new NotSupportedException();
-        public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) => throw new NotSupportedException();
+        public override MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) => throw new NotSupportedException();
+        public override IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) => throw new NotSupportedException();
+        public override IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) => throw new NotSupportedException();
+        public override IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) => throw new NotSupportedException();
+        public override IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => throw new NotSupportedException();
+        public override MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => throw new NotSupportedException();
+        public override MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) => throw new NotSupportedException();
+        public override IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) => throw new NotSupportedException();
     }
 
     private sealed class ClaudeCompatibilityStore(long rawRecordId) : ISourceCompatibilityStore

@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -103,7 +104,7 @@ public class MonitorProjectionStoreTests
         using var temp = new MonitorTempDirectory();
         BuildV2DatabaseWithoutRepositoryMetadata(temp.DatabasePath);
 
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, new MutableTimeProvider(T(0)), RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
 
         Assert.Equal(7, RawTelemetryStore.MonitorSchemaVersion);
@@ -192,15 +193,16 @@ public class MonitorProjectionStoreTests
     }
 
     [Fact]
-    public void GetRawRecordById_ReturnsRecordOrNull()
+    public async Task GetRawRecordById_ReturnsRecordOrNull()
     {
         using var temp = new MonitorTempDirectory();
         var store = NewStore(temp);
         var id = store.Insert(Raw("t1", T(1)));
 
-        var found = store.GetRawRecordById(id);
-        Assert.NotNull(found);
-        Assert.Equal("t1", found!.TraceId);
+        var read = await store.GetRawRecordByIdAsync(id, RetentionReadKind.Access, CancellationToken.None);
+        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        await using var lease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(read.Lease);
+        Assert.Equal("t1", lease.Value.TraceId);
 
         Assert.Null(store.GetRawRecordById(999_999));
     }
@@ -263,7 +265,7 @@ public class MonitorProjectionStoreTests
 
     private static RawTelemetryStore NewStore(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         return store;
     }

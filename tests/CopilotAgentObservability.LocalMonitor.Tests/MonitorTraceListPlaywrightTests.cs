@@ -112,7 +112,7 @@ public class MonitorTraceListPlaywrightTests
 
     private static void Seed(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         SeedTrace(store, PromptlessBigPayload, minute: 0);
         SeedTrace(store, BigPayload, minute: 1);

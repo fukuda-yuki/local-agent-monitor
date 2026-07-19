@@ -5,6 +5,7 @@ using System.Text.Json;
 using CopilotAgentObservability.Doctor;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -77,7 +78,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
 
         try
         {
-            return ObserveCore(databasePath, timeProvider, selection, storePolicy, partition);
+            return ObserveCoreAsync(databasePath, timeProvider, selection, storePolicy, partition).GetAwaiter().GetResult();
         }
         catch (InjectedDoctorStoreBusyException)
         {
@@ -137,7 +138,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
     private static string ObservationGateKey(string databasePath, string verificationId) =>
         $"{Path.GetFullPath(databasePath)}|{verificationId}";
 
-    private static GitHubCopilotDoctorEvidenceResult ObserveCore(
+    private static async Task<GitHubCopilotDoctorEvidenceResult> ObserveCoreAsync(
         string databasePath,
         TimeProvider timeProvider,
         GitHubCopilotDoctorEvidenceSelection selection,
@@ -161,8 +162,23 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         var connectionOptions = new RawTelemetryStoreConnectionOptions(
             EnableWriteAheadLog: true,
             storePolicy.BusyTimeoutMilliseconds);
-        var rawStore = new RawTelemetryStore(databasePath, connectionOptions);
-        var raw = rawStore.GetRawRecordById(selection.RawRecordId);
+        var retentionContext = RetentionCatalogContext.AdoptExistingCatalogV1(databasePath);
+        var rawStore = new RawTelemetryStore(databasePath, retentionContext, connectionOptions: connectionOptions);
+        var rawResult = await rawStore.GetRawRecordByIdAsync(
+            selection.RawRecordId,
+            RetentionReadKind.Operation,
+            CancellationToken.None);
+        if (rawResult.Disposition != RetentionReadDisposition.Granted || rawResult.Lease is null)
+        {
+            return Empty(
+                rawResult.Disposition == RetentionReadDisposition.Busy ? StoreBusy() : status,
+                partition,
+                selection.VerificationId,
+                timeProvider.GetUtcNow());
+        }
+
+        await using var rawLease = rawResult.Lease;
+        var raw = rawLease.Value;
         if (raw is null || raw.ReceivedAt < verification.StartedAt || raw.ReceivedAt >= verification.ExpiresAt ||
             !string.Equals(raw.Source, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
             !HasExpectedRawProvenance(raw, partition))

@@ -186,7 +186,7 @@ public class MonitorRawViewTests
 
     private static long SeedRawRecord(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var record = new RawTelemetryRecord(
             Id: null,
@@ -202,7 +202,7 @@ public class MonitorRawViewTests
 
     private static long SeedRawRecordWithPrompt(MonitorTempDirectory temp, string traceId, string promptText)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var payloadJson = PromptPayloadTemplate
             .Replace("TRACE_ID_PLACEHOLDER", traceId)
@@ -222,7 +222,7 @@ public class MonitorRawViewTests
 
     private static long SeedRawRecordWithoutPrompt(MonitorTempDirectory temp, string traceId)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var payloadJson = PromptlessPayloadTemplate.Replace("TRACE_ID_PLACEHOLDER", traceId);
         var record = new RawTelemetryRecord(

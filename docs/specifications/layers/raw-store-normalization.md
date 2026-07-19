@@ -584,6 +584,13 @@ is returned; a null selector result, expiry boundary, stale revision, or failed
 commit returns no value. SQLite busy/locked returns `busy` without changing
 lifecycle or error state.
 
+All production reads of `raw_records` that materialize `payload_json` or
+`resource_attributes_json` use this boundary. Multi-record raw reads acquire
+one composite lease inside that same transaction: a denied, stale, missing, or
+busy member returns no partial value and no synthetic marker. Callers keep the
+returned lease until their actual raw use completes, then dispose it exactly
+once.
+
 The immutable Issue #89 kickoff and inventory base are both
 `11d6c587903f6ea97026d815f608231efea08d65`. The checked-in current-callsite
 inventory is [issue-89-raw-read-callsite-inventory.md](../../sprints/issue-89-raw-read-callsite-inventory.md).

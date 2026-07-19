@@ -35,7 +35,7 @@ public class IngestionWriterWorkerTests
         var compatibilityStore = new SqliteSourceCompatibilityStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         var worker = new IngestionWriterWorker(
             queue,
-            new SqliteIngestionCommitStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter),
+            new SqliteIngestionCommitStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter, temp.TimeProvider),
             compatibilityStore,
             health);
 
@@ -52,7 +52,7 @@ public class IngestionWriterWorkerTests
             Assert.Equal(IngestionCommitStatus.Committed, secondResult.Status);
             Assert.Equal(firstResult.RawRecordId + 1, secondResult.RawRecordId);
             Assert.Equal(firstResult.ObservationId + 1, secondResult.ObservationId);
-            Assert.Equal(2, new RawTelemetryStore(temp.DatabasePath).ListRecords().Count);
+            Assert.Equal(2, new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider).ListRecords().Count);
             Assert.Equal(2, compatibilityStore.List(after: null, limit: 200).Count);
 
             var snapshot = health.Snapshot();
@@ -193,7 +193,7 @@ public class IngestionWriterWorkerTests
         var compatibilityStore = new SqliteSourceCompatibilityStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         var worker = new IngestionWriterWorker(
             queue,
-            new SqliteIngestionCommitStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter),
+            new SqliteIngestionCommitStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter, temp.TimeProvider),
             compatibilityStore,
             health);
 
@@ -213,7 +213,7 @@ public class IngestionWriterWorkerTests
             Assert.Equal(IngestionCommitStatus.Committed, result.Status);
         }
 
-        Assert.Equal(5, new RawTelemetryStore(temp.DatabasePath).ListRecords().Count);
+        Assert.Equal(5, new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider).ListRecords().Count);
         Assert.Equal(5, compatibilityStore.List(after: null, limit: 200).Count);
     }
 

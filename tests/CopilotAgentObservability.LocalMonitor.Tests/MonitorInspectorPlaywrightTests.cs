@@ -12,6 +12,64 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorInspectorPlaywrightTests
 {
+    [Fact]
+    public async Task Inspector_CoalescesSameSpanDetailRequestWithErrorPanelAndDoesNotCacheFailure()
+    {
+        using var temp = new MonitorTempDirectory();
+        MonitorRichTrace.Seed(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+        });
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var firstDetailRequest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstDetailResponse = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var detailRequestCount = 0;
+        await page.RouteAsync($"**/traces/{MonitorRichTrace.TraceId}/spans/f201/detail", async route =>
+        {
+            detailRequestCount++;
+            if (detailRequestCount == 1)
+            {
+                firstDetailRequest.SetResult();
+                await releaseFirstDetailResponse.Task;
+                await route.FulfillAsync(new RouteFulfillOptions
+                {
+                    Status = 503,
+                    ContentType = "application/json",
+                    Body = "{\"accepted\":false,\"error\":\"persistence_busy\"}",
+                });
+                return;
+            }
+
+            await route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = "{\"raw_span_json\":\"{\\\"spanId\\\":\\\"f201\\\"}\"}",
+            });
+        });
+
+        await page.GotoAsync($"{host.Url}/traces/{MonitorRichTrace.TraceId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await firstDetailRequest.Task;
+        await page.Locator("#flow-view .tool-card.tool-error").ClickAsync();
+        await Expect(page.Locator("#span-inspector")).ToBeVisibleAsync();
+        Assert.Equal(1, detailRequestCount);
+
+        releaseFirstDetailResponse.SetResult();
+        await page.Locator(".inspector-tab", new PageLocatorOptions { HasTextString = "raw" }).ClickAsync();
+        await Expect(page.Locator("#span-inspector")).ToContainTextAsync("raw スパン JSON を取得できませんでした");
+
+        await page.Keyboard.PressAsync("Escape");
+        await page.Locator("#flow-view .tool-card.tool-error").ClickAsync();
+        await page.Locator(".inspector-tab", new PageLocatorOptions { HasTextString = "raw" }).ClickAsync();
+        await Expect(page.Locator(".inspector-raw-json")).ToContainTextAsync("f201");
+        Assert.Equal(2, detailRequestCount);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -41,6 +99,9 @@ public class MonitorInspectorPlaywrightTests
         await Expect(page.Locator("#span-inspector")).ToBeHiddenAsync();
 
         // Click the recovered-error tool span: inspector replaces the side panel.
+        var detailResponse = sanitizedOnly
+            ? null
+            : page.WaitForResponseAsync(response => response.Url.Contains($"/traces/{MonitorRichTrace.TraceId}/spans/f201/detail", StringComparison.Ordinal));
         await page.Locator("#flow-view .tool-card.tool-error").ClickAsync();
         await Expect(page.Locator("#span-inspector")).ToBeVisibleAsync();
         await Expect(page.Locator("#error-panel")).ToBeHiddenAsync();
@@ -62,6 +123,7 @@ public class MonitorInspectorPlaywrightTests
         {
             // The formatted view loads from the raw span-detail route (D043).
             Assert.Contains(requestedUrls, url => url.Contains($"/traces/{MonitorRichTrace.TraceId}/spans/f201/detail", StringComparison.Ordinal));
+            Assert.Equal(200, (await detailResponse!).Status);
             await Expect(page.Locator("#span-inspector")).ToContainTextAsync("メタ");
             // Raw tab shows the OTLP span JSON.
             await page.Locator(".inspector-tab", new PageLocatorOptions { HasTextString = "raw" }).ClickAsync();

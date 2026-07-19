@@ -335,7 +335,7 @@ public class MonitorAgentExecutionPlaywrightTests
 
     private static void Seed(MonitorTempDirectory temp, string payload)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var record = new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, TraceId, DateTimeOffset.UnixEpoch.AddMinutes(1), null, payload);
         var id = store.Insert(record);

@@ -1,4 +1,5 @@
 using CopilotAgentObservability.Telemetry.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
@@ -8,14 +9,16 @@ public sealed class SqliteSessionOtelEnricher
     public const string ProjectorKey = "session-otel-enrichment";
     private readonly string databasePath;
     private readonly ISessionStore store;
+    private readonly RawTelemetryStore rawStore;
     private readonly ClaudeExactBindingRule claudeExactBindingRule;
     private readonly TimeProvider timeProvider;
     private readonly Action<string>? checkpoint;
 
-    public SqliteSessionOtelEnricher(string databasePath, ISessionStore store, TimeProvider? timeProvider = null)
+    public SqliteSessionOtelEnricher(string databasePath, ISessionStore store, RetentionCatalogContext retentionContext, TimeProvider? timeProvider = null)
     {
         this.databasePath = databasePath;
         this.store = store;
+        rawStore = new RawTelemetryStore(databasePath, retentionContext, timeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         claudeExactBindingRule = new(databasePath);
         this.timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -23,9 +26,10 @@ public sealed class SqliteSessionOtelEnricher
     internal SqliteSessionOtelEnricher(
         string databasePath,
         ISessionStore store,
+        RetentionCatalogContext retentionContext,
         TimeProvider timeProvider,
         Action<string> checkpoint)
-        : this(databasePath, store, timeProvider)
+        : this(databasePath, store, retentionContext, timeProvider)
     {
         this.checkpoint = checkpoint ?? throw new ArgumentNullException(nameof(checkpoint));
     }
@@ -34,18 +38,30 @@ public sealed class SqliteSessionOtelEnricher
     {
         var state = store.GetProjectionState(ProjectorKey);
         var rows = ReadRows(state?.ProjectionCursor ?? 0, limit);
-        foreach (var row in rows)
+        var rawResult = rawStore.ReadRawRecordsAsync(rows.Select(row => row.RawRecordId).ToArray(), RetentionReadKind.Operation, CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        if (rawResult.Disposition == RetentionReadDisposition.Busy)
         {
-            if (row.IsClaudeCode)
-            {
-                ProcessClaude(row);
-            }
-            else
-            {
-                Process(row);
-            }
-            store.UpsertProjectionState(new(ProjectorKey, row.Id, state?.UnsupportedEventVersionCount ?? 0, timeProvider.GetUtcNow()));
+            return 0;
         }
+        try
+        {
+            var payloadByRawRecordId = rawResult.Lease?.Value.ToDictionary(record => record.Id!.Value, record => record.PayloadJson)
+                ?? new Dictionary<long, string>();
+            foreach (var sourceRow in rows)
+            {
+                var row = sourceRow with { PayloadJson = payloadByRawRecordId.GetValueOrDefault(sourceRow.RawRecordId) };
+                if (row.IsClaudeCode)
+                {
+                    ProcessClaude(row);
+                }
+                else
+                {
+                    Process(row);
+                }
+                store.UpsertProjectionState(new(ProjectorKey, row.Id, state?.UnsupportedEventVersionCount ?? 0, timeProvider.GetUtcNow()));
+            }
+        }
+        finally { rawResult.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
         return rows.Count;
     }
 
@@ -293,11 +309,10 @@ public sealed class SqliteSessionOtelEnricher
         command.CommandText = $"""
             SELECT s.id,s.raw_record_id,s.trace_id,COALESCE(s.span_id,''),s.conversation_id,t.client_kind,
                    t.repository_name,t.workspace_label,s.start_time,s.end_time,s.projected_at,
-                   s.request_model,s.input_tokens,s.output_tokens,s.total_tokens,s.status,r.payload_json,
+                   s.request_model,s.input_tokens,s.output_tokens,s.total_tokens,s.status,
                    {observationColumns}
             FROM monitor_spans s
             JOIN monitor_traces t ON t.trace_id=s.trace_id
-            LEFT JOIN raw_records r ON r.id=s.raw_record_id
             {observationJoin}
             WHERE s.id > $after ORDER BY s.id LIMIT $limit;
             """;
@@ -312,7 +327,7 @@ public sealed class SqliteSessionOtelEnricher
                 Nullable(reader, 6), Nullable(reader, 7), Timestamp(reader, 8), Timestamp(reader, 9),
                 DateTimeOffset.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind),
                 Nullable(reader, 11), NullableInt64(reader, 12), NullableInt64(reader, 13), NullableInt64(reader, 14), Nullable(reader, 15),
-                Nullable(reader, 16), Nullable(reader, 17), Nullable(reader, 18), Nullable(reader, 19), Nullable(reader, 20), Nullable(reader, 21)));
+                PayloadJson: null, Nullable(reader, 16), Nullable(reader, 17), Nullable(reader, 18), Nullable(reader, 19), Nullable(reader, 20)));
         }
         return rows;
     }

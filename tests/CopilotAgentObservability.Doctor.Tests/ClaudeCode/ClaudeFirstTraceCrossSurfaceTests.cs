@@ -18,6 +18,7 @@ using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Doctor.ClaudeCode;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -160,7 +161,9 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
 
             await monitor.PostOtlpAsync(Payload(TraceId, NativeSessionMarker));
             await monitor.DrainAsync();
-            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+            Assert.Equal("completed", ReadProjectionDisposition(databasePath, TraceId));
+            Assert.True(ReadProjectedSpanCount(databasePath, TraceId) > 0);
+            CreateObserver(databasePath, time).RunOnce();
 
             using var complete = RunFirstTrace(
                 orchestrator,
@@ -198,7 +201,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             var verificationId = BeginVerification(orchestrator, databasePath, origin);
             await monitor.PostSessionStartAsync("SYNTHETIC_HOOK_ONLY_SESSION");
             await monitor.DrainAsync();
-            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+            CreateObserver(databasePath, time).RunOnce();
 
             using var status = RunFirstTrace(
                 orchestrator,
@@ -273,7 +276,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             await monitor.PostSessionStartAsync(NativeSessionMarker);
             await monitor.PostOtlpAsync(Payload(TraceId, NativeSessionMarker));
             await monitor.DrainAsync();
-            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+            CreateObserver(databasePath, time).RunOnce();
 
             using var exactComplete = CompleteVerification(
                 CreateOrchestrator(CreatePlatform(databasePath, origin, monitorProbe), time),
@@ -298,7 +301,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             await monitor.PostOtlpAsync(Payload(TraceContinuityTraceId, sessionId: null));
             await monitor.ProjectOnlyAsync();
             AddTraceContinuityEvents(databasePath, time, TraceContinuityTraceId, "SYNTHETIC_TRACE_ONLY_SESSION");
-            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+            CreateObserver(databasePath, time).RunOnce();
 
             using var continuityStatus = RunFirstTrace(
                 continuityOrchestrator,
@@ -345,7 +348,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             await monitor.PostSessionStartAsync("SYNTHETIC_CONTENT_DISABLED_SESSION");
             await monitor.PostOtlpAsync(Payload(ContentDisabledTraceId, "SYNTHETIC_CONTENT_DISABLED_SESSION", includeContent: false));
             await monitor.DrainAsync();
-            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+            CreateObserver(databasePath, time).RunOnce();
 
             using var contentDisabledComplete = CompleteVerification(
                 CreateOrchestrator(
@@ -408,7 +411,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             await monitor.PostOtlpAsync(Payload(TraceId, NativeSessionMarker));
             await monitor.DrainAsync();
 
-            var observer = new ClaudeDoctorCandidateObserver(databasePath, time);
+            var observer = CreateObserver(databasePath, time);
             observer.RunOnce();
 
             using var status = RunFirstTrace(
@@ -486,7 +489,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             await monitor.PostSessionStartAsync(NativeSessionMarker);
             await monitor.PostOtlpAsync(Payload(TraceId, sessionId: null));
             await monitor.DrainAsync();
-            new ClaudeDoctorCandidateObserver(databasePath, time).RunOnce();
+            CreateObserver(databasePath, time).RunOnce();
 
             var completionPlatform = CreatePlatform(databasePath, origin, monitorProbe);
             using var complete = RunFirstTrace(
@@ -662,7 +665,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
 
     private static void PrepareBaselineDatabase(string databasePath, TimeProvider time)
     {
-        new RawTelemetryStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(databasePath, time);
+        new RawTelemetryStore(databasePath, retentionContext, time, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
         new SqliteSourceCompatibilityStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
         new SqliteMonitorRuntimeStateStore(databasePath, time, RawTelemetryStoreConnectionOptions.MonitorWriter).Upsert(false);
 
@@ -688,6 +692,30 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             receivedAt);
         new SqliteIngestionCommitStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter)
             .Commit(ValidatedIngestionBatch.Create(record, observation));
+    }
+
+    private static ClaudeDoctorCandidateObserver CreateObserver(string databasePath, TimeProvider time) =>
+        new(databasePath, RetentionCatalogContext.AdoptExistingCatalogV1(databasePath), time);
+
+    private static string? ReadProjectionDisposition(string databasePath, string traceId)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT d.state FROM monitor_projection_dispositions d JOIN raw_records r ON r.id=d.raw_record_id WHERE r.trace_id=$trace_id;";
+        command.Parameters.AddWithValue("$trace_id", traceId);
+        return command.ExecuteScalar() as string;
+    }
+
+    private static long ReadProjectedSpanCount(string databasePath, string traceId)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM monitor_spans WHERE trace_id=$trace_id;";
+        command.Parameters.AddWithValue("$trace_id", traceId);
+        return (long)command.ExecuteScalar()!;
     }
 
     private static string Payload(string traceId, string? sessionId, bool includeContent = true)
@@ -951,7 +979,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             var compatibility = new SqliteSourceCompatibilityStore(
                 databasePath,
                 RawTelemetryStoreConnectionOptions.MonitorWriter);
-            var sessionStore = new SqliteSessionStore(databasePath, time);
+            var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(databasePath, time);
+            var sessionStore = new SqliteSessionStore(databasePath, retentionContext, time);
             var health = new MonitorHealthState();
             health.SetProjectionWorkerRunning(true);
             health.SetProjectionStatus(0, null);
@@ -996,7 +1025,11 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                     health,
                     compatibility,
                     time);
-                var enricher = new SqliteSessionOtelEnricher(databasePath, sessionStore, time);
+                var enricher = new SqliteSessionOtelEnricher(
+                    databasePath,
+                    sessionStore,
+                    app.Services.GetRequiredService<CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogContext>(),
+                    time);
                 return new(
                     app,
                     new HttpClient { BaseAddress = new Uri(origin) },

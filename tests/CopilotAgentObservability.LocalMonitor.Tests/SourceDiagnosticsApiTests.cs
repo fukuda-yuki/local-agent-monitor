@@ -313,7 +313,7 @@ public sealed class SourceDiagnosticsApiTests
                 VerifiedSourceFingerprintRegistry.Create([], [], [])),
             SourceCaptureContentState.NotCaptured,
             observedAt);
-        new SqliteIngestionCommitStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).Commit(
+        new SqliteIngestionCommitStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter, temp.TimeProvider).Commit(
             ValidatedIngestionBatch.Create(
                 new RawTelemetryRecord(
                     Id: null,
@@ -323,7 +323,7 @@ public sealed class SourceDiagnosticsApiTests
                     ResourceAttributesJson: null,
                     PayloadJson: rawPayload),
                 observation));
-        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", Assert.Single(new RawTelemetryStore(temp.DatabasePath).ListRecords()).PayloadJson);
+        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", Assert.Single(temp.CreateRawStore().ListRecords()).PayloadJson);
 
         await using var host = await MonitorTestHost.StartAsync(
             temp,

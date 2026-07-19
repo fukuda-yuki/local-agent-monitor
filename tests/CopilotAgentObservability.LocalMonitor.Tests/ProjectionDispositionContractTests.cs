@@ -1,6 +1,7 @@
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -16,7 +17,7 @@ public sealed class ProjectionDispositionContractTests
         var committed = Commit(temp.DatabasePath, ValidPayload("atomic"));
         var store = ProjectionStore(temp.DatabasePath);
 
-        Assert.Single(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        Assert.Single(new RawTelemetryStore(temp.DatabasePath, RetentionCatalogContext.AdoptExistingCatalogV1(temp.DatabasePath)).ListRecords());
         Assert.Single(new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
         AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.NotStarted, 1, ObservedAt);
     }
@@ -53,7 +54,7 @@ public sealed class ProjectionDispositionContractTests
         var exception = Assert.Throws<SqliteException>(() => CommitWithoutSchema(temp.DatabasePath, ValidPayload("rollback")));
 
         Assert.Contains("injected disposition insert failure", exception.Message, StringComparison.Ordinal);
-        Assert.Empty(new RawTelemetryStore(temp.DatabasePath).ListRecords());
+        Assert.Empty(new RawTelemetryStore(temp.DatabasePath, RetentionCatalogContext.AdoptExistingCatalogV1(temp.DatabasePath)).ListRecords());
         Assert.Empty(new SqliteSourceCompatibilityStore(temp.DatabasePath).List(after: null, limit: 200));
         Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM monitor_projection_dispositions;"));
     }
@@ -347,11 +348,14 @@ public sealed class ProjectionDispositionContractTests
             .Commit(ValidatedIngestionBatch.Create(raw, observation));
     }
 
-    private static void CreateSchema(string databasePath) =>
+    private static void CreateSchema(string databasePath)
+    {
+        RetentionCatalogContext.InitializeNewOwnedDatabase(databasePath);
         new SqliteSourceCompatibilityStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
+    }
 
     private static RawTelemetryStore ProjectionStore(string databasePath) =>
-        new(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        new(databasePath, RetentionCatalogContext.AdoptExistingCatalogV1(databasePath), connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
 
     private static MonitorRecordProjection EmptyProjection() =>
         new(TraceId: null, ClientKind: null, SpanCount: 0, TraceContributions: []);
@@ -414,7 +418,7 @@ public sealed class ProjectionDispositionContractTests
         return connection;
     }
 
-    private sealed class InterleavedProjectionStore : IMonitorProjectionStore
+    private sealed class InterleavedProjectionStore : ProjectionStoreTestDouble
     {
         private readonly IMonitorProjectionStore inner;
         private readonly Barrier firstClaimed;
@@ -443,20 +447,23 @@ public sealed class ProjectionDispositionContractTests
 
         public bool CompletionRecorded { get; private set; }
 
-        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit)
+        public override async ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken)
         {
-            var records = inner.ListUnprocessedForProjection(limit);
+            var result = await inner.ListUnprocessedForProjectionAsync(limit, cancellationToken);
+            if (result.Lease is null) return result;
+            await using var lease = result.Lease;
+            var records = lease.Value;
             if (Interlocked.Increment(ref listCallCount) == 1)
             {
-                return records;
+                return Granted<IReadOnlyList<RawTelemetryRecord>>(records);
             }
 
-            return records
+            return Granted<IReadOnlyList<RawTelemetryRecord>>(records
                 .Select(record => record with { PayloadJson = ValidPayload("concurrent-complete") })
-                .ToArray();
+                .ToArray());
         }
 
-        public bool ApplyProjection(
+        public override bool ApplyProjection(
             long rawRecordId,
             string source,
             DateTimeOffset receivedAt,
@@ -464,10 +471,10 @@ public sealed class ProjectionDispositionContractTests
             DateTimeOffset projectedAt) =>
             inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
 
-        public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
+        public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
             inner.GetProjectionDisposition(rawRecordId);
 
-        public bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt)
+        public override bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt)
         {
             var call = Interlocked.Increment(ref beginCallCount);
             lock (BeginExpectedRevisions)
@@ -489,7 +496,7 @@ public sealed class ProjectionDispositionContractTests
             return claimed;
         }
 
-        public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt)
+        public override bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt)
         {
             FailureExpectedRevision = expectedRevision;
             FailureRecorded = inner.RecordProjectionFailure(rawRecordId, expectedRevision, updatedAt);
@@ -497,7 +504,7 @@ public sealed class ProjectionDispositionContractTests
             return FailureRecorded;
         }
 
-        public bool ApplyProjection(
+        public override bool ApplyProjection(
             long rawRecordId,
             string source,
             DateTimeOffset receivedAt,
@@ -516,53 +523,57 @@ public sealed class ProjectionDispositionContractTests
             return CompletionRecorded;
         }
 
-        public MonitorProjectionStatus GetProjectionStatus() => inner.GetProjectionStatus();
+        public override MonitorProjectionStatus GetProjectionStatus() => inner.GetProjectionStatus();
 
-        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) =>
-            inner.ListUnprocessedForSpanProjection(limit);
+        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken) =>
+            inner.ListUnprocessedForSpanProjectionAsync(limit, cancellationToken);
 
-        public bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) =>
+        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) =>
             inner.ApplySpanProjection(rawRecordId, spans, projectedAt);
 
-        public MonitorProjectionStatus GetSpanProjectionStatus() => inner.GetSpanProjectionStatus();
+        public override MonitorProjectionStatus GetSpanProjectionStatus() => inner.GetSpanProjectionStatus();
 
-        public MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) =>
+        public override MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) =>
             inner.ListMonitorIngestions(afterRawRecordId, limit);
 
-        public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
+        public override MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
             inner.ListMonitorTraces(afterId, limit);
 
-        public MonitorTraceRow? GetMonitorTrace(string traceId) => inner.GetMonitorTrace(traceId);
+        public override MonitorTraceRow? GetMonitorTrace(string traceId) => inner.GetMonitorTrace(traceId);
 
-        public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
+        public override MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
             inner.ListMonitorSpans(traceId, afterId, limit);
 
-        public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) => inner.GetSpansForTrace(traceId);
+        public override IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) => inner.GetSpansForTrace(traceId);
 
-        public RawTelemetryRecord? GetRawRecordById(long id) => inner.GetRawRecordById(id);
+        public override ValueTask<RetentionReadResult<RawTelemetryRecord>> GetRawRecordByIdAsync(long id, RetentionReadKind readKind, CancellationToken cancellationToken) =>
+            inner.GetRawRecordByIdAsync(id, readKind, cancellationToken);
 
-        public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) =>
-            inner.ListRawRecordsByTraceId(traceId, limit);
+        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadRawRecordsAsync(IReadOnlyList<long> ids, RetentionReadKind readKind, CancellationToken cancellationToken) =>
+            inner.ReadRawRecordsAsync(ids, readKind, cancellationToken);
 
-        public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
+        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRawRecordsByTraceIdAsync(string traceId, int limit, RetentionReadKind readKind, CancellationToken cancellationToken) =>
+            inner.ListRawRecordsByTraceIdAsync(traceId, limit, readKind, cancellationToken);
+
+        public override MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
             inner.GetPeriodSummary(startInclusive, endExclusive);
 
-        public IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) =>
+        public override IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) =>
             inner.GetPerModelPeriodSummary(startInclusive, endExclusive);
 
-        public IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) =>
+        public override IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) =>
             inner.GetHourlyTokenDistribution(startInclusive, endExclusive);
 
-        public IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) =>
+        public override IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) =>
             inner.ListTopTokenTraces(startInclusive, endExclusive, limit);
 
-        public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => inner.ListRecentMonitorTraces(limit);
+        public override IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => inner.ListRecentMonitorTraces(limit);
 
-        public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => inner.ListMonitorTracesFiltered(query);
+        public override MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => inner.ListMonitorTracesFiltered(query);
 
-        public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) => inner.GetMonitorSpan(traceId, spanId);
+        public override MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) => inner.GetMonitorSpan(traceId, spanId);
 
-        public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) =>
+        public override IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) =>
             inner.ListConversationTraces(conversationId);
     }
 }

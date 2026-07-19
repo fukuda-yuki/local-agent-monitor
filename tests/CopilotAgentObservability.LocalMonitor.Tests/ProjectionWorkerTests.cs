@@ -3,6 +3,7 @@ using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry;
 using System.Text;
 using System.Text.Json;
@@ -681,7 +682,7 @@ public class ProjectionWorkerTests
         Fail,
     }
 
-    private sealed class FakeProjectionStore : IMonitorProjectionStore
+    private sealed class FakeProjectionStore : ProjectionStoreTestDouble
     {
         private readonly List<RawTelemetryRecord> records = new();
         private readonly HashSet<long> projected = new();
@@ -725,10 +726,10 @@ public class ProjectionWorkerTests
 
         public string GetPayload(long id) => records.Single(record => record.Id == id).PayloadJson;
 
-        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit) =>
-            records.Where(r => !projected.Contains(r.Id!.Value)).Take(limit).ToList();
+        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(Granted<IReadOnlyList<RawTelemetryRecord>>(records.Where(r => !projected.Contains(r.Id!.Value)).Take(limit).ToList()));
 
-        public bool ApplyProjection(
+        public override bool ApplyProjection(
             long rawRecordId,
             string source,
             DateTimeOffset receivedAt,
@@ -749,13 +750,13 @@ public class ProjectionWorkerTests
             }
         }
 
-        public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => null;
+        public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => null;
 
-        public bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
+        public override bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
 
-        public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
+        public override bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
 
-        public bool ApplyProjection(
+        public override bool ApplyProjection(
             long rawRecordId,
             string source,
             DateTimeOffset receivedAt,
@@ -764,7 +765,7 @@ public class ProjectionWorkerTests
             int expectedDispositionRevision) =>
             ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
 
-        public MonitorProjectionStatus GetProjectionStatus()
+        public override MonitorProjectionStatus GetProjectionStatus()
         {
             if (StatusThrowsBusy)
             {
@@ -776,10 +777,10 @@ public class ProjectionWorkerTests
             return new MonitorProjectionStatus(unprocessed.Count, oldest);
         }
 
-        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) =>
-            records.Where(r => projected.Contains(r.Id!.Value) && !spanProjected.Contains(r.Id!.Value)).Take(limit).ToList();
+        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(Granted<IReadOnlyList<RawTelemetryRecord>>(records.Where(r => projected.Contains(r.Id!.Value) && !spanProjected.Contains(r.Id!.Value)).Take(limit).ToList()));
 
-        public bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt)
+        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt)
         {
             SpanApplyCalls[rawRecordId] = SpanApplyCalls.GetValueOrDefault(rawRecordId) + 1;
             if (!projected.Contains(rawRecordId) || spanProjected.Contains(rawRecordId))
@@ -792,26 +793,26 @@ public class ProjectionWorkerTests
             return true;
         }
 
-        public MonitorProjectionStatus GetSpanProjectionStatus()
+        public override MonitorProjectionStatus GetSpanProjectionStatus()
         {
             var pending = records.Where(r => projected.Contains(r.Id!.Value) && !spanProjected.Contains(r.Id!.Value)).ToList();
             var oldest = pending.Count == 0 ? (DateTimeOffset?)null : pending.Min(r => r.ReceivedAt);
             return new MonitorProjectionStatus(pending.Count, oldest);
         }
 
-        public MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) =>
+        public override MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) =>
             throw new NotSupportedException();
 
-        public MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
+        public override MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) =>
             throw new NotSupportedException();
 
-        public MonitorTraceRow? GetMonitorTrace(string traceId) =>
+        public override MonitorTraceRow? GetMonitorTrace(string traceId) =>
             throw new NotSupportedException();
 
-        public MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
+        public override MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) =>
             throw new NotSupportedException();
 
-        public IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) =>
+        public override IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) =>
             throw new NotSupportedException();
 
         public RawTelemetryRecord? GetRawRecordById(long id) =>
@@ -820,28 +821,28 @@ public class ProjectionWorkerTests
         public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit) =>
             throw new NotSupportedException();
 
-        public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
+        public override MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
             throw new NotSupportedException();
 
-        public IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) =>
+        public override IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) =>
             throw new NotSupportedException();
 
-        public IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) =>
+        public override IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) =>
             throw new NotSupportedException();
 
-        public IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) =>
+        public override IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) =>
             throw new NotSupportedException();
 
-        public IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) =>
+        public override IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) =>
             throw new NotSupportedException();
 
-        public MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) =>
+        public override MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) =>
             throw new NotSupportedException();
 
-        public MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) =>
+        public override MonitorSpanRow? GetMonitorSpan(string traceId, string spanId) =>
             throw new NotSupportedException();
 
-        public IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) =>
+        public override IReadOnlyList<MonitorConversationTraceRow> ListConversationTraces(string conversationId) =>
             throw new NotSupportedException();
     }
 

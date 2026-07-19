@@ -5,6 +5,7 @@ using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions;
 
@@ -145,16 +146,24 @@ internal static class SessionRoutes
                 await Failure(context, 400, "invalid_session_workspace_query");
                 return;
             }
-            var items = store.ListMostRecent(limit).Select(item =>
+            try
             {
-                var detail = store.GetDetail(item.SessionId);
-                return SessionDto(
-                    item,
-                    detail?.NativeIds ?? [],
-                    store.GetRawRetentionState(item.SessionId),
-                    ProjectSession(detail, projectionStore, compatibilityStore));
-            });
-            await Json(context, new { items });
+                var items = new List<object>();
+                foreach (var item in store.ListMostRecent(limit))
+                {
+                    var detail = store.GetDetail(item.SessionId);
+                    items.Add(SessionDto(
+                        item,
+                        detail?.NativeIds ?? [],
+                        store.GetRawRetentionState(item.SessionId),
+                        await ProjectSessionAsync(detail, projectionStore, compatibilityStore, context.RequestAborted)));
+                }
+                await Json(context, new { items });
+            }
+            catch (PersistenceBusyException)
+            {
+                await Failure(context, 503, "session_store_busy");
+            }
         });
 
         app.MapGet("/api/session-workspace/improvement-proposals", async context =>
@@ -231,13 +240,15 @@ internal static class SessionRoutes
                 await Failure(context, 404, "session_not_found");
                 return;
             }
-            await Json(context, new
+            try
             {
-                session = SessionDto(
-                    detail.Session,
-                    detail.NativeIds,
-                    store.GetRawRetentionState(detail.Session.SessionId),
-                    ProjectSession(detail, projectionStore, compatibilityStore)),
+                await Json(context, new
+                {
+                    session = SessionDto(
+                        detail.Session,
+                        detail.NativeIds,
+                        store.GetRawRetentionState(detail.Session.SessionId),
+                        await ProjectSessionAsync(detail, projectionStore, compatibilityStore, context.RequestAborted)),
                 human_evaluation = store.GetHumanEvaluation(id) is { } evaluation ? new
                 {
                     verdict = evaluation.Verdict,
@@ -265,7 +276,7 @@ internal static class SessionRoutes
                     output_tokens = item.OutputTokens,
                     total_tokens = item.TotalTokens,
                 }),
-                events = detail.Events.Select(item => new
+                    events = detail.Events.Select(item => new
                 {
                     event_id = item.EventId,
                     run_id = item.RunId,
@@ -275,8 +286,13 @@ internal static class SessionRoutes
                     type = item.Type,
                     occurred_at = item.OccurredAt,
                     content_state = SessionWire.ToWire(item.ContentState),
-                }),
-            });
+                    }),
+                });
+            }
+            catch (PersistenceBusyException)
+            {
+                await Failure(context, 503, "session_store_busy");
+            }
         });
 
         app.MapPut("/api/session-workspace/sessions/{sessionId}/human-evaluation", async (string sessionId, HttpContext context) =>
@@ -526,10 +542,11 @@ internal static class SessionRoutes
         content_state = state.ContentState,
     };
 
-    private static SourceProjectionState ProjectSession(
+    private static async Task<SourceProjectionState> ProjectSessionAsync(
         SessionDetail? detail,
         IMonitorProjectionStore projectionStore,
-        ISourceCompatibilityStore compatibilityStore)
+        ISourceCompatibilityStore compatibilityStore,
+        CancellationToken cancellationToken)
     {
         if (detail is null)
         {
@@ -543,15 +560,20 @@ internal static class SessionRoutes
             .Distinct(StringComparer.Ordinal)
             .Cast<string>()
             .ToArray();
-        var observations = traceIds
-            .SelectMany(traceId => projectionStore.ListRawRecordsByTraceId(traceId, 200))
-            .Select(record => record.Id is { } id ? compatibilityStore.GetByRawRecordId(id) : null)
-            .Where(observation => observation is not null)
-            .Cast<SourceCompatibilityRow>()
-            .GroupBy(observation => observation.Id)
-            .Select(group => group.First())
-            .ToArray();
-        return SourceProjectionStateBuilder.Build(observations, detail);
+        var observations = new List<SourceCompatibilityRow>();
+        foreach (var traceId in traceIds)
+        {
+            var result = await projectionStore.ListRawRecordsByTraceIdAsync(traceId, 200, RetentionReadKind.Access, cancellationToken);
+            if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
+            if (result.Lease is null) continue;
+            await using var lease = result.Lease;
+            observations.AddRange(lease.Value
+                .Select(record => record.Id is { } id ? compatibilityStore.GetByRawRecordId(id) : null)
+                .Where(observation => observation is not null)
+                .Cast<SourceCompatibilityRow>());
+        }
+        var distinctObservations = observations.GroupBy(observation => observation.Id).Select(group => group.First()).ToArray();
+        return SourceProjectionStateBuilder.Build(distinctObservations, detail);
     }
 
     private static bool HasValidExplicitBinding(ISessionStore store, SessionIngestEnvelope envelope)

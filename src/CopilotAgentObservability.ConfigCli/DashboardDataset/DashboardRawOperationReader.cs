@@ -26,8 +26,9 @@ internal static class DashboardRawOperationReader
     {
         if (IsRawStorePath(inputPath))
         {
-            var store = new RawTelemetryStore(inputPath);
-            return store.ListRecords().SelectMany(record => ReadRawJson(record.PayloadJson)).ToArray();
+            return RawStoreLeaseReader.ReadAll(
+                inputPath,
+                records => records.SelectMany(record => ReadRawJson(record.PayloadJson)).ToArray());
         }
 
         return ReadRawJson(File.ReadAllText(inputPath));

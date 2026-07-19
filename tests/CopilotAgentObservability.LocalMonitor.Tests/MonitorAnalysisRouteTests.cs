@@ -4,6 +4,8 @@ using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -87,7 +89,7 @@ public class MonitorAnalysisRouteTests
     }
 
     [Fact]
-    public void MonitorAnalysisToolData_Create_PopulatesInstructionEvidence()
+    public async Task MonitorAnalysisToolData_CreateAsync_PopulatesInstructionEvidence()
     {
         // Sprint20 M3 (D047): Create runs the deterministic extractor and resolves
         // siblings through ListConversationTraces using the analyzed trace's
@@ -95,14 +97,16 @@ public class MonitorAnalysisRouteTests
         // conv-ie with an earlier sibling (start 00:01), so the sibling sorts first
         // and the analyzed trace is position 2 of 2.
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var time = new MutableTimeProvider(DateTimeOffset.UnixEpoch.AddMinutes(4));
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, time);
+        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, time, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         SeedEvidenceTrace(store, "trace-ie", conversationId: "conv-ie", startTime: "2026-07-01T00:02:00.000+00:00", withError: true);
         SeedEvidenceTrace(store, "trace-sib", conversationId: "conv-ie", startTime: "2026-07-01T00:01:00.000+00:00", withError: false);
         var projectionStore = new RawTelemetryStoreProjectionStore(store);
         var context = new MonitorAnalysisContext(1, "trace-ie", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
 
-        var data = MonitorAnalysisToolData.Create(projectionStore, context);
+        var data = await MonitorAnalysisToolData.CreateAsync(projectionStore, context, CancellationToken.None);
 
         var errorSpan = Assert.Single(data.InstructionEvidence.ErrorSpans);
         Assert.Equal("trace-ie-span-err", errorSpan.SpanId);
@@ -116,19 +120,28 @@ public class MonitorAnalysisRouteTests
         Assert.NotNull(conversationContext);
         Assert.Equal(new[] { "trace-sib", "trace-ie" }, conversationContext!.Traces.Select(trace => trace.TraceId).ToArray());
         Assert.Equal(new[] { -1, 0 }, conversationContext.Traces.Select(trace => trace.RelativePosition).ToArray());
+
+        var rawRecordId = projectionStore.GetSpansForTrace("trace-ie")[0].RawRecordId;
+        Assert.Equal(1L, CountOperationLeases(temp.DatabasePath, rawRecordId));
+        Assert.Contains("trace-ie", JsonSerializer.Serialize(data.RawTrace));
+
+        await data.DisposeAsync();
+
+        Assert.Equal(0L, CountOperationLeases(temp.DatabasePath, rawRecordId));
     }
 
     [Fact]
-    public void MonitorAnalysisToolData_Create_NoConversationId_ProducesNullConversation()
+    public async Task MonitorAnalysisToolData_CreateAsync_NoConversationId_ProducesNullConversation()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath);
+        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         SeedEvidenceTrace(store, "trace-nc", conversationId: null, startTime: "2026-07-01T00:02:00.000+00:00", withError: true);
         var projectionStore = new RawTelemetryStoreProjectionStore(store);
         var context = new MonitorAnalysisContext(1, "trace-nc", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
 
-        var data = MonitorAnalysisToolData.Create(projectionStore, context);
+        await using var data = await MonitorAnalysisToolData.CreateAsync(projectionStore, context, CancellationToken.None);
 
         Assert.Single(data.InstructionEvidence.ErrorSpans);
         Assert.Null(data.InstructionEvidence.Conversation);
@@ -136,10 +149,11 @@ public class MonitorAnalysisRouteTests
     }
 
     [Fact]
-    public void MonitorAnalysisToolData_Create_LoadsOnlyBoundedConversationWindow()
+    public async Task MonitorAnalysisToolData_CreateAsync_LoadsOnlyBoundedConversationWindow()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath);
+        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         for (var index = 0; index < 7; index++)
         {
@@ -154,7 +168,7 @@ public class MonitorAnalysisRouteTests
         var projectionStore = new CountingProjectionStore(new RawTelemetryStoreProjectionStore(store));
         var context = new MonitorAnalysisContext(1, "trace-3", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
 
-        var data = MonitorAnalysisToolData.Create(projectionStore, context);
+        await using var data = await MonitorAnalysisToolData.CreateAsync(projectionStore, context, CancellationToken.None);
 
         var conversationContext = Assert.IsType<InstructionEvidenceConversationContext>(data.InstructionEvidence.ConversationContext);
         Assert.Equal(new[] { "trace-1", "trace-2", "trace-3", "trace-4", "trace-5" }, conversationContext.Traces.Select(trace => trace.TraceId).ToArray());
@@ -165,17 +179,18 @@ public class MonitorAnalysisRouteTests
     }
 
     [Fact]
-    public void MonitorAnalysisToolData_Create_ExistingFocusDoesNotLoadConversationContext()
+    public async Task MonitorAnalysisToolData_CreateAsync_ExistingFocusDoesNotLoadConversationContext()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath);
+        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         SeedEvidenceTrace(store, "trace-current", conversationId: "conv-existing", startTime: "2026-07-01T00:02:00.000+00:00", withError: false);
         SeedEvidenceTrace(store, "trace-sibling", conversationId: "conv-existing", startTime: "2026-07-01T00:01:00.000+00:00", withError: false);
         var projectionStore = new CountingProjectionStore(new RawTelemetryStoreProjectionStore(store));
         var context = new MonitorAnalysisContext(1, "trace-current", null, null, MonitorAnalysisFocus.Tokens);
 
-        var data = MonitorAnalysisToolData.Create(projectionStore, context);
+        await using var data = await MonitorAnalysisToolData.CreateAsync(projectionStore, context, CancellationToken.None);
 
         Assert.Null(data.InstructionEvidence.ConversationContext);
         Assert.DoesNotContain("trace-sibling", projectionStore.SpansForTraceCalls);
@@ -195,9 +210,21 @@ public class MonitorAnalysisRouteTests
         return document.RootElement.GetProperty("run_id").GetInt64();
     }
 
+    private static long CountOperationLeases(string databasePath, long rawRecordId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT COUNT(*) FROM retention_leases l JOIN retention_items i ON i.item_id = l.item_id " +
+            "WHERE i.store_kind = 'raw_record' AND i.source_item_id = $raw_record_id AND l.lease_kind = 'operation';";
+        command.Parameters.AddWithValue("$raw_record_id", rawRecordId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return (long)command.ExecuteScalar()!;
+    }
+
     private static long SeedProjectedTrace(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var record = new RawTelemetryRecord(
             Id: null,
@@ -536,8 +563,8 @@ public class MonitorAnalysisRouteTests
 
         public List<string> RawRecordsByTraceCalls { get; } = new();
 
-        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit) =>
-            inner.ListUnprocessedForProjection(limit);
+        public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken) =>
+            inner.ListUnprocessedForProjectionAsync(limit, cancellationToken);
 
         public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) =>
             inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
@@ -557,8 +584,8 @@ public class MonitorAnalysisRouteTests
         public MonitorProjectionStatus GetProjectionStatus() =>
             inner.GetProjectionStatus();
 
-        public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) =>
-            inner.ListUnprocessedForSpanProjection(limit);
+        public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken) =>
+            inner.ListUnprocessedForSpanProjectionAsync(limit, cancellationToken);
 
         public bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) =>
             inner.ApplySpanProjection(rawRecordId, spans, projectedAt);
@@ -584,13 +611,16 @@ public class MonitorAnalysisRouteTests
             return inner.GetSpansForTrace(traceId);
         }
 
-        public RawTelemetryRecord? GetRawRecordById(long id) =>
-            inner.GetRawRecordById(id);
+        public ValueTask<RetentionReadResult<RawTelemetryRecord>> GetRawRecordByIdAsync(long id, RetentionReadKind readKind, CancellationToken cancellationToken) =>
+            inner.GetRawRecordByIdAsync(id, readKind, cancellationToken);
 
-        public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit)
+        public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadRawRecordsAsync(IReadOnlyList<long> ids, RetentionReadKind readKind, CancellationToken cancellationToken) =>
+            inner.ReadRawRecordsAsync(ids, readKind, cancellationToken);
+
+        public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRawRecordsByTraceIdAsync(string traceId, int limit, RetentionReadKind readKind, CancellationToken cancellationToken)
         {
             RawRecordsByTraceCalls.Add(traceId);
-            return inner.ListRawRecordsByTraceId(traceId, limit);
+            return inner.ListRawRecordsByTraceIdAsync(traceId, limit, readKind, cancellationToken);
         }
 
         public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>

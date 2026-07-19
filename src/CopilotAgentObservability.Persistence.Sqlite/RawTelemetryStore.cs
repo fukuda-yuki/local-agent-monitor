@@ -7,10 +7,33 @@ internal sealed partial class RawTelemetryStore
     private readonly string databasePath;
     private readonly RawTelemetryStoreConnectionOptions connectionOptions;
     private readonly Action<RawTelemetryStoreWritePhase>? writeFailureInjector;
+    private readonly Retention.RetentionCatalogContext? retentionContext;
+
+    internal string DatabasePath => databasePath;
+    private readonly TimeProvider timeProvider;
 
     public RawTelemetryStore(string databasePath, RawTelemetryStoreConnectionOptions? connectionOptions = null, Action<RawTelemetryStoreWritePhase>? writeFailureInjector = null)
     {
         this.databasePath = databasePath;
+        this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
+        this.writeFailureInjector = writeFailureInjector;
+        timeProvider = TimeProvider.System;
+    }
+
+    public RawTelemetryStore(
+        string databasePath,
+        Retention.RetentionCatalogContext retentionContext,
+        TimeProvider? timeProvider = null,
+        RawTelemetryStoreConnectionOptions? connectionOptions = null,
+        Action<RawTelemetryStoreWritePhase>? writeFailureInjector = null)
+    {
+        ArgumentNullException.ThrowIfNull(retentionContext);
+        if (!string.Equals(Path.GetFullPath(databasePath), retentionContext.DatabasePath, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("The retention catalog context belongs to a different database.", nameof(retentionContext));
+
+        this.databasePath = databasePath;
+        this.retentionContext = retentionContext;
+        this.timeProvider = timeProvider ?? TimeProvider.System;
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
         this.writeFailureInjector = writeFailureInjector;
     }
@@ -25,7 +48,7 @@ internal sealed partial class RawTelemetryStore
         ApplyWriteAheadLog(connection);
         using var transaction = connection.BeginTransaction();
         MonitorSchemaMigrator.EnsureRawRecordsSchema(connection, transaction);
-        new Retention.RetentionCatalogStore(databasePath).InitializeForWrite(connection, transaction);
+        new Retention.RetentionCatalogStore(databasePath, timeProvider).InitializeForWrite(connection, transaction);
         transaction.Commit();
     }
 
@@ -45,7 +68,7 @@ internal sealed partial class RawTelemetryStore
         ApplyWriteAheadLog(connection);
         using var transaction = connection.BeginTransaction();
         MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
-        new Retention.RetentionCatalogStore(databasePath).InitializeForWrite(connection, transaction);
+        new Retention.RetentionCatalogStore(databasePath, timeProvider).InitializeForWrite(connection, transaction);
         transaction.Commit();
     }
 
@@ -62,7 +85,7 @@ internal sealed partial class RawTelemetryStore
     {
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
-        var catalog = new Retention.RetentionCatalogStore(databasePath);
+        var catalog = new Retention.RetentionCatalogStore(databasePath, timeProvider);
         try { catalog.InitializeForWrite(connection, transaction); }
         catch (SqliteException) { throw new Retention.RetentionMigrationBlockedException(); }
         var ownerToken = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
@@ -74,33 +97,13 @@ internal sealed partial class RawTelemetryStore
         return rawRecordId;
     }
 
-    public IReadOnlyList<RawTelemetryRecord> ListRecords()
-    {
-        using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT
-                id,
-                source,
-                trace_id,
-                received_at,
-                resource_attributes_json,
-                payload_json,
-                schema_version
-            FROM raw_records
-            ORDER BY id;
-            """;
-
-        using var reader = command.ExecuteReader();
-        var records = new List<RawTelemetryRecord>();
-        while (reader.Read())
-        {
-            records.Add(ReadRawRecord(reader));
-        }
-
-        return records;
-    }
+    public ValueTask<Retention.RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRecordsAsync(
+        Retention.RetentionReadKind leaseKind,
+        CancellationToken cancellationToken) =>
+        ReadSelectedRawRecordsAsync(
+            static (connection, transaction) => SelectRawRecordIds(connection, transaction, "SELECT id FROM raw_records ORDER BY id;"),
+            leaseKind,
+            cancellationToken);
 
     /// <summary>
     /// Returns up to <paramref name="limit"/> raw records that have no
@@ -108,36 +111,14 @@ internal sealed partial class RawTelemetryStore
     /// because it is the projection worker's in-process input; it is never written
     /// to a projection table or a list response.
     /// </summary>
-    public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit)
-    {
-        using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT
-                id,
-                source,
-                trace_id,
-                received_at,
-                resource_attributes_json,
-                payload_json,
-                schema_version
-            FROM raw_records
-            WHERE id NOT IN (SELECT raw_record_id FROM monitor_ingestions)
-            ORDER BY id
-            LIMIT $limit;
-            """;
-        AddParameter(command, "$limit", limit);
-
-        using var reader = command.ExecuteReader();
-        var records = new List<RawTelemetryRecord>();
-        while (reader.Read())
-        {
-            records.Add(ReadRawRecord(reader));
-        }
-
-        return records;
-    }
+    public ValueTask<Retention.RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(
+        int limit,
+        Retention.RetentionReadKind leaseKind,
+        CancellationToken cancellationToken) =>
+        ReadSelectedRawRecordsAsync(
+            (connection, transaction) => SelectRawRecordIds(connection, transaction, "SELECT id FROM raw_records WHERE id NOT IN (SELECT raw_record_id FROM monitor_ingestions) ORDER BY id LIMIT $limit;", limit),
+            leaseKind,
+            cancellationToken);
 
     /// <summary>
     /// Idempotently projects one raw record. Inserts a single
@@ -537,21 +518,48 @@ internal sealed partial class RawTelemetryStore
             TraceStatus: reader.IsDBNull(26) ? null : reader.GetString(26));
     }
 
-    /// <summary>Fetches one raw record by id for the opt-in raw-detail route; null if not found.</summary>
-    public RawTelemetryRecord? GetRawRecordById(long id)
+    public ValueTask<Retention.RetentionReadResult<RawTelemetryRecord>> GetRawRecordByIdAsync(
+        long id,
+        Retention.RetentionReadKind leaseKind,
+        CancellationToken cancellationToken)
     {
-        using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT id, source, trace_id, received_at, resource_attributes_json, payload_json, schema_version
-            FROM raw_records
-            WHERE id = $id;
-            """;
-        AddParameter(command, "$id", id);
+        var context = retentionContext ?? throw new Retention.RetentionCatalogUnavailableException();
+        var key = new Retention.RetentionOwnershipKey(
+            context.StoreInstanceId,
+            Retention.RetentionStoreKind.RawRecord,
+            id.ToString(CultureInfo.InvariantCulture));
 
-        using var reader = command.ExecuteReader();
-        return reader.Read() ? ReadRawRecord(reader) : null;
+        return new Retention.RetentionCatalogStore(context, timeProvider).ReadAsync(
+            new Retention.RetentionReadRequest(key, leaseKind, timeProvider.GetUtcNow(), ExpectedRevision: null),
+            (connection, transaction, grant, _) => ValueTask.FromResult(SelectExactRawRecord(connection, transaction, id, grant)),
+            cancellationToken);
+    }
+
+    public ValueTask<Retention.RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadRawRecordsAsync(
+        IReadOnlyList<long> ids,
+        Retention.RetentionReadKind leaseKind,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(ids);
+        var context = retentionContext ?? throw new Retention.RetentionCatalogUnavailableException();
+        var requestedIds = ids.Distinct().ToArray();
+        if (requestedIds.Length == 0)
+            return ValueTask.FromResult(new Retention.RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>(
+                Retention.RetentionReadDisposition.Granted,
+                new Retention.RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>([], Retention.RetentionRevisionFence.Create(), static () => ValueTask.CompletedTask)));
+        var now = timeProvider.GetUtcNow();
+        var requests = requestedIds
+            .Select(id => new Retention.RetentionReadRequest(
+                new Retention.RetentionOwnershipKey(context.StoreInstanceId, Retention.RetentionStoreKind.RawRecord, id.ToString(CultureInfo.InvariantCulture)),
+                leaseKind,
+                now,
+                ExpectedRevision: null))
+            .ToArray();
+
+        return new Retention.RetentionCatalogStore(context, timeProvider).ReadBatchAsync(
+            requests,
+            (connection, transaction, grants, _) => ValueTask.FromResult(SelectExactRawRecords(connection, transaction, requestedIds, grants)),
+            cancellationToken);
     }
 
     /// <summary>
@@ -560,34 +568,15 @@ internal sealed partial class RawTelemetryStore
     /// mapping so secondary traces inside a multi-trace OTLP request resolve to
     /// their containing raw payload.
     /// </summary>
-    public IReadOnlyList<RawTelemetryRecord> ListRawRecordsByTraceId(string traceId, int limit)
-    {
-        using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT id, source, trace_id, received_at, resource_attributes_json, payload_json, schema_version
-            FROM raw_records
-            WHERE id IN (
-                SELECT DISTINCT raw_record_id
-                FROM monitor_spans
-                WHERE trace_id = $trace_id
-            )
-            ORDER BY id
-            LIMIT $limit;
-            """;
-        AddParameter(command, "$trace_id", traceId);
-        AddParameter(command, "$limit", limit);
-
-        using var reader = command.ExecuteReader();
-        var records = new List<RawTelemetryRecord>();
-        while (reader.Read())
-        {
-            records.Add(ReadRawRecord(reader));
-        }
-
-        return records;
-    }
+    public ValueTask<Retention.RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRawRecordsByTraceIdAsync(
+        string traceId,
+        int limit,
+        Retention.RetentionReadKind leaseKind,
+        CancellationToken cancellationToken) =>
+        ReadSelectedRawRecordsAsync(
+            (connection, transaction) => SelectRawRecordIdsForTrace(connection, transaction, traceId, limit),
+            leaseKind,
+            cancellationToken);
 
     /// <summary>
     /// Returns up to <paramref name="limit"/> raw records whose
@@ -595,36 +584,14 @@ internal sealed partial class RawTelemetryStore
     /// applied), ordered by id. A record must already have a <c>monitor_ingestions</c>
     /// row (i.e. trace-projection has completed) to be eligible.
     /// </summary>
-    public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit)
-    {
-        using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT
-                id,
-                source,
-                trace_id,
-                received_at,
-                resource_attributes_json,
-                payload_json,
-                schema_version
-            FROM raw_records
-            WHERE id IN (SELECT raw_record_id FROM monitor_ingestions WHERE span_projected_at IS NULL)
-            ORDER BY id
-            LIMIT $limit;
-            """;
-        AddParameter(command, "$limit", limit);
-
-        using var reader = command.ExecuteReader();
-        var records = new List<RawTelemetryRecord>();
-        while (reader.Read())
-        {
-            records.Add(ReadRawRecord(reader));
-        }
-
-        return records;
-    }
+    public ValueTask<Retention.RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(
+        int limit,
+        Retention.RetentionReadKind leaseKind,
+        CancellationToken cancellationToken) =>
+        ReadSelectedRawRecordsAsync(
+            (connection, transaction) => SelectRawRecordIds(connection, transaction, "SELECT id FROM raw_records WHERE id IN (SELECT raw_record_id FROM monitor_ingestions WHERE span_projected_at IS NULL) ORDER BY id LIMIT $limit;", limit),
+            leaseKind,
+            cancellationToken);
 
     /// <summary>
     /// Idempotently projects span rows for one raw record. Inserts <c>monitor_spans</c>
@@ -1031,6 +998,107 @@ internal sealed partial class RawTelemetryStore
         }
 
         return new MonitorProjectionPage<T>(rows, HasMore: false);
+    }
+
+    private ValueTask<Retention.RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadSelectedRawRecordsAsync(
+        Func<SqliteConnection, SqliteTransaction, IReadOnlyList<long>> candidateSelector,
+        Retention.RetentionReadKind leaseKind,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(candidateSelector);
+        var context = retentionContext ?? throw new Retention.RetentionCatalogUnavailableException();
+        IReadOnlyList<long>? selectedIds = null;
+        return new Retention.RetentionCatalogStore(context, timeProvider).ReadSelectedBatchAsync(
+            (connection, transaction, _) =>
+            {
+                var now = timeProvider.GetUtcNow();
+                selectedIds = candidateSelector(connection, transaction)
+                    .Distinct()
+                    .ToArray();
+                var requests = selectedIds
+                    .Select(id => new Retention.RetentionReadRequest(
+                        new Retention.RetentionOwnershipKey(context.StoreInstanceId, Retention.RetentionStoreKind.RawRecord, id.ToString(CultureInfo.InvariantCulture)),
+                        leaseKind,
+                        now,
+                        ExpectedRevision: null))
+                    .ToArray();
+                return ValueTask.FromResult<IReadOnlyList<Retention.RetentionReadRequest>>(requests);
+            },
+            (connection, transaction, grants, _) =>
+            {
+                return ValueTask.FromResult(SelectExactRawRecords(connection, transaction, selectedIds!, grants));
+            },
+            cancellationToken);
+    }
+
+    private static IReadOnlyList<long> SelectRawRecordIds(SqliteConnection connection, SqliteTransaction transaction, string commandText, int? limit = null)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = commandText;
+        if (limit is not null) AddParameter(command, "$limit", limit.Value);
+        using var reader = command.ExecuteReader();
+        var ids = new List<long>();
+        while (reader.Read()) ids.Add(reader.GetInt64(0));
+        return ids;
+    }
+
+    private static IReadOnlyList<long> SelectRawRecordIdsForTrace(SqliteConnection connection, SqliteTransaction transaction, string traceId, int limit)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT id
+            FROM raw_records
+            WHERE id IN (SELECT DISTINCT raw_record_id FROM monitor_spans WHERE trace_id = $trace_id)
+            ORDER BY id
+            LIMIT $limit;
+            """;
+        AddParameter(command, "$trace_id", traceId);
+        AddParameter(command, "$limit", limit);
+        using var reader = command.ExecuteReader();
+        var ids = new List<long>();
+        while (reader.Read()) ids.Add(reader.GetInt64(0));
+        return ids;
+    }
+
+    private static RawTelemetryRecord? SelectExactRawRecord(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long id,
+        Retention.RetentionReadGrant grant)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT id, source, trace_id, received_at, resource_attributes_json, payload_json, schema_version
+            FROM raw_records
+            WHERE id=$id AND retention_owner_token=$retention_read_source_token
+              AND EXISTS (SELECT 1 FROM retention_items WHERE item_id=$retention_read_item_id AND revision=$retention_read_revision)
+              AND EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$retention_read_item_id AND owner=$retention_read_lease_owner AND generation=$retention_read_lease_generation AND expires_at=$retention_read_lease_expires_at);
+            """;
+        AddParameter(command, "$id", id);
+        grant.BindSelectorCapability(command);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadRawRecord(reader) : null;
+    }
+
+    private static IReadOnlyList<RawTelemetryRecord>? SelectExactRawRecords(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<long> ids,
+        IReadOnlyList<Retention.RetentionReadGrant> grants)
+    {
+        var records = new List<RawTelemetryRecord>(ids.Count);
+        for (var index = 0; index < ids.Count; index++)
+        {
+            var record = SelectExactRawRecord(connection, transaction, ids[index], grants[index]);
+            if (record is null) return null;
+            records.Add(record);
+        }
+        return records;
     }
 
     private static RawTelemetryRecord ReadRawRecord(SqliteDataReader reader)

@@ -1,6 +1,7 @@
 using System.Net;
 using CopilotAgentObservability.ConfigCli.Setup.Cli;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.ConfigCli;
 
@@ -473,7 +474,8 @@ internal static class CliApplication
             }
 
             var record = RawOtlpIngestor.CreateRecord(parseResult.Options.InputPath, DateTimeOffset.UtcNow);
-            var store = new RawTelemetryStore(parseResult.Options.DatabasePath);
+            var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(parseResult.Options.DatabasePath);
+            var store = new RawTelemetryStore(parseResult.Options.DatabasePath, retentionContext);
             store.CreateSchema();
             store.Insert(record);
 
@@ -496,6 +498,11 @@ internal static class CliApplication
             return 1;
         }
         catch (SqliteException exception)
+        {
+            error.WriteLine($"error: failed to write raw store: {exception.Message}");
+            return 1;
+        }
+        catch (RetentionMigrationBlockedException exception)
         {
             error.WriteLine($"error: failed to write raw store: {exception.Message}");
             return 1;
@@ -562,6 +569,11 @@ internal static class CliApplication
         catch (SqliteException exception)
         {
             error.WriteLine($"error: failed to read raw store: {exception.Message}");
+            return 1;
+        }
+        catch (RetentionCatalogUnavailableException)
+        {
+            error.WriteLine("error: failed to read raw store: raw store is unavailable.");
             return 1;
         }
         catch (IOException exception)

@@ -173,7 +173,7 @@ public class MonitorHostTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Contains("\"accepted\":true", await response.Content.ReadAsStringAsync());
-        var record = Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath).ListRecords());
+        var record = Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath, tempDirectory.RetentionContext, tempDirectory.TimeProvider).ListRecords());
         Assert.Equal("11111111111111111111111111111111", record.TraceId);
         Assert.Equal(ValidTraceJson(), record.PayloadJson);
         Assert.DoesNotContain("StructuralInventory", record.PayloadJson, StringComparison.Ordinal);
@@ -190,7 +190,7 @@ public class MonitorHostTests
         var response = await host.Client.PostAsync("/v1/traces", content);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var record = Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath).ListRecords());
+        var record = Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath, tempDirectory.RetentionContext, tempDirectory.TimeProvider).ListRecords());
         Assert.Equal("11111111111111111111111111111111", record.TraceId);
     }
 
@@ -207,7 +207,7 @@ public class MonitorHostTests
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, rejected.StatusCode);
         Assert.Contains("request_too_large", await rejected.Content.ReadAsStringAsync());
-        Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath).ListRecords());
+        Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath, tempDirectory.RetentionContext, tempDirectory.TimeProvider).ListRecords());
     }
 
     [Theory]
@@ -265,7 +265,7 @@ public class MonitorHostTests
         Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
         Assert.Contains("invalid_payload", await invalid.Content.ReadAsStringAsync());
         Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
-        Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath).ListRecords());
+        Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath, tempDirectory.RetentionContext, tempDirectory.TimeProvider).ListRecords());
     }
 
     [Fact]
@@ -304,7 +304,7 @@ public class MonitorHostTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         ExecuteSql(connection, "ROLLBACK;");
-        Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath).ListRecords());
+        Assert.Single(new RawTelemetryStore(tempDirectory.DatabasePath, tempDirectory.RetentionContext, tempDirectory.TimeProvider).ListRecords());
     }
 
     [Fact]
@@ -541,7 +541,7 @@ public class MonitorHostTests
         }
 
         ExecuteSql(connection, "ROLLBACK;");
-        Assert.Equal(5, new RawTelemetryStore(tempDirectory.DatabasePath).ListRecords().Count);
+        Assert.Equal(5, new RawTelemetryStore(tempDirectory.DatabasePath, tempDirectory.RetentionContext, tempDirectory.TimeProvider).ListRecords().Count);
     }
 
     [Fact]

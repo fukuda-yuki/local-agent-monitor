@@ -79,12 +79,14 @@ internal static class MonitorHost
         builder.Services.AddRazorPages();
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(health);
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(options.DatabasePath, timeProvider);
+        builder.Services.AddSingleton(retentionContext);
         var doctorApplication = testOptions?.DoctorApplication
             ?? CreateDoctorApplication(options.DatabasePath, timeProvider, testOptions?.DoctorApplicationFactory);
         builder.Services.AddSingleton(doctorApplication);
         if (testOptions is null)
         {
-            var observer = new ClaudeDoctorCandidateObserver(options.DatabasePath, timeProvider);
+            var observer = new ClaudeDoctorCandidateObserver(options.DatabasePath, retentionContext, timeProvider);
             builder.Services.AddHostedService(_ => new ClaudeDoctorCandidateWorker(observer));
         }
 
@@ -100,14 +102,14 @@ internal static class MonitorHost
         if (testOptions?.StartWriter ?? true)
         {
             var commitStore = testOptions?.IngestionCommitStore
-                ?? new SqliteIngestionCommitStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+                ?? new SqliteIngestionCommitStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter, timeProvider);
             var worker = new IngestionWriterWorker(queue, commitStore, compatibilityStore, health);
             builder.Services.AddHostedService(_ => worker);
         }
 
         var projectionStore = testOptions?.ProjectionStore
             ?? new RawTelemetryStoreProjectionStore(
-                new RawTelemetryStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
+                new RawTelemetryStore(options.DatabasePath, retentionContext, timeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter));
         builder.Services.AddSingleton(projectionStore);
         var summaryService = new MonitorSummaryService(projectionStore);
         builder.Services.AddSingleton(summaryService);
@@ -117,7 +119,6 @@ internal static class MonitorHost
         analysisStore.CreateSchema();
         builder.Services.AddSingleton(analysisStore);
         var sessionTimeProvider = timeProvider;
-        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(options.DatabasePath, timeProvider);
         ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, retentionContext, sessionTimeProvider);
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
@@ -126,7 +127,7 @@ internal static class MonitorHost
         builder.Services.AddSingleton(proposalApplyService);
         var sessionEventQueue = testOptions?.SessionEventQueue ?? new SessionEventQueue();
         var sessionEventNormalizer = new SessionEventNormalizer(sessionStore, sessionTimeProvider);
-        var sessionOtelEnricher = new SqliteSessionOtelEnricher(options.DatabasePath, sessionStore, sessionTimeProvider);
+        var sessionOtelEnricher = new SqliteSessionOtelEnricher(options.DatabasePath, sessionStore, retentionContext, sessionTimeProvider);
         builder.Services.AddSingleton(sessionEventQueue);
         builder.Services.AddSingleton(sessionEventNormalizer);
         builder.Services.AddSingleton(sessionOtelEnricher);
@@ -155,9 +156,13 @@ internal static class MonitorHost
         }
 
         var app = builder.Build();
-        SourceProjectionState ProjectTrace(MonitorTraceRow row)
+        async Task<SourceProjectionState> ProjectTraceAsync(MonitorTraceRow row, CancellationToken cancellationToken)
         {
-            var observations = projectionStore.ListRawRecordsByTraceId(row.TraceId, 200)
+            var result = await projectionStore.ListRawRecordsByTraceIdAsync(row.TraceId, 200, RetentionReadKind.Access, cancellationToken);
+            if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
+            if (result.Lease is null) return SourceProjectionStateBuilder.Build([], FindSessionForTrace(sessionStore, row.TraceId));
+            await using var lease = result.Lease;
+            var observations = lease.Value
                 .Select(record => record.Id is { } id ? compatibilityStore.GetByRawRecordId(id) : null)
                 .Where(observation => observation is not null)
                 .Cast<SourceCompatibilityRow>()
@@ -306,7 +311,8 @@ internal static class MonitorHost
             try
             {
                 var page = projectionStore.ListMonitorTraces(after, limit);
-                var items = page.Items.Select(row => ToTraceDto(row, ProjectTrace(row)));
+                var items = new List<object>();
+                foreach (var row in page.Items) items.Add(ToTraceDto(row, await ProjectTraceAsync(row, context.RequestAborted))!);
                 long? nextCursor = page.HasMore && page.Items.Count > 0 ? page.Items[^1].Id : null;
                 await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
             }
@@ -377,13 +383,15 @@ internal static class MonitorHost
                 }
 
                 var spans = projectionStore.GetSpansForTrace(traceId);
-                var exactClaudeRawRecordIds = projectionStore.ListRawRecordsByTraceId(traceId, 200)
-                    .Where(record => record.Id is not null)
+                var exactClaudeRawRecordIds = spans
+                    .Select(span => span.RawRecordId)
+                    .Distinct()
+                    .OrderBy(rawRecordId => rawRecordId)
+                    .Take(200)
                     .Where(record => string.Equals(
-                        compatibilityStore.GetByRawRecordId(record.Id!.Value)?.SourceSurface,
+                        compatibilityStore.GetByRawRecordId(record)?.SourceSurface,
                         "claude-code",
                         StringComparison.Ordinal))
-                    .Select(record => record.Id!.Value)
                     .ToHashSet();
                 var graph = exactClaudeRawRecordIds.Count == 0
                     ? AgentExecutionGraphBuilder.Build(spans)
@@ -450,9 +458,9 @@ internal static class MonitorHost
                 await WriteJsonAsync(context, new
                 {
                     scope = new { limit, trace_count = summary.TraceCount },
-                    latest_trace = ToTraceDto(summary.LatestTrace, summary.LatestTrace is null ? null : ProjectTrace(summary.LatestTrace)),
-                    top_token_trace = ToTraceDto(summary.TopTokenTrace, summary.TopTokenTrace is null ? null : ProjectTrace(summary.TopTokenTrace)),
-                    error_trace = ToTraceDto(summary.ErrorTrace, summary.ErrorTrace is null ? null : ProjectTrace(summary.ErrorTrace)),
+                    latest_trace = ToTraceDto(summary.LatestTrace, summary.LatestTrace is null ? null : await ProjectTraceAsync(summary.LatestTrace, context.RequestAborted)),
+                    top_token_trace = ToTraceDto(summary.TopTokenTrace, summary.TopTokenTrace is null ? null : await ProjectTraceAsync(summary.TopTokenTrace, context.RequestAborted)),
+                    error_trace = ToTraceDto(summary.ErrorTrace, summary.ErrorTrace is null ? null : await ProjectTraceAsync(summary.ErrorTrace, context.RequestAborted)),
                     per_model_summary = summary.PerModelSummary.Select(m => new
                     {
                         model = m.Model,
@@ -550,7 +558,8 @@ internal static class MonitorHost
             try
             {
                 var page = projectionStore.ListMonitorTracesFiltered(query);
-                var items = page.Items.Select(row => ToTraceListDto(row, ProjectTrace(row)));
+                var items = new List<object>();
+                foreach (var row in page.Items) items.Add(ToTraceListDto(row, await ProjectTraceAsync(row, context.RequestAborted)));
                 await WriteJsonAsync(context, new
                 {
                     items,
@@ -720,10 +729,10 @@ internal static class MonitorHost
                     return;
                 }
 
-                RawTelemetryRecord? record;
+                RetentionReadResult<RawTelemetryRecord> result;
                 try
                 {
-                    record = projectionStore.GetRawRecordById(rawRecordId);
+                    result = await projectionStore.GetRawRecordByIdAsync(rawRecordId, RetentionReadKind.Access, context.RequestAborted);
                 }
                 catch (PersistenceBusyException)
                 {
@@ -731,18 +740,26 @@ internal static class MonitorHost
                     return;
                 }
 
-                if (record is null)
+                if (result.Disposition == RetentionReadDisposition.Busy)
+                {
+                    await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                    return;
+                }
+                if (result.Lease is null)
                 {
                     await WriteFailureAsync(context, StatusCodes.Status404NotFound, "raw_record_not_found", "No raw record exists for that id.");
                     return;
                 }
 
-                context.Response.StatusCode = StatusCodes.Status200OK;
-                context.Response.Headers["Cache-Control"] = "no-store";
-                context.Response.ContentType = "text/html; charset=utf-8";
-                var encodedPayload = HtmlEncoder.Default.Encode(record.PayloadJson);
-                await context.Response.WriteAsync(
-                    $"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Raw record {rawRecordId}</title></head><body><pre>{encodedPayload}</pre></body></html>");
+                await using (var lease = result.Lease)
+                {
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    context.Response.Headers["Cache-Control"] = "no-store";
+                    context.Response.ContentType = "text/html; charset=utf-8";
+                    var encodedPayload = HtmlEncoder.Default.Encode(lease.Value.PayloadJson);
+                    await context.Response.WriteAsync(
+                        $"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Raw record {rawRecordId}</title></head><body><pre>{encodedPayload}</pre></body></html>");
+                }
             });
 
             // A raw span-detail surface for the Sprint18 span inspector (D043).
@@ -758,13 +775,13 @@ internal static class MonitorHost
                 }
 
                 MonitorSpanRow? spanRow;
-                RawTelemetryRecord? record = null;
+                RetentionReadResult<RawTelemetryRecord>? rawResult = null;
                 try
                 {
                     spanRow = projectionStore.GetMonitorSpan(traceId, spanId);
                     if (spanRow is not null)
                     {
-                        record = projectionStore.GetRawRecordById(spanRow.RawRecordId);
+                        rawResult = await projectionStore.GetRawRecordByIdAsync(spanRow.RawRecordId, RetentionReadKind.Access, context.RequestAborted);
                     }
                 }
                 catch (PersistenceBusyException)
@@ -773,14 +790,20 @@ internal static class MonitorHost
                     return;
                 }
 
-                if (spanRow is null || record is null)
+                if (rawResult?.Disposition == RetentionReadDisposition.Busy)
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                    return;
+                }
+                if (spanRow is null || rawResult?.Lease is null)
                 {
                     await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "span_not_found", "No span exists for that trace and span id.");
                     return;
                 }
 
                 // Best-effort formatted extraction; the raw span JSON always works.
-                var detail = SpanDetailExtractor.Extract(record.PayloadJson, traceId, spanId);
+                await using var spanLease = rawResult.Lease;
+                var detail = SpanDetailExtractor.Extract(spanLease.Value.PayloadJson, traceId, spanId);
 
                 context.Response.Headers["Cache-Control"] = "no-store";
                 await WriteJsonAsync(context, new
@@ -849,10 +872,10 @@ internal static class MonitorHost
                     return;
                 }
 
-                IReadOnlyList<RawTelemetryRecord> records;
+                RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>> result;
                 try
                 {
-                    records = projectionStore.ListRawRecordsByTraceId(traceId, MonitorPromptExtractor.RecordScanLimit);
+                    result = await projectionStore.ListRawRecordsByTraceIdAsync(traceId, MonitorPromptExtractor.RecordScanLimit, RetentionReadKind.Access, context.RequestAborted);
                 }
                 catch (PersistenceBusyException)
                 {
@@ -860,9 +883,14 @@ internal static class MonitorHost
                     return;
                 }
 
+                if (result.Disposition == RetentionReadDisposition.Busy)
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                    return;
+                }
+                await using var promptLease = result.Lease;
                 var label = MonitorPromptExtractor.ExtractFirstPromptLabel(
-                    records.Select(record => record.PayloadJson),
-                    traceId);
+                    (promptLease?.Value ?? []).Select(record => record.PayloadJson), traceId);
 
                 context.Response.Headers["Cache-Control"] = "no-store";
                 await WriteJsonAsync(context, new { trace_id = traceId, prompt_label = label });
@@ -1611,7 +1639,7 @@ internal sealed class MonitorHostTestOptions
 
     public TimeSpan? SessionOtelPollInterval { get; init; }
 
-    public TimeProvider? TimeProvider { get; init; }
+    public TimeProvider? TimeProvider { get; set; }
 
     public TimeSpan? ProjectionPollInterval { get; init; }
 

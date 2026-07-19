@@ -124,6 +124,7 @@ public class MonitorTraceListEndpointTests
     public async Task TraceList_PeriodFilter_ExcludesOldRows()
     {
         using var temp = new MonitorTempDirectory();
+        temp.TimeProvider = TimeProvider.System;
         var store = SeedDefaultTraces(temp);
         await using var host = await StartHostAsync(temp);
 
@@ -144,7 +145,7 @@ public class MonitorTraceListEndpointTests
     public async Task TraceList_RejectsInvalidQueryWith400(string path)
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         await using var host = await StartHostAsync(temp);
 
@@ -158,7 +159,7 @@ public class MonitorTraceListEndpointTests
     public async Task TraceList_NeverReturnsRawContentOrPii()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         SeedTrace(store, "trace-pii", SensitivePayload, minute: 1);
         await using var host = await StartHostAsync(temp);
@@ -182,7 +183,7 @@ public class MonitorTraceListEndpointTests
     /// </summary>
     private static RawTelemetryStore SeedDefaultTraces(MonitorTempDirectory temp)
     {
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         SeedTrace(store, "trace-big", ChatPayload("trace-big", "gpt-4o", input: 4000, output: 1000, cacheRead: 400, cacheCreation: 20), minute: 1);
         SeedTrace(store, "trace-recovered", RecoveredPayload("trace-recovered", "gpt-4.1", input: 800, output: 200), minute: 2);

@@ -1,6 +1,7 @@
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
@@ -46,7 +47,7 @@ public sealed class TraceDetailModel : PageModel
 
     internal IReadOnlyList<RawRecordPreview> RawRecords { get; private set; } = Array.Empty<RawRecordPreview>();
 
-    public IActionResult OnGet(string traceId)
+    public async Task<IActionResult> OnGetAsync(string traceId)
     {
         var options = HttpContext.RequestServices.GetRequiredService<MonitorOptions>();
         RawAvailable = !options.SanitizedOnly;
@@ -71,7 +72,8 @@ public sealed class TraceDetailModel : PageModel
         var store = HttpContext.RequestServices.GetRequiredService<IMonitorProjectionStore>();
 
         MonitorTraceRow? trace;
-        IReadOnlyList<RawTelemetryRecord> rawRecords = Array.Empty<RawTelemetryRecord>();
+        IReadOnlyList<RawRecordPreview> rawRecords = Array.Empty<RawRecordPreview>();
+        string? promptLabel = null;
         try
         {
             trace = store.GetMonitorTrace(traceId);
@@ -82,7 +84,14 @@ public sealed class TraceDetailModel : PageModel
 
             if (RawAvailable)
             {
-                rawRecords = store.ListRawRecordsByTraceId(traceId, RawPreviewRecordLimit);
+                var result = await store.ListRawRecordsByTraceIdAsync(traceId, RawPreviewRecordLimit, RetentionReadKind.Access, HttpContext.RequestAborted);
+                if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
+                if (result.Lease is not null)
+                {
+                    await using var lease = result.Lease;
+                    rawRecords = lease.Value.Select(ToPreview).ToList();
+                    promptLabel = lease.Value.Select(record => MonitorPromptExtractor.ExtractPromptLabel(record.PayloadJson, traceId)).FirstOrDefault(prompt => prompt is not null);
+                }
             }
 
             // 前 / 次 navigation over the recent-first ordering (§6.3 breadcrumb).
@@ -108,12 +117,8 @@ public sealed class TraceDetailModel : PageModel
         }
 
         Trace = trace;
-        RawRecords = RawAvailable ? rawRecords.Select(ToPreview).ToList() : Array.Empty<RawRecordPreview>();
-        PromptLabel = RawAvailable
-            ? rawRecords
-                .Select(record => MonitorPromptExtractor.ExtractPromptLabel(record.PayloadJson, traceId))
-                .FirstOrDefault(prompt => prompt is not null)
-            : null;
+        RawRecords = RawAvailable ? rawRecords : Array.Empty<RawRecordPreview>();
+        PromptLabel = RawAvailable ? promptLabel : null;
 
         return Page();
     }

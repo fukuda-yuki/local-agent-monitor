@@ -16,7 +16,8 @@ public class MonitorOverviewEndpointTests
     public async Task Overview_EmptyStore_ReturnsZeroKpiAnd24HourBuckets()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        temp.TimeProvider = new UtcPinnedTimeProvider(PinnedNow);
+        var store = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         await using var host = await StartHostAsync(temp);
 
@@ -44,7 +45,8 @@ public class MonitorOverviewEndpointTests
     public async Task Overview_OmittedPeriod_DefaultsToToday()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        temp.TimeProvider = new UtcPinnedTimeProvider(PinnedNow);
+        var store = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         await using var host = await StartHostAsync(temp);
 
@@ -59,7 +61,8 @@ public class MonitorOverviewEndpointTests
     public async Task Overview_RejectsUnsupportedPeriodWith400(string path)
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        temp.TimeProvider = new UtcPinnedTimeProvider(PinnedNow);
+        var store = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         await using var host = await StartHostAsync(temp);
 
@@ -73,7 +76,8 @@ public class MonitorOverviewEndpointTests
     public async Task Overview_ComputesKpiFromCacheAwareRows()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        temp.TimeProvider = new UtcPinnedTimeProvider(PinnedNow);
+        var store = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         // Today: one cache-bearing trace (input 1000 / output 200 / cache read 700 /
         // cache creation 90) and one pre-v4-style trace without cache attributes
@@ -122,7 +126,8 @@ public class MonitorOverviewEndpointTests
     public async Task Overview_SevenDayPeriod_IncludesYesterday()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        temp.TimeProvider = new UtcPinnedTimeProvider(PinnedNow);
+        var store = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         SeedTrace(store, "trace-today", ChatPayload("trace-today", "gpt-4o", input: 100, output: 0, cacheRead: null, cacheCreation: null), PinnedNow.AddHours(-1));
         SeedTrace(store, "trace-yesterday", ChatPayload("trace-yesterday", "gpt-4o", input: 200, output: 0, cacheRead: null, cacheCreation: null), PinnedNow.AddHours(-24));
@@ -140,7 +145,8 @@ public class MonitorOverviewEndpointTests
     public async Task Overview_NeverReturnsRawContentOrPii()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new RawTelemetryStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        temp.TimeProvider = new UtcPinnedTimeProvider(PinnedNow);
+        var store = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         SeedTrace(store, "trace-pii", SensitivePayload, PinnedNow.AddHours(-1));
         await using var host = await StartHostAsync(temp);
@@ -160,7 +166,7 @@ public class MonitorOverviewEndpointTests
         {
             StartWriter = false,
             StartProjectionWorker = false,
-            TimeProvider = new UtcPinnedTimeProvider(PinnedNow),
+            TimeProvider = temp.TimeProvider,
         });
 
     /// <summary>Pinned clock with a UTC local zone so the local-calendar period windows are machine-timezone independent.</summary>

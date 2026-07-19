@@ -1,6 +1,7 @@
 using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
 using System.Text.Json.Nodes;
@@ -15,7 +16,7 @@ public sealed class SessionOtelEnrichmentTests
     public void ProcessNextBatch_UsesOnlyExactLinksAndCreatesUnboundForUnmatchedRows()
     {
         using var temp = new MonitorTempDirectory();
-        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        temp.CreateRawStore().CreateMonitorSchema();
         var store = new SqliteSessionStore(temp.DatabasePath);
         store.CreateSchema();
         var sessionId = Guid.CreateVersion7();
@@ -34,11 +35,11 @@ public sealed class SessionOtelEnrichmentTests
                 [],
                 events),
             []));
-        InsertProjectedSpan(temp.DatabasePath, "trace-exact", "span-1", "native-exact", "vscode-copilot-chat", "same-repo", now.AddSeconds(3));
-        InsertProjectedSpan(temp.DatabasePath, "trace-unmatched", "span-2", null, "vscode-copilot-chat", "same-repo", now.AddSeconds(4));
-        InsertProjectedSpan(temp.DatabasePath, "trace-by-context", "span-3", null, "unrecognized-client", "same-repo", now.AddSeconds(5));
+        InsertProjectedSpan(temp.DatabasePath, temp.RetentionContext, "trace-exact", "span-1", "native-exact", "vscode-copilot-chat", "same-repo", now.AddSeconds(3));
+        InsertProjectedSpan(temp.DatabasePath, temp.RetentionContext, "trace-unmatched", "span-2", null, "vscode-copilot-chat", "same-repo", now.AddSeconds(4));
+        InsertProjectedSpan(temp.DatabasePath, temp.RetentionContext, "trace-by-context", "span-3", null, "unrecognized-client", "same-repo", now.AddSeconds(5));
 
-        var processor = new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System);
+        var processor = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, TimeProvider.System);
         var processed = processor.ProcessNextBatch(100);
 
         Assert.Equal(3, processed);
@@ -65,15 +66,15 @@ public sealed class SessionOtelEnrichmentTests
     public void ProcessNextBatch_GenericPathBindsOnOwnSessionIdEvidenceWithoutAdapterPromotion()
     {
         using var temp = new MonitorTempDirectory();
-        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        temp.CreateRawStore().CreateMonitorSchema();
         var store = new SqliteSessionStore(temp.DatabasePath);
         store.CreateSchema();
         var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
         var hookSessionId = SeedClaudeSession(store, "GENERIC_NATIVE_001", SessionBindingKind.Native);
         var payload = BuildOtelPayload("generic-trace-1", "generic-span-1", "GENERIC_NATIVE_001");
-        InsertProjectedSpanWithPayload(temp.DatabasePath, "generic-trace-1", "generic-span-1", "unrecognized-client", "generic-repo", now.AddSeconds(1), payload);
+        InsertProjectedSpanWithPayload(temp.DatabasePath, temp.RetentionContext, "generic-trace-1", "generic-span-1", "unrecognized-client", "generic-repo", now.AddSeconds(1), payload);
 
-        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, TimeProvider.System).ProcessNextBatch(100);
 
         Assert.Equal(1, processed);
         var detail = store.GetDetail(hookSessionId)!;
@@ -90,7 +91,7 @@ public sealed class SessionOtelEnrichmentTests
     public void ProcessNextBatch_GenericPathPreservesReachabilityCountsAndAdapterLabels()
     {
         using var temp = new MonitorTempDirectory();
-        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        temp.CreateRawStore().CreateMonitorSchema();
         var store = new SqliteSessionStore(temp.DatabasePath);
         store.CreateSchema();
         var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
@@ -107,17 +108,17 @@ public sealed class SessionOtelEnrichmentTests
         var conversationSessionId = SeedClaudeSession(store, "GENERIC_CONVERSATION_001", SessionBindingKind.Native);
 
         InsertProjectedSpanWithPayload(
-            temp.DatabasePath,
+            temp.DatabasePath, temp.RetentionContext,
             "generic-exact-trace",
             "generic-span-1",
             "vscode-copilot-chat",
             "generic-repo",
             now.AddSeconds(1),
             BuildOtelPayload("generic-exact-trace", "generic-span-1", "GENERIC_EXACT_001"));
-        InsertProjectedSpan(temp.DatabasePath, "generic-shared-trace", "generic-span-2", null, "vscode-copilot-chat", "generic-repo", now.AddSeconds(2));
-        InsertProjectedSpan(temp.DatabasePath, "generic-conversation-trace", "generic-span-3", "GENERIC_CONVERSATION_001", "vscode-copilot-chat", "generic-repo", now.AddSeconds(3));
+        InsertProjectedSpan(temp.DatabasePath, temp.RetentionContext, "generic-shared-trace", "generic-span-2", null, "vscode-copilot-chat", "generic-repo", now.AddSeconds(2));
+        InsertProjectedSpan(temp.DatabasePath, temp.RetentionContext, "generic-conversation-trace", "generic-span-3", "GENERIC_CONVERSATION_001", "vscode-copilot-chat", "generic-repo", now.AddSeconds(3));
 
-        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, TimeProvider.System).ProcessNextBatch(100);
 
         Assert.Equal(3, processed);
         Assert.Equal(SessionMatchKind.ExactNative, Assert.Single(store.GetDetail(exactSessionId)!.Events, item => item.SourceAdapter == "otel-exact").MatchKind);
@@ -138,7 +139,7 @@ public sealed class SessionOtelEnrichmentTests
         var store = PrepareClaudeFixture(temp.DatabasePath, ReadClaudeFixture());
         var sessionId = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", bindingKind);
 
-        new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1);
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1);
 
         var detail = store.GetDetail(sessionId)!;
         Assert.Single(detail.Events, item => item.SourceAdapter == "claude-code-otel");
@@ -151,7 +152,7 @@ public sealed class SessionOtelEnrichmentTests
     public void ProcessNextBatch_GenericPathStillUsesSharedTraceIdContinuity()
     {
         using var temp = new MonitorTempDirectory();
-        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        temp.CreateRawStore().CreateMonitorSchema();
         var store = new SqliteSessionStore(temp.DatabasePath);
         store.CreateSchema();
         var sessionId = Guid.CreateVersion7();
@@ -164,9 +165,9 @@ public sealed class SessionOtelEnrichmentTests
             [],
             [Event(sessionId, "trace-context", "UserPromptSubmit", now) with { TraceId = "shared-trace-id" }]),
             []));
-        InsertProjectedSpan(temp.DatabasePath, "shared-trace-id", "shared-span-1", null, "unrecognized-client", "generic-repo", now.AddSeconds(1));
+        InsertProjectedSpan(temp.DatabasePath, temp.RetentionContext, "shared-trace-id", "shared-span-1", null, "unrecognized-client", "generic-repo", now.AddSeconds(1));
 
-        new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1);
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1);
 
         Assert.Single(store.GetDetail(sessionId)!.Events, item => item.SourceEventId == "shared-trace-id/shared-span-1");
     }
@@ -175,14 +176,14 @@ public sealed class SessionOtelEnrichmentTests
     public void ProcessNextBatch_GenericPathWithoutHookSessionCreatesFreshUnboundSession()
     {
         using var temp = new MonitorTempDirectory();
-        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        temp.CreateRawStore().CreateMonitorSchema();
         var store = new SqliteSessionStore(temp.DatabasePath);
         store.CreateSchema();
         var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
         var payload = BuildOtelPayload("generic-trace-2", "generic-span-2", "NO_MATCHING_HOOK_SESSION");
-        InsertProjectedSpanWithPayload(temp.DatabasePath, "generic-trace-2", "generic-span-2", "unrecognized-client", "generic-repo", now, payload);
+        InsertProjectedSpanWithPayload(temp.DatabasePath, temp.RetentionContext, "generic-trace-2", "generic-span-2", "unrecognized-client", "generic-repo", now, payload);
 
-        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, TimeProvider.System).ProcessNextBatch(100);
 
         Assert.Equal(1, processed);
         var unbound = Assert.Single(store.ListMostRecent(10));
@@ -193,15 +194,15 @@ public sealed class SessionOtelEnrichmentTests
     public void ProcessNextBatch_GenericPathAmbiguousSessionIdAttributesRemainUnbound()
     {
         using var temp = new MonitorTempDirectory();
-        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        temp.CreateRawStore().CreateMonitorSchema();
         var store = new SqliteSessionStore(temp.DatabasePath);
         store.CreateSchema();
         var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
         var hookSessionId = SeedClaudeSession(store, "AMBIGUOUS_NATIVE_001", SessionBindingKind.Native);
         var payload = BuildOtelPayload("generic-trace-3", "generic-span-3", "AMBIGUOUS_NATIVE_001", "OTHER_VALUE");
-        InsertProjectedSpanWithPayload(temp.DatabasePath, "generic-trace-3", "generic-span-3", "unrecognized-client", "generic-repo", now, payload);
+        InsertProjectedSpanWithPayload(temp.DatabasePath, temp.RetentionContext, "generic-trace-3", "generic-span-3", "unrecognized-client", "generic-repo", now, payload);
 
-        new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, TimeProvider.System).ProcessNextBatch(100);
 
         Assert.DoesNotContain(store.GetDetail(hookSessionId)!.Events, item => item.SourceEventId == "generic-trace-3/generic-span-3");
         Assert.Contains(store.ListMostRecent(10), item => item.SessionId != hookSessionId && item.Completeness == SessionCompleteness.Unbound);
@@ -213,15 +214,15 @@ public sealed class SessionOtelEnrichmentTests
     public void ProcessNextBatch_GenericPathByteMismatchDoesNotBind(string nearNativeId)
     {
         using var temp = new MonitorTempDirectory();
-        new RawTelemetryStore(temp.DatabasePath).CreateMonitorSchema();
+        temp.CreateRawStore().CreateMonitorSchema();
         var store = new SqliteSessionStore(temp.DatabasePath);
         store.CreateSchema();
         var now = DateTimeOffset.Parse("2026-07-16T00:00:00Z");
         var hookSessionId = SeedClaudeSession(store, "BYTE_NATIVE_001", SessionBindingKind.Native);
         var payload = BuildOtelPayload("generic-trace-4", "generic-span-4", nearNativeId);
-        InsertProjectedSpanWithPayload(temp.DatabasePath, "generic-trace-4", "generic-span-4", "unrecognized-client", "generic-repo", now, payload);
+        InsertProjectedSpanWithPayload(temp.DatabasePath, temp.RetentionContext, "generic-trace-4", "generic-span-4", "unrecognized-client", "generic-repo", now, payload);
 
-        new SqliteSessionOtelEnricher(temp.DatabasePath, store, TimeProvider.System).ProcessNextBatch(100);
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, TimeProvider.System).ProcessNextBatch(100);
 
         Assert.DoesNotContain(store.GetDetail(hookSessionId)!.Events, item => item.SourceEventId == "generic-trace-4/generic-span-4");
         Assert.Contains(store.ListMostRecent(10), item => item.SessionId != hookSessionId && item.Completeness == SessionCompleteness.Unbound);
@@ -239,25 +240,16 @@ public sealed class SessionOtelEnrichmentTests
     }
 
     private static void InsertProjectedSpanWithPayload(
-        string databasePath, string traceId, string spanId, string clientKind, string repository, DateTimeOffset time, string payloadJson)
+        string databasePath, RetentionCatalogContext retentionContext, string traceId, string spanId, string clientKind, string repository, DateTimeOffset time, string payloadJson)
     {
+        var rawRecordId = new RawTelemetryStore(
+            databasePath,
+            retentionContext,
+            connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter)
+            .Insert(new RawTelemetryRecord(null, "raw-otlp", traceId, time, null, payloadJson));
         using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open();
         using var transaction = connection.BeginTransaction();
-        using var raw = connection.CreateCommand();
-        raw.Transaction = transaction;
-        raw.CommandText = """
-            INSERT INTO raw_records(source,trace_id,received_at,payload_json,schema_version,retention_owner_token)
-            VALUES('raw-otlp',$trace_id,$time,$payload,1,randomblob(32));
-            """;
-        raw.Parameters.AddWithValue("$trace_id", traceId);
-        raw.Parameters.AddWithValue("$time", time.ToString("O"));
-        raw.Parameters.AddWithValue("$payload", payloadJson);
-        raw.ExecuteNonQuery();
-        using var idCommand = connection.CreateCommand();
-        idCommand.Transaction = transaction;
-        idCommand.CommandText = "SELECT last_insert_rowid();";
-        var rawRecordId = (long)idCommand.ExecuteScalar()!;
         using var trace = connection.CreateCommand();
         trace.Transaction = transaction;
         trace.CommandText = """
@@ -293,7 +285,7 @@ public sealed class SessionOtelEnrichmentTests
         var store = PrepareClaudeFixture(temp.DatabasePath, ReadClaudeFixture());
         var sessionId = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", bindingKind);
 
-        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, new FixedTimeProvider(ObservedAt.AddMinutes(1)))
+        var processed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, new FixedTimeProvider(ObservedAt.AddMinutes(1)))
             .ProcessNextBatch(100);
 
         Assert.Equal(6, processed);
@@ -339,7 +331,7 @@ public sealed class SessionOtelEnrichmentTests
             temp.DatabasePath,
             "UPDATE monitor_traces SET repository_name='same-repository',workspace_label='same-workspace';");
 
-        new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(100);
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(100);
 
         var existing = Assert.IsType<SessionDetail>(store.GetDetail(existingSessionId));
         Assert.DoesNotContain(existing.Events, item => item.SourceAdapter == "claude-code-otel");
@@ -359,7 +351,7 @@ public sealed class SessionOtelEnrichmentTests
         var first = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", SessionBindingKind.Native);
         var second = SeedClaudeSession(store, "SECOND_SESSION", SessionBindingKind.Native);
 
-        new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1);
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1);
 
         Assert.DoesNotContain(store.GetDetail(first)!.Events, item => item.SourceAdapter == "claude-code-otel");
         Assert.DoesNotContain(store.GetDetail(second)!.Events, item => item.SourceAdapter == "claude-code-otel");
@@ -373,7 +365,7 @@ public sealed class SessionOtelEnrichmentTests
         var store = PrepareClaudeFixture(temp.DatabasePath, ReadClaudeFixture());
         var sessionId = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", SessionBindingKind.TraceContext);
 
-        new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1);
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1);
 
         Assert.DoesNotContain(store.GetDetail(sessionId)!.Events, item => item.SourceAdapter == "claude-code-otel");
         Assert.Contains(store.ListMostRecent(10), item => item.SessionId != sessionId && item.Completeness == SessionCompleteness.Unbound);
@@ -397,7 +389,7 @@ public sealed class SessionOtelEnrichmentTests
                 "otel.span", ObservedAt, SessionContentState.NotCaptured)]), []));
         var competingOwner = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", SessionBindingKind.Native);
 
-        new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1);
+        new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1);
 
         Assert.Single(store.GetDetail(originalOwner)!.Events, item => item.SourceAdapter == "claude-code-otel" && item.SourceEventId == sourceIdentity);
         Assert.DoesNotContain(store.GetDetail(competingOwner)!.Events, item => item.SourceAdapter == "claude-code-otel");
@@ -416,7 +408,7 @@ public sealed class SessionOtelEnrichmentTests
             BEGIN SELECT RAISE(ABORT,'synthetic enrichment failure'); END;
             """);
 
-        Assert.Throws<SqliteException>(() => new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1));
+        Assert.Throws<SqliteException>(() => new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1));
 
         var afterFailure = store.GetDetail(sessionId)!;
         Assert.Equal(SessionCompleteness.Rich, afterFailure.Session.Completeness);
@@ -425,7 +417,7 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Null(store.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey));
 
         Execute(temp.DatabasePath, "DROP TRIGGER fail_claude_enrichment;");
-        Assert.Equal(1, new SqliteSessionOtelEnricher(temp.DatabasePath, store).ProcessNextBatch(1));
+        Assert.Equal(1, new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1));
         var afterRetry = store.GetDetail(sessionId)!;
         Assert.Single(afterRetry.Runs);
         Assert.Single(afterRetry.Events, item => item.SourceAdapter == "claude-code-otel");
@@ -468,7 +460,8 @@ public sealed class SessionOtelEnrichmentTests
         var persisted = raw with { Id = committed.RawRecordId };
         var projectionStore = new RawTelemetryStore(
             databasePath,
-            RawTelemetryStoreConnectionOptions.MonitorWriter);
+            RetentionCatalogContext.AdoptExistingCatalogV1(databasePath),
+            connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
         projectionStore.ApplyProjection(
             committed.RawRecordId,
             persisted.Source,
@@ -539,8 +532,13 @@ public sealed class SessionOtelEnrichmentTests
         command.ExecuteNonQuery();
     }
 
-    private static void InsertProjectedSpan(string databasePath, string traceId, string spanId, string? conversationId, string clientKind, string repository, DateTimeOffset time)
+    private static void InsertProjectedSpan(string databasePath, RetentionCatalogContext retentionContext, string traceId, string spanId, string? conversationId, string clientKind, string repository, DateTimeOffset time)
     {
+        var rawRecordId = new RawTelemetryStore(
+            databasePath,
+            retentionContext,
+            connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter)
+            .Insert(new RawTelemetryRecord(null, "raw-otlp", traceId, time, null, "{\"resourceSpans\":[]}"));
         using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open();
         using var transaction = connection.BeginTransaction();
@@ -563,7 +561,7 @@ public sealed class SessionOtelEnrichmentTests
             """;
         span.Parameters.AddWithValue("$trace_id", traceId);
         span.Parameters.AddWithValue("$span_id", spanId);
-        span.Parameters.AddWithValue("$raw_record_id", int.Parse(spanId.AsSpan(spanId.Length - 1), System.Globalization.CultureInfo.InvariantCulture));
+        span.Parameters.AddWithValue("$raw_record_id", rawRecordId);
         span.Parameters.AddWithValue("$conversation_id", (object?)conversationId ?? DBNull.Value);
         span.Parameters.AddWithValue("$time", time.ToString("O"));
         span.ExecuteNonQuery();
