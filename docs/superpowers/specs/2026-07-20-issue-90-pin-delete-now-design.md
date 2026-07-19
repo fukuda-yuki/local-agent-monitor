@@ -170,9 +170,9 @@ additional exclusion code is permitted.
 
 The selected item set includes every exact-owned catalog item, including a
 tombstone or denied item, so the preview can explain why an operation is
-rejected. If the selected set has more than 100 items, the preview fails with
-`retention_mutation_target_limit_exceeded`; it never truncates the set or
-creates a partial command.
+rejected. If the selected set has more than 100 items, the preview request
+fails with HTTP `413` `retention_mutation_target_limit_exceeded` and produces
+no preview record; it never truncates the set or creates a partial command.
 
 ### Opaque item target resolution
 
@@ -187,7 +187,7 @@ opaque-looking string; it is not a valid catalog item.
 ### Empty and not-applicable result
 
 An existing Session with no exact-owned item has a successful read-only preview
-response whose `result` is exactly `empty_not_applicable`,
+response (HTTP `200`) whose `result` is exactly `empty_not_applicable`,
 `empty_reason` is exactly `no_exact_owned_items`,
 `target_item_count` is `0`, `target_items` is `[]`, `mutation_allowed` is
 `false`, and `confirmation_expires_at` is JSON `null`. The same shape is used
@@ -214,11 +214,14 @@ null`, can issue a confirmation, and commits the
 expiry as historical metadata while automatic expiry is disabled. It does not
 create a new policy or TTL. `expiring` is the unpinned/readable state.
 
-The tables below are the complete mutation contract, split by reachability
-stage. A Session command is atomic across all selected items: every item must
-be allowed or an explicit idempotent case for that operation. One rejected item
-prevents partial application to the other items. The effect columns are, in
-order, token consumed / audit / idempotency / state change.
+The tables below are the complete lifecycle mutation contract, split between
+PREVIEW-STAGE rejection and COMMIT-STAGE outcomes. REQUEST-STAGE failures and
+CONFIRMATION-ISSUE-STAGE outcomes are defined in the preview, confirmation,
+and HTTP sections; they do not create commit rows. A Session command is atomic
+across all selected items: every item must be allowed or an explicit
+idempotent case for that operation. One rejected item prevents partial
+application to the other items. The effect columns are, in order, token
+consumed / audit / idempotency / state change.
 
 ### PREVIEW-STAGE rejections
 
@@ -244,10 +247,10 @@ mutation route cannot reach these rows.
 
 These rows are reachable only with a valid bound token issued from a preview
 with `rejection_code = null`. Committed successes and no-ops are shown with
-their completion codes. A state drift after issuance is checked first by the
-binding/version/conflict checks and returns the appropriate
-`retention_confirmation_*_changed` code; it never falls through to a
-transition code in this table.
+their completion codes. At mutation time, the binding and drift checks run in
+the exact first-failure order pinned in the reject-and-republish registry;
+exactly one code is returned for the request. A failing check never falls
+through to a later drift or transition code in this table.
 
 | Operation | Commit current state | Preconditions and result | New state / derived pin state | Completion / token consumed / audit / idempotency / state change |
 | --- | --- | --- | --- | --- |
@@ -477,24 +480,34 @@ exact stored mutation result, and the consumed token is not reissued.
 
 The closed reject-and-republish registry is:
 
-| Condition | Fixed code | Republish rule |
-| --- | --- | --- |
-| Token format, digest, nonce, or stored token hash is invalid, including a token invalidated by confirmation-issue reissue | `retention_confirmation_invalid` | Discard the token and create a new preview/key. |
-| Preview ID or stored preview cannot be found | `retention_preview_not_found` | Create a new preview/key. |
-| Preview or confirmation is past the exact five-minute expiry | `retention_confirmation_expired` or `retention_preview_expired` | Create a new preview/key; issuance never extends expiry. |
-| Submitted operation, scope, target kind, or target ID does not equal the binding | `retention_confirmation_binding_mismatch` | Create a new preview/key. |
-| Exact target item set changed | `retention_confirmation_target_changed` | Create a new preview/key. |
-| Pin state changed | `retention_confirmation_pin_changed` | Create a new preview/key. |
-| Retention state, policy, captured-at basis, or expiry changed | `retention_confirmation_retention_changed` | Create a new preview/key. |
-| Any expected catalog/pin/revision vector changed | `retention_confirmation_version_changed` | Create a new preview/key. |
-| An active cleanup conflict was added, removed, or changed | `retention_confirmation_conflict_changed` | Create a new preview/key. |
-| Token was committed by another request | `retention_confirmation_consumed` | Return the stored mutation linkage/result when available; never issue a new token for the consumed binding. A new preview/key is required for a new operation. |
+For mutation-time binding and drift checks, the `Mutation-time order` column is
+the exact evaluation sequence. The first failing check returns its code, and
+exactly one code is returned per request. The rows without an order apply to
+request, preview, or confirmation-issue routing before mutation-time
+evaluation.
 
-These are the only token validation outcomes. After successful binding, only
-the clock-only `retention_pin_expired` race can produce a transition rejection
-at commit; all other state drift is reported by the appropriate
-`retention_confirmation_*_changed` code before the transition matrix is
-evaluated. No failure silently changes the target or republishes a token.
+| Mutation-time order | Condition | Fixed code | Republish rule |
+| --- | --- | --- | --- |
+| 1 | Structural or cryptographic token validity, including token format, digest, nonce, stored token hash, or a token invalidated by confirmation-issue reissue | `retention_confirmation_invalid` | Discard the token and create a new preview/key. |
+| 2 | Token was committed by another request | `retention_confirmation_consumed` | Return the stored mutation linkage/result when available; never issue a new token for the consumed binding. A new preview/key is required for a new operation. |
+| 3 | Confirmation token is past the exact five-minute expiry | `retention_confirmation_expired` | Create a new preview/key; issuance never extends expiry. |
+| 4 | Submitted operation, scope, target kind, or target ID does not equal the binding | `retention_confirmation_binding_mismatch` | Create a new preview/key. |
+| 5 | Exact target item set digest changed | `retention_confirmation_target_changed` | Create a new preview/key. |
+| 6 | Pin-state vector changed | `retention_confirmation_pin_changed` | Create a new preview/key. |
+| 7 | Retention policy, captured-at basis, or expiry changed | `retention_confirmation_retention_changed` | Create a new preview/key. |
+| 8 | Active cleanup conflict snapshot was added, removed, or changed | `retention_confirmation_conflict_changed` | Create a new preview/key. |
+| 9 | Full expected catalog/revision vector changed after the preceding checks (the residual catch-all) | `retention_confirmation_version_changed` | Create a new preview/key. |
+| — | Preview ID or stored preview cannot be found | `retention_preview_not_found` | Create a new preview/key. |
+| — | Preview is past the exact five-minute expiry on preview read or confirmation issue | `retention_preview_expired` | Create a new preview/key; issuance never extends expiry. |
+
+These are the only token validation outcomes. At mutation time, the checks are
+evaluated in the exact order shown in the table, and the first failing check
+returns its one code; no request returns more than one of these codes. After
+successful binding, only the clock-only `retention_pin_expired` race can
+produce a transition rejection at commit; all other state drift is reported by
+the ordered `retention_confirmation_*_changed` checks before the transition
+matrix is evaluated. No failure silently changes the target or republishes a
+token.
 
 The confirmation-issue route validates the supplied `preview_digest` against
 the stored preview before issuing a token. A mismatch is exactly
@@ -736,26 +749,40 @@ ID is exposed or persisted by #90.
 
 ### HTTP status mapping
 
-The stage classification is normative: PREVIEW-STAGE rejection codes are
-returned by the preview as HTTP `200` with `mutation_allowed = false`, and by
-confirmation issue as HTTP `409` with no token. COMMIT-STAGE codes require a
-valid bound token; they are either mutation-time HTTP `409` outcomes, such as
-the clock-only `retention_pin_expired` race and confirmation binding/version
-failures, or HTTP `200` committed success/no-op/already-queued/replay results.
-The consumed-binding class is the one explicit cross-route case: a consumed
-preview retry or a token committed by another request returns HTTP `409`
-`retention_confirmation_consumed` and resolves to the stored mutation
-linkage, never a new token.
+The stage classification is normative and mutually exclusive:
+
+- `REQUEST-STAGE`: the request itself fails with an HTTP error before it can
+  produce a new preview record or stage result. The class is always written
+  with its route and HTTP status.
+- `PREVIEW-STAGE rejection`: the preview succeeds with HTTP `200`,
+  `mutation_allowed = false`, and a `rejection_code`; a confirmation-issue
+  attempt against that preview returns HTTP `409` with the same code and no
+  token.
+- `CONFIRMATION-ISSUE-STAGE`: an addressable persisted preview cannot produce
+  a fresh confirmation, returning its confirmation-issue error (or the
+  expired-preview read error) without entering commit. The consumed-binding
+  result is owned by this class because it returns stored linkage and no new
+  token; the mutation route may return that same code at mutation-time check 2.
+- `COMMIT-STAGE`: a valid bound token reaches mutation-time validation or the
+  durable mutation transaction. Outcomes are mutation HTTP `401`, `409`, or
+  `503`, or HTTP `200` for a committed success, no-op, actionable-idempotent
+  result, or replay.
+- `WARNING`: a fixed warning field attached to an otherwise successful result,
+  not an HTTP failure.
+
+Every diagnostic/error code below carries exactly one class. A code used by a
+shared route is called out in its single row rather than assigned a second
+class.
 
 | HTTP status | Conditions |
 | --- | --- |
 | `200` | Read; every preview, including a PREVIEW-STAGE rejection; fresh or reissued confirmation issue; COMMIT-STAGE committed success, no-op, actionable-idempotent `retention_delete_already_queued` result, or idempotent mutation replay. A committed delete-now response means read denial and durable queue handoff, not physical completion. |
-| `400` | `retention_mutation_request_invalid`, `retention_idempotency_key_invalid`, or `retention_history_cursor_invalid`. |
-| `401` | `retention_confirmation_invalid` when the token cannot be structurally or cryptographically validated. |
-| `404` | `retention_target_not_found`, `retention_preview_not_found`, or `retention_operation_not_found`. |
-| `409` | Confirmation-issue PREVIEW-STAGE/empty/expiry conflicts (`retention_target_empty`, `retention_target_not_applicable`, `retention_preview_expired`, and the fixed transition codes in the PREVIEW-STAGE table); confirmation-issue `retention_preview_digest_mismatch`; the consumed-binding `retention_confirmation_consumed`; workflow-key conflicts; or COMMIT-STAGE `retention_confirmation_expired`, `retention_confirmation_binding_mismatch`, `retention_confirmation_target_changed`, `retention_confirmation_pin_changed`, `retention_confirmation_retention_changed`, `retention_confirmation_version_changed`, `retention_confirmation_conflict_changed`, or `retention_pin_expired`. `retention_delete_already_queued` is the committed HTTP `200` exception. |
-| `413` | PREVIEW-STAGE `retention_mutation_target_limit_exceeded`. |
-| `503` | `retention_confirmation_generation_failed`, `retention_mutation_transaction_failed`, `retention_audit_write_failed`, or inherited `retention_catalog_unavailable`. |
+| `400` | REQUEST-STAGE `retention_mutation_request_invalid`, `retention_idempotency_key_invalid`, or `retention_history_cursor_invalid`. |
+| `401` | COMMIT-STAGE `retention_confirmation_invalid` when the token cannot be structurally or cryptographically validated. |
+| `404` | REQUEST-STAGE `retention_target_not_found`, `retention_preview_not_found`, or `retention_operation_not_found`. |
+| `409` | REQUEST-STAGE `retention_idempotency_conflict` or `retention_idempotency_expired`; PREVIEW-STAGE confirmation-issue returns for `retention_target_not_applicable` and the fixed transition codes in the PREVIEW-STAGE table; CONFIRMATION-ISSUE-STAGE `retention_target_empty`, `retention_preview_expired`, or `retention_preview_digest_mismatch`; mutation-time check 2 `retention_confirmation_consumed`, followed by COMMIT-STAGE checks 3–9 in order: `retention_confirmation_expired`, `retention_confirmation_binding_mismatch`, `retention_confirmation_target_changed`, `retention_confirmation_pin_changed`, `retention_confirmation_retention_changed`, `retention_confirmation_conflict_changed`, and `retention_confirmation_version_changed`; or post-check COMMIT-STAGE `retention_pin_expired`. `retention_delete_already_queued` is the committed HTTP `200` exception. |
+| `413` | REQUEST-STAGE `retention_mutation_target_limit_exceeded`; no preview record is produced. |
+| `503` | REQUEST-STAGE inherited `retention_catalog_unavailable`; CONFIRMATION-ISSUE-STAGE `retention_confirmation_generation_failed`; or COMMIT-STAGE `retention_mutation_transaction_failed` or `retention_audit_write_failed`. |
 
 All error bodies are the exact one-property JSON shape
 `{"error":"<code>"}` with no extra text. `401` responses do not identify
@@ -766,52 +793,54 @@ and `no-store`.
 
 ### New mutation diagnostic/error registry
 
-The following is the complete new #90 registry. Each code appears in exactly
-one reachability class in this table; a shared route is called out within that
-single class. The registry does not reuse a code from the #89 registry,
-including `retention_lease_conflict`,
+The following is the complete new #90 registry, plus the inherited
+`retention_catalog_unavailable` code used by these routes. Each code appears
+in exactly one reachability class in this table; a shared route is called out
+within that single class. The registry does not reuse a code from the #89
+registry, including `retention_lease_conflict`,
 `retention_lease_lost`, `retention_unexpected_source_missing`, or
 `retention_item_limit_exceeded`.
 
 | Code | Reachability class | Use |
 | --- | --- | --- |
-| `retention_mutation_request_invalid` | INPUT `400` | Invalid union, operation, scope, reason, comment, or body. |
-| `retention_target_not_found` | READ `404` | Exact Session or item target is absent. |
-| `retention_target_empty` | PREVIEW/CONFIRMATION-ISSUE `409` | Confirmation requested for an explicit empty/not-applicable target. |
-| `retention_target_not_applicable` | PREVIEW-STAGE (`200` preview / `409` issue) | The exact catalog row exists, but its `store_kind` is outside the closed five-kind v1 registry or #89 ownership validation identifies it as a non-product-owned imported reference. This is a deterministic catalog-row validation, not a scan. |
-| `retention_mutation_target_limit_exceeded` | PREVIEW-STAGE `413` | Exact Session target has more than 100 items. |
-| `retention_preview_not_found` | READ/CONFIRMATION-ISSUE `404` | Preview ID is not present in the current catalog. |
-| `retention_preview_expired` | PREVIEW/CONFIRMATION-ISSUE `409` | Preview read/issuance is past its five-minute expiry. |
-| `retention_preview_digest_mismatch` | CONFIRMATION-ISSUE `409` | Confirmation-issue route only: supplied preview digest does not match the persisted preview. |
-| `retention_confirmation_generation_failed` | CONFIRMATION-ISSUE `503` | Server nonce collision prevented safe token issuance. |
-| `retention_confirmation_invalid` | COMMIT-STAGE `401` | Mutation route only: confirmation token format, full-token hash, nonce, or cryptographic validation is invalid, including a token invalidated by reissue. |
-| `retention_confirmation_expired` | COMMIT-STAGE `409` | Confirmation token is past its fixed expiry. |
-| `retention_confirmation_consumed` | CONSUMED-BINDING `409` | A confirmation-issue retry or mutation request found a token already committed; return the stored mutation linkage/result and never issue a new token. |
-| `retention_confirmation_binding_mismatch` | COMMIT-STAGE `409` | Token binding does not match the confirmation request. |
-| `retention_confirmation_target_changed` | COMMIT-STAGE `409` | Exact target item set digest changed after issuance. |
-| `retention_confirmation_pin_changed` | COMMIT-STAGE `409` | Pin state changed after issuance. |
-| `retention_confirmation_retention_changed` | COMMIT-STAGE `409` | Retention policy, captured-at basis, or expiry changed after issuance. |
-| `retention_confirmation_version_changed` | COMMIT-STAGE `409` | Expected catalog/revision vector changed after issuance. |
-| `retention_confirmation_conflict_changed` | COMMIT-STAGE `409` | Active cleanup conflict snapshot changed after issuance. |
-| `retention_idempotency_key_invalid` | INPUT `400` | Key format is not the exact 48-character `rid1_` format. |
-| `retention_idempotency_conflict` | WORKFLOW-IDEMPOTENCY `409` | Same workflow key and same step were submitted for a different canonical request; different steps never conflict. |
-| `retention_idempotency_expired` | WORKFLOW-IDEMPOTENCY `409` | The 365-day key lifetime has ended; key reuse is forbidden. |
-| `retention_pin_read_denied` | PREVIEW-STAGE (`200` preview / `409` issue) | Pin attempted on an already denied lifecycle. |
-| `retention_pin_deleting` | PREVIEW-STAGE (`200` preview / `409` issue) | Pin attempted while #89 is deleting. |
-| `retention_pin_deleted` | PREVIEW-STAGE (`200` preview / `409` issue) | Pin attempted on a deleted tombstone. |
+| `retention_mutation_request_invalid` | REQUEST-STAGE (preview/confirmation/mutation request) `400` | Invalid union, operation, scope, reason, comment, or body; the request produces no preview record. |
+| `retention_target_not_found` | REQUEST-STAGE (preview request) `404` | Exact Session or item target is absent, so no preview record is produced. |
+| `retention_mutation_target_limit_exceeded` | REQUEST-STAGE (preview request) `413` | Exact Session target has more than 100 items; the preview request fails and produces no preview record. |
+| `retention_preview_not_found` | REQUEST-STAGE (preview read/confirmation issue) `404` | Preview ID is not present in the current catalog, so the request cannot address a preview record. |
+| `retention_idempotency_key_invalid` | REQUEST-STAGE (preview/confirmation/mutation request) `400` | Key format is not the exact 48-character `rid1_` format; the request produces no preview record. |
+| `retention_idempotency_conflict` | REQUEST-STAGE (preview/confirmation/mutation request) `409` | Same workflow key and same step were submitted for a different canonical request; the conflicting request produces no new preview record. |
+| `retention_idempotency_expired` | REQUEST-STAGE (preview/confirmation/mutation request) `409` | The 365-day key lifetime has ended; key reuse is forbidden and the request produces no new preview record. |
+| `retention_operation_not_found` | REQUEST-STAGE (mutation status read) `404` | Mutation operation ID is absent. |
+| `retention_history_cursor_invalid` | REQUEST-STAGE (history read) `400` | History cursor is malformed or not valid for the requested target. |
+| `retention_catalog_unavailable` | REQUEST-STAGE (any retention route) `503` | Inherited #89 catalog availability failure prevents any #90 preview, confirmation, or mutation record from being produced or addressed. |
+| `retention_target_not_applicable` | PREVIEW-STAGE rejection (`200` preview / `409` issue) | The exact catalog row exists, but its `store_kind` is outside the closed five-kind v1 registry or #89 ownership validation identifies it as a non-product-owned imported reference. This is a deterministic catalog-row validation, not a scan. |
+| `retention_pin_read_denied` | PREVIEW-STAGE rejection (`200` preview / `409` issue) | Pin attempted on an already denied lifecycle. |
+| `retention_pin_deleting` | PREVIEW-STAGE rejection (`200` preview / `409` issue) | Pin attempted while #89 is deleting. |
+| `retention_pin_deleted` | PREVIEW-STAGE rejection (`200` preview / `409` issue) | Pin attempted on a deleted tombstone. |
+| `retention_unpin_read_denied` | PREVIEW-STAGE rejection (`200` preview / `409` issue) | Unpin attempted on an already denied lifecycle. |
+| `retention_unpin_deleting` | PREVIEW-STAGE rejection (`200` preview / `409` issue) | Unpin attempted while #89 is deleting. |
+| `retention_unpin_deleted` | PREVIEW-STAGE rejection (`200` preview / `409` issue) | Unpin attempted on a deleted tombstone. |
+| `retention_delete_already_deleting` | PREVIEW-STAGE rejection (`200` preview / `409` issue) | Delete-now is already in #89 deletion. |
+| `retention_delete_already_deleted` | PREVIEW-STAGE rejection (`200` preview / `409` issue) | Delete-now targets a terminal deleted tombstone. |
+| `retention_delete_failed` | PREVIEW-STAGE rejection (`200` preview / `409` issue) | Delete-now targets an item in #89 `deletion_failed`; #89 retry rules remain authoritative. |
+| `retention_target_empty` | CONFIRMATION-ISSUE-STAGE `409` | The preview itself returned HTTP `200` with `result = empty_not_applicable`, `empty_reason = no_exact_owned_items` or `all_candidates_excluded`, `target_item_count = 0`, `target_items = []`, `mutation_allowed = false`, and `confirmation_expires_at = null`; no token can be issued, and a later confirmation attempt returns `409`. |
+| `retention_preview_expired` | CONFIRMATION-ISSUE-STAGE `409` | Preview read or confirmation issuance is past the five-minute expiry; no token is issued. |
+| `retention_preview_digest_mismatch` | CONFIRMATION-ISSUE-STAGE `409` | Confirmation-issue route only: supplied preview digest does not match the persisted preview. |
+| `retention_confirmation_generation_failed` | CONFIRMATION-ISSUE-STAGE `503` | Server nonce collision prevented safe token issuance. |
+| `retention_confirmation_consumed` | CONFIRMATION-ISSUE-STAGE `409` (also mutation-time check 2) | A confirmation-issue retry or mutation request found a token already committed; return the stored mutation linkage/result and never issue a new token. |
+| `retention_confirmation_invalid` | COMMIT-STAGE `401` (mutation-time check 1) | Mutation route only: confirmation token format, full-token hash, nonce, or cryptographic validation is invalid, including a token invalidated by reissue. |
+| `retention_confirmation_expired` | COMMIT-STAGE `409` (mutation-time check 3) | Confirmation token is past its fixed expiry. |
+| `retention_confirmation_binding_mismatch` | COMMIT-STAGE `409` (mutation-time check 4) | Token binding does not match the confirmation request. |
+| `retention_confirmation_target_changed` | COMMIT-STAGE `409` (mutation-time check 5) | Exact target item set digest changed after issuance. |
+| `retention_confirmation_pin_changed` | COMMIT-STAGE `409` (mutation-time check 6) | Pin-state vector changed after issuance. |
+| `retention_confirmation_retention_changed` | COMMIT-STAGE `409` (mutation-time check 7) | Retention policy, captured-at basis, or expiry changed after issuance. |
+| `retention_confirmation_conflict_changed` | COMMIT-STAGE `409` (mutation-time check 8) | Active cleanup conflict snapshot changed after issuance. |
+| `retention_confirmation_version_changed` | COMMIT-STAGE `409` (mutation-time check 9) | Full expected catalog/revision vector changed after the preceding checks. |
 | `retention_pin_expired` | COMMIT-STAGE `409` | Expiry won a clock-only pin race at commit. |
-| `retention_unpin_read_denied` | PREVIEW-STAGE (`200` preview / `409` issue) | Unpin attempted on an already denied lifecycle. |
-| `retention_unpin_deleting` | PREVIEW-STAGE (`200` preview / `409` issue) | Unpin attempted while #89 is deleting. |
-| `retention_unpin_deleted` | PREVIEW-STAGE (`200` preview / `409` issue) | Unpin attempted on a deleted tombstone. |
-| `retention_delete_already_queued` | COMMIT-STAGE `200` | Delete-now is already durably queued and was shown as actionable-idempotent by the preview. |
-| `retention_delete_already_deleting` | PREVIEW-STAGE (`200` preview / `409` issue) | Delete-now is already in #89 deletion. |
-| `retention_delete_already_deleted` | PREVIEW-STAGE (`200` preview / `409` issue) | Delete-now targets a terminal deleted tombstone. |
-| `retention_delete_failed` | PREVIEW-STAGE (`200` preview / `409` issue) | Delete-now targets an item in #89 `deletion_failed`; #89 retry rules remain authoritative. |
 | `retention_mutation_transaction_failed` | COMMIT-STAGE `503` | Durable mutation transaction rolled back or could not commit. |
 | `retention_audit_write_failed` | COMMIT-STAGE `503` | Required append-only audit write prevented commit. |
-| `retention_backup_not_purged` | RESULT-WARNING `200` | Fixed warning shown for every actionable preview/result; no backup purge is promised. |
-| `retention_operation_not_found` | READ `404` | Mutation operation ID is absent. |
-| `retention_history_cursor_invalid` | HISTORY `400` | History cursor is malformed or not valid for the requested target. |
+| `retention_delete_already_queued` | COMMIT-STAGE `200` | Delete-now is already durably queued and was shown as actionable-idempotent by the preview. |
+| `retention_backup_not_purged` | WARNING `200` | Fixed warning shown for every actionable preview/result; no backup purge is promised. |
 
 `retention_backup_not_purged` is a warning field, not a failure status. The
 #89 codes remain available only where their existing catalog/worker contracts
@@ -961,7 +990,7 @@ are committed.
 
 | Order | Task | Deliverable | Test focus | File-disjoint and parallel? |
 | --- | --- | --- | --- | --- |
-| A1 | Add the domain contract layer and failing-first domain/contract tests, then the minimal GREEN implementation. | Reviewed target/linkage, derived pin, PREVIEW-STAGE versus COMMIT-STAGE transition reachability, DTO/digest, error, workflow-idempotency, confirmation-issue replay exception, and side-effect contracts. | RED before implementation; identical GREEN run after the minimal domain implementation; cover preview `200` rejection plus confirmation-issue `409`, commit-time clock races and actionable-idempotent queue result, changed-state codes, effect columns, and hash-only replay constraints; no persistence/API dependency. | No; required predecessor for 90-B. |
+| A1 | Add the domain contract layer and failing-first domain/contract tests, then the minimal GREEN implementation. | Reviewed target/linkage, derived pin, REQUEST-STAGE, PREVIEW-STAGE versus CONFIRMATION-ISSUE-STAGE versus COMMIT-STAGE reachability, DTO/digest, error, workflow-key idempotency, confirmation-issue replay exception, and side-effect contracts. | RED before implementation; identical GREEN run after the minimal domain implementation; cover REQUEST-STAGE route errors, preview `200` rejection plus confirmation-issue `409`, confirmation-issue errors, commit-time clock races and actionable-idempotent queue result, changed-state codes in the pinned mutation-time order, effect columns, and hash-only replay constraints; no persistence/API dependency. | No; required predecessor for 90-B. |
 
 ### 90-B — Persistence, versioning, and audit
 
@@ -980,9 +1009,9 @@ does not perform a lifecycle transition by itself.
 | Order | Task | Deliverable | Test focus | File-disjoint and parallel? |
 | --- | --- | --- | --- | --- |
 | C1 | Implement the catalog-only Session exact-link resolver and the one-code exclusion projection. | Exact `session | item` resolver using only the `session_event_content` -> `session_events.session_id` join; all other store kinds are item-target-only. | Positive event linkage; `missing_ownership_proof`; no-scan candidate projection; empty/all-excluded shape; fixed structural exclusions for foreign/unlinked/non-session rows; negative run/trace/path/time proximity. | Yes with C2 only if C1 writes resolver contracts in a separate domain file; otherwise sequential. |
-| C2 | Implement exact item-set collection, 100-item limit, store-kind summaries, capture/expiry/policy summaries, and retained-impact projection. | Sanitized `RetentionMutationPreviewResponse` read model with no raw/source locator. | Exact ordering, all seven lifecycle counts, 100-item boundary, 101-item fail-closed result, no source key/path leakage. | No; depends on C1 and B2. |
+| C2 | Implement exact item-set collection, 100-item limit, store-kind summaries, capture/expiry/policy summaries, and retained-impact projection. | Sanitized `RetentionMutationPreviewResponse` read model with no raw/source locator. | Exact ordering, all seven lifecycle counts, 100-item boundary, 101-item REQUEST-STAGE `413` with no preview record, and no source key/path leakage. | No; depends on C1 and B2. |
 | C3 | Implement JCS SHA-256 preview/version/conflict digests and five-minute preview records, including state-bearing `rejection_code` in `preview_digest`. | Deterministic digest values and persisted preview ID/expiry. | Byte-identical digest under repeated reads; rejection-code changes alter the digest; property-order/locale differences do not alter it; expiry does not extend on re-read. | No; depends on C2. |
-| C4 | Implement confirmation issuance and all reject-and-republish checks. | Separate fresh/reissued token DTO, operation/scope/target echo checks, PREVIEW-STAGE rejection handling, consumed-linkage handling, and exact route-specific confirmation error mapping. | Preview rejection `200`/issue `409`, digest mismatch, same-key byte-identical lost-response/restart reissue with old-token invalidation, consumed retry without reissue, target/item-set/pin/retention/version/conflict changes, operation/scope/target binding mismatch, expiry, invalid full-token hash, and nonce collision. | No; depends on B4 and C3. |
+| C4 | Implement confirmation issuance and all reject-and-republish checks. | Separate fresh/reissued token DTO, operation/scope/target echo checks, REQUEST-STAGE and PREVIEW-STAGE rejection handling, CONFIRMATION-ISSUE-STAGE handling, consumed-linkage handling, and exact route-specific confirmation error mapping. | REQUEST-STAGE missing-target/preview and idempotency errors; successful empty preview `200` followed by `retention_target_empty` issue `409`; PREVIEW-STAGE rejection `200`/issue `409`; digest mismatch; same-key byte-identical lost-response/restart reissue with old-token invalidation; consumed retry without reissue; and mutation-time checks in exact order 1 invalid, 2 consumed, 3 expired, 4 binding mismatch, 5 target changed, 6 pin changed, 7 retention changed, 8 conflict changed, 9 version changed, with first-failure-only assertion and nonce collision. | No; depends on B4 and C3. |
 
 90-C deliverable: a deterministic preview and confirmation engine whose target
 boundary and digest are identical to the later commit boundary.
@@ -1003,10 +1032,10 @@ queue handoff and no direct source deletion.
 
 | Order | Task | Deliverable | Test focus | File-disjoint and parallel? |
 | --- | --- | --- | --- | --- |
-| E1 | Add exact API DTOs, routes, HTTP/error mapping, CSRF/same-origin/no-store controls. | The route list and response fields in this document, including mutation echo fields and no workspace v1 changes. | JSON shape, fixed #89 status bytes, `200` preview rejection versus `409` confirmation-issue rejection, fresh/reissued confirmation response, consumed linkage without a new token, mutation-time `401`/`409`/`200` mapping, invalid/empty/stale/expired/conflict handling, route-specific digest/token errors, and no-leak headers/body. | No; establishes the shared application/API contract. |
-| E2 | Add current item, fixed #89 status, operation status, and cursor-paged history projections. | Existing status route/DTO remains the fixed 100-item window with no `limit` query; new history uses 100-entry pages and fixed order/cursor behavior. | First/last cursor pages, duplicate/skip prevention, empty history, unknown target, 100/101 boundaries, byte-identical existing status projection. | Yes with E3 after E1 DTOs are frozen; separate API read files. |
+| E1 | Add exact API DTOs, routes, HTTP/error mapping, CSRF/same-origin/no-store controls. | The route list and response fields in this document, including mutation echo fields and no workspace v1 changes. | JSON shape; REQUEST-STAGE `400`/`404`/`409`/`413`/`503`; PREVIEW-STAGE `200` rejection versus `409` confirmation-issue rejection; CONFIRMATION-ISSUE-STAGE `409`/`503`; fresh/reissued confirmation response; consumed linkage without a new token; COMMIT-STAGE `401`/`409`/`503`/`200` mapping with the exact first-failure drift order; empty/stale/expired/conflict handling; warning field; route-specific digest/token errors; and no-leak headers/body. | No; establishes the shared application/API contract. |
+| E2 | Add current item, fixed #89 status, operation status, and cursor-paged history projections. | Existing status route/DTO remains the fixed 100-item window with no `limit` query; new history uses 100-entry pages and fixed order/cursor behavior. | First/last cursor pages, duplicate/skip prevention, empty history, REQUEST-STAGE `retention_history_cursor_invalid` `400` and `retention_target_not_found` `404`, 100/101 boundaries, byte-identical existing status projection. | Yes with E3 after E1 DTOs are frozen; separate API read files. |
 | E3 | Add the UI authoritative read model and Session-primary mutation flow. | Preview/confirmation/status UI with item target only from diagnostics selection. | Re-display rules, delete-now secondary action, in-memory token only, no client raw/path state. | Yes with E2 after E1 DTOs are frozen; separate UI files. |
-| E4 | Add Playwright interaction and accessibility coverage. | Browser evidence for Session/item happy/error/status flows. | Keyboard/focus/screen-reader labels, PREVIEW-STAGE rejection display, confirmation-issue `409`, fresh/reissued token handling, consumed linkage without reissue, stale/expired/empty/conflict errors, immediate read denial, backup warning, no token/raw/path leakage. | No; depends on E2 and E3. |
+| E4 | Add Playwright interaction and accessibility coverage. | Browser evidence for Session/item happy/error/status flows. | Keyboard/focus/screen-reader labels; REQUEST-STAGE route errors; PREVIEW-STAGE rejection display; CONFIRMATION-ISSUE-STAGE `409`/`503`; fresh/reissued token handling; consumed linkage without reissue; COMMIT-STAGE `401`/`409`/`503`/`200` with the exact first-failure drift order; stale/expired/empty/conflict errors; immediate read denial; backup warning; and no token/raw/path leakage. | No; depends on E2 and E3. |
 
 90-E deliverable: one safe API/UI surface over the same application result.
 
@@ -1014,7 +1043,7 @@ queue handoff and no direct source deletion.
 
 | Order | Task | Deliverable | Test focus | File-disjoint and parallel? |
 | --- | --- | --- | --- | --- |
-| F1 | Run the lifecycle integration matrix and record operation/audit/queue-state evidence. | Repository-safe integration evidence for pin -> expiry suppression -> unpin -> #89 sequential item-state queue and pinned Session -> delete-now through the same sequential path. | Exact Session/item targets, PREVIEW-STAGE versus COMMIT-STAGE reachability, empty target, already deleted, worker failure, restart, operation correlation, one revision per #89 step, final `result_version`, and physical completion through #89 only. | Yes with F2 after E4; separate test/evidence files. |
+| F1 | Run the lifecycle integration matrix and record operation/audit/queue-state evidence. | Repository-safe integration evidence for pin -> expiry suppression -> unpin -> #89 sequential item-state queue and pinned Session -> delete-now through the same sequential path. | Exact Session/item targets, REQUEST-STAGE versus PREVIEW-STAGE versus CONFIRMATION-ISSUE-STAGE versus COMMIT-STAGE reachability, empty target, already deleted, worker failure, restart, operation correlation, one revision per #89 step, final `result_version`, and physical completion through #89 only. | Yes with F2 after E4; separate test/evidence files. |
 | F2 | Run the security/no-leak matrix and inspect all response/log/evidence surfaces. | Repository-safe no-leak evidence with synthetic markers only. | Raw/body/path/credential/database-key/prompt-label/token injection; loopback/Host/same-origin/CSRF/no-store controls. | Yes with F1 after E4; separate security tests. |
 | F3 | Record #91 security rows and #88 tombstone/non-purge handoff. | Stable consumer handoff containing only opaque IDs, fixed codes, digests, and references. | Handoff schema/allowlist and no backup inventory claim. | No; depends on F1 and F2. |
 | F4 | Run the pinned repository validation sequence. | Build, Playwright bootstrap, full test result, and exact unverified scope. | `dotnet build CopilotAgentObservability.slnx`; `pwsh scripts/test/install-playwright-chromium.ps1`; `dotnet test CopilotAgentObservability.slnx`. | No; final sequential closeout. |
