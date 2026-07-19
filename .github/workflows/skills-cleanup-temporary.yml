@@ -140,7 +140,7 @@ jobs:
           diff -u <(printf '%s\n' "${expected_claude_skills[@]}") <(printf '%s\n' "${claude_skills[@]}")
 
           for skill in aspire-local-ops commit seed-demo sprint-evidence; do
-            grep -Fxq '    allow_implicit_invocation: false' ".agents/skills/${skill}/agents/openai.yaml"
+            grep -Fxq '  allow_implicit_invocation: false' ".agents/skills/${skill}/agents/openai.yaml"
           done
 
           for skill_file in .agents/skills/*/SKILL.md; do
