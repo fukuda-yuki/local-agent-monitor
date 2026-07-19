@@ -52,4 +52,17 @@ public sealed class RetentionNoLeakTests
         };
         Assert.All(types, type => Assert.Equal(type, type.GetMethod(nameof(ToString), Type.EmptyTypes)!.DeclaringType));
     }
+
+    [Fact]
+    public void SqliteDeletionBridgeCarriers_DoNotExposeBoundTokenOrCheckpointData()
+    {
+        var token = Enumerable.Repeat((byte)0xab, 32).ToArray();
+        var grant = new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSqliteDeletionGrant(
+            new("source-id", CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionStoreKind.RawRecord, "7"), token);
+        var forbidden = Convert.ToHexString(token).ToLowerInvariant();
+
+        Assert.DoesNotContain(forbidden, grant.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("source-id", grant.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(forbidden, CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionAdapterResult.TransientFailure(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionErrorCode.DeleteIoFailed).ToString(), StringComparison.OrdinalIgnoreCase);
+    }
 }

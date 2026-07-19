@@ -115,14 +115,14 @@ internal sealed class RetentionCleanupCoordinator
         catch { result = RetentionAdapterResult.TransientFailure(RetentionErrorCode.DeleteIoFailed); }
         finally { leaseLoss.Cancel(); try { await renewal.ConfigureAwait(false); } catch (OperationCanceledException) { } }
 
-        if (leaseWasLost)
-            return (0, false, false, false);
         if (result.Disposition == RetentionAdapterDisposition.Deleted)
         {
             var completed = await catalog.TryCompleteDeletionAsync(claim.Claim.Fence, time.GetUtcNow(), CancellationToken.None).ConfigureAwait(false);
             var final = completed is RetentionMutationDisposition.Applied or RetentionMutationDisposition.NoOpAlreadyFinalized;
             return (final ? 1 : 0, final, final && IsSqlite(claim.Claim.StoreKind), false);
         }
+        if (leaseWasLost)
+            return (0, false, false, false);
         if (result.Disposition == RetentionAdapterDisposition.TransientFailure)
             await catalog.TryRecordTransientFailureAsync(claim.Claim.Fence, result.ErrorCode!.Value, time.GetUtcNow(), CancellationToken.None).ConfigureAwait(false);
         else if (result.Disposition == RetentionAdapterDisposition.TerminalFailure)

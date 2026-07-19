@@ -535,12 +535,19 @@ Commit: `Issue #89: feat: add durable retention cleanup worker`
 
 **Files:**
 
+- Create: `src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionCatalogStore.SqliteDeletion.cs`
+- Create: `src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionSqliteDeletionContracts.cs`
+- Modify: `src/CopilotAgentObservability.Persistence.Sqlite/Retention/RetentionCatalogStore.cs`
+- Modify: `src/CopilotAgentObservability.LocalMonitor/Retention/RetentionCleanupCoordinator.cs`
 - Create: `src/CopilotAgentObservability.Persistence.Sqlite/Retention/SessionEventContentRetentionAdapter.cs`
 - Create: `src/CopilotAgentObservability.Persistence.Sqlite/Retention/RawRecordRetentionAdapter.cs`
 - Create: `src/CopilotAgentObservability.LocalMonitor/Retention/MonitorAnalysisRetentionAdapter.cs`
 - Modify: `src/CopilotAgentObservability.LocalMonitor/Analysis/SqliteMonitorAnalysisStore.cs`
-- Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/Retention/SqliteRetentionAdapterTests.cs`
-- Modify: `tests/CopilotAgentObservability.LocalMonitor.Tests/Retention/RetentionLifecycleIntegrationTests.cs`
+- Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/Retention/SessionEventContentRetentionAdapterTests.cs`
+- Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/Retention/RawRecordRetentionAdapterTests.cs`
+- Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/Retention/MonitorAnalysisRetentionAdapterTests.cs`
+- Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/Retention/SqliteRetentionDeletionBridgeTests.cs`
+- Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/Retention/AtomicSqliteCompletionCoordinatorTests.cs`
 
 ### Step 1: Write RED adapter tests
 
@@ -565,10 +572,19 @@ after source mutation/before receipt and while writing receipt/state; prove the
 source mutation and receipt roll back together, irreversible denial remains,
 recovery is fenced, and no duplicate deletion occurs.
 
+The catalog-owned internal bridge and coordinator ordering are the narrow D1
+file-boundary correction approved by Oracle. The bridge keeps the public
+adapter API unchanged and owns one `BEGIN IMMEDIATE` transaction across source
+mutation, absence proof, cursor advancement, and catalog completion. For
+Microsoft.Data.Sqlite 10.0.8 it uses `DefaultTimeout=1` with
+`PRAGMA busy_timeout=0`: zero disables native busy waiting, while the provider's
+minimum positive timeout bounds its otherwise-unlimited managed retry. There is
+no application-owned retry or delay.
+
 ### Step 2: Implement, validate, and commit
 
 ```powershell
-dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~SqliteRetentionAdapterTests
+dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter "FullyQualifiedName~RetentionAdapterTests|FullyQualifiedName~SqliteRetentionDeletionBridgeTests|FullyQualifiedName~AtomicSqliteCompletionCoordinatorTests"
 dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~RetentionLifecycleIntegrationTests
 dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~MonitorAnalysisStoreTests
 ```
@@ -1007,7 +1023,7 @@ unchanged and require PASS.
 | 89-A compatibility control `RawContent_ReturnsExpiredContract` | `SessionWorkspaceRouteTests` | `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~SessionWorkspaceRouteTests.RawContent_ReturnsExpiredContract` |
 | 89-B migration/capture/read-gate methods | all methods in `RetentionCatalogStoreTests` / `RetentionCatalogMigrationFixtureTests`; lifecycle methods use names containing `RetentionCatalog` | `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~RetentionCatalog` |
 | 89-C worker/retry/WAL methods | methods in `RetentionCleanupWorkerTests`; lifecycle methods use names containing `RetentionCleanup` | `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~RetentionCleanup` |
-| 89-D1 four SQLite adapter methods/matrix | `SqliteRetentionAdapterTests`; lifecycle methods use names containing `SqliteRetentionAdapter` | `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~SqliteRetentionAdapter` |
+| 89-D1 exact SQLite adapters/bridge matrix | three `*RetentionAdapterTests`, `SqliteRetentionDeletionBridgeTests`, and `AtomicSqliteCompletionCoordinatorTests` | `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter "FullyQualifiedName~RetentionAdapterTests|FullyQualifiedName~SqliteRetentionDeletionBridgeTests|FullyQualifiedName~AtomicSqliteCompletionCoordinatorTests"` |
 | 89-D2 option/capture methods | all methods in `RetentionSensitiveBundleStoreTests`, including option matrix | `dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~RetentionSensitiveBundleStoreTests` |
 | 89-D2 deletion adapter/matrix | `SensitiveBundleRetentionAdapterTests`; lifecycle/no-leak methods use names containing `SensitiveBundleRetentionAdapter` | `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~SensitiveBundleRetentionAdapter` |
 | 89-D3 SDK methods/matrices | `AnalysisSdkDirectoryRetentionTests`; lifecycle methods use names containing `AnalysisSdkDirectoryRetention` | `dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~AnalysisSdkDirectoryRetention` |

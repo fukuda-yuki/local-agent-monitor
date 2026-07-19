@@ -581,6 +581,31 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         return new AnalysisRunRawSnapshot(result, error, events.AsReadOnly());
     }
 
+    internal static ValueTask<int> DeleteOwnedRawFieldsAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionSqliteDeletionGrant grant,
+        long runId)
+    {
+        using (var deleteEvents = connection.CreateCommand())
+        {
+            deleteEvents.Transaction = transaction;
+            deleteEvents.CommandText =
+                "DELETE FROM monitor_analysis_events WHERE run_id=$run_id AND EXISTS(SELECT 1 FROM monitor_analysis_runs WHERE id=$run_id AND retention_owner_token=$retention_owner_token);";
+            AddParameter(deleteEvents, "$run_id", runId);
+            grant.BindSourceToken(deleteEvents);
+            _ = deleteEvents.ExecuteNonQuery();
+        }
+
+        using var clearRawFields = connection.CreateCommand();
+        clearRawFields.Transaction = transaction;
+        clearRawFields.CommandText =
+            "UPDATE monitor_analysis_runs SET result_markdown=NULL,error_message=NULL WHERE id=$run_id AND retention_owner_token=$retention_owner_token;";
+        AddParameter(clearRawFields, "$run_id", runId);
+        grant.BindSourceToken(clearRawFields);
+        return ValueTask.FromResult(clearRawFields.ExecuteNonQuery() == 1 ? 1 : -1);
+    }
+
     private static string FormatTimestamp(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
 
