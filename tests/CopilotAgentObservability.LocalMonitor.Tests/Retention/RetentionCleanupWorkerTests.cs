@@ -130,7 +130,10 @@ public sealed class RetentionCleanupWorkerTests
         var adapter=new StrictAdapter(RetentionStoreKind.RawRecord);var worker=new RetentionCleanupWorker(new RetentionCleanupCoordinator(store,Registry(adapter),time),time);
         await worker.StartAsync();await DrainAsync();Assert.Equal(0,adapter.Calls);
         time.Advance(TimeSpan.FromSeconds(4));await DrainAsync();Assert.Equal(0,adapter.Calls);
-        time.Advance(TimeSpan.FromSeconds(1));await DrainAsync();Assert.Equal(1,adapter.Calls);
+        time.Advance(TimeSpan.FromSeconds(1));
+        // Task.Yield() does not wait for the worker's SQLite cleanup cycle to reach the adapter.
+        await adapter.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal(1,adapter.Calls);
         await adapter.Completed.Task;await worker.StopAsync();await DrainAsync();
     }
 
@@ -142,7 +145,8 @@ public sealed class RetentionCleanupWorkerTests
         var adapter=new StrictAdapter(RetentionStoreKind.RawRecord);var worker=new RetentionCleanupWorker(new RetentionCleanupCoordinator(store,Registry(adapter),time),time);
 
         await worker.StartAsync();await DrainAsync();Assert.Equal(0,adapter.Calls);
-        time.Advance(TimeSpan.FromSeconds(5));await DrainAsync();
+        time.Advance(TimeSpan.FromSeconds(5));
+        await adapter.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
 
         Assert.Equal(1,adapter.Calls);
         await adapter.Completed.Task;await worker.StopAsync();await DrainAsync();
