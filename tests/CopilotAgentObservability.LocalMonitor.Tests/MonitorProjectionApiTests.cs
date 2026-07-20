@@ -207,9 +207,30 @@ public class MonitorProjectionApiTests
         var ingestions = await WaitForIngestionCountAsync(host, expected: 2);
         Assert.Equal(2, ingestions);
 
-        var ready = await host.Client.GetAsync("/health/ready");
-        Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
-        Assert.Contains("\"status\":\"ready\"", await ready.Content.ReadAsStringAsync());
+        var readyBody = await WaitForReadyAsync(host);
+        Assert.Contains("\"status\":\"ready\"", readyBody);
+    }
+
+    private static async Task<string> WaitForReadyAsync(RunningMonitorHost host)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (true)
+        {
+            var ready = await host.Client.GetAsync("/health/ready");
+            var body = await ready.Content.ReadAsStringAsync();
+            if (ready.StatusCode == HttpStatusCode.OK)
+            {
+                return body;
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+                return body;
+            }
+
+            await Task.Delay(25);
+        }
     }
 
     private static async Task<int> WaitForIngestionCountAsync(RunningMonitorHost host, int expected)
