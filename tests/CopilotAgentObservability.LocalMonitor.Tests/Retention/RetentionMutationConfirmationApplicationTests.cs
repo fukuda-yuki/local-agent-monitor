@@ -296,6 +296,176 @@ public sealed class RetentionMutationConfirmationApplicationTests
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_mutation_idempotency WHERE step='mutation';"));
     }
 
+    [Theory]
+    [InlineData("raw-default-90d", -1)]
+    [InlineData("sensitive-bundle-7d", -1)]
+    public void ExecuteMutation_UnpinRecalculatesExpiryFromCaptureAndPolicy(string policyId, int capturedDays)
+    {
+        using var fixture = Fixture.Create();
+        var capturedAt = Now.AddDays(capturedDays);
+        fixture.SetRetention("retained_by_policy", capturedAt, Now.AddDays(30), policyId, 1);
+        var preview = fixture.CreatePreview(operation: RetentionMutationOperation.Unpin);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Unpin, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        var expectedExpiry = policyId == "raw-default-90d" ? capturedAt.AddDays(90) : capturedAt.AddDays(7);
+        Assert.Equal(RetentionMutationCompletionCodes.UnpinApplied, result.Result!.ResultCode);
+        Assert.Equal(expectedExpiry, DateTimeOffset.Parse(fixture.ScalarText("SELECT expires_at FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId))!, CultureInfo.InvariantCulture));
+        Assert.Equal("expiring", fixture.ScalarText("SELECT state FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(2L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+    }
+
+    [Fact]
+    public void ExecuteMutation_UnpinFutureExpiringIsNoop()
+    {
+        using var fixture = Fixture.Create();
+        var preview = fixture.CreatePreview(operation: RetentionMutationOperation.Unpin);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Unpin, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        Assert.Equal(RetentionMutationCompletionCodes.UnpinNoop, result.Result!.ResultCode);
+        Assert.Equal(1L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
+    }
+
+    [Fact]
+    public void ExecuteMutation_UnpinRetainedExpiredRecalculatesThenQueuesWithThreeRevisions()
+    {
+        using var fixture = Fixture.Create();
+        fixture.SetRetention("retained_by_policy", Now.AddDays(-8), Now.AddDays(30), "sensitive-bundle-7d", 1);
+        var preview = fixture.CreatePreview(operation: RetentionMutationOperation.Unpin);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Unpin, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        Assert.Equal(RetentionMutationCompletionCodes.UnpinExpiredQueued, result.Result!.ResultCode);
+        Assert.Equal("deletion_queued", fixture.ScalarText("SELECT state FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(4L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.NotNull(fixture.ScalarText("SELECT read_denied_at FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(RetentionMutationDigests.ExpectedStateVersion([
+            new RetentionMutationExpectedStateItem(fixture.ItemId, 4, RetentionPinState.Unpinned, RetentionItemLifecycle.DeletionQueued)
+        ]), result.Result.ResultVersion);
+        Assert.Equal(1, result.Result.LifecycleCounts.DeletionQueued);
+        Assert.Equal(0, result.Result.LifecycleCounts.Expiring + result.Result.LifecycleCounts.RetainedByPolicy
+            + result.Result.LifecycleCounts.ExpiredPendingDeletion);
+        var audit = fixture.Store.ReadAuditEvents(new(RetentionMutationTargetKind.Item, fixture.ItemId)).Single();
+        Assert.Equal(1, audit.PreviousOperationState.RetainedByPolicy);
+        Assert.Equal(1, audit.NewOperationState.DeletionQueued);
+        Assert.Equal(1, audit.NewOperationState.Expiring + audit.NewOperationState.RetainedByPolicy
+            + audit.NewOperationState.ExpiredPendingDeletion + audit.NewOperationState.DeletionQueued
+            + audit.NewOperationState.Deleting + audit.NewOperationState.Deleted + audit.NewOperationState.DeletionFailed);
+    }
+
+    [Fact]
+    public void ExecuteMutation_UnpinExpiringAtNowQueuesWithTwoRevisions()
+    {
+        using var fixture = Fixture.Create();
+        fixture.SetExpiresAt(Now);
+        var preview = fixture.CreatePreview(operation: RetentionMutationOperation.Unpin);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Unpin, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        Assert.Equal(RetentionMutationCompletionCodes.UnpinExpiredQueued, result.Result!.ResultCode);
+        Assert.Equal("deletion_queued", fixture.ScalarText("SELECT state FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(3L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(1, result.Result.LifecycleCounts.DeletionQueued + result.Result.LifecycleCounts.Expiring
+            + result.Result.LifecycleCounts.RetainedByPolicy + result.Result.LifecycleCounts.ExpiredPendingDeletion
+            + result.Result.LifecycleCounts.Deleting + result.Result.LifecycleCounts.Deleted + result.Result.LifecycleCounts.DeletionFailed);
+    }
+
+    [Fact]
+    public void ExecuteMutation_AuditPreservesNormalizedReasonAndComment()
+    {
+        using var fixture = Fixture.Create();
+        var workflowKey = fixture.WorkflowKey(40);
+        var preview = fixture.CreatePreview(comment: "  needs review  ");
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), workflowKey).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), workflowKey);
+
+        Assert.Null(result.ErrorCode);
+        var audit = fixture.Store.ReadAuditEvents(new(RetentionMutationTargetKind.Item, fixture.ItemId)).Single();
+        Assert.Equal(RetentionMutationReasonCodes.ResearchNeeded, audit.ReasonCode);
+        Assert.Equal("  needs review  ", audit.Comment);
+        Assert.Equal(workflowKey, audit.RequestIdempotencyKey);
+    }
+
+    [Fact]
+    public void ExecuteMutation_SessionAppliesMixedPinTransitionsAtomically()
+    {
+        using var fixture = Fixture.Create(itemCount: 2);
+        fixture.SetStateFor(fixture.ItemIds[0], "retained_by_policy");
+        var workflowKey = fixture.WorkflowKey(40);
+        var preview = fixture.CreatePreview(session: true);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), workflowKey).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Pin, RetentionMutationScope.SessionItems,
+                RetentionMutationTargetKind.Session, fixture.SessionId), workflowKey);
+
+        Assert.Equal(RetentionMutationCompletionCodes.PinApplied, result.Result!.ResultCode);
+        Assert.Equal(1L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemIds[0])));
+        Assert.Equal(2L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemIds[1])));
+        Assert.Equal(2, result.Result.LifecycleCounts.RetainedByPolicy);
+        Assert.Equal(2, result.Result.TargetItemCount);
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+    }
+
+    [Fact]
+    public void ExecuteMutation_CrossStepKeyMismatchPrecedesMutationIdempotency()
+    {
+        using var fixture = Fixture.Create();
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(41));
+
+        Assert.Equal(RetentionMutationErrorCodes.RequestInvalid, result.ErrorCode);
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_mutation_idempotency WHERE step='mutation';"));
+    }
+
+    [Fact]
+    public void ExecuteMutation_DifferentRequestWithSameKeyConflictsAfterCommittedRequest()
+    {
+        using var fixture = Fixture.Create();
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+        var key = fixture.WorkflowKey(40);
+        var first = new RetentionMutationConfirmRequest(confirmation.ConfirmationToken,
+            RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem, RetentionMutationTargetKind.Item, fixture.ItemId);
+        Assert.Null(fixture.Application.ExecuteMutation(first, key).ErrorCode);
+
+        var conflict = fixture.Application.ExecuteMutation(first with { Operation = RetentionMutationOperation.Unpin }, key);
+
+        Assert.Equal(RetentionMutationErrorCodes.IdempotencyConflict, conflict.ErrorCode);
+        Assert.Equal(2L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+    }
+
     [Fact]
     public void IssueConfirmation_SurfacesFreshReissueConsumedLinkageConflictAndNonceCollision()
     {
@@ -397,14 +567,14 @@ public sealed class RetentionMutationConfirmationApplicationTests
             return new(path, time, store, sessionId.ToString("D"), ids.FirstOrDefault() ?? "missing-item", ids);
         }
 
-        internal RetentionMutationPreviewResponse CreatePreview(bool session = false, int itemIndex = 0)
+        internal RetentionMutationPreviewResponse CreatePreview(bool session = false, int itemIndex = 0, RetentionMutationOperation operation = RetentionMutationOperation.Pin, string? comment = null)
         {
             var request = new RetentionMutationPreviewRequest(
                 session ? new(RetentionMutationTargetKind.Session, SessionId) : new(RetentionMutationTargetKind.Item, ItemIds[itemIndex]),
-                RetentionMutationOperation.Pin,
+                operation,
                 session ? RetentionMutationScope.SessionItems : RetentionMutationScope.SingleItem,
                 RetentionMutationReasonCodes.ResearchNeeded,
-                null);
+                comment);
             return Assert.IsType<RetentionMutationPreviewResponse>(Application.CreatePreview(request, WorkflowKey((byte)(40 + itemIndex))).Preview);
         }
 
@@ -431,9 +601,17 @@ public sealed class RetentionMutationConfirmationApplicationTests
 
         internal void SetState(string state) => Execute("UPDATE retention_items SET state=$state WHERE item_id=$item;", ("$state", state), ("$item", ItemId));
 
+        internal void SetStateFor(string itemId, string state) => Execute("UPDATE retention_items SET state=$state WHERE item_id=$item;", ("$state", state), ("$item", itemId));
+
         internal void SetExpiresAt(DateTimeOffset expiresAt) => Execute(
             "UPDATE retention_items SET expires_at=$expires WHERE item_id=$item;",
             ("$expires", expiresAt.ToString("O", CultureInfo.InvariantCulture)), ("$item", ItemId));
+
+        internal void SetRetention(string state, DateTimeOffset capturedAt, DateTimeOffset expiresAt, string policyId, int policyVersion) => Execute(
+            "UPDATE retention_items SET state=$state,captured_at=$captured,expires_at=$expires,policy_id=$policy,policy_version=$version WHERE item_id=$item;",
+            ("$state", state), ("$captured", capturedAt.ToString("O", CultureInfo.InvariantCulture)),
+            ("$expires", expiresAt.ToString("O", CultureInfo.InvariantCulture)), ("$policy", policyId),
+            ("$version", policyVersion), ("$item", ItemId));
 
         internal void SetOwnershipReceiptToZero() => Execute("UPDATE retention_items SET ownership_receipt=zeroblob(32) WHERE item_id=$item;", ("$item", ItemId));
 

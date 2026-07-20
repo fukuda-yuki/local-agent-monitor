@@ -8,7 +8,8 @@ internal sealed record RetentionStoredMutationPreview(
     string? ActiveConflictSnapshot,
     string? ConflictVersion,
     string? ReasonCode,
-    byte[]? CommentSha256);
+    byte[]? CommentSha256,
+    string? Comment);
 
 internal sealed record RetentionMutationPreviewMaterializationResult(
     RetentionMutationPreviewProjectionOutcome Outcome,

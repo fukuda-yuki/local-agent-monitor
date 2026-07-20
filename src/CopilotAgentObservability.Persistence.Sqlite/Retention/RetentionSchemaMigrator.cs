@@ -141,11 +141,14 @@ internal static class RetentionSchemaMigrator
                 active_conflict_snapshot TEXT NULL,
                 conflict_version TEXT NULL,
                 reason_code TEXT NULL,
-                comment_sha256 BLOB NULL CHECK(comment_sha256 IS NULL OR (typeof(comment_sha256) = 'blob' AND length(comment_sha256) = 32))
+                comment_sha256 BLOB NULL CHECK(comment_sha256 IS NULL OR (typeof(comment_sha256) = 'blob' AND length(comment_sha256) = 32)),
+                comment TEXT NULL
             );
             """);
         if (!ColumnExists(connection, transaction, "retention_mutation_previews", "workflow_key_digest"))
             Execute(connection, transaction, "ALTER TABLE retention_mutation_previews ADD COLUMN workflow_key_digest BLOB NULL CHECK(workflow_key_digest IS NULL OR (typeof(workflow_key_digest) = 'blob' AND length(workflow_key_digest) = 32));");
+        if (!ColumnExists(connection, transaction, "retention_mutation_previews", "comment"))
+            Execute(connection, transaction, "ALTER TABLE retention_mutation_previews ADD COLUMN comment TEXT NULL;");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_previews_expiry ON retention_mutation_previews(expires_at, preview_id);");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_previews_target ON retention_mutation_previews(target_kind, target_id, preview_id);");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_previews_digest ON retention_mutation_previews(preview_digest, preview_id);");

@@ -132,7 +132,7 @@ internal sealed partial class RetentionMutationApplicationService
             mutationCheckpoint?.Invoke("token_consumed");
 
             var resultVector = catalog.MaterializeMutationVersionVectorWithinTransaction(connection, transaction, itemIds);
-            var completionCode = ResolveCompletionCode(transitions);
+            var completionCode = ResolveCompletionCode(binding.Operation, transitions);
             var result = new RetentionMutationResult(
                 RetentionMutationConstants.SchemaVersion,
                 operationId,
@@ -164,7 +164,7 @@ internal sealed partial class RetentionMutationApplicationService
                 RetentionMutationConstants.ActorLabel,
                 binding.Operation,
                 binding.ReasonCode,
-                null,
+                storedPreview!.Comment,
                 PinState(storedPreview!.Response.TargetItems.Select(static item => item.State)),
                 result.PinState,
                 RetentionMutationLifecycleCounts.From(storedPreview.Response.TargetItems.Select(static item => item.State)),
@@ -344,12 +344,19 @@ internal sealed partial class RetentionMutationApplicationService
 
     private static string Timestamp(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
 
-    private static string ResolveCompletionCode(IReadOnlyList<(RetentionPreviewItem Item, RetentionMutationTransitionEvaluation Evaluation)> transitions)
+    private static string ResolveCompletionCode(
+        RetentionMutationOperation operation,
+        IReadOnlyList<(RetentionPreviewItem Item, RetentionMutationTransitionEvaluation Evaluation)> transitions)
     {
-        var codes = transitions.Select(static value => value.Evaluation.Code).Distinct(StringComparer.Ordinal).ToArray();
-        if (codes.Length != 1 || codes[0] is null)
-            throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
-        return codes[0]!;
+        return operation switch
+        {
+            RetentionMutationOperation.Pin when transitions.Any(static value => value.Evaluation.StateSequence.Count > 0) => RetentionMutationCompletionCodes.PinApplied,
+            RetentionMutationOperation.Pin => RetentionMutationCompletionCodes.PinNoop,
+            RetentionMutationOperation.Unpin when transitions.Any(static value => value.Evaluation.Code == RetentionMutationCompletionCodes.UnpinExpiredQueued) => RetentionMutationCompletionCodes.UnpinExpiredQueued,
+            RetentionMutationOperation.Unpin when transitions.Any(static value => value.Evaluation.StateSequence.Count > 0) => RetentionMutationCompletionCodes.UnpinApplied,
+            RetentionMutationOperation.Unpin => RetentionMutationCompletionCodes.UnpinNoop,
+            _ => throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed)
+        };
     }
 
     private static RetentionPinState PinState(IEnumerable<RetentionItemLifecycle> states)

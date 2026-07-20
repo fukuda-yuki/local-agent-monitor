@@ -107,7 +107,7 @@ public sealed partial class RetentionCatalogStore
         command.Transaction = transaction;
         command.CommandText = """
             SELECT preview_id,preview_json,expected_state_version,target_item_set_digest,preview_digest,
-                   workflow_key_digest,created_at,expires_at,active_conflict_snapshot,conflict_version,reason_code,comment_sha256
+                   workflow_key_digest,created_at,expires_at,active_conflict_snapshot,conflict_version,reason_code,comment_sha256,comment
             FROM retention_mutation_previews
             WHERE preview_id=$preview_id;
             """;
@@ -139,7 +139,8 @@ public sealed partial class RetentionCatalogStore
             reader.IsDBNull(8) ? null : reader.GetString(8),
             reader.IsDBNull(9) ? null : reader.GetString(9),
             reader.IsDBNull(10) ? null : reader.GetString(10),
-            commentSha256);
+            commentSha256,
+            reader.IsDBNull(12) ? null : reader.GetString(12));
     }
 
     private static void InsertMutationPreviewWithinTransaction(
@@ -153,11 +154,11 @@ public sealed partial class RetentionCatalogStore
             INSERT INTO retention_mutation_previews(
                 preview_id,schema_version,target_kind,target_id,operation,scope,preview_json,
                 expected_state_version,target_item_set_digest,preview_digest,workflow_key_digest,created_at,expires_at,
-                rejection_code,active_conflict_snapshot,conflict_version,reason_code,comment_sha256)
+                rejection_code,active_conflict_snapshot,conflict_version,reason_code,comment_sha256,comment)
             VALUES(
                 $preview_id,$schema_version,$target_kind,$target_id,$operation,$scope,$preview_json,
                 $expected_state_version,$target_item_set_digest,$preview_digest,$workflow_key_digest,$created_at,$expires_at,
-                $rejection_code,$active_conflict_snapshot,$conflict_version,$reason_code,$comment_sha256);
+                $rejection_code,$active_conflict_snapshot,$conflict_version,$reason_code,$comment_sha256,$comment);
             """;
         command.Parameters.AddWithValue("$preview_id", record.Response.PreviewId);
         command.Parameters.AddWithValue("$schema_version", record.Response.SchemaVersion);
@@ -177,6 +178,7 @@ public sealed partial class RetentionCatalogStore
         command.Parameters.AddWithValue("$conflict_version", (object?)record.ConflictVersion ?? DBNull.Value);
         command.Parameters.AddWithValue("$reason_code", (object?)record.ReasonCode ?? DBNull.Value);
         command.Parameters.AddWithValue("$comment_sha256", (object?)record.CommentSha256 ?? DBNull.Value);
+        command.Parameters.AddWithValue("$comment", (object?)record.Comment ?? DBNull.Value);
         command.ExecuteNonQuery();
     }
 

@@ -142,7 +142,8 @@ internal sealed partial class RetentionMutationApplicationService
             RetentionMutationApplicationCanonicalization.ConflictSnapshot(conflictItems),
             RetentionMutationDigests.ConflictVersion(conflictItems),
             request.ReasonCode,
-            commentSha256);
+            commentSha256,
+            comment.NormalizedComment);
     }
 
     private static RetentionMutationPreviewResponse DeserializePreview(string? resultJson) =>

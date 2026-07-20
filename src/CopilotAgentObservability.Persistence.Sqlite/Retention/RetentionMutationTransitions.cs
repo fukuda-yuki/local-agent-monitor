@@ -67,7 +67,7 @@ public static class RetentionMutationTransitions
         var recalculatedExpiry = RetentionUnpinExpiryCalculator.Recalculate(item.CapturedAt, item.PolicyId, item.PolicyVersion);
         if (item.State == RetentionItemLifecycle.Expiring)
         {
-            return recalculatedExpiry <= now
+            return item.ExpiresAt <= now
                 ? Queued(RetentionMutationCompletionCodes.UnpinExpiredQueued, [RetentionItemLifecycle.ExpiredPendingDeletion, RetentionItemLifecycle.DeletionQueued])
                 : new(RetentionMutationStageClassification.CommitStageOutcome, RetentionMutationCompletionCodes.UnpinNoop, [], 0, new(true, true, true, false));
         }
