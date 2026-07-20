@@ -49,7 +49,7 @@ internal sealed partial class RetentionMutationApplicationService
             workflowKey!,
             canonicalRequest,
             now,
-            (projection, conflicts, createdAt) => CreateStoredPreview(normalized, projection, conflicts, createdAt));
+            (projection, conflicts, createdAt) => CreateStoredPreview(normalized, workflowKey!, projection, conflicts, createdAt));
 
         if (persistence.ErrorCode is not null)
             return new(null, persistence.ErrorCode);
@@ -77,6 +77,7 @@ internal sealed partial class RetentionMutationApplicationService
 
     private RetentionStoredMutationPreview CreateStoredPreview(
         RetentionMutationPreviewRequest request,
+        string workflowKey,
         RetentionMutationPreviewProjection projection,
         IReadOnlyList<RetentionMutationActiveConflictSnapshot> conflicts,
         DateTimeOffset createdAt)
@@ -123,6 +124,7 @@ internal sealed partial class RetentionMutationApplicationService
             response,
             createdAt,
             expiresAt,
+            RetentionMutationApplicationCanonicalization.WorkflowKeyDigest(workflowKey),
             RetentionMutationApplicationCanonicalization.ConflictSnapshot(conflictItems),
             RetentionMutationDigests.ConflictVersion(conflictItems),
             request.ReasonCode,
@@ -153,25 +155,16 @@ internal static partial class RetentionMutationApplicationCanonicalization
         });
 
     internal static string ConflictSnapshot(IEnumerable<RetentionMutationConflictItem> conflicts)
-    {
-        ArgumentNullException.ThrowIfNull(conflicts);
-        var order = RetentionMutationConflictCodes.All
-            .Select((code, index) => (code, index))
-            .ToDictionary(static pair => pair.code, static pair => pair.index, StringComparer.Ordinal);
-        var values = conflicts
-            .OrderBy(item => item.ItemId, StringComparer.Ordinal)
-            .ThenBy(item => order.TryGetValue(item.ConflictCode, out var index) ? index : int.MaxValue)
-            .ThenBy(item => item.ConflictCode, StringComparer.Ordinal)
-            .Select(static item => (object?)new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["item_id"] = item.ItemId,
-                ["conflict_code"] = item.ConflictCode,
-                ["lease_generation"] = item.LeaseGeneration
-            })
-            .ToArray();
-        return RetentionMutationJcs.Canonicalize(new Dictionary<string, object?>(StringComparer.Ordinal)
-        {
-            ["items"] = values
-        });
-    }
+        => RetentionMutationDigests.ConflictCanonicalJson(conflicts);
+
+    internal static byte[] WorkflowKeyDigest(string workflowKey) =>
+        SHA256.HashData(Encoding.ASCII.GetBytes(workflowKey));
+
+    internal static bool WorkflowKeyMatchesPreview(string workflowKey, byte[]? workflowKeyDigest) =>
+        RetentionMutationIdentifiers.IsValidWorkflowKey(workflowKey)
+        && workflowKeyDigest is { Length: 32 }
+        && CryptographicOperations.FixedTimeEquals(WorkflowKeyDigest(workflowKey), workflowKeyDigest);
+
+    internal static bool WorkflowKeyMatchesPreview(string workflowKey, RetentionStoredMutationPreview preview) =>
+        WorkflowKeyMatchesPreview(workflowKey, preview.WorkflowKeyDigest);
 }

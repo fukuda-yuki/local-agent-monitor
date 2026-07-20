@@ -42,6 +42,7 @@ public sealed class RetentionMutationPersistenceSchemaTests
             Assert.All(MutationIndexes, index => Assert.True(IndexExists(path, index), index));
             Assert.DoesNotContain("session_id", Columns(path, "retention_items"), StringComparer.Ordinal);
             Assert.DoesNotContain("pin_state", Columns(path, "retention_items"), StringComparer.Ordinal);
+            Assert.Contains("workflow_key_digest", Columns(path, "retention_mutation_previews"), StringComparer.Ordinal);
             Assert.DoesNotContain("queue", TableNames(path), StringComparer.OrdinalIgnoreCase);
 
             var auditColumns = Columns(path, "retention_audit_events");

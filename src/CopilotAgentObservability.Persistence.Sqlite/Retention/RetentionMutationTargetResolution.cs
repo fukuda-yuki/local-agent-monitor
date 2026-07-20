@@ -95,7 +95,7 @@ public sealed partial class RetentionCatalogStore
         var missingOwnershipProof = 0;
         foreach (var candidate in candidates)
         {
-            if (!TryCreateResolvedItem(candidate, out var item) || !SessionOwnershipProofMatches(connection, transaction, candidate, storeInstanceId))
+            if (!TryCreateResolvedItem(candidate, out var item) || !CatalogOwnershipProofMatches(candidate, storeInstanceId, RetentionStoreKind.SessionEventContent))
             {
                 missingOwnershipProof++;
                 continue;
@@ -146,61 +146,26 @@ public sealed partial class RetentionCatalogStore
         }
         if (!TryParseStoreKind(candidate.StoreKindWire, out var storeKind)
             || !TryCreateResolvedItem(candidate, out var item)
-            || !ItemOwnershipProofMatches(connection, transaction, candidate, storeInstanceId, storeKind))
+            || !CatalogOwnershipProofMatches(candidate, storeInstanceId, storeKind))
             return NotApplicable();
 
         return new(RetentionMutationTargetResolutionOutcome.Resolved, null, null, [item!], 0, []);
     }
 
-    private bool ItemOwnershipProofMatches(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
+    private static bool CatalogOwnershipProofMatches(
         MutationCandidate candidate,
         string storeInstanceId,
         RetentionStoreKind storeKind)
     {
         if (candidate.StoreInstanceId != storeInstanceId
+            || candidate.StoreKindWire != RetentionSchemaMigrator.Wire(storeKind)
             || candidate.ReceiptVersion != 1
             || candidate.AdapterCoverageVersion != RetentionV1Constants.AdapterCoverageVersion
-            || candidate.OwnershipReceipt is not { Length: 32 })
+            || string.IsNullOrEmpty(candidate.SourceItemId)
+            || candidate.OwnershipReceipt is not { Length: 32 }
+            || !candidate.OwnershipReceipt.Any(static value => value != 0))
             return false;
-
-        if (storeKind == RetentionStoreKind.SessionEventContent)
-            return SessionOwnershipProofMatches(connection, transaction, candidate, storeInstanceId);
-
-        return ValidateFirstIntentEvidence(connection, transaction, candidate.ItemId) == SourceReceiptProof.Match;
-    }
-
-    private bool SessionOwnershipProofMatches(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        MutationCandidate candidate,
-        string storeInstanceId)
-    {
-        if (candidate.StoreInstanceId != storeInstanceId
-            || candidate.StoreKindWire != "session_event_content"
-            || candidate.ReceiptVersion != 1
-            || candidate.AdapterCoverageVersion != RetentionV1Constants.AdapterCoverageVersion
-            || candidate.OwnershipReceipt is not { Length: 32 })
-            return false;
-
-        if (SourceProof(
-                connection,
-                transaction,
-                new RetentionOwnershipKey(storeInstanceId, RetentionStoreKind.SessionEventContent, candidate.SourceItemId)) == SourceReceiptProof.Match)
-            return true;
-
-        if (candidate.State == RetentionItemLifecycle.Deleted)
-        {
-            using var tombstone = connection.CreateCommand();
-            tombstone.Transaction = transaction;
-            tombstone.CommandText = "SELECT EXISTS(SELECT 1 FROM retention_tombstones WHERE item_id=$item);";
-            tombstone.Parameters.AddWithValue("$item", candidate.ItemId);
-            return Convert.ToInt64(tombstone.ExecuteScalar(), CultureInfo.InvariantCulture) == 1
-                && candidate.OwnershipReceipt.Any(static value => value != 0);
-        }
-
-        return false;
+        return true;
     }
 
     private static MutationCandidate ReadCandidate(SqliteDataReader reader) => new(

@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
@@ -16,8 +18,9 @@ public sealed class RetentionMutationPreviewApplicationTests
     {
         using var fixture = Fixture.Create();
         fixture.InsertAllFourActiveConflicts();
+        var workflowKey = fixture.WorkflowKey(1);
 
-        var result = fixture.Application.CreatePreview(fixture.Request(), fixture.WorkflowKey(1));
+        var result = fixture.Application.CreatePreview(fixture.Request(), workflowKey);
 
         var preview = Assert.IsType<RetentionMutationPreviewResponse>(result.Preview);
         Assert.Null(result.ErrorCode);
@@ -33,11 +36,55 @@ public sealed class RetentionMutationPreviewApplicationTests
         var storedSnapshot = fixture.ScalarText(
             "SELECT active_conflict_snapshot FROM retention_mutation_previews WHERE preview_id=$preview;",
             ("$preview", preview.PreviewId));
-        Assert.Contains("active_read_lease", storedSnapshot, StringComparison.Ordinal);
-        Assert.Contains("active_operation_lease", storedSnapshot, StringComparison.Ordinal);
-        Assert.Contains("active_deletion_lease", storedSnapshot, StringComparison.Ordinal);
-        Assert.Contains("active_delete_intent", storedSnapshot, StringComparison.Ordinal);
+        var expectedConflicts = RetentionMutationConflictCodes.All
+            .Select((code, index) => new RetentionMutationConflictItem(fixture.ItemId, code, index == 3 ? 1 : 11 + index))
+            .ToArray();
+        Assert.Equal(RetentionMutationApplicationCanonicalization.ConflictSnapshot(expectedConflicts), storedSnapshot);
+        Assert.Equal(
+            RetentionMutationDigests.ConflictVersion(expectedConflicts),
+            fixture.ScalarText("SELECT conflict_version FROM retention_mutation_previews WHERE preview_id=$preview;", ("$preview", preview.PreviewId)));
         Assert.DoesNotContain("rt90v1_", storedSnapshot, StringComparison.Ordinal);
+        Assert.Equal(
+            SHA256.HashData(Encoding.ASCII.GetBytes(workflowKey)),
+            fixture.ScalarBytes("SELECT workflow_key_digest FROM retention_mutation_previews WHERE preview_id=$preview;", ("$preview", preview.PreviewId)));
+    }
+
+    [Fact]
+    public void CreatePreview_ExcludesStaleExpectedRevisionDeleteIntentFromConflicts()
+    {
+        using var fixture = Fixture.Create();
+        fixture.Execute("""
+            UPDATE retention_items SET revision=2 WHERE item_id=$item;
+            INSERT INTO retention_delete_journal(item_id,durable_cursor,intent_at,expected_revision)
+            VALUES($item,NULL,$now,1);
+            """, ("$item", fixture.ItemId), ("$now", Now.ToString("O", CultureInfo.InvariantCulture)));
+
+        var preview = Assert.IsType<RetentionMutationPreviewResponse>(
+            fixture.Application.CreatePreview(fixture.Request(), fixture.WorkflowKey(30)).Preview);
+
+        Assert.DoesNotContain(
+            preview.ActiveCleanupExclusionConflicts,
+            static conflict => conflict.ConflictCode == RetentionMutationConflictCodes.ActiveDeleteIntent);
+        Assert.Equal("[]", fixture.ScalarText(
+            "SELECT active_conflict_snapshot FROM retention_mutation_previews WHERE preview_id=$preview;",
+            ("$preview", preview.PreviewId)));
+        Assert.Equal(
+            RetentionMutationDigests.ConflictVersion([]),
+            fixture.ScalarText("SELECT conflict_version FROM retention_mutation_previews WHERE preview_id=$preview;", ("$preview", preview.PreviewId)));
+    }
+
+    [Fact]
+    public void CreatePreview_DoesNotExposeSyntheticSourceKeysOrPathsInAnyDtoStringField()
+    {
+        using var fixture = Fixture.Create();
+        fixture.InjectNoLeakMarkers();
+
+        var preview = Assert.IsType<RetentionMutationPreviewResponse>(
+            fixture.Application.CreatePreview(fixture.Request(), fixture.WorkflowKey(31)).Preview);
+        var strings = StringFields(preview).ToArray();
+
+        Assert.DoesNotContain("SYNTHETIC_SOURCE_KEY_MARKER", strings);
+        Assert.DoesNotContain("C:\\synthetic\\path\\marker", strings);
     }
 
     [Fact]
@@ -285,6 +332,16 @@ public sealed class RetentionMutationPreviewApplicationTests
                 ("$intent_at", Now.ToString("O", CultureInfo.InvariantCulture)));
         }
 
+        internal void InjectNoLeakMarkers() => Execute("""
+            UPDATE retention_items SET private_locator='C:\\synthetic\\path\\marker' WHERE item_id=$item;
+            INSERT INTO retention_items(
+                item_id,store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,
+                captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version)
+            SELECT 'synthetic-source-marker',store_instance_id,'raw_record','SYNTHETIC_SOURCE_KEY_MARKER',1,zeroblob(32),
+                $captured,$expires,'raw-default-90d',1,'expiring',1,1
+            FROM retention_store_instances WHERE id=1;
+            """, ("$item", ItemId), ("$captured", Now.ToString("O", CultureInfo.InvariantCulture)), ("$expires", Now.AddDays(90).ToString("O", CultureInfo.InvariantCulture)));
+
         internal void SetState(string state) => Execute(
             "UPDATE retention_items SET state=$state WHERE item_id=$item;",
             ("$state", state),
@@ -294,6 +351,8 @@ public sealed class RetentionMutationPreviewApplicationTests
             Convert.ToInt64(ScalarObject(sql, parameters), CultureInfo.InvariantCulture);
 
         internal string ScalarText(string sql, params (string Name, object Value)[] parameters) => (string)ScalarObject(sql, parameters)!;
+
+        internal byte[] ScalarBytes(string sql, params (string Name, object Value)[] parameters) => (byte[])ScalarObject(sql, parameters)!;
 
         internal DateTimeOffset? ScalarTimestamp(string sql, params (string Name, object Value)[] parameters) =>
             ScalarObject(sql, parameters) is string value
@@ -344,6 +403,30 @@ public sealed class RetentionMutationPreviewApplicationTests
             var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
             connection.Open();
             return connection;
+        }
+    }
+
+    private static IEnumerable<string> StringFields(object? value)
+    {
+        if (value is null) yield break;
+        if (value is string stringValue)
+        {
+            yield return stringValue;
+            yield break;
+        }
+        if (value is System.Collections.IEnumerable sequence)
+        {
+            foreach (var item in sequence)
+                foreach (var nestedValue in StringFields(item))
+                    yield return nestedValue;
+            yield break;
+        }
+        if (value.GetType().IsValueType) yield break;
+        foreach (var property in value.GetType().GetProperties())
+        {
+            if (property.GetIndexParameters().Length != 0) continue;
+            foreach (var nestedValue in StringFields(property.GetValue(value)))
+                yield return nestedValue;
         }
     }
 }

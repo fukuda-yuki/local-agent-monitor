@@ -25,6 +25,12 @@ internal sealed partial class RetentionMutationApplicationService
         if (!RetentionMutationIdentifiers.IsValidWorkflowKey(workflowKey))
             return new(null, null, RetentionMutationErrorCodes.IdempotencyKeyInvalid);
 
+        var workflowKeyLookup = catalog.ReadMutationPreviewWorkflowKeyDigest(request.PreviewId);
+        if (!workflowKeyLookup.Found)
+            return new(null, null, RetentionMutationErrorCodes.PreviewNotFound);
+        if (!RetentionMutationApplicationCanonicalization.WorkflowKeyMatchesPreview(workflowKey!, workflowKeyLookup.WorkflowKeyDigest))
+            return new(null, null, RetentionMutationErrorCodes.RequestInvalid);
+
         var stored = catalog.ReadMutationPreview(request.PreviewId);
         if (stored is null)
             return new(null, null, RetentionMutationErrorCodes.PreviewNotFound);
@@ -34,21 +40,12 @@ internal sealed partial class RetentionMutationApplicationService
             return new(null, null, RetentionMutationErrorCodes.PreviewDigestMismatch);
         if (stored.ExpiresAt is { } expiresAt && now >= expiresAt)
             return new(null, null, RetentionMutationErrorCodes.PreviewExpired);
-        if (stored.Response.Result == RetentionMutationPreviewResult.EmptyNotApplicable || stored.Response.TargetItemCount == 0)
-            return new(null, null, RetentionMutationErrorCodes.TargetEmpty);
         if (stored.Response.RejectionCode is not null)
             return new(null, null, stored.Response.RejectionCode);
+        if (stored.Response.Result == RetentionMutationPreviewResult.EmptyNotApplicable || stored.Response.TargetItemCount == 0)
+            return new(null, null, RetentionMutationErrorCodes.TargetEmpty);
         if (stored.ReasonCode is null || stored.ActiveConflictSnapshot is null || stored.ConflictVersion is null)
             return new(null, null, RetentionMutationErrorCodes.CatalogUnavailable);
-
-        var current = catalog.CollectMutationPreviewMaterialization(
-            new(stored.Response.TargetKind, stored.Response.TargetId),
-            stored.Response.Operation,
-            stored.Response.Scope,
-            now);
-        var drift = EvaluateIssuanceDrift(stored, current);
-        if (drift is not null)
-            return new(null, null, drift);
 
         var confirmationId = confirmationIdGenerator();
         var token = tokenGenerator();
@@ -102,64 +99,6 @@ internal sealed partial class RetentionMutationApplicationService
             _ => throw new ArgumentOutOfRangeException()
         };
     }
-
-    private static string? EvaluateIssuanceDrift(
-        RetentionStoredMutationPreview stored,
-        RetentionMutationPreviewMaterializationResult current)
-    {
-        // Confirmation issue applies the pinned target/pin/retention/conflict/version
-        // rechecks; the complete 1-9 sequence is reserved for 90-D mutation time.
-        if (current.Outcome != RetentionMutationPreviewProjectionOutcome.Ready || current.Projection is null)
-            return RetentionMutationErrorCodes.ConfirmationTargetChanged;
-
-        var projection = current.Projection;
-        if (!string.Equals(projection.TargetItemSetDigest, stored.Response.TargetItemSetDigest, StringComparison.Ordinal))
-            return RetentionMutationErrorCodes.ConfirmationTargetChanged;
-
-        if (!PinVectorMatches(stored.Response.TargetItems, projection.TargetItems))
-            return RetentionMutationErrorCodes.ConfirmationPinChanged;
-
-        if (!RetentionMatches(stored.Response.TargetItems, projection.TargetItems))
-            return RetentionMutationErrorCodes.ConfirmationRetentionChanged;
-
-        var conflicts = current.ConflictSnapshot
-            .Select(static item => new RetentionMutationConflictItem(item.ItemId, item.ConflictCode, item.LeaseGeneration))
-            .ToArray();
-        var conflictSnapshot = RetentionMutationApplicationCanonicalization.ConflictSnapshot(conflicts);
-        var conflictVersion = RetentionMutationDigests.ConflictVersion(conflicts);
-        if (!string.Equals(conflictSnapshot, stored.ActiveConflictSnapshot, StringComparison.Ordinal)
-            || !string.Equals(conflictVersion, stored.ConflictVersion, StringComparison.Ordinal))
-            return RetentionMutationErrorCodes.ConfirmationConflictChanged;
-
-        return string.Equals(projection.ExpectedStateVersion, stored.Response.ExpectedStateVersion, StringComparison.Ordinal)
-            ? null
-            : RetentionMutationErrorCodes.ConfirmationVersionChanged;
-    }
-
-    private static bool PinVectorMatches(
-        IReadOnlyList<RetentionPreviewItem> expected,
-        IReadOnlyList<RetentionPreviewItem> actual) =>
-        expected.Count == actual.Count
-        && expected.OrderBy(static item => item.ItemId, StringComparer.Ordinal)
-            .Zip(actual.OrderBy(static item => item.ItemId, StringComparer.Ordinal))
-            .All(static pair => string.Equals(pair.First.ItemId, pair.Second.ItemId, StringComparison.Ordinal)
-                && pair.First.PinState == pair.Second.PinState);
-
-    private static bool RetentionMatches(
-        IReadOnlyList<RetentionPreviewItem> expected,
-        IReadOnlyList<RetentionPreviewItem> actual) =>
-        expected.Count == actual.Count
-        && expected.OrderBy(static item => item.ItemId, StringComparer.Ordinal)
-            .Zip(actual.OrderBy(static item => item.ItemId, StringComparer.Ordinal))
-            .All(static pair => string.Equals(pair.First.ItemId, pair.Second.ItemId, StringComparison.Ordinal)
-                && pair.First.CapturedAt == pair.Second.CapturedAt
-                && pair.First.ExpiresAt == pair.Second.ExpiresAt
-                && string.Equals(pair.First.PolicyId, pair.Second.PolicyId, StringComparison.Ordinal)
-                && pair.First.PolicyVersion == pair.Second.PolicyVersion
-                && pair.First.ReadDeniedAt == pair.Second.ReadDeniedAt
-                && pair.First.QueuedAt == pair.Second.QueuedAt
-                && pair.First.RetryExhausted == pair.Second.RetryExhausted
-                && pair.First.ErrorCode == pair.Second.ErrorCode);
 
     private static bool IsDigest(string value, string prefix) =>
         value.StartsWith(prefix, StringComparison.Ordinal)

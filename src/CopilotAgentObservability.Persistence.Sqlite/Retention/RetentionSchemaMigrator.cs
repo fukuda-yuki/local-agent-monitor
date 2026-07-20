@@ -134,6 +134,7 @@ internal static class RetentionSchemaMigrator
                 expected_state_version TEXT NOT NULL,
                 target_item_set_digest TEXT NOT NULL,
                 preview_digest TEXT NOT NULL,
+                workflow_key_digest BLOB NULL CHECK(workflow_key_digest IS NULL OR (typeof(workflow_key_digest) = 'blob' AND length(workflow_key_digest) = 32)),
                 created_at TEXT NOT NULL,
                 expires_at TEXT NULL,
                 rejection_code TEXT NULL,
@@ -143,9 +144,12 @@ internal static class RetentionSchemaMigrator
                 comment_sha256 BLOB NULL CHECK(comment_sha256 IS NULL OR (typeof(comment_sha256) = 'blob' AND length(comment_sha256) = 32))
             );
             """);
+        if (!ColumnExists(connection, transaction, "retention_mutation_previews", "workflow_key_digest"))
+            Execute(connection, transaction, "ALTER TABLE retention_mutation_previews ADD COLUMN workflow_key_digest BLOB NULL CHECK(workflow_key_digest IS NULL OR (typeof(workflow_key_digest) = 'blob' AND length(workflow_key_digest) = 32));");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_previews_expiry ON retention_mutation_previews(expires_at, preview_id);");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_previews_target ON retention_mutation_previews(target_kind, target_id, preview_id);");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_previews_digest ON retention_mutation_previews(preview_digest, preview_id);");
+        // Nonce uniqueness is permanent rather than active-only; this is stricter than the canonical active-only rule and is a safe-side choice.
         Execute(connection, transaction, """
             CREATE TABLE IF NOT EXISTS retention_confirmation_bindings (
                 confirmation_id TEXT PRIMARY KEY,

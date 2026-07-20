@@ -4,6 +4,7 @@ internal sealed record RetentionStoredMutationPreview(
     RetentionMutationPreviewResponse Response,
     DateTimeOffset CreatedAt,
     DateTimeOffset? ExpiresAt,
+    byte[]? WorkflowKeyDigest,
     string? ActiveConflictSnapshot,
     string? ConflictVersion,
     string? ReasonCode,

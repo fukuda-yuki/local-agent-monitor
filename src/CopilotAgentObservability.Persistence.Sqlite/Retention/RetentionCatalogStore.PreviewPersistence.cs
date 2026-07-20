@@ -75,6 +75,27 @@ public sealed partial class RetentionCatalogStore
         return result;
     }
 
+    internal (bool Found, byte[]? WorkflowKeyDigest) ReadMutationPreviewWorkflowKeyDigest(string previewId)
+    {
+        if (!RetentionMutationIdentifiers.TryParsePreviewId(previewId, out _)) return (false, null);
+        using var connection = OpenExisting();
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT workflow_key_digest FROM retention_mutation_previews WHERE preview_id=$preview_id;";
+        command.Parameters.AddWithValue("$preview_id", previewId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            transaction.Commit();
+            return (false, null);
+        }
+
+        var digest = reader.IsDBNull(0) ? null : reader.GetFieldValue<byte[]>(0);
+        transaction.Commit();
+        return (true, digest);
+    }
+
     internal RetentionStoredMutationPreview? ReadMutationPreviewWithinTransaction(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -86,7 +107,7 @@ public sealed partial class RetentionCatalogStore
         command.Transaction = transaction;
         command.CommandText = """
             SELECT preview_id,preview_json,expected_state_version,target_item_set_digest,preview_digest,
-                   created_at,expires_at,active_conflict_snapshot,conflict_version,reason_code,comment_sha256
+                   workflow_key_digest,created_at,expires_at,active_conflict_snapshot,conflict_version,reason_code,comment_sha256
             FROM retention_mutation_previews
             WHERE preview_id=$preview_id;
             """;
@@ -99,8 +120,9 @@ public sealed partial class RetentionCatalogStore
         var expectedStateVersion = reader.GetString(2);
         var targetItemSetDigest = reader.GetString(3);
         var previewDigest = reader.GetString(4);
-        var createdAt = ParseTimestamp(reader.GetString(5));
-        DateTimeOffset? expiresAt = reader.IsDBNull(6) ? null : ParseTimestamp(reader.GetString(6));
+        var workflowKeyDigest = reader.IsDBNull(5) ? null : reader.GetFieldValue<byte[]>(5);
+        var createdAt = ParseTimestamp(reader.GetString(6));
+        DateTimeOffset? expiresAt = reader.IsDBNull(7) ? null : ParseTimestamp(reader.GetString(7));
         if (!string.Equals(response.PreviewId, reader.GetString(0), StringComparison.Ordinal)
             || !string.Equals(response.ExpectedStateVersion, expectedStateVersion, StringComparison.Ordinal)
             || !string.Equals(response.TargetItemSetDigest, targetItemSetDigest, StringComparison.Ordinal)
@@ -108,14 +130,15 @@ public sealed partial class RetentionCatalogStore
             || response.ConfirmationExpiresAt != expiresAt)
             throw new InvalidOperationException(RetentionMutationErrorCodes.CatalogUnavailable);
 
-        var commentSha256 = reader.IsDBNull(10) ? null : reader.GetFieldValue<byte[]>(10);
+        var commentSha256 = reader.IsDBNull(11) ? null : reader.GetFieldValue<byte[]>(11);
         return new(
             response,
             createdAt,
             expiresAt,
-            reader.IsDBNull(7) ? null : reader.GetString(7),
+            workflowKeyDigest,
             reader.IsDBNull(8) ? null : reader.GetString(8),
             reader.IsDBNull(9) ? null : reader.GetString(9),
+            reader.IsDBNull(10) ? null : reader.GetString(10),
             commentSha256);
     }
 
@@ -129,11 +152,11 @@ public sealed partial class RetentionCatalogStore
         command.CommandText = """
             INSERT INTO retention_mutation_previews(
                 preview_id,schema_version,target_kind,target_id,operation,scope,preview_json,
-                expected_state_version,target_item_set_digest,preview_digest,created_at,expires_at,
+                expected_state_version,target_item_set_digest,preview_digest,workflow_key_digest,created_at,expires_at,
                 rejection_code,active_conflict_snapshot,conflict_version,reason_code,comment_sha256)
             VALUES(
                 $preview_id,$schema_version,$target_kind,$target_id,$operation,$scope,$preview_json,
-                $expected_state_version,$target_item_set_digest,$preview_digest,$created_at,$expires_at,
+                $expected_state_version,$target_item_set_digest,$preview_digest,$workflow_key_digest,$created_at,$expires_at,
                 $rejection_code,$active_conflict_snapshot,$conflict_version,$reason_code,$comment_sha256);
             """;
         command.Parameters.AddWithValue("$preview_id", record.Response.PreviewId);
@@ -146,6 +169,7 @@ public sealed partial class RetentionCatalogStore
         command.Parameters.AddWithValue("$expected_state_version", record.Response.ExpectedStateVersion);
         command.Parameters.AddWithValue("$target_item_set_digest", record.Response.TargetItemSetDigest);
         command.Parameters.AddWithValue("$preview_digest", record.Response.PreviewDigest);
+        command.Parameters.AddWithValue("$workflow_key_digest", (object?)record.WorkflowKeyDigest ?? DBNull.Value);
         command.Parameters.AddWithValue("$created_at", Timestamp(record.CreatedAt));
         command.Parameters.AddWithValue("$expires_at", (object?)record.ExpiresAt?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture) ?? DBNull.Value);
         command.Parameters.AddWithValue("$rejection_code", (object?)record.Response.RejectionCode ?? DBNull.Value);

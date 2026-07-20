@@ -71,6 +71,11 @@ public static class RetentionMutationDigests
 
     public static string ConflictVersion(IEnumerable<RetentionMutationConflictItem> conflicts)
     {
+        return HashPrefixed(ConflictCanonicalJson(conflicts), "v1-");
+    }
+
+    internal static string ConflictCanonicalJson(IEnumerable<RetentionMutationConflictItem> conflicts)
+    {
         ArgumentNullException.ThrowIfNull(conflicts);
         var registryOrder = RetentionMutationConflictCodes.All.Select((code, index) => (code, index)).ToDictionary(pair => pair.code, pair => pair.index, StringComparer.Ordinal);
         var values = conflicts
@@ -84,7 +89,7 @@ public static class RetentionMutationDigests
                 ["lease_generation"] = item.LeaseGeneration
             })
             .ToArray();
-        return HashPrefixed(RetentionMutationJcs.Canonicalize(values), "v1-");
+        return RetentionMutationJcs.Canonicalize(values);
     }
 
     public static string PreviewDigest(RetentionPreviewDigestInput input)

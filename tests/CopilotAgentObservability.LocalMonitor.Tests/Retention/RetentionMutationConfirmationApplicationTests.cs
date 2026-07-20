@@ -20,7 +20,7 @@ public sealed class RetentionMutationConfirmationApplicationTests
 
         var result = fixture.Application.IssueConfirmation(
             new(preview.PreviewId, preview.PreviewDigest),
-            fixture.WorkflowKey(1));
+            fixture.WorkflowKey(40));
 
         var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(result.Confirmation);
         Assert.Equal(RetentionConfirmationIssuePersistenceDisposition.IssuedFresh, result.Disposition);
@@ -40,7 +40,7 @@ public sealed class RetentionMutationConfirmationApplicationTests
             var preview = fixture.CreatePreview();
             var mismatch = fixture.Application.IssueConfirmation(
                 new(preview.PreviewId, "sha256-" + new string('f', 64)),
-                fixture.WorkflowKey(2));
+                fixture.WorkflowKey(40));
             Assert.Equal(RetentionMutationErrorCodes.PreviewDigestMismatch, mismatch.ErrorCode);
             Assert.Null(mismatch.Confirmation);
             Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings;"));
@@ -52,7 +52,7 @@ public sealed class RetentionMutationConfirmationApplicationTests
             fixture.Time.Advance(RetentionMutationConstants.ConfirmationLifetime);
             var expired = fixture.Application.IssueConfirmation(
                 new(preview.PreviewId, preview.PreviewDigest),
-                fixture.WorkflowKey(3));
+                fixture.WorkflowKey(40));
             Assert.Equal(RetentionMutationErrorCodes.PreviewExpired, expired.ErrorCode);
         }
 
@@ -61,7 +61,7 @@ public sealed class RetentionMutationConfirmationApplicationTests
             var preview = fixture.CreatePreview(session: true);
             var empty = fixture.Application.IssueConfirmation(
                 new(preview.PreviewId, preview.PreviewDigest),
-                fixture.WorkflowKey(4));
+                fixture.WorkflowKey(40));
             Assert.Equal(RetentionMutationErrorCodes.TargetEmpty, empty.ErrorCode);
         }
 
@@ -71,32 +71,32 @@ public sealed class RetentionMutationConfirmationApplicationTests
             var preview = fixture.CreatePreview();
             var rejected = fixture.Application.IssueConfirmation(
                 new(preview.PreviewId, preview.PreviewDigest),
-                fixture.WorkflowKey(5));
+                fixture.WorkflowKey(40));
             Assert.Equal(RetentionMutationErrorCodes.PinDeleting, rejected.ErrorCode);
         }
     }
 
     [Fact]
-    public void IssueConfirmation_RechecksCatalogDriftInPinnedIssuanceOrder()
+    public void IssueConfirmation_UsesStoredPreviewBindingValuesWithoutIssuanceDriftRecheck()
     {
-        var cases = new (string Code, Action<Fixture> Mutate)[]
+        var cases = new Action<Fixture>[]
         {
-            (RetentionMutationErrorCodes.ConfirmationTargetChanged, fixture => fixture.Execute(
+            fixture => fixture.Execute(
                 "UPDATE retention_items SET item_id='replacement-item' WHERE item_id=$item;",
-                ("$item", fixture.ItemId))),
-            (RetentionMutationErrorCodes.ConfirmationPinChanged, fixture => fixture.Execute(
+                ("$item", fixture.ItemId)),
+            fixture => fixture.Execute(
                 "UPDATE retention_items SET state='retained_by_policy' WHERE item_id=$item;",
-                ("$item", fixture.ItemId))),
-            (RetentionMutationErrorCodes.ConfirmationRetentionChanged, fixture => fixture.Execute(
+                ("$item", fixture.ItemId)),
+            fixture => fixture.Execute(
                 "UPDATE retention_items SET expires_at=$expires WHERE item_id=$item;",
-                ("$item", fixture.ItemId), ("$expires", Now.AddDays(2).ToString("O", CultureInfo.InvariantCulture)))),
-            (RetentionMutationErrorCodes.ConfirmationConflictChanged, fixture => fixture.InsertReadLease()),
-            (RetentionMutationErrorCodes.ConfirmationVersionChanged, fixture => fixture.Execute(
+                ("$item", fixture.ItemId), ("$expires", Now.AddDays(2).ToString("O", CultureInfo.InvariantCulture))),
+            fixture => fixture.InsertReadLease(),
+            fixture => fixture.Execute(
                 "UPDATE retention_items SET revision=revision+1 WHERE item_id=$item;",
-                ("$item", fixture.ItemId)))
+                ("$item", fixture.ItemId))
         };
 
-        foreach (var (code, mutate) in cases)
+        foreach (var mutate in cases)
         {
             using var fixture = Fixture.Create();
             var preview = fixture.CreatePreview();
@@ -104,12 +104,53 @@ public sealed class RetentionMutationConfirmationApplicationTests
 
             var result = fixture.Application.IssueConfirmation(
                 new(preview.PreviewId, preview.PreviewDigest),
-                fixture.WorkflowKey((byte)(10 + Array.IndexOf(cases, (code, mutate)))));
+                fixture.WorkflowKey(40));
 
-            Assert.Equal(code, result.ErrorCode);
-            Assert.Null(result.Confirmation);
-            Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings;"));
+            Assert.Null(result.ErrorCode);
+            var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(result.Confirmation);
+            var binding = fixture.Store.ReadConfirmationBinding(confirmation.ConfirmationId);
+            Assert.Equal(preview.PreviewDigest, binding!.PreviewDigest);
+            Assert.Equal(preview.ExpectedStateVersion, binding.ExpectedStateVersion);
+            Assert.Equal(preview.TargetItemSetDigest, binding.TargetItemSetDigest);
+            Assert.Equal(fixture.WorkflowKey(40), binding.WorkflowIdempotencyKey);
         }
+    }
+
+    [Fact]
+    public void IssueConfirmation_RejectsDifferentWorkflowKeyBeforePreviewOrBindingInspection()
+    {
+        using var fixture = Fixture.Create();
+        var preview = fixture.CreatePreview();
+        fixture.Execute(
+            "UPDATE retention_mutation_previews SET preview_json='not-json' WHERE preview_id=$preview;",
+            ("$preview", preview.PreviewId));
+
+        var result = fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest),
+            fixture.WorkflowKey(41));
+
+        Assert.Equal(RetentionMutationErrorCodes.RequestInvalid, result.ErrorCode);
+        Assert.Null(result.Confirmation);
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings;"));
+    }
+
+    [Fact]
+    public void IssueConfirmation_NotApplicablePreviewReturnsStoredRejectionBeforeEmptyState()
+    {
+        using var fixture = Fixture.Create();
+        fixture.SetOwnershipReceiptToZero();
+        var workflowKey = fixture.WorkflowKey(40);
+        var preview = Assert.IsType<RetentionMutationPreviewResponse>(fixture.Application.CreatePreview(fixture.Request(), workflowKey).Preview);
+
+        Assert.Equal(RetentionMutationErrorCodes.TargetNotApplicable, preview.RejectionCode);
+        Assert.Equal(0, preview.TargetItemCount);
+
+        var result = fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest),
+            workflowKey);
+
+        Assert.Equal(RetentionMutationErrorCodes.TargetNotApplicable, result.ErrorCode);
+        Assert.Null(result.Confirmation);
     }
 
     [Fact]
@@ -119,7 +160,7 @@ public sealed class RetentionMutationConfirmationApplicationTests
         {
             var preview = fixture.CreatePreview();
             var request = new RetentionConfirmationIssueRequest(preview.PreviewId, preview.PreviewDigest);
-            var key = fixture.WorkflowKey(20);
+            var key = fixture.WorkflowKey(40);
             var fresh = fixture.Application.IssueConfirmation(request, key);
             var reissued = fixture.Application.IssueConfirmation(request, key);
             Assert.Equal(RetentionConfirmationIssuePersistenceDisposition.IssuedFresh, fresh.Disposition);
@@ -136,12 +177,12 @@ public sealed class RetentionMutationConfirmationApplicationTests
         {
             var first = fixture.CreatePreview(itemIndex: 0);
             var second = fixture.CreatePreview(itemIndex: 1);
-            var key = fixture.WorkflowKey(21);
+            var key = fixture.WorkflowKey(40);
             Assert.Equal(RetentionConfirmationIssuePersistenceDisposition.IssuedFresh,
                 fixture.Application.IssueConfirmation(new(first.PreviewId, first.PreviewDigest), key).Disposition);
             var conflict = fixture.Application.IssueConfirmation(new(second.PreviewId, second.PreviewDigest), key);
-            Assert.Equal(RetentionConfirmationIssuePersistenceDisposition.Conflict, conflict.Disposition);
-            Assert.Equal(RetentionMutationErrorCodes.IdempotencyConflict, conflict.ErrorCode);
+            Assert.Equal(RetentionMutationErrorCodes.RequestInvalid, conflict.ErrorCode);
+            Assert.Null(conflict.Confirmation);
         }
 
         using (var fixture = Fixture.Create())
@@ -153,8 +194,8 @@ public sealed class RetentionMutationConfirmationApplicationTests
                 confirmationIdGenerator: () => fixture.ConfirmationId(33));
             var request = new RetentionConfirmationIssueRequest(preview.PreviewId, preview.PreviewDigest);
             Assert.Equal(RetentionConfirmationIssuePersistenceDisposition.IssuedFresh,
-                application.IssueConfirmation(request, fixture.WorkflowKey(22)).Disposition);
-            var collision = application.IssueConfirmation(request, fixture.WorkflowKey(23));
+                application.IssueConfirmation(request, fixture.WorkflowKey(40)).Disposition);
+            var collision = application.IssueConfirmation(request, fixture.WorkflowKey(40));
             Assert.Equal(RetentionConfirmationIssuePersistenceDisposition.GenerationFailed, collision.Disposition);
             Assert.Equal(RetentionMutationErrorCodes.ConfirmationGenerationFailed, collision.ErrorCode);
         }
@@ -224,6 +265,13 @@ public sealed class RetentionMutationConfirmationApplicationTests
             return Assert.IsType<RetentionMutationPreviewResponse>(Application.CreatePreview(request, WorkflowKey((byte)(40 + itemIndex))).Preview);
         }
 
+        internal RetentionMutationPreviewRequest Request() => new(
+            new(RetentionMutationTargetKind.Item, ItemId),
+            RetentionMutationOperation.Pin,
+            RetentionMutationScope.SingleItem,
+            RetentionMutationReasonCodes.ResearchNeeded,
+            null);
+
         internal RetentionMutationApplicationService NewApplication(
             Func<string>? tokenGenerator = null,
             Func<string>? confirmationIdGenerator = null) =>
@@ -238,6 +286,8 @@ public sealed class RetentionMutationConfirmationApplicationTests
             Enumerable.Repeat(nonce, 16).ToArray(), Enumerable.Repeat(secret, 32).ToArray());
 
         internal void SetState(string state) => Execute("UPDATE retention_items SET state=$state WHERE item_id=$item;", ("$state", state), ("$item", ItemId));
+
+        internal void SetOwnershipReceiptToZero() => Execute("UPDATE retention_items SET ownership_receipt=zeroblob(32) WHERE item_id=$item;", ("$item", ItemId));
 
         internal void InsertReadLease() => Execute(
             "INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation) VALUES($item,'access','owner',$expires,99);",

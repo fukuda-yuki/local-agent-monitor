@@ -403,9 +403,10 @@ public sealed partial class RetentionCatalogStore
             FROM retention_leases
             WHERE item_id IN ({string.Join(',', parameters)}) AND expires_at>$now
             UNION ALL
-            SELECT item_id,'delete_intent',expected_revision
-            FROM retention_delete_journal
-            WHERE item_id IN ({string.Join(',', parameters)});
+            SELECT j.item_id,'delete_intent',j.expected_revision
+            FROM retention_delete_journal j
+            JOIN retention_items i ON i.item_id=j.item_id AND i.revision=j.expected_revision
+            WHERE j.item_id IN ({string.Join(',', parameters)});
             """;
         using var reader = command.ExecuteReader();
         var conflicts = new List<RetentionMutationActiveConflictSnapshot>();

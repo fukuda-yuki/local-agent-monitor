@@ -458,7 +458,7 @@ public sealed partial class RetentionCatalogStore
         try
         {
             using var document = JsonDocument.Parse(value);
-            return document.RootElement.ValueKind == JsonValueKind.Object;
+            return document.RootElement.ValueKind is JsonValueKind.Object or JsonValueKind.Array;
         }
         catch (JsonException) { return false; }
     }

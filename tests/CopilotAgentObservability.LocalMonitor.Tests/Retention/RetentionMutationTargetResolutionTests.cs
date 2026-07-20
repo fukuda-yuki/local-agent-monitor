@@ -37,6 +37,27 @@ public sealed class RetentionMutationTargetResolutionTests
     }
 
     [Fact]
+    public void SessionResolution_SelectsCatalogOwnedDeniedItemWhenSourceContentIsMissing()
+    {
+        using var fixture = Fixture.Create();
+        fixture.Execute("""
+            UPDATE retention_items
+            SET state='deletion_failed',read_denied_at=$now,error_code='retention_unexpected_source_missing'
+            WHERE item_id=$item;
+            DELETE FROM session_event_content
+            WHERE event_id=(SELECT source_item_id FROM retention_items WHERE item_id=$item);
+            """, ("$item", fixture.OwnedEventItemId), ("$now", Now.ToString("O")));
+
+        var result = fixture.Store.ResolveMutationTarget(new(RetentionMutationTargetKind.Session, fixture.SessionId));
+
+        Assert.Equal(RetentionMutationTargetResolutionOutcome.Resolved, result.Outcome);
+        var item = Assert.Single(result.Items);
+        Assert.Equal(fixture.OwnedEventItemId, item.ItemId);
+        Assert.Equal(RetentionItemLifecycle.DeletionFailed, item.State);
+        Assert.Equal(RetentionErrorCode.UnexpectedSourceMissing, item.ErrorCode);
+    }
+
+    [Fact]
     public void SessionResolution_ReturnsExplicitEmptyForExistingSessionWithoutExactOwnedItems()
     {
         using var fixture = Fixture.Create(includeOwnedContent: false);
@@ -93,6 +114,32 @@ public sealed class RetentionMutationTargetResolutionTests
         Assert.Equal(RetentionMutationErrorCodes.TargetNotApplicable, result.ErrorCode);
     }
 
+    [Theory]
+    [InlineData(RetentionMutationOperation.Pin, "retention_pin_deleted")]
+    [InlineData(RetentionMutationOperation.Unpin, "retention_unpin_deleted")]
+    [InlineData(RetentionMutationOperation.DeleteNow, "retention_delete_already_deleted")]
+    public void ItemResolution_DeletedNonSessionTombstoneRemainsActionableWithOperationRejection(
+        RetentionMutationOperation operation,
+        string expectedRejectionCode)
+    {
+        using var fixture = Fixture.Create();
+        var itemId = fixture.AddDeletedRawItem();
+
+        var resolved = fixture.Store.ResolveMutationTarget(new(RetentionMutationTargetKind.Item, itemId));
+        var projection = fixture.Store.CollectMutationPreviewProjection(
+            new(RetentionMutationTargetKind.Item, itemId),
+            operation,
+            RetentionMutationScope.SingleItem,
+            Now).Projection;
+
+        Assert.Equal(RetentionMutationTargetResolutionOutcome.Resolved, resolved.Outcome);
+        Assert.Equal([itemId], resolved.Items.Select(static item => item.ItemId));
+        Assert.Equal(RetentionMutationPreviewResult.Actionable, projection!.Result);
+        Assert.Equal(1, projection.TargetItemCount);
+        Assert.Equal(expectedRejectionCode, projection.RejectionCode);
+        Assert.False(projection.MutationAllowed);
+    }
+
     private sealed class Fixture : IDisposable
     {
         private Fixture(string path, RetentionCatalogStore store, string sessionId, string ownedEventItemId, string siblingEventItemId)
@@ -134,6 +181,40 @@ public sealed class RetentionMutationTargetResolutionTests
         }
 
         internal void Execute(string sql, params (string Name, object Value)[] values) => Execute(Path, sql, values);
+
+        internal string AddDeletedRawItem()
+        {
+            const long sourceId = 9001;
+            const string itemId = "deleted-raw-item";
+            var capturedAt = Now.AddMinutes(-2);
+            var deletedAt = Now;
+            var storeInstanceId = Scalar<string>(Path, "SELECT store_instance_id FROM retention_store_instances WHERE id=1;");
+            var receipt = RetentionOwnershipReceipt.CreateRawRecord(new(
+                storeInstanceId,
+                sourceId,
+                capturedAt.ToString("O"),
+                capturedAt.UtcDateTime.Ticks,
+                1,
+                Enumerable.Repeat((byte)7, 32).ToArray()));
+            Execute(Path, """
+                INSERT INTO retention_items(
+                    item_id,store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,
+                    captured_at,expires_at,policy_id,policy_version,state,revision,read_denied_at,queued_at,
+                    deleted_at,adapter_coverage_version)
+                VALUES($item,$store,'raw_record',$source,1,$receipt,$captured,$expires,'raw-default-90d',1,
+                    'deleted',2,$deleted,$deleted,$deleted,1);
+                INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at)
+                VALUES($item,$deleted,$deleted);
+                """, [
+                    ("$item", itemId),
+                    ("$store", storeInstanceId),
+                    ("$source", sourceId.ToString()),
+                    ("$receipt", receipt),
+                    ("$captured", capturedAt.ToString("O")),
+                    ("$expires", capturedAt.AddDays(90).ToString("O")),
+                    ("$deleted", deletedAt.ToString("O"))]);
+            return itemId;
+        }
 
         public void Dispose()
         {
