@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -34,7 +35,10 @@ public class MonitorSseTests
 
         Assert.Contains("event: projection", eventText);
         Assert.Contains("data: {}", eventText);
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", eventText);
+        foreach (var marker in Issue91SecretCorpus.Markers)
+        {
+            Assert.DoesNotContain(marker, eventText, StringComparison.Ordinal);
+        }
         Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", eventText);
         Assert.DoesNotContain("leak-marker@example.com", eventText);
         Assert.DoesNotContain("33333333333333333333333333333333", eventText);
@@ -88,7 +92,12 @@ public class MonitorSseTests
 
     private static StringContent JsonContent(string json) => new(json, Encoding.UTF8, "application/json");
 
-    private const string SensitiveTraceJson = """
+    private static string SensitiveTraceJson => SensitiveTraceJsonTemplate.Replace(
+        "\"SECRET_PROMPT_TEXT_MARKER\"",
+        JsonSerializer.Serialize(string.Join('|', Issue91SecretCorpus.Markers)),
+        StringComparison.Ordinal);
+
+    private const string SensitiveTraceJsonTemplate = """
         {"resourceSpans":[{"resource":{"attributes":[
           {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
           {"key":"user.email","value":{"stringValue":"leak-marker@example.com"}}

@@ -1,0 +1,78 @@
+{
+  "$schema": "future-surface-registry.schema.json",
+  "schema_version": "validation-future-surfaces.v1",
+  "entries": [
+    {
+      "surface_id": "historical-analysis",
+      "title": "Historical analysis",
+      "owner_issue": 75,
+      "state": "not_available",
+      "entry_condition": "Issue #75 production routes and executable tests are present in a candidate SHA.",
+      "required_profiles": ["raw-default", "sanitized-only", "content-available", "content-unavailable", "expired-evidence"],
+      "expected_evidence_location": "docs/sprints/issue-75-historical-analysis/validation-matrix.json"
+    },
+    {
+      "surface_id": "historical-import",
+      "title": "Historical import",
+      "owner_issue": 79,
+      "state": "not_available",
+      "entry_condition": "Issue #79 import surface and executable compatibility tests are present in a candidate SHA.",
+      "required_profiles": ["raw-default", "sanitized-only", "supported", "new-version", "unsupported", "schema-drift"],
+      "expected_evidence_location": "docs/sprints/issue-79-historical-import/validation-matrix.json"
+    },
+    {
+      "surface_id": "alert-center",
+      "title": "Alerts and Alert Center",
+      "owner_issue": 84,
+      "state": "not_available",
+      "entry_condition": "Issue #84 alert DTO and UI surfaces plus executable tests are present in a candidate SHA.",
+      "required_profiles": ["sanitized", "sanitized-only", "evidence-available", "evidence-missing", "evidence-expired"],
+      "expected_evidence_location": "docs/sprints/issue-84-alert-center/validation-matrix.json"
+    },
+    {
+      "surface_id": "sanitized-evidence-export",
+      "title": "Sanitized evidence export",
+      "owner_issue": 85,
+      "state": "not_available",
+      "entry_condition": "Issue #85 export surface and scanner-backed tests are present in a candidate SHA.",
+      "required_profiles": ["sanitized-evidence", "raw-default-source", "sanitized-only-source", "scanner-failure"],
+      "expected_evidence_location": "docs/sprints/issue-85-sanitized-export/validation-matrix.json"
+    },
+    {
+      "surface_id": "transactional-sanitized-import",
+      "title": "Transactional sanitized import",
+      "owner_issue": 86,
+      "state": "not_available",
+      "entry_condition": "Issue #86 transactional import surface and executable tests are present in a candidate SHA.",
+      "required_profiles": ["sanitized-evidence", "compatible", "new-version", "unsupported", "unresolved", "cross-machine"],
+      "expected_evidence_location": "docs/sprints/issue-86-sanitized-import/validation-matrix.json"
+    },
+    {
+      "surface_id": "raw-replay",
+      "title": "Raw replay",
+      "owner_issue": 87,
+      "state": "not_available",
+      "entry_condition": "Issue #87 replay surface and executable safety tests are present in a candidate SHA.",
+      "required_profiles": ["raw-local-replay", "raw-default", "content-authorized", "sanitized-only-denied", "source-versioned"],
+      "expected_evidence_location": "docs/sprints/issue-87-raw-replay/validation-matrix.json"
+    },
+    {
+      "surface_id": "backup-restore",
+      "title": "Backup and restore",
+      "owner_issue": 88,
+      "state": "not_available",
+      "entry_condition": "Issue #88 backup/restore surface and executable compatibility tests are present in a candidate SHA.",
+      "required_profiles": ["local-runtime-backup", "raw-content-warning", "retention-deleted", "restore-compatible", "restore-incompatible"],
+      "expected_evidence_location": "docs/sprints/issue-88-backup-restore/validation-matrix.json"
+    },
+    {
+      "surface_id": "codex-app",
+      "title": "Codex App",
+      "owner_issue": 93,
+      "state": "not_available",
+      "entry_condition": "Issue #93 production source adapter and executable tests are present in a candidate SHA.",
+      "required_profiles": ["raw-default", "content-disabled", "content-enabled", "sanitized-only", "supported", "new-version", "unsupported", "otel-available", "otel-unavailable", "exact-linked", "unbound"],
+      "expected_evidence_location": "docs/sprints/issue-93-codex-app/validation-matrix.json"
+    }
+  ]
+}

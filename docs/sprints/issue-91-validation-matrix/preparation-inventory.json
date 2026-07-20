@@ -1,0 +1,175 @@
+{
+  "schema_version": "validation-preparation-inventory.v1",
+  "state": "dependency_gate_open",
+  "starting_sha": "5180a0424ff5488354a3e173c74b7e931d28679d",
+  "matrix_prep_sha": "5180a0424ff5488354a3e173c74b7e931d28679d",
+  "final_validation_sha": null,
+  "branch": "codex/issue-91-validation-matrix",
+  "worktree_boundary": "dedicated ignored repository worktree; machine path intentionally omitted",
+  "clean_at_start": true,
+  "dependency_gate": [
+    { "issue": 69, "github_state": "open", "accepted_revision": null, "gate_satisfied": false, "reason": "Children #103, #104, and #105 remain open; #105 has no repository evidence artifact." },
+    { "issue": 89, "github_state": "closed", "accepted_revision": "043f7a3228d1e1e97f91de965d91b6e41a48e472", "gate_satisfied": true, "reason": "Closed dependency tip and pinned validation/review revisions are ancestors of matrix_prep_sha." },
+    { "issue": 90, "github_state": "open", "accepted_revision": null, "gate_satisfied": false, "reason": "Local validated revisions through 5180a042 are present, but the Issue is open and no accepted revision is recorded." },
+    { "issue": 106, "github_state": "closed", "accepted_revision": "87c240adf0dfbaa20b0abf24c4b2d7571a828781", "gate_satisfied": true, "reason": "Closed live-validation evidence and the later #110 value-aware rerun lineage are ancestors of matrix_prep_sha." }
+  ],
+  "active_surfaces": [
+    {
+      "surface_id": "otlp-receiver",
+      "operations": ["POST /v1/traces", "deterministic receiver errors", "ingestion queue/store"],
+      "owner": "telemetry ingestion / Issues #62-#65",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["raw-default", "content-disabled", "content-enabled", "sanitized-only", "json", "protobuf", "parse-failure"],
+      "automated_test_filters": ["MonitorHostTests", "MonitorSecurityBoundaryTests", "SourceCompatibilityIngestionTests", "RawOtlpIngestorTests"]
+    },
+    {
+      "surface_id": "hook-session-ingest",
+      "operations": ["hook-forward", "POST /api/session-ingest/v1/events"],
+      "owner": "Session subsystem / Issue #51",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["hook-available", "hook-unavailable", "content-disabled", "content-enabled", "supported", "new-version", "unsupported", "unknown-field", "parse-failure"],
+      "automated_test_filters": ["HookForwarderTests", "ClaudeHookEventMapperTests", "ClaudeIngestionConcurrencyTests"]
+    },
+    {
+      "surface_id": "monitor-sanitized-api-sse",
+      "operations": ["health", "readiness", "ingestions", "diagnostics", "traces", "spans", "graph", "summary", "overview", "trace-list", "SSE /events"],
+      "owner": "Local Monitor projection",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["raw-default", "content-disabled", "content-enabled", "sanitized-only", "restart"],
+      "automated_test_filters": ["MonitorProjectionApiTests", "MonitorOverviewEndpointTests", "MonitorTraceListEndpointTests", "MonitorSseTests", "MonitorHealthTests"]
+    },
+    {
+      "surface_id": "monitor-ui-prompt-boundary",
+      "operations": ["GET /", "GET /traces", "GET /traces/{traceId}", "prompt label rendering", "diagnostics UI"],
+      "owner": "Local Monitor UI / D032 D039 D042",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["raw-default", "content-disabled", "content-enabled", "sanitized-only"],
+      "automated_test_filters": ["MonitorRawViewTests", "MonitorTraceListPlaywrightTests", "MonitorTraceDetailTests", "MonitorOverviewPlaywrightTests", "SourceDiagnosticsPlaywrightTests"]
+    },
+    {
+      "surface_id": "monitor-raw-routes",
+      "operations": ["GET /traces/{rawRecordId}/raw", "GET /traces/{traceId}/prompt-label", "GET /traces/{traceId}/spans/{spanId}/detail"],
+      "owner": "Local Monitor raw boundary",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["raw-default-allowlisted", "content-disabled-no-fabrication", "sanitized-only-denied", "same-origin", "no-store"],
+      "automated_test_filters": ["MonitorRawViewTests", "MonitorSpanDetailRouteTests", "MonitorInspectorPlaywrightTests", "MonitorSecurityBoundaryTests"]
+    },
+    {
+      "surface_id": "session-workspace",
+      "operations": ["Session list/detail/resolve/status", "GET /sessions/{sessionId}/events/{eventId}/content"],
+      "owner": "Session subsystem / Issue #51",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["hook-only", "otel-only", "exact-linked", "unbound", "partial", "content-disabled", "sanitized-only", "expired-read-denied"],
+      "automated_test_filters": ["SessionWorkspaceRouteTests", "SessionOtelEnrichmentTests", "SqliteSessionStoreTests"]
+    },
+    {
+      "surface_id": "raw-analysis",
+      "operations": ["analysis start", "analysis result", "safe summary", "options", "drawer"],
+      "owner": "Local Monitor analysis / D035 D045",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["raw-default", "sanitized-only-denied", "retention-read-denied"],
+      "automated_test_filters": ["MonitorAnalysisRouteTests", "MonitorAnalysisOptionsEndpointTests", "MonitorAnalysisStoreTests", "DotNetCopilotRawAnalysisRunnerTests"]
+    },
+    {
+      "surface_id": "application-output",
+      "operations": ["Local Monitor startup stdout/stderr", "Config CLI stdout/stderr", "Canvas runtime errors"],
+      "owner": "cross-cutting security boundary",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["success", "bounded-error", "invalid-input", "sanitized-only"],
+      "automated_test_filters": ["MonitorSecurityBoundaryTests", "CliApplicationTests", "CanvasExtensionContractTests"]
+    },
+    {
+      "surface_id": "canvas-actions-helpers",
+      "operations": ["sanitized action DTOs", "token-gated helper JSON/HTML", "raw preview/content", "session.send prompts", "Evidence", "proposal/apply/comparison"],
+      "owner": "Canvas / Issues #45 #51 #53-#56",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["raw-default", "content-disabled", "sanitized-only", "token-valid", "token-invalid", "exact-linked", "unbound"],
+      "automated_test_filters": ["CanvasExtensionContractTests", "SessionWorkspaceRouteTests", "SessionEffectComparisonRouteTests", "SessionImprovementProposalRouteTests", "SessionProposalApplyRouteTests"]
+    },
+    {
+      "surface_id": "setup-cli",
+      "operations": ["setup plan", "setup apply", "setup rollback", "setup status"],
+      "owner": "configuration ownership / Issues #66-#68",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["github-copilot-vscode", "github-copilot-cli", "app-sdk", "claude-cli", "content-disabled", "content-enabled-authorized", "unsupported-version"],
+      "automated_test_filters": ["SetupContractValidationTests", "GitHubCopilotSetupAdapterTests", "ClaudeCodeSetupAdapterTests", "ClaudeConfigurationSetupIntegrationTests"]
+    },
+    {
+      "surface_id": "setup-api-ui",
+      "operations": ["setup HTTP", "setup proxy", "setup UI"],
+      "owner": "configuration ownership / Issues #66-#68",
+      "requirement_level": "required",
+      "applicability": "not_applicable",
+      "applicability_reason": "docs/spec.md Public Interfaces states that no setup HTTP/proxy/UI surface exists.",
+      "profiles": [],
+      "automated_test_filters": []
+    },
+    {
+      "surface_id": "doctor-cli-api",
+      "operations": ["doctor CLI", "first-trace CLI", "five /api/doctor routes"],
+      "owner": "First-trace Doctor / Issues #102-#105",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["supported-source", "partial-facts", "missing-facts", "verification-expired", "bounded-error", "sanitized"],
+      "automated_test_filters": ["DoctorCliTests", "FirstTraceCliTests", "DoctorRoutesTests", "DoctorCrossSurfaceContractTests"]
+    },
+    {
+      "surface_id": "doctor-ui",
+      "operations": ["dedicated doctor.v1 evaluation/verification UI"],
+      "owner": "First-trace Doctor / Issue #105",
+      "requirement_level": "required",
+      "applicability": "not_applicable",
+      "applicability_reason": "No dedicated doctor.v1 UI exists at matrix_prep_sha; /diagnostics is a distinct sanitized diagnostics surface.",
+      "profiles": [],
+      "automated_test_filters": []
+    },
+    {
+      "surface_id": "source-compatibility",
+      "operations": ["supported fingerprint", "new/unverified version", "known incompatible", "schema drift", "unknown field", "parse failure", "source diagnostics"],
+      "owner": "source compatibility / Issues #62 #65 #69",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["github-copilot", "claude-code", "hook-available", "hook-unavailable", "otel-available", "otel-unavailable", "restart", "reconnect"],
+      "automated_test_filters": ["SourceCompatibilityTests", "SourceCompatibilityIngestionTests", "ClaudeProducerFixtureContractTests", "ClaudeCodeSpanAdapterTests"]
+    },
+    {
+      "surface_id": "exact-binding",
+      "operations": ["hook-only", "otel-only", "exact-linked", "unbound", "shared trace ID negative", "generic label negative"],
+      "owner": "Session/source projection / Issues #51 #65 #109",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["hook-available", "hook-unavailable", "otel-available", "otel-unavailable", "native-id-equal", "native-id-different", "trace-id-only"],
+      "automated_test_filters": ["ClaudeFirstTraceCrossSurfaceTests", "SessionOtelEnrichmentTests", "SourceProjectionStateTests"]
+    },
+    {
+      "surface_id": "retention-cleanup",
+      "operations": ["status", "expiry read denial", "cleanup", "retry", "restart", "audit diagnostics"],
+      "owner": "retention catalog / Issue #89",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["expiring", "retained_by_policy", "expired_pending_deletion", "deletion_queued", "deleting", "deleted", "deletion_failed"],
+      "automated_test_filters": ["RetentionLifecycleIntegrationTests", "RetentionReadPrimitiveTests", "RetentionCleanupWorkerTests", "RetentionNoLeakTests"]
+    },
+    {
+      "surface_id": "retention-mutation",
+      "operations": ["pin", "unpin", "delete-now", "preview", "confirmation", "mutation status", "history/audit", "retention UI", "exact Session ownership"],
+      "owner": "retention mutation / Issue #90",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["pinned", "unpinned", "delete-now-confirmed", "session-target", "item-target", "expired", "restart", "replay", "ownership-mismatch"],
+      "automated_test_filters": ["RetentionMutationHttpMatrixTests", "RetentionMutationSecurityMatrixTests", "RetentionMutationUiPlaywrightTests", "RetentionOwnershipReceiptTests", "RetentionMutationTargetResolutionTests"]
+    }
+  ],
+  "future_registry": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+  "evidence_template": "docs/sprints/issue-91-validation-matrix/evidence-ledger-template.md"
+}

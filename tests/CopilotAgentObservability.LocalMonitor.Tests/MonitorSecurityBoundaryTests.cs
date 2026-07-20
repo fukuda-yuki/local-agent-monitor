@@ -17,11 +17,12 @@ public class MonitorSecurityBoundaryTests
 {
     private const string ClaudeSecretMarker = "sk-task18-claude-secret-marker";
     private static readonly string[] Markers =
-    {
+    [
         "SECRET_PROMPT_TEXT_MARKER",
         "SECRET_TOOL_ARGS_MARKER",
         "leak-marker@example.com",
-    };
+        .. Issue91SecretCorpus.Markers,
+    ];
 
     // Distinctive fragments of the unsafe values injected into the guarded free-form
     // attributes by SanitizationProbePayload; none may surface in any sanitized read API.
@@ -580,7 +581,12 @@ public class MonitorSecurityBoundaryTests
         {"resourceSpans":[{"resource":{"attributes":[{"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}}]},"scopeSpans":[{"spans":[{"traceId":"55555555555555555555555555555555","spanId":"6666666666666666","name":"chat gpt-4o"}]}]}]}
         """;
 
-    private const string SensitiveTraceJson = """
+    private static string SensitiveTraceJson => SensitiveTraceJsonTemplate.Replace(
+        "\"SECRET_PROMPT_TEXT_MARKER\"",
+        JsonSerializer.Serialize(string.Join('|', new[] { "SECRET_PROMPT_TEXT_MARKER" }.Concat(Issue91SecretCorpus.Markers))),
+        StringComparison.Ordinal);
+
+    private const string SensitiveTraceJsonTemplate = """
         {"resourceSpans":[{"resource":{"attributes":[
           {"key":"client.kind","value":{"stringValue":"vscode-copilot-chat"}},
           {"key":"user.email","value":{"stringValue":"leak-marker@example.com"}}

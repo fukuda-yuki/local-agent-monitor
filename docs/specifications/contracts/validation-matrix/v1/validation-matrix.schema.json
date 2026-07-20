@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-agent-monitor.invalid/contracts/validation-matrix/v1/validation-matrix.schema.json",
+  "title": "Cross-surface validation matrix v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "matrix_prep_sha",
+    "final_validation_sha",
+    "inventory_date",
+    "environment_boundary",
+    "active_rows",
+    "future_registry_ref",
+    "evidence_ledger_refs",
+    "release_decision"
+  ],
+  "properties": {
+    "schema_version": { "const": "validation-matrix.v1" },
+    "matrix_prep_sha": { "$ref": "#/$defs/sha" },
+    "final_validation_sha": { "$ref": "#/$defs/sha" },
+    "inventory_date": { "type": "string", "format": "date" },
+    "environment_boundary": { "type": "string", "minLength": 1 },
+    "active_rows": { "type": "array", "items": { "$ref": "#/$defs/active_row" } },
+    "future_registry_ref": { "type": "string", "minLength": 1 },
+    "evidence_ledger_refs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "release_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "external_blockers"],
+      "properties": {
+        "decision": { "$ref": "#/$defs/release_decision" },
+        "external_blockers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/external_blocker" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "classification": {
+      "enum": ["passed", "failed", "blocked_external", "not_applicable", "not_attempted"]
+    },
+    "release_decision": {
+      "enum": ["release_ready", "release_ready_with_external_blockers", "release_blocked"]
+    },
+    "severity": { "enum": ["none", "low", "medium", "high", "critical"] },
+    "requirement_level": { "enum": ["required", "optional"] },
+    "applicability": { "enum": ["applicable", "not_applicable"] },
+    "external_blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_id", "severity", "blocker", "retry_condition", "unverified_capability"],
+      "properties": {
+        "row_id": { "type": "string", "pattern": "^91-[A-Z]-[0-9]{3}$" },
+        "severity": { "enum": ["low", "medium", "high", "critical"] },
+        "blocker": { "type": "string", "minLength": 1 },
+        "retry_condition": { "type": "string", "minLength": 1 },
+        "unverified_capability": { "type": "string", "minLength": 1 }
+      }
+    },
+    "profile_axes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collection", "content_access", "compatibility", "hook", "otel", "binding", "restart", "retention"],
+      "properties": {
+        "collection": { "type": "array", "items": { "type": "string" } },
+        "content_access": { "type": "array", "items": { "type": "string" } },
+        "compatibility": { "type": "array", "items": { "type": "string" } },
+        "hook": { "type": "array", "items": { "type": "string" } },
+        "otel": { "type": "array", "items": { "type": "string" } },
+        "binding": { "type": "array", "items": { "type": "string" } },
+        "restart": { "type": "array", "items": { "type": "string" } },
+        "retention": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference", "compatibility_basis"],
+      "properties": {
+        "kind": { "enum": ["automated", "live", "historical"] },
+        "reference": { "type": "string", "minLength": 1 },
+        "compatibility_basis": { "type": "string", "minLength": 1 }
+      }
+    },
+    "active_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_id", "matrix_schema_version", "surface", "operation", "profiles",
+        "requirement_level", "applicability", "applicability_reason", "versions", "expected_invariant",
+        "evidence", "actual_result", "classification", "severity", "blocker",
+        "retry_condition", "unverified_capability", "owner", "validation_sha", "validation_date", "environment_boundary"
+      ],
+      "properties": {
+        "row_id": { "type": "string", "pattern": "^91-[A-Z]-[0-9]{3}$" },
+        "matrix_schema_version": { "const": "validation-matrix.v1" },
+        "surface": { "type": "string", "minLength": 1 },
+        "operation": { "type": "string", "minLength": 1 },
+        "profiles": { "$ref": "#/$defs/profile_axes" },
+        "requirement_level": { "$ref": "#/$defs/requirement_level" },
+        "applicability": { "$ref": "#/$defs/applicability" },
+        "applicability_reason": { "type": ["string", "null"] },
+        "versions": { "type": "object" },
+        "expected_invariant": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence_ref" } },
+        "actual_result": { "type": "string" },
+        "classification": { "$ref": "#/$defs/classification" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "blocker": { "type": ["string", "null"] },
+        "retry_condition": { "type": ["string", "null"] },
+        "unverified_capability": { "type": ["string", "null"] },
+        "owner": { "type": "string", "minLength": 1 },
+        "validation_sha": { "$ref": "#/$defs/sha" },
+        "validation_date": { "type": "string", "format": "date" },
+        "environment_boundary": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

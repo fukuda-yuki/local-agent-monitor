@@ -332,6 +332,7 @@ sanitized. The canonical contract is
 | Candidate pipeline | [specifications/layers/candidate-pipeline.md](specifications/layers/candidate-pipeline.md) |
 | Dashboard publishing | [specifications/layers/dashboard-publishing.md](specifications/layers/dashboard-publishing.md) |
 | Security and data boundaries | [specifications/security-data-boundaries.md](specifications/security-data-boundaries.md) |
+| Validation and release matrix | [specifications/validation-release-matrix.md](specifications/validation-release-matrix.md) |
 | Collection profile interface | [specifications/interfaces/collection-profiles.md](specifications/interfaces/collection-profiles.md) |
 | Config CLI interface | [specifications/interfaces/config-cli.md](specifications/interfaces/config-cli.md) |
 | Configuration setup interface | [specifications/interfaces/configuration-setup.md](specifications/interfaces/configuration-setup.md) |
@@ -409,6 +410,14 @@ Publicly documented interfaces are:
 Changing these requires updating the relevant specification file and tests.
 
 ## Validation
+
+Cross-surface release validation uses the versioned contract in
+[Validation And Release Matrix Specification](specifications/validation-release-matrix.md).
+The matrix records a preparation SHA, freezes a final candidate only after its
+declared dependency gate is satisfied, inventories active surfaces from that
+exact candidate, and ties every classification and evidence reference to an
+exact SHA rather than a moving branch. Future unavailable surfaces remain in a
+separate registry and do not count toward release success.
 
 Code、project file、CLI behavior、workflow を変更した場合:
 

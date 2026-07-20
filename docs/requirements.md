@@ -378,8 +378,20 @@ docker compose -f infra\otel-collector\docker-compose.example.yml config
 ```
 
 Copilot 実行に依存する挙動は自動テストだけで保証しない。
-live validation では、確認日時、実行環境、設定値、trace id または識別情報、確認項目、未確認項目を記録する。
-Docker Desktop、WSL2 Docker Engine、remote managed endpoint、raw local receiver の各 profile は、それぞれ profile value、client kind、endpoint、trace id または raw record identifier を live validation evidence に含める。
+live validation では、確認日時、実行環境、sanitized setting label または
+credential/path を含まない effective state、opaque な trace / record reference、
+確認項目、未確認項目を記録する。credential、authorization value、raw content、
+PII、sensitive path を含み得る literal setting value や raw identifier は
+repository-safe evidence に記録しない。
+Docker Desktop、WSL2 Docker Engine、remote managed endpoint、raw local receiver の各 profile は、それぞれ sanitized profile label、client kind、non-secret endpoint label、opaque または truncated な repository-safe trace / raw-record reference を live validation evidence に含める。
+
+Release validation は一つの immutable candidate SHA に対して active product
+surface を inventory し、versioned matrix contract に従って automated / live
+evidence を分類する。Active row は `passed`、`failed`、
+`blocked_external`、`not_applicable`、または作業中だけ許可する
+`not_attempted` のいずれかとし、future surface の `not_available` と混同しない。
+Skipped、timed-out、unavailable、unexecuted、または code defect は pass ではない。
+Repository code で解決不能な required live case だけを `blocked_external` にできる。
 
 ## 11. Open Product Decisions
 

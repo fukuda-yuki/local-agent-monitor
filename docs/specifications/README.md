@@ -35,6 +35,7 @@
 | Canvas Effect Comparison | [interfaces/canvas-effect-comparison.md](interfaces/canvas-effect-comparison.md) |
 | Trace agent execution graph | [interfaces/trace-agent-execution-graph.md](interfaces/trace-agent-execution-graph.md) |
 | Security and data boundaries | [security-data-boundaries.md](security-data-boundaries.md) |
+| Validation and release matrix | [validation-release-matrix.md](validation-release-matrix.md) |
 
 ## Change Rule
 

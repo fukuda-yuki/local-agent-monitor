@@ -223,6 +223,27 @@ test("compactTrace: exposes the expected sanitized field set and no raw key", ()
     }
 });
 
+test("compactTrace: Issue #91 synthetic corpus cannot enter Canvas action output", async () => {
+    const corpus = JSON.parse(await readFile(
+        new URL("../../../scripts/validation/issue-91/fixtures/secret-corpus.v1.json", import.meta.url),
+        "utf8",
+    ));
+    const markers = corpus.cases.map((entry) => entry.marker);
+    const markerText = markers.join("|");
+    const output = JSON.stringify(compactTrace({
+        ...SAMPLE_TRACE_ROW,
+        payload_json: markerText,
+        prompt: markerText,
+        content: markerText,
+        tool_arguments: markerText,
+        tool_result: markerText,
+        authorization: markerText,
+        local_path: markerText,
+    }));
+
+    for (const marker of markers) assert.doesNotMatch(output, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
 test("repository label helpers: render sanitized labels and unknown fallback", () => {
     const trace = compactTrace(SAMPLE_TRACE_ROW);
 
