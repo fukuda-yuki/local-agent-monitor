@@ -10,7 +10,7 @@
   "dependency_gate": [
     { "issue": 69, "github_state": "open", "accepted_revision": null, "gate_satisfied": false, "reason": "Children #103, #104, and #105 remain open; #105 has no repository evidence artifact." },
     { "issue": 89, "github_state": "closed", "accepted_revision": "043f7a3228d1e1e97f91de965d91b6e41a48e472", "gate_satisfied": true, "reason": "Closed dependency tip and pinned validation/review revisions are ancestors of matrix_prep_sha." },
-    { "issue": 90, "github_state": "open", "accepted_revision": null, "gate_satisfied": false, "reason": "Local validated revisions through 5180a042 are present, but the Issue is open and no accepted revision is recorded." },
+    { "issue": 90, "github_state": "open", "accepted_revision": "5180a0424ff5488354a3e173c74b7e931d28679d", "gate_satisfied": true, "reason": "The operator accepted the local closeout without push. Implementation candidate 4d966472, closeout f412a5bf, and the integrated validation repair through 5180a042 are present; the accepted local revision is an ancestor of the Issue #91 branch. GitHub remains open because the local main branch was not pushed." },
     { "issue": 106, "github_state": "closed", "accepted_revision": "87c240adf0dfbaa20b0abf24c4b2d7571a828781", "gate_satisfied": true, "reason": "Closed live-validation evidence and the later #110 value-aware rerun lineage are ancestors of matrix_prep_sha." }
   ],
   "active_surfaces": [
