@@ -25,3 +25,15 @@ internal sealed record RetentionIdempotencyOutcome(
 internal sealed record RetentionAuditReadTarget(
     RetentionMutationTargetKind TargetKind,
     string TargetId);
+
+internal enum RetentionAuditHistoryReadDisposition
+{
+    Found,
+    TargetNotFound,
+    CursorInvalid
+}
+
+internal sealed record RetentionAuditHistoryReadResult(
+    RetentionAuditHistoryReadDisposition Disposition,
+    IReadOnlyList<RetentionAuditEvent> Events,
+    string? NextCursor);

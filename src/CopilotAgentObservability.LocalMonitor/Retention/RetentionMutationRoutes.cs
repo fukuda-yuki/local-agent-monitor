@@ -22,6 +22,7 @@ internal static class RetentionMutationRoutes
         app.MapPost("/api/retention/v1/mutations", context => ExecuteMutationAsync(context, application));
         app.MapGet("/api/retention/v1/mutations/{operationId}", (string operationId, HttpContext context) => ReadMutationStatusAsync(context, application, operationId));
         app.MapGet("/api/retention/v1/items/{itemId}", (string itemId, HttpContext context) => ReadItemStateAsync(context, application, itemId));
+        RetentionHistoryRoutes.Map(app, application);
     }
 
     internal static bool IsRetentionPath(PathString path) => path.StartsWithSegments("/api/retention/v1");
@@ -247,7 +248,7 @@ internal static class RetentionMutationRoutes
         _ => null
     };
 
-    private static async Task WriteApplicationErrorAsync(HttpContext context, string error, bool confirmationIssue, bool preview)
+    internal static async Task WriteApplicationErrorAsync(HttpContext context, string error, bool confirmationIssue, bool preview)
     {
         if (!RetentionMutationErrorCodeRegistry.All.Any(entry => string.Equals(entry.Code, error, StringComparison.Ordinal)))
         {
@@ -264,14 +265,14 @@ internal static class RetentionMutationRoutes
         await WriteErrorAsync(context, status ?? StatusCodes.Status503ServiceUnavailable, error);
     }
 
-    private static async Task WriteJsonAsync<T>(HttpContext context, T value)
+    internal static async Task WriteJsonAsync<T>(HttpContext context, T value)
     {
         PrepareRetentionResponse(context.Response);
         context.Response.StatusCode = StatusCodes.Status200OK;
         await JsonSerializer.SerializeAsync(context.Response.Body, value, Json, context.RequestAborted);
     }
 
-    private static T? Invoke<T>(Func<T> action) where T : class
+    internal static T? Invoke<T>(Func<T> action) where T : class
     {
         try
         {

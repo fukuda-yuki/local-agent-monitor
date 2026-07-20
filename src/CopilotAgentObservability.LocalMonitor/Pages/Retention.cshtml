@@ -1,0 +1,89 @@
+@page "/retention/{targetKind}/{targetId}"
+@model RetentionModel
+
+<section class="retention-page" id="retention-root" data-target-kind="@Model.TargetKind" data-target-id="@Model.TargetId">
+    <nav class="breadcrumb" aria-label="パンくず">
+        <a href="/diagnostics">診断</a>
+        <span class="breadcrumb-sep" aria-hidden="true">/</span>
+        <span class="breadcrumb-current">保持管理</span>
+    </nav>
+
+    <h2 class="monitor-page-title">保持管理</h2>
+    <p class="monitor-subtle">正確な対象と影響を確認してから、保持状態を変更します。</p>
+    <button class="monitor-btn monitor-btn-primary" id="retention-manage-trigger" type="button">保持を管理</button>
+
+    <dialog class="retention-dialog" id="retention-dialog" aria-labelledby="retention-dialog-title" aria-describedby="retention-dialog-description">
+        <div class="retention-dialog-head">
+            <div>
+                <h2 id="retention-dialog-title" tabindex="-1">保持を管理</h2>
+                <p id="retention-dialog-description">対象、操作、理由、影響を順に確認してください。操作は最終確認まで実行されません。</p>
+            </div>
+            <button class="retention-close" id="retention-close" type="button" aria-label="保持管理を閉じる">×</button>
+        </div>
+
+        <dl class="retention-target">
+            <dt>対象種別</dt>
+            <dd id="retention-target-kind">@Model.TargetKind</dd>
+            <dt>正確な対象 ID</dt>
+            <dd id="retention-target-id">@Model.TargetId</dd>
+        </dl>
+
+        <div id="retention-current-status" class="retention-current-status" aria-label="現在の保持状態"></div>
+
+        <fieldset class="retention-operation" id="retention-operation">
+            <legend>操作を選択</legend>
+            <div class="retention-operation-standard">
+                <label><input type="radio" name="retention-operation" value="pin"> ピン留め</label>
+                <label><input type="radio" name="retention-operation" value="unpin"> ピン留め解除</label>
+            </div>
+            <div class="retention-operation-destructive">
+                <span class="retention-warning"><span aria-hidden="true">⚠</span> 今すぐ削除は読み取りを直ちに拒否し、物理削除をキューへ渡します。</span>
+                <label class="retention-delete-choice"><input type="radio" name="retention-operation" value="delete_now"> 今すぐ削除</label>
+            </div>
+        </fieldset>
+
+        <div class="retention-field">
+            <label for="retention-reason">理由</label>
+            <select id="retention-reason" aria-describedby="retention-reason-help">
+                <option value="">理由を選択してください</option>
+                <option value="research_needed">調査に必要</option>
+                <option value="review_complete">確認完了</option>
+                <option value="privacy_request">プライバシー要求</option>
+                <option value="data_minimization">データ最小化</option>
+                <option value="test_cleanup">テストデータ整理</option>
+                <option value="operator_correction">操作訂正</option>
+                <option value="other_local_reason">その他のローカル理由</option>
+            </select>
+            <span class="retention-help" id="retention-reason-help">監査記録に残す固定の理由を選びます。</span>
+        </div>
+
+        <div class="retention-field">
+            <label for="retention-comment">コメント（任意）</label>
+            <textarea id="retention-comment" rows="3" aria-describedby="retention-comment-help"></textarea>
+            <span class="retention-help" id="retention-comment-help">入力する場合は 1〜256 文字。秘密、個人情報、パス、プロンプトや応答本文は入力しないでください。</span>
+        </div>
+
+        <div class="retention-dialog-actions">
+            <button class="monitor-btn" id="retention-preview" type="button">影響を確認</button>
+        </div>
+
+        <section class="retention-preview" id="retention-preview-surface" aria-labelledby="retention-preview-title" hidden>
+            <h3 id="retention-preview-title" tabindex="-1">変更前の最終確認</h3>
+            <div id="retention-preview-content"></div>
+            <div class="retention-final-actions">
+                <p class="retention-warning"><span aria-hidden="true">⚠</span> 表示された正確な対象と影響に同意した場合だけ確定してください。</p>
+                <button class="monitor-btn monitor-btn-primary" id="retention-confirm" type="button" disabled>この内容で確定</button>
+            </div>
+        </section>
+
+        <section class="retention-result" id="retention-result" aria-labelledby="retention-result-title" hidden>
+            <h3 id="retention-result-title" tabindex="-1">操作結果と物理処理状態</h3>
+            <div id="retention-result-content"></div>
+            <button class="monitor-btn" id="retention-refresh" type="button">状態を再取得</button>
+        </section>
+
+        <p class="retention-live" id="retention-live" role="status" aria-live="polite" aria-atomic="true"></p>
+        <p class="retention-error" id="retention-error" role="alert" hidden></p>
+    </dialog>
+</section>
+<script src="/monitor-retention.js" defer></script>

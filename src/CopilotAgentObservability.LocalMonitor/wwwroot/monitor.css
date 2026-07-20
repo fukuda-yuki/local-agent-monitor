@@ -3128,3 +3128,154 @@ a.kpi-card:hover {
         transition-duration: 0ms !important;
     }
 }
+
+/* Retention management */
+.retention-page { max-width: 980px; }
+
+.retention-dialog {
+    width: min(920px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px);
+    padding: 0;
+    overflow-y: auto;
+    color: var(--monitor-ink);
+    background: var(--monitor-surface-card);
+    border: 1px solid var(--monitor-border-strong);
+    border-radius: var(--monitor-radius);
+    box-shadow: 0 24px 80px rgb(0 0 0 / 45%);
+}
+
+.retention-dialog::backdrop { background: rgb(0 0 0 / 66%); }
+.retention-dialog > * { margin-right: 22px; margin-left: 22px; }
+
+.retention-dialog-head {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--monitor-space-4);
+    justify-content: space-between;
+    margin: 0;
+    padding: 20px 22px 14px;
+    border-bottom: 1px solid var(--monitor-border);
+}
+
+.retention-dialog-head h2,
+.retention-preview h3,
+.retention-result h3,
+.retention-current-status h4,
+.retention-preview h4,
+.retention-result h4 { margin: 0 0 var(--monitor-space-2); color: var(--monitor-ink); }
+.retention-dialog-head p { margin: 0; color: var(--monitor-muted); }
+.retention-close { flex: none; width: 32px; min-width: 32px; padding: 0; font-size: 20px; }
+
+.retention-target,
+.retention-current-status,
+.retention-operation,
+.retention-field,
+.retention-preview,
+.retention-result,
+.retention-dialog-actions,
+.retention-live,
+.retention-error { margin-top: var(--monitor-space-4); margin-bottom: var(--monitor-space-4); }
+
+.retention-operation {
+    padding: var(--monitor-space-4);
+    border: 1px solid var(--monitor-border);
+    border-radius: var(--monitor-radius-sm);
+}
+
+.retention-operation legend,
+.retention-field > label { color: var(--monitor-ink-subtle); font-weight: var(--monitor-weight-semibold); }
+
+.retention-operation-standard,
+.retention-operation-destructive {
+    display: flex;
+    gap: var(--monitor-space-4);
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.retention-operation label,
+.retention-delete-choice {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--monitor-space-2);
+    min-height: 32px;
+    cursor: pointer;
+}
+
+.retention-operation-destructive {
+    justify-content: space-between;
+    margin-top: var(--monitor-space-4);
+    padding-top: var(--monitor-space-4);
+    border-top: 1px solid var(--monitor-error);
+}
+
+.retention-delete-choice {
+    padding: var(--monitor-space-1) var(--monitor-space-3);
+    color: var(--monitor-error);
+    border: 1px solid var(--monitor-error);
+    border-radius: var(--monitor-radius-xs);
+    font-weight: var(--monitor-weight-semibold);
+}
+
+.retention-warning { color: var(--monitor-warning); font-weight: var(--monitor-weight-semibold); }
+.retention-field { display: grid; gap: var(--monitor-space-1); }
+.retention-field select, .retention-field textarea { width: 100%; max-width: 640px; }
+
+.retention-field textarea {
+    min-height: 74px;
+    padding: var(--monitor-space-2);
+    resize: vertical;
+    color: var(--monitor-ink);
+    background: var(--monitor-surface-input);
+    border: 1px solid var(--monitor-border);
+    border-radius: var(--monitor-radius-xs);
+    font: inherit;
+}
+
+.retention-help { color: var(--monitor-muted); font-size: var(--monitor-text-sm); }
+
+.retention-dialog-actions,
+.retention-final-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--monitor-space-3);
+}
+
+.retention-preview,
+.retention-result {
+    padding: var(--monitor-space-4);
+    background: var(--monitor-surface-alt);
+    border: 1px solid var(--monitor-border-strong);
+    border-radius: var(--monitor-radius-sm);
+}
+
+.retention-preview h4, .retention-result h4 { margin-top: var(--monitor-space-5); font-size: var(--monitor-text-base); }
+.retention-details, .retention-table-wrapper { margin-bottom: var(--monitor-space-3); }
+.retention-table-wrapper { max-height: 320px; }
+
+.retention-final-actions {
+    align-items: flex-end;
+    justify-content: space-between;
+    margin-top: var(--monitor-space-5);
+    padding-top: var(--monitor-space-4);
+    border-top: 1px solid var(--monitor-border-strong);
+}
+
+.retention-live { min-height: 1.5em; color: var(--monitor-ink-subtle); }
+
+.retention-error {
+    padding: var(--monitor-space-3);
+    color: var(--monitor-error);
+    background: var(--monitor-error-bg);
+    border: 1px solid var(--monitor-error);
+    border-radius: var(--monitor-radius-xs);
+}
+
+.retention-diagnostics-help { padding: 0 18px; }
+
+@media (max-width: 640px) {
+    .retention-dialog > * { margin-right: 14px; margin-left: 14px; }
+    .retention-dialog-head { margin: 0; padding-right: 14px; padding-left: 14px; }
+    .retention-final-actions { align-items: stretch; flex-direction: column; }
+}

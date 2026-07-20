@@ -220,6 +220,21 @@ test("workspace HTML contains the sidebar groups, four-tab shell, review cards, 
     assert.doesNotMatch(html, /innerHTML/);
 });
 
+test("Session workspace offers an exact navigation-only Local Monitor retention link", () => {
+    const html = renderWorkspaceHtml({
+        monitorUrl: "http://127.0.0.1:4320",
+        healthState: "ready",
+        token: "synthetic-token",
+    });
+
+    assert.match(html, /data-session-action/);
+    assert.match(html, /Manage retention/);
+    assert.match(html, /monitorUrl\+"\/retention\/session\/"\+encodeURIComponent\(session\.session_id\)/);
+    assert.match(html, /rel="noopener"/);
+    assert.doesNotMatch(html, /\/api\/retention/);
+    assert.doesNotMatch(html, /retention\/session\/[^"\n]*token/);
+});
+
 test("Improve shows an honest unavailable state for an unbound session and contains no mutation controls", () => {
     const html = renderWorkspaceHtml({
         monitorUrl: "http://127.0.0.1:4320",

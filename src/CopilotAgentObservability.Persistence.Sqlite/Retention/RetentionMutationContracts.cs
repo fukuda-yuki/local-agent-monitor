@@ -163,6 +163,8 @@ public static class RetentionMutationConstants
 {
     public const int SchemaVersion = 1;
     public const int TargetItemLimit = 100;
+    public const int HistoryPageDefault = 100;
+    public const int HistoryPageMaximum = 100;
     public const int IdempotencyLifetimeDays = 365;
     public const string ActorLabel = "local-user";
     public const string EventType = "retention_mutation";

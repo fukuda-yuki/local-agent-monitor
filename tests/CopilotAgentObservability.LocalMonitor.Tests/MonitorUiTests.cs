@@ -11,7 +11,7 @@ public class MonitorUiTests
         EnsureSchema(temp);
         await using var host = await StartHostAsync(temp);
 
-        foreach (var path in new[] { "/", "/traces", "/diagnostics" })
+        foreach (var path in new[] { "/", "/traces", "/diagnostics", "/retention/session/11111111-1111-7111-8111-111111111111", "/retention/item/item.synthetic" })
         {
             var response = await host.Client.GetAsync(path);
             var body = await response.Content.ReadAsStringAsync();
@@ -77,8 +77,82 @@ public class MonitorUiTests
         Assert.Contains("id=\"source-diagnostics\"", diagnostics);
         Assert.Contains("ソース互換性", diagnostics);
         Assert.Contains("/monitor-diagnostics.js", diagnostics);
+        Assert.Contains("id=\"retention-diagnostics\"", diagnostics);
+        Assert.Contains("id=\"retention-diagnostics-items\"", diagnostics);
+        Assert.Contains("/monitor-retention.js", diagnostics);
         Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", diagnostics);
         Assert.DoesNotContain("leak-marker@example.com", diagnostics);
+    }
+
+    [Fact]
+    public async Task RetentionPage_RendersExactTargetAccessibleDialogWithoutPublishingPreview()
+    {
+        using var temp = new MonitorTempDirectory();
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp);
+
+        const string targetId = "11111111-1111-7111-8111-111111111111";
+        var response = await host.Client.GetAsync($"/retention/session/{targetId}");
+        var page = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Contains("id=\"retention-root\"", page);
+        Assert.Contains("data-target-kind=\"session\"", page);
+        Assert.Contains($"data-target-id=\"{targetId}\"", page);
+        Assert.Contains("<dialog", page);
+        Assert.Contains("aria-labelledby=\"retention-dialog-title\"", page);
+        Assert.Contains("aria-describedby=\"retention-dialog-description\"", page);
+        Assert.Contains("id=\"retention-operation\"", page);
+        Assert.Contains("id=\"retention-reason\"", page);
+        Assert.Contains("id=\"retention-comment\"", page);
+        Assert.Contains("id=\"retention-preview\"", page);
+        Assert.Contains("id=\"retention-confirm\"", page);
+        Assert.Contains("id=\"retention-live\"", page);
+        Assert.Contains("/monitor-retention.js", page);
+        Assert.DoesNotContain("confirmation_token", page);
+        Assert.DoesNotContain("autofocus", page);
+        Assert.True(page.IndexOf("value=\"delete_now\"", StringComparison.Ordinal) > page.IndexOf("value=\"unpin\"", StringComparison.Ordinal));
+        foreach (var reasonCode in new[] { "research_needed", "review_complete", "privacy_request", "data_minimization", "test_cleanup", "operator_correction", "other_local_reason" })
+        {
+            Assert.Contains($"value=\"{reasonCode}\"", page);
+        }
+    }
+
+    [Theory]
+    [InlineData("/retention/trace/11111111-1111-7111-8111-111111111111")]
+    [InlineData("/retention/session/not-a-session-id")]
+    public async Task RetentionPage_RejectsUnsupportedOrInvalidTargets(string path)
+    {
+        using var temp = new MonitorTempDirectory();
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp);
+
+        var response = await host.Client.GetAsync(path);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("Sec-Fetch-Site", "cross-site")]
+    [InlineData("Origin", "https://foreign.example")]
+    public async Task RetentionPage_RejectsCrossSiteRequestsBeforeRenderingActions(string header, string value)
+    {
+        using var temp = new MonitorTempDirectory();
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp);
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/retention/session/11111111-1111-7111-8111-111111111111");
+        request.Headers.TryAddWithoutValidation(header, value);
+
+        using var response = await host.Client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("{\"error\":\"cross_origin_forbidden\"}", body);
+        Assert.DoesNotContain("retention-dialog", body);
+        Assert.DoesNotContain("retention-confirm", body);
     }
 
     [Fact]
@@ -189,6 +263,88 @@ public class MonitorUiTests
     }
 
     [Fact]
+    public async Task RetentionScript_UsesAuthoritativeOneShotWorkflowWithoutLeaksOrAutomaticRetry()
+    {
+        using var temp = new MonitorTempDirectory();
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp);
+
+        var script = await host.Client.GetStringAsync("/monitor-retention.js");
+
+        foreach (var endpoint in new[]
+        {
+            "/api/retention/v1/status",
+            "/api/retention/v1/sessions/",
+            "/api/retention/v1/items/",
+            "/api/retention/v1/previews",
+            "/api/retention/v1/confirmations",
+            "/api/retention/v1/mutations",
+        })
+        {
+            Assert.Contains(endpoint, script);
+        }
+
+        Assert.Contains("x-monitor-csrf", script);
+        Assert.Contains("Idempotency-Key", script);
+        Assert.Contains("crypto.getRandomValues", script);
+        Assert.Contains("rid1_", script);
+        Assert.Contains("confirmationToken = null", script);
+        Assert.Contains("finally", script);
+        Assert.Contains("confirmation_consumed", script);
+        Assert.Contains("response.headers.get(\"Location\")", script);
+        Assert.Contains("refreshStatusAndPreviewOnce", script);
+        Assert.Contains("if (!operation || !reason.value || commentLength > 256)", script);
+        Assert.Contains("if (recoveryUsed) return", script);
+        Assert.Contains("!location.startsWith(\"/\") || location.startsWith(\"//\")", script);
+        Assert.Contains("addEventListener(\"pagehide\"", script);
+        Assert.Contains("addEventListener(\"cancel\"", script);
+        Assert.Contains("showModal()", script);
+        Assert.Contains("textContent", script);
+        Assert.Contains("createElement", script);
+        Assert.Contains("invalidatePreview", script);
+        Assert.Contains("previewSurface.hidden = true", script);
+        Assert.Contains("operationControl.addEventListener(\"change\", invalidatePreview)", script);
+        Assert.Contains("reason.addEventListener(\"change\", invalidatePreview)", script);
+        Assert.Contains("comment.addEventListener(\"input\", invalidatePreview)", script);
+        Assert.Contains("selectionRevision", script);
+        Assert.Contains("resolveConsumedLocation", script);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(script, "await resolveConsumedLocation\\(failure\\)").Count);
+        Assert.Contains("renderCommittedCore(committed)", script);
+        Assert.Contains("await loadCommittedSupplements(committed)", script);
+        Assert.True(script.IndexOf("renderCommittedCore(committed)", StringComparison.Ordinal) < script.IndexOf("await loadCommittedSupplements(committed)", StringComparison.Ordinal));
+        var committedFunction = script[script.IndexOf("async function renderCommitted(committed)", StringComparison.Ordinal)..script.IndexOf("async function refreshStatusAndPreviewOnce", StringComparison.Ordinal)];
+        Assert.DoesNotContain("refreshStatusAndPreviewOnce", committedFunction);
+        Assert.Contains("Promise.allSettled", committedFunction);
+        Assert.Contains("function committedStatus(committed)", script);
+        Assert.Contains("return committed.status || (committed.idempotent_replay ? \"replayed\" : \"committed\")", script);
+        Assert.Contains("operationStatus.textContent = committedStatus(committed)", script);
+        Assert.Contains("`/api/retention/v1/mutations/${encodeURIComponent(committed.operation_id)}`", script);
+        Assert.Contains("operationStatus.textContent = committedStatus(authoritativeStatus)", script);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(script, "operationStatus\\.textContent =").Count);
+        Assert.Contains("Promise.allSettled([operationSupplement, targetSupplement, workerSupplement])", committedFunction);
+        var operationSupplement = committedFunction[committedFunction.IndexOf("const operationSupplement", StringComparison.Ordinal)..committedFunction.IndexOf("const targetSupplement", StringComparison.Ordinal)];
+        Assert.Contains("catch (failure)", operationSupplement);
+        Assert.DoesNotContain("refreshStatusAndPreviewOnce", operationSupplement);
+        Assert.DoesNotContain("operationStatus.textContent =", operationSupplement[operationSupplement.IndexOf("catch (failure)", StringComparison.Ordinal)..]);
+        foreach (var previewField in new[]
+        {
+            "target_item_count", "store_kind_summary", "current_state", "target_items", "capture_expiry_policy_summary",
+            "retained_metadata_impact", "active_cleanup_exclusion_conflicts", "backup_non_purge_warning_code",
+            "expected_state_version", "target_item_set_digest", "preview_digest", "confirmation_expires_at",
+        })
+        {
+            Assert.Contains(previewField, script);
+        }
+
+        Assert.Matches("(?s)confirmationToken = \\(await requestJson\\(\\\"/api/retention/v1/confirmations\\\".*?\\)\\)\\.confirmation_token;.*?requestJson\\(\\\"/api/retention/v1/mutations\\\".*?finally \\{\\s*confirmationToken = null;", script);
+
+        foreach (var forbidden in new[] { "innerHTML", "localStorage", "sessionStorage", "console.", "setInterval", "setTimeout", "/api/session-workspace", "window.location.search" })
+        {
+            Assert.DoesNotContain(forbidden, script);
+        }
+    }
+
+    [Fact]
     public async Task MonitorCss_IsServed()
     {
         using var temp = new MonitorTempDirectory();
@@ -196,8 +352,12 @@ public class MonitorUiTests
         await using var host = await StartHostAsync(temp);
 
         var response = await host.Client.GetAsync("/monitor.css");
+        var css = await response.Content.ReadAsStringAsync();
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains(".retention-dialog", css);
+        Assert.Contains(".retention-operation-destructive", css);
+        Assert.Contains(".retention-warning", css);
     }
 
     [Fact]

@@ -197,5 +197,30 @@
             </table>
         </div>
     </section>
+
+    <section class="panel" id="retention-diagnostics">
+        <div class="panel-head">
+            <span class="panel-title">保持と削除の状態</span>
+            <span class="panel-meta" id="retention-diagnostics-summary">sanitized metadata の固定一覧</span>
+        </div>
+        <p class="monitor-subtle retention-diagnostics-help">対象 ID を選ぶと、その項目だけの保持管理を開きます。近似検索や自由入力は行いません。</p>
+        <div class="monitor-table-wrapper">
+            <table class="monitor-table">
+                <thead>
+                    <tr>
+                        <th>正確な項目 ID</th>
+                        <th>保存先種別</th>
+                        <th>状態</th>
+                        <th>期限</th>
+                        <th>試行</th>
+                        <th>エラー</th>
+                    </tr>
+                </thead>
+                <tbody id="retention-diagnostics-items"></tbody>
+            </table>
+        </div>
+        <p class="retention-error" id="retention-diagnostics-error" role="alert" hidden></p>
+    </section>
 </section>
 <script src="/monitor-diagnostics.js" defer></script>
+<script src="/monitor-retention.js" defer></script>
