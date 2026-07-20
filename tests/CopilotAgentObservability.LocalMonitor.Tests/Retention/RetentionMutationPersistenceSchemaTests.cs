@@ -54,6 +54,7 @@ public sealed class RetentionMutationPersistenceSchemaTests
                     "expected_version", "result_version", "target_item_set_digest", "completion_code", "error_code"
                 ],
                 auditColumns);
+            Assert.Contains("last_replayed_at", Columns(path, "retention_operation_receipts"), StringComparer.Ordinal);
         }
         finally
         {

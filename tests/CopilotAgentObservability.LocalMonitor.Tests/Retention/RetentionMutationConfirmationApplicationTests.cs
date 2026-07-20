@@ -247,6 +247,87 @@ public sealed class RetentionMutationConfirmationApplicationTests
     }
 
     [Fact]
+    public void ReadOperationStatus_ReportsReplayedAfterReplayBookkeeping()
+    {
+        using var fixture = Fixture.Create();
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+        var request = new RetentionMutationConfirmRequest(confirmation.ConfirmationToken,
+            RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem, RetentionMutationTargetKind.Item, fixture.ItemId);
+
+        var first = fixture.Application.ExecuteMutation(request, fixture.WorkflowKey(40));
+        var replay = fixture.Application.ExecuteMutation(request, fixture.WorkflowKey(40));
+        var status = fixture.Application.ReadOperationStatus(first.Result!.OperationId);
+
+        Assert.Equal(RetentionMutationResultCodes.Replayed, replay.Result!.ResultCode);
+        Assert.True(replay.Result.IdempotentReplay);
+        var response = Assert.IsType<RetentionMutationStatusResponse>(status.Status);
+        Assert.Equal(RetentionMutationResultStatus.Replayed, response.Status);
+        Assert.Equal(RetentionMutationResultCodes.Replayed, response.ResultCode);
+        Assert.True(response.IdempotentReplay);
+        Assert.Equal(first.Result.OperationId, response.OperationId);
+        Assert.NotNull(fixture.ScalarText("SELECT last_replayed_at FROM retention_operation_receipts WHERE operation_id=$operation;",
+            ("$operation", first.Result.OperationId)));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+    }
+
+    [Theory]
+    [InlineData("invalid-token", RetentionMutationErrorCodes.ConfirmationInvalid)]
+    [InlineData("consumed-token", RetentionMutationErrorCodes.ConfirmationConsumed)]
+    [InlineData("expired-token", RetentionMutationErrorCodes.ConfirmationExpired)]
+    [InlineData("binding-echo-mismatch", RetentionMutationErrorCodes.ConfirmationBindingMismatch)]
+    [InlineData("retention-drift", RetentionMutationErrorCodes.ConfirmationRetentionChanged)]
+    [InlineData("conflict-drift", RetentionMutationErrorCodes.ConfirmationConflictChanged)]
+    public void ExecuteMutation_MutationTimeOrderChecksRunThroughApplicationWithoutStateMutation(string scenario, string expectedCode)
+    {
+        using var fixture = Fixture.Create();
+        var workflowKey = fixture.WorkflowKey(40);
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), workflowKey).Confirmation);
+        var request = new RetentionMutationConfirmRequest(confirmation.ConfirmationToken,
+            RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem, RetentionMutationTargetKind.Item, fixture.ItemId);
+
+        switch (scenario)
+        {
+            case "invalid-token":
+                request = request with { ConfirmationToken = "rt90v1_invalid" };
+                break;
+            case "consumed-token":
+                Assert.Equal(RetentionConfirmationConsumptionDisposition.Consumed,
+                    fixture.Store.ConsumeConfirmation(confirmation.ConfirmationToken).Disposition);
+                break;
+            case "expired-token":
+                fixture.Time.Advance(RetentionMutationConstants.ConfirmationLifetime);
+                break;
+            case "binding-echo-mismatch":
+                request = request with { Operation = RetentionMutationOperation.Unpin };
+                break;
+            case "retention-drift":
+                fixture.SetRetentionBasis(Now.AddDays(-2), Now.AddDays(30), "raw-default-90d", 1);
+                break;
+            case "conflict-drift":
+                fixture.InsertReadLease();
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(scenario), scenario, null);
+        }
+
+        var result = fixture.Application.ExecuteMutation(request, workflowKey);
+
+        Assert.Equal(expectedCode, result.ErrorCode);
+        Assert.Null(result.Result);
+        Assert.Equal("expiring", fixture.ScalarText("SELECT state FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(1L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(scenario == "consumed-token" ? 1L : 0L,
+            fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings WHERE consumed_at IS NOT NULL;"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_mutation_idempotency WHERE step='mutation';"));
+    }
+
+    [Fact]
     public void ExecuteMutation_DriftReturnsFirstPinnedCheckWithoutMutation()
     {
         var cases = new (Action<Fixture> Mutate, string Code)[]
@@ -531,6 +612,7 @@ public sealed class RetentionMutationConfirmationApplicationTests
         Assert.Equal(RetentionMutationReasonCodes.ResearchNeeded, audit.ReasonCode);
         Assert.Equal("  needs review  ", audit.Comment);
         Assert.Equal(workflowKey, audit.RequestIdempotencyKey);
+        Assert.Equal(fixture.SessionId, audit.SessionId);
     }
 
     [Fact]
@@ -753,6 +835,12 @@ public sealed class RetentionMutationConfirmationApplicationTests
             ("$state", state), ("$captured", capturedAt.ToString("O", CultureInfo.InvariantCulture)),
             ("$expires", expiresAt.ToString("O", CultureInfo.InvariantCulture)), ("$policy", policyId),
             ("$version", policyVersion), ("$item", itemId));
+
+        internal void SetRetentionBasis(DateTimeOffset capturedAt, DateTimeOffset expiresAt, string policyId, int policyVersion) => Execute(
+            "UPDATE retention_items SET captured_at=$captured,expires_at=$expires,policy_id=$policy,policy_version=$version WHERE item_id=$item;",
+            ("$captured", capturedAt.ToString("O", CultureInfo.InvariantCulture)),
+            ("$expires", expiresAt.ToString("O", CultureInfo.InvariantCulture)), ("$policy", policyId),
+            ("$version", policyVersion), ("$item", ItemId));
 
         internal RetentionOwnershipKey ItemOwnershipKey()
         {

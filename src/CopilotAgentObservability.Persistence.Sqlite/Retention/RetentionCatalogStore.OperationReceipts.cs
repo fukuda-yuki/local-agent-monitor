@@ -22,10 +22,55 @@ public sealed partial class RetentionCatalogStore
         if (string.IsNullOrWhiteSpace(operationId)) return null;
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT result_json FROM retention_operation_receipts WHERE operation_id=$operation_id;";
+        command.CommandText = "SELECT result_json,last_replayed_at FROM retention_operation_receipts WHERE operation_id=$operation_id;";
         command.Parameters.AddWithValue("$operation_id", operationId);
-        var value = command.ExecuteScalar() as string;
-        return value is null ? null : JsonSerializer.Deserialize<RetentionMutationResult>(value);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+        var result = JsonSerializer.Deserialize<RetentionMutationResult>(reader.GetString(0));
+        return result is null || reader.IsDBNull(1)
+            ? result
+            : result with { ResultCode = RetentionMutationResultCodes.Replayed, IdempotentReplay = true };
+    }
+
+    internal void MarkOperationReceiptReplayedWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string operationId,
+        DateTimeOffset replayedAt)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "UPDATE retention_operation_receipts SET last_replayed_at=$last_replayed_at WHERE operation_id=$operation_id;";
+        command.Parameters.AddWithValue("$last_replayed_at", replayedAt.ToUniversalTime().ToString("O"));
+        command.Parameters.AddWithValue("$operation_id", operationId);
+        if (command.ExecuteNonQuery() != 1)
+            throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
+    }
+
+    internal string? ReadSessionIdForItemWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string itemId)
+    {
+        using (var kind = connection.CreateCommand())
+        {
+            kind.Transaction = transaction;
+            kind.CommandText = "SELECT store_kind FROM retention_items WHERE item_id=$item_id;";
+            kind.Parameters.AddWithValue("$item_id", itemId);
+            if (!string.Equals(kind.ExecuteScalar() as string, "session_event_content", StringComparison.Ordinal))
+                return null;
+        }
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT e.session_id
+            FROM retention_items i
+            JOIN session_events e ON e.event_id=i.source_item_id
+            WHERE i.item_id=$item_id AND i.store_kind='session_event_content';
+            """;
+        command.Parameters.AddWithValue("$item_id", itemId);
+        return command.ExecuteScalar() as string;
     }
 
     internal void InsertOperationReceiptWithinTransaction(

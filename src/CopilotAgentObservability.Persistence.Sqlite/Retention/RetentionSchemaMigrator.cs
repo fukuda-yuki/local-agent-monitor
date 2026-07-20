@@ -213,9 +213,12 @@ internal static class RetentionSchemaMigrator
                 result_version TEXT NOT NULL,
                 target_item_set_digest TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                completed_at TEXT NOT NULL
+                completed_at TEXT NOT NULL,
+                last_replayed_at TEXT NULL
             );
             """);
+        if (!ColumnExists(connection, transaction, "retention_operation_receipts", "last_replayed_at"))
+            Execute(connection, transaction, "ALTER TABLE retention_operation_receipts ADD COLUMN last_replayed_at TEXT NULL;");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_operation_receipts_target ON retention_operation_receipts(target_kind, target_id, operation_id);");
         Execute(connection, transaction, """
             CREATE TABLE IF NOT EXISTS retention_audit_events (

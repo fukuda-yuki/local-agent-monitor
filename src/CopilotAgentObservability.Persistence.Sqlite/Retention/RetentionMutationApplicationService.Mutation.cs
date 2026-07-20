@@ -23,6 +23,14 @@ internal sealed partial class RetentionMutationApplicationService
             FailureJson(RetentionMutationErrorCodes.RequestInvalid),
             null);
         using var connection = catalog.OpenMutationConnection();
+        try
+        {
+            mutationCheckpoint?.Invoke("before_transaction");
+        }
+        catch
+        {
+            return new(null, RetentionMutationErrorCodes.MutationTransactionFailed);
+        }
         using var transaction = catalog.BeginMutationTransaction(connection);
         try
         {
@@ -37,8 +45,11 @@ internal sealed partial class RetentionMutationApplicationService
             var lookup = catalog.LookupIdempotencyWithinTransaction(connection, transaction, lookupRequest);
             if (lookup is not null)
             {
+                var replay = ReplayOrFailure(lookup);
+                if (lookup.Disposition == RetentionIdempotencyDisposition.Replayed && replay.Result is { } replayedResult)
+                    catalog.MarkOperationReceiptReplayedWithinTransaction(connection, transaction, replayedResult.OperationId, timeProvider.GetUtcNow().ToUniversalTime());
                 transaction.Commit();
-                return ReplayOrFailure(lookup);
+                return replay;
             }
 
             var now = timeProvider.GetUtcNow().ToUniversalTime();
@@ -117,17 +128,19 @@ internal sealed partial class RetentionMutationApplicationService
             var operationId = operationIdGenerator();
             var completedAt = now;
             var finalItems = new List<RetentionPreviewItem>(transitions.Length);
+            var stateUpdateIndex = 0;
             foreach (var transition in transitions)
             {
-                finalItems.Add(ApplyTransition(connection, transaction, transition.Item, transition.Evaluation, binding.Operation, now));
+                finalItems.Add(ApplyTransition(connection, transaction, transition.Item, transition.Evaluation, binding.Operation, now,
+                    () => $"state_update_{++stateUpdateIndex}"));
                 mutationCheckpoint?.Invoke("state_mutated");
             }
 
             var consumed = catalog.TryConsumeConfirmationWithinTransaction(connection, transaction, request.ConfirmationToken);
             if (consumed.Disposition != RetentionConfirmationConsumptionDisposition.Consumed || consumed.Binding is null)
                 throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
-            catalog.SetConfirmationOperationIdWithinTransaction(connection, transaction, binding.ConfirmationId, operationId);
             mutationCheckpoint?.Invoke("token_consumed");
+            catalog.SetConfirmationOperationIdWithinTransaction(connection, transaction, binding.ConfirmationId, operationId);
 
             var resultVector = catalog.MaterializeMutationVersionVectorWithinTransaction(connection, transaction, itemIds);
             var completionCode = ResolveCompletionCode(binding.Operation, transitions);
@@ -157,7 +170,9 @@ internal sealed partial class RetentionMutationApplicationService
                 RetentionMutationConstants.EventType,
                 binding.TargetKind,
                 binding.TargetId,
-                binding.TargetKind == RetentionMutationTargetKind.Session ? binding.TargetId : null,
+                binding.TargetKind == RetentionMutationTargetKind.Session
+                    ? binding.TargetId
+                    : catalog.ReadSessionIdForItemWithinTransaction(connection, transaction, binding.TargetId),
                 completedAt,
                 RetentionMutationConstants.ActorLabel,
                 binding.Operation,
@@ -279,7 +294,8 @@ internal sealed partial class RetentionMutationApplicationService
         RetentionPreviewItem item,
         RetentionMutationTransitionEvaluation evaluation,
         RetentionMutationOperation operation,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        Func<string> stateUpdateCheckpoint)
     {
         var state = item.State;
         var expiry = item.ExpiresAt ?? throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
@@ -292,6 +308,9 @@ internal sealed partial class RetentionMutationApplicationService
                 ? RetentionUnpinExpiryCalculator.Recalculate(item.CapturedAt ?? throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed), item.PolicyId, item.PolicyVersion)
                 : expiry;
             ExecuteTransition(connection, transaction, item.ItemId, revision, state, next, nextExpiry, operation, now);
+            mutationCheckpoint?.Invoke(stateUpdateCheckpoint());
+            if (next == RetentionItemLifecycle.ExpiredPendingDeletion)
+                mutationCheckpoint?.Invoke("denial_write");
             state = next;
             expiry = nextExpiry;
             revision++;
@@ -342,9 +361,6 @@ internal sealed partial class RetentionMutationApplicationService
         command.Parameters.AddWithValue("$expires", Timestamp(expiry));
         if (command.ExecuteNonQuery() != 1)
             throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
-        mutationCheckpoint?.Invoke("state_update");
-        if (to == RetentionItemLifecycle.ExpiredPendingDeletion)
-            mutationCheckpoint?.Invoke("denial_write");
     }
 
     private static string Timestamp(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
