@@ -23,7 +23,9 @@ public sealed class RetentionConfirmationBindingPersistenceTests
         Assert.Equal(fixture.PreviewCreatedAt.Add(RetentionMutationConstants.ConfirmationLifetime), binding.ConfirmationExpiresAt);
         Assert.Equal(SHA256.HashData(Encoding.ASCII.GetBytes(request.ConfirmationToken)), binding.TokenSha256);
         Assert.Equal(16, binding.Nonce.Length);
-        Assert.DoesNotContain(request.ConfirmationToken, binding.ToString(), StringComparison.Ordinal);
+        Assert.False(
+            binding.ToString().Contains(request.ConfirmationToken, StringComparison.Ordinal),
+            "Plaintext confirmation material reached a persistence carrier.");
         Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings WHERE token_sha256=$hash;", ("$hash", SHA256.HashData(Encoding.ASCII.GetBytes(request.ConfirmationToken)))));
         Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings;"));
     }

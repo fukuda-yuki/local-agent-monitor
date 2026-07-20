@@ -24,10 +24,10 @@ public sealed class RetentionMutationHttpMatrixTests
         var firstToken = await fixture.IssueTokenAsync(preview, workflowKey);
         var secondToken = await fixture.IssueTokenAsync(preview, workflowKey);
 
-        Assert.NotEqual(firstToken, secondToken);
+        Assert.False(string.Equals(firstToken, secondToken, StringComparison.Ordinal), "Confirmation reissue reused prior material.");
         using var oldTokenMutation = await fixture.MutateAsync(firstToken, workflowKey);
         await AssertErrorAsync(oldTokenMutation, HttpStatusCode.Unauthorized, RetentionMutationErrorCodes.ConfirmationInvalid);
-        Assert.DoesNotContain(firstToken, await oldTokenMutation.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        AssertTokenAbsent(await oldTokenMutation.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -41,7 +41,7 @@ public sealed class RetentionMutationHttpMatrixTests
             using var response = await emptyFixture.IssueConfirmationAsync(preview, workflowKey);
 
             await AssertErrorAsync(response, HttpStatusCode.Conflict, RetentionMutationErrorCodes.TargetEmpty);
-            Assert.DoesNotContain(RetentionMutationIdentifierFormats.ConfirmationTokenPrefix, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+            AssertTokenAbsent(await response.Content.ReadAsStringAsync());
         }
 
         await using (var expiredFixture = await Fixture.CreateAsync())
@@ -53,7 +53,7 @@ public sealed class RetentionMutationHttpMatrixTests
             using var response = await expiredFixture.IssueConfirmationAsync(preview, workflowKey);
 
             await AssertErrorAsync(response, HttpStatusCode.Conflict, RetentionMutationErrorCodes.PreviewExpired);
-            Assert.DoesNotContain(RetentionMutationIdentifierFormats.ConfirmationTokenPrefix, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+            AssertTokenAbsent(await response.Content.ReadAsStringAsync());
         }
     }
 
@@ -102,9 +102,9 @@ public sealed class RetentionMutationHttpMatrixTests
 
         using var collision = await fixture.IssueConfirmationAsync(preview, workflowKey);
 
-        Assert.Equal(token, firstToken);
+        Assert.True(string.Equals(token, firstToken, StringComparison.Ordinal), "Injected confirmation material was not issued.");
         await AssertErrorAsync(collision, HttpStatusCode.ServiceUnavailable, RetentionMutationErrorCodes.ConfirmationGenerationFailed);
-        Assert.DoesNotContain(token, await collision.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        AssertTokenAbsent(await collision.Content.ReadAsStringAsync(), token);
     }
 
     [Theory]
@@ -179,7 +179,7 @@ public sealed class RetentionMutationHttpMatrixTests
         using var response = await fixture.MutateAsync(token, workflowKey, operation);
 
         await AssertErrorAsync(response, HttpStatusCode.Conflict, expectedCode);
-        Assert.DoesNotContain(token, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        AssertTokenAbsent(await response.Content.ReadAsStringAsync(), token);
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
     }
@@ -199,7 +199,7 @@ public sealed class RetentionMutationHttpMatrixTests
         using var response = await fixture.MutateAsync(token, workflowKey);
 
         await AssertErrorAsync(response, HttpStatusCode.ServiceUnavailable, RetentionMutationErrorCodes.MutationTransactionFailed);
-        Assert.DoesNotContain(token, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        AssertTokenAbsent(await response.Content.ReadAsStringAsync(), token);
         Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_items WHERE state='expiring' AND revision=1;"));
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings WHERE consumed_at IS NOT NULL;"));
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
@@ -211,14 +211,11 @@ public sealed class RetentionMutationHttpMatrixTests
     {
         await using var fixture = await Fixture.CreateAsync();
         var workflowKey = fixture.WorkflowKey(81);
-        var token = RetentionMutationToken.Create(
-            Enumerable.Repeat((byte)0x55, RetentionMutationIdentifierFormats.NonceByteLength).ToArray(),
-            Enumerable.Repeat((byte)0x66, RetentionMutationIdentifierFormats.SecretByteLength).ToArray());
         var posts = new[]
         {
             (Path: "/api/retention/v1/previews", Body: Fixture.PreviewJson(fixture.SessionId)),
             (Path: "/api/retention/v1/confirmations", Body: $"{{\"preview_id\":\"{RetentionMutationIdentifiers.CreatePreviewId(new byte[16])}\",\"preview_digest\":\"sha256-{new string('0', 64)}\"}}"),
-            (Path: "/api/retention/v1/mutations", Body: $"{{\"confirmation_token\":\"{token}\",\"operation\":\"pin\",\"scope\":\"session_items\",\"target_kind\":\"session\",\"target_id\":\"{fixture.SessionId}\"}}")
+            (Path: "/api/retention/v1/mutations", Body: $"{{\"confirmation_token\":\"rt90v1_invalid\",\"operation\":\"pin\",\"scope\":\"session_items\",\"target_kind\":\"session\",\"target_id\":\"{fixture.SessionId}\"}}")
         };
 
         foreach (var post in posts)
@@ -242,7 +239,9 @@ public sealed class RetentionMutationHttpMatrixTests
                 post.Body[..^1] + ",\"unknown_field\":\"synthetic-secret-marker\"}",
                 workflowKey);
             await AssertErrorAsync(unknownField, HttpStatusCode.BadRequest, RetentionMutationErrorCodes.RequestInvalid);
-            Assert.DoesNotContain("synthetic-secret-marker", await unknownField.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+            Assert.False(
+                (await unknownField.Content.ReadAsStringAsync()).Contains("synthetic-secret-marker", StringComparison.Ordinal),
+                "Unknown request material was reflected in an error response.");
         }
 
         using (var declaredRequest = new HttpRequestMessage(HttpMethod.Post, "/api/retention/v1/previews"))
@@ -269,7 +268,18 @@ public sealed class RetentionMutationHttpMatrixTests
         Assert.Equal(status, response.StatusCode);
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
-        Assert.Equal($"{{\"error\":\"{code}\"}}", await response.Content.ReadAsStringAsync());
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True(
+            string.Equals($"{{\"error\":\"{code}\"}}", body, StringComparison.Ordinal),
+            "Response did not match the fixed retention error contract.");
+    }
+
+    private static void AssertTokenAbsent(string value, string? token = null)
+    {
+        var containsToken = token is null
+            ? value.Contains(RetentionMutationIdentifierFormats.ConfirmationTokenPrefix, StringComparison.Ordinal)
+            : value.Contains(token, StringComparison.Ordinal);
+        Assert.False(containsToken, "Plaintext confirmation material reached a non-issue response.");
     }
 
     private sealed class StreamingContent : HttpContent
@@ -355,7 +365,7 @@ public sealed class RetentionMutationHttpMatrixTests
         {
             using var response = await PostPreviewAsync(workflowKey, operation);
             var body = await response.Content.ReadAsStringAsync();
-            Assert.True(response.IsSuccessStatusCode, $"{response.StatusCode}: {body}");
+            Assert.True(response.IsSuccessStatusCode, "Preview request did not succeed.");
             using var json = JsonDocument.Parse(body);
             return new(
                 json.RootElement.GetProperty("preview_id").GetString()!,
@@ -369,7 +379,7 @@ public sealed class RetentionMutationHttpMatrixTests
         {
             using var response = await IssueConfirmationAsync(preview, workflowKey);
             var body = await response.Content.ReadAsStringAsync();
-            Assert.True(response.IsSuccessStatusCode, $"{response.StatusCode}: {body}");
+            Assert.True(response.IsSuccessStatusCode, "Confirmation issue did not succeed.");
             using var json = JsonDocument.Parse(body);
             return json.RootElement.GetProperty("confirmation_token").GetString()!;
         }

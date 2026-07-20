@@ -77,7 +77,9 @@ public sealed class RetentionFileCaptureCatalogTests
         Assert.Equal(3, snapshot.PlannedMemberCount);
         Assert.Equal(RetentionCaptureMutationDisposition.Applied, reopenedAgain.AdvanceSensitiveBundleCursor(second, 0));
         Assert.DoesNotContain("private-parent", snapshot.ToString(), StringComparison.Ordinal);
-        Assert.DoesNotContain("private-token", snapshot.ToString(), StringComparison.Ordinal);
+        Assert.False(
+            snapshot.ToString().Contains("private-token", StringComparison.Ordinal),
+            "Private capture material reached the catalog snapshot.");
         Assert.Throws<ArgumentOutOfRangeException>(() => reopened.FindIncompleteSensitiveBundles(0));
     }
 

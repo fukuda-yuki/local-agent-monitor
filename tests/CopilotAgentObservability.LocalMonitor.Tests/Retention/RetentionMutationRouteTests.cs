@@ -81,29 +81,30 @@ public sealed class RetentionMutationRouteTests
             "preview_digest", "confirmation_expires_at", "rejection_code");
         Assert.Contains("empty_reason", previewJson.RootElement.EnumerateObject().Select(static property => property.Name));
         Assert.Equal(JsonValueKind.Null, previewJson.RootElement.GetProperty("empty_reason").ValueKind);
-        Assert.DoesNotContain("confirmation_token", previewBody, StringComparison.Ordinal);
+        AssertTokenAbsent(previewBody);
 
         using var storedPreview = await host.Client.GetAsync($"/api/retention/v1/previews/{previewJson.RootElement.GetProperty("preview_id").GetString()}");
         Assert.Equal(HttpStatusCode.OK, storedPreview.StatusCode);
         Assert.Equal("no-store", storedPreview.Headers.CacheControl?.ToString());
-        Assert.Equal(previewBody, await storedPreview.Content.ReadAsStringAsync());
+        Assert.True(
+            string.Equals(previewBody, await storedPreview.Content.ReadAsStringAsync(), StringComparison.Ordinal),
+            "Stored preview replay did not preserve the exact response.");
 
         var confirmationRequest = $"{{\"preview_id\":\"{previewJson.RootElement.GetProperty("preview_id").GetString()}\",\"preview_digest\":\"{previewJson.RootElement.GetProperty("preview_digest").GetString()}\"}}";
         using var confirmation = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/confirmations", confirmationRequest, workflowKey);
-        var confirmationFailureBody = await confirmation.Content.ReadAsStringAsync();
-        Assert.True(confirmation.IsSuccessStatusCode, $"{confirmation.StatusCode}: {confirmationFailureBody}");
+        Assert.True(confirmation.IsSuccessStatusCode, "Confirmation issue did not succeed.");
         AssertNoStore(confirmation);
         var confirmationBody = await confirmation.Content.ReadAsStringAsync();
         using var confirmationJson = JsonDocument.Parse(confirmationBody);
         var token = confirmationJson.RootElement.GetProperty("confirmation_token").GetString()!;
-        Assert.StartsWith("rt90v1_", token, StringComparison.Ordinal);
+        Assert.True(token.StartsWith("rt90v1_", StringComparison.Ordinal), "Confirmation issue returned noncanonical material.");
         Assert.Equal(new[] { "schema_version", "confirmation_id", "confirmation_token", "confirmation_expires_at" }, confirmationJson.RootElement.EnumerateObject().Select(static property => property.Name).ToArray());
 
         using var mutation = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/mutations", $"{{\"confirmation_token\":\"{token}\",\"operation\":\"pin\",\"scope\":\"session_items\",\"target_kind\":\"session\",\"target_id\":\"{sessionId}\"}}", workflowKey);
         Assert.Equal(HttpStatusCode.OK, mutation.StatusCode);
         AssertNoStore(mutation);
         var mutationBody = await mutation.Content.ReadAsStringAsync();
-        Assert.DoesNotContain(token, mutationBody, StringComparison.Ordinal);
+        AssertTokenAbsent(mutationBody, token);
         using var mutationJson = JsonDocument.Parse(mutationBody);
         AssertPropertyNames(mutationJson.RootElement,
             "schema_version", "operation_id", "result_code", "target_kind", "target_id", "operation", "scope", "target_item_count",
@@ -115,8 +116,10 @@ public sealed class RetentionMutationRouteTests
 
         using var consumedRetry = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/confirmations", confirmationRequest, workflowKey);
         await AssertErrorAsync(consumedRetry, HttpStatusCode.Conflict, RetentionMutationErrorCodes.ConfirmationConsumed);
-        Assert.Equal($"/api/retention/v1/mutations/{operationId}", consumedRetry.Headers.Location?.OriginalString);
-        Assert.DoesNotContain(token, await consumedRetry.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.True(
+            string.Equals($"/api/retention/v1/mutations/{operationId}", consumedRetry.Headers.Location?.OriginalString, StringComparison.Ordinal),
+            "Consumed confirmation returned an invalid operation-status location.");
+        AssertTokenAbsent(await consumedRetry.Content.ReadAsStringAsync(), token);
 
         using var status = await host.Client.GetAsync($"/api/retention/v1/mutations/{operationId}");
         Assert.Equal(HttpStatusCode.OK, status.StatusCode);
@@ -137,7 +140,7 @@ public sealed class RetentionMutationRouteTests
             "retry_exhausted", "error_code", "retry_at", "revision", "session_id");
         Assert.Equal("pinned", itemJson.RootElement.GetProperty("pin_state").GetString());
         Assert.Equal(sessionId, itemJson.RootElement.GetProperty("session_id").GetString());
-        Assert.DoesNotContain(token, await host.Client.GetStringAsync($"/api/retention/v1/items/{itemId}"), StringComparison.Ordinal);
+        AssertTokenAbsent(await host.Client.GetStringAsync($"/api/retention/v1/items/{itemId}"), token);
     }
 
     [Fact]
@@ -184,15 +187,17 @@ public sealed class RetentionMutationRouteTests
         using var previewJson = JsonDocument.Parse(previewBody);
         Assert.False(previewJson.RootElement.GetProperty("mutation_allowed").GetBoolean());
         Assert.Equal(RetentionMutationErrorCodes.PinReadDenied, previewJson.RootElement.GetProperty("rejection_code").GetString());
-        Assert.DoesNotContain("rt90v1_", previewBody, StringComparison.Ordinal);
+        AssertTokenAbsent(previewBody);
 
         using var rejection = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/confirmations", $"{{\"preview_id\":\"{previewJson.RootElement.GetProperty("preview_id").GetString()}\",\"preview_digest\":\"{previewJson.RootElement.GetProperty("preview_digest").GetString()}\"}}", workflowKey);
         await AssertErrorAsync(rejection, HttpStatusCode.Conflict, RetentionMutationErrorCodes.PinReadDenied);
-        Assert.DoesNotContain("rt90v1_", await rejection.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        AssertTokenAbsent(await rejection.Content.ReadAsStringAsync());
 
         using var digestMismatch = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/confirmations", $"{{\"preview_id\":\"{previewJson.RootElement.GetProperty("preview_id").GetString()}\",\"preview_digest\":\"sha256-{new string('0', 64)}\"}}", workflowKey);
         await AssertErrorAsync(digestMismatch, HttpStatusCode.Conflict, RetentionMutationErrorCodes.PreviewDigestMismatch);
-        Assert.DoesNotContain(itemId, await digestMismatch.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(
+            (await digestMismatch.Content.ReadAsStringAsync()).Contains(itemId, StringComparison.Ordinal),
+            "Target material was reflected in a digest-mismatch response.");
     }
 
     [Fact]
@@ -206,7 +211,9 @@ public sealed class RetentionMutationRouteTests
 
         using var invalid = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/mutations", $"{{\"confirmation_token\":\"rt90v1_invalid\",\"operation\":\"delete_now\",\"scope\":\"session_items\",\"target_kind\":\"session\",\"target_id\":\"{sessionId}\"}}", WorkflowKey(40));
         await AssertErrorAsync(invalid, HttpStatusCode.Unauthorized, RetentionMutationErrorCodes.ConfirmationInvalid);
-        Assert.DoesNotContain("rt90v1_invalid", await invalid.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.False(
+            (await invalid.Content.ReadAsStringAsync()).Contains("rt90v1_invalid", StringComparison.Ordinal),
+            "Invalid confirmation input was reflected in an error response.");
 
         var workflowKey = WorkflowKey(41);
         using var preview = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/previews", PreviewJson(sessionId, "delete_now"), workflowKey);
@@ -214,8 +221,7 @@ public sealed class RetentionMutationRouteTests
         AssertNoStore(preview);
         using var previewJson = JsonDocument.Parse(await preview.Content.ReadAsStreamAsync());
         using var confirmation = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/confirmations", $"{{\"preview_id\":\"{previewJson.RootElement.GetProperty("preview_id").GetString()}\",\"preview_digest\":\"{previewJson.RootElement.GetProperty("preview_digest").GetString()}\"}}", workflowKey);
-        var confirmationFailureBody = await confirmation.Content.ReadAsStringAsync();
-        Assert.True(confirmation.IsSuccessStatusCode, $"{confirmation.StatusCode}: {confirmationFailureBody}");
+        Assert.True(confirmation.IsSuccessStatusCode, "Confirmation issue did not succeed.");
         AssertNoStore(confirmation);
         using var confirmationJson = JsonDocument.Parse(await confirmation.Content.ReadAsStreamAsync());
         var token = confirmationJson.RootElement.GetProperty("confirmation_token").GetString()!;
@@ -224,7 +230,7 @@ public sealed class RetentionMutationRouteTests
         AssertNoStore(mutation);
         using var mutationJson = JsonDocument.Parse(await mutation.Content.ReadAsStreamAsync());
         Assert.Equal(RetentionMutationErrorCodes.DeleteAlreadyQueued, mutationJson.RootElement.GetProperty("result_code").GetString());
-        Assert.DoesNotContain(token, await mutation.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        AssertTokenAbsent(await mutation.Content.ReadAsStringAsync(), token);
     }
 
     [Fact]
@@ -355,7 +361,7 @@ public sealed class RetentionMutationRouteTests
         using var confirmation = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/confirmations",
             $"{{\"preview_id\":\"{previewJson.RootElement.GetProperty("preview_id").GetString()}\",\"preview_digest\":\"{previewJson.RootElement.GetProperty("preview_digest").GetString()}\"}}", workflowKey);
         var confirmationBody = await confirmation.Content.ReadAsStringAsync();
-        Assert.True(confirmation.StatusCode == HttpStatusCode.OK, $"{confirmation.StatusCode}: {confirmationBody}");
+        Assert.True(confirmation.StatusCode == HttpStatusCode.OK, "Confirmation issue did not succeed.");
         using var confirmationJson = JsonDocument.Parse(confirmationBody);
         return confirmationJson.RootElement.GetProperty("confirmation_token").GetString()!;
     }
@@ -394,7 +400,18 @@ public sealed class RetentionMutationRouteTests
         Assert.Equal(status, response.StatusCode);
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
-        Assert.Equal($"{{\"error\":\"{code}\"}}", await response.Content.ReadAsStringAsync());
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True(
+            string.Equals($"{{\"error\":\"{code}\"}}", body, StringComparison.Ordinal),
+            "Response did not match the fixed retention error contract.");
+    }
+
+    private static void AssertTokenAbsent(string value, string? token = null)
+    {
+        var containsToken = token is null
+            ? value.Contains(RetentionMutationIdentifierFormats.ConfirmationTokenPrefix, StringComparison.Ordinal)
+            : value.Contains(token, StringComparison.Ordinal);
+        Assert.False(containsToken, "Plaintext confirmation material reached a non-issue response.");
     }
 
     private static void AssertNoStore(HttpResponseMessage response) =>

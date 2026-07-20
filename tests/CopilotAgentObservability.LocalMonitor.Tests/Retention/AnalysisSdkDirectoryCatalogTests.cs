@@ -19,7 +19,7 @@ public sealed class AnalysisSdkDirectoryCatalogTests
         Assert.Equal(639200197230000000L, fixture.Scalar<long>("SELECT requested_at_utc_ticks FROM retention_analysis_sdk_directory_reservations WHERE analysis_run_id=7"));
         Assert.False(Directory.Exists(reservation.ChildLocator));
         Assert.DoesNotContain(fixture.Parent, reservation.ToString(), StringComparison.Ordinal);
-        Assert.NotEqual(fixture.RunOwnerToken, reservation.OwnerToken);
+        Assert.False(fixture.RunOwnerToken.SequenceEqual(reservation.OwnerToken), "Fresh ownership material was not generated.");
     }
 
     [Fact]

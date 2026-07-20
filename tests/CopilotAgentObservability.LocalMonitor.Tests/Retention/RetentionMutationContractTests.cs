@@ -309,7 +309,9 @@ public sealed class RetentionMutationContractTests
         Assert.StartsWith(RetentionMutationIdentifierFormats.AuditEventIdPrefix, auditId);
         Assert.StartsWith(RetentionMutationIdentifierFormats.HistoryCursorPrefix, cursor);
         Assert.StartsWith(RetentionMutationIdentifierFormats.WorkflowKeyPrefix, workflowKey);
-        Assert.StartsWith(RetentionMutationIdentifierFormats.ConfirmationTokenPrefix, token);
+        Assert.True(
+            token.StartsWith(RetentionMutationIdentifierFormats.ConfirmationTokenPrefix, StringComparison.Ordinal),
+            "Generated confirmation material was not canonical.");
 
         Assert.True(RetentionMutationIdentifiers.TryParsePreviewId(previewId, out var parsedNonce));
         Assert.Equal(nonce, parsedNonce);

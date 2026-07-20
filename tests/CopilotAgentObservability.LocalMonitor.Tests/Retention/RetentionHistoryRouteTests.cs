@@ -117,9 +117,11 @@ public sealed class RetentionHistoryRouteTests
         using var success = await host.Client.GetAsync($"/api/retention/v1/items/{seeded.ItemIds[0]}/history");
         await AssertSuccessHeadersAsync(success);
         var body = await success.Content.ReadAsStringAsync();
-        Assert.DoesNotContain("RAW_PAYLOAD_MARKER", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("PRIVATE_PATH_MARKER", body, StringComparison.Ordinal);
-        Assert.DoesNotContain(RetentionMutationIdentifierFormats.ConfirmationTokenPrefix, body, StringComparison.Ordinal);
+        Assert.False(body.Contains("RAW_PAYLOAD_MARKER", StringComparison.Ordinal), "Raw marker reached retention history.");
+        Assert.False(body.Contains("PRIVATE_PATH_MARKER", StringComparison.Ordinal), "Path marker reached retention history.");
+        Assert.False(
+            body.Contains(RetentionMutationIdentifierFormats.ConfirmationTokenPrefix, StringComparison.Ordinal),
+            "Plaintext confirmation material reached retention history.");
 
         using var crossSiteRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/retention/v1/items/{seeded.ItemIds[0]}/history");
         crossSiteRequest.Headers.Add("Sec-Fetch-Site", "cross-site");
@@ -130,8 +132,8 @@ public sealed class RetentionHistoryRouteTests
         using var corrupt = await host.Client.GetAsync($"/api/retention/v1/items/{seeded.ItemIds[0]}/history");
         await AssertErrorAsync(corrupt, HttpStatusCode.ServiceUnavailable, RetentionMutationErrorCodes.CatalogUnavailable);
         var corruptBody = await corrupt.Content.ReadAsStringAsync();
-        Assert.DoesNotContain("CREDENTIAL_MARKER", corruptBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("PRIVATE_PATH_MARKER", corruptBody, StringComparison.Ordinal);
+        Assert.False(corruptBody.Contains("CREDENTIAL_MARKER", StringComparison.Ordinal), "Credential marker reached an error response.");
+        Assert.False(corruptBody.Contains("PRIVATE_PATH_MARKER", StringComparison.Ordinal), "Path marker reached an error response.");
     }
 
     private static MonitorTempDirectory NewTemp() => new()
@@ -225,7 +227,10 @@ public sealed class RetentionHistoryRouteTests
         Assert.Equal(status, response.StatusCode);
         Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
-        Assert.Equal($"{{\"error\":\"{error}\"}}", await response.Content.ReadAsStringAsync());
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True(
+            string.Equals($"{{\"error\":\"{error}\"}}", body, StringComparison.Ordinal),
+            "Response did not match the fixed retention error contract.");
     }
 
     private static void AssertPropertyNames(JsonElement value, params string[] expected) =>

@@ -75,7 +75,12 @@ public sealed class RetentionStatusRouteTests
                 Execute(path, "UPDATE retention_items SET item_id='ret-item-0001',policy_id='raw-default-90d',error_code='retention_delete_busy';");
                 Execute(path, $"UPDATE retention_items SET {update} WHERE item_id='ret-item-0001';");
                 using var response = await host.Client.GetAsync("/api/retention/v1/status"); await AssertHeaders(response); var body = await response.Content.ReadAsByteArrayAsync();
-                Assert.Equal(await FixtureAsync("status-unavailable.json"), body); Assert.DoesNotContain("MARKER", System.Text.Encoding.UTF8.GetString(body), StringComparison.Ordinal);
+                Assert.True(
+                    (await FixtureAsync("status-unavailable.json")).SequenceEqual(body),
+                    "Unavailable status did not match the fixed response contract.");
+                Assert.False(
+                    System.Text.Encoding.UTF8.GetString(body).Contains("MARKER", StringComparison.Ordinal),
+                    "Sensitive catalog material reached the status response.");
             }
         }
         finally { Delete(path); }

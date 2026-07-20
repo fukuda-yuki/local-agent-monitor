@@ -651,13 +651,20 @@ public sealed partial class RetentionCatalogStore
     {
         foreach (var kind in new[] { RetentionStoreKind.SessionEventContent, RetentionStoreKind.RawRecord, RetentionStoreKind.AnalysisRunRaw })
         {
+            var sourceBackedCatalogCount = 0L;
             foreach (var key in CatalogKeys(connection, transaction, kind))
             {
-                if (SourceProof(connection, transaction, key) != SourceReceiptProof.Match)
+                var proof = SourceProof(connection, transaction, key);
+                if (proof == SourceReceiptProof.Match)
+                {
+                    sourceBackedCatalogCount++;
+                    continue;
+                }
+                if (proof != SourceReceiptProof.Missing || !IsFinalizedDeletedItem(connection, transaction, key))
                     throw new RetentionMigrationBlockedException();
             }
 
-            if (CatalogCount(connection, transaction, kind) != SourceCount(connection, transaction, kind))
+            if (sourceBackedCatalogCount != SourceCount(connection, transaction, kind))
                 throw new RetentionMigrationBlockedException();
         }
     }
@@ -675,13 +682,26 @@ public sealed partial class RetentionCatalogStore
             yield return new RetentionOwnershipKey(store, kind, reader.GetString(0));
     }
 
-    private static long CatalogCount(SqliteConnection connection, SqliteTransaction transaction, RetentionStoreKind kind)
+    private static bool IsFinalizedDeletedItem(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionOwnershipKey key)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT COUNT(*) FROM retention_items WHERE store_kind=$kind;";
-        command.Parameters.AddWithValue("$kind", RetentionSchemaMigrator.Wire(kind));
-        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+        command.CommandText = """
+            SELECT EXISTS(
+                SELECT 1
+                FROM retention_items i
+                JOIN retention_tombstones t ON t.item_id=i.item_id AND t.deleted_at=i.deleted_at
+                WHERE i.store_instance_id=$store AND i.store_kind=$kind AND i.source_item_id=$source
+                  AND i.state='deleted' AND i.deleted_at IS NOT NULL
+            );
+            """;
+        command.Parameters.AddWithValue("$store", key.StoreInstanceId);
+        command.Parameters.AddWithValue("$kind", RetentionSchemaMigrator.Wire(key.StoreKind));
+        command.Parameters.AddWithValue("$source", key.SourceItemId);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
     private static long SourceCount(SqliteConnection connection, SqliteTransaction transaction, RetentionStoreKind kind)

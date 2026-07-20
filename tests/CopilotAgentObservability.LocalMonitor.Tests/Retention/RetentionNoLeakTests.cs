@@ -61,8 +61,15 @@ public sealed class RetentionNoLeakTests
             new("source-id", CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionStoreKind.RawRecord, "7"), token);
         var forbidden = Convert.ToHexString(token).ToLowerInvariant();
 
-        Assert.DoesNotContain(forbidden, grant.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.False(
+            (grant.ToString() ?? string.Empty).Contains(forbidden, StringComparison.OrdinalIgnoreCase),
+            "Ownership material reached a deletion carrier.");
         Assert.DoesNotContain("source-id", grant.ToString(), StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain(forbidden, CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionAdapterResult.TransientFailure(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionErrorCode.DeleteIoFailed).ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.False(
+            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionAdapterResult
+                .TransientFailure(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionErrorCode.DeleteIoFailed)
+                .ToString()
+                .Contains(forbidden, StringComparison.OrdinalIgnoreCase),
+            "Ownership material reached an adapter result.");
     }
 }

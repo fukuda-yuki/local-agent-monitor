@@ -36,7 +36,9 @@ public sealed class RetentionMutationUiPlaywrightTests
         });
         await Expect(page.Locator("#retention-dialog")).ToBeVisibleAsync();
         await Expect(page.Locator("#retention-dialog-title")).ToBeFocusedAsync();
-        Assert.DoesNotContain(requests, request => request.Url.EndsWith("/api/retention/v1/previews", StringComparison.Ordinal));
+        Assert.False(
+            requests.Any(request => request.Url.EndsWith("/api/retention/v1/previews", StringComparison.Ordinal)),
+            "The browser issued a preview before explicit user input.");
 
         await page.GetByLabel("ピン留め", new PageGetByLabelOptions { Exact = true }).CheckAsync();
         await page.GetByLabel("理由").SelectOptionAsync("research_needed");
@@ -118,9 +120,11 @@ public sealed class RetentionMutationUiPlaywrightTests
         await Expect(page.Locator("input[name='retention-operation']:checked")).ToHaveCountAsync(0);
 
         await page.Keyboard.PressAsync("Enter");
-        Assert.DoesNotContain(requests, request => request.Url.EndsWith("/api/retention/v1/previews", StringComparison.Ordinal)
-            || request.Url.EndsWith("/api/retention/v1/confirmations", StringComparison.Ordinal)
-            || request.Url.EndsWith("/api/retention/v1/mutations", StringComparison.Ordinal));
+        Assert.False(
+            requests.Any(request => request.Url.EndsWith("/api/retention/v1/previews", StringComparison.Ordinal)
+                || request.Url.EndsWith("/api/retention/v1/confirmations", StringComparison.Ordinal)
+                || request.Url.EndsWith("/api/retention/v1/mutations", StringComparison.Ordinal)),
+            "The browser issued a mutation workflow request before explicit user input.");
         await page.Keyboard.PressAsync("Escape");
         await Expect(dialog).ToBeHiddenAsync();
         await Expect(page.Locator("#retention-manage-trigger")).ToBeFocusedAsync();
@@ -169,7 +173,7 @@ public sealed class RetentionMutationUiPlaywrightTests
         await AssertValuesAbsentFromClientStateAsync(page, "confirmation token", token);
         await AssertValuesAbsentFromClientStateAsync(page, "raw/path marker", "RAW_SECRET_MARKER", "PATH_SECRET_MARKER");
         var content = await page.ContentAsync();
-        Assert.DoesNotContain("物理削除が完了", content, StringComparison.Ordinal);
+        Assert.False(content.Contains("物理削除が完了", StringComparison.Ordinal), "The UI claimed physical deletion completion.");
 
         var confirmationCount = requests.Count(request => request.Url.EndsWith("/api/retention/v1/confirmations", StringComparison.Ordinal));
         await page.GetByLabel("ピン留め", new PageGetByLabelOptions { Exact = true }).CheckAsync();
@@ -216,7 +220,9 @@ public sealed class RetentionMutationUiPlaywrightTests
         await page.GetByRole(AriaRole.Button, new() { Name = "この内容で確定" }).ClickAsync();
         var consumed = await consumedTask;
         Assert.Equal(409, consumed.Status);
-        Assert.Equal($"/api/retention/v1/mutations/{operationId}", await consumed.HeaderValueAsync("Location"));
+        Assert.True(
+            string.Equals($"/api/retention/v1/mutations/{operationId}", await consumed.HeaderValueAsync("Location"), StringComparison.Ordinal),
+            "Consumed confirmation returned an invalid operation-status location.");
 
         await Expect(page.Locator("#retention-result")).ToBeVisibleAsync();
         await Expect(page.Locator("#retention-operation-status")).ToHaveTextAsync("committed");
@@ -224,8 +230,10 @@ public sealed class RetentionMutationUiPlaywrightTests
         Assert.Equal(beforeConfirmation + 1, requests.Count(request => request.Url.EndsWith("/api/retention/v1/confirmations", StringComparison.Ordinal)));
         Assert.Equal(beforeMutation, requests.Count(request => request.Url.EndsWith("/api/retention/v1/mutations", StringComparison.Ordinal)));
         Assert.Equal(beforePreview, requests.Count(request => request.Url.EndsWith("/api/retention/v1/previews", StringComparison.Ordinal)));
-        Assert.Single(requests, request => request.Method == "GET"
-            && request.Url.EndsWith($"/api/retention/v1/mutations/{operationId}", StringComparison.Ordinal));
+        Assert.True(
+            requests.Count(request => request.Method == "GET"
+                && request.Url.EndsWith($"/api/retention/v1/mutations/{operationId}", StringComparison.Ordinal)) == 1,
+            "The browser did not follow the consumed operation status exactly once.");
         await AssertValuesAbsentFromClientStateAsync(page, "confirmation token", token);
         Assert.False(requests.Any(request => request.Url.Contains(token, StringComparison.Ordinal)), "A confirmation token appeared in a request URL.");
     }
@@ -269,11 +277,17 @@ public sealed class RetentionMutationUiPlaywrightTests
         await Expect(page.Locator("#retention-live")).ToContainTextAsync("最終確定してください");
 
         Assert.Equal(2, requests.Count(request => request.Url.EndsWith("/api/retention/v1/previews", StringComparison.Ordinal)));
-        Assert.Single(requests, request => request.Url.EndsWith("/api/retention/v1/confirmations", StringComparison.Ordinal));
-        Assert.DoesNotContain(requests, request => request.Url.EndsWith("/api/retention/v1/mutations", StringComparison.Ordinal));
+        Assert.True(
+            requests.Count(request => request.Url.EndsWith("/api/retention/v1/confirmations", StringComparison.Ordinal)) == 1,
+            "The browser did not issue exactly one confirmation request.");
+        Assert.False(
+            requests.Any(request => request.Url.EndsWith("/api/retention/v1/mutations", StringComparison.Ordinal)),
+            "The browser issued a mutation after confirmation failure.");
         Assert.Equal(2, requests.Count(request => request.Method == "GET"
             && request.Url.EndsWith($"/api/retention/v1/sessions/{fixture.SessionId}", StringComparison.Ordinal)));
-        Assert.DoesNotContain("rt90v1_", await page.ContentAsync(), StringComparison.Ordinal);
+        Assert.False(
+            (await page.ContentAsync()).Contains(RetentionMutationIdentifierFormats.ConfirmationTokenPrefix, StringComparison.Ordinal),
+            "Plaintext confirmation material reached the rendered page.");
     }
 
     [Fact(Timeout = 60_000)]
@@ -452,7 +466,9 @@ public sealed class RetentionMutationUiPlaywrightTests
             Assert.True(consumedStatusCalls == (scenario.Stage == UiErrorStage.MutationConsumed ? 1 : 0),
                 $"Unexpected consumed status call count for {scenario.Stage}:{scenario.Code}.");
             await AssertValuesAbsentFromClientStateAsync(page, "confirmation token", token);
-            Assert.Equal("{}|{}", await page.EvaluateAsync<string>("() => JSON.stringify(localStorage) + '|' + JSON.stringify(sessionStorage)"));
+            Assert.True(
+                string.Equals("{}|{}", await page.EvaluateAsync<string>("() => JSON.stringify(localStorage) + '|' + JSON.stringify(sessionStorage)"), StringComparison.Ordinal),
+                "Retention state reached browser storage.");
             await page.CloseAsync();
         }
     }

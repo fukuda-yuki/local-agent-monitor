@@ -13,6 +13,8 @@ public sealed class MonitorAnalysisRetentionAdapterTests
         using var fixture = await Fixture.CreateAsync();
         var targetBefore = fixture.RunSnapshot(fixture.TargetRunId);
         var otherBefore = fixture.RunSnapshot(fixture.OtherRunId);
+        var targetOwnerTokenBefore = fixture.OwnerToken(fixture.TargetRunId);
+        var otherOwnerTokenBefore = fixture.OwnerToken(fixture.OtherRunId);
         var targetSummaryBefore = fixture.SafeSummary(fixture.TargetRunId);
         var otherSummaryBefore = fixture.SafeSummary(fixture.OtherRunId);
 
@@ -21,6 +23,12 @@ public sealed class MonitorAnalysisRetentionAdapterTests
         Assert.Same(RetentionAdapterResult.Deleted, result);
         Assert.Equal(targetBefore with { ResultMarkdown = null, ErrorMessage = null, Events = null, EventCount = 0 }, fixture.RunSnapshot(fixture.TargetRunId));
         Assert.Equal(otherBefore, fixture.RunSnapshot(fixture.OtherRunId));
+        Assert.True(
+            string.Equals(targetOwnerTokenBefore, fixture.OwnerToken(fixture.TargetRunId), StringComparison.Ordinal),
+            "Target ownership material changed during raw-field deletion.");
+        Assert.True(
+            string.Equals(otherOwnerTokenBefore, fixture.OwnerToken(fixture.OtherRunId), StringComparison.Ordinal),
+            "Sibling ownership material changed during raw-field deletion.");
         Assert.Equal(targetSummaryBefore, fixture.SafeSummary(fixture.TargetRunId));
         Assert.Equal(otherSummaryBefore, fixture.SafeSummary(fixture.OtherRunId));
         Assert.Equal(1L, fixture.Scalar("SELECT durable_cursor FROM retention_delete_journal WHERE item_id=$item_id;"));
@@ -33,6 +41,7 @@ public sealed class MonitorAnalysisRetentionAdapterTests
     {
         using var fixture = await Fixture.CreateAsync();
         var before = fixture.RunSnapshot(fixture.TargetRunId);
+        var ownerTokenBefore = fixture.OwnerToken(fixture.TargetRunId);
         var adapter = new MonitorAnalysisRetentionAdapter(fixture.Catalog);
 
         var wrongKind = await adapter.DeleteAsync(fixture.Context with { StoreKind = RetentionStoreKind.RawRecord });
@@ -44,6 +53,9 @@ public sealed class MonitorAnalysisRetentionAdapterTests
         Assert.Same(RetentionAdapterResult.LeaseLost, wrongKind);
         Assert.Same(RetentionAdapterResult.LeaseLost, wrongSource);
         Assert.Equal(before, fixture.RunSnapshot(fixture.TargetRunId));
+        Assert.True(
+            string.Equals(ownerTokenBefore, fixture.OwnerToken(fixture.TargetRunId), StringComparison.Ordinal),
+            "Ownership material changed after a rejected deletion context.");
         Assert.Equal(0L, fixture.Scalar("SELECT durable_cursor FROM retention_delete_journal WHERE item_id=$item_id;"));
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_tombstones WHERE item_id=$item_id;"));
     }
@@ -90,12 +102,14 @@ public sealed class MonitorAnalysisRetentionAdapterTests
         {
             using var connection = Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "SELECT trace_id,raw_record_id,span_id,focus,status,requested_at,started_at,completed_at,result_markdown,error_message,hex(retention_owner_token),(SELECT COUNT(*) FROM monitor_analysis_events WHERE run_id=$run_id),(SELECT group_concat(event_type || '|' || message || '|' || occurred_at, '||') FROM monitor_analysis_events WHERE run_id=$run_id ORDER BY id) FROM monitor_analysis_runs WHERE id=$run_id;";
+            command.CommandText = "SELECT trace_id,raw_record_id,span_id,focus,status,requested_at,started_at,completed_at,result_markdown,error_message,(SELECT COUNT(*) FROM monitor_analysis_events WHERE run_id=$run_id),(SELECT group_concat(event_type || '|' || message || '|' || occurred_at, '||') FROM monitor_analysis_events WHERE run_id=$run_id ORDER BY id) FROM monitor_analysis_runs WHERE id=$run_id;";
             command.Parameters.AddWithValue("$run_id", runId);
             using var row = command.ExecuteReader();
             Assert.True(row.Read());
-            return new RunSnapshot(row.GetString(0), row.GetInt64(1), row.GetString(2), row.GetString(3), row.GetString(4), row.GetString(5), row.IsDBNull(6) ? null : row.GetString(6), row.IsDBNull(7) ? null : row.GetString(7), row.IsDBNull(8) ? null : row.GetString(8), row.IsDBNull(9) ? null : row.GetString(9), row.GetString(10), row.GetInt32(11), row.IsDBNull(12) ? null : row.GetString(12));
+            return new RunSnapshot(row.GetString(0), row.GetInt64(1), row.GetString(2), row.GetString(3), row.GetString(4), row.GetString(5), row.IsDBNull(6) ? null : row.GetString(6), row.IsDBNull(7) ? null : row.GetString(7), row.IsDBNull(8) ? null : row.GetString(8), row.IsDBNull(9) ? null : row.GetString(9), row.GetInt32(10), row.IsDBNull(11) ? null : row.GetString(11));
         }
+
+        internal string OwnerToken(long runId) => Text(Path, "SELECT hex(retention_owner_token) FROM monitor_analysis_runs WHERE id=$run_id;", ("$run_id", runId));
 
         internal string SafeSummary(long runId) => Text(Path, "SELECT markdown || '|' || generated_at FROM monitor_analysis_safe_summaries WHERE run_id=$run_id;", ("$run_id", runId));
         internal long Scalar(string sql) => Convert.ToInt64(Value(sql), System.Globalization.CultureInfo.InvariantCulture);
@@ -107,5 +121,5 @@ public sealed class MonitorAnalysisRetentionAdapterTests
         private static string Text(string path, string sql, params (string Name, object Value)[] values) { using var connection = new SqliteConnection($"Data Source={path};Pooling=False"); connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql; foreach (var (name, value) in values) command.Parameters.AddWithValue(name, value); return (string)command.ExecuteScalar()!; }
     }
 
-    private sealed record RunSnapshot(string TraceId, long RawRecordId, string SpanId, string Focus, string Status, string RequestedAt, string? StartedAt, string? CompletedAt, string? ResultMarkdown, string? ErrorMessage, string OwnerToken, int EventCount, string? Events);
+    private sealed record RunSnapshot(string TraceId, long RawRecordId, string SpanId, string Focus, string Status, string RequestedAt, string? StartedAt, string? CompletedAt, string? ResultMarkdown, string? ErrorMessage, int EventCount, string? Events);
 }

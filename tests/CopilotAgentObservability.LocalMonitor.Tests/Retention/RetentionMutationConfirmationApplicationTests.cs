@@ -27,10 +27,16 @@ public sealed class RetentionMutationConfirmationApplicationTests
         Assert.Equal(RetentionConfirmationIssuePersistenceDisposition.IssuedFresh, result.Disposition);
         Assert.Null(result.ErrorCode);
         Assert.StartsWith("rcid1_", confirmation.ConfirmationId, StringComparison.Ordinal);
-        Assert.StartsWith("rt90v1_", confirmation.ConfirmationToken, StringComparison.Ordinal);
+        Assert.True(
+            confirmation.ConfirmationToken.StartsWith("rt90v1_", StringComparison.Ordinal),
+            "Confirmation issue returned noncanonical material.");
         Assert.Equal(preview.ConfirmationExpiresAt, confirmation.ConfirmationExpiresAt);
-        Assert.DoesNotContain(confirmation.ConfirmationToken, fixture.PersistedText(), StringComparison.Ordinal);
-        Assert.DoesNotContain(confirmation.ConfirmationToken, fixture.Store.ReadConfirmationBinding(confirmation.ConfirmationId)!.ToString(), StringComparison.Ordinal);
+        Assert.False(
+            fixture.PersistedText().Contains(confirmation.ConfirmationToken, StringComparison.Ordinal),
+            "Plaintext confirmation material reached persistence.");
+        Assert.False(
+            fixture.Store.ReadConfirmationBinding(confirmation.ConfirmationId)!.ToString().Contains(confirmation.ConfirmationToken, StringComparison.Ordinal),
+            "Plaintext confirmation material reached a persistence carrier.");
     }
 
     [Fact]
