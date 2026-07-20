@@ -152,6 +152,33 @@ public sealed class RetentionMutationPersistenceSchemaTests
         }
     }
 
+    [Fact]
+    public void ActiveConfirmationIndex_EnforcesOnlyOneActiveBindingButAllowsConsumedAndInvalidatedRows()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"retention-mutation-partial-index-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            new RetentionCatalogStore(path).CreateSchema();
+            Execute(path, "INSERT INTO retention_mutation_previews(preview_id,schema_version,target_kind,target_id,operation,scope,preview_json,expected_state_version,target_item_set_digest,preview_digest,created_at,expires_at) VALUES('preview',1,'item','item','pin','single_item','{}','v1-state','sha256-items','sha256-preview','2026-07-20T00:00:00.0000000+00:00','2026-07-20T00:05:00.0000000+00:00');");
+            InsertBinding(path, "confirmation-1", Enumerable.Repeat((byte)1, 16).ToArray());
+
+            Assert.Throws<SqliteException>(() => InsertBinding(path, "confirmation-2", Enumerable.Repeat((byte)2, 16).ToArray()));
+
+            Execute(path, "UPDATE retention_confirmation_bindings SET consumed_at='2026-07-20T00:01:00.0000000+00:00' WHERE confirmation_id='confirmation-1';");
+            InsertBinding(path, "confirmation-2", Enumerable.Repeat((byte)2, 16).ToArray());
+            Execute(path, "UPDATE retention_confirmation_bindings SET invalidated_at='2026-07-20T00:02:00.0000000+00:00' WHERE confirmation_id='confirmation-2';");
+            InsertBinding(path, "confirmation-3", Enumerable.Repeat((byte)3, 16).ToArray());
+
+            Assert.Equal(3L, Scalar(path, "SELECT COUNT(*) FROM retention_confirmation_bindings WHERE preview_id='preview';"));
+            Assert.Equal(1L, Scalar(path, "SELECT COUNT(*) FROM retention_confirmation_bindings WHERE preview_id='preview' AND consumed_at IS NULL AND invalidated_at IS NULL;"));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabase(path);
+        }
+    }
+
     private static IReadOnlyList<CatalogItemRow> ReadItems(string path)
     {
         using var connection = Open(path);
@@ -205,6 +232,28 @@ public sealed class RetentionMutationPersistenceSchemaTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    private static void InsertBinding(string path, string confirmationId, byte[] nonce)
+    {
+        Execute(path, """
+            INSERT INTO retention_confirmation_bindings(
+                confirmation_id,preview_id,schema_version,token_sha256,nonce,target_kind,target_id,operation,scope,
+                preview_digest,expected_state_version,target_item_set_digest,active_conflict_snapshot,conflict_version,
+                confirmation_expires_at,workflow_idempotency_key,reason_code,created_at)
+            VALUES($id,'preview',1,zeroblob(32),$nonce,'item','item','pin','single_item',
+                'sha256-preview','v1-state','sha256-items','{}','v1-conflict',
+                '2026-07-20T00:05:00.0000000+00:00',$key,'research_needed','2026-07-20T00:00:00.0000000+00:00');
+            """, ("$id", confirmationId), ("$nonce", nonce), ("$key", "rid1_synthetic_workflow_key"));
+    }
+
+    private static void Execute(string path, string sql, params (string Name, object Value)[] values)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in values) command.Parameters.AddWithValue(name, value);
+        command.ExecuteNonQuery();
     }
 
     private static SqliteConnection Open(string path)
