@@ -27,8 +27,7 @@ public sealed class RetentionCatalogContext
         try
         {
             if (string.IsNullOrWhiteSpace(databasePath) || !File.Exists(databasePath)) throw new RetentionCatalogUnavailableException();
-            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
-            connection.Open();
+            using var connection = RetentionCatalogConnectionPolicy.OpenOrdinary(databasePath, SqliteOpenMode.ReadWrite);
             using var command = connection.CreateCommand();
             command.CommandText = "SELECT (SELECT version FROM retention_component_versions WHERE component='retention'), (SELECT store_instance_id FROM retention_store_instances WHERE id=1);";
             using var reader = command.ExecuteReader();
@@ -41,4 +40,25 @@ public sealed class RetentionCatalogContext
     }
 
     private static bool IsStoreId(string value) => value.Length == 32 && value.All(static character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+}
+
+internal static class RetentionCatalogConnectionPolicy
+{
+    internal const int OrdinaryCatalogBusyTimeoutMilliseconds = 5000;
+
+    internal static SqliteConnection OpenOrdinary(string databasePath, SqliteOpenMode mode, bool enforceForeignKeys = true)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = mode,
+            Pooling = false,
+            DefaultTimeout = OrdinaryCatalogBusyTimeoutMilliseconds / 1000
+        }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA busy_timeout={OrdinaryCatalogBusyTimeoutMilliseconds}; PRAGMA foreign_keys={(enforceForeignKeys ? "ON" : "OFF")};";
+        command.ExecuteNonQuery();
+        return connection;
+    }
 }

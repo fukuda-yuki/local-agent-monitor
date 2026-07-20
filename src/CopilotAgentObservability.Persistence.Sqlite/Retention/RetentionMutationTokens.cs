@@ -83,8 +83,8 @@ public static class RetentionMutationToken
         parts = null!;
         if (token is null || !token.StartsWith(RetentionMutationIdentifierFormats.ConfirmationTokenPrefix, StringComparison.Ordinal)) return false;
         var payload = token[RetentionMutationIdentifierFormats.ConfirmationTokenPrefix.Length..];
-        var separator = payload.IndexOf('_');
-        if (separator != RetentionMutationIdentifierFormats.NonceTextLength) return false;
+        var separator = RetentionMutationIdentifierFormats.NonceTextLength;
+        if (payload.Length <= separator || payload[separator] != '_') return false;
         if (!Base64Url.TryDecode(payload[..separator], RetentionMutationIdentifierFormats.NonceByteLength, out var nonce)
             || !Base64Url.TryDecode(payload[(separator + 1)..], RetentionMutationIdentifierFormats.SecretByteLength, out var secret)) return false;
         parts = new(nonce, secret);

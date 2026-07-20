@@ -2219,5 +2219,12 @@ deletion.
   through the existing `retained_by_policy -> expiring` seam and then executes
   only the sequential #89 forward transitions to `deletion_queued`; it never
   introduces a new lifecycle edge or performs a separate unpin round trip.
+- A consumed confirmation retry remains HTTP `409` with the exact one-property
+  `retention_confirmation_consumed` body. When stored operation linkage exists,
+  a same-origin relative `Location` header points to the versioned mutation
+  status read; the response never reissues a token or embeds the stored result.
+- The Canvas Session workspace may provide only a navigation link carrying the
+  selected exact local Session ID to the Local Monitor retention page. Canvas
+  adds no retention action, fetch, proxy, mutation state, or raw-bearing field.
 
 The complete public contract is [retention mutation](specifications/interfaces/retention-mutation.md).

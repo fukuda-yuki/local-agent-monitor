@@ -245,7 +245,7 @@ internal static class MonitorHost
         app.MapRazorPages();
         DoctorRoutes.Map(app, doctorApplication);
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
-        RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider);
+        RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;
@@ -1648,6 +1648,8 @@ internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMet
 
 internal sealed class MonitorHostTestOptions
 {
+    public Func<RetentionCatalogStore, TimeProvider, RetentionMutationApplicationService>? RetentionMutationApplicationFactory { get; init; }
+
     public IDoctorHttpApplication? DoctorApplication { get; init; }
 
     public Func<string, TimeProvider, IDoctorHttpApplication>? DoctorApplicationFactory { get; init; }

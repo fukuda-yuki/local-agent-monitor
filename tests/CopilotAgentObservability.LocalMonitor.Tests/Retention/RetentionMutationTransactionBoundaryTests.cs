@@ -4,6 +4,55 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 
 public sealed class RetentionMutationTransactionBoundaryTests
 {
+    [Fact]
+    public void ExecuteMutation_CatalogOpenFailureReturnsCatalogUnavailable()
+    {
+        using var fixture = RetentionMutationConfirmationApplicationTests.Fixture.Create();
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+        var request = new RetentionMutationConfirmRequest(confirmation.ConfirmationToken,
+            RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem, RetentionMutationTargetKind.Item, fixture.ItemId);
+        var unavailablePath = fixture.Path + ".unavailable";
+        File.Move(fixture.Path, unavailablePath);
+
+        try
+        {
+            var result = fixture.Application.ExecuteMutation(request, fixture.WorkflowKey(40));
+
+            Assert.Equal(RetentionMutationErrorCodes.CatalogUnavailable, result.ErrorCode);
+            Assert.Null(result.Result);
+        }
+        finally
+        {
+            File.Move(unavailablePath, fixture.Path);
+        }
+    }
+
+    [Fact]
+    public void ExecuteMutation_AuditAppendFailureReturnsAuditWriteFailedAndLeavesExactRetryEligible()
+    {
+        using var fixture = RetentionMutationConfirmationApplicationTests.Fixture.Create();
+        var preview = fixture.CreatePreview(operation: RetentionMutationOperation.DeleteNow);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+        var request = new RetentionMutationConfirmRequest(confirmation.ConfirmationToken,
+            RetentionMutationOperation.DeleteNow, RetentionMutationScope.SingleItem, RetentionMutationTargetKind.Item, fixture.ItemId);
+        fixture.Execute("CREATE TRIGGER fail_retention_audit_append BEFORE INSERT ON retention_audit_events BEGIN SELECT RAISE(ABORT, 'synthetic audit append failure'); END;");
+
+        var failed = fixture.Application.ExecuteMutation(request, fixture.WorkflowKey(40));
+
+        Assert.Equal(RetentionMutationErrorCodes.AuditWriteFailed, failed.ErrorCode);
+        AssertNoDurableMutationAfterReopen(fixture, confirmation.ConfirmationId, fixture.ItemIds);
+
+        fixture.Execute("DROP TRIGGER fail_retention_audit_append;");
+        var retried = fixture.Application.ExecuteMutation(request, fixture.WorkflowKey(40));
+
+        Assert.Null(retried.ErrorCode);
+        Assert.NotNull(retried.Result);
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+    }
+
     [Theory]
     [InlineData("state_update_1")]
     [InlineData("state_update_2")]

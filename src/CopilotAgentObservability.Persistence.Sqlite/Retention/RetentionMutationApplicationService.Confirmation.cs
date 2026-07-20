@@ -6,7 +6,8 @@ internal sealed record RetentionMutationConfirmationApplicationResult(
     RetentionConfirmationIssueResponse? Confirmation,
     RetentionConfirmationIssuePersistenceDisposition? Disposition,
     string? ErrorCode,
-    bool IsReplay = false);
+    bool IsReplay = false,
+    string? OperationId = null);
 
 internal sealed record RetentionConfirmationIssueStoredResult(
     string ConfirmationId,
@@ -89,7 +90,7 @@ internal sealed partial class RetentionMutationApplicationService
                     persistence.Disposition,
                     persistence.Binding is null ? RetentionMutationErrorCodes.ConfirmationGenerationFailed : null),
             RetentionConfirmationIssuePersistenceDisposition.ConsumedLinkage =>
-                new(null, persistence.Disposition, RetentionMutationErrorCodes.ConfirmationConsumed),
+                new(null, persistence.Disposition, RetentionMutationErrorCodes.ConfirmationConsumed, OperationId: persistence.OperationId),
             RetentionConfirmationIssuePersistenceDisposition.Conflict =>
                 new(null, persistence.Disposition, RetentionMutationErrorCodes.IdempotencyConflict),
             RetentionConfirmationIssuePersistenceDisposition.Expired =>

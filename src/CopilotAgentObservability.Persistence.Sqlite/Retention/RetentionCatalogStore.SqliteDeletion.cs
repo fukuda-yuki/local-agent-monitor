@@ -6,8 +6,6 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 public sealed partial class RetentionCatalogStore
 {
-    private const int DeletionLockTimeoutSeconds = 1;
-
     internal ValueTask<RetentionAdapterResult> ExecuteSqliteDeletionAsync(
         RetentionDeleteContext context,
         RetentionSqliteSourceMutation mutateSource) =>
@@ -175,18 +173,5 @@ public sealed partial class RetentionCatalogStore
     };
 
     private SqliteConnection OpenDeletion()
-    {
-        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = databasePath,
-            Mode = SqliteOpenMode.ReadWrite,
-            Pooling = false,
-            DefaultTimeout = DeletionLockTimeoutSeconds
-        }.ToString());
-        connection.Open();
-        using var busy = connection.CreateCommand();
-        busy.CommandText = "PRAGMA busy_timeout=0; PRAGMA foreign_keys=ON;";
-        busy.ExecuteNonQuery();
-        return connection;
-    }
+        => RetentionCatalogConnectionPolicy.OpenOrdinary(databasePath, SqliteOpenMode.ReadWrite);
 }

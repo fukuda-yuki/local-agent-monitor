@@ -696,6 +696,14 @@ evidence value. Persistence stores only SHA-256 over the exact full ASCII token
 string; the plaintext token, nonce/secret material, and token value are never
 persisted or logged.
 
+The only error-response linkage is the optional same-origin relative
+`Location: /api/retention/v1/mutations/{operationId}` header on a consumed
+confirmation response. It contains only the opaque #90 operation ID in the
+fixed status route and never a token, target ID, path, source key, or raw
+value. The Canvas Session workspace handoff is likewise navigation-only and
+places only the exact local Session ID in the Local Monitor retention route;
+it adds no retention proxy/action payload or helper token.
+
 The actor label is the server-derived fixed value `local-user`; the client
 cannot provide, override, or cause the current OS user name to appear in an
 audit event or response. The exact `rid1_...` workflow idempotency key is not a

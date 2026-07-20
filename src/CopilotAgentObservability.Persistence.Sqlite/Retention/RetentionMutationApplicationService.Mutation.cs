@@ -22,7 +22,9 @@ internal sealed partial class RetentionMutationApplicationService
             canonicalRequest,
             FailureJson(RetentionMutationErrorCodes.RequestInvalid),
             null);
-        using var connection = catalog.OpenMutationConnection();
+        using var connection = TryOpenMutationConnection();
+        if (connection is null)
+            return new(null, RetentionMutationErrorCodes.CatalogUnavailable);
         try
         {
             mutationCheckpoint?.Invoke("before_transaction");
@@ -191,7 +193,16 @@ internal sealed partial class RetentionMutationApplicationService
 
             catalog.InsertOperationReceiptWithinTransaction(connection, transaction, result, binding.TargetItemSetDigest);
             mutationCheckpoint?.Invoke("receipt_written");
-            catalog.AppendAuditEventWithinTransaction(connection, transaction, auditEvent);
+            try
+            {
+                catalog.AppendAuditEventWithinTransaction(connection, transaction, auditEvent);
+            }
+            catch (SqliteException)
+            {
+                try { transaction.Rollback(); }
+                catch (Exception rollbackException) when (rollbackException is InvalidOperationException or SqliteException) { }
+                return new(null, RetentionMutationErrorCodes.AuditWriteFailed);
+            }
             mutationCheckpoint?.Invoke("audit_written");
             var committedIdempotency = catalog.GetOrCreateIdempotencyWithinTransaction(
                 connection,
@@ -210,8 +221,21 @@ internal sealed partial class RetentionMutationApplicationService
         }
         catch
         {
-            try { transaction.Rollback(); } catch (InvalidOperationException) { }
+            try { transaction.Rollback(); }
+            catch (Exception rollbackException) when (rollbackException is InvalidOperationException or SqliteException) { }
             return new(null, RetentionMutationErrorCodes.MutationTransactionFailed);
+        }
+    }
+
+    private SqliteConnection? TryOpenMutationConnection()
+    {
+        try
+        {
+            return catalog.OpenMutationConnection();
+        }
+        catch (SqliteException)
+        {
+            return null;
         }
     }
 

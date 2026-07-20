@@ -331,11 +331,17 @@ The UI consumes the same authoritative application result as the API. It does
 not reconstruct state from the Session workspace shape, DOM text, URL
 parameters, source tables, or client-side timers.
 
-The Session target is the primary flow. From the Session workspace, the UI
-offers a non-destructive `Manage retention` action that loads the exact
-Session-target preview. The item target is available only from an explicit
-selection in the #89 retention diagnostics item list; there is no free-form
-item-ID input, approximate search, multi-Session selector, or path selector.
+The Session target is the primary flow. From the Canvas Session workspace, a
+navigation-only `Manage retention` link opens the Local Monitor route
+`/retention/session/{targetId}` with only the selected exact local Session ID.
+Canvas does not issue a retention action, fetch or proxy retention data, add
+mutation state, or place a helper token in the destination URL. The Local
+Monitor page opens the exact-target dialog without creating a preview; the
+user must explicitly choose the operation and one of the closed reason codes
+before the first preview request. The item target is available only from an
+explicit selection in the #89 retention diagnostics item list and opens
+`/retention/item/{targetId}`; there is no free-form item-ID input, approximate
+search, multi-Session selector, or path selector.
 
 Delete-now is never the visually primary action. It is a secondary destructive
 choice behind the retention details/confirmation step, has no default focus,
@@ -352,9 +358,11 @@ preview content; the token is held in memory only for the dedicated confirm
 request and is discarded after success, failure, navigation, or expiry.
 
 On `retention_confirmation_*`, `retention_preview_*`, empty, stale, conflict,
-or incompatible-state results, the UI discards the token, does not retry
-automatically, fetches a fresh status/preview, and re-displays the new
-sanitized values. It must not present the old operation as successful. After
+or incompatible-state results, the UI discards the token and never retries a
+confirmation or mutation automatically. It may perform one fresh
+authoritative status read and one new-key preview publication, with no retry
+loop, then re-displays the new sanitized values. It must not present the old
+operation as successful. After
 a committed result it shows the operation status, immediate read-denied state,
 queue handoff, audit reference, and the #89 physical worker status; it does
 not claim physical deletion at transaction commit.
@@ -410,8 +418,12 @@ confirmation-issue route. A successful fresh or reissued
 `RetentionConfirmationIssueResponse` has exactly `schema_version`,
 `confirmation_id`, `confirmation_token`, and `confirmation_expires_at`.
 It is the only API response containing a token. A consumed-preview retry
-returns stored mutation linkage/result under `retention_confirmation_consumed`
-and is not a token response.
+returns HTTP `409` with the exact one-property
+`{"error":"retention_confirmation_consumed"}` body and, when stored operation
+linkage exists, a same-origin relative
+`Location: /api/retention/v1/mutations/{operationId}` header. It is not a token
+response and does not embed or replay the stored mutation result. The client
+may follow the `Location` status read to recover the committed operation.
 
 The token wire format is exactly:
 
@@ -451,8 +463,10 @@ exception. It atomically invalidates a prior unconsumed binding, generates a
 fresh nonce and secret, stores the new full-token hash and `confirmation_id`,
 and returns a fresh token. It reuses the original preview expiry and never
 extends the five-minute window. If the prior token was consumed, it returns
-the stored mutation linkage under `retention_confirmation_consumed` and never
-issues a token or confirmation ID. An invalidated token is
+`retention_confirmation_consumed` and, when stored operation linkage exists,
+exposes it only through the optional same-origin relative mutation-status
+`Location` header. It never issues a token or confirmation ID and never embeds
+or replays the stored mutation result. An invalidated token is
 `retention_confirmation_invalid`; only the fresh response token can commit.
 
 ## Idempotency contract
@@ -658,8 +672,8 @@ The stage classification is normative and mutually exclusive:
   returns HTTP `409` with the same code and no token.
 - `CONFIRMATION-ISSUE-STAGE`: an addressable persisted preview cannot produce
   a fresh confirmation. A consumed-binding result belongs to this class
-  because it returns stored linkage and no new token; the mutation route may
-  return the same code at mutation-time check 2.
+  because it returns an optional status-route `Location` linkage and no new
+  token; the mutation route may return the same code at mutation-time check 2.
 - `COMMIT-STAGE`: a token is presented to the mutation route and enters the
   ordered evaluation or durable transaction. Outcomes are `401`, `409`, or
   `503`, or `200` for committed success, no-op, actionable-idempotent result,
@@ -676,7 +690,10 @@ The stage classification is normative and mutually exclusive:
 | `413` | REQUEST-STAGE `retention_mutation_target_limit_exceeded`; no preview record |
 | `503` | REQUEST-STAGE inherited `retention_catalog_unavailable`; CONFIRMATION-ISSUE-STAGE `retention_confirmation_generation_failed`; or COMMIT-STAGE `retention_mutation_transaction_failed` / `retention_audit_write_failed` |
 
-All error bodies are exactly `{"error":"<code>"}` with no extra text. `401`
+All error bodies are exactly `{"error":"<code>"}` with no extra text. The
+only error response linkage is the optional same-origin relative `Location`
+header on `retention_confirmation_consumed`; it contains only the opaque
+operation ID inside the fixed mutation-status route. `401`
 does not identify which token component failed. `409` does not echo current or
 submitted values. All routes are loopback/Host-header restricted,
 same-origin, JSON-only where a body exists, CSRF-protected for state-changing
@@ -689,7 +706,7 @@ The first failing check returns exactly one code. The order is:
 | Order | Condition | Fixed code | Republish rule |
 | --- | --- | --- | --- |
 | `1` | Structural or cryptographic token validity, including format, digest, nonce, stored token hash, or a token invalidated by confirmation-issue reissue | `retention_confirmation_invalid` | Discard token and create a new preview/key |
-| `2` | Token was committed by another request | `retention_confirmation_consumed` | Return stored mutation linkage/result when available; never issue a token; new preview/key for a new operation |
+| `2` | Token was committed by another request | `retention_confirmation_consumed` | Return the exact error body and, when stored operation linkage exists, expose it only through the optional same-origin relative mutation-status `Location` header; never issue a token or embed/replay the stored result; new preview/key for a new operation |
 | `3` | Confirmation token is past the exact five-minute expiry | `retention_confirmation_expired` | Create a new preview/key; issuance never extends expiry |
 | `4` | Submitted operation, scope, target kind, or target ID differs from binding | `retention_confirmation_binding_mismatch` | Create a new preview/key |
 | `5` | Exact target item set digest changed | `retention_confirmation_target_changed` | Create a new preview/key |
@@ -710,7 +727,7 @@ The complete diagnostic registry is:
 
 | Code | Reachability class | Use |
 | --- | --- | --- |
-| `retention_mutation_request_invalid` | REQUEST-STAGE (preview/confirmation/mutation request) `400` | Invalid union, operation, scope, reason, comment, or body; no preview record |
+| `retention_mutation_request_invalid` | REQUEST-STAGE (preview/confirmation/mutation request or history limit) `400` | Invalid union, operation, scope, reason, comment, body, or history `limit`; no preview record |
 | `retention_target_not_found` | REQUEST-STAGE (preview request, item read, history read) `404` | Exact Session or item target absent |
 | `retention_mutation_target_limit_exceeded` | REQUEST-STAGE (preview request) `413` | Exact Session target has more than `100` items; no preview record |
 | `retention_preview_not_found` | REQUEST-STAGE (preview read/confirmation issue) `404` | Preview ID absent from current catalog |
@@ -734,7 +751,7 @@ The complete diagnostic registry is:
 | `retention_preview_expired` | CONFIRMATION-ISSUE-STAGE `409` | Preview read or issue is past five-minute expiry |
 | `retention_preview_digest_mismatch` | CONFIRMATION-ISSUE-STAGE `409` | Supplied preview digest differs; confirmation issue only |
 | `retention_confirmation_generation_failed` | CONFIRMATION-ISSUE-STAGE `503` | Server nonce collision prevented safe issuance |
-| `retention_confirmation_consumed` | CONFIRMATION-ISSUE-STAGE `409` (also mutation-time check 2) | Token already committed; return stored linkage/result and never issue a new token |
+| `retention_confirmation_consumed` | CONFIRMATION-ISSUE-STAGE `409` (also mutation-time check 2) | Token already committed; return the exact error body plus an optional mutation-status `Location` linkage and never issue a new token |
 | `retention_confirmation_invalid` | COMMIT-STAGE `401` (mutation-time check 1) | Token format, full-token hash, nonce, or cryptographic validation invalid, including a token invalidated by confirmation-issue reissue |
 | `retention_confirmation_expired` | COMMIT-STAGE `409` (mutation-time check 3) | Token past fixed expiry |
 | `retention_confirmation_binding_mismatch` | COMMIT-STAGE `409` (mutation-time check 4) | Token binding differs from confirmation request |
@@ -766,7 +783,14 @@ History pages accept `limit=1..100`, default to `100`, and use an exclusive,
 opaque cursor. The order is `occurred_at DESC, event_id DESC` (newest first),
 and `next_cursor` is null only on the final page. A history cursor is bound to
 its requested target and contains no source key, path, comment, token, or raw
-value.
+value. Query evaluation is exact and ordered: validate that `limit` is absent
+or one decimal integer in `1..100`; resolve the exact target; then validate and
+bind the optional cursor. An invalid, blank, or repeated `limit` returns `400`
+`retention_mutation_request_invalid`. A missing or noncanonical target,
+including a malformed Session ID, returns `404` `retention_target_not_found`
+before cursor validation. For an existing target, a malformed cursor or a
+cursor bound to another target returns `400`
+`retention_history_cursor_invalid`.
 
 Issue #90 does not add pin, deletion, audit, preview, revision, or queue fields
 to `/api/session-workspace/*` v1. The frozen projection is:

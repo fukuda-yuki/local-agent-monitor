@@ -6,6 +6,33 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionCatalogStoreTests
 {
     [Fact]
+    public void OrdinaryCatalogConnections_UseFiveSecondBusyTimeout()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            long createTimeout = -1;
+            var initializing = new RetentionCatalogStore(path, backfillValidationCheckpoint: (connection, transaction) =>
+            {
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = "PRAGMA busy_timeout;";
+                createTimeout = Convert.ToInt64(command.ExecuteScalar());
+            });
+
+            initializing.CreateSchema();
+            var adopted = new RetentionCatalogStore(RetentionCatalogContext.AdoptExistingCatalogV1(path));
+            using var existing = adopted.OpenMutationConnection();
+            using var existingTimeout = existing.CreateCommand();
+            existingTimeout.CommandText = "PRAGMA busy_timeout;";
+
+            Assert.Equal(5000L, createTimeout);
+            Assert.Equal(5000L, Convert.ToInt64(existingTimeout.ExecuteScalar()));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
     public void CreateSchema_RebuildsRawSourceWithRequiredImmutableOwnerToken()
     {
         var path = CopyFixture("monitor", "monitor-v5.sqlite");

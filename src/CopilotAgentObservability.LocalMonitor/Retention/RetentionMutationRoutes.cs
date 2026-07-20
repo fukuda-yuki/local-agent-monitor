@@ -13,9 +13,9 @@ internal static class RetentionMutationRoutes
     private const string JsonContentType = "application/json";
     private static readonly JsonSerializerOptions Json = CreateJsonOptions();
 
-    internal static void Map(WebApplication app, RetentionCatalogStore catalog, TimeProvider timeProvider)
+    internal static void Map(WebApplication app, RetentionCatalogStore catalog, TimeProvider timeProvider, RetentionMutationApplicationService? applicationOverride = null)
     {
-        var application = new RetentionMutationApplicationService(catalog, timeProvider);
+        var application = applicationOverride ?? new RetentionMutationApplicationService(catalog, timeProvider);
         app.MapPost("/api/retention/v1/previews", context => CreatePreviewAsync(context, application));
         app.MapGet("/api/retention/v1/previews/{previewId}", (string previewId, HttpContext context) => ReadPreviewAsync(context, application, previewId));
         app.MapPost("/api/retention/v1/confirmations", context => IssueConfirmationAsync(context, application));
@@ -103,6 +103,9 @@ internal static class RetentionMutationRoutes
         }
         if (result.ErrorCode is not null)
         {
+            if (string.Equals(result.ErrorCode, RetentionMutationErrorCodes.ConfirmationConsumed, StringComparison.Ordinal)
+                && result.OperationId is not null)
+                context.Response.Headers.Location = $"/api/retention/v1/mutations/{Uri.EscapeDataString(result.OperationId)}";
             await WriteApplicationErrorAsync(context, result.ErrorCode, confirmationIssue: true, preview: false);
             return;
         }

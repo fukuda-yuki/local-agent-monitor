@@ -360,6 +360,18 @@ public sealed class RetentionMutationContractTests
     }
 
     [Fact]
+    public void ConfirmationToken_ParsesBase64UrlUnderscoreInsideNonce()
+    {
+        var nonce = Enumerable.Repeat((byte)0xff, RetentionMutationIdentifierFormats.NonceByteLength).ToArray();
+        var secret = Enumerable.Repeat((byte)0x22, RetentionMutationIdentifierFormats.SecretByteLength).ToArray();
+        var token = RetentionMutationToken.Create(nonce, secret);
+
+        Assert.True(RetentionMutationToken.TryParse(token, out var parts));
+        Assert.Equal(nonce, parts.Nonce);
+        Assert.Equal(secret, parts.Secret);
+    }
+
+    [Fact]
     public void TokenHash_UsesTheExactFullAsciiTokenString()
     {
         var nonce = Enumerable.Repeat((byte)0x11, 16).ToArray();

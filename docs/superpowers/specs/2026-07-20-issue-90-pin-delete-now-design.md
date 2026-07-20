@@ -74,7 +74,7 @@ The following values are new Issue #90 decisions:
 | Token secret | Exactly 32 cryptographically secure random bytes; the plaintext token/secret is never persisted, the persisted token hash is SHA-256 over the exact full ASCII token string, and at most one unconsumed token exists for a preview. |
 | Idempotency key | `rid1_` plus 43 unpadded base64url characters encoding 32 client-generated random bytes; total length is 48 ASCII characters. One client-generated workflow key is shared by preview, confirmation issue, and mutation; records are still separated by step. |
 | Idempotency lifetime | 365 days from first durable record creation; after expiry the key is permanently rejected and never reused. |
-| Confirmation-issue retry exception | A same-key, byte-identical `confirmation_issue` retry atomically invalidates any prior unconsumed token for that preview and issues a fresh token and `confirmation_id` with a new nonce/secret and stored hash. The original preview expiry remains fixed; a consumed token returns the stored mutation linkage under `retention_confirmation_consumed` and never issues another token. |
+| Confirmation-issue retry exception | A same-key, byte-identical `confirmation_issue` retry atomically invalidates any prior unconsumed token for that preview and issues a fresh token and `confirmation_id` with a new nonce/secret and stored hash. The original preview expiry remains fixed; a consumed token returns `retention_confirmation_consumed` and, when stored operation linkage exists, exposes it only through the optional same-origin relative mutation-status `Location` header. It never issues another token or embeds/replays the stored result. |
 | Pin-state source of truth | `pin_state` is derived: `pinned` iff lifecycle state is `retained_by_policy`; otherwise a represented catalog item is `unpinned`. 90-B stores no second pin column. |
 | Comment | Null or 1–256 Unicode scalar values, NFC-normalized, with no control character, CR/LF, URL, path separator, credential marker, database-key marker, or token value. |
 | Actor label | Server-derived fixed value `local-user`; the client cannot supply or override it. |
@@ -469,8 +469,11 @@ full-token hash and `confirmation_id`, and returns a fresh token. This
 reissue-with-invalidation preserves the at-most-one-consumable-token rule. It
 reuses the original preview's `confirmation_expires_at`; it never extends the
 five-minute window. If the prior token was already consumed, the retry returns
-the stored mutation linkage under `retention_confirmation_consumed` and never
-issues a new token or confirmation ID.
+HTTP `409` with the exact one-property
+`{"error":"retention_confirmation_consumed"}` body and, when stored operation
+linkage exists, a same-origin relative
+`Location: /api/retention/v1/mutations/{operationId}` header. It never issues a
+new token or confirmation ID and does not embed the stored mutation result.
 
 A token invalidated by this reissue is no longer an active binding and is
 rejected as `retention_confirmation_invalid`; only the fresh response token
@@ -489,7 +492,7 @@ evaluation.
 | Mutation-time order | Condition | Fixed code | Republish rule |
 | --- | --- | --- | --- |
 | 1 | Structural or cryptographic token validity, including token format, digest, nonce, stored token hash, or a token invalidated by confirmation-issue reissue | `retention_confirmation_invalid` | Discard the token and create a new preview/key. |
-| 2 | Token was committed by another request | `retention_confirmation_consumed` | Return the stored mutation linkage/result when available; never issue a new token for the consumed binding. A new preview/key is required for a new operation. |
+| 2 | Token was committed by another request | `retention_confirmation_consumed` | Return the exact error body and, when stored operation linkage exists, expose it only through the optional same-origin relative mutation-status `Location` header; never issue a new token or embed/replay the stored result. A new preview/key is required for a new operation. |
 | 3 | Confirmation token is past the exact five-minute expiry | `retention_confirmation_expired` | Create a new preview/key; issuance never extends expiry. |
 | 4 | Submitted operation, scope, target kind, or target ID does not equal the binding | `retention_confirmation_binding_mismatch` | Create a new preview/key. |
 | 5 | Exact target item set digest changed | `retention_confirmation_target_changed` | Create a new preview/key. |
@@ -516,8 +519,9 @@ When the stored preview has a non-null `rejection_code`, the issue attempt
 returns HTTP `409` with that same preview-stage code and issues no token. When
 the preview is eligible, the same-key, byte-identical retry rule above applies:
 an unconsumed binding is invalidated and reissued with a fresh token, while a
-consumed binding returns its stored mutation linkage under
-`retention_confirmation_consumed`.
+consumed binding returns `retention_confirmation_consumed` and, when stored
+operation linkage exists, exposes it only through the optional same-origin
+relative mutation-status `Location` header.
 On the mutation route, a structurally malformed or cryptographically invalid
 token is exactly `retention_confirmation_invalid`; the operation/scope/target
 echo fields below make a valid-token binding mismatch a separate reachable
@@ -554,9 +558,11 @@ event, except for the single `confirmation_issue` replay rule. For that step,
 the request is still accepted as the same idempotent request, but a prior
 unconsumed binding is atomically invalidated and a fresh token and
 `confirmation_id` are issued with a new nonce/secret and stored hash. The
-original preview expiry is reused. If the prior binding was consumed, the
-stored mutation linkage is returned under `retention_confirmation_consumed`
-and no token is issued. This exception is required because hash-only token
+original preview expiry is reused. If the prior binding was consumed,
+`retention_confirmation_consumed` is returned and any stored operation linkage
+is exposed only through the optional same-origin relative mutation-status
+`Location` header. No token is issued and no stored result is embedded or
+replayed. This exception is required because hash-only token
 persistence cannot reconstruct the plaintext response after a lost response
 or restart, and invalidation preserves at most one consumable token per
 preview. The same workflow key plus the same step plus any different
@@ -714,8 +720,10 @@ The #90 mutation/read surface is:
 `RetentionConfirmationIssueResponse` has exactly `schema_version`,
 `confirmation_id`, `confirmation_token`, and `confirmation_expires_at`; a
 consumed-preview retry returns the stored mutation linkage under
-`retention_confirmation_consumed` and is not a token response. No response
-ever persists or replays the plaintext token. `RetentionMutationConfirmRequest`
+`retention_confirmation_consumed` through an optional same-origin relative
+mutation-status `Location` header and is not a token response. Its body remains
+the exact one-property error body; no response persists, embeds, or replays the
+plaintext token or stored mutation result. `RetentionMutationConfirmRequest`
 has exactly `confirmation_token`, `operation`, `scope`, `target_kind`, and
 `target_id`.
 The latter four are explicit echoes of the intended command and are checked
@@ -736,7 +744,13 @@ and revision.
 `RetentionAuditEvent` schema above. `next_cursor` is null on the last page or
 an opaque `rhc1_` cursor otherwise. History uses `occurred_at DESC,
 event_id DESC`, and a cursor resumes strictly after the last pair. No cursor
-contains a source key, path, comment, token, or raw value.
+contains a source key, path, comment, token, or raw value. Query evaluation
+first validates one optional decimal `limit` in `1..100`, then resolves the
+exact target, then validates and binds the optional cursor. Invalid, blank, or
+repeated limits return `retention_mutation_request_invalid`; a missing or
+noncanonical target returns `retention_target_not_found` before cursor
+validation; an existing target with a malformed or foreign cursor returns
+`retention_history_cursor_invalid`.
 
 `RetentionMutationResult` has exactly `schema_version`, `operation_id`,
 `result_code`, `target_kind`, `target_id`, `operation`, `scope`,
@@ -770,8 +784,10 @@ The stage classification is normative and mutually exclusive:
 - `CONFIRMATION-ISSUE-STAGE`: an addressable persisted preview cannot produce
   a fresh confirmation, returning its confirmation-issue error (or the
   expired-preview read error) without entering commit. The consumed-binding
-  result is owned by this class because it returns stored linkage and no new
-  token; the mutation route may return that same code at mutation-time check 2.
+  result is owned by this class because it returns the exact error body, an
+  optional same-origin relative mutation-status `Location` header when stored
+  operation linkage exists, and no new token or stored result; the mutation
+  route may return that same code at mutation-time check 2.
 - `COMMIT-STAGE`: a token is presented to the mutation route and enters the
   mutation-time evaluation sequence or the durable mutation transaction; the
   presented token itself may prove structurally or cryptographically invalid
@@ -795,7 +811,9 @@ class.
 | `503` | REQUEST-STAGE inherited `retention_catalog_unavailable`; CONFIRMATION-ISSUE-STAGE `retention_confirmation_generation_failed`; or COMMIT-STAGE `retention_mutation_transaction_failed` or `retention_audit_write_failed`. |
 
 All error bodies are the exact one-property JSON shape
-`{"error":"<code>"}` with no extra text. `401` responses do not identify
+`{"error":"<code>"}` with no extra text. The only error response linkage is
+the optional same-origin relative mutation-status `Location` header on
+`retention_confirmation_consumed`. `401` responses do not identify
 which token component failed. `409` responses do not echo the current or
 submitted value. All routes are loopback/Host-header restricted, same-origin,
 JSON-only where a body exists, CSRF-protected for state-changing requests,
@@ -816,7 +834,7 @@ registry, including `retention_lease_conflict`,
 
 | Code | Reachability class | Use |
 | --- | --- | --- |
-| `retention_mutation_request_invalid` | REQUEST-STAGE (preview/confirmation/mutation request) `400` | Invalid union, operation, scope, reason, comment, or body; the request produces no preview record. |
+| `retention_mutation_request_invalid` | REQUEST-STAGE (preview/confirmation/mutation request or history limit) `400` | Invalid union, operation, scope, reason, comment, body, or history `limit`; the request produces no preview record. |
 | `retention_target_not_found` | REQUEST-STAGE (preview request, item state read, history read) `404` | Exact Session or item target is absent. A preview request produces no preview record; the item state and history read routes return the same code for an unknown exact target. |
 | `retention_mutation_target_limit_exceeded` | REQUEST-STAGE (preview request) `413` | Exact Session target has more than 100 items; the preview request fails and produces no preview record. |
 | `retention_preview_not_found` | REQUEST-STAGE (preview read/confirmation issue) `404` | Preview ID is not present in the current catalog, so the request cannot address a preview record. |
@@ -840,7 +858,7 @@ registry, including `retention_lease_conflict`,
 | `retention_preview_expired` | CONFIRMATION-ISSUE-STAGE `409` | Preview read or confirmation issuance is past the five-minute expiry; no token is issued. |
 | `retention_preview_digest_mismatch` | CONFIRMATION-ISSUE-STAGE `409` | Confirmation-issue route only: supplied preview digest does not match the persisted preview. |
 | `retention_confirmation_generation_failed` | CONFIRMATION-ISSUE-STAGE `503` | Server nonce collision prevented safe token issuance. |
-| `retention_confirmation_consumed` | CONFIRMATION-ISSUE-STAGE `409` (also mutation-time check 2) | A confirmation-issue retry or mutation request found a token already committed; return the stored mutation linkage/result and never issue a new token. |
+| `retention_confirmation_consumed` | CONFIRMATION-ISSUE-STAGE `409` (also mutation-time check 2) | A confirmation-issue retry or mutation request found a token already committed; return the exact error body plus an optional mutation-status `Location` linkage and never issue a new token. |
 | `retention_confirmation_invalid` | COMMIT-STAGE `401` (mutation-time check 1) | Mutation route only: confirmation token format, full-token hash, nonce, or cryptographic validation is invalid, including a token invalidated by reissue. |
 | `retention_confirmation_expired` | COMMIT-STAGE `409` (mutation-time check 3) | Confirmation token is past its fixed expiry. |
 | `retention_confirmation_binding_mismatch` | COMMIT-STAGE `409` (mutation-time check 4) | Token binding does not match the confirmation request. |
@@ -884,11 +902,15 @@ The UI consumes the same authoritative application result as the API. It does
 not reconstruct state from the frozen workspace v1 shape, DOM text, URL
 parameters, source tables, or client-side timers.
 
-The Session target is the primary flow. From the Session workspace, the UI
-offers a non-destructive `Manage retention` action that loads the exact
-Session-target preview. The item target is available only from an explicit
-selection in the #89 retention diagnostics item list; there is no free-form
-item-ID input, approximate search, multi-Session selector, or path selector.
+The Session target is the primary flow. From the Canvas Session workspace, a
+navigation-only `Manage retention` link opens the Local Monitor route
+`/retention/session/{targetId}` with only the selected exact local Session ID.
+Canvas adds no retention action, fetch, proxy, mutation state, or helper token.
+The Local Monitor dialog requires an explicit operation and reason selection
+before creating the first preview. The item target is available only from an
+explicit selection in the #89 retention diagnostics item list and opens
+`/retention/item/{targetId}`; there is no free-form item-ID input, approximate
+search, multi-Session selector, or path selector.
 
 Delete-now is never the visually primary action. It is a secondary destructive
 choice behind the retention details/confirmation step, has no default focus,
@@ -905,9 +927,11 @@ preview content; the token is held in memory only for the dedicated confirm
 request and is discarded after success, failure, navigation, or expiry.
 
 On `retention_confirmation_*`, `retention_preview_*`, empty, stale, conflict,
-or incompatible-state results, the UI discards the token, does not retry
-automatically, fetches a fresh status/preview, and re-displays the new
-sanitized values. It must not present the old operation as successful. After a
+or incompatible-state results, the UI discards the token and never retries a
+confirmation or mutation automatically. It may perform one fresh
+authoritative status read and one new-key preview publication, with no retry
+loop, then re-displays the new sanitized values. It must not present the old
+operation as successful. After a
 committed result it shows the operation status, immediate read-denied state,
 queue handoff, audit reference, and the #89 physical worker status; it does
 not claim physical deletion at transaction commit.
@@ -1105,9 +1129,11 @@ as follows:
    requires the same step and byte-identical canonical request, except that a
    same-key byte-identical `confirmation_issue` retry invalidates any prior
    unconsumed token and issues a fresh token/`confirmation_id` with the same
-   preview-bound expiry. A consumed confirmation retry returns the stored
-   mutation linkage under `retention_confirmation_consumed` and never issues a
-   token. Different steps never conflict. The token binding field is the exact
+   preview-bound expiry. A consumed confirmation retry returns
+   `retention_confirmation_consumed` and, when stored operation linkage exists,
+   exposes it only through the optional same-origin relative mutation-status
+   `Location` header. It never issues a token or embeds/replays the stored
+   result. Different steps never conflict. The token binding field is the exact
    full ASCII workflow key, even when lookup uses its digest.
 10. Token verification hashes the exact full ASCII `rt90v1_...` token string,
     not the 32-byte secret alone.

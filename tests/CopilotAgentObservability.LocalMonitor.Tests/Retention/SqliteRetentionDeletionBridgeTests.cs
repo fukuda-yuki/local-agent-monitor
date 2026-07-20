@@ -10,11 +10,18 @@ public sealed class SqliteRetentionDeletionBridgeTests
     public async Task SqliteRetentionAdapter_DeletesSourceAndFinalizesReceiptInOneTransaction()
     {
         using var fixture = await Fixture.CreateAsync();
+        long deletionTimeout = -1;
 
         var result = await fixture.Catalog.ExecuteSqliteDeletionAsync(
             fixture.Context,
             (connection, transaction, grant) =>
             {
+                using (var timeout = connection.CreateCommand())
+                {
+                    timeout.Transaction = transaction;
+                    timeout.CommandText = "PRAGMA busy_timeout;";
+                    deletionTimeout = Convert.ToInt64(timeout.ExecuteScalar());
+                }
                 using var delete = connection.CreateCommand();
                 delete.Transaction = transaction;
                 delete.CommandText = "DELETE FROM raw_records WHERE id=$id AND retention_owner_token=$token;";
@@ -25,6 +32,7 @@ public sealed class SqliteRetentionDeletionBridgeTests
             });
 
         Assert.Same(RetentionAdapterResult.Deleted, result);
+        Assert.Equal(5000L, deletionTimeout);
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM raw_records;"));
         Assert.Equal(1L, fixture.Scalar("SELECT durable_cursor FROM retention_delete_journal WHERE item_id=$id;"));
         Assert.Equal("deleted", fixture.Text("SELECT state FROM retention_items WHERE item_id=$id;"));
@@ -157,7 +165,7 @@ public sealed class SqliteRetentionDeletionBridgeTests
         var timedOut = false;
         try
         {
-            try { result = await operation.WaitAsync(TimeSpan.FromSeconds(5)); }
+            try { result = await operation.WaitAsync(TimeSpan.FromMilliseconds(RetentionCatalogConnectionPolicy.OrdinaryCatalogBusyTimeoutMilliseconds * 2)); }
             catch (TimeoutException) { timedOut = true; }
         }
         finally

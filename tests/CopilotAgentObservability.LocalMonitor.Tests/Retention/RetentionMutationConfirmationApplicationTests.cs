@@ -685,11 +685,20 @@ public sealed class RetentionMutationConfirmationApplicationTests
             Assert.Equal(RetentionConfirmationIssuePersistenceDisposition.IssuedFresh, fresh.Disposition);
             Assert.Equal(RetentionConfirmationIssuePersistenceDisposition.ReissuedAfterInvalidation, reissued.Disposition);
 
-            var consumed = fixture.Store.ConsumeConfirmation(reissued.Confirmation!.ConfirmationToken);
-            Assert.Equal(RetentionConfirmationConsumptionDisposition.Consumed, consumed.Disposition);
+            var mutation = fixture.Application.ExecuteMutation(
+                new(
+                    reissued.Confirmation!.ConfirmationToken,
+                    RetentionMutationOperation.Pin,
+                    RetentionMutationScope.SingleItem,
+                    RetentionMutationTargetKind.Item,
+                    fixture.ItemId),
+                key);
+            Assert.NotNull(mutation.Result);
             var linkage = fixture.Application.IssueConfirmation(request, key);
             Assert.Equal(RetentionConfirmationIssuePersistenceDisposition.ConsumedLinkage, linkage.Disposition);
             Assert.Equal(RetentionMutationErrorCodes.ConfirmationConsumed, linkage.ErrorCode);
+            Assert.Equal(mutation.Result.OperationId, linkage.OperationId);
+            Assert.Null(linkage.Confirmation);
         }
 
         using (var fixture = Fixture.Create(itemCount: 2))

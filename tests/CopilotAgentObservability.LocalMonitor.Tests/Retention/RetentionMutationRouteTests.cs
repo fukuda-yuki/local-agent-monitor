@@ -88,7 +88,8 @@ public sealed class RetentionMutationRouteTests
         Assert.Equal("no-store", storedPreview.Headers.CacheControl?.ToString());
         Assert.Equal(previewBody, await storedPreview.Content.ReadAsStringAsync());
 
-        using var confirmation = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/confirmations", $"{{\"preview_id\":\"{previewJson.RootElement.GetProperty("preview_id").GetString()}\",\"preview_digest\":\"{previewJson.RootElement.GetProperty("preview_digest").GetString()}\"}}", workflowKey);
+        var confirmationRequest = $"{{\"preview_id\":\"{previewJson.RootElement.GetProperty("preview_id").GetString()}\",\"preview_digest\":\"{previewJson.RootElement.GetProperty("preview_digest").GetString()}\"}}";
+        using var confirmation = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/confirmations", confirmationRequest, workflowKey);
         var confirmationFailureBody = await confirmation.Content.ReadAsStringAsync();
         Assert.True(confirmation.IsSuccessStatusCode, $"{confirmation.StatusCode}: {confirmationFailureBody}");
         AssertNoStore(confirmation);
@@ -111,6 +112,11 @@ public sealed class RetentionMutationRouteTests
         var operationId = mutationJson.RootElement.GetProperty("operation_id").GetString()!;
         Assert.Equal("retention_pin_applied", mutationJson.RootElement.GetProperty("result_code").GetString());
         Assert.Contains("audit_event_id", mutationJson.RootElement.EnumerateObject().Select(static property => property.Name));
+
+        using var consumedRetry = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/confirmations", confirmationRequest, workflowKey);
+        await AssertErrorAsync(consumedRetry, HttpStatusCode.Conflict, RetentionMutationErrorCodes.ConfirmationConsumed);
+        Assert.Equal($"/api/retention/v1/mutations/{operationId}", consumedRetry.Headers.Location?.OriginalString);
+        Assert.DoesNotContain(token, await consumedRetry.Content.ReadAsStringAsync(), StringComparison.Ordinal);
 
         using var status = await host.Client.GetAsync($"/api/retention/v1/mutations/{operationId}");
         Assert.Equal(HttpStatusCode.OK, status.StatusCode);
@@ -222,6 +228,46 @@ public sealed class RetentionMutationRouteTests
     }
 
     [Fact]
+    public async Task MutationRoute_MapsAuditAppendFailureToExactAuditWriteFailed503()
+    {
+        using var temp = new MonitorTempDirectory { TimeProvider = new MutableTimeProvider(new DateTimeOffset(2026, 7, 20, 12, 0, 0, TimeSpan.Zero)) };
+        var sessionId = SeedSession(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: TestOptions());
+        var workflowKey = WorkflowKey(43);
+        var token = await IssueMutationTokenAsync(host, sessionId, workflowKey);
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TRIGGER fail_retention_audit_append BEFORE INSERT ON retention_audit_events BEGIN SELECT RAISE(ABORT, 'synthetic audit append failure'); END;";
+            command.ExecuteNonQuery();
+        }
+
+        using var mutation = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/mutations",
+            $"{{\"confirmation_token\":\"{token}\",\"operation\":\"pin\",\"scope\":\"session_items\",\"target_kind\":\"session\",\"target_id\":\"{sessionId}\"}}", workflowKey);
+
+        await AssertErrorAsync(mutation, HttpStatusCode.ServiceUnavailable, RetentionMutationErrorCodes.AuditWriteFailed);
+    }
+
+    [Fact]
+    public async Task MutationRoute_MapsCatalogOpenFailureToExactCatalogUnavailable503()
+    {
+        using var temp = new MonitorTempDirectory { TimeProvider = new MutableTimeProvider(new DateTimeOffset(2026, 7, 20, 12, 0, 0, TimeSpan.Zero)) };
+        var unavailablePath = Path.Combine(temp.Path, "unavailable-retention.db");
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: TestOptions(
+            (_, timeProvider) => new RetentionMutationApplicationService(new RetentionCatalogStore(unavailablePath, timeProvider), timeProvider)));
+        var token = RetentionMutationToken.Create(
+            Enumerable.Repeat((byte)0xff, RetentionMutationIdentifierFormats.NonceByteLength).ToArray(),
+            Enumerable.Repeat((byte)0x22, RetentionMutationIdentifierFormats.SecretByteLength).ToArray());
+
+        using var mutation = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/mutations",
+            $"{{\"confirmation_token\":\"{token}\",\"operation\":\"pin\",\"scope\":\"session_items\",\"target_kind\":\"session\",\"target_id\":\"018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071\"}}",
+            WorkflowKey(44));
+
+        await AssertErrorAsync(mutation, HttpStatusCode.ServiceUnavailable, RetentionMutationErrorCodes.CatalogUnavailable);
+    }
+
+    [Fact]
     public async Task ReadRoutes_ReturnFixedNotFoundErrorsAndCrossOriginIsRejected()
     {
         using var temp = new MonitorTempDirectory { TimeProvider = new MutableTimeProvider(new DateTimeOffset(2026, 7, 20, 12, 0, 0, TimeSpan.Zero)) };
@@ -301,7 +347,21 @@ public sealed class RetentionMutationRouteTests
     private static string PreviewJson(string sessionId, string operation = "pin") =>
         $"{{\"target\":{{\"kind\":\"session\",\"id\":\"{sessionId}\"}},\"operation\":\"{operation}\",\"scope\":\"session_items\",\"reason_code\":\"research_needed\",\"comment\":null}}";
 
-    private static MonitorHostTestOptions TestOptions() => new()
+    private static async Task<string> IssueMutationTokenAsync(RunningMonitorHost host, string sessionId, string workflowKey)
+    {
+        using var preview = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/previews", PreviewJson(sessionId), workflowKey);
+        Assert.Equal(HttpStatusCode.OK, preview.StatusCode);
+        using var previewJson = JsonDocument.Parse(await preview.Content.ReadAsStreamAsync());
+        using var confirmation = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/confirmations",
+            $"{{\"preview_id\":\"{previewJson.RootElement.GetProperty("preview_id").GetString()}\",\"preview_digest\":\"{previewJson.RootElement.GetProperty("preview_digest").GetString()}\"}}", workflowKey);
+        var confirmationBody = await confirmation.Content.ReadAsStringAsync();
+        Assert.True(confirmation.StatusCode == HttpStatusCode.OK, $"{confirmation.StatusCode}: {confirmationBody}");
+        using var confirmationJson = JsonDocument.Parse(confirmationBody);
+        return confirmationJson.RootElement.GetProperty("confirmation_token").GetString()!;
+    }
+
+    private static MonitorHostTestOptions TestOptions(
+        Func<RetentionCatalogStore, TimeProvider, RetentionMutationApplicationService>? retentionMutationApplicationFactory = null) => new()
     {
         StartWriter = false,
         StartProjectionWorker = false,
@@ -309,6 +369,7 @@ public sealed class RetentionMutationRouteTests
         StartSessionOtelEnrichment = false,
         StartRetentionCleanupWorker = false,
         UseUserSecrets = false,
+        RetentionMutationApplicationFactory = retentionMutationApplicationFactory,
     };
 
     private static async Task<HttpResponseMessage> SendJsonAsync(RunningMonitorHost host, HttpMethod method, string path, string json, string workflowKey)
