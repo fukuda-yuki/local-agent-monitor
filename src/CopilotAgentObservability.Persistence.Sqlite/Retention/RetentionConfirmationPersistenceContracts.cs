@@ -55,7 +55,8 @@ internal sealed record RetentionConfirmationBindingRequest(
     string WorkflowIdempotencyKey,
     string ReasonCode,
     string? Comment,
-    string? OperationId);
+    string? OperationId,
+    byte[]? CommentSha256 = null);
 
 internal sealed record RetentionConfirmationBinding(
     string ConfirmationId,

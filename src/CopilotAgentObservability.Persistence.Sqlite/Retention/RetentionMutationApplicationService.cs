@@ -169,6 +169,9 @@ internal static partial class RetentionMutationApplicationCanonicalization
                 ["lease_generation"] = item.LeaseGeneration
             })
             .ToArray();
-        return RetentionMutationJcs.Canonicalize(values);
+        return RetentionMutationJcs.Canonicalize(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["items"] = values
+        });
     }
 }

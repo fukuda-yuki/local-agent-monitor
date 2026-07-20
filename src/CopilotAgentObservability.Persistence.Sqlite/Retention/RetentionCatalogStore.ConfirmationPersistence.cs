@@ -237,9 +237,9 @@ public sealed partial class RetentionCatalogStore
         invalidate.ExecuteNonQuery();
 
         var comment = RetentionMutationCommentValidator.Validate(request.Comment);
-        var commentHash = comment.NormalizedComment is null
+        var commentHash = request.CommentSha256 ?? (comment.NormalizedComment is null
             ? null
-            : SHA256.HashData(Encoding.UTF8.GetBytes(comment.NormalizedComment));
+            : SHA256.HashData(Encoding.UTF8.GetBytes(comment.NormalizedComment)));
         var expiresAt = previewCreatedAt.Add(RetentionMutationConstants.ConfirmationLifetime);
         using var insert = connection.CreateCommand();
         insert.Transaction = transaction;
@@ -336,10 +336,14 @@ public sealed partial class RetentionCatalogStore
             || !IsConfirmationJson(request.ActiveConflictSnapshot)
             || !RetentionMutationIdentifiers.IsValidWorkflowKey(request.WorkflowIdempotencyKey)
             || !RetentionMutationReasonCodes.All.Contains(request.ReasonCode, StringComparer.Ordinal)
-            || !RetentionMutationCommentValidator.Validate(request.Comment).IsValid)
+            || !ValidComment(request))
             throw new ArgumentException(RetentionMutationErrorCodes.RequestInvalid, nameof(request));
         ValidateStoredPayload(request.ActiveConflictSnapshot);
     }
+
+    private static bool ValidComment(RetentionConfirmationBindingRequest request) =>
+        request.CommentSha256 is { Length: 32 } && request.Comment is null
+        || request.CommentSha256 is null && RetentionMutationCommentValidator.Validate(request.Comment).IsValid;
 
     private static DateTimeOffset ReadPreviewCreatedAt(SqliteConnection connection, SqliteTransaction transaction, string previewId)
     {
