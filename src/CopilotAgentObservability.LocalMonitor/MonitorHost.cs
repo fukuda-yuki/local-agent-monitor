@@ -200,6 +200,11 @@ internal static class MonitorHost
             errorApp.Run(async context =>
             {
                 var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;
+                if (RetentionMutationRoutes.IsRetentionPath(context.Request.Path))
+                {
+                    await RetentionMutationRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, RetentionMutationErrorCodes.CatalogUnavailable);
+                    return;
+                }
                 if (exception is BadHttpRequestException badRequestException
                     && badRequestException.StatusCode == StatusCodes.Status413PayloadTooLarge)
                 {
@@ -212,9 +217,18 @@ internal static class MonitorHost
         });
         app.Use(async (context, next) =>
         {
+            var retentionPath = RetentionMutationRoutes.IsRetentionPath(context.Request.Path);
+            if (retentionPath)
+            {
+                context.Response.Headers.CacheControl = "no-store";
+            }
             if (!IsValidHostHeader(context.Request.Host.Host))
             {
-                if (DoctorRoutes.IsDoctorPath(context.Request.Path))
+                if (retentionPath)
+                {
+                    await RetentionMutationRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (DoctorRoutes.IsDoctorPath(context.Request.Path))
                 {
                     await DoctorRoutes.WriteInvalidHostAsync(context);
                 }
@@ -231,6 +245,7 @@ internal static class MonitorHost
         app.MapRazorPages();
         DoctorRoutes.Map(app, doctorApplication);
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
+        RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider);
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;

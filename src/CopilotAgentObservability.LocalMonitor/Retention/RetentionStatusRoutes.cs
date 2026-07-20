@@ -12,6 +12,23 @@ internal static class RetentionStatusRoutes
 
     internal static void Map(WebApplication app, RetentionCatalogStore catalog, Func<bool> workerEnabled)
     {
+        app.Use(async (context, next) =>
+        {
+            if (!RetentionMutationRoutes.IsRetentionPath(context.Request.Path))
+            {
+                await next();
+                return;
+            }
+
+            RetentionMutationRoutes.PrepareRetentionResponse(context.Response);
+            if (MonitorHost.IsCrossSiteRequest(context))
+            {
+                await RetentionMutationRoutes.WriteErrorAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden");
+                return;
+            }
+
+            await next();
+        });
         app.MapGet("/api/retention/v1/status", async context =>
         {
             context.Response.Headers.CacheControl = "no-store";

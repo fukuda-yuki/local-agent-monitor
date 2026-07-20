@@ -4,6 +4,10 @@ internal sealed record RetentionMutationStatusApplicationResult(
     RetentionMutationStatusResponse? Status,
     string? ErrorCode);
 
+internal sealed record RetentionMutationItemStateApplicationResult(
+    RetentionItemStateResponse? Item,
+    string? ErrorCode);
+
 internal sealed partial class RetentionMutationApplicationService
 {
     internal RetentionMutationStatusApplicationResult ReadOperationStatus(string? operationId)
@@ -27,5 +31,13 @@ internal sealed partial class RetentionMutationApplicationService
             result.CreatedAt,
             result.CompletedAt,
             result.BackupNonPurgeWarningCode), null);
+    }
+
+    internal RetentionMutationItemStateApplicationResult ReadItemState(string? itemId)
+    {
+        var item = catalog.ReadMutationItemState(itemId);
+        return item is null
+            ? new(null, RetentionMutationErrorCodes.TargetNotFound)
+            : new(item, null);
     }
 }
