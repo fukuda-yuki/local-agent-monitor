@@ -214,6 +214,30 @@ public sealed partial class RetentionCatalogStore
         return binding;
     }
 
+    internal RetentionConfirmationBinding? ReadConfirmationBindingByTokenWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string presentedToken)
+    {
+        if (!RetentionMutationToken.TryParse(presentedToken, out _)) return null;
+        return ReadConfirmationBindingByHash(connection, transaction, RetentionMutationToken.HashFullToken(presentedToken));
+    }
+
+    internal void SetConfirmationOperationIdWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string confirmationId,
+        string operationId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "UPDATE retention_confirmation_bindings SET operation_id=$operation_id WHERE confirmation_id=$confirmation_id AND consumed_at IS NOT NULL AND operation_id IS NULL;";
+        command.Parameters.AddWithValue("$operation_id", operationId);
+        command.Parameters.AddWithValue("$confirmation_id", confirmationId);
+        if (command.ExecuteNonQuery() != 1)
+            throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
+    }
+
     private RetentionConfirmationPersistenceResult InsertConfirmationBindingWithinTransaction(
         SqliteConnection connection,
         SqliteTransaction transaction,

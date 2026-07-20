@@ -9,6 +9,11 @@ internal sealed record RetentionMutationPreviewApplicationResult(
     string? ErrorCode,
     bool IsReplay = false);
 
+internal sealed record RetentionMutationApplicationResult(
+    RetentionMutationResult? Result,
+    string? ErrorCode,
+    bool IsReplay = false);
+
 internal sealed partial class RetentionMutationApplicationService
 {
     private readonly RetentionCatalogStore catalog;
@@ -16,19 +21,28 @@ internal sealed partial class RetentionMutationApplicationService
     private readonly Func<string> previewIdGenerator;
     private readonly Func<string> confirmationIdGenerator;
     private readonly Func<string> tokenGenerator;
+    private readonly Func<string> operationIdGenerator;
+    private readonly Func<string> auditEventIdGenerator;
+    private readonly Action<string>? mutationCheckpoint;
 
     internal RetentionMutationApplicationService(
         RetentionCatalogStore catalog,
         TimeProvider timeProvider,
         Func<string>? previewIdGenerator = null,
         Func<string>? confirmationIdGenerator = null,
-        Func<string>? tokenGenerator = null)
+        Func<string>? tokenGenerator = null,
+        Func<string>? operationIdGenerator = null,
+        Func<string>? auditEventIdGenerator = null,
+        Action<string>? mutationCheckpoint = null)
     {
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         this.timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         this.previewIdGenerator = previewIdGenerator ?? RetentionMutationIdentifiers.GeneratePreviewId;
         this.confirmationIdGenerator = confirmationIdGenerator ?? RetentionMutationIdentifiers.GenerateConfirmationId;
         this.tokenGenerator = tokenGenerator ?? RetentionMutationToken.Generate;
+        this.operationIdGenerator = operationIdGenerator ?? (static () => Guid.NewGuid().ToString("N"));
+        this.auditEventIdGenerator = auditEventIdGenerator ?? RetentionMutationIdentifiers.GenerateAuditEventId;
+        this.mutationCheckpoint = mutationCheckpoint;
     }
 
     internal RetentionMutationPreviewApplicationResult CreatePreview(

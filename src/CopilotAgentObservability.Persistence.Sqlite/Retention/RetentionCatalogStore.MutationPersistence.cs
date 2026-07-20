@@ -93,6 +93,17 @@ public sealed partial class RetentionCatalogStore
             RetentionMutationDigests.TargetItemSetDigest(targets));
     }
 
+    internal RetentionMutationVersionVector MaterializeMutationVersionVectorWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<string> itemIds) =>
+        MaterializeMutationVersionVector(connection, transaction, ValidateTargetIds(itemIds));
+
+    internal bool MutationVersionMatches(
+        RetentionMutationVersionVector expected,
+        RetentionMutationVersionVector current) =>
+        MatchesExpected(expected, current);
+
     private static bool MatchesExpected(RetentionMutationVersionVector expected, RetentionMutationVersionVector current)
     {
         if (!string.Equals(expected.TargetItemSetDigest, current.TargetItemSetDigest, StringComparison.Ordinal)

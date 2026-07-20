@@ -154,6 +154,149 @@ public sealed class RetentionMutationConfirmationApplicationTests
     }
 
     [Fact]
+    public void ExecuteMutation_PinAppliesAndCommitsReceiptAuditAndConsumption()
+    {
+        using var fixture = Fixture.Create();
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        Assert.Null(result.ErrorCode);
+        Assert.Equal(RetentionMutationCompletionCodes.PinApplied, result.Result!.ResultCode);
+        Assert.Equal(2L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal("retained_by_policy", fixture.ScalarText("SELECT state FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_mutation_idempotency WHERE step='mutation';"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings WHERE consumed_at IS NOT NULL;"));
+        Assert.Equal(1, result.Result.LifecycleCounts.RetainedByPolicy);
+        Assert.Equal(1, result.Result.LifecycleCounts.Expiring + result.Result.LifecycleCounts.RetainedByPolicy
+            + result.Result.LifecycleCounts.ExpiredPendingDeletion + result.Result.LifecycleCounts.DeletionQueued
+            + result.Result.LifecycleCounts.Deleting + result.Result.LifecycleCounts.Deleted + result.Result.LifecycleCounts.DeletionFailed);
+    }
+
+    [Fact]
+    public void ExecuteMutation_PinNoopConsumesTokenAndAuditsWithoutRevisionChange()
+    {
+        using var fixture = Fixture.Create();
+        fixture.SetState("retained_by_policy");
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        Assert.Equal(RetentionMutationCompletionCodes.PinNoop, result.Result!.ResultCode);
+        Assert.Equal(1L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings WHERE consumed_at IS NOT NULL;"));
+    }
+
+    [Fact]
+    public void ExecuteMutation_PinAtExpiryRejectsWithoutStateChangeOrTokenConsumption()
+    {
+        using var fixture = Fixture.Create();
+        fixture.SetExpiresAt(Now.AddMinutes(2));
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+        fixture.Time.Advance(preview.TargetItems[0].ExpiresAt!.Value - Now);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        Assert.Equal(RetentionMutationErrorCodes.PinExpired, result.ErrorCode);
+        Assert.Null(result.Result);
+        Assert.Equal(1L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal("expiring", fixture.ScalarText("SELECT state FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings WHERE consumed_at IS NOT NULL;"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_mutation_idempotency WHERE step='mutation';"));
+    }
+
+    [Fact]
+    public void ExecuteMutation_ReplayReturnsStoredResultWithoutSecondAudit()
+    {
+        using var fixture = Fixture.Create();
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+        var request = new RetentionMutationConfirmRequest(confirmation.ConfirmationToken,
+            RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem, RetentionMutationTargetKind.Item, fixture.ItemId);
+
+        var first = fixture.Application.ExecuteMutation(request, fixture.WorkflowKey(40));
+        var replay = fixture.Application.ExecuteMutation(request, fixture.WorkflowKey(40));
+
+        Assert.Equal(RetentionMutationCompletionCodes.PinApplied, first.Result!.ResultCode);
+        Assert.Equal(RetentionMutationResultCodes.Replayed, replay.Result!.ResultCode);
+        Assert.True(replay.Result.IdempotentReplay);
+        Assert.Equal(first.Result.OperationId, replay.Result.OperationId);
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings WHERE consumed_at IS NOT NULL;"));
+    }
+
+    [Fact]
+    public void ExecuteMutation_DriftReturnsFirstPinnedCheckWithoutMutation()
+    {
+        var cases = new (Action<Fixture> Mutate, string Code)[]
+        {
+            (fixture => fixture.Execute("UPDATE retention_items SET item_id='replacement-item' WHERE item_id=$item;", ("$item", fixture.ItemId)), RetentionMutationErrorCodes.ConfirmationTargetChanged),
+            (fixture => fixture.SetState("retained_by_policy"), RetentionMutationErrorCodes.ConfirmationPinChanged),
+            (fixture => fixture.Execute("UPDATE retention_items SET revision=revision+1 WHERE item_id=$item;", ("$item", fixture.ItemId)), RetentionMutationErrorCodes.ConfirmationVersionChanged)
+        };
+
+        foreach (var (mutate, code) in cases)
+        {
+            using var fixture = Fixture.Create();
+            var preview = fixture.CreatePreview();
+            var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+                new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+            mutate(fixture);
+
+            var result = fixture.Application.ExecuteMutation(
+                new(confirmation.ConfirmationToken, RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem,
+                    RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+            Assert.Equal(code, result.ErrorCode);
+            Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
+            Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+            Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings WHERE consumed_at IS NOT NULL;"));
+        }
+    }
+
+    [Fact]
+    public void ExecuteMutation_RollbackLeavesStateAndTokenUnchanged()
+    {
+        using var fixture = Fixture.Create();
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+        var failingApplication = fixture.NewApplication(mutationCheckpoint: _ => throw new InvalidOperationException("injected"));
+
+        var result = failingApplication.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        Assert.Equal(RetentionMutationErrorCodes.MutationTransactionFailed, result.ErrorCode);
+        Assert.Equal("expiring", fixture.ScalarText("SELECT state FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(1L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings WHERE consumed_at IS NOT NULL;"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_mutation_idempotency WHERE step='mutation';"));
+    }
+
+    [Fact]
     public void IssueConfirmation_SurfacesFreshReissueConsumedLinkageConflictAndNonceCollision()
     {
         using (var fixture = Fixture.Create())
@@ -274,9 +417,10 @@ public sealed class RetentionMutationConfirmationApplicationTests
 
         internal RetentionMutationApplicationService NewApplication(
             Func<string>? tokenGenerator = null,
-            Func<string>? confirmationIdGenerator = null) =>
+            Func<string>? confirmationIdGenerator = null,
+            Action<string>? mutationCheckpoint = null) =>
             new(Store, Time, previewIdGenerator: () => RetentionMutationIdentifiers.CreatePreviewId(Enumerable.Repeat((byte)50, 16).ToArray()),
-                confirmationIdGenerator: confirmationIdGenerator, tokenGenerator: tokenGenerator);
+                confirmationIdGenerator: confirmationIdGenerator, tokenGenerator: tokenGenerator, mutationCheckpoint: mutationCheckpoint);
 
         internal string WorkflowKey(byte value) => RetentionMutationIdentifiers.CreateWorkflowKey(Enumerable.Repeat(value, 32).ToArray());
 
@@ -286,6 +430,10 @@ public sealed class RetentionMutationConfirmationApplicationTests
             Enumerable.Repeat(nonce, 16).ToArray(), Enumerable.Repeat(secret, 32).ToArray());
 
         internal void SetState(string state) => Execute("UPDATE retention_items SET state=$state WHERE item_id=$item;", ("$state", state), ("$item", ItemId));
+
+        internal void SetExpiresAt(DateTimeOffset expiresAt) => Execute(
+            "UPDATE retention_items SET expires_at=$expires WHERE item_id=$item;",
+            ("$expires", expiresAt.ToString("O", CultureInfo.InvariantCulture)), ("$item", ItemId));
 
         internal void SetOwnershipReceiptToZero() => Execute("UPDATE retention_items SET ownership_receipt=zeroblob(32) WHERE item_id=$item;", ("$item", ItemId));
 
@@ -325,6 +473,15 @@ public sealed class RetentionMutationConfirmationApplicationTests
             command.CommandText = sql;
             foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value);
             return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+
+        internal string? ScalarText(string sql, params (string Name, object Value)[] parameters)
+        {
+            using var connection = Open(Path);
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value);
+            return command.ExecuteScalar() as string;
         }
 
         internal void Execute(string sql, params (string Name, object Value)[] parameters)
