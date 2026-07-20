@@ -472,6 +472,11 @@ completion code. Result metadata never contains plaintext token material. The
 non-reusable tombstone and returns `retention_idempotency_expired` for every
 step.
 
+At confirmation issue, a supplied key whose digest differs from the workflow-key
+digest persisted on the addressed preview is a cross-step mismatch: it returns
+`retention_mutation_request_invalid` as a REQUEST-STAGE `400`, evaluated before
+any preview or binding inspection.
+
 The canonical request bytes are JCS UTF-8 bytes of the validated request body
 after NFC comment normalization:
 

@@ -1142,6 +1142,12 @@ as follows:
     ID prefixes `rpv1_`, `rcid1_`, `rt90v1_`, `rid1_`, `rae1_`, and `rhc1_`;
     path separators are `/` and `\`. Validation is fail-closed: a matching
     comment is rejected, never partially accepted or redacted.
+17. A confirmation issue must carry the same workflow key as its preview. The
+    supplied key's SHA-256 digest is compared with the preview-persisted digest
+    before preview or binding inspection; a mismatch is
+    `retention_mutation_request_invalid` at REQUEST-STAGE `400`, not an
+    idempotency conflict. The same digest check is exposed for 90-D mutation
+    reuse.
 
 These choices are preparation for 90-A. Until canonical specification changes
 are approved, the current canonical documents remain the implementation
