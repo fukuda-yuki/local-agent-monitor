@@ -548,10 +548,12 @@ The completion registry is exactly:
 `retention_delete_already_queued`, and
 `retention_delete_now_superseded_pin`.
 
-`retention_mutation_replayed` is result-only for a same-workflow-key,
-same-step response. It is never a second audit event or an audit completion
-code. The audit store is append-only: events are never updated, overwritten,
-or deleted by retry, restart, cleanup, or a later command.
+`retention_mutation_replayed` is exposed as the result/status code for a
+same-workflow-key, same-step response. The operation receipt persists a
+nullable `last_replayed_at` timestamp when that response is served; this is
+not a lifecycle state change, second audit event, or audit completion code.
+The audit store is append-only: events are never updated, overwritten, or
+deleted by retry, restart, cleanup, or a later command.
 
 ## Durable atomic boundary
 

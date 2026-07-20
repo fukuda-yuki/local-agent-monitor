@@ -1148,6 +1148,11 @@ as follows:
     `retention_mutation_request_invalid` at REQUEST-STAGE `400`, not an
     idempotency conflict. The same digest check is exposed for 90-D mutation
     reuse.
+18. A successful mutation replay persists only receipt-level bookkeeping, using
+    a nullable `last_replayed_at` timestamp on the existing operation receipt. The
+    replay transaction does not update lifecycle state, consume a second token,
+    create an audit event, or change the stored committed result; status derives
+    `replayed` and `idempotent_replay=true` from that receipt marker.
 
 These choices are preparation for 90-A. Until canonical specification changes
 are approved, the current canonical documents remain the implementation
