@@ -461,7 +461,7 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.Null(failure.CaptureContentState);
         Assert.Equal(SourceCompatibilityState.AdapterFailure, failure.CompatibilityState);
         Assert.Equal([SourceCompatibilityReasonCodes.AdapterParseFailure], failure.ReasonCodes);
-        Assert.DoesNotContain(marker, Encoding.UTF8.GetString(File.ReadAllBytes(temp.DatabasePath)), StringComparison.Ordinal);
+        Assert.DoesNotContain(marker, ReadSharedDatabaseText(temp.DatabasePath), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -498,7 +498,7 @@ public sealed class SourceCompatibilityIngestionTests
             Assert.Equal([SourceCompatibilityReasonCodes.AdapterParseFailure], failure.ReasonCodes);
         }
 
-        Assert.DoesNotContain(marker, Encoding.UTF8.GetString(File.ReadAllBytes(temp.DatabasePath)), StringComparison.Ordinal);
+        Assert.DoesNotContain(marker, ReadSharedDatabaseText(temp.DatabasePath), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -532,10 +532,18 @@ public sealed class SourceCompatibilityIngestionTests
         Assert.Null(failure.CaptureContentState);
         Assert.Equal(SourceCompatibilityState.AdapterFailure, failure.CompatibilityState);
         Assert.Equal([SourceCompatibilityReasonCodes.AdapterException], failure.ReasonCodes);
-        Assert.DoesNotContain(marker, Encoding.UTF8.GetString(File.ReadAllBytes(temp.DatabasePath)), StringComparison.Ordinal);
+        Assert.DoesNotContain(marker, ReadSharedDatabaseText(temp.DatabasePath), StringComparison.Ordinal);
     }
 
     private static StringContent JsonContent(string json) => new(json, Encoding.UTF8, "application/json");
+
+    private static string ReadSharedDatabaseText(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var copy = new MemoryStream();
+        stream.CopyTo(copy);
+        return Encoding.UTF8.GetString(copy.ToArray());
+    }
 
     private sealed class ThrowingSourceMetadataProvider(string marker) : IOtlpTraceSourceMetadataProvider
     {
