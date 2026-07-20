@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
@@ -76,6 +77,47 @@ public sealed class RetentionMutationRepositoriesTests
     }
 
     [Fact]
+    public async Task Idempotency_ConcurrentSameKeySameStepWritersHaveOneCreatedAndOneReplayOrConflict()
+    {
+        using (var fixture = Fixture.Create())
+        {
+            var request = fixture.Idempotency("confirmation_issue", "{\"preview_id\":\"rpv1_preview\"}", "{\"confirmation_id\":\"redacted\"}");
+            var barrier = new Barrier(2);
+            async Task<RetentionIdempotencyOutcome> Write()
+            {
+                barrier.SignalAndWait();
+                await Task.Yield();
+                return fixture.Store.GetOrCreateIdempotency(request);
+            }
+
+            var results = await Task.WhenAll(Task.Run(Write), Task.Run(Write));
+
+            Assert.Equal(1, results.Count(result => result.Disposition == RetentionIdempotencyDisposition.Created));
+            Assert.Equal(1, results.Count(result => result.Disposition == RetentionIdempotencyDisposition.Replayed));
+            Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_mutation_idempotency;"));
+        }
+
+        using (var fixture = Fixture.Create())
+        {
+            var first = fixture.Idempotency("confirmation_issue", "{\"preview_id\":\"rpv1_preview\"}", "{\"confirmation_id\":\"redacted\"}");
+            var second = first with { CanonicalRequest = "{\"preview_id\":\"rpv1_other\"}" };
+            var barrier = new Barrier(2);
+            async Task<RetentionIdempotencyOutcome> Write(RetentionIdempotencyRequest request)
+            {
+                barrier.SignalAndWait();
+                await Task.Yield();
+                return fixture.Store.GetOrCreateIdempotency(request);
+            }
+
+            var results = await Task.WhenAll(Task.Run(() => Write(first)), Task.Run(() => Write(second)));
+
+            Assert.Equal(1, results.Count(result => result.Disposition == RetentionIdempotencyDisposition.Created));
+            Assert.Equal(1, results.Count(result => result.Disposition == RetentionIdempotencyDisposition.Conflict));
+            Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_mutation_idempotency;"));
+        }
+    }
+
+    [Fact]
     public void Audit_ValidatesCommentAndPersistsExactCanonicalSevenKeyCountsWithoutUpdateOrDeleteSurface()
     {
         using var fixture = Fixture.Create();
@@ -127,6 +169,47 @@ public sealed class RetentionMutationRepositoriesTests
 
         Assert.Equal([laterHigh.EventId, laterLow.EventId, earlier.EventId], events.Select(static item => item.EventId));
         Assert.Equal("safe comment", fixture.ScalarText("SELECT comment FROM retention_audit_events WHERE event_id=$id;", ("$id", laterHigh.EventId)));
+    }
+
+    [Fact]
+    public void Audit_RejectsEveryApprovedForbiddenCommentMarkerWithoutPartialRows()
+    {
+        using var fixture = Fixture.Create();
+        var baseline = fixture.Audit(fixture.AuditEventId(1), fixture.Time.GetUtcNow(), null);
+
+        var markers = ApprovedForbiddenCommentMarkers();
+        for (var index = 0; index < markers.Length; index++)
+        {
+            var marker = markers[index];
+            var forbidden = baseline with
+            {
+                EventId = fixture.AuditEventId((byte)(index + 2)),
+                Comment = marker == "mailto:"
+                    ? "reject mailto:test@example.invalid marker"
+                    : $"reject {marker} marker"
+            };
+
+            Assert.Throws<ArgumentException>(() => fixture.Store.AppendAuditEvent(forbidden));
+            Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+        }
+    }
+
+    private static string[] ApprovedForbiddenCommentMarkers()
+    {
+        var validator = typeof(RetentionMutationCommentValidator);
+        var credential = (string[])validator.GetField("CredentialMarkers", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+        var databaseKeys = (string[])validator.GetField("DatabaseKeyMarkers", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+        return [
+            ..credential,
+            ..databaseKeys,
+            "http://",
+            "https://",
+            "ftp://",
+            "mailto:",
+            "www.",
+            "/",
+            "\\"
+        ];
     }
 
     private sealed class Fixture : IDisposable

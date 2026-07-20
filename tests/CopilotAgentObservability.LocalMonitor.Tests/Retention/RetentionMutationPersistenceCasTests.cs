@@ -27,6 +27,36 @@ public sealed class RetentionMutationPersistenceCasTests
     }
 
     [Fact]
+    public async Task TryCompareAndSwapMutationAsync_CallbackExceptionRollsBackIntermediateWriteAfterReopen()
+    {
+        using var fixture = Fixture.Create();
+        var expected = fixture.Store.MaterializeMutationVersionVector(["item-a"]);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await fixture.Store.TryCompareAndSwapMutationAsync(
+                expected,
+                (connection, transaction, _) =>
+                {
+                    using var update = connection.CreateCommand();
+                    update.Transaction = transaction;
+                    update.CommandText = "UPDATE retention_items SET state='retained_by_policy',revision=revision+1 WHERE item_id='item-a' AND revision=1;";
+                    Assert.Equal(1, update.ExecuteNonQuery());
+                    throw new InvalidOperationException("injected callback failure");
+                },
+                (_, _, _) => throw new InvalidOperationException("result writer must not run"),
+                CancellationToken.None));
+
+        SqliteConnection.ClearAllPools();
+        var reopened = new RetentionCatalogStore(fixture.Path);
+        Assert.Equal(RetentionItemLifecycle.Expiring, reopened.Find(new RetentionOwnershipKey(
+            reopened.StoreInstanceId,
+            RetentionStoreKind.RawRecord,
+            "source-item-a"))!.State);
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT revision FROM retention_items WHERE item_id='item-a';"));
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM retention_operation_receipts;"));
+    }
+
+    [Fact]
     public async Task TryCompareAndSwapMutationAsync_StaleRevisionSkipsCallbackAndResultWrite()
     {
         using var fixture = Fixture.Create();

@@ -33,63 +33,97 @@ public sealed partial class RetentionCatalogStore
         ArgumentNullException.ThrowIfNull(transaction);
         ValidateConfirmationBindingRequest(request);
 
-        var previewCreatedAt = ReadPreviewCreatedAt(connection, transaction, request.PreviewId);
+        var consumed = ReadConfirmationBindingForPreview(connection, transaction, request.PreviewId, consumed: true);
+        return consumed is not null
+            ? new(RetentionConfirmationBindingPersistenceDisposition.Consumed, consumed)
+            : InsertConfirmationBindingWithinTransaction(connection, transaction, request);
+    }
+
+    internal RetentionConfirmationIssuePersistenceResult IssueConfirmation(
+        RetentionIdempotencyRequest idempotencyRequest,
+        RetentionConfirmationBindingRequest bindingRequest)
+    {
+        ValidateIdempotencyRequest(idempotencyRequest);
+        ValidateConfirmationBindingRequest(bindingRequest);
+        if (idempotencyRequest.Step != RetentionMutationOperationStep.ConfirmationIssue
+            || !string.Equals(idempotencyRequest.WorkflowKey, bindingRequest.WorkflowIdempotencyKey, StringComparison.Ordinal))
+            throw new ArgumentException(RetentionMutationErrorCodes.RequestInvalid, nameof(bindingRequest));
+
+        using var connection = OpenExisting();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        var result = IssueConfirmationWithinTransaction(connection, transaction, idempotencyRequest, bindingRequest);
+        transaction.Commit();
+        return result;
+    }
+
+    internal RetentionConfirmationIssuePersistenceResult IssueConfirmationWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionIdempotencyRequest idempotencyRequest,
+        RetentionConfirmationBindingRequest bindingRequest)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ValidateIdempotencyRequest(idempotencyRequest);
+        ValidateConfirmationBindingRequest(bindingRequest);
+        if (idempotencyRequest.Step != RetentionMutationOperationStep.ConfirmationIssue
+            || !string.Equals(idempotencyRequest.WorkflowKey, bindingRequest.WorkflowIdempotencyKey, StringComparison.Ordinal))
+            throw new ArgumentException(RetentionMutationErrorCodes.RequestInvalid, nameof(bindingRequest));
+
         var now = timeProvider.GetUtcNow().ToUniversalTime();
-        var tokenParts = RetentionMutationToken.TryParse(request.ConfirmationToken, out var parts) ? parts : null;
-        if (tokenParts is null)
-            throw new ArgumentException(RetentionMutationErrorCodes.ConfirmationInvalid, nameof(request));
-        var tokenHash = RetentionMutationToken.HashFullToken(request.ConfirmationToken);
-
-        if (NonceExists(connection, transaction, tokenParts.Nonce))
-            return new(RetentionConfirmationBindingPersistenceDisposition.GenerationFailed, null);
-
-        using (var invalidate = connection.CreateCommand())
+        var keyDigest = SHA256.HashData(Encoding.ASCII.GetBytes(idempotencyRequest.WorkflowKey));
+        var fingerprint = SHA256.HashData(Encoding.UTF8.GetBytes(idempotencyRequest.CanonicalRequest));
+        var existing = ReadIdempotency(connection, transaction, keyDigest, "confirmation_issue");
+        if (existing is not null)
         {
-            invalidate.Transaction = transaction;
-            invalidate.CommandText = "UPDATE retention_confirmation_bindings SET invalidated_at=$invalidated_at WHERE preview_id=$preview_id AND consumed_at IS NULL AND invalidated_at IS NULL;";
-            invalidate.Parameters.AddWithValue("$invalidated_at", Timestamp(now));
-            invalidate.Parameters.AddWithValue("$preview_id", request.PreviewId);
-            invalidate.ExecuteNonQuery();
+            if (now >= existing.ExpiresAt)
+                return new(RetentionConfirmationIssuePersistenceDisposition.Expired, null, null, null, null, existing.CreatedAt, existing.ExpiresAt);
+            if (!CryptographicOperations.FixedTimeEquals(fingerprint, existing.RequestFingerprint))
+                return new(RetentionConfirmationIssuePersistenceDisposition.Conflict, null, null, null, null, existing.CreatedAt, existing.ExpiresAt);
         }
 
-        var comment = RetentionMutationCommentValidator.Validate(request.Comment);
-        var commentHash = comment.NormalizedComment is null
-            ? null
-            : SHA256.HashData(Encoding.UTF8.GetBytes(comment.NormalizedComment));
-        var expiresAt = previewCreatedAt.Add(RetentionMutationConstants.ConfirmationLifetime);
-        using var insert = connection.CreateCommand();
-        insert.Transaction = transaction;
-        insert.CommandText = """
-            INSERT INTO retention_confirmation_bindings(
-                confirmation_id,preview_id,schema_version,token_sha256,nonce,target_kind,target_id,operation,scope,
-                preview_digest,expected_state_version,target_item_set_digest,active_conflict_snapshot,conflict_version,
-                confirmation_expires_at,workflow_idempotency_key,reason_code,comment_sha256,created_at,consumed_at,
-                invalidated_at,operation_id)
-            VALUES($confirmation_id,$preview_id,1,$token_sha256,$nonce,$target_kind,$target_id,$operation,$scope,
-                $preview_digest,$expected_state_version,$target_item_set_digest,$active_conflict_snapshot,$conflict_version,
-                $confirmation_expires_at,$workflow_idempotency_key,$reason_code,$comment_sha256,$created_at,NULL,NULL,$operation_id);
-            """;
-        insert.Parameters.AddWithValue("$confirmation_id", request.ConfirmationId);
-        insert.Parameters.AddWithValue("$preview_id", request.PreviewId);
-        insert.Parameters.AddWithValue("$token_sha256", tokenHash);
-        insert.Parameters.AddWithValue("$nonce", tokenParts.Nonce);
-        insert.Parameters.AddWithValue("$target_kind", RetentionMutationWire.TargetKind(request.Target.Kind));
-        insert.Parameters.AddWithValue("$target_id", request.Target.Id);
-        insert.Parameters.AddWithValue("$operation", RetentionMutationWire.Operation(request.Operation));
-        insert.Parameters.AddWithValue("$scope", RetentionMutationWire.Scope(request.Scope));
-        insert.Parameters.AddWithValue("$preview_digest", request.PreviewDigest);
-        insert.Parameters.AddWithValue("$expected_state_version", request.ExpectedStateVersion);
-        insert.Parameters.AddWithValue("$target_item_set_digest", request.TargetItemSetDigest);
-        insert.Parameters.AddWithValue("$active_conflict_snapshot", request.ActiveConflictSnapshot);
-        insert.Parameters.AddWithValue("$conflict_version", request.ConflictVersion);
-        insert.Parameters.AddWithValue("$confirmation_expires_at", Timestamp(expiresAt));
-        insert.Parameters.AddWithValue("$workflow_idempotency_key", request.WorkflowIdempotencyKey);
-        insert.Parameters.AddWithValue("$reason_code", request.ReasonCode);
-        insert.Parameters.AddWithValue("$comment_sha256", (object?)commentHash ?? DBNull.Value);
-        insert.Parameters.AddWithValue("$created_at", Timestamp(now));
-        insert.Parameters.AddWithValue("$operation_id", (object?)request.OperationId ?? DBNull.Value);
-        insert.ExecuteNonQuery();
-        return new(RetentionConfirmationBindingPersistenceDisposition.Stored, ReadConfirmationBinding(connection, transaction, request.ConfirmationId));
+        var lifetime = ReadIdempotencyLifetime(connection, transaction, keyDigest);
+        if (existing is null && lifetime is not null && now >= lifetime.Value.ExpiresAt)
+            return new(RetentionConfirmationIssuePersistenceDisposition.Expired, null, null, null, null, lifetime.Value.CreatedAt, lifetime.Value.ExpiresAt);
+
+        var consumed = ReadConfirmationBindingForPreview(connection, transaction, bindingRequest.PreviewId, consumed: true);
+        if (consumed is not null)
+        {
+            var linkage = ReadOperationLinkage(connection, transaction, consumed.OperationId);
+            return new(
+                RetentionConfirmationIssuePersistenceDisposition.ConsumedLinkage,
+                consumed,
+                consumed.OperationId,
+                linkage.ResultJson ?? existing?.ResultJson,
+                linkage.CompletionCode ?? existing?.CompletionCode,
+                existing?.CreatedAt ?? lifetime?.CreatedAt,
+                existing?.ExpiresAt ?? lifetime?.ExpiresAt);
+        }
+
+        var tokenParts = RetentionMutationToken.TryParse(bindingRequest.ConfirmationToken, out var parts) ? parts : null;
+        if (tokenParts is null)
+            throw new ArgumentException(RetentionMutationErrorCodes.ConfirmationInvalid, nameof(bindingRequest));
+        if (NonceExists(connection, transaction, tokenParts.Nonce))
+            return new(RetentionConfirmationIssuePersistenceDisposition.GenerationFailed, null, null, null, null, null, null);
+
+        var hadUnconsumed = HasUnconsumedConfirmationBinding(connection, transaction, bindingRequest.PreviewId);
+        var stored = InsertConfirmationBindingWithinTransaction(connection, transaction, bindingRequest);
+        if (stored.Disposition != RetentionConfirmationBindingPersistenceDisposition.Stored)
+            return new(RetentionConfirmationIssuePersistenceDisposition.GenerationFailed, null, null, null, null, null, null);
+
+        var createdAt = existing?.CreatedAt ?? lifetime?.CreatedAt ?? now;
+        var expiresAt = existing?.ExpiresAt ?? lifetime?.ExpiresAt ?? createdAt.AddDays(RetentionMutationConstants.IdempotencyLifetimeDays);
+        UpsertIdempotency(connection, transaction, keyDigest, "confirmation_issue", fingerprint, idempotencyRequest, createdAt, expiresAt);
+        return new(
+            hadUnconsumed
+                ? RetentionConfirmationIssuePersistenceDisposition.ReissuedAfterInvalidation
+                : RetentionConfirmationIssuePersistenceDisposition.IssuedFresh,
+            stored.Binding,
+            null,
+            idempotencyRequest.ResultJson,
+            idempotencyRequest.CompletionCode,
+            createdAt,
+            expiresAt);
     }
 
     internal RetentionConfirmationValidationResult ValidateConfirmationToken(string presentedToken)
@@ -178,6 +212,109 @@ public sealed partial class RetentionCatalogStore
         var binding = ReadConfirmationBinding(connection, transaction, confirmationId);
         transaction.Commit();
         return binding;
+    }
+
+    private RetentionConfirmationPersistenceResult InsertConfirmationBindingWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionConfirmationBindingRequest request)
+    {
+        var previewCreatedAt = ReadPreviewCreatedAt(connection, transaction, request.PreviewId);
+        var now = timeProvider.GetUtcNow().ToUniversalTime();
+        var tokenParts = RetentionMutationToken.TryParse(request.ConfirmationToken, out var parts) ? parts : null;
+        if (tokenParts is null)
+            throw new ArgumentException(RetentionMutationErrorCodes.ConfirmationInvalid, nameof(request));
+        var tokenHash = RetentionMutationToken.HashFullToken(request.ConfirmationToken);
+
+        if (NonceExists(connection, transaction, tokenParts.Nonce))
+            return new(RetentionConfirmationBindingPersistenceDisposition.GenerationFailed, null);
+
+        using var invalidate = connection.CreateCommand();
+        invalidate.Transaction = transaction;
+        invalidate.CommandText = "UPDATE retention_confirmation_bindings SET invalidated_at=$invalidated_at WHERE preview_id=$preview_id AND consumed_at IS NULL AND invalidated_at IS NULL;";
+        invalidate.Parameters.AddWithValue("$invalidated_at", Timestamp(now));
+        invalidate.Parameters.AddWithValue("$preview_id", request.PreviewId);
+        invalidate.ExecuteNonQuery();
+
+        var comment = RetentionMutationCommentValidator.Validate(request.Comment);
+        var commentHash = comment.NormalizedComment is null
+            ? null
+            : SHA256.HashData(Encoding.UTF8.GetBytes(comment.NormalizedComment));
+        var expiresAt = previewCreatedAt.Add(RetentionMutationConstants.ConfirmationLifetime);
+        using var insert = connection.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = """
+            INSERT INTO retention_confirmation_bindings(
+                confirmation_id,preview_id,schema_version,token_sha256,nonce,target_kind,target_id,operation,scope,
+                preview_digest,expected_state_version,target_item_set_digest,active_conflict_snapshot,conflict_version,
+                confirmation_expires_at,workflow_idempotency_key,reason_code,comment_sha256,created_at,consumed_at,
+                invalidated_at,operation_id)
+            VALUES($confirmation_id,$preview_id,1,$token_sha256,$nonce,$target_kind,$target_id,$operation,$scope,
+                $preview_digest,$expected_state_version,$target_item_set_digest,$active_conflict_snapshot,$conflict_version,
+                $confirmation_expires_at,$workflow_idempotency_key,$reason_code,$comment_sha256,$created_at,NULL,NULL,$operation_id);
+            """;
+        insert.Parameters.AddWithValue("$confirmation_id", request.ConfirmationId);
+        insert.Parameters.AddWithValue("$preview_id", request.PreviewId);
+        insert.Parameters.AddWithValue("$token_sha256", tokenHash);
+        insert.Parameters.AddWithValue("$nonce", tokenParts.Nonce);
+        insert.Parameters.AddWithValue("$target_kind", RetentionMutationWire.TargetKind(request.Target.Kind));
+        insert.Parameters.AddWithValue("$target_id", request.Target.Id);
+        insert.Parameters.AddWithValue("$operation", RetentionMutationWire.Operation(request.Operation));
+        insert.Parameters.AddWithValue("$scope", RetentionMutationWire.Scope(request.Scope));
+        insert.Parameters.AddWithValue("$preview_digest", request.PreviewDigest);
+        insert.Parameters.AddWithValue("$expected_state_version", request.ExpectedStateVersion);
+        insert.Parameters.AddWithValue("$target_item_set_digest", request.TargetItemSetDigest);
+        insert.Parameters.AddWithValue("$active_conflict_snapshot", request.ActiveConflictSnapshot);
+        insert.Parameters.AddWithValue("$conflict_version", request.ConflictVersion);
+        insert.Parameters.AddWithValue("$confirmation_expires_at", Timestamp(expiresAt));
+        insert.Parameters.AddWithValue("$workflow_idempotency_key", request.WorkflowIdempotencyKey);
+        insert.Parameters.AddWithValue("$reason_code", request.ReasonCode);
+        insert.Parameters.AddWithValue("$comment_sha256", (object?)commentHash ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$created_at", Timestamp(now));
+        insert.Parameters.AddWithValue("$operation_id", (object?)request.OperationId ?? DBNull.Value);
+        insert.ExecuteNonQuery();
+        return new(RetentionConfirmationBindingPersistenceDisposition.Stored, ReadConfirmationBinding(connection, transaction, request.ConfirmationId));
+    }
+
+    private static RetentionConfirmationBinding? ReadConfirmationBindingForPreview(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string previewId,
+        bool consumed)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = BindingSelect(consumed
+            ? "preview_id=$preview_id AND consumed_at IS NOT NULL ORDER BY consumed_at DESC"
+            : "preview_id=$preview_id AND consumed_at IS NULL");
+        command.Parameters.AddWithValue("$preview_id", previewId);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadBinding(reader) : null;
+    }
+
+    private static bool HasUnconsumedConfirmationBinding(SqliteConnection connection, SqliteTransaction transaction, string previewId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM retention_confirmation_bindings WHERE preview_id=$preview_id AND consumed_at IS NULL);";
+        command.Parameters.AddWithValue("$preview_id", previewId);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+    }
+
+    private static (string? ResultJson, string? CompletionCode) ReadOperationLinkage(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string? operationId)
+    {
+        if (operationId is null) return (null, null);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT result_json,completion_code FROM retention_operation_receipts WHERE operation_id=$operation_id;";
+        command.Parameters.AddWithValue("$operation_id", operationId);
+        using var reader = command.ExecuteReader();
+        return reader.Read()
+            ? (reader.GetString(0), reader.GetString(1))
+            : (null, null);
     }
 
     private static void ValidateConfirmationBindingRequest(RetentionConfirmationBindingRequest request)

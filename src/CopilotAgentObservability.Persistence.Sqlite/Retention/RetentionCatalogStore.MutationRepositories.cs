@@ -213,6 +213,38 @@ public sealed partial class RetentionCatalogStore
         command.ExecuteNonQuery();
     }
 
+    private static void UpsertIdempotency(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        byte[] keyDigest,
+        string step,
+        byte[] fingerprint,
+        RetentionIdempotencyRequest request,
+        DateTimeOffset createdAt,
+        DateTimeOffset expiresAt)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO retention_mutation_idempotency(key_digest,step,request_fingerprint,result_json,completion_code,created_at,expires_at)
+            VALUES($key_digest,$step,$fingerprint,$result_json,$completion_code,$created_at,$expires_at)
+            ON CONFLICT(key_digest,step) DO UPDATE SET
+                request_fingerprint=excluded.request_fingerprint,
+                result_json=excluded.result_json,
+                completion_code=excluded.completion_code,
+                created_at=excluded.created_at,
+                expires_at=excluded.expires_at;
+            """;
+        command.Parameters.AddWithValue("$key_digest", keyDigest);
+        command.Parameters.AddWithValue("$step", step);
+        command.Parameters.AddWithValue("$fingerprint", fingerprint);
+        command.Parameters.AddWithValue("$result_json", request.ResultJson);
+        command.Parameters.AddWithValue("$completion_code", (object?)request.CompletionCode ?? DBNull.Value);
+        command.Parameters.AddWithValue("$created_at", Timestamp(createdAt));
+        command.Parameters.AddWithValue("$expires_at", Timestamp(expiresAt));
+        command.ExecuteNonQuery();
+    }
+
     private static IdempotencyRow? ReadIdempotency(SqliteConnection connection, SqliteTransaction transaction, byte[] keyDigest, string step)
     {
         using var command = connection.CreateCommand();

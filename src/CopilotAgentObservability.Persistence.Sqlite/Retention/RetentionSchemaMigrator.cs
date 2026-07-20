@@ -172,6 +172,7 @@ internal static class RetentionSchemaMigrator
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_confirmation_bindings_expiry ON retention_confirmation_bindings(confirmation_expires_at, confirmation_id);");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_confirmation_bindings_preview ON retention_confirmation_bindings(preview_id, invalidated_at, consumed_at, confirmation_id);");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_confirmation_bindings_token_hash ON retention_confirmation_bindings(token_sha256);");
+        Execute(connection, transaction, "CREATE UNIQUE INDEX IF NOT EXISTS IX_retention_confirmation_bindings_one_active_preview ON retention_confirmation_bindings(preview_id) WHERE consumed_at IS NULL AND invalidated_at IS NULL;");
         Execute(connection, transaction, """
             CREATE TABLE IF NOT EXISTS retention_mutation_idempotency (
                 key_digest BLOB NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),

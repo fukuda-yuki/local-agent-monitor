@@ -23,6 +23,7 @@ public sealed class RetentionMutationPersistenceSchemaTests
         "IX_retention_confirmation_bindings_expiry",
         "IX_retention_confirmation_bindings_preview",
         "IX_retention_confirmation_bindings_token_hash",
+        "IX_retention_confirmation_bindings_one_active_preview",
         "IX_retention_mutation_idempotency_expiry",
         "IX_retention_operation_receipts_target",
         "IX_retention_audit_events_target"
@@ -137,6 +138,12 @@ public sealed class RetentionMutationPersistenceSchemaTests
             Assert.All(MutationTables, table => Assert.False(TableExists(path, table), table));
             Assert.Equal(5L, Scalar(path, "SELECT version FROM schema_version WHERE component='monitor';"));
             Assert.Equal(originalRawCount, Scalar(path, "SELECT COUNT(*) FROM raw_records;"));
+
+            new RetentionCatalogStore(path).CreateSchema();
+            Assert.All(MutationTables, table => Assert.True(TableExists(path, table), table));
+            Assert.All(MutationIndexes, index => Assert.True(IndexExists(path, index), index));
+            Assert.Equal(originalRawCount, Scalar(path, "SELECT COUNT(*) FROM raw_records;"));
+            Assert.Equal(1L, Scalar(path, "SELECT version FROM retention_component_versions WHERE component='retention';"));
         }
         finally
         {

@@ -3,6 +3,17 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 internal enum RetentionConfirmationBindingPersistenceDisposition
 {
     Stored,
+    GenerationFailed,
+    Consumed
+}
+
+internal enum RetentionConfirmationIssuePersistenceDisposition
+{
+    IssuedFresh,
+    ReissuedAfterInvalidation,
+    ConsumedLinkage,
+    Conflict,
+    Expired,
     GenerationFailed
 }
 
@@ -84,3 +95,12 @@ internal sealed record RetentionConfirmationConsumptionResult(
 internal sealed record RetentionConfirmationPersistenceResult(
     RetentionConfirmationBindingPersistenceDisposition Disposition,
     RetentionConfirmationBinding? Binding);
+
+internal sealed record RetentionConfirmationIssuePersistenceResult(
+    RetentionConfirmationIssuePersistenceDisposition Disposition,
+    RetentionConfirmationBinding? Binding,
+    string? OperationId,
+    string? ResultJson,
+    string? CompletionCode,
+    DateTimeOffset? CreatedAt,
+    DateTimeOffset? ExpiresAt);
