@@ -135,8 +135,12 @@ internal static class RetentionSchemaMigrator
                 target_item_set_digest TEXT NOT NULL,
                 preview_digest TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                rejection_code TEXT NULL
+                expires_at TEXT NULL,
+                rejection_code TEXT NULL,
+                active_conflict_snapshot TEXT NULL,
+                conflict_version TEXT NULL,
+                reason_code TEXT NULL,
+                comment_sha256 BLOB NULL CHECK(comment_sha256 IS NULL OR (typeof(comment_sha256) = 'blob' AND length(comment_sha256) = 32))
             );
             """);
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_retention_mutation_previews_expiry ON retention_mutation_previews(expires_at, preview_id);");

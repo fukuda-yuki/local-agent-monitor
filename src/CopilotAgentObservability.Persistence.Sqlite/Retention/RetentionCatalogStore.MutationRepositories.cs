@@ -60,6 +60,36 @@ public sealed partial class RetentionCatalogStore
         return new(RetentionIdempotencyDisposition.Created, request.ResultJson, request.CompletionCode, createdAt, expiresAt);
     }
 
+    internal RetentionIdempotencyOutcome? LookupIdempotencyWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionIdempotencyRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ValidateIdempotencyRequest(request);
+
+        var now = timeProvider.GetUtcNow().ToUniversalTime();
+        var keyDigest = SHA256.HashData(Encoding.ASCII.GetBytes(request.WorkflowKey));
+        var step = IdempotencyStep(request.Step);
+        var fingerprint = SHA256.HashData(Encoding.UTF8.GetBytes(request.CanonicalRequest));
+        var existing = ReadIdempotency(connection, transaction, keyDigest, step);
+        if (existing is not null)
+        {
+            if (now >= existing.ExpiresAt)
+                return new(RetentionIdempotencyDisposition.Expired, null, null, existing.CreatedAt, existing.ExpiresAt);
+
+            return CryptographicOperations.FixedTimeEquals(fingerprint, existing.RequestFingerprint)
+                ? new(RetentionIdempotencyDisposition.Replayed, existing.ResultJson, existing.CompletionCode, existing.CreatedAt, existing.ExpiresAt)
+                : new(RetentionIdempotencyDisposition.Conflict, null, null, existing.CreatedAt, existing.ExpiresAt);
+        }
+
+        var lifetime = ReadIdempotencyLifetime(connection, transaction, keyDigest);
+        return lifetime is { } value && now >= value.ExpiresAt
+            ? new(RetentionIdempotencyDisposition.Expired, null, null, value.CreatedAt, value.ExpiresAt)
+            : null;
+    }
+
     internal void AppendAuditEvent(RetentionAuditEvent auditEvent)
     {
         using var connection = OpenExisting();

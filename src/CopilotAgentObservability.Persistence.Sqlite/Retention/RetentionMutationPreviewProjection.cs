@@ -272,14 +272,56 @@ public sealed partial class RetentionCatalogStore
             || target.Kind == RetentionMutationTargetKind.Item && scope != RetentionMutationScope.SingleItem)
             throw new ArgumentException(RetentionMutationErrorCodes.RequestInvalid);
 
-        var resolution = ResolveMutationTarget(target);
-        if (resolution.Outcome == RetentionMutationTargetResolutionOutcome.NotFound)
-            return new(RetentionMutationPreviewProjectionOutcome.TargetNotFound, resolution.ErrorCode, null);
-        if (resolution.Items.Count > RetentionMutationConstants.TargetItemLimit)
-            return new(RetentionMutationPreviewProjectionOutcome.TargetLimitExceeded, RetentionMutationErrorCodes.TargetLimitExceeded, null);
-
         using var connection = OpenExisting();
         using var transaction = connection.BeginTransaction();
+        var result = MaterializeMutationPreviewWithinTransaction(connection, transaction, target, operation, scope, now);
+        transaction.Commit();
+        return new(result.Outcome, result.ErrorCode, result.Projection);
+    }
+
+    internal RetentionMutationPreviewMaterializationResult CollectMutationPreviewMaterialization(
+        RetentionMutationTarget target,
+        RetentionMutationOperation operation,
+        RetentionMutationScope scope,
+        DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        using var connection = OpenExisting();
+        using var transaction = connection.BeginTransaction();
+        var result = MaterializeMutationPreviewWithinTransaction(connection, transaction, target, operation, scope, now);
+        transaction.Commit();
+        return result;
+    }
+
+    internal RetentionMutationPreviewMaterializationResult MaterializeMutationPreviewWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionMutationTarget target,
+        RetentionMutationOperation operation,
+        RetentionMutationScope scope,
+        DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(target);
+        if (!RetentionMutationTargetValidator.Validate(target).IsValid
+            || !Enum.IsDefined(operation)
+            || !Enum.IsDefined(scope)
+            || target.Kind == RetentionMutationTargetKind.Session && scope != RetentionMutationScope.SessionItems
+            || target.Kind == RetentionMutationTargetKind.Item && scope != RetentionMutationScope.SingleItem)
+            throw new ArgumentException(RetentionMutationErrorCodes.RequestInvalid);
+
+        var resolution = target.Kind switch
+        {
+            RetentionMutationTargetKind.Session => ResolveSessionTarget(connection, transaction, target.Id),
+            RetentionMutationTargetKind.Item => ResolveItemTarget(connection, transaction, target.Id),
+            _ => throw new ArgumentOutOfRangeException(nameof(target))
+        };
+        if (resolution.Outcome == RetentionMutationTargetResolutionOutcome.NotFound)
+            return new(RetentionMutationPreviewProjectionOutcome.TargetNotFound, resolution.ErrorCode, null, []);
+        if (resolution.Items.Count > RetentionMutationConstants.TargetItemLimit)
+            return new(RetentionMutationPreviewProjectionOutcome.TargetLimitExceeded, RetentionMutationErrorCodes.TargetLimitExceeded, null, []);
+
         var versionVector = resolution.Outcome == RetentionMutationTargetResolutionOutcome.NotApplicable
             ? EmptyVersionVector()
             : MaterializeMutationVersionVector(connection, transaction, resolution.Items.Select(static item => item.ItemId).ToArray());
@@ -288,8 +330,7 @@ public sealed partial class RetentionCatalogStore
             : null;
         var conflicts = ReadActiveConflicts(connection, transaction, resolution.Items.Select(static item => item.ItemId).ToArray(), now);
         var projection = RetentionMutationPreviewProjector.Project(target, operation, scope, resolution, versionVector, sessionProjection, conflicts, now);
-        transaction.Commit();
-        return new(RetentionMutationPreviewProjectionOutcome.Ready, null, projection);
+        return new(RetentionMutationPreviewProjectionOutcome.Ready, null, projection, conflicts);
     }
 
     private static RetentionMutationVersionVector EmptyVersionVector()
