@@ -5,6 +5,15 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 public sealed partial class RetentionCatalogStore
 {
+    internal RetentionMutationResult? ReadOperationReceipt(string? operationId)
+    {
+        using var connection = OpenMutationConnection();
+        using var transaction = BeginMutationTransaction(connection);
+        var result = ReadOperationReceiptWithinTransaction(connection, transaction, operationId);
+        transaction.Commit();
+        return result;
+    }
+
     internal RetentionMutationResult? ReadOperationReceiptWithinTransaction(
         SqliteConnection connection,
         SqliteTransaction transaction,
