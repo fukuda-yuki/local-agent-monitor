@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -389,6 +390,129 @@ public sealed class RetentionMutationConfirmationApplicationTests
             + result.Result.LifecycleCounts.Deleting + result.Result.LifecycleCounts.Deleted + result.Result.LifecycleCounts.DeletionFailed);
     }
 
+    [Theory]
+    [InlineData("expiring", 3, RetentionMutationCompletionCodes.DeleteQueued)]
+    [InlineData("retained_by_policy", 4, RetentionMutationCompletionCodes.DeleteNowSupersededPin)]
+    [InlineData("expired_pending_deletion", 2, RetentionMutationCompletionCodes.DeleteQueued)]
+    [InlineData("deletion_queued", 1, RetentionMutationCompletionCodes.DeleteAlreadyQueued)]
+    public void ExecuteMutation_DeleteNowFollowsThePinnedCommitRows(string state, long expectedRevision, string completionCode)
+    {
+        using var fixture = Fixture.Create();
+        if (state == "retained_by_policy")
+            fixture.SetRetention(state, Now.AddDays(-8), Now.AddDays(30), "sensitive-bundle-7d", 1);
+        else if (state is "expired_pending_deletion" or "deletion_queued")
+            fixture.SetDeniedState(state);
+
+        var preview = fixture.CreatePreview(operation: RetentionMutationOperation.DeleteNow);
+        Assert.True(preview.MutationAllowed);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.DeleteNow, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        Assert.Null(result.ErrorCode);
+        Assert.Equal(completionCode, result.Result!.ResultCode);
+        Assert.Equal("deletion_queued", fixture.ScalarText("SELECT state FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(expectedRevision, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.NotNull(fixture.ScalarText("SELECT read_denied_at FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_operation_receipts;"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM retention_audit_events;"));
+        Assert.Equal(result.Result.OperationId, fixture.Store.ReadAuditEvents(new(RetentionMutationTargetKind.Item, fixture.ItemId)).Single().OperationId);
+        Assert.Equal(result.Result.ResultVersion, RetentionMutationDigests.ExpectedStateVersion([
+            new RetentionMutationExpectedStateItem(fixture.ItemId, expectedRevision, RetentionPinState.Unpinned, RetentionItemLifecycle.DeletionQueued)
+        ]));
+    }
+
+    [Fact]
+    public async Task ExecuteMutation_DeleteNowDeniesReadAccessBeforeAnyWorkerDeletion()
+    {
+        using var fixture = Fixture.Create();
+        var preview = fixture.CreatePreview(operation: RetentionMutationOperation.DeleteNow);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.DeleteNow, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        Assert.Null(result.ErrorCode);
+        var key = fixture.ItemOwnershipKey();
+        Assert.Null(await fixture.Store.TryAcquireAsync(key, 3, RetentionLeaseKind.Access, Now, CancellationToken.None));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM session_event_content WHERE event_id=$event;", ("$event", key.SourceItemId)));
+    }
+
+    [Fact]
+    public async Task DeleteNowQueue_IsClaimedAndProcessedByTheExistingWorkerLikeExpiryQueue()
+    {
+        using var fixture = Fixture.Create(itemCount: 2);
+        var preview = fixture.CreatePreview(itemIndex: 0, operation: RetentionMutationOperation.DeleteNow);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.DeleteNow, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, fixture.ItemIds[0]), fixture.WorkflowKey(40));
+        Assert.Null(result.ErrorCode);
+        fixture.SetExpiresAtFor(fixture.ItemIds[1], Now);
+        fixture.Execute("DELETE FROM retention_adapter_coverage; INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1);");
+
+        var adapter = new Fixture.GatedAdapter(RetentionStoreKind.SessionEventContent);
+        var registry = new RetentionAdapterRegistry([
+            adapter,
+            new Fixture.GatedAdapter(RetentionStoreKind.RawRecord),
+            new Fixture.GatedAdapter(RetentionStoreKind.AnalysisRunRaw),
+            new Fixture.GatedAdapter(RetentionStoreKind.SensitiveBundle),
+            new Fixture.GatedAdapter(RetentionStoreKind.AnalysisSdkDirectory)
+        ]);
+        var worker = new RetentionCleanupWorker(new RetentionCleanupCoordinator(fixture.Store, registry, fixture.Time), fixture.Time);
+        var run = worker.RunOnceAsync(CancellationToken.None).AsTask();
+        await adapter.Entered.Task;
+        adapter.Release.TrySetResult();
+        await run;
+
+        Assert.Equal(2, adapter.Contexts.Count);
+        Assert.All(fixture.ItemIds, item => Assert.Equal("deleted", fixture.ScalarText("SELECT state FROM retention_items WHERE item_id=$item;", ("$item", item))));
+        Assert.All(fixture.ItemIds, item => Assert.Equal(5L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", item))));
+    }
+
+    [Fact]
+    public void ExecuteMutation_DeleteNowSessionMixedStatesCommitsExactBeforeAndAfterCounts()
+    {
+        using var fixture = Fixture.Create(itemCount: 4);
+        fixture.SetStateFor(fixture.ItemIds[0], "expiring");
+        fixture.SetRetentionFor(fixture.ItemIds[1], "retained_by_policy", Now.AddDays(-8), Now.AddDays(30), "sensitive-bundle-7d", 1);
+        fixture.SetDeniedStateFor(fixture.ItemIds[2], "expired_pending_deletion");
+        fixture.SetDeniedStateFor(fixture.ItemIds[3], "deletion_queued");
+        var preview = fixture.CreatePreview(session: true, operation: RetentionMutationOperation.DeleteNow);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(
+            new(confirmation.ConfirmationToken, RetentionMutationOperation.DeleteNow, RetentionMutationScope.SessionItems,
+                RetentionMutationTargetKind.Session, fixture.SessionId), fixture.WorkflowKey(40));
+
+        Assert.Null(result.ErrorCode);
+        Assert.Equal(RetentionMutationCompletionCodes.DeleteNowSupersededPin, result.Result!.ResultCode);
+        Assert.Equal(4, result.Result.LifecycleCounts.DeletionQueued);
+        Assert.Equal(0, result.Result.LifecycleCounts.Expiring + result.Result.LifecycleCounts.RetainedByPolicy
+            + result.Result.LifecycleCounts.ExpiredPendingDeletion + result.Result.LifecycleCounts.Deleting
+            + result.Result.LifecycleCounts.Deleted + result.Result.LifecycleCounts.DeletionFailed);
+        var audit = fixture.Store.ReadAuditEvents(new(RetentionMutationTargetKind.Session, fixture.SessionId)).Single();
+        Assert.Equal(1, audit.PreviousOperationState.Expiring);
+        Assert.Equal(1, audit.PreviousOperationState.RetainedByPolicy);
+        Assert.Equal(1, audit.PreviousOperationState.ExpiredPendingDeletion);
+        Assert.Equal(1, audit.PreviousOperationState.DeletionQueued);
+        Assert.Equal(4, audit.NewOperationState.DeletionQueued);
+        Assert.Equal(0, audit.NewOperationState.Expiring + audit.NewOperationState.RetainedByPolicy
+            + audit.NewOperationState.ExpiredPendingDeletion + audit.NewOperationState.Deleting
+            + audit.NewOperationState.Deleted + audit.NewOperationState.DeletionFailed);
+        Assert.Equal(3L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemIds[0])));
+        Assert.Equal(4L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemIds[1])));
+        Assert.Equal(2L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemIds[2])));
+        Assert.Equal(1L, fixture.Scalar("SELECT revision FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemIds[3])));
+    }
+
     [Fact]
     public void ExecuteMutation_AuditPreservesNormalizedReasonAndComment()
     {
@@ -514,7 +638,7 @@ public sealed class RetentionMutationConfirmationApplicationTests
         }
     }
 
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         private byte issuanceEntropy = 1;
 
@@ -544,6 +668,7 @@ public sealed class RetentionMutationConfirmationApplicationTests
         internal string ItemId { get; }
         internal IReadOnlyList<string> ItemIds { get; }
         internal RetentionMutationApplicationService Application { get; }
+        internal int GateEntered;
 
         internal static Fixture Create(int itemCount = 1)
         {
@@ -603,15 +728,40 @@ public sealed class RetentionMutationConfirmationApplicationTests
 
         internal void SetStateFor(string itemId, string state) => Execute("UPDATE retention_items SET state=$state WHERE item_id=$item;", ("$state", state), ("$item", itemId));
 
+        internal void SetDeniedState(string state) => SetDeniedStateFor(ItemId, state);
+
+        internal void SetDeniedStateFor(string itemId, string state) => Execute(
+            "UPDATE retention_items SET state=$state,read_denied_at=$now,queued_at=$now WHERE item_id=$item;",
+            ("$state", state), ("$now", Now.ToString("O", CultureInfo.InvariantCulture)), ("$item", itemId));
+
         internal void SetExpiresAt(DateTimeOffset expiresAt) => Execute(
             "UPDATE retention_items SET expires_at=$expires WHERE item_id=$item;",
             ("$expires", expiresAt.ToString("O", CultureInfo.InvariantCulture)), ("$item", ItemId));
+
+        internal void SetExpiresAtFor(string itemId, DateTimeOffset expiresAt) => Execute(
+            "UPDATE retention_items SET expires_at=$expires WHERE item_id=$item;",
+            ("$expires", expiresAt.ToString("O", CultureInfo.InvariantCulture)), ("$item", itemId));
 
         internal void SetRetention(string state, DateTimeOffset capturedAt, DateTimeOffset expiresAt, string policyId, int policyVersion) => Execute(
             "UPDATE retention_items SET state=$state,captured_at=$captured,expires_at=$expires,policy_id=$policy,policy_version=$version WHERE item_id=$item;",
             ("$state", state), ("$captured", capturedAt.ToString("O", CultureInfo.InvariantCulture)),
             ("$expires", expiresAt.ToString("O", CultureInfo.InvariantCulture)), ("$policy", policyId),
             ("$version", policyVersion), ("$item", ItemId));
+
+        internal void SetRetentionFor(string itemId, string state, DateTimeOffset capturedAt, DateTimeOffset expiresAt, string policyId, int policyVersion) => Execute(
+            "UPDATE retention_items SET state=$state,captured_at=$captured,expires_at=$expires,policy_id=$policy,policy_version=$version WHERE item_id=$item;",
+            ("$state", state), ("$captured", capturedAt.ToString("O", CultureInfo.InvariantCulture)),
+            ("$expires", expiresAt.ToString("O", CultureInfo.InvariantCulture)), ("$policy", policyId),
+            ("$version", policyVersion), ("$item", itemId));
+
+        internal RetentionOwnershipKey ItemOwnershipKey()
+        {
+            using var connection = Open(Path);
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT source_item_id FROM retention_items WHERE item_id=$item;";
+            command.Parameters.AddWithValue("$item", ItemId);
+            return new(Store.StoreInstanceId, RetentionStoreKind.SessionEventContent, (string)command.ExecuteScalar()!);
+        }
 
         internal void SetOwnershipReceiptToZero() => Execute("UPDATE retention_items SET ownership_receipt=zeroblob(32) WHERE item_id=$item;", ("$item", ItemId));
 
@@ -675,6 +825,27 @@ public sealed class RetentionMutationConfirmationApplicationTests
         {
             SqliteConnection.ClearAllPools();
             foreach (var file in new[] { Path, Path + "-wal", Path + "-shm" }) if (File.Exists(file)) File.Delete(file);
+        }
+
+        internal sealed class GatedAdapter(RetentionStoreKind kind) : IRetentionDeletionAdapter
+        {
+            internal readonly List<RetentionDeleteContext> Contexts = [];
+            internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            private int calls;
+
+            public RetentionStoreKind StoreKind => kind;
+
+            public async ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context)
+            {
+                lock (Contexts) Contexts.Add(context);
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    Entered.TrySetResult();
+                    await Release.Task.ConfigureAwait(false);
+                }
+                return RetentionAdapterResult.Deleted;
+            }
         }
 
         private static string[] ReadItems(string path)

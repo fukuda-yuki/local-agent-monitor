@@ -113,15 +113,13 @@ internal sealed partial class RetentionMutationApplicationService
             var transitionFailure = transitions.Select(static value => value.Evaluation).FirstOrDefault(static value => value.Classification != RetentionMutationStageClassification.CommitStageOutcome);
             if (transitionFailure is not null)
                 return CommitFailure(connection, transaction, lookupRequest, transitionFailure.Code!);
-            if (binding.Operation == RetentionMutationOperation.DeleteNow)
-                throw new NotSupportedException("delete_now mutation execution is reserved for milestone 90-D3");
 
             var operationId = operationIdGenerator();
             var completedAt = now;
             var finalItems = new List<RetentionPreviewItem>(transitions.Length);
             foreach (var transition in transitions)
             {
-                finalItems.Add(ApplyTransition(connection, transaction, transition.Item, transition.Evaluation, now));
+                finalItems.Add(ApplyTransition(connection, transaction, transition.Item, transition.Evaluation, binding.Operation, now));
                 mutationCheckpoint?.Invoke("state_mutated");
             }
 
@@ -186,6 +184,7 @@ internal sealed partial class RetentionMutationApplicationService
                 lookupRequest with { ResultJson = JsonSerializer.Serialize(result), CompletionCode = completionCode });
             if (committedIdempotency.Disposition != RetentionIdempotencyDisposition.Created)
                 throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
+            mutationCheckpoint?.Invoke("idempotency_written");
             transaction.Commit();
             return new(result, null);
         }
@@ -279,6 +278,7 @@ internal sealed partial class RetentionMutationApplicationService
         SqliteTransaction transaction,
         RetentionPreviewItem item,
         RetentionMutationTransitionEvaluation evaluation,
+        RetentionMutationOperation operation,
         DateTimeOffset now)
     {
         var state = item.State;
@@ -291,7 +291,7 @@ internal sealed partial class RetentionMutationApplicationService
             var nextExpiry = state == RetentionItemLifecycle.RetainedByPolicy && next == RetentionItemLifecycle.Expiring
                 ? RetentionUnpinExpiryCalculator.Recalculate(item.CapturedAt ?? throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed), item.PolicyId, item.PolicyVersion)
                 : expiry;
-            ExecuteTransition(connection, transaction, item.ItemId, revision, state, next, nextExpiry, now);
+            ExecuteTransition(connection, transaction, item.ItemId, revision, state, next, nextExpiry, operation, now);
             state = next;
             expiry = nextExpiry;
             revision++;
@@ -314,7 +314,7 @@ internal sealed partial class RetentionMutationApplicationService
         };
     }
 
-    private static void ExecuteTransition(
+    private void ExecuteTransition(
         SqliteConnection connection,
         SqliteTransaction transaction,
         string itemId,
@@ -322,6 +322,7 @@ internal sealed partial class RetentionMutationApplicationService
         RetentionItemLifecycle from,
         RetentionItemLifecycle to,
         DateTimeOffset expiry,
+        RetentionMutationOperation operation,
         DateTimeOffset now)
     {
         using var command = connection.CreateCommand();
@@ -330,6 +331,7 @@ internal sealed partial class RetentionMutationApplicationService
         {
             (RetentionItemLifecycle.Expiring, RetentionItemLifecycle.RetainedByPolicy) => "UPDATE retention_items SET state='retained_by_policy',revision=revision+1 WHERE item_id=$item AND revision=$revision AND state='expiring' AND read_denied_at IS NULL AND expires_at>$now;",
             (RetentionItemLifecycle.RetainedByPolicy, RetentionItemLifecycle.Expiring) => "UPDATE retention_items SET state='expiring',expires_at=$expires,revision=revision+1 WHERE item_id=$item AND revision=$revision AND state='retained_by_policy' AND read_denied_at IS NULL;",
+            (RetentionItemLifecycle.Expiring, RetentionItemLifecycle.ExpiredPendingDeletion) when operation == RetentionMutationOperation.DeleteNow => "UPDATE retention_items SET state='expired_pending_deletion',read_denied_at=$now,queued_at=$now,revision=revision+1 WHERE item_id=$item AND revision=$revision AND state='expiring' AND read_denied_at IS NULL;",
             (RetentionItemLifecycle.Expiring, RetentionItemLifecycle.ExpiredPendingDeletion) => "UPDATE retention_items SET state='expired_pending_deletion',read_denied_at=$now,queued_at=$now,revision=revision+1 WHERE item_id=$item AND revision=$revision AND state='expiring' AND expires_at<=$now AND read_denied_at IS NULL;",
             (RetentionItemLifecycle.ExpiredPendingDeletion, RetentionItemLifecycle.DeletionQueued) => "UPDATE retention_items SET state='deletion_queued',revision=revision+1,next_retry_at=NULL,error_code=NULL WHERE item_id=$item AND revision=$revision AND state='expired_pending_deletion' AND read_denied_at IS NOT NULL;",
             _ => throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed)
@@ -340,6 +342,9 @@ internal sealed partial class RetentionMutationApplicationService
         command.Parameters.AddWithValue("$expires", Timestamp(expiry));
         if (command.ExecuteNonQuery() != 1)
             throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
+        mutationCheckpoint?.Invoke("state_update");
+        if (to == RetentionItemLifecycle.ExpiredPendingDeletion)
+            mutationCheckpoint?.Invoke("denial_write");
     }
 
     private static string Timestamp(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
@@ -355,6 +360,9 @@ internal sealed partial class RetentionMutationApplicationService
             RetentionMutationOperation.Unpin when transitions.Any(static value => value.Evaluation.Code == RetentionMutationCompletionCodes.UnpinExpiredQueued) => RetentionMutationCompletionCodes.UnpinExpiredQueued,
             RetentionMutationOperation.Unpin when transitions.Any(static value => value.Evaluation.StateSequence.Count > 0) => RetentionMutationCompletionCodes.UnpinApplied,
             RetentionMutationOperation.Unpin => RetentionMutationCompletionCodes.UnpinNoop,
+            RetentionMutationOperation.DeleteNow when transitions.Any(static value => value.Evaluation.Code == RetentionMutationCompletionCodes.DeleteNowSupersededPin) => RetentionMutationCompletionCodes.DeleteNowSupersededPin,
+            RetentionMutationOperation.DeleteNow when transitions.Any(static value => value.Evaluation.StateSequence.Count > 0) => RetentionMutationCompletionCodes.DeleteQueued,
+            RetentionMutationOperation.DeleteNow => RetentionMutationCompletionCodes.DeleteAlreadyQueued,
             _ => throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed)
         };
     }
