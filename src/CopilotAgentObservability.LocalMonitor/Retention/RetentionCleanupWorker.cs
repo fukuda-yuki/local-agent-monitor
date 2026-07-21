@@ -8,6 +8,8 @@ internal sealed class RetentionCleanupWorker : IHostedService
     private readonly RetentionCleanupCoordinator? coordinator;
     private readonly TimeProvider time;
     private readonly SemaphoreSlim wake = new(0, 1);
+    private readonly object wakeGate = new();
+    private bool wakePending;
     private CancellationTokenSource? stopScanning;
     private CancellationTokenSource? drain;
     private Task? running;
@@ -23,8 +25,12 @@ internal sealed class RetentionCleanupWorker : IHostedService
     }
     internal void Wake()
     {
-        try { wake.Release(); }
-        catch (SemaphoreFullException) { }
+        lock (wakeGate)
+        {
+            if (wakePending) return;
+            wakePending = true;
+            wake.Release();
+        }
     }
     internal async Task StopAsync()
     {
@@ -50,6 +56,7 @@ internal sealed class RetentionCleanupWorker : IHostedService
         try
         {
             var cycle = await coordinator!.RunOneCycleAsync(stopToken, drainSource.Token).ConfigureAwait(false);
+            CompleteWakeCycle();
             ScheduleDueWake(cycle.NextEligibleAt, ref scheduledDue, ref dueWake, ref dueWakeCancellation);
             while (!stopToken.IsCancellationRequested)
             {
@@ -72,11 +79,21 @@ internal sealed class RetentionCleanupWorker : IHostedService
                     }
                 }
                 cycle = await coordinator.RunOneCycleAsync(stopToken, drainSource.Token).ConfigureAwait(false);
+                CompleteWakeCycle();
                 ScheduleDueWake(cycle.NextEligibleAt, ref scheduledDue, ref dueWake, ref dueWakeCancellation);
             }
         }
         catch (OperationCanceledException) when (stopToken.IsCancellationRequested) { }
         finally { dueWakeCancellation?.Cancel(); dueWakeCancellation?.Dispose(); drain = null; }
+    }
+
+    private void CompleteWakeCycle()
+    {
+        lock (wakeGate)
+        {
+            wake.Wait(0);
+            wakePending = false;
+        }
     }
 
     private void ScheduleDueWake(DateTimeOffset? candidate, ref DateTimeOffset? scheduledDue, ref Task? dueWake, ref CancellationTokenSource? cancellation)
