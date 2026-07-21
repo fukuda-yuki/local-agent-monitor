@@ -10,7 +10,7 @@ database content, reversible markers, or machine-sensitive paths.
 | --- | --- |
 | Branch | `codex/issue-91-validation-matrix` |
 | Starting SHA / `matrix_prep_sha` | `5180a0424ff5488354a3e173c74b7e931d28679d` |
-| Immutable `final_validation_sha` | `9fe02f6e7dfaaec71bd6d7cc05aa75d1e3318858` |
+| Immutable `final_validation_sha` | `40ac55974dc7788f4abd54dfa85abd97739b3201` |
 | Candidate state at freeze | clean dedicated worktree |
 | Date / boundary | 2026-07-21; Windows native, current user; live runs used loopback-only disposable databases |
 
@@ -20,7 +20,7 @@ returned exit `0` for each accepted revision against the candidate:
 | Dependency | Accepted revision | Additional ancestral evidence |
 | --- | --- | --- |
 | #69 | `b72309cca5544fdf84e2935619449dc26fb4f261` | #105 candidate `b581be9864c284d27884e94208e92138b3e83040` |
-| #89 | `043f7a3228d1e1e97f91de965d91b6e41a48e472` | retention implementation lineage |
+| #89 | `de48d717479a40921a6fe70825f6e95a7a75037a` | accepted wake-coalescing fix; prior lineage `043f7a32...` |
 | #90 | `5180a0424ff5488354a3e173c74b7e931d28679d` | implementation `4d966472...`, closeout `f412a5bf...` |
 | #106 | `87c240adf0dfbaa20b0abf24c4b2d7571a828781` | #110 evidence through `11d6c587...` |
 
@@ -49,7 +49,7 @@ closed before candidate freeze.
   negative binding rules.
 
 The final candidate automated run reported `PASS`: ConfigCli 760/760 and Local
-Monitor 942/942, with zero failed and zero unexecuted cases.
+Monitor 948/948, with zero failed and zero unexecuted cases.
 
 ## 91-E live and runtime evidence
 
@@ -84,32 +84,37 @@ Monitor 942/942, with zero failed and zero unexecuted cases.
   authorization alone is insufficient. Row `91-D-001` records the exact
   `blocked_external`, severity, retry condition, and unverified capability.
 
-## Required candidate validation and defect finding
+## Required candidate validation and correction
 
-Commands were run from the repository root at the unchanged candidate:
+The accepted #89 fix `de48d717...` makes active-cycle wake coalescing
+atomic and is ancestral to the final candidate. Candidate-focused retention
+runtime tests passed 7/7. The first pre-correction #91 candidate was invalidated
+and none of its classifications were carried forward.
+
+A later candidate at `f4bc73f1...` produced one file-level Canvas Node smoke
+failure during the required full suite: the first 12 in-memory JS cases passed
+and the file aborted when the first loopback helper server began. Exact focused
+and direct Node runs passed, but the retry was not converted into passing
+evidence. The validation test was corrected by placing all 28 Canvas extension
+contract tests in a dedicated xUnit collection with
+`DisableParallelization = true`. This preserves every assertion and removes
+full-suite loopback/process resource contention without retry, sleep, skip, or
+product behavior change. The corrected candidate is `40ac5597...`.
+
+Commands were run from the repository root at the unchanged corrected
+candidate:
 
 | Command | Result |
 | --- | --- |
 | `dotnet build CopilotAgentObservability.slnx` | exit 0; 0 warnings, 0 errors |
-| `pwsh scripts\test\install-playwright-chromium.ps1` | exit 0 |
-| `dotnet test CopilotAgentObservability.slnx` | exit 1; 6,582 total, 6,581 passed, 1 failed, 0 skipped |
+| `pwsh scripts\\test\\install-playwright-chromium.ps1` | exit 0 |
+| `dotnet test CopilotAgentObservability.slnx` | exit 0; 6,582/6,582 passed, 0 skipped |
 
-The failed test was
-`RetentionWorkerRaceTests.DueWinnerDoesNotLeaveAWakeLoserToStealTheNextCoalescedWake`:
-one cleanup cycle was expected and two were observed. There is no change to
-the worker, the test, or `MutableTimeProvider` between accepted #90 revision
-`5180a042...` and the final candidate. A single exact diagnostic execution
-passed 1/1; it establishes intermittency and does not replace the required
-full-suite failure.
-
-Root cause is a product concurrency defect in the #89-owned
-`RetentionCleanupWorker`: with `SemaphoreSlim(0,1)`, the first release may
-complete an active waiter while the next release becomes a newly queued wake,
-allowing an extra cleanup cycle. Issue #91 explicitly forbids silently fixing
-production behavior or splitting a new Issue, so row `91-C-012` is
-`failed/high`. Resolution requires an owning retention-worker fix outside
-#91, integration into a new candidate, and rerun of the affected row and all
-required candidate commands.
+The corrected candidate automated matrix also passed: scanner self-test 100
+transformations and five negative cases, semantic contract 10/10, ConfigCli
+760/760, Doctor 24/24, and LocalMonitor 948/948. The runner removed its
+ephemeral TRX directory in `finally`; only these bounded counts are retained
+in the repository evidence ledger.
 
 ## 91-F classification and decision
 
@@ -117,40 +122,35 @@ The signed matrix and final candidate inventory is
 [`final-matrix.json`](final-matrix.json). Its semantic validator reports:
 
 ```text
-matrix_validation=PASS rows=19 decision=release_blocked
+matrix_validation=PASS rows=19 decision=release_ready_with_external_blockers
 ```
 
-Classification totals are 16 `passed`, one `not_applicable`, one
-`blocked_external`, and one `failed`. There are no `not_attempted`, unknown,
+Classification totals are 17 `passed`, one `not_applicable`, and one
+`blocked_external`. There are no `failed`, `not_attempted`, unknown,
 unclassified, or unknown-owner rows.
 
-- `failed/high`: `91-C-012` retention cleanup wake coalescing product defect.
-- `blocked_external/medium`: `91-D-001` current Claude 2.1.215 content-enabled
-  capture, pending distinct operator authorization.
+- `blocked_external/medium`: `91-D-001` current Claude 2.1.215
+  content-enabled capture, pending distinct operator authorization.
 - `not_applicable`: `91-C-017` setup HTTP/proxy/UI, excluded by the canonical
   public-interface specification.
 
-The exact release decision is **`release_blocked`**. Issue #91 does not satisfy
-its close condition because a required active row and the required full test
-command failed. Issue #57 closeout must not begin. Repository-safe blocker
-handoffs were posted to #57 and #60, and the same status was recorded on #91;
-none claims release readiness.
-
-| Handoff | GitHub record |
-| --- | --- |
-| #91 status | `issuecomment-5033117261` |
-| #57 blocker handoff | `issuecomment-5033117466` |
-| #60 blocker handoff | `issuecomment-5033117652` |
+The exact release decision is **`release_ready_with_external_blockers`**.
+All hard required rows pass on the immutable candidate; the remaining live row
+is a correctly recorded external authorization blocker. Under the Issue #91
+release and close contracts, #91 satisfies its close condition and #57 closeout
+may begin. Historical blocker handoffs remain provenance and must be superseded
+by the final GitHub close record; none is used as current classification
+evidence.
 
 ## Delegated evidence checks
 
 Read-only subagents independently checked #113/#114/#115 close conditions,
 dependency state and ancestry, final active surfaces, historical compatibility,
-live execution requirements, and the retention failure. The primary
+live execution requirements, the #89 retention defect, the Canvas file-level
+failure, and the deterministic Canvas isolation correction. The primary
 coordinator verified each result using GitHub state, exact ancestry commands,
 candidate diffs, the matrix runner, focused runtime execution, and the required
-repository commands. Final independent review findings are recorded below
-after adjudication.
+repository commands.
 
 ## Final review
 
@@ -164,11 +164,13 @@ Three independent read-only reviews completed after integration:
    occurrences were removed; no marker or derived value is retained. No other
    credential, authorization, raw body, PII, database-content, or sensitive
    path finding remained.
-3. Candidate/evidence/test integrity reconfirmed dependency ancestry, bounded
-   historical reuse, classification totals, the authoritative full-suite
-   failure, and the `release_blocked` aggregation without a new finding.
+3. Candidate/evidence/test integrity reconfirmed all cited ancestry, 19/19 SHA
+   ties, bounded historical reuse, the Canvas isolation boundary, and the
+   `release_ready_with_external_blockers` aggregation. It found one false
+   persistent-artifact reference, which was removed because the runner deletes
+   its ephemeral TRX directory.
 
-After correction, both final artifacts were rescanned separately and the
-semantic matrix validator was rerun. The preparation inventory intentionally
-retains its pre-freeze state and null final SHA; this signed matrix is the final
-candidate inventory.
+After final-candidate correction, both final artifacts are rescanned separately
+and the semantic matrix validator is rerun. The preparation inventory
+intentionally retains its pre-freeze state and null final SHA; this signed
+matrix is the final candidate inventory.
