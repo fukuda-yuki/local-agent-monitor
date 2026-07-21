@@ -365,6 +365,21 @@ evidence gates. A selected raw record with no successful projection row does
 not distinguish `not_started`, `pending`, or `failed`; all remain unknown until
 an exact per-record projection disposition exists.
 
+Managed VS Code and CLI do not require a Session binding after exact accepted
+raw provenance and a completed per-record projection have been established.
+For those two surfaces the adapter reports `not_required` / `not_applicable`
+binding and may persist a raw-derived `completeness_content` candidate with
+known unbound completeness. Caller-managed App/SDK remains binding-required
+and produces no completeness candidate without exact Session identity.
+
+During completion, each explicitly selected opaque evidence reference must
+resolve through its persisted `source_diagnostic` navigation target to one
+`source_schema_observations` row and its exact `raw_record_id`. All selected
+references must resolve to the same raw record before runtime fact families are
+merged. A missing, conflicting, or mixed-record linkage fails closed; hashes,
+latest records, trace IDs alone, and timestamp proximity are not resolution
+authority.
+
 When a surface cannot safely carry the opaque verification ID, candidate
 selection is an explicit raw-record or native-Session selection followed by
 exact source and identity validation. Latest trace/Session, repository,
@@ -417,6 +432,16 @@ keeps it `required` until the caller explicitly selects matching real-source
 evidence within the verification window; only then may the merged runtime
 observation set restart/new-process to `not_required`. Synthetic/probe evidence
 never does so.
+
+For each common-adapter request, static facts use exactly one newly dispatched
+`setup status`. Managed target configuration must be current at the desired
+reference and its recorded endpoint must equal the normalized request endpoint.
+Current source detection and the existing source-specific version thresholds
+(VS Code 1.128 or later; Copilot CLI 1.0.4 or later) are authoritative for
+source availability/version, and the existing bounded loopback health probe is
+authoritative for monitor process, receiver/port ownership, and reachability.
+Historical detected versions and plan/apply projections are not authority;
+unavailable or malformed current observations remain unknown.
 
 For evaluation or completion the orchestrator maps setup families 1--5 and 12
 through the GitHub Copilot setup mapper and replaces only runtime families

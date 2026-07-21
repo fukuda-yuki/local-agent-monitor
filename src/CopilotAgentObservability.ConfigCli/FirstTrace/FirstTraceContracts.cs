@@ -19,6 +19,20 @@ internal interface IFirstTraceSourceAdapter
         string normalizedEndpoint,
         DoctorVerification? verification);
 
+    DoctorFactSnapshot CollectSelectedFacts(
+        string databasePath,
+        string normalizedEndpoint,
+        DoctorVerification verification,
+        IReadOnlyList<string> evidenceRefs,
+        DoctorFactSnapshot collectedFacts) =>
+        collectedFacts;
+
+    DoctorFactSnapshot CollectPreWindowFacts(
+        string databasePath,
+        string normalizedEndpoint,
+        DoctorFactSnapshot collectedFacts) =>
+        CollectFacts(databasePath, normalizedEndpoint, verification: null);
+
     IReadOnlyList<FirstTraceGuidance> GetGuidance(
         string? interaction,
         bool includeSetupPlan);
@@ -26,6 +40,10 @@ internal interface IFirstTraceSourceAdapter
     FirstTraceEvidenceSelection SelectEvidence(
         IReadOnlyList<DoctorEvidenceCandidate> candidates,
         DateTimeOffset now);
+
+    bool CanBeginVerification(DoctorResult evaluation) =>
+        evaluation.Code != DoctorResultCode.PartialFactSnapshot &&
+        evaluation.Evaluation?.States.Any(state => state.Severity == DoctorSeverity.Error) == false;
 }
 
 internal sealed record FirstTraceGuidance(

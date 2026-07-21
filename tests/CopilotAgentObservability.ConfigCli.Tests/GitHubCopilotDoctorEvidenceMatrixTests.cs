@@ -18,7 +18,7 @@ public sealed class GitHubCopilotDoctorEvidenceMatrixTests
     [InlineData("supported", SourceCompatibilityStatus.Supported, SchemaStatus.Matching)]
     [InlineData("supported_with_unknown_fields", SourceCompatibilityStatus.Supported, SchemaStatus.Matching)]
     [InlineData("unsupported_source_version", SourceCompatibilityStatus.UnsupportedSourceVersion, SchemaStatus.Unknown)]
-    [InlineData("schema_drift_detected", SourceCompatibilityStatus.Unknown, SchemaStatus.DriftDetected)]
+    [InlineData("schema_drift_detected", SourceCompatibilityStatus.Supported, SchemaStatus.DriftDetected)]
     [InlineData("recognized_record_drop_detected", SourceCompatibilityStatus.Unknown, SchemaStatus.DriftDetected)]
     public void Observe_ProjectsExactCompatibilityWithoutChangingIndependentRuntimeGates(
         string compatibilityState,
@@ -190,7 +190,7 @@ public sealed class GitHubCopilotDoctorEvidenceMatrixTests
         var expectedBinding = scenario switch
         {
             "complete" or "no_disposition" => ExactSessionBindingOutcome.ExactBound,
-            "no_session" => ExactSessionBindingOutcome.Unbound,
+            "no_session" => ExactSessionBindingOutcome.NotApplicable,
             _ => ExactSessionBindingOutcome.Unknown,
         };
         var expectedCompleteness = scenario switch
@@ -209,13 +209,17 @@ public sealed class GitHubCopilotDoctorEvidenceMatrixTests
         Assert.Equal(expectedBinding, observed.Snapshot.ExactSessionBinding!.Outcome);
         Assert.Equal(expectedCompleteness, observed.Snapshot.CompletenessAndContent!.Completeness);
         Assert.Equal(
-            scenario == "no_compatibility" ? ExactSessionBindingRequirement.Unknown : ExactSessionBindingRequirement.Required,
+            scenario == "no_compatibility" ? ExactSessionBindingRequirement.Unknown : ExactSessionBindingRequirement.NotRequired,
             observed.Snapshot.ExactSessionBinding.Requirement);
         Assert.Equal(
-            expectedCompleteness == DoctorCompleteness.Full ? ContentCaptureStatus.Enabled : ContentCaptureStatus.Unknown,
+            expectedCompleteness is DoctorCompleteness.Full or DoctorCompleteness.Unbound
+                ? ContentCaptureStatus.Enabled
+                : ContentCaptureStatus.Unknown,
             observed.Snapshot.CompletenessAndContent.ContentCapture);
         Assert.Equal(
-            expectedCompleteness == DoctorCompleteness.Full ? RawAccessStatus.Available : RawAccessStatus.Unknown,
+            expectedCompleteness is DoctorCompleteness.Full or DoctorCompleteness.Unbound
+                ? RawAccessStatus.Available
+                : RawAccessStatus.Unknown,
             observed.Snapshot.CompletenessAndContent.RawAccess);
     }
 

@@ -181,6 +181,157 @@ public sealed class FirstTraceSourceRegistryTests
     }
 
     [Fact]
+    public void GitHubAdapter_CollectFactsUsesOneStatusAndCurrentLiveAuthorities()
+    {
+        var platform = ReadyCliPlatform();
+        var dispatchCount = 0;
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            options =>
+            {
+                dispatchCount++;
+                Assert.Equal(SetupCommand.Status, options.Command);
+                return CurrentCliStatus();
+            },
+            () => Now,
+            platform);
+
+        var facts = adapter.CollectFacts(
+            "synthetic-doctor.db",
+            "http://127.0.0.1:4320",
+            verification: null);
+
+        Assert.Equal(1, dispatchCount);
+        Assert.Equal(
+            new InstallAndSourceVersionFacts(
+                MonitorInstallStatus.Installed,
+                SourceVersionStatus.Supported,
+                SourceFeatureStatus.Available),
+            facts.InstallAndSourceVersion);
+        Assert.Equal(
+            new ProcessReceiverAndPortFacts(
+                MonitorProcessStatus.Running,
+                ReceiverBindStatus.Bound,
+                PortOwnerStatus.Monitor),
+            facts.ProcessReceiverAndPort);
+        Assert.Equal(new EndpointReachabilityFacts(ReachabilityStatus.Reachable), facts.EndpointReachability);
+        Assert.Equal(1, platform.Operations.Count(operation =>
+            operation == "process.run:copilot:version"));
+        Assert.Equal(1, platform.Operations.Count(operation =>
+            operation == "http.get:http://127.0.0.1:4320:/health/live:500:4096"));
+    }
+
+    [Fact]
+    public void GitHubAdapter_UnavailableCurrentAuthoritiesStayUnknown()
+    {
+        var platform = new SetupTestPlatform(Now);
+        platform.InjectFault(
+            "process.run:copilot:version",
+            new InvalidOperationException("synthetic unavailable"));
+        platform.InjectFault(
+            "http.get:http://127.0.0.1:4320:/health/live:500:4096",
+            new InvalidOperationException("synthetic unavailable"));
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            _ => CurrentCliStatus(),
+            () => Now,
+            platform);
+
+        var facts = adapter.CollectFacts(
+            "synthetic-doctor.db",
+            "http://127.0.0.1:4320",
+            verification: null);
+
+        Assert.Equal(
+            new InstallAndSourceVersionFacts(
+                MonitorInstallStatus.Unknown,
+                SourceVersionStatus.Unknown,
+                SourceFeatureStatus.Unknown),
+            facts.InstallAndSourceVersion);
+        Assert.Equal(
+            new ProcessReceiverAndPortFacts(
+                MonitorProcessStatus.Unknown,
+                ReceiverBindStatus.Unknown,
+                PortOwnerStatus.Unknown),
+            facts.ProcessReceiverAndPort);
+        Assert.Equal(new EndpointReachabilityFacts(ReachabilityStatus.Unknown), facts.EndpointReachability);
+    }
+
+    private static SetupTestPlatform ReadyCliPlatform()
+    {
+        var platform = new SetupTestPlatform(Now);
+        platform.ScriptProcess(
+            "copilot",
+            ["version"],
+            new SetupProcessObservation(SetupProcessOutcome.Completed, 0, "1.0.71"));
+        platform.ScriptHttpProbe(new SetupHttpProbeObservation(
+            SetupHttpProbeOutcome.Response,
+            200,
+            17,
+            "{\"status\":\"live\"}"u8.ToArray(),
+            true));
+        return platform;
+    }
+
+    private static SetupCommandResult CurrentCliStatus()
+    {
+        var changes = new[]
+        {
+            "COPILOT_OTEL_ENABLED",
+            "COPILOT_OTEL_EXPORTER_TYPE",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_PROTOCOL",
+        }.Select(key => new SetupMemberChangeResult(
+            key,
+            SetupOperation.NoOp,
+            "process_absent_user_present_desired",
+            "present_desired",
+            "none",
+            false)).ToArray();
+        var target = new SetupTargetResult(
+            Guid.CreateVersion7().ToString("D"),
+            SetupTargetKind.Env,
+            "copilot-cli-user-environment",
+            true,
+            "historical-version-must-not-authorize",
+            SetupOperation.NoOp,
+            SetupEffectiveSource.Environment,
+            SetupReferenceState.Desired,
+            SetupCurrentState.Current,
+            SetupRestartRequirement.RestartTerminalSession,
+            false,
+            "http://127.0.0.1:4320",
+            CopilotAgentObservability.ConfigCli.Setup.Capabilities.SourceCapabilityManifestLoader
+                .LoadForSurface("github-copilot-cli").CanonicalJson.Clone(),
+            null,
+            changes);
+        var changeSet = new SetupChangeSetStatusResult(
+            Guid.CreateVersion7().ToString("D"),
+            "github-copilot",
+            "cli",
+            Now.AddMinutes(-1).ToString("O"),
+            Now.ToString("O"),
+            SetupChangeSetState.Applied,
+            SetupCodes.ApplySucceeded,
+            SetupCurrentState.Current,
+            false,
+            [target]);
+        return new SetupCommandResult(
+            SetupCommand.Status,
+            true,
+            SetupCodes.StatusReady,
+            null,
+            null,
+            null,
+            "github-copilot",
+            [],
+            [changeSet],
+            [],
+            [],
+            false);
+    }
+
+    [Fact]
     public void Help_ListsTheCompleteFirstTraceLifecycleWithoutAdapterOnStoredVerificationCommands()
     {
         Assert.Contains("first-trace begin --database <file> --adapter <github-copilot-vscode|github-copilot-cli|github-copilot-app-sdk|claude-code>", CliHelpText.Text, StringComparison.Ordinal);

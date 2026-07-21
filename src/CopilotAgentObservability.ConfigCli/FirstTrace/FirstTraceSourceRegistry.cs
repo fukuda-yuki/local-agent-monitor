@@ -51,15 +51,18 @@ internal static class FirstTraceSourceRegistry
             new GitHubCopilotFirstTraceAdapter(
                 "github-copilot-vscode",
                 setupDispatch,
-                () => platform.Clock.UtcNow),
+                () => platform.Clock.UtcNow,
+                platform),
             new GitHubCopilotFirstTraceAdapter(
                 "github-copilot-cli",
                 setupDispatch,
-                () => platform.Clock.UtcNow),
+                () => platform.Clock.UtcNow,
+                platform),
             new GitHubCopilotFirstTraceAdapter(
                 "github-copilot-app-sdk",
                 setupDispatch,
-                () => platform.Clock.UtcNow),
+                () => platform.Clock.UtcNow,
+                platform),
             new ClaudeCodeFirstTraceAdapter(platform),
         ];
     }

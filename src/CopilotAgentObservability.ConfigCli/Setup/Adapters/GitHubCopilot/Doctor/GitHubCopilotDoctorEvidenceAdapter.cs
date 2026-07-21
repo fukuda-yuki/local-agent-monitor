@@ -232,6 +232,12 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             evidence.Add(new(DoctorEvidenceKind.ExactSessionBinding, binding.ObservedAt, binding.Identity));
             evidence.Add(new(DoctorEvidenceKind.CompletenessContent, binding.ObservedAt, binding.Identity));
         }
+        else if (!partition.RequiresBinding &&
+            selection.NativeSession is null &&
+            disposition?.State == ProjectionDispositionState.Completed)
+        {
+            evidence.Add(new(DoctorEvidenceKind.CompletenessContent, disposition.UpdatedAt, Identity: null));
+        }
 
         var evidenceRefs = new List<string>(evidence.Count);
         var observationResult = status;
@@ -382,10 +388,23 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             _ => ProjectionOutcome.Unknown,
         }),
         new ExactSessionBindingFacts(
-            ExactSessionBindingRequirement.Required,
-            binding is null ? ExactSessionBindingOutcome.Unbound : ExactSessionBindingOutcome.ExactBound),
+            partition.RequiresBinding
+                ? ExactSessionBindingRequirement.Required
+                : ExactSessionBindingRequirement.NotRequired,
+            partition.RequiresBinding
+                ? binding is null ? ExactSessionBindingOutcome.Unbound : ExactSessionBindingOutcome.ExactBound
+                : binding is null ? ExactSessionBindingOutcome.NotApplicable : ExactSessionBindingOutcome.ExactBound),
         binding is null
-            ? new CompletenessAndContentFacts(DoctorCompleteness.Unbound, ContentCaptureStatus.Unknown, RawAccessStatus.Unknown)
+            ? new CompletenessAndContentFacts(
+                DoctorCompleteness.Unbound,
+                compatibility.CaptureContentState switch
+                {
+                    SourceCaptureContentState.Available => ContentCaptureStatus.Enabled,
+                    SourceCaptureContentState.NotCaptured or SourceCaptureContentState.Redacted => ContentCaptureStatus.Disabled,
+                    SourceCaptureContentState.Unsupported => ContentCaptureStatus.Unsupported,
+                    _ => ContentCaptureStatus.Unknown,
+                },
+                RawAccessStatus.Available)
             : ContentFacts(binding),
         null);
 
@@ -420,7 +439,9 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
     private static SourceVersionAndSchemaDiagnosticsFacts CompatibilityFacts(SourceCompatibilityRow row) => new(
         row.CompatibilityState switch
         {
-            SourceCompatibilityState.Supported or SourceCompatibilityState.SupportedWithUnknownFields => SourceCompatibilityStatus.Supported,
+            SourceCompatibilityState.Supported or
+            SourceCompatibilityState.SupportedWithUnknownFields or
+            SourceCompatibilityState.SchemaDriftDetected => SourceCompatibilityStatus.Supported,
             SourceCompatibilityState.UnsupportedSourceVersion => SourceCompatibilityStatus.UnsupportedSourceVersion,
             _ => SourceCompatibilityStatus.Unknown,
         },

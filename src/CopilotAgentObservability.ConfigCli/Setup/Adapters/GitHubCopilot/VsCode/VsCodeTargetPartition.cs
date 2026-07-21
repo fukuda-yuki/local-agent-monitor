@@ -210,7 +210,7 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
             SetupRestartRequirement.None));
     }
 
-    private static bool IsSupportedVersion(string? version)
+    internal static bool IsSupportedVersion(string? version)
     {
         var match = version is null ? Match.Empty : Regex.Match(version, "^(?<major>\\d+)\\.(?<minor>\\d+)\\.");
         return match.Success && int.TryParse(match.Groups["major"].Value, out var major) &&
@@ -218,7 +218,7 @@ internal sealed class VsCodeTargetPartition : IGitHubCopilotTargetPartition
             (major > 1 || major == 1 && minor >= 128);
     }
 
-    private static bool HasCopilotChatExtension(ISetupPlatform platform, string executable)
+    internal static bool HasCopilotChatExtension(ISetupPlatform platform, string executable)
     {
         SetupProcessObservation observation;
         try

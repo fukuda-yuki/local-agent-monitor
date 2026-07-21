@@ -91,10 +91,11 @@ internal sealed class FirstTraceOrchestrator
                 evaluation);
         }
 
+        var canBegin = adapter.CanBeginVerification(evaluation);
         var guidance = adapter.GetGuidance(
             request.Interaction,
-            includeSetupPlan: HasBlockingState(evaluation));
-        if (HasBlockingState(evaluation))
+            includeSetupPlan: !canBegin);
+        if (!canBegin)
         {
             return new FirstTraceEnvelope(
                 request.Command,
@@ -180,6 +181,10 @@ internal sealed class FirstTraceOrchestrator
             return Invalid(request.Command);
         }
 
+        var snapshot = adapter.CollectFacts(request.DatabasePath, endpoint, verification) with
+        {
+            Observations = [],
+        };
         var candidatesOutcome = application.ListCandidates(verification.VerificationId);
         if (candidatesOutcome.Code != DoctorResultCode.VerificationActive)
         {
@@ -192,10 +197,6 @@ internal sealed class FirstTraceOrchestrator
         }
 
         var candidates = candidatesOutcome.ResolvedCandidates;
-        var snapshot = adapter.CollectFacts(request.DatabasePath, endpoint, verification) with
-        {
-            Observations = [],
-        };
         var preview = application.Evaluate(snapshot with
         {
             Observations = candidates.Select(ToObservation).ToArray(),
@@ -239,6 +240,10 @@ internal sealed class FirstTraceOrchestrator
                 status with { Success = false, Code = DoctorResultCode.ExpectedSourceMismatch });
         }
 
+        var snapshot = adapter.CollectFacts(request.DatabasePath, endpoint, verification) with
+        {
+            Observations = [],
+        };
         var candidatesOutcome = application.ListCandidates(verification.VerificationId);
         if (candidatesOutcome.Code != DoctorResultCode.VerificationActive)
         {
@@ -257,20 +262,14 @@ internal sealed class FirstTraceOrchestrator
             var selection = adapter.SelectEvidence(candidates, UtcNow());
             if (!selection.HasEligibleCandidates)
             {
-                var freshSnapshot = adapter.CollectFacts(
-                    request.DatabasePath,
-                    endpoint,
-                    verification) with
-                {
-                    Observations = [],
-                };
+                var freshSnapshot = snapshot;
                 var evaluation = application.Evaluate(freshSnapshot);
                 if (evaluation.Code == DoctorResultCode.PartialFactSnapshot)
                 {
-                    freshSnapshot = adapter.CollectFacts(
+                    freshSnapshot = adapter.CollectPreWindowFacts(
                         request.DatabasePath,
                         endpoint,
-                        verification: null) with
+                        snapshot) with
                     {
                         Observations = [],
                     };
@@ -320,14 +319,19 @@ internal sealed class FirstTraceOrchestrator
             evidenceRefs = selection.EvidenceRefs;
         }
 
-        var snapshot = adapter.CollectFacts(request.DatabasePath, endpoint, verification) with
+        var selectedSnapshot = adapter.CollectSelectedFacts(
+            request.DatabasePath,
+            endpoint,
+            verification,
+            evidenceRefs,
+            snapshot) with
         {
             Observations = [],
         };
         var doctor = application.Complete(
             verification.VerificationId,
             request.ExpectedRevision!.Value,
-            snapshot,
+            selectedSnapshot,
             evidenceRefs);
         return CompletionEnvelope(request, adapter, verification, doctor, candidates);
     }
@@ -486,9 +490,6 @@ internal sealed class FirstTraceOrchestrator
             Truncated: false);
 
     private DateTimeOffset UtcNow() => timeProvider.GetUtcNow().ToUniversalTime();
-
-    private static bool HasBlockingState(DoctorResult result) =>
-        result.Evaluation?.States.Any(state => state.Severity == DoctorSeverity.Error) == true;
 
     private static DoctorResult StoreResult(DoctorStoreOutcome outcome) =>
         new(

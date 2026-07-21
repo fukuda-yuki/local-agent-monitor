@@ -233,6 +233,21 @@ exact per-record projection disposition exists. The existing CLI JSON/human
 projection and five Local Monitor HTTP routes continue to emit the same
 `doctor.v1`; #105 owns later common proxy/UI/Release closeout.
 
+For managed VS Code and CLI, exact accepted raw provenance plus a completed
+per-record projection makes Session binding `not_required` / `not_applicable`
+and permits one raw-derived `completeness_content` candidate with known unbound
+completeness. Caller-managed App/SDK continues to require exact Session
+binding. Completion resolves every selected opaque reference through its
+persisted source-diagnostic target to one raw record; mixed-record selections
+fail closed and never obtain merged runtime facts.
+
+Each common GitHub adapter request obtains exactly one current setup `status`
+and combines it with current source detection/version plus the existing bounded
+loopback health probe. Historical detected versions and plan/apply projections
+do not authorize current static facts; unavailable authorities remain unknown.
+Managed-source begin is allowed when `agent_restart_required` is the only
+remaining blocker, while every other blocker remains non-startable.
+
 ## Cross-surface first-trace closeout
 
 Issue #105 integrates Config CLI, the Windows x64 Release ZIP, and the existing
