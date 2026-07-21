@@ -12,6 +12,7 @@ public class LocalMonitorScriptTests
         "common.ps1",
         "install.ps1",
         "package-release.ps1",
+        "first-trace.ps1",
         "setup.ps1",
         "start.ps1",
         "stop.ps1",
@@ -118,11 +119,85 @@ public class LocalMonitorScriptTests
         Assert.Contains("uninstall-user-env.ps1", package, StringComparison.Ordinal);
         Assert.Contains("install-session-hooks.ps1", package, StringComparison.Ordinal);
         Assert.Contains("uninstall-session-hooks.ps1", package, StringComparison.Ordinal);
+        Assert.Contains("first-trace.ps1", package, StringComparison.Ordinal);
         Assert.Contains("Compress-Archive", package, StringComparison.Ordinal);
         Assert.Contains("$LASTEXITCODE", package, StringComparison.Ordinal);
         Assert.Contains("dotnet_publish_failed", package, StringComparison.Ordinal);
         Assert.Contains("Join-Path $OutputDirectory 'artifacts'", package, StringComparison.Ordinal);
         Assert.Equal(2, package.Split("--artifacts-path $artifactsDirectory", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void FirstTraceWrapperUsesRuntimeDatabaseAndPreservesPackagedCliTransport()
+    {
+        var wrapper = File.ReadAllText(ScriptPath("first-trace.ps1"));
+
+        Assert.Contains("common.ps1", wrapper, StringComparison.Ordinal);
+        Assert.Contains("$script:DefaultDbPath", wrapper, StringComparison.Ordinal);
+        Assert.Contains("CopilotAgentObservability.ConfigCli.exe", wrapper, StringComparison.Ordinal);
+        Assert.Contains("@('first-trace')", wrapper, StringComparison.Ordinal);
+        Assert.Contains("'--database'", wrapper, StringComparison.Ordinal);
+        Assert.Contains("$LASTEXITCODE", wrapper, StringComparison.Ordinal);
+        Assert.Contains("internal_error", wrapper, StringComparison.Ordinal);
+        Assert.Contains("runtime_database_not_found", wrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("dotnet", wrapper, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("'begin', 'status', 'complete', 'cancel'", wrapper, StringComparison.Ordinal);
+        Assert.Contains("$_ -eq '--database'", wrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("[string] $DatabasePath", wrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("Write-LocalMonitorLog", wrapper, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FirstTraceWrapperRejectsCallerDatabaseWithoutDisclosingItsValue()
+    {
+        var callerDatabase = Path.Combine(Path.GetTempPath(), "ISSUE105_PRIVATE_DATABASE", "raw-store.db");
+
+        var result = RunPowerShellScript(
+            ScriptPath("first-trace.ps1"),
+            "status",
+            "--verification-id",
+            "01999999-9999-7999-8999-999999999999",
+            "--database",
+            callerDatabase,
+            "--json");
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Empty(result.Output);
+        Assert.Equal("invalid_arguments\n", result.Error.Replace("\r\n", "\n", StringComparison.Ordinal));
+        Assert.DoesNotContain(callerDatabase, result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ISSUE105_PRIVATE_DATABASE", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FirstTraceWrapperFailsClosedWhenRuntimeDatabaseIsMissing()
+    {
+        var root = CreateTemporaryDirectory("cao-first-trace-missing-database");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var wrapper = Path.Combine(scripts, "first-trace.ps1");
+            File.Copy(ScriptPath("first-trace.ps1"), wrapper);
+            File.WriteAllText(
+                Path.Combine(scripts, "common.ps1"),
+                "$script:DefaultDbPath = Join-Path '" + root.Replace("'", "''", StringComparison.Ordinal) + "' 'ISSUE105_PRIVATE_DATABASE\\raw-store.db'\n");
+
+            var result = RunPowerShellScript(
+                wrapper,
+                "status",
+                "--verification-id",
+                "01999999-9999-7999-8999-999999999999",
+                "--json");
+
+            Assert.Equal(5, result.ExitCode);
+            Assert.Empty(result.Output);
+            Assert.Equal("runtime_database_not_found\n", result.Error.Replace("\r\n", "\n", StringComparison.Ordinal));
+            Assert.DoesNotContain(root, result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("ISSUE105_PRIVATE_DATABASE", result.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -155,8 +230,10 @@ public class LocalMonitorScriptTests
 
             var staging = Path.Combine(outputDirectory, "staging");
             var packagedSetup = Path.Combine(staging, "scripts", "setup.ps1");
+            var packagedFirstTrace = Path.Combine(staging, "scripts", "first-trace.ps1");
             var packagedCli = Path.Combine(staging, "app", "config-cli", "CopilotAgentObservability.ConfigCli.exe");
             Assert.True(File.Exists(packagedSetup), "The release layout is missing scripts/setup.ps1.");
+            Assert.True(File.Exists(packagedFirstTrace), "The release layout is missing scripts/first-trace.ps1.");
             Assert.True(File.Exists(packagedCli), "The release layout is missing the self-contained Config CLI executable.");
             Assert.True(File.Exists(Path.ChangeExtension(packagedCli, ".runtimeconfig.json")), "The Config CLI runtime configuration is missing.");
 
@@ -165,6 +242,7 @@ public class LocalMonitorScriptTests
             using (var archive = System.IO.Compression.ZipFile.OpenRead(zipPath))
             {
                 Assert.Contains(archive.Entries, entry => entry.FullName == "scripts/setup.ps1");
+                Assert.Contains(archive.Entries, entry => entry.FullName == "scripts/first-trace.ps1");
                 Assert.Contains(archive.Entries, entry => entry.FullName == "app/config-cli/CopilotAgentObservability.ConfigCli.exe");
             }
 

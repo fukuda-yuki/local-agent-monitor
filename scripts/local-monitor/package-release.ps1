@@ -82,6 +82,7 @@ $scriptNames = @(
     'uninstall-startup-task.ps1',
     'install-session-hooks.ps1',
     'uninstall-session-hooks.ps1',
+    'first-trace.ps1',
     'setup.ps1'
 )
 foreach ($scriptName in $scriptNames) {
