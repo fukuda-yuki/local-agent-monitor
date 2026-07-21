@@ -31,6 +31,10 @@ internal static class CliHelpText
           config-cli doctor verification status --database <file> --verification-id <uuid-v7> [--json]
           config-cli doctor verification complete --database <file> --verification-id <uuid-v7> --expected-revision <positive-int> --input <file> [--json]
           config-cli doctor verification cancel --database <file> --verification-id <uuid-v7> --expected-revision <positive-int> [--json]
+          config-cli first-trace begin --database <file> --adapter <github-copilot-vscode|github-copilot-cli|github-copilot-app-sdk|claude-code> [--interaction <value>] [--endpoint <loopback-http-url>] [--expires-at <RFC3339>] [--json]
+          config-cli first-trace status --database <file> --verification-id <uuid-v7> [--endpoint <loopback-http-url>] [--json]
+          config-cli first-trace complete --database <file> --verification-id <uuid-v7> --expected-revision <positive-int> [--endpoint <loopback-http-url>] [--evidence <opaque-ref>]... [--json]
+          config-cli first-trace cancel --database <file> --verification-id <uuid-v7> --expected-revision <positive-int> [--json]
           config-cli ingest-raw <raw.json> --db <raw-store.db>
           config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]
           config-cli serve-raw-local-receiver [--db <raw-store.db>] [--url <loopback-http-url>]
