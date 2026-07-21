@@ -61,7 +61,7 @@ public sealed class Issue91ValidationContractTests
         Assert.Equal("5180a0424ff5488354a3e173c74b7e931d28679d",
             inventory.RootElement.GetProperty("matrix_prep_sha").GetString());
         Assert.Equal(JsonValueKind.Null, inventory.RootElement.GetProperty("final_validation_sha").ValueKind);
-        Assert.Equal("dependency_gate_open", inventory.RootElement.GetProperty("state").GetString());
+        Assert.Equal("candidate_ready_to_freeze", inventory.RootElement.GetProperty("state").GetString());
 
         var serialized = inventory.RootElement.GetRawText();
         Assert.DoesNotContain("\"classification\"", serialized, StringComparison.Ordinal);

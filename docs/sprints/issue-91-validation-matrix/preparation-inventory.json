@@ -1,6 +1,6 @@
 {
   "schema_version": "validation-preparation-inventory.v1",
-  "state": "dependency_gate_open",
+  "state": "candidate_ready_to_freeze",
   "starting_sha": "5180a0424ff5488354a3e173c74b7e931d28679d",
   "matrix_prep_sha": "5180a0424ff5488354a3e173c74b7e931d28679d",
   "final_validation_sha": null,
@@ -8,9 +8,9 @@
   "worktree_boundary": "dedicated ignored repository worktree; machine path intentionally omitted",
   "clean_at_start": true,
   "dependency_gate": [
-    { "issue": 69, "github_state": "open", "accepted_revision": null, "gate_satisfied": false, "reason": "Children #103 and #104 are closed. Replacement #105 candidate b581be98 and corrected evidence b72309cc record a successful operator-accepted current-user journey, but #105 remains open and its branch is not integrated into this preparation branch. #69 therefore does not satisfy its formal four-child close condition and the #91 final-candidate gate remains unsatisfied." },
+    { "issue": 69, "github_state": "closed", "accepted_revision": "b72309cca5544fdf84e2935619449dc26fb4f261", "gate_satisfied": true, "reason": "Children #102 through #105 and corrective Issues #113 through #115 are closed. The #105 replacement candidate and corrected evidence are integrated and ancestral." },
     { "issue": 89, "github_state": "closed", "accepted_revision": "043f7a3228d1e1e97f91de965d91b6e41a48e472", "gate_satisfied": true, "reason": "Closed dependency tip and pinned validation/review revisions are ancestors of matrix_prep_sha." },
-    { "issue": 90, "github_state": "open", "accepted_revision": "5180a0424ff5488354a3e173c74b7e931d28679d", "gate_satisfied": true, "reason": "The operator accepted the local closeout without push. Implementation candidate 4d966472, closeout f412a5bf, and the integrated validation repair through 5180a042 are present; the accepted local revision is an ancestor of the Issue #91 branch. GitHub remains open because the local main branch was not pushed." },
+    { "issue": 90, "github_state": "closed", "accepted_revision": "5180a0424ff5488354a3e173c74b7e931d28679d", "gate_satisfied": true, "reason": "The operator-accepted local closeout is now formally closed. Implementation candidate 4d966472, closeout f412a5bf, and integrated validation repair 5180a042 are ancestors." },
     { "issue": 106, "github_state": "closed", "accepted_revision": "87c240adf0dfbaa20b0abf24c4b2d7571a828781", "gate_satisfied": true, "reason": "Closed live-validation evidence and the later #110 value-aware rerun lineage are ancestors of matrix_prep_sha." }
   ],
   "active_surfaces": [
@@ -116,22 +116,39 @@
     },
     {
       "surface_id": "doctor-cli-api",
-      "operations": ["doctor CLI", "first-trace CLI", "five /api/doctor routes"],
-      "owner": "First-trace Doctor / Issues #102-#105",
+      "operations": ["doctor CLI", "first-trace CLI", "four-source detection", "candidate promotion", "verification lifecycle API"],
+      "owner": "First-trace Doctor / Issues #102-#105 #113",
       "requirement_level": "required",
       "applicability": "applicable",
       "profiles": ["supported-source", "partial-facts", "missing-facts", "verification-expired", "bounded-error", "sanitized"],
-      "automated_test_filters": ["DoctorCliTests", "FirstTraceCliTests", "DoctorRoutesTests", "DoctorCrossSurfaceContractTests"]
+      "automated_test_filters": ["DoctorCliTests", "FirstTraceCliTests", "FirstTraceSourceRegistryTests", "GitHubCopilotDoctorOrchestratorTests", "DoctorRoutesTests", "DoctorCrossSurfaceContractTests"]
     },
     {
       "surface_id": "doctor-ui",
-      "operations": ["dedicated doctor.v1 evaluation/verification UI"],
+      "operations": ["GET sources", "POST begin", "GET exact status", "POST complete", "POST cancel", "diagnostics Doctor controls"],
       "owner": "First-trace Doctor / Issue #105",
       "requirement_level": "required",
-      "applicability": "not_applicable",
-      "applicability_reason": "No dedicated doctor.v1 UI exists at matrix_prep_sha; /diagnostics is a distinct sanitized diagnostics surface.",
-      "profiles": [],
-      "automated_test_filters": []
+      "applicability": "applicable",
+      "profiles": ["supported-source", "partial-facts", "running", "completed", "expired", "cancelled", "process-error", "keyboard-only", "no-store", "csrf"],
+      "automated_test_filters": ["DoctorUiRoutesTests", "DoctorUiApplicationTests", "DoctorUiPlaywrightTests", "MonitorSecurityBoundaryTests"]
+    },
+    {
+      "surface_id": "doctor-evidence-navigation",
+      "operations": ["persist exact evidence targets", "project accepted navigation", "GET exact Session", "GET exact source diagnostic", "trace destination"],
+      "owner": "First-trace Doctor / Issues #103-#105 #115",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["active", "completed", "cancelled", "expired", "accepted", "unaccepted", "malformed", "cross-verification", "trace", "session", "source-diagnostic", "no-store", "sanitized"],
+      "automated_test_filters": ["FirstTraceNavigationStoreTests", "DoctorEvidenceRoutesTests", "DoctorUiApplicationTests", "DoctorUiRoutesTests", "DoctorUiPlaywrightTests", "GitHubCopilotDoctorEvidenceAdapterTests", "ClaudeDoctorCandidateObserverTests"]
+    },
+    {
+      "surface_id": "release-local-monitor-lifecycle",
+      "operations": ["package Windows x64 ZIP", "packaged first-trace wrapper", "install/start/readiness", "rollback", "stop", "uninstall", "tool-owned cleanup"],
+      "owner": "Local Monitor Release / Issues #105 #114",
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "profiles": ["win-x64", "self-contained", "missing-runtime-db", "bounded-process", "normal-stop", "stop-failure", "residual-install", "retain-data", "remove-data-force"],
+      "automated_test_filters": ["LocalMonitorScriptTests"]
     },
     {
       "surface_id": "source-compatibility",
@@ -140,7 +157,7 @@
       "requirement_level": "required",
       "applicability": "applicable",
       "profiles": ["github-copilot", "claude-code", "hook-available", "hook-unavailable", "otel-available", "otel-unavailable", "restart", "reconnect"],
-      "automated_test_filters": ["SourceCompatibilityTests", "SourceCompatibilityIngestionTests", "ClaudeProducerFixtureContractTests", "ClaudeCodeSpanAdapterTests"]
+      "automated_test_filters": ["SourceCompatibilityTests", "FirstTraceSourceRegistryTests", "SourceCompatibilityIngestionTests", "ClaudeProducerFixtureContractTests", "ClaudeCodeSpanAdapterTests", "GitHubCopilotDoctorEvidenceMatrixTests"]
     },
     {
       "surface_id": "exact-binding",
@@ -149,7 +166,7 @@
       "requirement_level": "required",
       "applicability": "applicable",
       "profiles": ["hook-available", "hook-unavailable", "otel-available", "otel-unavailable", "native-id-equal", "native-id-different", "trace-id-only"],
-      "automated_test_filters": ["ClaudeFirstTraceCrossSurfaceTests", "SessionOtelEnrichmentTests", "SourceProjectionStateTests"]
+      "automated_test_filters": ["ClaudeFirstTraceCrossSurfaceTests", "FirstTraceNavigationStoreTests", "ClaudeDoctorCandidateObserverTests", "GitHubCopilotDoctorEvidenceAdapterTests", "SessionOtelEnrichmentTests", "SourceProjectionStateTests"]
     },
     {
       "surface_id": "retention-cleanup",
