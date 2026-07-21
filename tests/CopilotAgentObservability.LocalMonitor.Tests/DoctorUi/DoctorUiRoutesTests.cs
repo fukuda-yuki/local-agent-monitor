@@ -14,6 +14,7 @@ public sealed class DoctorUiRoutesTests
 {
     private const string VerificationId = "0190c7a0-0000-7000-8000-000000000001";
     private const string Envelope = "{\"contract_version\":\"first-trace.v1\",\"command\":\"status\",\"success\":true,\"code\":\"verification_active\",\"adapter\":\"github-copilot-cli\",\"source_surface\":\"github-copilot-cli\",\"verification_id\":\"0190c7a0-0000-7000-8000-000000000001\",\"doctor\":{\"evaluation\":{\"states\":[{\"evidence_refs\":[\"receipt-1\",\"receipt-2\",\"receipt-3\"]}]},\"verification\":{\"accepted_evidence_refs\":[\"receipt-1\",\"receipt-2\",\"receipt-3\"]}},\"evaluation_preview\":null,\"guidance\":[],\"candidates\":[],\"truncated\":false}";
+    private const string CompletedEnvelope = "{\"contract_version\":\"first-trace.v1\",\"command\":\"status\",\"success\":false,\"code\":\"doctor_failed\",\"adapter\":\"github-copilot-cli\",\"source_surface\":\"github-copilot-cli\",\"verification_id\":\"0190c7a0-0000-7000-8000-000000000001\",\"doctor\":{\"schema_version\":\"doctor.v1\",\"success\":false,\"code\":\"verification_already_completed\",\"evaluation\":null,\"verification\":{\"verification_id\":\"0190c7a0-0000-7000-8000-000000000001\",\"expected_source_surface\":\"github-copilot-cli\",\"expected_source_adapter\":\"github-copilot-doctor\",\"state\":\"completed\",\"revision\":2,\"started_at\":\"2026-07-21T01:00:00.0000000Z\",\"expires_at\":\"2026-07-21T01:10:00.0000000Z\",\"completed_at\":\"2026-07-21T01:01:00.0000000Z\",\"cancelled_at\":null,\"accepted_evidence_refs\":[\"receipt-1\",\"receipt-3\"]}},\"evaluation_preview\":null,\"guidance\":[],\"candidates\":[],\"truncated\":false}";
 
     [Fact]
     public async Task Sources_ReturnsFixedOrderedRegistryAndBoundedDetection()
@@ -62,6 +63,69 @@ public sealed class DoctorUiRoutesTests
         Assert.Equal("/diagnostics?session_id=0190c7a0-0000-7000-8000-000000000002#doctor-session", targets[1].GetProperty("href").GetString());
         Assert.Equal("/diagnostics?observation_id=obs.1#source-diagnostics", targets[2].GetProperty("href").GetString());
         Assert.Equal(VerificationId, application.StatusInput);
+    }
+
+    [Fact]
+    public async Task CompletedStatus_AuthorizesOnlyPersistedAcceptedEvidenceNavigation()
+    {
+        var application = new StubApplication
+        {
+            Result = new DoctorUiApplicationResult(
+                StatusCodes.Status410Gone,
+                CompletedEnvelope,
+                [
+                    new("receipt-1", DoctorUiNavigationTargetKind.Trace, "0123456789abcdef0123456789abcdef"),
+                    new("receipt-3", DoctorUiNavigationTargetKind.SourceDiagnostic, "obs.1"),
+                ]),
+        };
+        await using var host = await StartAsync(application);
+
+        using var response = await host.Client.GetAsync($"/api/doctor/ui/v1/verifications/{VerificationId}");
+
+        Assert.Equal(HttpStatusCode.Gone, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
+        var targets = json.RootElement.GetProperty("navigation_targets").EnumerateArray().ToArray();
+        Assert.Equal(["receipt-1", "receipt-3"], targets.Select(target => target.GetProperty("evidence_ref").GetString()));
+        Assert.Equal(["trace", "source_diagnostic"], targets.Select(target => target.GetProperty("target_kind").GetString()));
+    }
+
+    [Fact]
+    public async Task CompletedStatus_RejectsNavigationForUnacceptedEvidence()
+    {
+        var application = new StubApplication
+        {
+            Result = new DoctorUiApplicationResult(
+                StatusCodes.Status410Gone,
+                CompletedEnvelope,
+                [new("receipt-2", DoctorUiNavigationTargetKind.Trace, "0123456789abcdef0123456789abcdef")]),
+        };
+        await using var host = await StartAsync(application);
+
+        using var response = await host.Client.GetAsync($"/api/doctor/ui/v1/verifications/{VerificationId}");
+
+        await AssertError(response, HttpStatusCode.InternalServerError, "invalid_application_result");
+    }
+
+    [Fact]
+    public async Task CompletedStatus_RejectsMalformedAcceptedEvidenceNavigation()
+    {
+        var malformedEnvelope = CompletedEnvelope.Replace(
+            "\"accepted_evidence_refs\":[\"receipt-1\",\"receipt-3\"]",
+            "\"accepted_evidence_refs\":[\"receipt-1\",\"C:\\\\private\\\\trace.json\"]",
+            StringComparison.Ordinal);
+        var application = new StubApplication
+        {
+            Result = new DoctorUiApplicationResult(
+                StatusCodes.Status410Gone,
+                malformedEnvelope,
+                [new(@"C:\private\trace.json", DoctorUiNavigationTargetKind.Trace, "0123456789abcdef0123456789abcdef")]),
+        };
+        await using var host = await StartAsync(application);
+
+        using var response = await host.Client.GetAsync($"/api/doctor/ui/v1/verifications/{VerificationId}");
+
+        await AssertError(response, HttpStatusCode.InternalServerError, "invalid_application_result");
     }
 
     [Fact]

@@ -163,10 +163,15 @@ idempotent and a conflicting target is rejected. `trace` IDs are 32 lowercase
 hex characters, `session` IDs are canonical lowercase UUIDv7, and
 `source_diagnostic` IDs are the existing 1..128-character safe opaque
 `observation_id`. Only source candidate producers write this table; the UI
-proxy is read-only and lists targets only for evidence references present in
-the authoritative returned `doctor.evaluation` states. Candidate-only and
-`evaluation_preview` references do not authorize a target. Missing linkage
-produces no target and remains missing evidence; no
+proxy is read-only. While a verification is active, it lists targets only for
+evidence references present in the authoritative returned
+`doctor.evaluation` states. After successful completion, it lists targets only
+for the verification's persisted `accepted_evidence_refs`; the completed
+projection does not depend on an evaluation that is no longer returned.
+Cancelled and expired verifications authorize no targets. Candidate-only,
+unaccepted, malformed, cross-verification, and `evaluation_preview` references
+do not authorize a target. Missing linkage produces no target and remains
+missing evidence; no
 caller may recover it by hash reversal, latest row, repository, workspace,
 cwd, process, trace ID alone, or timestamp proximity. The proxy validates kind,
 identity, and same-origin relative href. Query values are encoded and the UI

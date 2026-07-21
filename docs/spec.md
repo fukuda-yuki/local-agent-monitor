@@ -271,7 +271,11 @@ linkage. The only destinations are `/traces/{traceId}`,
 `/diagnostics?observation_id={observationId}#source-diagnostics`. Missing
 linkage yields no link; latest record, hash reversal, repository/workspace/cwd,
 process identity, trace ID alone, and timestamp proximity are forbidden. The
-complete registry, proxy, retry, accessibility, exact-link, Release ZIP, and
+active result authorizes only references in its returned evaluation states;
+after completion, only the verification's persisted accepted evidence
+references authorize navigation. Cancelled and expired verifications authorize
+no navigation.
+The complete registry, proxy, retry, accessibility, exact-link, Release ZIP, and
 security contract is [first-trace Doctor](specifications/interfaces/first-trace-doctor.md).
 
 ## Claude Code guided setup

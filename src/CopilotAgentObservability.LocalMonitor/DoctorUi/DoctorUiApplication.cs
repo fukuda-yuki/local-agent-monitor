@@ -94,21 +94,40 @@ internal sealed class DoctorUiApplication : IDoctorUiApplication
     private DoctorUiApplicationResult Execute(FirstTraceRequest request)
     {
         var envelope = orchestrator.Execute(request);
-        var references = EvidenceReferences(envelope.Doctor)
-            .Distinct(StringComparer.Ordinal)
-            .Take(DoctorValidation.MaximumEvidenceCandidates)
-            .ToArray();
-        var identities = envelope.VerificationId is null
-            ? []
-            : navigationStore.List(envelope.VerificationId, references)
-                .Take(64)
-                .Select(ToIdentity)
-                .ToArray();
+        var identities = NavigationIdentities(envelope.VerificationId, envelope.Doctor, navigationStore);
         return new(StatusCode(envelope), FirstTraceJson.Serialize(envelope), identities);
     }
 
-    private static IEnumerable<string> EvidenceReferences(DoctorResult? result) =>
-        result?.Evaluation?.States.SelectMany(state => state.EvidenceRefs) ?? [];
+    internal static IReadOnlyList<DoctorUiNavigationIdentity> NavigationIdentities(
+        string? verificationId,
+        DoctorResult? result,
+        SqliteFirstTraceNavigationStore store)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        var references = EvidenceReferences(result)
+            .Distinct(StringComparer.Ordinal)
+            .Take(DoctorValidation.MaximumEvidenceCandidates)
+            .ToArray();
+        return verificationId is null
+            ? []
+            : store.List(verificationId, references)
+                .Take(64)
+                .Select(ToIdentity)
+                .ToArray();
+    }
+
+    internal static IEnumerable<string> EvidenceReferences(DoctorResult? result)
+    {
+        if (result?.Verification is { State: DoctorVerificationState.Completed } completed)
+        {
+            return completed.AcceptedEvidenceRefs.Where(DoctorValidation.IsValidEvidenceReference);
+        }
+        if (result?.Verification is { State: not DoctorVerificationState.Active })
+        {
+            return [];
+        }
+        return result?.Evaluation?.States.SelectMany(state => state.EvidenceRefs) ?? [];
+    }
 
     private static DoctorUiNavigationIdentity ToIdentity(FirstTraceNavigationTarget target) => new(
         target.EvidenceRef,

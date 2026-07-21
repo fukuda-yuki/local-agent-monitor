@@ -316,9 +316,27 @@ internal static class DoctorUiRoutes
     private static HashSet<string> EvidenceReferences(JsonElement root)
     {
         var values = new HashSet<string>(StringComparer.Ordinal);
-        if (!root.TryGetProperty("doctor", out var doctor)
-            || doctor.ValueKind != JsonValueKind.Object
-            || !doctor.TryGetProperty("evaluation", out var evaluation)
+        if (!root.TryGetProperty("doctor", out var doctor) || doctor.ValueKind != JsonValueKind.Object)
+        {
+            return values;
+        }
+        if (doctor.TryGetProperty("verification", out var verification)
+            && verification.ValueKind == JsonValueKind.Object
+            && verification.TryGetProperty("state", out var verificationState)
+            && verificationState.ValueKind == JsonValueKind.String)
+        {
+            if (verificationState.GetString() == "completed"
+                && verification.TryGetProperty("accepted_evidence_refs", out var accepted)
+                && accepted.ValueKind == JsonValueKind.Array)
+            {
+                AddStringReferences(values, accepted, requireValidEvidenceReference: true);
+            }
+            if (verificationState.GetString() != "active")
+            {
+                return values;
+            }
+        }
+        if (!doctor.TryGetProperty("evaluation", out var evaluation)
             || evaluation.ValueKind != JsonValueKind.Object
             || !evaluation.TryGetProperty("states", out var states)
             || states.ValueKind != JsonValueKind.Array)
@@ -333,15 +351,25 @@ internal static class DoctorUiRoutes
             {
                 continue;
             }
-            foreach (var reference in references.EnumerateArray())
-            {
-                if (reference.ValueKind == JsonValueKind.String)
-                {
-                    values.Add(reference.GetString()!);
-                }
-            }
+            AddStringReferences(values, references, requireValidEvidenceReference: false);
         }
         return values;
+    }
+
+    private static void AddStringReferences(
+        HashSet<string> values,
+        JsonElement references,
+        bool requireValidEvidenceReference)
+    {
+        foreach (var reference in references.EnumerateArray())
+        {
+            if (reference.ValueKind == JsonValueKind.String
+                && (!requireValidEvidenceReference
+                    || DoctorValidation.IsValidEvidenceReference(reference.GetString())))
+            {
+                values.Add(reference.GetString()!);
+            }
+        }
     }
 
     private static string Href(DoctorUiNavigationIdentity target)
