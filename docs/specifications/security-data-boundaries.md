@@ -712,6 +712,29 @@ only in the persisted audit/history read model. It is never logged and is not
 emitted by any other DTO, diagnostic, screenshot, evidence record, or
 repository-safe output.
 
+## Cross-Surface Doctor Boundary
+
+Issue #105's `/api/doctor/ui/v1` proxy remains inside the installed Local
+Monitor's loopback-only, valid-Host, no-CORS boundary. All responses and the
+`/diagnostics` Doctor section are `no-store`. Mutations require same-origin and
+the existing CSRF token; status retry is GET-only and mutation response loss is
+resolved by reading the exact verification and revision before another action.
+
+The proxy may return the unchanged sanitized `FirstTraceEnvelope`, fixed source
+registry metadata, and exact navigation targets containing only an opaque
+evidence reference, fixed target kind, opaque persisted identity, and a server-
+generated same-origin relative href. It must not return raw prompt/response,
+tool body, authorization material, credentials, PII, absolute/local paths,
+source payload fragments, raw database rows, or exception/provider text.
+
+Navigation does not authorize a raw read. Trace links use the existing trace
+page boundary. Exact Session and source-diagnostic links remain inside
+`/diagnostics` and render bounded sanitized metadata only. The server rejects
+unknown target kinds, malformed identities, non-relative/other-origin hrefs,
+and evidence references absent from the returned Doctor result. The browser
+uses DOM properties and inert text; it does not use HTML interpolation or
+client-side parsing to recover a target from an opaque evidence reference.
+
 ## Session Workspace Boundary
 
 Issue #51 Session ingestion remains inside the installed Local Monitor's

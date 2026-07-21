@@ -17,9 +17,10 @@ completeness/content, and report `first_trace_ready` or a specific failure or
 capability state with next actions.
 
 The CLI syntax, result envelope, and application boundary are source-neutral.
-Version 1 registers exactly one source adapter: `claude-code`. Claude-specific
-behavior is confined to the `claude-code` first-trace adapter and the Claude
-candidate observer described below.
+Issue #104 initially registered exactly one source adapter, `claude-code`.
+Issue #105/D064 extends that same v1 registry with the three GitHub Copilot
+source IDs defined by `first-trace-doctor.md`; it does not change the Claude
+mapping below or the `FirstTraceEnvelope`.
 
 ## CLI surface
 
@@ -42,8 +43,9 @@ first-trace cancel   --database <path> --verification-id <uuid-v7> --expected-re
   the validation and default the setup contract's `--endpoint` option uses.
   `begin`, `status`, and `complete` accept it; `cancel` does not perform fact
   collection and does not accept it.
-- `--adapter` selects the registered first-trace source adapter. v1 accepts
-  only `claude-code`; anything else is `invalid_arguments`.
+- `--adapter` selects the registered first-trace source adapter. The current v1
+  registry and per-source interactions are fixed by `first-trace-doctor.md`;
+  this section defines the `claude-code` member.
 - `--interaction` selects which bounded-interaction guidance variant is
   rendered. When omitted, guidance for all three variants is rendered. It does
   not change verification identity: all three variants share source surface

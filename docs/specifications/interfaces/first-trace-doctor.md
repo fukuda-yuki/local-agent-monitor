@@ -27,6 +27,172 @@ must not add a `GET /health/ready` check, reason, threshold, configuration
 name, body field, or status transition and must not prevent Local Monitor
 startup, telemetry ingestion, or source-independent evaluation.
 
+## Cross-surface closeout contract
+
+Issue #105 integrates, but does not replace, the frozen Doctor domain and the
+source-specific evidence adapters. The fixed public source registry is:
+
+| `source_id` / `source_surface` / CLI `--adapter` | `display_label` | Expected Doctor adapter | Allowed `--interaction` | Setup ownership |
+| --- | --- | --- | --- | --- |
+| `github-copilot-vscode` | `GitHub Copilot in VS Code` | `github-copilot-doctor` | `vscode-chat` | managed |
+| `github-copilot-cli` | `GitHub Copilot CLI` | `github-copilot-doctor` | `cli` | managed on Windows |
+| `github-copilot-app-sdk` | `GitHub Copilot App/SDK` | `github-copilot-doctor` | `app-sdk` | caller-managed |
+| `claude-code` | `Claude Code` | `claude-code-otel` | `interactive-cli|print|agent-sdk` | managed CLI; caller-managed Agent SDK |
+
+The registry has ordinal unique IDs and the stable order above. Detection
+reports `detected|not_detected|unavailable`; it never removes an item, treats
+unknown as absent, or selects a source automatically when more than one managed
+source is detected. Caller-managed entries remain visible and are never
+represented as managed setup success.
+
+Detection is a read-only presence check and never invokes setup planning,
+persists a plan, mutates configuration, or uses Doctor facts as an absence
+signal. `github-copilot-vscode` runs the existing Stable and Insiders
+`--list-extensions --show-versions` observations: an exact
+`github.copilot-chat` entry is `detected`; successful observations with no such
+entry, or an executable explicitly reported missing, are `not_detected`; and an
+exception, failure, or timeout is `unavailable` unless the other channel
+positively detects the extension. `github-copilot-cli` and `claude-code` use
+their existing `version` and `--version` process observations respectively:
+a completed invocation is `detected` even when its version is unsupported, an
+explicit executable-not-found result is `not_detected`, and every ambiguous
+failure is `unavailable`. `github-copilot-app-sdk` is caller-managed and always
+reports `unavailable` because v1 has no bounded authoritative local detector.
+Unknown or unavailable Doctor facts never become `not_detected`.
+
+The common `first-trace begin` command accepts these source IDs through
+`--adapter`. A GitHub source accepts only its one interaction value, which is
+also the default when omitted. Claude retains its existing optional interaction
+behavior. `status|complete|cancel` derive the registered adapter from the exact
+stored verification source and do not accept `--adapter`. JSON output is the existing
+`FirstTraceEnvelope`; human output is projected from that same envelope. The
+Local Monitor proxy and UI consume the same application operation and preserve
+the embedded `DoctorResult` byte-for-byte after canonical JSON serialization.
+They do not add a state, change precedence, synthesize a missing fact, or
+substitute `evaluation_preview` for `doctor.evaluation`.
+
+### Local Monitor UI proxy
+
+The additive proxy is versioned under `/api/doctor/ui/v1`. JSON property names
+and request bodies are closed; unknown or duplicate properties are invalid:
+
+- `GET /api/doctor/ui/v1/sources` returns the complete ordered registry and its
+  bounded detection state;
+- `POST /api/doctor/ui/v1/verifications` accepts required `source_id` and
+  optional `interaction` and `expires_at`, and begins one exact selected source;
+- `GET /api/doctor/ui/v1/verifications/{verificationId}` refreshes and returns
+  that exact verification at its current persisted revision;
+- `POST /api/doctor/ui/v1/verifications/{verificationId}/complete` completes
+  a body containing required positive `expected_revision` and required ordered
+  distinct `accepted_evidence_refs` (0..16); and
+- `POST /api/doctor/ui/v1/verifications/{verificationId}/cancel` cancels the
+  exact required positive `expected_revision`.
+
+The source response is exactly
+`{schema_version:"doctor.ui.v1",sources:[...]}`. Each source has exactly
+`source_id`, `display_label`, `setup_ownership = managed|managed_windows|caller_managed`,
+and `detection_state = detected|not_detected|unavailable`. It contains no
+envelope. Every verification-operation response is exactly
+`{schema_version:"doctor.ui.v1",envelope:<FirstTraceEnvelope>,navigation_targets:[...]}`.
+The envelope is present on success and failure; targets are empty unless the
+returned result contains their evidence references.
+
+Mutation routes require the existing loopback, valid Host, same-origin and
+CSRF controls. Every route uses `Cache-Control: no-store`, the existing 64 KiB
+body limit, canonical UUIDv7/timestamp/revision rules, fixed sanitized error
+codes, and no redirect. `expires_at` has the existing 1..30 minute bounds and
+defaults to exactly ten minutes from the store clock. `interaction` is 1..32
+ASCII lower-case token characters and must match the registry row. A safe
+status retry may repeat a GET. A client must
+not blindly repeat a mutation after response loss; it first GETs the exact
+verification and revision and then offers the one currently valid action.
+
+HTTP status mapping is closed: successful source/status/complete/cancel is
+`200`; a newly started verification is `201`; invalid JSON/arguments is `400`;
+verification not found is `404`; stale revision, active-verification conflict,
+not-ready completion, or required explicit selection is `409`; expired or
+already terminal verification/evidence is `410`; store busy/unavailable is
+`503`; and an internal/unmapped failure is `500`. The envelope retains the
+canonical FirstTrace/Doctor code and is authoritative; HTTP status never turns
+a failure into success.
+
+The Doctor section lives in the existing `/diagnostics` page. D042 remains a
+seven-screen, two-navigation-item information architecture. The section shows
+source selection, empty/detected state, the returned current state, severity,
+source, evidence references, next action, retryability and active/expired/
+cancelled/completed lifecycle. It exposes at most one primary action. API
+failure provides an explicit GET retry action, restores focus to the result
+heading, and announces state changes through a labelled live region. All
+controls are keyboard reachable in DOM order and carry explicit labels.
+
+### Exact evidence navigation
+
+Navigation is a separate sanitized projection; it never changes or parses the
+opaque Doctor evidence reference. Each target contains exactly
+`evidence_ref`, `target_kind = trace|session|source_diagnostic`, `target_id`,
+and `href`. The reference must occur in the returned result; the identity must
+already be persisted and exact; and the server generates one fixed relative
+href:
+
+| Target kind | Fixed relative href |
+| --- | --- |
+| `trace` | `/traces/{traceId}` |
+| `session` | `/diagnostics?session_id={sessionId}#doctor-session` |
+| `source_diagnostic` | `/diagnostics?observation_id={observationId}#source-diagnostics` |
+
+The source evidence adapter persists this linkage when it accepts the
+candidate. The additive `first_trace_navigation` schema component v1 owns
+`first_trace_evidence_navigation`, keyed by
+`(verification_id,evidence_ref,target_kind,target_id)`, with a foreign key to
+the exact Doctor evidence row and cascade lifetime. One evidence reference may
+have at most one target of each kind; duplicate identical writes are
+idempotent and a conflicting target is rejected. `trace` IDs are 32 lowercase
+hex characters, `session` IDs are canonical lowercase UUIDv7, and
+`source_diagnostic` IDs are the existing 1..128-character safe opaque
+`observation_id`. Only source candidate producers write this table; the UI
+proxy is read-only and lists targets only for evidence references present in
+the returned envelope. Missing linkage produces no target and remains missing evidence; no
+caller may recover it by hash reversal, latest row, repository, workspace,
+cwd, process, trace ID alone, or timestamp proximity. The proxy validates kind,
+identity, and same-origin relative href. Query values are encoded and the UI
+creates links with DOM properties and inert text only. The diagnostics page may
+show a bounded sanitized Session summary and exact source observation for these
+query parameters. It adds no Session page, raw route, raw payload fetch, or
+prompt/response field.
+
+`GET /api/doctor/ui/v1/sessions/{sessionId}` and
+`GET /api/doctor/ui/v1/source-diagnostics/{observationId}` are the two
+sanitized exact-read endpoints used by those diagnostics sections. An exact
+Session/source observation read that does not exist or no longer has
+retention-authorized sanitized metadata renders a fixed `evidence_not_found`
+empty state and HTTP `404` from its additive exact read endpoint. It does not
+fall back to a list row. A malformed query identity is `400`. The source-
+diagnostic exact projection contains the existing sanitized DTO fields plus its
+opaque `observation_id`; the Session projection uses the existing sanitized
+Session detail DTO and does not expose event content.
+
+### Release ZIP and rollback handoff
+
+The Windows x64 Release ZIP includes `first-trace.ps1` beside the existing
+installed scripts and self-contained `config-cli.exe`. The wrapper forwards
+only `begin|status|complete|cancel` arguments, rejects a caller-supplied
+`--database`, injects the installed current-user runtime database
+`%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\raw-store.db`, and
+passes stdout, stderr, and exit code through unchanged. It performs no source
+build, restore, environment mutation, setup apply, source restart, telemetry
+generation, or retry. Missing executable/database/runtime root is a fixed
+fail-closed error with no resolved local path in output.
+
+The setup completion handoff remains the existing sanitized
+`run_first_trace_doctor` next action plus the `/diagnostics` source selector;
+there is no setup Razor screen. A release journey performs explicit first-trace
+cancel when a verification is active, then source setup rollback, then refresh.
+Rollback does not erase Doctor history or invent a new Doctor state: the
+refreshed envelope projects current setup facts and the cancelled lifecycle.
+Uninstall runs only after cancellation/rollback in the supported journey,
+removes only tool-owned configuration/runtime installation artifacts under the
+existing uninstall contract, and never converts retained evidence into a pass.
+
 ## Common lexical and size rules
 
 Unless a narrower rule is stated below:

@@ -233,6 +233,32 @@ exact per-record projection disposition exists. The existing CLI JSON/human
 projection and five Local Monitor HTTP routes continue to emit the same
 `doctor.v1`; #105 owns later common proxy/UI/Release closeout.
 
+## Cross-surface first-trace closeout
+
+Issue #105 integrates Config CLI, the Windows x64 Release ZIP, and the existing
+Local Monitor `/diagnostics` page over one fixed source registry:
+`github-copilot-vscode`, `github-copilot-cli`,
+`github-copilot-app-sdk`, and `claude-code`. The common command and additive
+`/api/doctor/ui/v1` proxy return the same persisted `FirstTraceEnvelope` with
+the embedded `doctor.v1` result unchanged. Human and UI projections do not add
+source-specific states, reorder precedence, fill missing facts, or substitute
+an evaluation preview for the persisted evaluation.
+
+The UI proxy provides ordered source discovery and begin/status/complete/cancel
+operations. Existing five `/api/doctor` routes, D051 readiness, and D042's
+seven-screen/two-navigation-item information architecture remain unchanged.
+Doctor controls, exact Session summary, and source-diagnostic targeting are
+sections of `/diagnostics`, not new screens.
+
+Evidence navigation is an additive sanitized projection over exact persisted
+linkage. The only destinations are `/traces/{traceId}`,
+`/diagnostics?session_id={sessionId}#doctor-session`, and
+`/diagnostics?observation_id={observationId}#source-diagnostics`. Missing
+linkage yields no link; latest record, hash reversal, repository/workspace/cwd,
+process identity, trace ID alone, and timestamp proximity are forbidden. The
+complete registry, proxy, retry, accessibility, exact-link, Release ZIP, and
+security contract is [first-trace Doctor](specifications/interfaces/first-trace-doctor.md).
+
 ## Claude Code guided setup
 
 Issue #68 adds the `claude-code` adapter to the same transaction and

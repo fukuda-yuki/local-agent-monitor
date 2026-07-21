@@ -2228,3 +2228,27 @@ deletion.
   adds no retention action, fetch, proxy, mutation state, or raw-bearing field.
 
 The complete public contract is [retention mutation](specifications/interfaces/retention-mutation.md).
+
+## D064: Cross-surface Doctor remains inside the existing diagnostics screen
+
+Status: Accepted (2026-07-21)
+
+Issue #105 integrates GitHub Copilot and Claude Code first-trace journeys
+without expanding D042's seven-screen, two-navigation-item Local Monitor IA.
+Doctor controls, exact Session summary, and source-diagnostic targeting live in
+the existing `/diagnostics` screen. No independent Doctor or Session-detail
+screen is added.
+
+- The stable source registry is `github-copilot-vscode`,
+  `github-copilot-cli`, `github-copilot-app-sdk`, and `claude-code`.
+- Config CLI, Release ZIP, and the additive `/api/doctor/ui/v1` proxy project
+  the same `FirstTraceEnvelope` and embedded `doctor.v1` result.
+- Exact evidence navigation is a separate sanitized server projection. It may
+  link to the existing trace screen or to exact Session/source-diagnostic
+  sections in `/diagnostics`; it never parses or reverses an opaque evidence
+  reference and never falls back to latest/time/repository/workspace matching.
+- Existing `/api/doctor` routes, D051 readiness, raw routes, and same-origin/
+  Host/CSRF boundaries remain unchanged.
+
+The complete public and security contract is
+[first-trace Doctor](specifications/interfaces/first-trace-doctor.md).
