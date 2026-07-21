@@ -114,7 +114,11 @@ complete at the exact displayed revision; with none available it refreshes by
 GET. A separate non-primary cancel action may cancel at that revision. After a
 lost complete/cancel response the UI performs the exact status GET before it
 offers another mutation and never repeats the POST automatically. Terminal
-completed, cancelled, and expired results expose no lifecycle mutation.
+completed, cancelled, and expired results expose no lifecycle mutation. A
+cancelled result may expose one safe exact status GET so the user can refresh
+current setup facts after the external rollback; it retains the cancelled
+verification history. An unresolved begin locks source selection and exposes
+no begin retry because no exact verification identity is available.
 
 HTTP status mapping is closed: successful source/status/complete/cancel is
 `200`; a newly started verification is `201`; invalid JSON/arguments is `400`;

@@ -172,7 +172,6 @@
   };
   let doctorAction = null;
   let currentVerification = null;
-  let doctorSelectionGeneration = 0;
 
   function setDoctorAction(label, action, disabled) {
     doctorAction = action;
@@ -184,6 +183,10 @@
   function setCancelAction(visible) {
     doctorCancelAction.hidden = !visible;
     doctorCancelAction.disabled = false;
+  }
+
+  function setSourceLocked(locked) {
+    doctorSource.disabled = Boolean(locked);
   }
 
   function announceDoctor(message, focusHeading) {
@@ -280,8 +283,8 @@
     const evaluation = result?.evaluation;
     const primary = evaluation?.primary_state;
     const verification = result?.verification;
-    currentVerification = verification?.state === "active" && envelope.verification_id
-      ? { id: envelope.verification_id, revision: verification.revision }
+    currentVerification = verification && envelope.verification_id
+      ? { id: envelope.verification_id, revision: verification.revision, state: verification.state }
       : null;
 
     doctorFields.state.textContent = display(primary?.state_code);
@@ -294,13 +297,19 @@
     renderCandidates(envelope.candidates);
 
     if (verification?.state === "active" && currentVerification) {
+      setSourceLocked(true);
       setCancelAction(true);
       if (Array.isArray(envelope.candidates) && envelope.candidates.length > 0) {
         setDoctorAction("選択した証拠で完了", completeVerification, true);
       } else {
         setDoctorAction("状態を確認", refreshVerification);
       }
+    } else if (verification?.state === "cancelled" && currentVerification) {
+      setSourceLocked(false);
+      setCancelAction(false);
+      setDoctorAction("ロールバック後の状態を更新", refreshVerification);
     } else {
+      setSourceLocked(false);
       setCancelAction(false);
       setDoctorAction(null, null);
     }
@@ -419,7 +428,7 @@
   async function beginVerification() {
     const sourceId = doctorSource.value;
     if (!sourceId) return;
-    const generation = doctorSelectionGeneration;
+    setSourceLocked(true);
     setDoctorAction(null, null);
     try {
       const payload = await requestDoctor("/api/doctor/ui/v1/verifications", {
@@ -427,26 +436,28 @@
         headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
         body: JSON.stringify({ source_id: sourceId }),
       });
-      if (generation !== doctorSelectionGeneration || doctorSource.value !== sourceId) return;
       renderDoctor(payload);
     } catch (error) {
-      if (generation !== doctorSelectionGeneration || doctorSource.value !== sourceId) return;
-      renderFailureEnvelope(error);
-      if (currentVerification) mutationFailure();
-      else doctorFailure(loadDoctorSources);
+      if (renderFailureEnvelope(error) && currentVerification?.state === "active") mutationFailure();
+      else {
+        setCancelAction(false);
+        setDoctorAction(null, null);
+        announceDoctor("検証開始の結果を確認できませんでした。ページを再読み込みしてください。", true);
+      }
     }
   }
 
   async function refreshVerification() {
     if (!currentVerification) return;
     const exact = currentVerification;
+    setSourceLocked(true);
     setDoctorAction(null, null);
     try {
       const payload = await requestDoctor(`/api/doctor/ui/v1/verifications/${encodeURIComponent(exact.id)}`);
       renderDoctor(payload);
     } catch (error) {
       renderFailureEnvelope(error);
-      if (currentVerification) doctorFailure(refreshVerification);
+      if (currentVerification?.state === "active") doctorFailure(refreshVerification);
     }
   }
 
@@ -455,6 +466,7 @@
     const exact = currentVerification;
     const acceptedEvidenceRefs = selectedEvidenceRefs();
     if (acceptedEvidenceRefs.length === 0) return;
+    setSourceLocked(true);
     setCancelAction(false);
     setDoctorAction(null, null);
     try {
@@ -466,13 +478,14 @@
       renderDoctor(payload);
     } catch (error) {
       renderFailureEnvelope(error);
-      if (currentVerification) mutationFailure();
+      if (currentVerification?.state === "active") mutationFailure();
     }
   }
 
   async function cancelVerification() {
     if (!currentVerification) return;
     const exact = currentVerification;
+    setSourceLocked(true);
     setCancelAction(false);
     setDoctorAction(null, null);
     try {
@@ -484,7 +497,7 @@
       renderDoctor(payload);
     } catch (error) {
       renderFailureEnvelope(error);
-      if (currentVerification) mutationFailure();
+      if (currentVerification?.state === "active") mutationFailure();
     }
   }
 
@@ -497,7 +510,6 @@
   }
 
   doctorSource?.addEventListener("change", () => {
-    doctorSelectionGeneration += 1;
     const option = doctorSource.selectedOptions[0];
     resetDoctorResult();
     doctorSourceState.textContent = option?.value
