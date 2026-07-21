@@ -838,6 +838,7 @@ internal static class SetupPhysicalProcessRunner
         startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
         startInfo.Environment["DOTNET_NOLOGO"] = "1";
         startInfo.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
+        startInfo.Environment["MSBUILDDISABLENODEREUSE"] = "1";
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
