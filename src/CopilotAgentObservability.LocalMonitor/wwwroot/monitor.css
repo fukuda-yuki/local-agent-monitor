@@ -3274,6 +3274,27 @@ a.kpi-card:hover {
 
 .retention-diagnostics-help { padding: 0 18px; }
 
+/* First-Trace Doctor on the existing diagnostics screen. */
+.doctor-panel { display: grid; gap: var(--monitor-space-4); }
+.doctor-source-control { display: grid; gap: var(--monitor-space-2); padding: 0 18px; }
+.doctor-source-control label { color: var(--monitor-ink-subtle); font-weight: var(--monitor-weight-semibold); }
+.doctor-source-control select { width: min(100%, 520px); }
+.doctor-source-control p { margin: 0; }
+.doctor-result { padding: var(--monitor-space-4); background: var(--monitor-surface-alt); border: 1px solid var(--monitor-border); border-radius: var(--monitor-radius-sm); }
+.doctor-result h3, .doctor-evidence h4 { margin: 0 0 var(--monitor-space-3); }
+#doctor-result-heading:focus { outline: 2px solid var(--monitor-accent); outline-offset: 3px; }
+.doctor-result-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--monitor-space-3); }
+.doctor-result-grid > div { padding: var(--monitor-space-3); background: var(--monitor-surface-card); border: 1px solid var(--monitor-border); border-radius: var(--monitor-radius-xs); }
+.doctor-evidence { margin-top: var(--monitor-space-4); }
+.doctor-evidence ul { display: grid; gap: var(--monitor-space-2); margin: 0; padding-left: 22px; }
+.doctor-evidence li { overflow-wrap: anywhere; font-family: var(--monitor-font-mono); font-size: var(--monitor-text-sm); }
+.doctor-live { min-height: 1.5em; margin: 0 18px; color: var(--monitor-ink-subtle); }
+.doctor-actions { display: flex; justify-content: flex-end; padding: 0 18px 18px; }
+
+@media (max-width: 720px) {
+    .doctor-result-grid { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 640px) {
     .retention-dialog > * { margin-right: 14px; margin-left: 14px; }
     .retention-dialog-head { margin: 0; padding-right: 14px; padding-left: 14px; }

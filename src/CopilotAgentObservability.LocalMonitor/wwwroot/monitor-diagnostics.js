@@ -1,14 +1,23 @@
 // Local Ingestion Monitor — diagnostics page (ingestion history, Sprint18 C5).
 //
-// Sanitized boundary: reads only the sanitized GET /api/monitor/ingestions and
-// GET /api/monitor/source-diagnostics cursor APIs. It never fetches a
-// raw-bearing route. All DOM nodes are built with createElement / textContent;
-// no markup strings are ever injected.
+// Sanitized boundary: reads only the sanitized monitor diagnostics and
+// doctor.ui.v1 APIs. It never fetches a raw-bearing route. All DOM nodes are
+// built with createElement / textContent; no markup strings are ever injected.
 (() => {
   "use strict";
 
   const rows = document.getElementById("ingestion-history-rows");
   const sourceDiagnosticRows = document.getElementById("source-diagnostics-rows");
+  const doctorSource = document.getElementById("doctor-source");
+  const doctorSourceState = document.getElementById("doctor-source-state");
+  const doctorHeading = document.getElementById("doctor-result-heading");
+  const doctorLive = document.getElementById("doctor-live");
+  const doctorPrimaryAction = document.getElementById("doctor-primary-action");
+  const doctorEvidenceList = document.getElementById("doctor-evidence-list");
+  const doctorSessionTarget = document.getElementById("doctor-session-target");
+  const doctorSessionTargetSummary = document.getElementById("doctor-session-target-summary");
+  const doctorSourceTarget = document.getElementById("doctor-source-target");
+  const doctorSourceTargetSummary = document.getElementById("doctor-source-target-summary");
   const sourceDiagnosticsPageSize = 50;
   const maximumSourceDiagnosticsPages = 200;
   if (!rows) return; // Not the diagnostics page — no-op.
@@ -150,8 +159,238 @@
     }
   }
 
+  const doctorFields = {
+    state: document.getElementById("doctor-current-state"),
+    severity: document.getElementById("doctor-severity"),
+    source: document.getElementById("doctor-result-source"),
+    nextAction: document.getElementById("doctor-next-action"),
+    retryability: document.getElementById("doctor-retryability"),
+    lifecycle: document.getElementById("doctor-lifecycle"),
+  };
+  let doctorAction = null;
+  let currentVerification = null;
+
+  function setDoctorAction(label, action) {
+    doctorAction = action;
+    doctorPrimaryAction.hidden = !label;
+    doctorPrimaryAction.textContent = label || "";
+  }
+
+  function announceDoctor(message, focusHeading) {
+    doctorLive.textContent = message;
+    if (focusHeading) doctorHeading.focus();
+  }
+
+  function doctorFailure(retry) {
+    setDoctorAction("再試行", retry);
+    announceDoctor("Doctor の状態を読み込めませんでした。", true);
+  }
+
+  function display(value) {
+    return value === null || value === undefined || value === "" ? "—" : String(value);
+  }
+
+  function safeNavigationTarget(target, evidenceRef) {
+    return target
+      && target.evidence_ref === evidenceRef
+      && typeof target.href === "string"
+      && target.href.startsWith("/")
+      && !target.href.startsWith("//");
+  }
+
+  function renderEvidence(evidenceRefs, navigationTargets) {
+    doctorEvidenceList.replaceChildren();
+    if (!Array.isArray(evidenceRefs) || evidenceRefs.length === 0) {
+      const empty = document.createElement("li");
+      empty.className = "monitor-subtle";
+      empty.textContent = "証拠参照はまだありません。";
+      doctorEvidenceList.append(empty);
+      return;
+    }
+
+    for (const evidenceRef of evidenceRefs) {
+      const item = document.createElement("li");
+      const target = Array.isArray(navigationTargets)
+        ? navigationTargets.find(candidate => safeNavigationTarget(candidate, evidenceRef))
+        : null;
+      if (target) {
+        const link = document.createElement("a");
+        link.href = target.href;
+        link.textContent = String(evidenceRef);
+        item.append(link);
+      } else {
+        item.textContent = String(evidenceRef);
+      }
+      doctorEvidenceList.append(item);
+    }
+  }
+
+  function renderDoctor(payload) {
+    if (!payload || payload.schema_version !== "doctor.ui.v1" || !payload.envelope) {
+      throw new Error("invalid doctor response");
+    }
+
+    const envelope = payload.envelope;
+    const result = envelope.doctor;
+    const evaluation = result?.evaluation;
+    const primary = evaluation?.primary_state;
+    const verification = result?.verification;
+    currentVerification = verification && envelope.verification_id
+      ? { id: envelope.verification_id, revision: verification.revision }
+      : null;
+
+    doctorFields.state.textContent = display(primary?.state_code);
+    doctorFields.severity.textContent = display(primary?.severity);
+    doctorFields.source.textContent = display(evaluation?.source_surface ?? envelope.source_surface);
+    doctorFields.nextAction.textContent = display(primary?.next_action);
+    doctorFields.retryability.textContent = display(primary?.retryability);
+    doctorFields.lifecycle.textContent = display(verification?.state);
+    renderEvidence(primary?.evidence_refs, payload.navigation_targets);
+
+    if (verification?.state === "active" && currentVerification) {
+      setDoctorAction("状態を更新", refreshVerification);
+    } else {
+      setDoctorAction(null, null);
+    }
+    announceDoctor(`Doctor の状態を更新しました: ${display(verification?.state ?? primary?.state_code)}`, true);
+  }
+
+  async function requestDoctor(url, options) {
+    const response = await fetch(url, { cache: "no-store", ...options });
+    const payload = await response.json();
+    if (!response.ok && !payload?.envelope) throw new Error("doctor request failed");
+    return payload;
+  }
+
+  function renderExactSummary(container, values) {
+    container.replaceChildren();
+    for (const [label, value] of values) {
+      const row = document.createElement("div");
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      term.textContent = label;
+      detail.textContent = display(value);
+      row.append(term, detail);
+      container.append(row);
+    }
+  }
+
+  async function loadExactEvidenceTarget() {
+    const query = new URLSearchParams(window.location.search);
+    const sessionId = query.get("session_id");
+    const observationId = query.get("observation_id");
+    if (sessionId) {
+      try {
+        const payload = await requestDoctor(`/api/doctor/ui/v1/sessions/${encodeURIComponent(sessionId)}`);
+        const session = payload?.session;
+        if (!session) throw new Error("invalid session evidence");
+        renderExactSummary(doctorSessionTargetSummary, [
+          ["Session ID", session.session_id], ["状態", session.status],
+          ["完全性", session.completeness], ["最終確認", session.last_seen_at],
+        ]);
+        doctorSessionTarget.hidden = false;
+        document.getElementById("doctor-session-target-heading")?.focus();
+      } catch {
+        renderExactSummary(doctorSessionTargetSummary, [["状態", "evidence_not_found"]]);
+        doctorSessionTarget.hidden = false;
+      }
+    }
+    if (observationId) {
+      try {
+        const payload = await requestDoctor(`/api/doctor/ui/v1/source-diagnostics/${encodeURIComponent(observationId)}`);
+        const observation = payload?.observation;
+        const diagnostic = observation?.source_diagnostic;
+        if (!diagnostic) throw new Error("invalid source evidence");
+        renderExactSummary(doctorSourceTargetSummary, [
+          ["Observation ID", observation.observation_id], ["ソース", diagnostic.source_surface],
+          ["adapter", diagnostic.source_adapter], ["互換性", diagnostic.compatibility_state],
+          ["次の対応", diagnostic.next_action], ["観測時刻", observation.observed_at],
+        ]);
+        doctorSourceTarget.hidden = false;
+        document.getElementById("doctor-source-target-heading")?.focus();
+      } catch {
+        renderExactSummary(doctorSourceTargetSummary, [["状態", "evidence_not_found"]]);
+        doctorSourceTarget.hidden = false;
+      }
+    }
+  }
+
+  async function loadDoctorSources() {
+    setDoctorAction(null, null);
+    doctorSource.disabled = true;
+    try {
+      const payload = await requestDoctor("/api/doctor/ui/v1/sources");
+      if (payload?.schema_version !== "doctor.ui.v1" || !Array.isArray(payload.sources)) {
+        throw new Error("invalid sources response");
+      }
+
+      doctorSource.replaceChildren();
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "ソースを選択";
+      doctorSource.append(placeholder);
+      for (const source of payload.sources) {
+        const option = document.createElement("option");
+        option.value = String(source.source_id);
+        option.textContent = `${display(source.display_label)} — ${display(source.detection_state)}`;
+        option.dataset.detectionState = String(source.detection_state);
+        option.dataset.setupOwnership = String(source.setup_ownership);
+        doctorSource.append(option);
+      }
+      doctorSource.value = "";
+      doctorSource.disabled = false;
+      const detected = payload.sources.filter(source => source.detection_state === "detected").length;
+      doctorSourceState.textContent = detected === 0
+        ? "検出されたソースはありません。ソースを選択して確認できます。"
+        : `${detected} 件のソースを検出しました。確認するソースを選択してください。`;
+      announceDoctor("Doctor のソース一覧を読み込みました。", false);
+    } catch {
+      doctorSourceState.textContent = "ソース一覧を読み込めませんでした。";
+      doctorFailure(loadDoctorSources);
+    }
+  }
+
+  async function beginVerification() {
+    const sourceId = doctorSource.value;
+    if (!sourceId) return;
+    setDoctorAction(null, null);
+    try {
+      const payload = await requestDoctor("/api/doctor/ui/v1/verifications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
+        body: JSON.stringify({ source_id: sourceId }),
+      });
+      renderDoctor(payload);
+    } catch {
+      doctorFailure(loadDoctorSources);
+    }
+  }
+
+  async function refreshVerification() {
+    if (!currentVerification) return;
+    const exact = currentVerification;
+    setDoctorAction(null, null);
+    try {
+      const payload = await requestDoctor(`/api/doctor/ui/v1/verifications/${encodeURIComponent(exact.id)}`);
+      renderDoctor(payload);
+    } catch {
+      doctorFailure(refreshVerification);
+    }
+  }
+
+  doctorSource?.addEventListener("change", () => {
+    const option = doctorSource.selectedOptions[0];
+    doctorSourceState.textContent = option?.value
+      ? `${option.textContent} / setup: ${option.dataset.setupOwnership}`
+      : "確認するソースを選択してください。";
+    setDoctorAction(option?.value ? "検証を開始" : null, option?.value ? beginVerification : null);
+  });
+  doctorPrimaryAction?.addEventListener("click", () => doctorAction?.());
+
   refresh();
   refreshSourceDiagnostics();
+  if (doctorSource) loadDoctorSources();
+  loadExactEvidenceTarget();
   document.addEventListener("cao-monitor-refresh", () => {
     refresh();
     refreshSourceDiagnostics();
