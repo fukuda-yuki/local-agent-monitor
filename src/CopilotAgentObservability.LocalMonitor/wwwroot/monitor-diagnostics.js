@@ -13,7 +13,10 @@
   const doctorHeading = document.getElementById("doctor-result-heading");
   const doctorLive = document.getElementById("doctor-live");
   const doctorPrimaryAction = document.getElementById("doctor-primary-action");
+  const doctorCancelAction = document.getElementById("doctor-cancel-action");
   const doctorEvidenceList = document.getElementById("doctor-evidence-list");
+  const doctorCandidates = document.getElementById("doctor-candidates");
+  const doctorCandidateList = document.getElementById("doctor-candidate-list");
   const doctorSessionTarget = document.getElementById("doctor-session-target");
   const doctorSessionTargetSummary = document.getElementById("doctor-session-target-summary");
   const doctorSourceTarget = document.getElementById("doctor-source-target");
@@ -170,10 +173,16 @@
   let doctorAction = null;
   let currentVerification = null;
 
-  function setDoctorAction(label, action) {
+  function setDoctorAction(label, action, disabled) {
     doctorAction = action;
     doctorPrimaryAction.hidden = !label;
+    doctorPrimaryAction.disabled = Boolean(disabled);
     doctorPrimaryAction.textContent = label || "";
+  }
+
+  function setCancelAction(visible) {
+    doctorCancelAction.hidden = !visible;
+    doctorCancelAction.disabled = false;
   }
 
   function announceDoctor(message, focusHeading) {
@@ -182,8 +191,15 @@
   }
 
   function doctorFailure(retry) {
+    setCancelAction(false);
     setDoctorAction("再試行", retry);
     announceDoctor("Doctor の状態を読み込めませんでした。", true);
+  }
+
+  function mutationFailure() {
+    setCancelAction(false);
+    setDoctorAction("現在の状態を確認", refreshVerification);
+    announceDoctor("操作結果を確認できませんでした。現在の状態を確認してください。", true);
   }
 
   function display(value) {
@@ -225,6 +241,34 @@
     }
   }
 
+  function selectedEvidenceRefs() {
+    return Array.from(doctorCandidateList.querySelectorAll("input[type=checkbox]:checked"))
+      .map(input => input.value);
+  }
+
+  function renderCandidates(candidates) {
+    doctorCandidateList.replaceChildren();
+    doctorCandidates.hidden = !Array.isArray(candidates) || candidates.length === 0;
+    if (doctorCandidates.hidden) return;
+
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate.evidence_ref !== "string") continue;
+      const label = document.createElement("label");
+      label.className = "doctor-candidate-choice";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = candidate.evidence_ref;
+      input.setAttribute("aria-label", `候補 ${candidate.evidence_ref} を選択`);
+      input.addEventListener("change", () => {
+        doctorPrimaryAction.disabled = selectedEvidenceRefs().length === 0;
+      });
+      const text = document.createElement("span");
+      text.textContent = candidate.evidence_ref;
+      label.append(input, text);
+      doctorCandidateList.append(label);
+    }
+  }
+
   function renderDoctor(payload) {
     if (!payload || payload.schema_version !== "doctor.ui.v1" || !payload.envelope) {
       throw new Error("invalid doctor response");
@@ -235,7 +279,7 @@
     const evaluation = result?.evaluation;
     const primary = evaluation?.primary_state;
     const verification = result?.verification;
-    currentVerification = verification && envelope.verification_id
+    currentVerification = verification?.state === "active" && envelope.verification_id
       ? { id: envelope.verification_id, revision: verification.revision }
       : null;
 
@@ -246,10 +290,17 @@
     doctorFields.retryability.textContent = display(primary?.retryability);
     doctorFields.lifecycle.textContent = display(verification?.state);
     renderEvidence(primary?.evidence_refs, payload.navigation_targets);
+    renderCandidates(envelope.candidates);
 
     if (verification?.state === "active" && currentVerification) {
-      setDoctorAction("状態を更新", refreshVerification);
+      setCancelAction(true);
+      if (Array.isArray(envelope.candidates) && envelope.candidates.length > 0) {
+        setDoctorAction("選択した証拠で完了", completeVerification, true);
+      } else {
+        setDoctorAction("状態を確認", refreshVerification);
+      }
     } else {
+      setCancelAction(false);
       setDoctorAction(null, null);
     }
     announceDoctor(`Doctor の状態を更新しました: ${display(verification?.state ?? primary?.state_code)}`, true);
@@ -258,8 +309,22 @@
   async function requestDoctor(url, options) {
     const response = await fetch(url, { cache: "no-store", ...options });
     const payload = await response.json();
-    if (!response.ok && !payload?.envelope) throw new Error("doctor request failed");
+    if (!response.ok) {
+      const error = new Error("doctor request failed");
+      error.doctorPayload = payload;
+      throw error;
+    }
     return payload;
+  }
+
+  function renderFailureEnvelope(error) {
+    if (!error?.doctorPayload?.envelope) return false;
+    try {
+      renderDoctor(error.doctorPayload);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function renderExactSummary(container, values) {
@@ -361,8 +426,10 @@
         body: JSON.stringify({ source_id: sourceId }),
       });
       renderDoctor(payload);
-    } catch {
-      doctorFailure(loadDoctorSources);
+    } catch (error) {
+      renderFailureEnvelope(error);
+      if (currentVerification) mutationFailure();
+      else doctorFailure(loadDoctorSources);
     }
   }
 
@@ -373,19 +440,68 @@
     try {
       const payload = await requestDoctor(`/api/doctor/ui/v1/verifications/${encodeURIComponent(exact.id)}`);
       renderDoctor(payload);
-    } catch {
-      doctorFailure(refreshVerification);
+    } catch (error) {
+      renderFailureEnvelope(error);
+      if (currentVerification) doctorFailure(refreshVerification);
     }
+  }
+
+  async function completeVerification() {
+    if (!currentVerification) return;
+    const exact = currentVerification;
+    const acceptedEvidenceRefs = selectedEvidenceRefs();
+    if (acceptedEvidenceRefs.length === 0) return;
+    setCancelAction(false);
+    setDoctorAction(null, null);
+    try {
+      const payload = await requestDoctor(`/api/doctor/ui/v1/verifications/${encodeURIComponent(exact.id)}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
+        body: JSON.stringify({ expected_revision: exact.revision, accepted_evidence_refs: acceptedEvidenceRefs }),
+      });
+      renderDoctor(payload);
+    } catch (error) {
+      renderFailureEnvelope(error);
+      if (currentVerification) mutationFailure();
+    }
+  }
+
+  async function cancelVerification() {
+    if (!currentVerification) return;
+    const exact = currentVerification;
+    setCancelAction(false);
+    setDoctorAction(null, null);
+    try {
+      const payload = await requestDoctor(`/api/doctor/ui/v1/verifications/${encodeURIComponent(exact.id)}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
+        body: JSON.stringify({ expected_revision: exact.revision }),
+      });
+      renderDoctor(payload);
+    } catch (error) {
+      renderFailureEnvelope(error);
+      if (currentVerification) mutationFailure();
+    }
+  }
+
+  function resetDoctorResult() {
+    currentVerification = null;
+    for (const field of Object.values(doctorFields)) field.textContent = "—";
+    renderEvidence([], []);
+    renderCandidates([]);
+    setCancelAction(false);
   }
 
   doctorSource?.addEventListener("change", () => {
     const option = doctorSource.selectedOptions[0];
+    resetDoctorResult();
     doctorSourceState.textContent = option?.value
       ? `${option.textContent} / setup: ${option.dataset.setupOwnership}`
       : "確認するソースを選択してください。";
     setDoctorAction(option?.value ? "検証を開始" : null, option?.value ? beginVerification : null);
   });
   doctorPrimaryAction?.addEventListener("click", () => doctorAction?.());
+  doctorCancelAction?.addEventListener("click", cancelVerification);
 
   refresh();
   refreshSourceDiagnostics();

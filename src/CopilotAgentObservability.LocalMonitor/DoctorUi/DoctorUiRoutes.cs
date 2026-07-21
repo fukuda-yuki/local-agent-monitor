@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.ConfigCli.FirstTrace;
 using CopilotAgentObservability.Doctor;
 
 namespace CopilotAgentObservability.LocalMonitor;
@@ -14,13 +15,9 @@ internal static class DoctorUiRoutes
     private const string SchemaVersion = "doctor.ui.v1";
     private const string JsonContentType = "application/json";
 
-    private static readonly DoctorUiSource[] Sources =
-    [
-        new("github-copilot-vscode", "GitHub Copilot in VS Code", "managed"),
-        new("github-copilot-cli", "GitHub Copilot CLI", "managed_windows"),
-        new("github-copilot-app-sdk", "GitHub Copilot App/SDK", "caller_managed"),
-        new("claude-code", "Claude Code", "managed_cli_caller_managed_agent_sdk"),
-    ];
+    private static readonly DoctorUiSource[] Sources = FirstTraceSourceRegistry.Entries
+        .Select(source => new DoctorUiSource(source.SourceId, source.DisplayLabel, Wire(source.SetupOwnership)))
+        .ToArray();
 
     public static void Map(WebApplication app, IDoctorUiApplication application)
     {
@@ -471,6 +468,15 @@ internal static class DoctorUiRoutes
         DoctorUiNavigationTargetKind.Session => "session",
         DoctorUiNavigationTargetKind.SourceDiagnostic => "source_diagnostic",
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+    };
+
+    private static string Wire(FirstTraceSetupOwnership ownership) => ownership switch
+    {
+        FirstTraceSetupOwnership.Managed => "managed",
+        FirstTraceSetupOwnership.ManagedOnWindows => "managed_windows",
+        FirstTraceSetupOwnership.CallerManaged => "caller_managed",
+        FirstTraceSetupOwnership.ManagedCliAndCallerManagedAgentSdk => "managed_cli_caller_managed_agent_sdk",
+        _ => throw new ArgumentOutOfRangeException(nameof(ownership)),
     };
 
     private sealed record DoctorUiSource(string SourceId, string DisplayLabel, string SetupOwnership);

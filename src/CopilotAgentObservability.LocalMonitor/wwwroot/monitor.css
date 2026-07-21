@@ -3288,8 +3288,14 @@ a.kpi-card:hover {
 .doctor-evidence { margin-top: var(--monitor-space-4); }
 .doctor-evidence ul { display: grid; gap: var(--monitor-space-2); margin: 0; padding-left: 22px; }
 .doctor-evidence li { overflow-wrap: anywhere; font-family: var(--monitor-font-mono); font-size: var(--monitor-text-sm); }
+.doctor-candidates { margin-top: var(--monitor-space-4); padding: var(--monitor-space-3); border: 1px solid var(--monitor-border); border-radius: var(--monitor-radius-xs); }
+.doctor-candidates legend { color: var(--monitor-ink-subtle); font-weight: var(--monitor-weight-semibold); }
+.doctor-candidates p { margin: 0 0 var(--monitor-space-2); }
+#doctor-candidate-list { display: grid; gap: var(--monitor-space-2); }
+.doctor-candidate-choice { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--monitor-space-2); align-items: start; cursor: pointer; }
+.doctor-candidate-choice span { overflow-wrap: anywhere; font-family: var(--monitor-font-mono); font-size: var(--monitor-text-sm); }
 .doctor-live { min-height: 1.5em; margin: 0 18px; color: var(--monitor-ink-subtle); }
-.doctor-actions { display: flex; justify-content: flex-end; padding: 0 18px 18px; }
+.doctor-actions { display: flex; flex-wrap: wrap; gap: var(--monitor-space-3); justify-content: flex-end; padding: 0 18px 18px; }
 
 @media (max-width: 720px) {
     .doctor-result-grid { grid-template-columns: 1fr; }
