@@ -186,11 +186,21 @@ The current fail-closed diagnostic registry is:
 | `historical_source_malformed` | The bounded container/reference shape is invalid, or a future supported parser cannot validate the entire selected record set. | Discard all tentative output and emit zero candidates. No partial batch is allowed. |
 
 When `support_authorized` is false, `source_format_profile` is `none`,
-`candidate_count` is zero, and `content_risk` is `not_read`. An unknown
+`candidate_count` is zero, `diagnostics` contains at least one fixed failure
+code, and `content_risk` is `not_read`. An unknown
 application version, missing format version, unknown schema fingerprint,
 fixture hash mismatch, malformed record, record-limit failure, or adapter
 exception is unsupported/malformed; it is never downgraded to a warning that
 permits candidates.
+
+A future exact fixture-bound success sets `support_authorized = true`, names
+the exact bound source-format profile, emits a positive `candidate_count` that
+equals the separate candidate batch count, and has an empty diagnostics array.
+`content_risk` is `source_read_metadata_only` when record bodies were read only
+to emit allowlisted summaries, or `source_read_include_content` only after the
+separate content-consent gate. A true support flag is not sufficient evidence;
+#79 still validates the complete profile evidence tuple and the candidate
+batch marker.
 
 Diagnostics, previews, logs, tests, screenshots, and repository artifacts must
 remain repository-safe. They contain no source paths, raw payloads, prompts,
@@ -201,10 +211,23 @@ content-derived labels.
 
 A supported adapter may hand #79 only a complete
 `historical-candidate-batch/v1`; adapters do not write Session tables. A
-candidate key is batch-local and is not an event, trace, or span identity.
-Each candidate carries only normalized allowlisted values, source-record
-identity scoped to the admitted source format, completeness, and field-level
-provenance.
+candidate carries only the one-or-more normalized leaves actually observed and
+admitted by the active strict-subset allowlist, source-record identity scoped
+to the admitted source format, completeness, and field-level provenance. It
+must not populate an absent ceiling field with zero, false, null, an empty
+string, a value from another record, or any other synthetic default.
+
+`candidate_key` and `source_record_key` are internal, local-only opaque tokens
+with the closed forms `hc_` plus 32 lowercase hexadecimal characters and `hr_`
+plus 32 lowercase hexadecimal characters, respectively. They are not event,
+trace, or span identities. The source adapter creates them only after mapping
+the admitted source identity to a non-reversible repository-safe token; it may
+not embed or derive a reversible value from a path, repository, prompt,
+response, tool data, credential, or PII. Production keys are omitted from
+previews, diagnostics, logs, screenshots, repository artifacts, and other safe
+serialization. A source-record key is stable for the same admitted format,
+record identity, and local import store, but it need not correlate across
+stores. Checked-in fixtures use fixed synthetic tokens only.
 
 Every populated field has its own provenance entry containing:
 
@@ -218,6 +241,13 @@ Every populated field has its own provenance entry containing:
   identity;
 - `capture_content_state` using the existing closed source-capture values;
 - normalization version.
+
+The populated normalized leaves and `field_provenance[].field` have exact
+one-to-one correspondence. There are between one and ten populated leaves,
+with no duplicates, and the provenance array emits those fields in
+policy-ceiling order. An extra provenance row, a missing provenance row, an
+empty `values` object, an empty field-family object, or any non-allowlisted leaf
+rejects the complete batch.
 
 The adapter must never fill a missing provenance member from the import clock,
 filesystem metadata, repository context, another record, or a detector
@@ -360,11 +390,20 @@ different parser. #79 must not infer support from a detector version, file
 extension, JSON/JSONL shape, successful partial parse, repository, path, or a
 candidate-like payload supplied outside the admitted adapter boundary.
 
+After an exact profile promotion, a positive preview has a positive
+`eligible_candidate_count`, `commit_allowed = true`, and
+`rejection_code = null` only when every candidate and profile evidence check
+succeeds. Its `content_risk` preserves the adapter result. The generic preview
+schema permits that future state while the checked-in zero-candidate fixture
+and semantic tests continue to pin the current fail-closed state.
+
 When a profile is later fixture-bound, #79 owns preview/confirmation/commit,
 exact deduplication, field-level merge, sanitized conflict recording, and the
-retention transaction. The synthetic candidate fixture proves only this
-interface shape and must be rejected in production because
-`fixture_only_not_source_support_evidence = true`.
+retention transaction. A production adapter must emit
+`fixture_only_not_source_support_evidence = false`; #79 rejects `true`. The
+checked-in synthetic candidate fixture proves only the interface shape and
+therefore emits `true`. The boolean is not source-support evidence: the exact
+profile evidence tuple remains mandatory even when it is `false`.
 
 ## Persistence and migration
 

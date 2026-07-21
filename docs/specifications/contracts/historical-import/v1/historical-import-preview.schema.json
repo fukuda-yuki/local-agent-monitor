@@ -24,7 +24,6 @@
     "adapter_id": { "$ref": "#/$defs/token" },
     "adapter_diagnostics": {
       "type": "array",
-      "minItems": 1,
       "uniqueItems": true,
       "items": {
         "enum": [
@@ -34,12 +33,15 @@
         ]
       }
     },
-    "requested_capture": { "const": "metadata_only" },
-    "eligible_candidate_count": { "const": 0 },
+    "requested_capture": { "enum": ["metadata_only", "include_content"] },
+    "eligible_candidate_count": { "type": "integer", "minimum": 0 },
     "rejected_candidate_count": { "type": "integer", "minimum": 0 },
-    "commit_allowed": { "const": false },
-    "rejection_code": { "const": "historical_import_no_eligible_candidates" },
-    "content_risk": { "const": "not_read" }
+    "commit_allowed": { "type": "boolean" },
+    "rejection_code": {
+      "type": ["string", "null"],
+      "enum": ["historical_import_no_eligible_candidates", null]
+    },
+    "content_risk": { "enum": ["not_read", "source_read_metadata_only", "source_read_include_content"] }
   },
   "$defs": {
     "token": {

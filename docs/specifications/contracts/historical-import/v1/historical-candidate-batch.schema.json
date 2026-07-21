@@ -22,7 +22,7 @@
   ],
   "properties": {
     "contract_version": { "const": "historical-candidate-batch/v1" },
-    "fixture_only_not_source_support_evidence": { "const": true },
+    "fixture_only_not_source_support_evidence": { "type": "boolean" },
     "profile_id": { "$ref": "#/$defs/token" },
     "adapter_id": { "$ref": "#/$defs/token" },
     "source_surface": { "enum": ["claude-code", "github-copilot-cli"] },
@@ -71,12 +71,12 @@
     "values": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["model_tokens", "retry_attempt", "errors"],
+      "minProperties": 1,
       "properties": {
         "model_tokens": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["model", "input_tokens", "output_tokens", "total_tokens", "cache_tokens", "reasoning_tokens"],
+          "minProperties": 1,
           "properties": {
             "model": { "type": "string", "minLength": 1 },
             "input_tokens": { "type": "integer", "minimum": 0 },
@@ -89,7 +89,7 @@
         "retry_attempt": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["retry", "attempt"],
+          "minProperties": 1,
           "properties": {
             "retry": { "type": "boolean" },
             "attempt": { "type": "integer", "minimum": 0 }
@@ -98,7 +98,7 @@
         "errors": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["present", "code"],
+          "minProperties": 1,
           "properties": {
             "present": { "type": "boolean" },
             "code": { "type": ["string", "null"], "minLength": 1 }
@@ -131,7 +131,7 @@
         "source_format_version": { "$ref": "#/$defs/version" },
         "source_fixture_sha256": { "$ref": "#/$defs/sha256" },
         "source_schema_fingerprint": { "$ref": "#/$defs/fingerprint" },
-        "source_record_key": { "type": "string", "minLength": 1 },
+        "source_record_key": { "$ref": "#/$defs/sourceRecordKey" },
         "capture_content_state": { "enum": ["available", "not_captured", "redacted", "unsupported"] },
         "normalization_version": { "$ref": "#/$defs/token" }
       }
@@ -141,8 +141,8 @@
       "additionalProperties": false,
       "required": ["candidate_key", "source_record_key", "values", "completeness", "completeness_reasons", "field_provenance"],
       "properties": {
-        "candidate_key": { "type": "string", "minLength": 1 },
-        "source_record_key": { "type": "string", "minLength": 1 },
+        "candidate_key": { "$ref": "#/$defs/candidateKey" },
+        "source_record_key": { "$ref": "#/$defs/sourceRecordKey" },
         "values": { "$ref": "#/$defs/values" },
         "completeness": { "const": "partial" },
         "completeness_reasons": {
@@ -153,11 +153,20 @@
         },
         "field_provenance": {
           "type": "array",
-          "minItems": 10,
+          "minItems": 1,
           "maxItems": 10,
+          "uniqueItems": true,
           "items": { "$ref": "#/$defs/provenance" }
         }
       }
+    },
+    "candidateKey": {
+      "type": "string",
+      "pattern": "^hc_[a-f0-9]{32}$"
+    },
+    "sourceRecordKey": {
+      "type": "string",
+      "pattern": "^hr_[a-f0-9]{32}$"
     }
   }
 }

@@ -14,8 +14,8 @@
   "completeness_ceiling": "partial",
   "candidates": [
     {
-      "candidate_key": "fixture-candidate-001",
-      "source_record_key": "fixture-record-001",
+      "candidate_key": "hc_00000000000000000000000000000001",
+      "source_record_key": "hr_00000000000000000000000000000001",
       "values": {
         "model_tokens": {
           "model": "fixture-model",
@@ -48,7 +48,7 @@
           "source_format_version": "0.0.0",
           "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
           "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_record_key": "fixture-record-001",
+          "source_record_key": "hr_00000000000000000000000000000001",
           "capture_content_state": "not_captured",
           "normalization_version": "historical-summary-v1"
         },
@@ -61,7 +61,7 @@
           "source_format_version": "0.0.0",
           "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
           "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_record_key": "fixture-record-001",
+          "source_record_key": "hr_00000000000000000000000000000001",
           "capture_content_state": "not_captured",
           "normalization_version": "historical-summary-v1"
         },
@@ -74,7 +74,7 @@
           "source_format_version": "0.0.0",
           "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
           "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_record_key": "fixture-record-001",
+          "source_record_key": "hr_00000000000000000000000000000001",
           "capture_content_state": "not_captured",
           "normalization_version": "historical-summary-v1"
         },
@@ -87,7 +87,7 @@
           "source_format_version": "0.0.0",
           "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
           "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_record_key": "fixture-record-001",
+          "source_record_key": "hr_00000000000000000000000000000001",
           "capture_content_state": "not_captured",
           "normalization_version": "historical-summary-v1"
         },
@@ -100,7 +100,7 @@
           "source_format_version": "0.0.0",
           "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
           "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_record_key": "fixture-record-001",
+          "source_record_key": "hr_00000000000000000000000000000001",
           "capture_content_state": "not_captured",
           "normalization_version": "historical-summary-v1"
         },
@@ -113,7 +113,7 @@
           "source_format_version": "0.0.0",
           "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
           "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_record_key": "fixture-record-001",
+          "source_record_key": "hr_00000000000000000000000000000001",
           "capture_content_state": "not_captured",
           "normalization_version": "historical-summary-v1"
         },
@@ -126,7 +126,7 @@
           "source_format_version": "0.0.0",
           "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
           "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_record_key": "fixture-record-001",
+          "source_record_key": "hr_00000000000000000000000000000001",
           "capture_content_state": "not_captured",
           "normalization_version": "historical-summary-v1"
         },
@@ -139,7 +139,7 @@
           "source_format_version": "0.0.0",
           "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
           "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_record_key": "fixture-record-001",
+          "source_record_key": "hr_00000000000000000000000000000001",
           "capture_content_state": "not_captured",
           "normalization_version": "historical-summary-v1"
         },
@@ -152,7 +152,7 @@
           "source_format_version": "0.0.0",
           "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
           "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_record_key": "fixture-record-001",
+          "source_record_key": "hr_00000000000000000000000000000001",
           "capture_content_state": "not_captured",
           "normalization_version": "historical-summary-v1"
         },
@@ -165,7 +165,7 @@
           "source_format_version": "0.0.0",
           "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
           "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_record_key": "fixture-record-001",
+          "source_record_key": "hr_00000000000000000000000000000001",
           "capture_content_state": "not_captured",
           "normalization_version": "historical-summary-v1"
         }

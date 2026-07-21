@@ -111,6 +111,21 @@ public sealed class HistoricalSourceContractTests
     }
 
     [Fact]
+    public void Adapter_result_schema_accepts_a_future_fixture_bound_supported_result()
+    {
+        using var schema = Read("historical-adapter-result.schema.json");
+        var result = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "github-copilot-cli", "detected-unsupported.json")))!.AsObject();
+        result["support_authorized"] = true;
+        result["source_format_profile"] = "fixture-bound-v1";
+        result["candidate_count"] = 1;
+        result["content_risk"] = "source_read_metadata_only";
+        result["diagnostics"] = new JsonArray();
+
+        using var supported = JsonDocument.Parse(result.ToJsonString());
+        Assert.Empty(HistoricalContractSchemaValidator.Validate(schema, supported));
+    }
+
+    [Fact]
     public void Candidate_handoff_is_synthetic_only_partial_and_contains_no_trace_authority()
     {
         using var fixture = Read("fixtures", "handoff", "synthetic-candidate-batch.json");
@@ -125,6 +140,7 @@ public sealed class HistoricalSourceContractTests
         Assert.Equal(PolicyFieldCeiling, candidate.GetProperty("field_provenance").EnumerateArray().Select(field => Value(field.GetProperty("field"))));
         Assert.All(candidate.GetProperty("field_provenance").EnumerateArray(), provenance =>
             Assert.Equal(root.GetProperty("adapter_id").GetString(), provenance.GetProperty("adapter_id").GetString()));
+        AssertCandidateFieldParity(candidate);
 
         var forbidden = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -132,6 +148,81 @@ public sealed class HistoricalSourceContractTests
             "started_at", "ended_at", "agent_id", "repository", "workspace", "source_path"
         };
         Assert.DoesNotContain(EnumeratePropertyNames(root), forbidden.Contains);
+    }
+
+    [Fact]
+    public void Candidate_schema_accepts_production_marker_and_sparse_allowlisted_values()
+    {
+        using var schema = Read("historical-candidate-batch.schema.json");
+        var batch = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "handoff", "synthetic-candidate-batch.json")))!.AsObject();
+        batch["fixture_only_not_source_support_evidence"] = false;
+
+        var candidate = batch["candidates"]!.AsArray().Single()!.AsObject();
+        var provenance = candidate["field_provenance"]!.AsArray()
+            .Single(item => item!["field"]!.GetValue<string>() == "errors.present")!
+            .DeepClone();
+        candidate["values"] = JsonNode.Parse("""{ "errors": { "present": false } }""");
+        candidate["field_provenance"] = new JsonArray(provenance);
+
+        using var productionBatch = JsonDocument.Parse(batch.ToJsonString());
+        Assert.Empty(HistoricalContractSchemaValidator.Validate(schema, productionBatch));
+        AssertCandidateFieldParity(productionBatch.RootElement.GetProperty("candidates")[0]);
+        Assert.False(productionBatch.RootElement.GetProperty("fixture_only_not_source_support_evidence").GetBoolean());
+        Assert.False(productionBatch.RootElement.GetProperty("candidates")[0].GetProperty("values").TryGetProperty("model_tokens", out _));
+        Assert.False(productionBatch.RootElement.GetProperty("candidates")[0].GetProperty("values").TryGetProperty("retry_attempt", out _));
+    }
+
+    [Theory]
+    [InlineData("candidate_key")]
+    [InlineData("source_record_key")]
+    public void Candidate_keys_reject_paths_and_require_closed_repository_safe_opaque_tokens(string propertyName)
+    {
+        using var schema = Read("historical-candidate-batch.schema.json");
+        var batch = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "handoff", "synthetic-candidate-batch.json")))!.AsObject();
+        var candidate = batch["candidates"]!.AsArray().Single()!.AsObject();
+        candidate[propertyName] = "C:\\Users\\private\\session.jsonl";
+
+        using var invalidBatch = JsonDocument.Parse(batch.ToJsonString());
+        Assert.Contains(
+            $"$.candidates[0].{propertyName} does not match the required pattern.",
+            HistoricalContractSchemaValidator.Validate(schema, invalidBatch));
+    }
+
+    [Fact]
+    public void Candidate_schema_rejects_an_empty_values_object()
+    {
+        using var schema = Read("historical-candidate-batch.schema.json");
+        var batch = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "handoff", "synthetic-candidate-batch.json")))!.AsObject();
+        var candidate = batch["candidates"]!.AsArray().Single()!.AsObject();
+        candidate["values"] = new JsonObject();
+
+        using var invalidBatch = JsonDocument.Parse(batch.ToJsonString());
+        Assert.Contains(
+            "$.candidates[0].values has too few properties.",
+            HistoricalContractSchemaValidator.Validate(schema, invalidBatch));
+    }
+
+    [Fact]
+    public void Candidate_field_parity_rejects_missing_or_extra_provenance()
+    {
+        using var fixture = Read("fixtures", "handoff", "synthetic-candidate-batch.json");
+        var candidate = fixture.RootElement.GetProperty("candidates")[0];
+        AssertCandidateFieldParity(candidate);
+
+        var batch = JsonNode.Parse(fixture.RootElement.GetRawText())!.AsObject();
+        batch["candidates"]![0]!["field_provenance"]!.AsArray().RemoveAt(0);
+        using var mismatched = JsonDocument.Parse(batch.ToJsonString());
+        Assert.Equal(
+            ["Candidate populated fields and field provenance must have exact one-to-one ordered correspondence."],
+            CandidateFieldParityErrors(mismatched.RootElement.GetProperty("candidates")[0]));
+
+        var extraBatch = JsonNode.Parse(fixture.RootElement.GetRawText())!.AsObject();
+        var provenance = extraBatch["candidates"]![0]!["field_provenance"]!.AsArray();
+        provenance.Add(provenance[^1]!.DeepClone());
+        using var extra = JsonDocument.Parse(extraBatch.ToJsonString());
+        Assert.Equal(
+            ["Candidate populated fields and field provenance must have exact one-to-one ordered correspondence."],
+            CandidateFieldParityErrors(extra.RootElement.GetProperty("candidates")[0]));
     }
 
     [Fact]
@@ -160,6 +251,21 @@ public sealed class HistoricalSourceContractTests
             "no_automatic_pin"
         ],
         cases.RootElement.GetProperty("cases").EnumerateArray().Select(item => Value(item.GetProperty("decision"))));
+    }
+
+    [Fact]
+    public void Import_preview_schema_accepts_future_eligible_candidates_without_a_rejection_code()
+    {
+        using var schema = Read("historical-import-preview.schema.json");
+        var preview = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "handoff", "zero-candidate-preview.json")))!.AsObject();
+        preview["adapter_diagnostics"] = new JsonArray();
+        preview["eligible_candidate_count"] = 1;
+        preview["commit_allowed"] = true;
+        preview["rejection_code"] = null;
+        preview["content_risk"] = "source_read_metadata_only";
+
+        using var eligible = JsonDocument.Parse(preview.ToJsonString());
+        Assert.Empty(HistoricalContractSchemaValidator.Validate(schema, eligible));
     }
 
     [Fact]
@@ -266,6 +372,30 @@ public sealed class HistoricalSourceContractTests
 
     private static string Value(JsonElement element) => element.GetString()!;
 
+    private static void AssertCandidateFieldParity(JsonElement candidate)
+    {
+        Assert.Empty(CandidateFieldParityErrors(candidate));
+    }
+
+    private static IReadOnlyList<string> CandidateFieldParityErrors(JsonElement candidate)
+    {
+        var populatedFields = candidate.GetProperty("values").EnumerateObject()
+            .SelectMany(family => family.Value.EnumerateObject().Select(field => $"{family.Name}.{field.Name}"))
+            .ToArray();
+        var provenanceFields = candidate.GetProperty("field_provenance").EnumerateArray()
+            .Select(provenance => Value(provenance.GetProperty("field")))
+            .ToArray();
+        var expectedProvenance = PolicyFieldCeiling
+            .Where(field => populatedFields.Contains(field, StringComparer.Ordinal))
+            .ToArray();
+
+        return populatedFields.Distinct(StringComparer.Ordinal).Count() == populatedFields.Length
+            && populatedFields.Length == provenanceFields.Length
+            && provenanceFields.SequenceEqual(expectedProvenance, StringComparer.Ordinal)
+            ? []
+            : ["Candidate populated fields and field provenance must have exact one-to-one ordered correspondence."];
+    }
+
     private static IEnumerable<string> EnumeratePropertyNames(JsonElement value)
     {
         if (value.ValueKind == JsonValueKind.Object)
@@ -326,6 +456,10 @@ internal static class HistoricalContractSchemaValidator
 
         if (value.ValueKind == JsonValueKind.Object)
         {
+            if (schema.TryGetProperty("minProperties", out var minProperties)
+                && value.EnumerateObject().Count() < minProperties.GetInt32())
+                errors.Add($"{path} has too few properties.");
+
             var properties = schema.TryGetProperty("properties", out var declared) ? declared : default;
             if (schema.TryGetProperty("required", out var required))
             foreach (var name in required.EnumerateArray().Select(Value))
