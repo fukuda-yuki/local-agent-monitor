@@ -1264,7 +1264,14 @@ output へ返す禁止は維持する。
 CM-1 では repository label source を OpenTelemetry VCS semantic convention
 に合わせて `vcs.repository.name` へ置き換える。`repo.name` 互換 fallback は
 持たず、`vcs.repository.url.full` は Canvas helper / bounded action DTO へ
-返さない。
+返さない。Issue #58 では resource-scoped `vcs.repository.name` を authoritative
+のまま維持し、その key が absent の場合だけ canonical GitHub HTTPS
+`vcs.repository.url.full` の sanitized repository segment を fallback として
+許可する。unsafe name は fallback せず、raw URL / owner は projection に保存しない。
+`/diagnostics` は Retention-gated な bounded key/count/scope/classification、fixed
+5-state reason、label/fallback booleans だけを表示し、attribute value、identity、PII、
+credential、path は表示・永続化しない。既存 API / SSE / Canvas DTO shape と
+#72 / #85 の nullable projection handoff は変更しない。
 
 ## D041: Canvas analysis UX は session.send の requested controls として扱う
 
@@ -2252,3 +2259,51 @@ screen is added.
 
 The complete public and security contract is
 [first-trace Doctor](specifications/interfaces/first-trace-doctor.md).
+
+## D065: Instruction findings use a closed repository-safe receipt boundary
+
+Status: Accepted (2026-07-22)
+
+Issue #59 validates every model-submitted reference against the exact raw-local
+evidence index before any receipt is created. Source Session, trace, and span
+IDs are then replaced with kind-specific domain-separated opaque tokens; raw
+IDs and model free text never enter the carrier. The taxonomy and safe text
+templates are closed and versioned. Only a final `supported` finding is
+candidate-eligible; `weak` and `incomplete` remain ineligible receipts, and an
+empty finding/candidate handoff is valid. Successful analysis result and
+`instruction-finding-handoff.v1` persistence are atomic. #72 and #73 consume
+rather than redefine v1; the handoff grants no effect, apply, export, file, or
+promotion authority. The canonical contract is
+[instruction diagnosis analysis](specifications/interfaces/instruction-diagnosis-analysis.md).
+
+## D066: Historical source import is profile-bound, consented, and fail-closed
+
+Status: Accepted (2026-07-22)
+
+Issue #76 admits only product-owned versioned Tier A artifacts or Tier B
+producer formats bound to exact fixture SHA, schema fingerprint, application
+version, and golden tests. Tier C private/heuristic stores are excluded. The
+current GitHub Copilot CLI and Claude Code profiles have empty support sets and
+allowlists; detector evidence alone authorizes no content read or candidate.
+A later #77/#78 exact profile promotion is a D056-compatible technical
+revision. Production candidates contain only 1–10 actually observed
+allowlisted leaves with exact ordered provenance; missing values are never
+synthesized. #79 rejects repository fixture markers and zero eligible
+candidates, preserves partial / `historical_summary_only`, exact merge, and
+#89/#90 retention boundaries. The canonical policy is
+[historical source import](specifications/interfaces/historical-source-import.md).
+
+## D067: Alert evaluation uses capability-gated deterministic receipts
+
+Status: Accepted (2026-07-22)
+
+Issue #80 evaluates versioned source-neutral snapshots with a compiled rule
+registry. Missing, unknown, or unavailable capability is an explicit bounded
+suppression, never an inferred zero. Accepted matches become immutable
+canonical `alert.receipt.v1` values carrying exact evidence and config/input/
+evaluation hashes; sensitive comparable labels use private keyed HMAC tokens.
+The `alert_engine` SQLite component owns only its schema-v1 evaluation,
+receipt, and suppression tables. #81/#82 add rules through the frozen registry,
+#83 owns a separate lifecycle component, and #85 reads canonical receipts;
+none may rewrite engine receipt bytes or tables. The canonical contract is
+[alert rule engine](specifications/interfaces/alert-rule-engine.md).

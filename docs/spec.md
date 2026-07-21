@@ -347,6 +347,36 @@ proxy, or UI DTO. The semantic rules and canonical locations are defined by
 [Canvas Session workspace](specifications/interfaces/canvas-session-workspace.md),
 and [security data boundaries](specifications/security-data-boundaries.md).
 
+## Historical source import contract v1
+
+Issue #76 freezes a policy/contract-only historical import boundary at
+[historical source import](specifications/interfaces/historical-source-import.md)
+and `specifications/contracts/historical-import/v1/`. Tier A product-owned
+versioned artifacts and exact fixture/fingerprint-bound Tier B producer history
+are eligible source classes; private or heuristic Tier C stores are excluded.
+The current GitHub Copilot CLI and Claude Code profiles have empty supported
+application/format sets and empty active allowlists, so detection is opt-in,
+content is not read, and the handoff has zero candidates. A later exact
+fixture-bound #77/#78 promotion is a technical compatibility revision within
+D056, not permission for heuristic discovery. #79 must enforce sparse
+allowlisted values, exact per-field provenance, no synthesis, partial /
+`historical_summary_only` completeness, exact merge, and the fixture marker.
+No adapter, importer, persistence migration, background scan, or UI is part of
+Issue #76.
+
+## Alert-rule engine foundation
+
+Issue #80 defines the source-neutral deterministic alert contract at
+[alert rule engine](specifications/interfaces/alert-rule-engine.md). Versioned
+snapshots and capabilities feed a compiled rule registry. Missing, unknown, or
+unavailable evidence produces a bounded suppression, never an inferred zero.
+Accepted matches become immutable canonical `alert.receipt.v1` values with
+exact evidence and config/input/evaluation hashes; comparable sensitive labels
+use private keyed HMAC tokens. SQLite ownership is limited to the
+`alert_engine` component v1 tables, allowing the separate #83 lifecycle
+component to coexist without rewriting receipt bytes. Concrete #81/#82 rules
+and #85 UI/export remain downstream work.
+
 ## Source schema drift and Claude Code P0
 
 Issue #62 stores immutable source-schema observations per committed ingest
@@ -387,6 +417,8 @@ sanitized. The canonical contract is
 | Human-review record interfaces | [specifications/interfaces/human-review-records.md](specifications/interfaces/human-review-records.md) |
 | Dashboard dataset interface | [specifications/interfaces/dashboard-dataset.md](specifications/interfaces/dashboard-dataset.md) |
 | Instruction diagnosis analysis interface | [specifications/interfaces/instruction-diagnosis-analysis.md](specifications/interfaces/instruction-diagnosis-analysis.md) |
+| Historical source import interface | [specifications/interfaces/historical-source-import.md](specifications/interfaces/historical-source-import.md) |
+| Alert rule engine interface | [specifications/interfaces/alert-rule-engine.md](specifications/interfaces/alert-rule-engine.md) |
 | Source schema drift and Claude Code interface | [specifications/interfaces/source-schema-drift-claude-code.md](specifications/interfaces/source-schema-drift-claude-code.md) |
 | Canvas Session workspace interface | [specifications/interfaces/canvas-session-workspace.md](specifications/interfaces/canvas-session-workspace.md) |
 | Canvas Session Evidence interface | [specifications/interfaces/canvas-session-evidence.md](specifications/interfaces/canvas-session-evidence.md) |
@@ -442,7 +474,7 @@ Publicly documented interfaces are:
 - Local Ingestion Monitor client config: `config-cli profile-vscode-env --profile raw-local-receiver --target monitor`（または `--endpoint`）が monitor endpoint（既定 `http://127.0.0.1:4320`）向けの VS Code env を出力。`--target receiver` 既定は `4319` のまま。
 - Canvas adapter は raw default の Local Monitor と併用できる。`--sanitized-only` は Canvas の必須起動条件ではなく、Local Monitor の任意 metadata-only opt-out である。Canvas actions は引き続き既存 sanitized `/api/monitor/*` と readiness を読む bounded DTO surface であり、action responses / logs / committed outputs に raw / PII を返さない。
 - Canvas helper analysis trigger: extension-owned `POST /analyze` remains a token-gated `session.send({ prompt })` fire-and-forget trigger. Payload includes `traceId`、optional `spanId`、`focus`、`profile`、`requestedModel`、`requestedReasoningEffort`、`requestedTimeoutSeconds`; response includes dispatch metadata (`analysis_trigger_id`、requested values、`prompt_template_version`、`dispatched_at`、and message id when the SDK exposes one). It does not call `/traces/{traceId}/analysis`, does not wait for a model response, and does not store final analysis result metadata.
-- Canvas cross-repo metadata fields: `repository_name`、`workspace_label`、`repo_snapshot` は既存 OTLP Resource Attributes `vcs.repository.name`、`workspace.name`、`repo.snapshot` から生成する sanitized nullable projection fields である。`repo.name` は repository label source として扱わない。これらは `/api/monitor/*`、Canvas helper routes、bounded Canvas action DTO でのみ使用し、既存 projected rows は自動 backfill しない。
+- Canvas cross-repo metadata fields: `repository_name` は resource-scoped `vcs.repository.name` を authoritative source とし、その key が absent の場合だけ allowlisted canonical GitHub HTTPS `vcs.repository.url.full` の sanitized repository segment を fallback にできる。`workspace_label` と `repo_snapshot` はそれぞれ `workspace.name` と `repo.snapshot` から生成する sanitized nullable projection fields である。`repo.name` は repository label source として扱わない。raw URL / owner は保存・送出せず、unsafe authoritative name は fallback しない。`/diagnostics` の key-only inventory / fixed 5-state reason は Retention-gated で、既存 `/api/monitor/*`、SSE、Canvas DTO shape を変えない。既存 projected rows は自動 backfill しない。
 - Canvas Session workspace: `POST /api/session-ingest/v1/events`（schema/header version 1、batch 1..100、1 MiB、commit 後のみ `204`、固定 `400/413/415/503/504`）、sanitized `GET /api/session-workspace/sessions` / session detail / `resolve` / `status`、same-origin/no-store の `GET /sessions/{id}/events/{eventId}/content`、および installed `hook-forward --endpoint <loopback-url> --timeout-ms 250 [--source claude-code [--source-version <metadata-token>] [--schema-fingerprint <64-lowercase-hex>]]`。`--source` 省略は既存 Copilot mode、exact `--source claude-code` は Claude mode とする。provenance 引数は Claude mode だけで有効であり、Claude は out-of-band の信頼できる version または承認済み fingerprint を少なくとも一方要求する。Claude invocation の selector/provenance 欠落または不正時は payload shape で source を推測せず fail-open/silent で転送しない。完全な identity、merge、completeness、retention、response shape は [Canvas Session workspace interface](specifications/interfaces/canvas-session-workspace.md) を正本とする。
 - Retention catalog v1: one versioned component in each Local Monitor SQLite database owns the closed seven-state lifecycle, exact item ownership, authoritative timestamps, catalog-gated raw reads, durable queue/leases/retry, and store-specific physical cleanup. Existing `/api/session-workspace/*` v1 remains a frozen compatibility projection; later sanitized retention reads use an additive v1 surface. The canonical persistence, inventory, worker, and adapter contract is [Raw Store And Normalization Specification](specifications/layers/raw-store-normalization.md).
 - Retention ownership receipt v1 is an internal, persistence-neutral SHA-256 primitive over framed exact owner fields and a random private 32-byte source token. It has no raw/content/path/credential-bearing public DTO and changes neither SQLite schema nor capture/deletion writers.
@@ -450,7 +482,7 @@ Publicly documented interfaces are:
 - Canvas Improvement Proposals: exact-bound terminal Session の evidence を使う local-runtime `candidate` / `recommended` / `verified` lifecycle。詳細分析は既存 `session.send()` dispatch のままで、Canvas はモデル応答を取得しない。Candidate は citeable evidence、Recommended は2つ以上の distinct exact-bound Session と explicit promotion、Verified は Issue #56 comparison のみが設定する。direct apply / diff / path / rollback は Issue #55 の責務である。詳細は [Canvas Improvement Proposal interface](specifications/interfaces/canvas-improvement-proposals.md) を正本とする。
 - Canvas Proposal Apply: Issue #54 proposal を明示承認後に限って、startup `--apply-root user_config|skill|repository=<absolute-directory>` に登録済みの root 内 existing regular file へ適用する。Canvas action / `session.send()` は file authority を持たず、token-gated helper display だけが full diff を扱う。apply は relative path / non-reparse target / all-target current SHA-256 / immutable approval digest を検証し、stale は no-write。snapshot + journal recovery は all-applied or all-restored、rollback は post-apply hash precondition と一回限りを保証する。詳細は [Canvas Proposal Apply interface](specifications/interfaces/canvas-proposal-apply.md) を正本とする。
 - Canvas Effect Comparison: exact Session/Run/trace objective receipt と human evaluation、proposal revision、active application receipt を入力に、user-confirmed pre/post cohort を quality-first で判定する。pre/post 各3件以上、missing/partial/rollback/stale は不足証拠、quality を efficiency より優先し、quality 同等時だけ duration / total-token median の10%境界を使う。`improved` receipt と Verified は atomic、rollback 後は historical/inactive。詳細は [Canvas Effect Comparison interface](specifications/interfaces/canvas-effect-comparison.md) を正本とする。
-- Copilot SDK raw analysis is hosted by the Local Monitor process as a .NET GitHub Copilot SDK service. Its internal tool set is `get_raw_trace`、`get_raw_record`、`get_raw_span_context`、`get_trace_summary`、`get_trace_span_tree`、`get_cache_summary`、`get_instruction_evidence`（instruction-diagnosis 向けの deterministic instruction-evidence extractor 出力。bounded `conversation_context` を含む。D047 / D048）; raw-returning tools are process-internal and remain separate from repository-safe summary generation.
+- Copilot SDK raw analysis is hosted by the Local Monitor process as a .NET GitHub Copilot SDK service. Its internal tool set is `get_raw_trace`、`get_raw_record`、`get_raw_span_context`、`get_trace_summary`、`get_trace_span_tree`、`get_cache_summary`、`get_instruction_evidence`（instruction-diagnosis 向けの deterministic instruction-evidence extractor 出力。bounded `conversation_context` を含む。D047 / D048）、および instruction-diagnosis 専用の `submit_instruction_finding`（closed fields と exact raw-local evidence refs のみ）。accepted submissions は fixed-template `instruction-finding-handoff.v1` へ deterministic に変換され、zero finding を許可し、successful analysis result と同じ SQLite transaction で保存する（D065）。raw-returning tools are process-internal and remain separate from repository-safe carrier generation; carrier details are frozen in [instruction diagnosis analysis](specifications/interfaces/instruction-diagnosis-analysis.md).
 
 Changing these requires updating the relevant specification file and tests.
 
