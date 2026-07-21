@@ -1,0 +1,71 @@
+{
+  "contract_version": "historical-merge-cases/v1",
+  "cases": [
+    {
+      "case_id": "exact-provenance-duplicate",
+      "condition": "The source profile, application version, format identity, fixture hash, schema fingerprint, source record key, normalization version, and normalized values all match an existing historical observation.",
+      "decision": "duplicate_noop",
+      "required_result": "Do not add or mutate an observation, event, trace, span, or retention item."
+    },
+    {
+      "case_id": "same-source-record-conflicting-value",
+      "condition": "The exact source record and field provenance match, but a normalized field value conflicts with the stored historical observation.",
+      "decision": "source_record_conflict_preserve_existing",
+      "required_result": "Preserve the stored value, record a conflict diagnostic without source content, and require an explicit later repair contract."
+    },
+    {
+      "case_id": "strong-event-exact-binding",
+      "condition": "An explicit existing binding names a strong event and the candidate contributes an allowed historical summary field.",
+      "decision": "attach_observation_preserve_strong",
+      "required_result": "Attach provenance-scoped historical observation data only; never overwrite strong identity, hierarchy, timing, lifecycle, or event identity."
+    },
+    {
+      "case_id": "no-explicit-binding",
+      "condition": "No explicit event binding exists, even when repository names, times, text, or model values look similar.",
+      "decision": "keep_distinct_unbound",
+      "required_result": "Keep the candidate distinct and unbound; do not infer a trace, span, parent, event, session, or repository relationship."
+    },
+    {
+      "case_id": "missing-candidate-field",
+      "condition": "The candidate does not capture a field already present on an existing observation.",
+      "decision": "missing_does_not_overwrite",
+      "required_result": "Preserve the existing value and provenance; absence is not a correction."
+    },
+    {
+      "case_id": "weak-field-conflict",
+      "condition": "A historical field conflicts with an existing normalized or live-capture value.",
+      "decision": "record_conflict_no_overwrite",
+      "required_result": "Preserve the stronger value and record a field-level conflict without replacing either value or provenance."
+    },
+    {
+      "case_id": "historical-completeness",
+      "condition": "Any historical Tier B candidate is accepted by a future supported profile.",
+      "decision": "partial_historical_summary_only",
+      "required_result": "Set completeness to partial and include historical_summary_only; historical data alone can never claim full completeness."
+    },
+    {
+      "case_id": "metadata-only-import",
+      "condition": "The import captures only normalized summary metadata and no raw or Session event content.",
+      "decision": "metadata_only_no_retention_item",
+      "required_result": "Store content_state as not_captured and create no content-bearing retention catalog item."
+    },
+    {
+      "case_id": "expired-content-at-import",
+      "condition": "A future supported include-content import has a valid authoritative source time whose raw-default-90d expiry is already reached.",
+      "decision": "read_denied_and_deletion_queued",
+      "required_result": "Deny content reads irreversibly and transactionally advance only through allowed retention states to deletion_queued before the import operation succeeds."
+    },
+    {
+      "case_id": "unexpired-content-at-import",
+      "condition": "A future supported include-content import has valid authoritative source time and its raw-default-90d expiry remains in the future.",
+      "decision": "expiring_raw_default_90d",
+      "required_result": "Create the exact content-bearing item as expiring under raw-default-90d version 1 using the authoritative source time."
+    },
+    {
+      "case_id": "import-retention-default",
+      "condition": "An imported item has no explicit user pin mutation.",
+      "decision": "no_automatic_pin",
+      "required_result": "Never assign retained_by_policy; that lifecycle state requires the existing explicit pin contract."
+    }
+  ]
+}

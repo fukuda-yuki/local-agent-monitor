@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.copilot-agent-observability.invalid/contracts/historical-import/v1/historical-source-profile.schema.json",
+  "title": "Historical source profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "profile_id",
+    "adapter_id",
+    "source_surface",
+    "source_tier",
+    "support_state",
+    "documented_container",
+    "source_reference_policy",
+    "observed_detector_versions",
+    "supported_application_versions",
+    "supported_source_formats",
+    "active_field_allowlist",
+    "policy_field_ceiling",
+    "completeness_ceiling",
+    "required_completeness_reasons",
+    "activation_gate"
+  ],
+  "properties": {
+    "contract_version": { "const": "historical-source-profile/v1" },
+    "profile_id": { "$ref": "#/$defs/token" },
+    "adapter_id": { "$ref": "#/$defs/token" },
+    "source_surface": { "enum": ["claude-code", "github-copilot-cli"] },
+    "source_tier": { "const": "tier_b" },
+    "support_state": { "enum": ["unsupported_no_fixture", "supported_fixture_bound"] },
+    "documented_container": { "type": "string", "minLength": 1 },
+    "source_reference_policy": {
+      "enum": [
+        "official_hook_reference_or_explicit_file",
+        "explicit_opt_in_documented_root"
+      ]
+    },
+    "observed_detector_versions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/version" }
+    },
+    "supported_application_versions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/version" }
+    },
+    "supported_source_formats": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/supportedFormat" }
+    },
+    "active_field_allowlist": {
+      "type": "array",
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/field" }
+    },
+    "policy_field_ceiling": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/field" }
+    },
+    "completeness_ceiling": { "const": "partial" },
+    "required_completeness_reasons": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": { "const": "historical_summary_only" }
+    },
+    "activation_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product_decision_required", "promotion_scope", "required_evidence"],
+      "properties": {
+        "product_decision_required": { "const": false },
+        "promotion_scope": { "const": "source_specific_compatibility_revision" },
+        "required_evidence": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "source_application_version",
+              "source_format_name",
+              "source_format_version",
+              "source_fixture_sha256",
+              "source_schema_fingerprint",
+              "adapter_golden_tests"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+    },
+    "field": {
+      "type": "string",
+      "enum": [
+        "model_tokens.model",
+        "model_tokens.input_tokens",
+        "model_tokens.output_tokens",
+        "model_tokens.total_tokens",
+        "model_tokens.cache_tokens",
+        "model_tokens.reasoning_tokens",
+        "retry_attempt.retry",
+        "retry_attempt.attempt",
+        "errors.present",
+        "errors.code"
+      ]
+    },
+    "supportedFormat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_application_version",
+        "source_format_name",
+        "source_format_version",
+        "source_fixture_sha256",
+        "source_schema_fingerprint",
+        "active_field_allowlist",
+        "golden_test_id"
+      ],
+      "properties": {
+        "source_application_version": { "$ref": "#/$defs/version" },
+        "source_format_name": { "$ref": "#/$defs/token" },
+        "source_format_version": { "$ref": "#/$defs/version" },
+        "source_fixture_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "source_schema_fingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "active_field_allowlist": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/field" }
+        },
+        "golden_test_id": { "$ref": "#/$defs/token" }
+      }
+    }
+  }
+}

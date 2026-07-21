@@ -34,6 +34,7 @@
 | Canvas Proposal Apply | [interfaces/canvas-proposal-apply.md](interfaces/canvas-proposal-apply.md) |
 | Canvas Effect Comparison | [interfaces/canvas-effect-comparison.md](interfaces/canvas-effect-comparison.md) |
 | Trace agent execution graph | [interfaces/trace-agent-execution-graph.md](interfaces/trace-agent-execution-graph.md) |
+| Historical source import | [interfaces/historical-source-import.md](interfaces/historical-source-import.md) |
 | Security and data boundaries | [security-data-boundaries.md](security-data-boundaries.md) |
 | Validation and release matrix | [validation-release-matrix.md](validation-release-matrix.md) |
 

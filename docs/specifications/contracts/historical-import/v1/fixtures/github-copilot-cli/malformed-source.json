@@ -1,0 +1,18 @@
+{
+  "contract_version": "historical-adapter-result/v1",
+  "adapter_id": "github-copilot-cli-history-v1",
+  "profile_id": "github-copilot-cli-session-state",
+  "source_surface": "github-copilot-cli",
+  "source_tier": "tier_b",
+  "detection_state": "detected",
+  "source_reference_state": "provided",
+  "source_application_version": "1.0.71",
+  "support_authorized": false,
+  "source_format_profile": "none",
+  "candidate_count": 0,
+  "content_risk": "not_read",
+  "repository_safe": true,
+  "diagnostics": [
+    "historical_source_malformed"
+  ]
+}

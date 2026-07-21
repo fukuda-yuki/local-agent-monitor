@@ -1,0 +1,175 @@
+{
+  "contract_version": "historical-candidate-batch/v1",
+  "fixture_only_not_source_support_evidence": true,
+  "profile_id": "synthetic-contract-fixture",
+  "adapter_id": "claude-code-history-v1",
+  "source_surface": "claude-code",
+  "source_tier": "tier_b",
+  "source_application_version": "0.0.0",
+  "source_format_name": "synthetic-contract-fixture",
+  "source_format_version": "0.0.0",
+  "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "normalization_version": "historical-summary-v1",
+  "completeness_ceiling": "partial",
+  "candidates": [
+    {
+      "candidate_key": "fixture-candidate-001",
+      "source_record_key": "fixture-record-001",
+      "values": {
+        "model_tokens": {
+          "model": "fixture-model",
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "total_tokens": 15,
+          "cache_tokens": 0,
+          "reasoning_tokens": 0
+        },
+        "retry_attempt": {
+          "retry": false,
+          "attempt": 1
+        },
+        "errors": {
+          "present": false,
+          "code": null
+        }
+      },
+      "completeness": "partial",
+      "completeness_reasons": [
+        "historical_summary_only"
+      ],
+      "field_provenance": [
+        {
+          "field": "model_tokens.model",
+          "adapter_id": "claude-code-history-v1",
+          "source_surface": "claude-code",
+          "source_application_version": "0.0.0",
+          "source_format_name": "synthetic-contract-fixture",
+          "source_format_version": "0.0.0",
+          "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_record_key": "fixture-record-001",
+          "capture_content_state": "not_captured",
+          "normalization_version": "historical-summary-v1"
+        },
+        {
+          "field": "model_tokens.input_tokens",
+          "adapter_id": "claude-code-history-v1",
+          "source_surface": "claude-code",
+          "source_application_version": "0.0.0",
+          "source_format_name": "synthetic-contract-fixture",
+          "source_format_version": "0.0.0",
+          "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_record_key": "fixture-record-001",
+          "capture_content_state": "not_captured",
+          "normalization_version": "historical-summary-v1"
+        },
+        {
+          "field": "model_tokens.output_tokens",
+          "adapter_id": "claude-code-history-v1",
+          "source_surface": "claude-code",
+          "source_application_version": "0.0.0",
+          "source_format_name": "synthetic-contract-fixture",
+          "source_format_version": "0.0.0",
+          "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_record_key": "fixture-record-001",
+          "capture_content_state": "not_captured",
+          "normalization_version": "historical-summary-v1"
+        },
+        {
+          "field": "model_tokens.total_tokens",
+          "adapter_id": "claude-code-history-v1",
+          "source_surface": "claude-code",
+          "source_application_version": "0.0.0",
+          "source_format_name": "synthetic-contract-fixture",
+          "source_format_version": "0.0.0",
+          "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_record_key": "fixture-record-001",
+          "capture_content_state": "not_captured",
+          "normalization_version": "historical-summary-v1"
+        },
+        {
+          "field": "model_tokens.cache_tokens",
+          "adapter_id": "claude-code-history-v1",
+          "source_surface": "claude-code",
+          "source_application_version": "0.0.0",
+          "source_format_name": "synthetic-contract-fixture",
+          "source_format_version": "0.0.0",
+          "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_record_key": "fixture-record-001",
+          "capture_content_state": "not_captured",
+          "normalization_version": "historical-summary-v1"
+        },
+        {
+          "field": "model_tokens.reasoning_tokens",
+          "adapter_id": "claude-code-history-v1",
+          "source_surface": "claude-code",
+          "source_application_version": "0.0.0",
+          "source_format_name": "synthetic-contract-fixture",
+          "source_format_version": "0.0.0",
+          "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_record_key": "fixture-record-001",
+          "capture_content_state": "not_captured",
+          "normalization_version": "historical-summary-v1"
+        },
+        {
+          "field": "retry_attempt.retry",
+          "adapter_id": "claude-code-history-v1",
+          "source_surface": "claude-code",
+          "source_application_version": "0.0.0",
+          "source_format_name": "synthetic-contract-fixture",
+          "source_format_version": "0.0.0",
+          "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_record_key": "fixture-record-001",
+          "capture_content_state": "not_captured",
+          "normalization_version": "historical-summary-v1"
+        },
+        {
+          "field": "retry_attempt.attempt",
+          "adapter_id": "claude-code-history-v1",
+          "source_surface": "claude-code",
+          "source_application_version": "0.0.0",
+          "source_format_name": "synthetic-contract-fixture",
+          "source_format_version": "0.0.0",
+          "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_record_key": "fixture-record-001",
+          "capture_content_state": "not_captured",
+          "normalization_version": "historical-summary-v1"
+        },
+        {
+          "field": "errors.present",
+          "adapter_id": "claude-code-history-v1",
+          "source_surface": "claude-code",
+          "source_application_version": "0.0.0",
+          "source_format_name": "synthetic-contract-fixture",
+          "source_format_version": "0.0.0",
+          "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_record_key": "fixture-record-001",
+          "capture_content_state": "not_captured",
+          "normalization_version": "historical-summary-v1"
+        },
+        {
+          "field": "errors.code",
+          "adapter_id": "claude-code-history-v1",
+          "source_surface": "claude-code",
+          "source_application_version": "0.0.0",
+          "source_format_name": "synthetic-contract-fixture",
+          "source_format_version": "0.0.0",
+          "source_fixture_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_schema_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_record_key": "fixture-record-001",
+          "capture_content_state": "not_captured",
+          "normalization_version": "historical-summary-v1"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.copilot-agent-observability.invalid/contracts/historical-import/v1/historical-import-preview.schema.json",
+  "title": "Historical import preview",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "source_surface",
+    "profile_id",
+    "adapter_id",
+    "adapter_diagnostics",
+    "requested_capture",
+    "eligible_candidate_count",
+    "rejected_candidate_count",
+    "commit_allowed",
+    "rejection_code",
+    "content_risk"
+  ],
+  "properties": {
+    "contract_version": { "const": "historical-import-preview/v1" },
+    "source_surface": { "enum": ["claude-code", "github-copilot-cli"] },
+    "profile_id": { "$ref": "#/$defs/token" },
+    "adapter_id": { "$ref": "#/$defs/token" },
+    "adapter_diagnostics": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "historical_source_format_unsupported",
+          "historical_source_malformed",
+          "historical_source_reference_required"
+        ]
+      }
+    },
+    "requested_capture": { "const": "metadata_only" },
+    "eligible_candidate_count": { "const": 0 },
+    "rejected_candidate_count": { "type": "integer", "minimum": 0 },
+    "commit_allowed": { "const": false },
+    "rejection_code": { "const": "historical_import_no_eligible_candidates" },
+    "content_risk": { "const": "not_read" }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+    }
+  }
+}
