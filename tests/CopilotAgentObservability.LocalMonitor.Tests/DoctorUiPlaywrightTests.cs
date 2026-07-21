@@ -394,6 +394,7 @@ public sealed class DoctorUiPlaywrightTests
         var rows = new[]
         {
             ("ready_no_real_trace", "info", "run_bounded_source_interaction", "after_action"),
+            ("monitor_not_running", "error", "start_monitor", "after_action"),
             ("receiver_not_bound", "error", "restart_monitor", "after_action"),
             ("protocol_mismatch", "error", "use_http_protobuf", "after_action"),
             ("signal_disabled", "error", "enable_trace_signal", "after_action"),
@@ -443,6 +444,121 @@ public sealed class DoctorUiPlaywrightTests
         }
 
         Assert.Equal(rows.Length, rowIndex);
+    }
+
+    [Fact]
+    public async Task Diagnostics_DelayedBeginCannotCarryPreviousSourceFactsAcrossSelection()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var responded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await RouteSourcesAsync(page);
+        await page.RouteAsync("**/api/doctor/ui/v1/verifications", async route =>
+        {
+            arrived.SetResult();
+            await release.Task;
+            await route.FulfillAsync(new RouteFulfillOptions { ContentType = "application/json", Body = VerificationJson });
+            responded.SetResult();
+        });
+
+        await page.GotoAsync($"{host.Url}/diagnostics", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.Locator("#doctor-source").SelectOptionAsync("claude-code");
+        await page.Locator("#doctor-primary-action").ClickAsync();
+        await arrived.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await page.Locator("#doctor-source").SelectOptionAsync("github-copilot-cli");
+        release.SetResult();
+        await responded.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        await Expect(page.Locator("#doctor-current-state")).ToHaveTextAsync("—");
+        await Expect(page.Locator("#doctor-result-source")).ToHaveTextAsync("—");
+        await Expect(page.Locator("#doctor-lifecycle")).ToHaveTextAsync("—");
+        await Expect(page.Locator("#doctor-primary-action")).ToHaveTextAsync("検証を開始");
+    }
+
+    [Fact]
+    public async Task Diagnostics_PostRollbackRefreshShowsNotDetectedWithoutPriorDoctorState()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var afterRollback = false;
+
+        await page.RouteAsync("**/api/doctor/ui/v1/sources", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            ContentType = "application/json",
+            Body = afterRollback ? SourcesJson.Replace("\"detected\"", "\"not_detected\"", StringComparison.Ordinal) : SourcesJson,
+        }));
+        await page.RouteAsync("**/api/doctor/ui/v1/verifications", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            ContentType = "application/json",
+            Body = VerificationJson,
+        }));
+
+        await page.GotoAsync($"{host.Url}/diagnostics", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.Locator("#doctor-source").SelectOptionAsync("claude-code");
+        await page.Locator("#doctor-primary-action").ClickAsync();
+        await Expect(page.Locator("#doctor-current-state")).ToHaveTextAsync("first_trace_ready");
+
+        afterRollback = true;
+        await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#doctor-source-state")).ToHaveTextAsync("検出されたソースはありません。ソースを選択して確認できます。");
+        await Expect(page.Locator("#doctor-current-state")).ToHaveTextAsync("—");
+        await Expect(page.Locator("#doctor-actions button:visible")).ToHaveCountAsync(0);
+    }
+
+    [Fact]
+    public async Task Diagnostics_KeyboardOnlyCompletesExplicitCandidateFlow()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+
+        await RouteSourcesAsync(page);
+        await page.RouteAsync("**/api/doctor/ui/v1/verifications/*/complete", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            ContentType = "application/json",
+            Body = VerificationJson,
+        }));
+        await page.RouteAsync("**/api/doctor/ui/v1/verifications", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            ContentType = "application/json",
+            Body = ActiveWithCandidatesJson,
+        }));
+
+        await page.GotoAsync($"{host.Url}/diagnostics", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.Locator("#doctor-source").FocusAsync();
+        await page.Keyboard.PressAsync("End");
+        await page.Keyboard.PressAsync("Tab");
+        await Expect(page.Locator("#doctor-primary-action")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Enter");
+
+        await Expect(page.Locator("#doctor-result-heading")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Tab");
+        await page.Keyboard.PressAsync("Tab");
+        await Expect(page.Locator("#doctor-candidate-list input").First).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Space");
+        await page.Keyboard.PressAsync("Tab");
+        await page.Keyboard.PressAsync("Tab");
+        await page.Keyboard.PressAsync("Tab");
+        await Expect(page.Locator("#doctor-primary-action")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Enter");
+
+        await Expect(page.Locator("#doctor-lifecycle")).ToHaveTextAsync("completed");
+        await Expect(page.Locator("#doctor-live")).ToContainTextAsync("completed");
     }
 
     [Fact]

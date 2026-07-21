@@ -172,6 +172,7 @@
   };
   let doctorAction = null;
   let currentVerification = null;
+  let doctorSelectionGeneration = 0;
 
   function setDoctorAction(label, action, disabled) {
     doctorAction = action;
@@ -418,6 +419,7 @@
   async function beginVerification() {
     const sourceId = doctorSource.value;
     if (!sourceId) return;
+    const generation = doctorSelectionGeneration;
     setDoctorAction(null, null);
     try {
       const payload = await requestDoctor("/api/doctor/ui/v1/verifications", {
@@ -425,8 +427,10 @@
         headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
         body: JSON.stringify({ source_id: sourceId }),
       });
+      if (generation !== doctorSelectionGeneration || doctorSource.value !== sourceId) return;
       renderDoctor(payload);
     } catch (error) {
+      if (generation !== doctorSelectionGeneration || doctorSource.value !== sourceId) return;
       renderFailureEnvelope(error);
       if (currentVerification) mutationFailure();
       else doctorFailure(loadDoctorSources);
@@ -493,6 +497,7 @@
   }
 
   doctorSource?.addEventListener("change", () => {
+    doctorSelectionGeneration += 1;
     const option = doctorSource.selectedOptions[0];
     resetDoctorResult();
     doctorSourceState.textContent = option?.value
