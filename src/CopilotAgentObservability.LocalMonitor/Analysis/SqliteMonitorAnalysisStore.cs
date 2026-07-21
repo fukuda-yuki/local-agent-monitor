@@ -29,6 +29,8 @@ internal interface IMonitorAnalysisStore
 
     RetentionRevisionFence CompleteRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string resultMarkdown, DateTimeOffset completedAt);
 
+    RetentionRevisionFence CompleteInstructionDiagnosisRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string resultMarkdown, InstructionFindingHandoffV1 handoff, DateTimeOffset completedAt);
+
     RetentionRevisionFence? FinishRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, MonitorAnalysisStatus status, string? message, DateTimeOffset completedAt);
 
     MonitorAnalysisSafeSummary GenerateRepositorySafeSummary(long runId, DateTimeOffset generatedAt);
@@ -101,6 +103,7 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
             """);
         ExecuteNonQuery(connection, transaction,
             "CREATE TRIGGER IF NOT EXISTS retention_monitor_analysis_runs_token_immutable BEFORE UPDATE OF retention_owner_token ON monitor_analysis_runs WHEN NEW.retention_owner_token IS NOT OLD.retention_owner_token BEGIN SELECT RAISE(ABORT,'retention_owner_token_immutable'); END;");
+        SqliteInstructionFindingHandoffStore.CreateSchema(connection, transaction);
         transaction.Commit();
     }
 
@@ -242,10 +245,34 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
     }
 
     public RetentionRevisionFence CompleteRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string resultMarkdown, DateTimeOffset completedAt)
+        => CompleteRunCore(runId, operationToken, expectedFence, resultMarkdown, handoff: null, completedAt);
+
+    public RetentionRevisionFence CompleteInstructionDiagnosisRun(
+        long runId,
+        MonitorAnalysisOperationToken operationToken,
+        RetentionRevisionFence? expectedFence,
+        string resultMarkdown,
+        InstructionFindingHandoffV1 handoff,
+        DateTimeOffset completedAt)
+    {
+        if (handoff.AnalysisRunId != runId)
+            throw new InstructionFindingValidationException(InstructionFindingValidationCodeV1.InvalidContract);
+        return CompleteRunCore(runId, operationToken, expectedFence, resultMarkdown, handoff, completedAt);
+    }
+
+    private RetentionRevisionFence CompleteRunCore(
+        long runId,
+        MonitorAnalysisOperationToken operationToken,
+        RetentionRevisionFence? expectedFence,
+        string resultMarkdown,
+        InstructionFindingHandoffV1? handoff,
+        DateTimeOffset completedAt)
     {
         using var connection = OpenConnection();
         using var transaction = BeginRawWriterTransaction(connection);
         var run = ReadRetentionRun(connection, transaction, runId);
+        if (handoff is not null && run.Focus != MonitorAnalysisFocus.InstructionDiagnosis)
+            throw new InstructionFindingValidationException(InstructionFindingValidationCodeV1.InvalidContract);
         var createsRaw = ValidateRawWrite(connection, transaction, run, operationToken, expectedFence);
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -260,6 +287,10 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         AddParameter(command, "$result_markdown", resultMarkdown);
         AddParameter(command, "$id", runId);
         RequireSingleSourceRow(command);
+        if (handoff is not null)
+        {
+            SqliteInstructionFindingHandoffStore.Save(connection, transaction, handoff, completedAt);
+        }
         writeFailureInjector?.Invoke(MonitorAnalysisStoreWritePhase.AfterSourceWrite);
         if (createsRaw)
         {
@@ -379,10 +410,13 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT id, requested_at, raw_record_id, span_id, retention_owner_token FROM monitor_analysis_runs WHERE id=$id;";
+        command.CommandText = "SELECT id, requested_at, raw_record_id, span_id, focus, retention_owner_token FROM monitor_analysis_runs WHERE id=$id;";
         AddParameter(command, "$id", runId);
         using var reader = command.ExecuteReader();
-        if (!reader.Read() || reader.IsDBNull(4) || reader.GetFieldValue<byte[]>(4) is not { Length: 32 } ownerToken)
+        if (!reader.Read()
+            || !MonitorAnalysisWire.TryParseFocus(reader.GetString(4), out var focus)
+            || reader.IsDBNull(5)
+            || reader.GetFieldValue<byte[]>(5) is not { Length: 32 } ownerToken)
         {
             throw new InvalidOperationException("analysis run is not writable.");
         }
@@ -392,7 +426,7 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
             throw new InvalidOperationException("analysis run is not writable.");
         }
 
-        return new RetentionRun(reader.GetInt64(0), requestedAt, reader.IsDBNull(2) ? null : reader.GetInt64(2), reader.IsDBNull(3) ? null : reader.GetString(3), ownerToken);
+        return new RetentionRun(reader.GetInt64(0), requestedAt, reader.IsDBNull(2) ? null : reader.GetInt64(2), reader.IsDBNull(3) ? null : reader.GetString(3), focus, ownerToken);
     }
 
     private static bool HasRawAggregate(SqliteConnection connection, SqliteTransaction transaction, long runId, bool excludeEvents = false, bool excludeResult = false, bool excludeError = false)
@@ -629,6 +663,6 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
         command.Parameters.AddWithValue(name, value ?? DBNull.Value);
     }
 
-    private sealed record RetentionRun(long Id, DateTimeOffset RequestedAt, long? RawRecordId, string? SpanId, byte[] OwnerToken);
+    private sealed record RetentionRun(long Id, DateTimeOffset RequestedAt, long? RawRecordId, string? SpanId, MonitorAnalysisFocus Focus, byte[] OwnerToken);
     private sealed record CatalogItem(string ItemId, long Revision);
 }

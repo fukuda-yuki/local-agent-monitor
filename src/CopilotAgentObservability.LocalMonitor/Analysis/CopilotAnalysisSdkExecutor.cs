@@ -17,19 +17,24 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
         try
         {
             await client.StartAsync(cancellationToken);
+            var tools = new List<AIFunctionDeclaration>
+            {
+                DefineTool("get_raw_trace", "Return the raw trace records for this Local Monitor analysis run.", () => Serialize(request.Data.RawTrace)),
+                DefineTool("get_raw_record", "Return the selected raw record for this Local Monitor analysis run.", () => Serialize(request.Data.RawRecord)),
+                DefineTool("get_raw_span_context", "Return the selected raw span context for this Local Monitor analysis run.", () => Serialize(request.Data.RawSpanContext)),
+                DefineTool("get_trace_summary", "Return the sanitized trace summary for this Local Monitor analysis run.", () => Serialize(request.Data.TraceSummary)),
+                DefineTool("get_trace_span_tree", "Return the sanitized span tree for this Local Monitor analysis run.", () => Serialize(request.Data.TraceSpanTree)),
+                DefineTool("get_cache_summary", "Return the sanitized cache summary for this Local Monitor analysis run.", () => Serialize(request.Data.CacheSummary)),
+                DefineTool("get_instruction_evidence", "Return deterministic instruction evidence for this Local Monitor analysis run.", () => Serialize(request.Data.InstructionEvidence)),
+            };
+            if (request.Data.InstructionFindingCollector is { } collector)
+            {
+                tools.Add(DefineInstructionFindingSubmissionTool(collector));
+            }
             session = await client.CreateSessionAsync(new SessionConfig
             {
                 Model = settings.Model, Streaming = true, OnPermissionRequest = PermissionHandler.ApproveAll, Provider = settings.Provider,
-                Tools =
-                [
-                    DefineTool("get_raw_trace", "Return the raw trace records for this Local Monitor analysis run.", () => Serialize(request.Data.RawTrace)),
-                    DefineTool("get_raw_record", "Return the selected raw record for this Local Monitor analysis run.", () => Serialize(request.Data.RawRecord)),
-                    DefineTool("get_raw_span_context", "Return the selected raw span context for this Local Monitor analysis run.", () => Serialize(request.Data.RawSpanContext)),
-                    DefineTool("get_trace_summary", "Return the sanitized trace summary for this Local Monitor analysis run.", () => Serialize(request.Data.TraceSummary)),
-                    DefineTool("get_trace_span_tree", "Return the sanitized span tree for this Local Monitor analysis run.", () => Serialize(request.Data.TraceSpanTree)),
-                    DefineTool("get_cache_summary", "Return the sanitized cache summary for this Local Monitor analysis run.", () => Serialize(request.Data.CacheSummary)),
-                    DefineTool("get_instruction_evidence", "Return deterministic instruction evidence for this Local Monitor analysis run.", () => Serialize(request.Data.InstructionEvidence)),
-                ],
+                Tools = tools,
                 SystemMessage = new SystemMessageConfig { Mode = SystemMessageMode.Append, Content = "You are analyzing a local Copilot/agent observability trace. Use the provided tools for raw data. Do not claim the response is repository-safe." },
             }, cancellationToken);
             var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -64,5 +69,20 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
     }
 
     private static AIFunction DefineTool(string name, string description, Func<string> tool) => CopilotTool.DefineTool((([Description("No input is required for this run-scoped Local Monitor tool.")] string? _ = null) => tool()), new CopilotToolOptions { SkipPermission = true }, new AIFunctionFactoryOptions { Name = name, Description = description });
+
+    private static AIFunction DefineInstructionFindingSubmissionTool(InstructionFindingSubmissionCollectorV1 collector) =>
+        CopilotTool.DefineTool(
+            ([Description("Closed instruction-finding category id.")] string category,
+             [Description("Finding verdict: supported, weak, or incomplete.")] string verdict,
+             [Description("Extractor source: deterministic_prepass or prompt_only.")] string extractor_source,
+             [Description("JSON array containing only exact evidence references returned by get_instruction_evidence.")] string evidence_refs_json) =>
+                collector.SubmitWire(category, verdict, extractor_source, evidence_refs_json),
+            new CopilotToolOptions { SkipPermission = true },
+            new AIFunctionFactoryOptions
+            {
+                Name = "submit_instruction_finding",
+                Description = "Validate and submit one instruction finding without free-form or raw content.",
+            });
+
     private static string Serialize(object? value) => JsonSerializer.Serialize(value, new JsonSerializerOptions(JsonSerializerDefaults.Web));
 }

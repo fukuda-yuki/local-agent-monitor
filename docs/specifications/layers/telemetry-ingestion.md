@@ -649,14 +649,23 @@ Supported process-internal .NET SDK tool names:
 - `get_trace_span_tree`
 - `get_cache_summary`
 - `get_instruction_evidence`
+- `submit_instruction_finding` (`instruction-diagnosis` only)
 
 These tools are not exposed as public HTTP routes and are separate from
 repository-safe summary generation. `get_instruction_evidence` returns the
 deterministic instruction-evidence extractor output defined in
 [instruction diagnosis analysis](../interfaces/instruction-diagnosis-analysis.md),
 including the bounded same-conversation `conversation_context` for
-`instruction-diagnosis` when available (D047 / D048). The Local Monitor project references the
-official `GitHub.Copilot.SDK` .NET package. Normal repository validation can
+`instruction-diagnosis` when available (D047 / D048).
+`submit_instruction_finding` accepts only the closed category, verdict, and
+extractor-source values plus a raw-local exact evidence-reference JSON array. It
+rejects unresolved references and never accepts model-authored gap,
+instruction, title, or rule text. Accepted raw IDs are domain-separated and
+tokenized before the versioned repository-safe handoff is constructed or
+persisted. The handoff is committed atomically with the successful analysis
+result as defined by the focused interface specification. The Local
+Monitor project references the official `GitHub.Copilot.SDK` .NET package.
+Normal repository validation can
 build and test the integration without requiring a signed-in Copilot SDK
 runtime; live analysis validation still requires a signed-in Copilot session.
 The SDK runner reads local configuration from `CopilotAnalysis:*`, including

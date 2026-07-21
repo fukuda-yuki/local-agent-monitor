@@ -186,6 +186,28 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         Assert.Equal(1L, Convert.ToInt64(command.ExecuteScalar()));
     }
 
+    [Fact]
+    public async Task RunAsync_InstructionDiagnosis_CompletesWithMachineReadableZeroFindingHandoff()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new FakeStore(Run(Focus: MonitorAnalysisFocus.InstructionDiagnosis));
+        var runner = CreateRunner(temp, store, new FakeOwner(new FakeScope("owned-child")), new FakeExecutor());
+        var context = new MonitorAnalysisContext(
+            7,
+            "trace",
+            9,
+            "span",
+            MonitorAnalysisFocus.InstructionDiagnosis,
+            OperationToken: new MonitorAnalysisOperationToken([1]));
+
+        await runner.RunAsync(context, CancellationToken.None);
+
+        var handoff = Assert.IsType<InstructionFindingHandoffV1>(store.CompletedHandoff);
+        Assert.Equal(7, handoff.AnalysisRunId);
+        Assert.Empty(handoff.Findings);
+        Assert.Empty(handoff.Candidates);
+    }
+
     private static DotNetCopilotRawAnalysisRunner CreateRunner(MonitorTempDirectory temp, FakeStore store, FakeOwner owner, FakeExecutor executor)
     {
         var raw = temp.CreateRawStore();
@@ -195,7 +217,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
     }
 
     private static MonitorAnalysisContext Context() => new(7, "trace", 9, "span", MonitorAnalysisFocus.Errors, OperationToken: new MonitorAnalysisOperationToken([1]));
-    private static MonitorAnalysisRun Run(string? RequestedAtText = null, string TraceId = "trace") => new(7, TraceId, 9, "span", MonitorAnalysisFocus.Errors, MonitorAnalysisStatus.Queued, RequestedAtText ?? RequestedAt.ToString("O"), null, null);
+    private static MonitorAnalysisRun Run(string? RequestedAtText = null, string TraceId = "trace", MonitorAnalysisFocus Focus = MonitorAnalysisFocus.Errors) => new(7, TraceId, 9, "span", Focus, MonitorAnalysisStatus.Queued, RequestedAtText ?? RequestedAt.ToString("O"), null, null);
 
     private sealed class FakeOwner : IAnalysisSdkDirectoryOwner
     {
@@ -258,6 +280,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         public FakeStore(MonitorAnalysisRun? run) => Run = run;
         public MonitorAnalysisRun? Run { get; }
         public int CompleteCount { get; private set; }
+        public InstructionFindingHandoffV1? CompletedHandoff { get; private set; }
         public string? FinishedMessage { get; private set; }
         public MonitorAnalysisStatus? FinishedStatus { get; private set; }
         public void CreateSchema() { }
@@ -268,6 +291,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         public void MarkRunning(long runId, DateTimeOffset startedAt) { }
         public RetentionRevisionFence AppendEvent(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string eventType, string message, DateTimeOffset occurredAt) => null!;
         public RetentionRevisionFence CompleteRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string resultMarkdown, DateTimeOffset completedAt) { CompleteCount++; return null!; }
+        public RetentionRevisionFence CompleteInstructionDiagnosisRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string resultMarkdown, InstructionFindingHandoffV1 handoff, DateTimeOffset completedAt) { CompleteCount++; CompletedHandoff = handoff; return null!; }
         public RetentionRevisionFence? FinishRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, MonitorAnalysisStatus status, string? message, DateTimeOffset completedAt) { FinishedStatus = status; FinishedMessage = message; return null; }
         public MonitorAnalysisSafeSummary GenerateRepositorySafeSummary(long runId, DateTimeOffset generatedAt) => throw new NotSupportedException();
     }
