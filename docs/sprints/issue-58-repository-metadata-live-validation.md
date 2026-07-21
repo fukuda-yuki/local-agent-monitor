@@ -1,8 +1,10 @@
 # Issue #58 Repository Metadata Live Validation
 
 Status: repository-safe implementation and synthetic live HTTP validation
-complete; real GitHub Copilot producer payload validation remains blocked by
-external authorization and producer availability.
+complete. An authorized GitHub Copilot CLI 1.0.73 execution produced live
+content-enabled file-export evidence on 2026-07-22. Direct loopback HTTP export
+is blocked by the producer's current cleartext policy, and VS Code producer
+validation remains blocked by producer and desktop-control availability.
 
 This record contains attribute keys, counts, scopes, fixed status tokens,
 tool versions, booleans, commands, and test totals only. It contains no raw
@@ -34,13 +36,48 @@ emitted the synthetic payloads below and is not a compatibility allowlist.
 | GitHub Copilot CLI-shaped fixtures | `live` | CLI version observed out of band | Unsafe URL shape rejection and canonical GitHub HTTPS fallback were both observed; the allowlisted record reported `url_fallback_used`, label-present true, and fallback true. This is synthetic shape evidence, not a real producer payload. |
 | Issue #58 automated fixture corpus | `reused` | execution SHA above | Focused status, URL rejection, duplicate-key, bounds, retention, and UI fixtures passed and support the live assertions below. |
 | Sprint16 Canvas validation | `reused` | historical evidence only | Reused only for the existing bounded Canvas/`unknown repository` boundary. It is not accepted as Issue #58 producer inventory or URL-fallback evidence. |
-| Real VS Code GitHub Copilot Chat payload | `blocked_external` | VS Code executable observed; official extension unavailable in queried CLI profile | No authorized editor environment mutation or external Copilot interaction was in scope, so no real producer payload was captured. |
-| Real GitHub Copilot CLI payload | `blocked_external` | CLI executable observed | A real authenticated external Copilot execution was not authorized; no producer payload was captured. |
+| Real VS Code GitHub Copilot Chat payload | `blocked_external` | VS Code executable observed; official extension unavailable in queried CLI profile | Authorization is present, but no official signed-in extension profile or observable desktop-control runtime was available, so no real producer payload was captured. |
+| Real GitHub Copilot CLI payload | `live` | GitHub Copilot CLI `1.0.73` | An authorized non-interactive execution completed and emitted 14 content-enabled file-export records. The 55 observed attribute keys contained no `vcs.*`, `workspace.*`, or `repo.*` key, so repository metadata was not present in this producer observation. |
 | GitHub Copilot App / SDK producer payload | `not_attempted` | unavailable | Optional Issue #58 surface; no supported runtime or authorized external execution was provided. |
 | Multiple repositories open concurrently | `not_attempted` | unavailable | Optional Issue #58 scenario; no authorized live editor session was provided. |
 
 `blocked_external` and `not_attempted` rows are not converted into passes by
 the synthetic or historical evidence.
+
+## Authorized producer follow-up — 2026-07-22
+
+- Execution SHA: `a041e0a531ff8d298dba2869b764be41b65f2478`
+- Producer: GitHub Copilot CLI `1.0.73`
+- Invocation result: exit `0`; the requested fixed response was returned
+- Content gate: enabled in the child process only. The current CLI gate
+  `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` was effective;
+  `gen_ai.input.messages` and `gen_ai.output.messages` keys were present.
+- File-export evidence: 14 JSON-lines records, 169,718 bytes, 55 distinct
+  attribute keys, ephemeral SHA-256
+  `e49a1947280d499ca7bf764b6056e446a4e8f883a7b295ee80dca8fe39223829`
+- Repository-key result: zero keys matching `vcs.*`, `workspace.*`, or
+  `repo.*`; no repository value, URL, owner, prompt, response, tool body,
+  identity, credential, or machine path was copied into this record.
+- Cleanup: the isolated raw SQLite database and content-enabled JSON-lines
+  payload were deleted after key-only analysis. No raw artifact was committed.
+
+The first authorized attempt used the canonical loopback HTTP configuration at
+`127.0.0.1` with HTTP/protobuf. The Copilot invocation succeeded, but the
+isolated monitor observed zero traces after a bounded 20-second wait. The
+installed CLI's `copilot help monitoring` states that version 1.0.73 disables
+OTLP export when an endpoint resolves to cleartext HTTP, including localhost.
+The successful file exporter is therefore live producer-shape evidence but is
+not reported as direct Local Monitor transport evidence. Retry direct transport
+only after the producer provides a supported loopback mechanism or the monitor
+has a separately specified compatible secure endpoint.
+
+The VS Code row remains `blocked_external` at medium severity. Authorization is
+now present, but the queried VS Code 1.129.1 profile exposes no official GitHub
+Copilot extension and the desktop-control runtime was unavailable, so no exact
+signed-in producer interaction could be executed or observed. Retry when an
+official signed-in extension profile and observable desktop interaction are
+available. The unverified capability is real VS Code producer repository-key
+inventory and its resulting Issue #58 status.
 
 ## Repository-safe live inventory
 
