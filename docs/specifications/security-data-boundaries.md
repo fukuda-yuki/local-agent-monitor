@@ -670,6 +670,43 @@ Route boundary:
   keys must not be logged, stored in analysis events/results, exposed in UI, or
   included in repository-safe summaries.
 
+### Instruction finding receipt boundary
+
+The Issue #59 `instruction-finding.v1`, `instruction-rule-candidate.v1`, and
+`instruction-finding-handoff.v1` carriers are repository-safe allowlist
+projections, not raw-analysis results. They may contain only:
+
+- positive numeric analysis-run identity;
+- deterministic domain-separated opaque Session / trace / span reference
+  tokens and numeric turn references, never the source IDs;
+- closed taxonomy, verdict, extractor-source, relative-position, eligibility,
+  target-kind, and scope values;
+- deterministic IDs and deduplication keys;
+- fixed taxonomy-owned Japanese summaries and instruction-rule templates.
+
+They must never accept, serialize, or persist producer/model-supplied summary,
+instruction, title, target, or rule text. This fixed-template construction is
+what prevents copying raw prompt/response/tool content, observed source code or
+file bodies, credentials, PII, and local paths into generated instruction text.
+A permissive redactor or free-text negative scanner is not an alternative
+authority for v1.
+
+Every raw-local submission evidence reference resolves exactly within the
+supplied anchor and emitted bounded sibling evidence index before tokenization.
+Unresolved references are rejected, not downgraded or persisted. Unsupported
+categories are rejected. `weak` and `incomplete` receipts may be retained as
+repository-safe diagnosis state but are always `ineligible` and cannot generate
+a rule candidate. The handoff does not authorize raw reads, Canvas action
+output, proposal promotion, file apply, effect measurement, export, or git
+activity.
+
+Raw-local Session, trace, and span IDs exist only during exact index
+validation. Before constructing a carrier, each is replaced with a
+kind-specific `*-ref-<32-lowercase-hex>` token derived by length-framed,
+domain-separated SHA-256. This prevents a syntactically valid but identifying
+source ID, local label, or PII-like value from entering the repository-safe
+carrier while preserving deterministic equality for downstream references.
+
 ## Issue #90 Retention Mutation No-Leak Boundary
 
 The versioned `/api/retention/v1/*` surface is a sanitized local-user

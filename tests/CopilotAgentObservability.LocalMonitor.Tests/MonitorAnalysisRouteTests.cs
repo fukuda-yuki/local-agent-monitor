@@ -412,14 +412,18 @@ public class MonitorAnalysisRouteTests
         Assert.Contains("focus instruction-diagnosis", prompt);
         Assert.Contains(DotNetCopilotRawAnalysisRunner.InstructionDiagnosisPromptBlock, prompt);
         Assert.Contains("analyzed trace", prompt);
-        Assert.Contains("goal-clarity", prompt);
+        Assert.Contains("goal_clarity", prompt);
         Assert.Contains("ambiguity", prompt);
-        Assert.Contains("missing-acceptance-criteria", prompt);
-        Assert.Contains("task-size-split", prompt);
-        Assert.Contains("missing-context-constraints", prompt);
-        Assert.Contains("exactly these four parts", prompt);
-        Assert.Contains("a finding without a citable evidence reference is forbidden", prompt);
-        Assert.Contains("Zero findings is a valid result and must be stated explicitly", prompt);
+        Assert.Contains("acceptance_criteria_missing", prompt);
+        Assert.Contains("scope_boundary_missing", prompt);
+        Assert.Contains("task_too_large", prompt);
+        Assert.Contains("test_requirement_missing", prompt);
+        Assert.Contains("evidence_requirement_missing", prompt);
+        Assert.Contains("environment_assumption_missing", prompt);
+        Assert.Contains("submit_instruction_finding", prompt);
+        Assert.Contains("supported, weak, or incomplete", prompt);
+        Assert.Contains("A finding without an accepted submission is forbidden", prompt);
+        Assert.Contains("Zero findings is valid", prompt);
         Assert.Contains("in Japanese", prompt);
         Assert.DoesNotContain("Return concise findings, likely causes, and recommended next checks.", prompt);
     }
@@ -427,9 +431,6 @@ public class MonitorAnalysisRouteTests
     [Fact]
     public void BuildPrompt_InstructionDiagnosis_EmbedsEvidenceGroundingRules()
     {
-        // Sprint20 M3 (D047 / prompt template v3): the instruction-diagnosis block
-        // must direct the model to get_instruction_evidence and pin the per-category
-        // coupling plus the raw-verified escape hatch.
         var context = new MonitorAnalysisContext(1, "trace-x", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
 
         var prompt = DotNetCopilotRawAnalysisRunner.BuildPrompt(context);
@@ -440,7 +441,7 @@ public class MonitorAnalysisRouteTests
         Assert.Contains("turn_tokens", prompt);
         Assert.Contains("user_instruction", prompt);
         Assert.Contains("conversation", prompt);
-        Assert.Contains("raw-verified", prompt);
+        Assert.Contains("exact evidence references", prompt);
     }
 
     [Fact]
@@ -502,12 +503,12 @@ public class MonitorAnalysisRouteTests
 
         var prompt = DotNetCopilotRawAnalysisRunner.BuildPrompt(context);
 
-        Assert.Contains("goal-clarity", prompt);
+        Assert.Contains("goal_clarity", prompt);
         Assert.Contains("Q: PRIOR_Q_MARKER", prompt);
         Assert.Contains("A: PRIOR_A_MARKER", prompt);
         Assert.Contains("Follow-up question: FOLLOWUP_QUESTION_MARKER", prompt);
         Assert.True(
-            prompt.IndexOf("goal-clarity", StringComparison.Ordinal)
+            prompt.IndexOf("goal_clarity", StringComparison.Ordinal)
                 < prompt.IndexOf("Prior Q&A", StringComparison.Ordinal),
             "The taxonomy block must precede the D045 chat blocks.");
     }

@@ -117,6 +117,76 @@ public class MonitorAnalysisStoreTests
     }
 
     [Fact]
+    public void CompleteInstructionDiagnosisRun_PersistsResultAndHandoffAtomically()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        store.CreateSchema();
+        var requestedAt = DateTimeOffset.UnixEpoch.AddMinutes(1);
+        var run = store.StartRun("trace-analysis", 42, "span-1", MonitorAnalysisFocus.InstructionDiagnosis, requestedAt);
+        var fence = store.AppendEvent(run.RunId, run.OperationToken, null, "running", "started", requestedAt.AddMinutes(1));
+        var handoff = InstructionFindingPipelineV1.Generate(
+            run.RunId,
+            new InstructionFindingEvidenceIndexV1("trace-analysis", []),
+            []);
+
+        store.CompleteInstructionDiagnosisRun(run.RunId, run.OperationToken, fence, "result", handoff, requestedAt.AddMinutes(2));
+
+        Assert.Equal(MonitorAnalysisStatus.Succeeded, store.GetRun(run.RunId)!.Status);
+        Assert.Equal(
+            InstructionFindingJsonV1.Serialize(handoff),
+            InstructionFindingJsonV1.Serialize(new SqliteInstructionFindingHandoffStore(temp.DatabasePath).Get(run.RunId)!));
+    }
+
+    [Fact]
+    public void CompleteInstructionDiagnosisRun_FailureBeforeCommitRollsBackResultAndHandoff()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteMonitorAnalysisStore(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            temp.TimeProvider,
+            phase =>
+            {
+                if (phase == MonitorAnalysisStoreWritePhase.BeforeCommit) throw new InvalidOperationException("injected");
+            });
+        store.CreateSchema();
+        var requestedAt = DateTimeOffset.UnixEpoch.AddMinutes(1);
+        var run = store.StartRun("trace-analysis", 42, "span-1", MonitorAnalysisFocus.InstructionDiagnosis, requestedAt);
+        var handoff = InstructionFindingPipelineV1.Generate(
+            run.RunId,
+            new InstructionFindingEvidenceIndexV1("trace-analysis", []),
+            []);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            store.CompleteInstructionDiagnosisRun(run.RunId, run.OperationToken, null, "result", handoff, requestedAt.AddMinutes(2)));
+
+        Assert.Equal(MonitorAnalysisStatus.Queued, store.GetRun(run.RunId)!.Status);
+        Assert.Null(new SqliteInstructionFindingHandoffStore(temp.DatabasePath).Get(run.RunId));
+    }
+
+    [Fact]
+    public void CompleteInstructionDiagnosisRun_NonInstructionFocusRejectsHandoff()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        store.CreateSchema();
+        var requestedAt = DateTimeOffset.UnixEpoch.AddMinutes(1);
+        var run = store.StartRun("trace-analysis", 42, "span-1", MonitorAnalysisFocus.Errors, requestedAt);
+        var handoff = InstructionFindingPipelineV1.Generate(
+            run.RunId,
+            new InstructionFindingEvidenceIndexV1("trace-analysis", []),
+            []);
+
+        var exception = Assert.Throws<InstructionFindingValidationException>(() =>
+            store.CompleteInstructionDiagnosisRun(run.RunId, run.OperationToken, null, "result", handoff, requestedAt.AddMinutes(2)));
+
+        Assert.Equal(InstructionFindingValidationCodeV1.InvalidContract, exception.Code);
+        Assert.Equal(MonitorAnalysisStatus.Queued, store.GetRun(run.RunId)!.Status);
+        Assert.Null(new SqliteInstructionFindingHandoffStore(temp.DatabasePath).Get(run.RunId));
+    }
+
+    [Fact]
     public void StartRun_DerivesOperationTokenWithoutExposingTheRetentionOwnerToken()
     {
         using var temp = new MonitorTempDirectory();

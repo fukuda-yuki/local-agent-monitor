@@ -1,8 +1,9 @@
 # Instruction Diagnosis Analysis Interface
 
 This document defines the `instruction-diagnosis` focus of the Local Monitor
-Copilot raw analysis (decision D046, Issue #46 Phase 1). The analysis routes,
-runner, and run lifecycle are defined in
+Copilot raw analysis (decisions D046-D048, Issue #46) and the versioned,
+repository-safe finding and instruction-rule handoff introduced by Issue #59.
+The analysis routes, runner, and run lifecycle are defined in
 [telemetry ingestion](../layers/telemetry-ingestion.md). The focus diagnoses
 the implementation instructions the user gave the agent, using the analyzed
 trace as the anchor plus bounded same-conversation sibling evidence when
@@ -10,25 +11,28 @@ available, and reports findings in a fixed per-finding format.
 
 ## Scope And Non-Goals
 
-- Diagnosis display only: the result appears as a normal raw analysis result
-  in the Local Monitor analysis drawer.
+- The raw result appears as a normal raw analysis result in the Local Monitor
+  analysis drawer. Issue #59 additionally persists an internal repository-safe
+  finding handoff for downstream consumers.
 - Evidence is the analyzed trace plus the bounded `conversation_context`
   window from the same `conversation_id`. No GitHub issue / commit /
   test-evidence correlation (traces stay manually selected, D037).
-- No memory candidate generation, no adoption workflow, and no new
-  repository-safe export.
-- Prompt-only in v1; deterministic pre-extraction since prompt template v3
-  (D047, Issue #46 Phase 2 step 1): a code extractor runs at analysis start
+- Issue #59 generates deterministic instruction-rule candidates only. It does
+  not promote, approve, apply, display, or measure them, and it does not add a
+  repository-safe export route.
+- Deterministic pre-extraction has run since prompt template v3 (D047, Issue
+  #46 Phase 2 step 1): a code extractor runs at analysis start
   and its output is exposed through the process-internal tool
   `get_instruction_evidence`. Prompt template v4 (D048, Issue #46 Phase 2
-  step 2) extends that output with bounded conversation context and requires
-  per-category citations of extractor output or explicitly raw-verified
-  evidence inside the emitted bounded window (see Evidence Extractor Output
-  Contract and Per-Category Required Evidence below). The raw trace is still
-  fed through the existing analysis runner, and the existing six raw tools
-  stay available unchanged as the verification path.
+  step 2) extends that output with bounded conversation context. Issue #59
+  prompt template v5 requires exact extractor-index references for the
+  machine-readable receipt and adds `submit_instruction_finding`; other raw
+  tools remain available for the local markdown analysis but cannot authorize
+  receipt evidence outside that index.
 - The focus value rides the existing `POST /traces/{traceId}/analysis`
-  payload. No new routes, no schema change, and no new API fields.
+  payload. There is no new public route or API field. Additive local SQLite
+  storage holds the repository-safe handoff; raw analysis storage and the
+  existing public route shapes remain unchanged.
 
 ## Focus Value
 
@@ -39,26 +43,30 @@ available, and reports findings in a fixed per-finding format.
 - The D045 history-resend follow-up chat works with this focus like any
   other focus.
 
-## Taxonomy v1
+## Finding Taxonomy v1
 
 Coupling rule: a category exists in this taxonomy only together with a
 defined analyzed-trace or bounded same-conversation evidence pattern. Adding a
 category requires adding its evidence pattern in the same change.
 
-| Category id | Name (JA) | Definition | Required trace / bounded-conversation evidence pattern |
-| --- | --- | --- | --- |
-| `goal-clarity` | 目標の明確さ | The instruction does not state the intended outcome. | User follow-up turns that redirect or redefine the goal after work started; discarded or redone agent output (rework turns, tokens spent on abandoned work). |
-| `ambiguity` | 曖昧さ | The instruction admits multiple readings. | A rephrased or clarified instruction in a later user turn; agent clarifying-question turns; divergent exploration before the user disambiguates. |
-| `missing-acceptance-criteria` | 受け入れ基準の欠如 | The instruction has no verifiable done-condition. | User correction turns after the agent declares completion; extra user-initiated verification turns. |
-| `task-size-split` | タスク粒度・分割 | The instruction bundles too much work for one run. | A long multi-goal trace with mid-trace error spans or retries; token totals concentrated in retried segments; follow-up turns re-scoping the work to a subset. |
-| `missing-context-constraints` | 前提・制約の欠如 | The instruction omits environment facts or constraints the agent needed. | Failed or retried tool calls, or error spans, that resolve only after a user turn supplies the missing information. |
+| Category id | Name (JA) | Definition | Deterministically checkable evidence | Permitted interpretation | Minimum `supported` pattern |
+| --- | --- | --- | --- | --- | --- |
+| `goal_clarity` | 目標の明確さ | The intended outcome is not sufficiently pinned. | Two distinct exact turn references. | Whether the later turn redirects or redefines the goal. | Two distinct turns and a producer-assessed `supported` verdict. |
+| `ambiguity` | 曖昧さ | The instruction admits multiple materially different readings. | Two distinct turns, or anchor plus bounded sibling trace references. | Whether the later evidence is a clarification or disambiguation. | Either two distinct turns or two distinct traces including the anchor, plus a producer-assessed `supported` verdict. |
+| `acceptance_criteria_missing` | 受け入れ基準の欠如 | No verifiable done-condition was stated. | Two distinct exact turn references. | Whether a later turn corrects completion or adds verification. | Two distinct turns and a producer-assessed `supported` verdict. |
+| `scope_boundary_missing` | スコープ境界の欠如 | Included and excluded work was not bounded. | At least one exact turn plus one exact error/retry span. | Whether the failure or rework resulted from an unstated boundary. | A turn and an error/retry span, plus a producer-assessed `supported` verdict. |
+| `task_too_large` | タスク過大 | The instruction bundles too much work for one bounded run. | The exact instruction span plus two distinct turn references. | Whether the instruction is multi-goal and the later turns show concentration or re-scoping. | The instruction span and two distinct turns, plus a producer-assessed `supported` verdict. |
+| `test_requirement_missing` | テスト要件の欠如 | Required test scope was not stated before completion. | Two distinct exact turn references. | Whether a later turn adds or corrects test requirements. | Two distinct turns and a producer-assessed `supported` verdict. |
+| `evidence_requirement_missing` | 証跡要件の欠如 | Required completion evidence or artifact checks were not stated. | Two distinct exact turn references. | Whether a later turn asks for missing proof or artifact existence. | Two distinct turns and a producer-assessed `supported` verdict. |
+| `environment_assumption_missing` | 環境前提の欠如 | An environment fact or constraint needed for execution was omitted. | At least one exact turn plus one exact error/retry span. | Whether the later turn supplies the missing environment fact. | A turn and an error/retry span, plus a producer-assessed `supported` verdict. |
 
-Disambiguation note: `missing-context-constraints` is distinguished from
-`ambiguity` by evidence type — execution failure resolved by supplied
-information versus instruction rephrasing.
+Disambiguation note: `environment_assumption_missing` is distinguished from
+`ambiguity` by evidence type: execution failure or retry resolved by supplied
+environment information versus instruction rephrasing.
 
-Category ids are prompt-template and output vocabulary. They are not API
-fields and not schema.
+Category ids are closed receipt values. Adding a category requires the evidence
+pattern, deterministic fact boundary, permitted interpretation, positive
+fixture, negative fixture, and eligibility rule in the same versioned change.
 
 ## Evidence Extractor Output Contract
 
@@ -153,11 +161,14 @@ first. Each finding must ground its category in extractor output as follows:
 
 | Category id | Required extractor evidence |
 | --- | --- |
-| `goal-clarity` | Turn-level evidence of the analyzed trace: `turn_tokens` entries and/or spans verified through the raw tools. |
-| `ambiguity` | User rephrase evidence: `conversation_context` sibling metadata plus corrective wording inside the analyzed trace or a bounded sibling trace. |
-| `missing-acceptance-criteria` | Turn-level evidence of the analyzed trace: `turn_tokens` entries and/or spans verified through the raw tools. |
-| `task-size-split` | Both a multi-goal `user_instruction` descriptor and a `turn_tokens` concentration (the concentrated turns must be named). |
-| `missing-context-constraints` | At least one `error_spans` or `retry_chains` entry cited by span id. |
+| `goal_clarity` | Two exact `turn_tokens` entries from the analyzed trace. |
+| `ambiguity` | Two exact turns, or the anchor plus one emitted `conversation_context` sibling trace. |
+| `acceptance_criteria_missing` | Two exact `turn_tokens` entries from the analyzed trace. |
+| `scope_boundary_missing` | One exact analyzed-trace turn plus one analyzed-trace span in `error_spans` or `retry_chains`. |
+| `task_too_large` | The analyzed-trace `user_instruction` span plus two exact analyzed-trace `turn_tokens` entries. |
+| `test_requirement_missing` | Two exact `turn_tokens` entries from the analyzed trace. |
+| `evidence_requirement_missing` | Two exact `turn_tokens` entries from the analyzed trace. |
+| `environment_assumption_missing` | One exact analyzed-trace turn plus one analyzed-trace span in `error_spans` or `retry_chains`. |
 
 Conversation-scope rules:
 
@@ -177,29 +188,28 @@ Conversation-scope rules:
 - Sibling instruction descriptors must not be copied verbatim into the final
   report beyond short factual references.
 
-Escape hatch: a finding grounded outside the extractor output is allowed only
-with a span id citation explicitly verified through the raw tools in the same
-session, and the finding must state that verification. For sibling evidence,
-the verified span must still belong to a trace emitted in
-`conversation_context.traces[]`. Discovery of evidence the extractor cannot see
-stays possible through this hatch.
+There is no raw-tool escape hatch for the machine-readable receipt. Evidence
+that does not resolve exactly in this deterministic index cannot be submitted
+as a receipt, even if the model inspected it through another process-internal
+tool.
 
 ## Per-Finding Output Contract
 
-Each finding must contain exactly these four parts:
+Each accepted finding in the local markdown result contains these four parts:
 
 1. Category: exactly one taxonomy category id.
 2. Evidence citation: span id(s), turn number(s), and/or sibling trace id(s)
    that exist in the analyzed trace or emitted `conversation_context.traces[]`,
    with a short factual descriptor. Long raw bodies must not be copied into the
    finding.
-3. Gap explanation: what the instruction lacked, tied to the cited evidence.
-4. Improved next-time instruction: a concrete rewrite the user could give
-   next time.
+3. Gap explanation: the fixed taxonomy `gap_summary`.
+4. Improved next-time instruction: the fixed taxonomy
+   `suggested_instruction`.
 
 Rules:
 
-- A finding without a citable evidence reference is forbidden.
+- A finding without an accepted `submit_instruction_finding` call is
+  forbidden.
 - Citations must refer to spans/turns present in the analyzed trace or trace
   ids present in the emitted bounded conversation window. The Sprint21 M5
   live-validation gate checks citation existence, trace-specificity, bounded
@@ -208,8 +218,277 @@ Rules:
 - Findings, including the improved next-time instruction, are written in
   Japanese, so the rewrite is usable verbatim as the user's next
   instruction. Other focuses stay language-unpinned.
-- The result is markdown inside the existing analysis run result and remains
-  local runtime data. No new schema.
+- The result markdown remains local raw-derived runtime data. The separate
+  machine-readable handoff below is the only new versioned schema; it is not
+  embedded as model-authored JSON in the markdown result.
+
+## Process-Internal Finding Submission
+
+`instruction-diagnosis` adds the process-internal SDK tool
+`submit_instruction_finding`. It is not an HTTP route and is not available to
+other focuses. The model calls it once for each proposed finding before
+writing the final markdown. Its exact string parameters are:
+
+| Parameter | Contract |
+| --- | --- |
+| `category` | One closed v1 category value. |
+| `verdict` | `supported`, `weak`, or `incomplete`. |
+| `extractor_source` | `deterministic_prepass` or `prompt_only`. |
+| `evidence_refs_json` | A raw-local JSON array containing only exact evidence-reference objects returned by the extractor. |
+
+No gap, instruction, title, rule, or other free-text field is accepted. The
+bounded response is exactly `{"status":"accepted"}` or
+`{"status":"rejected","code":"<closed-code>"}`. A rejected submission is
+not retained and may not appear in the final finding report. No submission is
+the valid zero-finding path. Submission rejection codes are closed to
+`invalid_contract`, `invalid_serialization`,
+`unresolved_evidence_reference`, and `invalid_derived_identity`. Persistence
+uses the separate internal codes `conflicting_persistence` and
+`invalid_persistence`.
+
+Submission references are raw-local inputs used only to resolve the exact
+extractor index. After validation, each non-null Session, trace, and span ID is
+replaced by a deterministic domain-separated opaque reference before any
+receipt, candidate, JSON carrier, or persistence write is constructed. Raw IDs
+never cross into the repository-safe handoff.
+
+## Machine-Readable Finding Handoff v1
+
+The Issue #59 handoff is an internal bounded DTO and a canonical JSON carrier.
+Its structural source of truth is
+[`instruction-finding-handoff.schema.json`](../contracts/instruction-findings/v1/instruction-finding-handoff.schema.json).
+It is not a new HTTP route. Exact .NET type names are:
+
+- `InstructionRawEvidenceReferenceV1` (raw-local submission/index only)
+- `InstructionEvidenceReferenceV1`
+- `InstructionFindingReceiptV1`
+- `InstructionRuleProvenanceV1`
+- `InstructionRuleCandidateV1`
+- `InstructionFindingHandoffV1`
+
+The three exact schema-version values are:
+
+- finding: `instruction-finding.v1`
+- candidate: `instruction-rule-candidate.v1`
+- handoff: `instruction-finding-handoff.v1`
+
+The closed wire vocabularies are:
+
+| Field | Values |
+| --- | --- |
+| `category` | `goal_clarity`, `ambiguity`, `acceptance_criteria_missing`, `scope_boundary_missing`, `task_too_large`, `test_requirement_missing`, `evidence_requirement_missing`, `environment_assumption_missing` |
+| `verdict` | `supported`, `weak`, `incomplete` |
+| `extractor_source` | `deterministic_prepass`, `prompt_only` |
+| `relative_position` | `anchor`, `previous`, `following` |
+| `evidence_quote_state` | `raw_local_only` |
+| `candidate_eligibility` | `eligible`, `ineligible` |
+| `target_kind` | `prompt_instruction` |
+| `scope_hint` | `task`, `repository` |
+
+`InstructionFindingReceiptV1` has this exact JSON shape and property order:
+
+```json
+{
+  "schema_version": "instruction-finding.v1",
+  "finding_id": "instruction-finding-<24-lowercase-hex>",
+  "analysis_run_id": 123,
+  "category": "acceptance_criteria_missing",
+  "verdict": "supported",
+  "extractor_source": "deterministic_prepass",
+  "anchor_trace_id": "trace-ref-f5ae5df5128a218007b6681270f7ff01",
+  "evidence_refs": [
+    {
+      "session_id": null,
+      "trace_id": "trace-ref-f5ae5df5128a218007b6681270f7ff01",
+      "span_id": "span-ref-349edfe8b40889b23c198307e6a28602",
+      "turn_index": 1,
+      "relative_position": "anchor"
+    },
+    {
+      "session_id": null,
+      "trace_id": "trace-ref-f5ae5df5128a218007b6681270f7ff01",
+      "span_id": "span-ref-4fd8fb963e88a87d6a94c68bd275ef96",
+      "turn_index": 2,
+      "relative_position": "anchor"
+    }
+  ],
+  "evidence_quote_state": "raw_local_only",
+  "gap_summary": "完了条件を確認できる証拠が不足している。",
+  "suggested_instruction": "実装前に完了条件と、それを確認する必須テストを明記する。",
+  "candidate_eligibility": "eligible"
+}
+```
+
+Rules:
+
+- `analysis_run_id` is a positive signed 64-bit integer.
+- `finding_id` is unique within the run. Duplicate canonical findings collapse
+  to one receipt. If duplicate submissions assess different verdicts, the
+  least-strong verdict wins (`incomplete` before `weak` before `supported`),
+  independent of submission order.
+- Repository-safe references have exact forms
+  `session-ref-<32-lowercase-hex>`, `trace-ref-<32-lowercase-hex>`, and
+  `span-ref-<32-lowercase-hex>`. They are derived opaque tokens, never source
+  IDs, bodies, labels, or paths.
+- `evidence_refs` is nonempty. Its canonical order is `session_id` (null first),
+  `trace_id`, `span_id` (null first), `turn_index` (null first), then
+  `relative_position` (`anchor`, `previous`, `following` order). String fields
+  use ordinal comparison. Exact duplicate references collapse.
+- `span_id` and `turn_index` may not both be null. `turn_index`, when present,
+  is positive.
+- `anchor` requires the derived anchor trace reference. `previous` and
+  `following` require a derived reference for an emitted bounded sibling trace
+  on the corresponding side.
+- Each raw-local submission reference must resolve before tokenization: a span
+  reference resolves only when that exact span is present in the deterministic
+  evidence index for the referenced trace, and a turn reference resolves only
+  when that exact 1-based turn exists for the referenced trace. Receipt
+  references are the kind-specific tokens of those already-resolved raw-local
+  inputs; consumers do not re-resolve them as source IDs. Trace proximity,
+  repository, timestamp, text similarity, and guessed session linkage never
+  resolve evidence.
+- An unresolved raw-local reference rejects the finding before a receipt is
+  constructed. It is never persisted as a weaker receipt and never becomes a
+  candidate.
+- Unsupported category, schema, or enum values are rejected. There is no
+  `unsupported` verdict in v1.
+- `gap_summary` and `suggested_instruction` come only from the fixed taxonomy
+  templates below. Arbitrary model text is never copied into this carrier.
+
+### Verdict and eligibility
+
+The producer supplies an assessed verdict, but the pipeline deterministically
+enforces the category minimum:
+
+1. Validate every raw-local submission reference exactly. Any unresolved
+   reference rejects the finding before repository-safe tokenization.
+2. `incomplete` stays `incomplete`.
+3. `weak` stays `weak`.
+4. An assessed `supported` becomes `supported` only when the category's minimum
+   evidence pattern is satisfied; otherwise it is downgraded to `weak`.
+5. Only final `supported` is `eligible`. `weak` and `incomplete` are
+   `ineligible`.
+
+`extractor_source` records how the finding itself was produced. It does not
+upgrade the verdict. A `prompt_only` finding can be supported only when its
+exact deterministic evidence references meet the same minimum. A
+`deterministic_prepass` finding does not authorize semantic claims outside the
+taxonomy's deterministically checkable facts.
+
+The fixed safe text and targeting templates are:
+
+| Category | `gap_summary` | `suggested_instruction` / candidate `rule_text` | `title` | `target_hint` | `scope_hint` |
+| --- | --- | --- | --- | --- | --- |
+| `goal_clarity` | `達成する成果の定義が不足している。` | `作業開始前に、達成する成果と利用者が判断できる終了状態を明記する。` | `Goal clarity` | `task_prompt` | `task` |
+| `ambiguity` | `複数の解釈を防ぐ指定が不足している。` | `複数の解釈が可能な語は、期待する解釈と除外する解釈を明記する。` | `Disambiguate instructions` | `task_prompt` | `task` |
+| `acceptance_criteria_missing` | `完了条件を確認できる証拠が不足している。` | `実装前に完了条件と、それを確認する必須テストを明記する。` | `Acceptance criteria` | `task_prompt` | `task` |
+| `scope_boundary_missing` | `実施範囲と非対象範囲の境界が不足している。` | `着手前に実施範囲、非対象範囲、変更してよい対象を明記する。` | `Scope boundaries` | `repository_guidance` | `repository` |
+| `task_too_large` | `一回の実行に対して作業範囲が大きすぎる。` | `独立して検証できる単位に作業を分割し、各単位の完了条件を明記する。` | `Bound task size` | `task_prompt` | `task` |
+| `test_requirement_missing` | `必要なテスト範囲の指定が不足している。` | `変更前に実行する対象テストと、完了前に実行する回帰テストを明記する。` | `Test requirements` | `repository_guidance` | `repository` |
+| `evidence_requirement_missing` | `完了時に残す証跡の指定が不足している。` | `完了を宣言する前に、必須テスト結果と必要な証跡の存在を確認する。` | `Evidence requirements` | `repository_guidance` | `repository` |
+| `environment_assumption_missing` | `実行に必要な環境前提の指定が不足している。` | `着手前に、必要な実行環境、利用可能なツール、禁止された代替経路を明記する。` | `Environment assumptions` | `repository_guidance` | `repository` |
+
+## Instruction Rule Candidate v1
+
+Only eligible receipts generate candidates. The exact JSON shape and property
+order are:
+
+```json
+{
+  "schema_version": "instruction-rule-candidate.v1",
+  "candidate_id": "instruction-rule-<24-lowercase-hex>",
+  "deduplication_key": "instruction-rule-dedup-<24-lowercase-hex>",
+  "source_finding_ids": ["instruction-finding-<24-lowercase-hex>"],
+  "title": "Evidence requirements",
+  "rule_text": "完了を宣言する前に、必須テスト結果と必要な証跡の存在を確認する。",
+  "target_kind": "prompt_instruction",
+  "target_hint": "repository_guidance",
+  "scope_hint": "repository",
+  "provenance": {
+    "analysis_run_id": 123,
+    "trace_refs": ["trace-ref-f5ae5df5128a218007b6681270f7ff01"]
+  }
+}
+```
+
+- `deduplication_key` depends only on schema major, category, target kind,
+  target hint, scope hint, and the fixed rule-template version. It does not
+  depend on input order, run ID, finding ID, or trace ID.
+- Equal deduplication keys collapse to one candidate. Source finding IDs and
+  trace refs are distinct and ordinally sorted.
+- `candidate_id` is derived from the deduplication key using a separate hash
+  domain and is therefore stable across analysis runs for the same rule.
+- Target values are hints only. They grant no file, proposal, apply, or git
+  authority.
+
+## Deterministic Identity
+
+Finding IDs, deduplication keys, and candidate IDs use SHA-256 over a fixed UTF-8
+domain followed by length-framed canonical fields. Each field is encoded as a
+four-byte unsigned big-endian byte length followed by its UTF-8 bytes; null is
+encoded with length `0xffffffff`; integers use invariant decimal text. Only the
+first 12 digest bytes are rendered as 24 lowercase hexadecimal characters.
+
+- Finding domain: `copilot-agent-observability/instruction-finding/v1`.
+  Fields are analysis run ID, category, extractor source, and the canonical
+  evidence-reference tuples. The assessed/final verdict and generated text do
+  not change identity.
+- Dedup domain: `copilot-agent-observability/instruction-rule-dedup/v1`.
+  Fields are category, target kind, target hint, scope hint, and template
+  version `instruction-rule-template.v1`.
+- Candidate domain: `copilot-agent-observability/instruction-rule/v1`.
+  The sole field is the complete deduplication key.
+
+Repository-safe reference tokens use the same four-byte big-endian
+length-framing rule and the first 16 SHA-256 digest bytes (32 lowercase hex).
+The domains are
+`copilot-agent-observability/instruction-session-reference/v1`,
+`copilot-agent-observability/instruction-trace-reference/v1`, and
+`copilot-agent-observability/instruction-span-reference/v1`; the sole framed
+field is the corresponding exact raw-local ID. Domain separation prevents a
+value reused across identifier kinds from producing the same token.
+
+## Handoff, Serialization, And Persistence
+
+`InstructionFindingHandoffV1` has exact fields
+`schema_version`, `analysis_run_id`, `findings`, and `candidates`, in that
+order. Findings and candidates are ordinally ordered by their IDs. Canonical
+JSON is UTF-8 without BOM, indentation, or trailing newline. It includes null
+evidence-reference fields, uses the exact snake_case names above, and rejects
+unknown properties and non-string enum values on read.
+
+Local persistence is additive table `instruction_finding_handoffs`:
+
+```text
+analysis_run_id INTEGER PRIMARY KEY
+schema_version TEXT NOT NULL
+payload_json TEXT NOT NULL
+payload_sha256 TEXT NOT NULL
+created_at TEXT NOT NULL
+```
+
+`payload_sha256` is the lowercase SHA-256 of the exact UTF-8 `payload_json`
+bytes. A write validates the typed handoff, serializes it canonically, and uses
+insert-or-identical semantics: a second write for the same run succeeds only
+when schema, payload bytes, and checksum are identical. A conflicting rewrite
+fails. A read verifies schema, checksum, strict deserialization, all derived
+ids, ordering, and candidate/source-finding consistency before returning the
+DTO. The successful analysis-result update and handoff insert occur in the
+same SQLite transaction; neither may commit without the other.
+
+Consumer handoff:
+
+- Issue #72 may retain only existing `finding_id` references and, when needed,
+  the already-tokenized receipt references in its bounded evidence dataset. It
+  never retains the raw-local submission IDs and does not copy or redefine the
+  receipt schema.
+- Issue #73 constructs assessed finding drafts from the frozen #72 dataset,
+  supplies the exact evidence index, and consumes `InstructionFindingHandoffV1`.
+  It may add no category or field locally. Invalid citations are rejected;
+  zero findings is a valid handoff with empty arrays.
+- Issue #85 may export only the canonical handoff JSON after its own bundle
+  repository-safe scanner succeeds. It must preserve IDs, provenance, schema
+  versions, nulls, and byte ordering.
 
 ## Safety Boundary
 
@@ -223,17 +502,26 @@ unchanged:
   bodies.
 - `--sanitized-only` removes the whole raw analysis surface, including this
   focus.
+- The finding handoff remains usable in sanitized consumers because it contains
+  only derived opaque reference tokens, closed classifications, numeric run
+  identity, and fixed templates. It never accepts model-supplied summary,
+  instruction, title, rule text, or a raw Session/trace/span ID.
+- Generated text may not contain a raw prompt/response/tool body, source-code
+  or file fragment, credential, PII, or local path. The fixed-template-only
+  construction is the v1 enforcement mechanism; a permissive free-text scanner
+  is not a substitute.
 
 ## Change Rules
 
-- Taxonomy changes must preserve the category-evidence coupling rule; a
-  category addition or removal updates this specification and the analysis
-  prompt template together.
+- Taxonomy or field changes require a named contract-version change and update
+  this specification, the JSON Schema, the canonical fixture, the analysis
+  prompt template, and positive/negative compatibility tests together.
 - Wire-value changes must update
   [telemetry ingestion](../layers/telemetry-ingestion.md) and the focus
   parse tests together.
-- Output-contract changes must update this specification, the prompt
-  template, and `docs/requirements.md` together.
+- Output-contract changes must update this specification, the prompt template,
+  and the Wave integration-owner edits to `docs/requirements.md`,
+  `docs/spec.md`, and `docs/decisions.md` together.
 - Extractor-field or per-category coupling-rule changes must update this
   specification, the relevant decision (D047 / D048), and the prompt template
   together.

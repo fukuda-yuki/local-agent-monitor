@@ -80,13 +80,15 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
             }
             Exception? primaryFailure = null;
             string result;
+            InstructionFindingHandoffV1? instructionFindingHandoff = null;
             try
             {
                 using var leaseCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, scope.LeaseLostToken);
                 fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "loading_local_tool_data", timeProvider.GetUtcNow());
                 await using var data = await MonitorAnalysisToolData.CreateAsync(projectionStore, context, leaseCancellation.Token);
                 result = await executor.ExecuteAsync(scope.ChildDirectory, settings.ToExecutionSettings(), new CopilotAnalysisToolRequest(BuildPrompt(context), data), leaseCancellation.Token);
-            if (scope.IsLeaseLost) throw new AnalysisOwnershipException();
+                instructionFindingHandoff = data.InstructionFindingCollector?.BuildHandoff();
+                if (scope.IsLeaseLost) throw new AnalysisOwnershipException();
             }
             catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && (scope.IsLeaseLost || scope.LeaseLostToken.IsCancellationRequested))
             {
@@ -113,7 +115,10 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 }
             }
             if (scope.IsLeaseLost) throw new AnalysisOwnershipException();
-            fence = analysisStore.CompleteRun(context.RunId, operationToken, fence, result, timeProvider.GetUtcNow());
+            var completedAt = timeProvider.GetUtcNow();
+            fence = instructionFindingHandoff is null
+                ? analysisStore.CompleteRun(context.RunId, operationToken, fence, result, completedAt)
+                : analysisStore.CompleteInstructionDiagnosisRun(context.RunId, operationToken, fence, result, instructionFindingHandoff, completedAt);
         }
         catch (OperationCanceledException)
         {
@@ -154,11 +159,9 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
     }
 
     /// <summary>
-    /// Instruction-diagnosis prompt block (D046 + D047 + D048, prompt template v4):
-    /// taxonomy v1 with the category=evidence coupling, the per-category
-    /// required-evidence rules grounding each finding in the
-    /// <c>get_instruction_evidence</c> output (with a raw-verified escape hatch),
-    /// the fixed 4-part finding format, and the no-evidence-no-finding rule,
+    /// Instruction-diagnosis prompt block (Issue #59, prompt template v5):
+    /// taxonomy v1 with category-specific evidence minima, exact references
+    /// from <c>get_instruction_evidence</c>, and process-internal submission,
     /// mirroring docs/specifications/interfaces/instruction-diagnosis-analysis.md.
     /// Internal for tests.
     /// </summary>
@@ -166,24 +169,18 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         """
         Diagnose the implementation instructions the user gave the agent, using the analyzed trace as the anchor plus bounded same-conversation sibling trace evidence when available.
         Classify each finding into exactly one taxonomy v1 category:
-        - goal-clarity: the instruction does not state the intended outcome. Evidence: user follow-up turns that redirect or redefine the goal after work started; discarded or redone agent output (rework turns, tokens spent on abandoned work).
-        - ambiguity: the instruction admits multiple readings. Evidence: a rephrased or clarified instruction in a later user turn; agent clarifying-question turns; divergent exploration before the user disambiguates.
-        - missing-acceptance-criteria: the instruction has no verifiable done-condition. Evidence: user correction turns after the agent declares completion; extra user-initiated verification turns.
-        - task-size-split: the instruction bundles too much work for one run. Evidence: a long multi-goal trace with mid-trace error spans or retries; token totals concentrated in retried segments; follow-up turns re-scoping the work to a subset.
-        - missing-context-constraints: the instruction omits environment facts or constraints the agent needed. Evidence: failed or retried tool calls, or error spans, that resolve only after a user turn supplies the missing information. (Distinguished from ambiguity by evidence type: execution failure resolved by supplied information, not instruction rephrasing.)
-        Evidence grounding rules (v4): call get_instruction_evidence first. It returns deterministic, code-extracted evidence: error_spans, retry_chains, turn_tokens, user_instruction, conversation, and conversation_context. Each finding must ground its category in that output as follows:
-        - missing-context-constraints: cite at least one error_spans or retry_chains entry by span id.
-        - task-size-split: cite both a multi-goal user_instruction descriptor and a turn_tokens concentration (name the concentrated turns).
-        - ambiguity: cite user rephrase evidence - conversation_context sibling metadata plus the corrective wording inside the analyzed trace or a bounded sibling trace.
-        - goal-clarity and missing-acceptance-criteria: cite turn-level evidence of the analyzed trace (turn_tokens entries and/or spans you verified through the raw tools).
-        Conversation scope rules: treat the analyzed trace as the anchor. Use conversation_context.traces[] only as a bounded window of supporting evidence. A sibling trace citation must include the sibling trace_id and relative_position and must explain how that previous or following sibling trace relates to the analyzed trace. Do not cite or imply evidence outside the bounded window. If the only proof would be outside the bounded window, state that the bounded evidence is insufficient instead of inferring from missing context. Do not copy sibling instruction descriptors verbatim beyond short factual references.
-        - Escape hatch: a finding grounded outside the extractor output is allowed only with a raw-verified span id you explicitly checked through the raw tools in this session; state that raw-verified citation in the finding. Sibling raw-verified evidence must still belong to a trace_id emitted in conversation_context.traces[]. Discovery of evidence the extractor cannot see stays possible through this hatch.
-        Report each finding with exactly these four parts:
-        1. Category: exactly one taxonomy category id.
-        2. Evidence citation: span id(s), turn number(s), and/or sibling trace_id(s) that exist in the analyzed trace or emitted conversation_context.traces[], with a short factual descriptor. Do not copy long raw bodies.
-        3. Gap explanation: what the instruction lacked, tied to the cited evidence.
-        4. Improved next-time instruction: a concrete rewrite the user could give next time.
-        Rules: a finding without a citable evidence reference is forbidden. Citations must refer to spans/turns present in the analyzed trace or trace_id values present in the emitted bounded window. Zero findings is a valid result and must be stated explicitly.
+        - goal_clarity: the intended outcome is unclear; requires at least two turn references.
+        - ambiguity: multiple readings remain; requires at least two turn references, or anchor plus bounded sibling trace evidence.
+        - acceptance_criteria_missing: no verifiable done-condition; requires at least two turn references.
+        - scope_boundary_missing: excluded work is unclear; requires a turn reference plus an error or retry span.
+        - task_too_large: too many goals are bundled; requires two turn references plus the user_instruction span.
+        - test_requirement_missing: required verification is absent; requires at least two turn references.
+        - evidence_requirement_missing: required evidence is absent; requires at least two turn references.
+        - environment_assumption_missing: an environment fact is unstated; requires a turn reference plus an error or retry span.
+        Call get_instruction_evidence first. It returns deterministic, code-extracted evidence: error_spans, retry_chains, turn_tokens, user_instruction, conversation, and conversation_context. Except for ambiguity's bounded sibling supplement, every category minimum uses the required turn, error/retry, and instruction references from the anchor trace. Sibling-only evidence is insufficient. Use conversation_context only as the emitted bounded window and never infer evidence outside the bounded window.
+        Assess the verdict as supported, weak, or incomplete. Weak and incomplete findings are preserved but are never eligible for rule candidates. Do not upgrade weak or incomplete evidence.
+        For every proposed finding, call submit_instruction_finding exactly once before writing the final report. Pass only category, verdict, extractor_source (deterministic_prepass or prompt_only), and evidence_refs_json. evidence_refs_json must be a JSON array of exact evidence references from get_instruction_evidence, including trace_id, relative_position, and at least one of span_id or turn_index. Do not pass gap text, suggested instruction text, raw prompts, outputs, tool arguments/results, source code, secrets, personal data, or paths. The tool validates references and returns accepted or rejected with a bounded code.
+        A finding without an accepted submission is forbidden. Do not report a rejected submission. Zero findings is valid: make no submission and state that no supported finding was identified. For accepted findings, cite only the submitted span, turn, and trace identifiers; do not copy raw bodies. Repository-safe gap summaries and candidate instruction text are fixed templates generated by code, not model output.
         Output language rule: the entire final report - headings, findings, gap explanations, improved next-time instructions, and the assessment of non-applicable categories - must be written in Japanese. Do not write the report in Chinese or English. 最終レポート全体（見出し・所見・改善指示・非該当カテゴリの評価を含む）は必ず日本語で書くこと。
         Respond with the final markdown report only; do not narrate tool usage before it.
         """;
@@ -339,6 +336,7 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
         object traceSpanTree,
         object cacheSummary,
         InstructionEvidence instructionEvidence,
+        InstructionFindingSubmissionCollectorV1? instructionFindingCollector,
         RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>? rawLease)
     {
         RawTrace = rawTrace;
@@ -348,6 +346,7 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
         TraceSpanTree = traceSpanTree;
         CacheSummary = cacheSummary;
         InstructionEvidence = instructionEvidence;
+        InstructionFindingCollector = instructionFindingCollector;
         this.rawLease = rawLease;
     }
 
@@ -358,6 +357,7 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
     public object TraceSpanTree { get; }
     public object CacheSummary { get; }
     public InstructionEvidence InstructionEvidence { get; }
+    public InstructionFindingSubmissionCollectorV1? InstructionFindingCollector { get; }
 
     public ValueTask DisposeAsync() => rawLease?.DisposeAsync() ?? ValueTask.CompletedTask;
 
@@ -509,6 +509,11 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
                     },
                 },
                 instructionEvidence,
+                context.Focus == MonitorAnalysisFocus.InstructionDiagnosis
+                    ? new InstructionFindingSubmissionCollectorV1(
+                        context.RunId,
+                        InstructionFindingEvidenceIndexV1.FromInstructionEvidence(context.TraceId, instructionEvidence))
+                    : null,
                 rawLease);
         }
         catch

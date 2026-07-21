@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-agent-monitor.invalid/contracts/instruction-findings/v1/instruction-finding-handoff.schema.json",
+  "title": "Instruction finding handoff v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "analysis_run_id", "findings", "candidates"],
+  "properties": {
+    "schema_version": { "const": "instruction-finding-handoff.v1" },
+    "analysis_run_id": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+    "findings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "candidates": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/candidate" }
+    }
+  },
+  "$defs": {
+    "sessionRef": {
+      "type": "string",
+      "pattern": "^session-ref-[0-9a-f]{32}$"
+    },
+    "traceRef": {
+      "type": "string",
+      "pattern": "^trace-ref-[0-9a-f]{32}$"
+    },
+    "spanRef": {
+      "type": "string",
+      "pattern": "^span-ref-[0-9a-f]{32}$"
+    },
+    "nullableSessionRef": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sessionRef" }
+      ]
+    },
+    "nullableSpanRef": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/spanRef" }
+      ]
+    },
+    "category": {
+      "enum": [
+        "goal_clarity",
+        "ambiguity",
+        "acceptance_criteria_missing",
+        "scope_boundary_missing",
+        "task_too_large",
+        "test_requirement_missing",
+        "evidence_requirement_missing",
+        "environment_assumption_missing"
+      ]
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "trace_id", "span_id", "turn_index", "relative_position"],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/nullableSessionRef" },
+        "trace_id": { "$ref": "#/$defs/traceRef" },
+        "span_id": { "$ref": "#/$defs/nullableSpanRef" },
+        "turn_index": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+          ]
+        },
+        "relative_position": { "enum": ["anchor", "previous", "following"] }
+      },
+      "anyOf": [
+        { "required": ["span_id"], "properties": { "span_id": { "type": "string" } } },
+        { "required": ["turn_index"], "properties": { "turn_index": { "type": "integer" } } }
+      ]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "finding_id",
+        "analysis_run_id",
+        "category",
+        "verdict",
+        "extractor_source",
+        "anchor_trace_id",
+        "evidence_refs",
+        "evidence_quote_state",
+        "gap_summary",
+        "suggested_instruction",
+        "candidate_eligibility"
+      ],
+      "properties": {
+        "schema_version": { "const": "instruction-finding.v1" },
+        "finding_id": { "type": "string", "pattern": "^instruction-finding-[0-9a-f]{24}$" },
+        "analysis_run_id": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+        "category": { "$ref": "#/$defs/category" },
+        "verdict": { "enum": ["supported", "weak", "incomplete"] },
+        "extractor_source": { "enum": ["deterministic_prepass", "prompt_only"] },
+        "anchor_trace_id": { "$ref": "#/$defs/traceRef" },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/evidenceRef" }
+        },
+        "evidence_quote_state": { "const": "raw_local_only" },
+        "gap_summary": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "suggested_instruction": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "candidate_eligibility": { "enum": ["eligible", "ineligible"] }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analysis_run_id", "trace_refs"],
+      "properties": {
+        "analysis_run_id": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+        "trace_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/traceRef" }
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "candidate_id",
+        "deduplication_key",
+        "source_finding_ids",
+        "title",
+        "rule_text",
+        "target_kind",
+        "target_hint",
+        "scope_hint",
+        "provenance"
+      ],
+      "properties": {
+        "schema_version": { "const": "instruction-rule-candidate.v1" },
+        "candidate_id": { "type": "string", "pattern": "^instruction-rule-[0-9a-f]{24}$" },
+        "deduplication_key": { "type": "string", "pattern": "^instruction-rule-dedup-[0-9a-f]{24}$" },
+        "source_finding_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^instruction-finding-[0-9a-f]{24}$" }
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "rule_text": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "target_kind": { "const": "prompt_instruction" },
+        "target_hint": { "enum": ["task_prompt", "repository_guidance"] },
+        "scope_hint": { "enum": ["task", "repository"] },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    }
+  }
+}
