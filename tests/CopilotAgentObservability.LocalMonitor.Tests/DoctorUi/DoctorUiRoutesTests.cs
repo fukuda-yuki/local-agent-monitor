@@ -13,7 +13,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.DoctorUi;
 public sealed class DoctorUiRoutesTests
 {
     private const string VerificationId = "0190c7a0-0000-7000-8000-000000000001";
-    private const string Envelope = "{\"contract_version\":\"first-trace.v1\",\"command\":\"status\",\"success\":true,\"code\":\"verification_active\",\"adapter\":\"github-copilot-cli\",\"source_surface\":\"github-copilot-cli\",\"verification_id\":\"0190c7a0-0000-7000-8000-000000000001\",\"doctor\":{\"verification\":{\"accepted_evidence_refs\":[\"receipt-1\",\"receipt-2\",\"receipt-3\"]}},\"evaluation_preview\":null,\"guidance\":[],\"candidates\":[],\"truncated\":false}";
+    private const string Envelope = "{\"contract_version\":\"first-trace.v1\",\"command\":\"status\",\"success\":true,\"code\":\"verification_active\",\"adapter\":\"github-copilot-cli\",\"source_surface\":\"github-copilot-cli\",\"verification_id\":\"0190c7a0-0000-7000-8000-000000000001\",\"doctor\":{\"evaluation\":{\"states\":[{\"evidence_refs\":[\"receipt-1\",\"receipt-2\",\"receipt-3\"]}]},\"verification\":{\"accepted_evidence_refs\":[\"receipt-1\",\"receipt-2\",\"receipt-3\"]}},\"evaluation_preview\":null,\"guidance\":[],\"candidates\":[],\"truncated\":false}";
 
     [Fact]
     public async Task Sources_ReturnsFixedOrderedRegistryAndBoundedDetection()
@@ -40,6 +40,7 @@ public sealed class DoctorUiRoutesTests
             sources.Select(source => source.GetProperty("source_id").GetString()));
         Assert.Equal("GitHub Copilot CLI", sources[1].GetProperty("display_label").GetString());
         Assert.Equal("managed_windows", sources[1].GetProperty("setup_ownership").GetString());
+        Assert.Equal("managed_cli_caller_managed_agent_sdk", sources[3].GetProperty("setup_ownership").GetString());
         Assert.Equal("not_detected", sources[1].GetProperty("detection_state").GetString());
         Assert.Equal("detected", sources[3].GetProperty("detection_state").GetString());
         Assert.Equal("unavailable", sources[0].GetProperty("detection_state").GetString());
@@ -127,6 +128,24 @@ public sealed class DoctorUiRoutesTests
         };
         using var invalidNavigation = await host.Client.GetAsync($"/api/doctor/ui/v1/verifications/{VerificationId}");
         await AssertError(invalidNavigation, HttpStatusCode.InternalServerError, "invalid_application_result");
+    }
+
+    [Fact]
+    public async Task CandidateOnlyEvidence_DoesNotAuthorizeExactNavigation()
+    {
+        const string candidateOnlyEnvelope = "{\"contract_version\":\"first-trace.v1\",\"command\":\"status\",\"success\":true,\"code\":\"verification_active\",\"adapter\":\"claude-code\",\"source_surface\":\"claude-code\",\"verification_id\":\"0190c7a0-0000-7000-8000-000000000001\",\"doctor\":{\"evaluation\":{\"states\":[]}},\"evaluation_preview\":{\"evaluation\":{\"states\":[{\"evidence_refs\":[\"candidate-only\"]}]}},\"guidance\":[],\"candidates\":[{\"evidence_ref\":\"candidate-only\"}],\"truncated\":false}";
+        var application = new StubApplication
+        {
+            Result = new DoctorUiApplicationResult(
+                StatusCodes.Status200OK,
+                candidateOnlyEnvelope,
+                [new("candidate-only", DoctorUiNavigationTargetKind.Trace, "0123456789abcdef0123456789abcdef")]),
+        };
+        await using var host = await StartAsync(application);
+
+        using var response = await host.Client.GetAsync($"/api/doctor/ui/v1/verifications/{VerificationId}");
+
+        await AssertError(response, HttpStatusCode.InternalServerError, "invalid_application_result");
     }
 
     private static DoctorUiApplicationResult SuccessResult() => new(

@@ -90,7 +90,8 @@ and request bodies are closed; unknown or duplicate properties are invalid:
 
 The source response is exactly
 `{schema_version:"doctor.ui.v1",sources:[...]}`. Each source has exactly
-`source_id`, `display_label`, `setup_ownership = managed|managed_windows|caller_managed`,
+`source_id`, `display_label`,
+`setup_ownership = managed|managed_windows|caller_managed|managed_cli_caller_managed_agent_sdk`,
 and `detection_state = detected|not_detected|unavailable`. It contains no
 envelope. Every verification-operation response is exactly
 `{schema_version:"doctor.ui.v1",envelope:<FirstTraceEnvelope>,navigation_targets:[...]}`.
@@ -106,6 +107,14 @@ ASCII lower-case token characters and must match the registry row. A safe
 status retry may repeat a GET. A client must
 not blindly repeat a mutation after response loss; it first GETs the exact
 verification and revision and then offers the one currently valid action.
+
+An active result lists its bounded opaque candidates as explicit checkbox
+choices. With one or more selected references the single primary action may
+complete at the exact displayed revision; with none available it refreshes by
+GET. A separate non-primary cancel action may cancel at that revision. After a
+lost complete/cancel response the UI performs the exact status GET before it
+offers another mutation and never repeats the POST automatically. Terminal
+completed, cancelled, and expired results expose no lifecycle mutation.
 
 HTTP status mapping is closed: successful source/status/complete/cancel is
 `200`; a newly started verification is `201`; invalid JSON/arguments is `400`;
@@ -151,7 +160,9 @@ hex characters, `session` IDs are canonical lowercase UUIDv7, and
 `source_diagnostic` IDs are the existing 1..128-character safe opaque
 `observation_id`. Only source candidate producers write this table; the UI
 proxy is read-only and lists targets only for evidence references present in
-the returned envelope. Missing linkage produces no target and remains missing evidence; no
+the authoritative returned `doctor.evaluation` states. Candidate-only and
+`evaluation_preview` references do not authorize a target. Missing linkage
+produces no target and remains missing evidence; no
 caller may recover it by hash reversal, latest row, repository, workspace,
 cwd, process, trace ID alone, or timestamp proximity. The proxy validates kind,
 identity, and same-origin relative href. Query values are encoded and the UI
@@ -168,8 +179,11 @@ retention-authorized sanitized metadata renders a fixed `evidence_not_found`
 empty state and HTTP `404` from its additive exact read endpoint. It does not
 fall back to a list row. A malformed query identity is `400`. The source-
 diagnostic exact projection contains the existing sanitized DTO fields plus its
-opaque `observation_id`; the Session projection uses the existing sanitized
-Session detail DTO and does not expose event content.
+opaque `observation_id`; the Session projection contains exactly the bounded
+Doctor navigation summary fields
+`session_id,status,completeness,started_at,ended_at,last_seen_at`. It is not the
+broader Session workspace DTO and exposes no native IDs, runs, events,
+evaluation, raw payload, prompt, response, or event content.
 
 ### Release ZIP and rollback handoff
 

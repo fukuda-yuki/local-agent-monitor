@@ -21,6 +21,7 @@ public sealed class DiagnosticsModel : PageModel
 
     public void OnGet()
     {
+        Response.Headers.CacheControl = "no-store";
         var health = HttpContext.RequestServices.GetRequiredService<MonitorHealthState>();
         var options = HttpContext.RequestServices.GetRequiredService<MonitorOptions>();
         IngestionStallThresholdSeconds = options.IngestionStallThresholdSeconds;

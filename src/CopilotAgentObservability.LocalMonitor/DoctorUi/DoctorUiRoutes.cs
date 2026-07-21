@@ -19,7 +19,7 @@ internal static class DoctorUiRoutes
         new("github-copilot-vscode", "GitHub Copilot in VS Code", "managed"),
         new("github-copilot-cli", "GitHub Copilot CLI", "managed_windows"),
         new("github-copilot-app-sdk", "GitHub Copilot App/SDK", "caller_managed"),
-        new("claude-code", "Claude Code", "managed"),
+        new("claude-code", "Claude Code", "managed_cli_caller_managed_agent_sdk"),
     ];
 
     public static void Map(WebApplication app, IDoctorUiApplication application)
@@ -319,32 +319,32 @@ internal static class DoctorUiRoutes
     private static HashSet<string> EvidenceReferences(JsonElement root)
     {
         var values = new HashSet<string>(StringComparer.Ordinal);
-        Visit(root, values);
-        return values;
-
-        static void Visit(JsonElement element, HashSet<string> output)
+        if (!root.TryGetProperty("doctor", out var doctor)
+            || doctor.ValueKind != JsonValueKind.Object
+            || !doctor.TryGetProperty("evaluation", out var evaluation)
+            || evaluation.ValueKind != JsonValueKind.Object
+            || !evaluation.TryGetProperty("states", out var states)
+            || states.ValueKind != JsonValueKind.Array)
         {
-            if (element.ValueKind == JsonValueKind.Object)
+            return values;
+        }
+        foreach (var state in states.EnumerateArray())
+        {
+            if (state.ValueKind != JsonValueKind.Object
+                || !state.TryGetProperty("evidence_refs", out var references)
+                || references.ValueKind != JsonValueKind.Array)
             {
-                foreach (var property in element.EnumerateObject())
+                continue;
+            }
+            foreach (var reference in references.EnumerateArray())
+            {
+                if (reference.ValueKind == JsonValueKind.String)
                 {
-                    if (property.NameEquals("evidence_ref") && property.Value.ValueKind == JsonValueKind.String)
-                    {
-                        output.Add(property.Value.GetString()!);
-                    }
-                    else if (property.NameEquals("accepted_evidence_refs") && property.Value.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var item in property.Value.EnumerateArray())
-                            if (item.ValueKind == JsonValueKind.String) output.Add(item.GetString()!);
-                    }
-                    Visit(property.Value, output);
+                    values.Add(reference.GetString()!);
                 }
             }
-            else if (element.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var item in element.EnumerateArray()) Visit(item, output);
-            }
         }
+        return values;
     }
 
     private static string Href(DoctorUiNavigationIdentity target)

@@ -94,10 +94,7 @@ internal sealed class DoctorUiApplication : IDoctorUiApplication
     private DoctorUiApplicationResult Execute(FirstTraceRequest request)
     {
         var envelope = orchestrator.Execute(request);
-        var references = envelope.Candidates
-            .Select(candidate => candidate.EvidenceRef)
-            .Concat(EvidenceReferences(envelope.Doctor))
-            .Concat(EvidenceReferences(envelope.EvaluationPreview))
+        var references = EvidenceReferences(envelope.Doctor)
             .Distinct(StringComparer.Ordinal)
             .Take(DoctorValidation.MaximumEvidenceCandidates)
             .ToArray();

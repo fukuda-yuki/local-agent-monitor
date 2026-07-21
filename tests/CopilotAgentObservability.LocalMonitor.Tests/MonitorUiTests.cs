@@ -61,7 +61,8 @@ public class MonitorUiTests
         SeedRawWithSensitiveMarkers(temp);
         await using var host = await StartHostAsync(temp);
 
-        var diagnostics = await host.Client.GetStringAsync("/diagnostics");
+        using var response = await host.Client.GetAsync("/diagnostics");
+        var diagnostics = await response.Content.ReadAsStringAsync();
 
         // Sprint18 §6.7: readiness heading + probe link, 4-stage pipeline,
         // component table, thresholds, and the C5 ingestion-history section —
@@ -80,6 +81,7 @@ public class MonitorUiTests
         Assert.Contains("id=\"retention-diagnostics\"", diagnostics);
         Assert.Contains("id=\"retention-diagnostics-items\"", diagnostics);
         Assert.Contains("/monitor-retention.js", diagnostics);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", diagnostics);
         Assert.DoesNotContain("leak-marker@example.com", diagnostics);
     }
