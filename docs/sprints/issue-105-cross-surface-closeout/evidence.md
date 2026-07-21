@@ -38,10 +38,10 @@ repository-safe evidence comments.
 | Fixed source/application/adapter identities | `github-copilot-vscode` / `github-copilot-doctor` / `vscode-chat`; `github-copilot-cli` / `github-copilot-doctor` / `cli`; `github-copilot-app-sdk` / `github-copilot-doctor` / `app-sdk`; `claude-code` / `claude-code-otel` / `interactive-cli`, `print`, or `agent-sdk` |
 | Inventoried source versions | GitHub Copilot CLI 1.0.71; Claude Code 2.1.215; packaged Copilot CLI 1.0.65 |
 | Safe settings labels | loopback OTLP boundary; content disabled for reused Copilot evidence; explicit-content, gate-disabled, Hook, restart, and sanitized-only labels are retained only in the cited Claude evidence records |
-| New live opaque refs | none; no candidate live run occurred |
+| New live opaque refs | one candidate verification was created and cancelled; its opaque ID is intentionally not duplicated here |
 | Reused opaque refs | retained in the cited #103/#106/#110 repository-safe records and not duplicated here |
 | Automated state transitions | fixture-specific expected states and lifecycle transitions matched actual canonical Doctor results in the passing source, route, and Playwright matrices |
-| Live state transitions | not observed on this candidate; classified `blocked` below |
+| Live state transitions | install/ready/plan/apply/begin passed; real trace arrived but candidate promotion failed; cancel/rollback passed; uninstall failed |
 
 ## Delivered integration
 
@@ -126,8 +126,9 @@ candidate using a new disposable output directory outside the repository.
 | Staging files | 765 |
 | Classification | passed for package construction only |
 
-The ZIP was not installed or exercised in a clean Windows user profile. Its
-hash therefore proves package identity, not the clean-machine journey.
+The ZIP was later installed and exercised in the current Windows user context
+under the operator's explicit boundary waiver. The run found the product
+defects recorded below; package identity remains tied to this hash.
 
 ## Historical live-evidence compatibility
 
@@ -138,11 +139,12 @@ hash therefore proves package identity, not the clean-machine journey.
 | Claude Code older run | #99 `09e0bd76`, Claude 2.1.207 | ancestral historical context only; source version/settings and later implementation differ | schema-drift history only | all candidate closeout claims |
 
 Historical evidence is not used to claim the final common UI, exact navigation,
-Release ZIP, clean-user, or rollback/uninstall journey. No new real-source live
-run has completed because the required disposable Windows-user execution
-boundary remains unavailable; source authorization is now granted.
+Release ZIP, or rollback/uninstall journey. A new candidate-bound GitHub
+Copilot CLI run was executed after the operator explicitly accepted the current
+Windows user as the validation boundary. Its failed results supersede the
+previous external-boundary blocker for the affected rows.
 
-### 2026-07-21 clean-user boundary diagnostic
+### 2026-07-21 pre-waiver clean-user boundary diagnostic
 
 The operator subsequently authorized GitHub Copilot CLI use. The candidate ZIP
 hash was reverified, extracted to OS-temporary storage, and its published
@@ -163,28 +165,68 @@ action. The temporary monitor was stopped, its loopback port was released, and
 all temporary extracted files, database, and logs were moved to the recycle
 bin. Existing user state was not changed.
 
+This diagnostic applied the Issue body's original clean/disposable-user rule.
+The operator's later explicit instruction accepted the current Windows user as
+the #105 validation boundary. Per the repository source-of-truth order, that
+latest user instruction supersedes the clean-user restriction for the run
+below; no separate clean-machine blocker is carried forward.
+
+### 2026-07-21 current-user candidate live run
+
+The operator explicitly waived the clean/disposable-user requirement and
+authorized GitHub Copilot CLI use. Existing Local Monitor runtime material was
+moved to a recoverable sibling location before the run. Existing user-scoped
+Copilot OTel values were represented only by SHA-256 equality checks and were
+restored byte-equivalently after rollback.
+
+| Step | Bounded actual result | Classification |
+| --- | --- | --- |
+| Candidate artifact | SHA-256 matched `111A288DFBFBBDEE4FB0ABBDEC3DE26103638F905CB4A49258F9AB4BDADAA71B` | passed |
+| Install and published start | install exit `0`; live `200`; ready `200` / `ready` | passed |
+| Guided setup | redacted plan `plan_ready`; explicit apply `apply_succeeded`; status `status_ready`; fresh-process values matched the canonical loopback settings | passed |
+| Verification start | `first_trace_verification_started`, revision 1 | passed |
+| Real source | GitHub Copilot CLI 1.0.71, authenticated, bounded no-tool interaction exit `0`; content capture disabled | passed |
+| Ingest and projection | 7 ingestion records and 1 sanitized trace appeared | passed |
+| Candidate promotion | trace classified `source_surface=raw-otlp`, `source_adapter=raw-otlp`, `compatibility_state=schema_drift_detected`; three exact status reads returned 0 candidates and `agent_restart_required` | failed |
+| Exact navigation | no authoritative candidate/evidence navigation target could be created | failed as downstream consequence of candidate-promotion defect |
+| Cancel and rollback | exact cancel exit `0`, revision advanced to 2; rollback exit `0`; all four managed user-environment labels restored to their pre-run presence/value hashes | passed |
+| Post-rollback read | exact status exit `0`, 0 candidates, preview `protocol_mismatch` | passed as an honest non-ready result |
+| Uninstall | internal `stop_timeout` was emitted, but the wrapper continued to print `uninstalled` and returned exit `0`; listener and installed executable remained | failed |
+| Cleanup/restoration | remaining candidate-owned PID was verified by executable path and stopped; candidate runtime and temporary raw-bearing output were moved to the recycle bin; prior Local Monitor `logs/setup` state was restored; port and task were absent | passed as cleanup only; not an uninstall pass |
+
+No prompt, response, raw payload, credential, authorization value, database,
+log body, or sensitive path is retained in this evidence. The candidate
+promotion failure belongs to the GitHub Copilot first-trace evidence observer /
+source-compatibility integration. The uninstall failure belongs to
+`scripts/local-monitor/stop.ps1` and
+`scripts/local-monitor/uninstall-startup-task.ps1`. No existing open Issue was
+found that owns either exact defect; separate fix Issues are required before a
+replacement #105 candidate can be frozen. The defects are not repaired inside
+this validation path.
+
 ## Live and external matrix
 
-Every unexecuted required live capability is explicitly classified; none is
-converted to `passed`.
+Every required live capability is explicitly classified; none is converted to
+`passed` after an incomplete or failed execution.
 
 | Required row | Classification | Severity and exact blocker | Retry condition / unverified capability |
 | --- | --- | --- | --- |
-| Release ZIP clean-machine setup-to-first-trace happy path | blocked | P0: `disposable_windows_user_and_operator_source_authorization_unavailable` | provide a disposable Windows user/VM and authorize one supported source; verify install, launch, guided setup, restart, real trace, exact navigation, rollback, uninstall |
-| GitHub Copilot supported happy-path run on candidate | blocked | P0: same clean-user and operator authorization boundary | authenticate/authorize VS Code Chat or Copilot CLI in the disposable boundary and run against exact candidate ZIP |
+| Release ZIP operator-accepted current-user setup-to-first-trace happy path | failed | P0: candidate-promotion and uninstall product defects above | fix both owning components, freeze a replacement candidate, and rerun the complete journey |
+| GitHub Copilot supported happy-path run on candidate | failed | P0: real trace arrived but remained `raw-otlp/schema_drift_detected`; 0 exact candidates | fix the candidate observer/source-compatibility integration and rerun against a replacement candidate |
 | Claude supported happy-path run on candidate | blocked | P0: current CLI is 2.1.215 while reusable evidence is 2.1.214, and no candidate run was authorized | pin and record 2.1.215 (or an explicitly accepted version), authorize the run, and execute the shared journey against the candidate ZIP |
-| Exact Session/trace/source navigation from a fresh real record | blocked | P0: no candidate-bound real record exists | complete either candidate happy path and follow only authoritative evidence refs |
-| Rollback/uninstall live consistency | blocked | P0: no disposable installed candidate and authorized source run | complete setup, rollback and uninstall in the disposable boundary; re-read exact Doctor state and tool-owned configuration |
-| GitHub restart-required live behavior | blocked | P1: no candidate-bound source restart run | authorize source restart in disposable boundary and retain exact pre/post evidence identity |
+| Exact Session/trace/source navigation from a fresh real record | failed | P0: a fresh real record exists, but no authoritative candidate/navigation target was created | fix candidate promotion and follow only replacement-candidate server-provided targets |
+| Rollback/uninstall live consistency | failed | P0: rollback restored all tracked values, but uninstall reported success after `stop_timeout` and left the process/app installed | make uninstall fail closed or complete removal, then rerun exact rollback/uninstall |
+| GitHub restart-required live behavior | failed | P1: Copilot ran as a fresh process with applied values and emitted telemetry, but Doctor remained `agent_restart_required` because no candidate was promoted | fix candidate promotion and prove the replacement candidate reaches the expected post-restart state |
 | GitHub receiver-down/projection failure/unbound live cases | blocked | P1: destructive/error live matrix was not authorized | execute bounded disposable negative cases without converting unavailable cases to pass |
 | Claude Hook/OTel unavailable, drift, parentage, content, restart live gaps on candidate | blocked | P1: reused evidence predates the candidate/shared journey and current source version differs | rerun only incompatible gaps with pinned version/settings and candidate identity |
 | Genuine attended Claude interactive TTY on candidate | blocked | P1: attended TTY/operator authorization unavailable | run an attended, explicitly authorized interaction in the disposable boundary |
 | GitHub App/SDK provider execution | blocked | P1: provider package/credentials/caller application unavailable | provide caller application, accepted package/version and credentials; verify caller-managed state without storing sensitive values |
 | Claude Agent SDK provider execution | blocked | P1: SDK package/credentials/caller application unavailable | same caller-managed retry boundary for an accepted Claude Agent SDK version |
 
-`failed`: none. `not-applicable`: none. `not-attempted` without a blocker:
-none. The rows above are unverified and remain `blocked` until their retry
-conditions are met.
+`failed`: Release ZIP happy path, GitHub candidate happy path, exact navigation,
+and rollback/uninstall consistency. `not-applicable`: none. `not-attempted`
+without a blocker: none. Remaining provider-dependent rows stay `blocked` until
+their retry conditions are met.
 
 ## Review and decision
 
@@ -198,9 +240,11 @@ re-review of the final candidate reported no implementation or security
 blocker. Primary coordination then reran focused tests, the complete required
 suite, ancestry checks, clean/diff checks, and package construction.
 
-Release decision: **BLOCKED**. The immutable candidate has no known severe
-implementation defect, its automated suite passes, and #103/#104 are closed,
-but the P0 clean-machine, candidate-bound live journey is unverified.
+Release decision: **BLOCKED**. The automated suite passes and #103/#104 are
+closed, but the current candidate has two P0 live product defects: GitHub
+Copilot candidate promotion/exact navigation fails after a real trace arrives,
+and uninstall reports success after `stop_timeout` while leaving the process
+and installed application present.
 Issue #105 does not satisfy its close condition. Consequently #69 does not
 satisfy its four-child close condition. This evidence location is the intended
 #60/#91 handoff, but #91 must retain the dependency gate and must not treat this
