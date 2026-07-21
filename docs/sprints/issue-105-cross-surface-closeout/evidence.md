@@ -17,16 +17,17 @@ does not replace or mutate that candidate.
 | Dependency | GitHub state on 2026-07-21 | Accepted / evidence revisions | Candidate ancestry | Gate result |
 | --- | --- | --- | --- | --- |
 | #102 | closed | `1d7822a`; closeout `31d7ec5` | both ancestors | passed |
-| #103 | open | production `8dd751d`; live `f67e1a0`; closeout `916484d` | all ancestors | blocked: Issue completion state is not satisfied |
-| #104 | open | frozen product `54d758a260f347cc31a3191d342ad509eb62d81f`; integration `70206cec` | both ancestors | blocked: Issue completion state is not satisfied |
+| #103 | closed on 2026-07-21 | production `8dd751d`; live `f67e1a0`; closeout `916484d` | all ancestors | passed |
+| #104 | closed on 2026-07-21 | frozen product `54d758a260f347cc31a3191d342ad509eb62d81f`; integration `70206cec` | both ancestors | passed |
 | #106 | closed | evidence `87c240ad`; integration `b4e59a59`; closeout `2378228d` | all ancestors | passed |
 
 The candidate also contains #99 revision `09e0bd76` and #110 live-evidence
 revision `502acd9a`. Every ancestry check used
 `git merge-base --is-ancestor <revision> 78958f2e...` and returned exit `0`.
 The #105 acceptance criterion requiring #102, #103, and #104 to be complete is
-therefore **blocked** by the external Issue states of #103 and #104, despite
-their integrated revisions being present.
+now **passed**. The primary coordinator independently audited every #103 and
+#104 acceptance criterion and ancestry chain before closing those Issues with
+repository-safe evidence comments.
 
 ## Execution envelope
 
@@ -138,8 +139,29 @@ hash therefore proves package identity, not the clean-machine journey.
 
 Historical evidence is not used to claim the final common UI, exact navigation,
 Release ZIP, clean-user, or rollback/uninstall journey. No new real-source live
-run was executed in this closeout because the required disposable Windows-user
-boundary and source/operator authorization were unavailable.
+run has completed because the required disposable Windows-user execution
+boundary remains unavailable; source authorization is now granted.
+
+### 2026-07-21 clean-user boundary diagnostic
+
+The operator subsequently authorized GitHub Copilot CLI use. The candidate ZIP
+hash was reverified, extracted to OS-temporary storage, and its published
+monitor was started with a disposable database and non-default loopback port.
+`/health/live` and `/health/ready` both returned `200` with ready state
+`ready`. `first-trace begin` then failed closed with
+`first_trace_doctor_failed` because no authoritative applied setup ledger
+existed in that user context. Copilot CLI was not executed and no source prompt
+or response was produced or retained. Process-scoped environment labels were
+not accepted as a substitute for guided setup authority.
+
+The current Windows user already owns Local Monitor state and is therefore not
+a conforming clean/disposable user. The existing dedicated
+`CodexSandboxOnline` account has no active logon session, reusable token,
+scheduled task, service, or credential-free execution broker. Windows Sandbox
+and Hyper-V are not installed, and enabling either requires administrator
+action. The temporary monitor was stopped, its loopback port was released, and
+all temporary extracted files, database, and logs were moved to the recycle
+bin. Existing user state was not changed.
 
 ## Live and external matrix
 
@@ -177,8 +199,8 @@ blocker. Primary coordination then reran focused tests, the complete required
 suite, ancestry checks, clean/diff checks, and package construction.
 
 Release decision: **BLOCKED**. The immutable candidate has no known severe
-implementation defect and its automated suite passes, but #103 and #104 remain
-open and the P0 clean-machine, candidate-bound live journey is unverified.
+implementation defect, its automated suite passes, and #103/#104 are closed,
+but the P0 clean-machine, candidate-bound live journey is unverified.
 Issue #105 does not satisfy its close condition. Consequently #69 does not
 satisfy its four-child close condition. This evidence location is the intended
 #60/#91 handoff, but #91 must retain the dependency gate and must not treat this
