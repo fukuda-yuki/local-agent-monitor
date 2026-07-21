@@ -1,0 +1,15 @@
+{
+  "contract_version": "historical-import-preview/v1",
+  "source_surface": "github-copilot-cli",
+  "profile_id": "github-copilot-cli-session-state",
+  "adapter_id": "github-copilot-cli-history-v1",
+  "adapter_diagnostics": [
+    "historical_source_format_unsupported"
+  ],
+  "requested_capture": "metadata_only",
+  "eligible_candidate_count": 0,
+  "rejected_candidate_count": 0,
+  "commit_allowed": false,
+  "rejection_code": "historical_import_no_eligible_candidates",
+  "content_risk": "not_read"
+}

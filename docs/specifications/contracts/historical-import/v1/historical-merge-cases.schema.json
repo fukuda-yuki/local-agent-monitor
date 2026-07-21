@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.copilot-agent-observability.invalid/contracts/historical-import/v1/historical-merge-cases.schema.json",
+  "title": "Historical import merge and retention cases",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "cases"],
+  "properties": {
+    "contract_version": { "const": "historical-merge-cases/v1" },
+    "cases": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": { "$ref": "#/$defs/case" }
+    }
+  },
+  "$defs": {
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_id", "condition", "decision", "required_result"],
+      "properties": {
+        "case_id": { "type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$" },
+        "condition": { "type": "string", "minLength": 1 },
+        "decision": {
+          "enum": [
+            "duplicate_noop",
+            "source_record_conflict_preserve_existing",
+            "attach_observation_preserve_strong",
+            "keep_distinct_unbound",
+            "missing_does_not_overwrite",
+            "record_conflict_no_overwrite",
+            "partial_historical_summary_only",
+            "metadata_only_no_retention_item",
+            "read_denied_and_deletion_queued",
+            "expiring_raw_default_90d",
+            "no_automatic_pin"
+          ]
+        },
+        "required_result": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

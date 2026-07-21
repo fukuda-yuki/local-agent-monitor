@@ -1,0 +1,18 @@
+{
+  "contract_version": "historical-adapter-result/v1",
+  "adapter_id": "claude-code-history-v1",
+  "profile_id": "claude-code-transcript",
+  "source_surface": "claude-code",
+  "source_tier": "tier_b",
+  "detection_state": "not_evaluated",
+  "source_reference_state": "missing",
+  "source_application_version": null,
+  "support_authorized": false,
+  "source_format_profile": "none",
+  "candidate_count": 0,
+  "content_risk": "not_read",
+  "repository_safe": true,
+  "diagnostics": [
+    "historical_source_reference_required"
+  ]
+}

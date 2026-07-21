@@ -1,0 +1,44 @@
+{
+  "contract_version": "historical-source-profile/v1",
+  "profile_id": "github-copilot-cli-session-state",
+  "adapter_id": "github-copilot-cli-history-v1",
+  "source_surface": "github-copilot-cli",
+  "source_tier": "tier_b",
+  "support_state": "unsupported_no_fixture",
+  "documented_container": "session-state/{sessionId}/events.jsonl",
+  "source_reference_policy": "explicit_opt_in_documented_root",
+  "observed_detector_versions": [
+    "1.0.71"
+  ],
+  "supported_application_versions": [],
+  "supported_source_formats": [],
+  "active_field_allowlist": [],
+  "policy_field_ceiling": [
+    "model_tokens.model",
+    "model_tokens.input_tokens",
+    "model_tokens.output_tokens",
+    "model_tokens.total_tokens",
+    "model_tokens.cache_tokens",
+    "model_tokens.reasoning_tokens",
+    "retry_attempt.retry",
+    "retry_attempt.attempt",
+    "errors.present",
+    "errors.code"
+  ],
+  "completeness_ceiling": "partial",
+  "required_completeness_reasons": [
+    "historical_summary_only"
+  ],
+  "activation_gate": {
+    "product_decision_required": false,
+    "promotion_scope": "source_specific_compatibility_revision",
+    "required_evidence": [
+      "source_application_version",
+      "source_format_name",
+      "source_format_version",
+      "source_fixture_sha256",
+      "source_schema_fingerprint",
+      "adapter_golden_tests"
+    ]
+  }
+}
