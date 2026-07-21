@@ -797,6 +797,150 @@ public class LocalMonitorScriptTests
     }
 
     [Fact]
+    public void UninstallFailsClosedWhenStopFails()
+    {
+        var root = CreateTemporaryDirectory("cao-uninstall-stop-failure");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            var installedFile = Path.Combine(installRoot, "installed.txt");
+            File.WriteAllText(installedFile, "test-owned");
+            File.Copy(ScriptPath("uninstall-startup-task.ps1"), Path.Combine(scripts, "uninstall-startup-task.ps1"));
+            File.WriteAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:RuntimeRoot = '{{root.Replace("'", "''", StringComparison.Ordinal)}}'
+                function Get-LocalMonitorDefaultInstallRoot { '{{installRoot.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Get-LocalMonitorTask { $null }
+                function Remove-LocalMonitorState { }
+                function Remove-LocalMonitorInstall {
+                    param([string] $InstallRoot, [switch] $AllowExternal)
+                    Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+                }
+                """);
+            File.WriteAllText(
+                Path.Combine(scripts, "stop.ps1"),
+                "Write-Error 'stop_timeout'\nexit 1\n");
+
+            var result = RunPowerShellScript(
+                Path.Combine(scripts, "uninstall-startup-task.ps1"),
+                "-StopRunning",
+                "-InstallRoot", installRoot);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.DoesNotContain("uninstalled", result.Output, StringComparison.Ordinal);
+            Assert.Contains("stop_timeout", result.Error, StringComparison.Ordinal);
+            Assert.True(File.Exists(installedFile), "Install removal must not begin after stop fails.");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StopTerminatesAHeadlessPublishedProcessWithoutForce()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateTemporaryDirectory("cao-headless-stop");
+        Process? monitor = null;
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            File.Copy(ScriptPath("stop.ps1"), Path.Combine(scripts, "stop.ps1"));
+            monitor = Process.Start(new ProcessStartInfo
+            {
+                FileName = PowerShellExecutablePath(),
+                ArgumentList =
+                {
+                    "-NoProfile",
+                    "-Command",
+                    "while ($true) { Start-Sleep -Seconds 60 }",
+                },
+                CreateNoWindow = true,
+                UseShellExecute = false,
+            }) ?? throw new InvalidOperationException("Failed to start test-owned headless process.");
+            File.WriteAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                function Get-LocalMonitorState { [pscustomobject]@{ process_id = {{monitor.Id}} } }
+                function Test-LocalMonitorProcess { param([int] $ProcessId) $ProcessId -eq {{monitor.Id}} }
+                function Remove-LocalMonitorState { }
+                function Write-LocalMonitorLog { param([string] $Message) }
+                """);
+
+            var result = RunPowerShellScript(
+                Path.Combine(scripts, "stop.ps1"),
+                "-TimeoutSeconds", "1");
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Contains("stopped", result.Output, StringComparison.Ordinal);
+            Assert.True(monitor.WaitForExit(5_000), "The test-owned headless process remained running.");
+        }
+        finally
+        {
+            if (monitor is { HasExited: false })
+            {
+                monitor.Kill(entireProcessTree: true);
+                monitor.WaitForExit();
+            }
+
+            monitor?.Dispose();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StopUsesOnlyBoundedProcessExitWaits()
+    {
+        var stop = File.ReadAllText(ScriptPath("stop.ps1"));
+
+        Assert.DoesNotContain("$process.WaitForExit()", stop, StringComparison.Ordinal);
+        Assert.Equal(2, stop.Split("$process.WaitForExit($TimeoutSeconds * 1000)", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void UninstallFailsClosedWhenInstalledFilesRemain()
+    {
+        var root = CreateTemporaryDirectory("cao-uninstall-removal-failure");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            var installedFile = Path.Combine(installRoot, "installed.txt");
+            File.WriteAllText(installedFile, "test-owned");
+            File.Copy(ScriptPath("uninstall-startup-task.ps1"), Path.Combine(scripts, "uninstall-startup-task.ps1"));
+            File.WriteAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:RuntimeRoot = '{{root.Replace("'", "''", StringComparison.Ordinal)}}'
+                function Get-LocalMonitorDefaultInstallRoot { '{{installRoot.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Get-LocalMonitorTask { $null }
+                function Remove-LocalMonitorState { }
+                function Remove-LocalMonitorInstall { param([string] $InstallRoot, [switch] $AllowExternal) }
+                """);
+
+            var result = RunPowerShellScript(
+                Path.Combine(scripts, "uninstall-startup-task.ps1"),
+                "-InstallRoot", installRoot);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.DoesNotContain("uninstalled", result.Output, StringComparison.Ordinal);
+            Assert.Contains("uninstall_incomplete", result.Error, StringComparison.Ordinal);
+            Assert.True(File.Exists(installedFile));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void UserEnvironmentScriptsPersistRawLocalMonitorOtelSettingsForCurrentUser()
     {
         var install = File.ReadAllText(ScriptPath("install-user-env.ps1"));

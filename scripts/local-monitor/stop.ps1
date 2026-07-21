@@ -25,7 +25,17 @@ if ($null -eq $process) {
     exit 0
 }
 
-$process.CloseMainWindow() | Out-Null
+$closeRequested = $process.CloseMainWindow()
+if (-not $closeRequested) {
+    try {
+        Stop-Process -Id $processId -Force:$Force.IsPresent -ErrorAction Stop
+    }
+    catch {
+        Write-Error 'stop_failed'
+        exit 1
+    }
+}
+
 $exited = $process.WaitForExit($TimeoutSeconds * 1000)
 if (-not $exited) {
     if (-not $Force) {
@@ -33,7 +43,19 @@ if (-not $exited) {
         exit 1
     }
 
-    Stop-Process -Id $processId -Force
+    try {
+        Stop-Process -Id $processId -Force -ErrorAction Stop
+        $exited = $process.WaitForExit($TimeoutSeconds * 1000)
+    }
+    catch {
+        Write-Error 'stop_failed'
+        exit 1
+    }
+
+    if (-not $exited) {
+        Write-Error 'stop_timeout'
+        exit 1
+    }
 }
 
 Remove-LocalMonitorState

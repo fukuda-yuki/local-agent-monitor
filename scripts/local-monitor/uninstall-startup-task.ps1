@@ -14,6 +14,9 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
 
 if ($StopRunning) {
     & (Join-Path $PSScriptRoot 'stop.ps1') -Force:$Force.IsPresent
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 }
 
 $task = Get-LocalMonitorTask -TaskName $TaskName
@@ -23,6 +26,10 @@ if ($null -ne $task) {
 
 Remove-LocalMonitorState
 Remove-LocalMonitorInstall -InstallRoot $InstallRoot -AllowExternal:$Force.IsPresent
+if (Test-Path -LiteralPath $InstallRoot) {
+    Write-Error 'uninstall_incomplete'
+    exit 1
+}
 
 if ($RemoveData) {
     if (-not $Force) {
