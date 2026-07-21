@@ -1,9 +1,12 @@
 # Issue #105 Cross-surface Closeout Evidence
 
 This repository-safe record contains no prompts, responses, tool arguments or
-results, credentials, authorization values, PII, database contents, runtime
-trace identifiers, or machine-specific sensitive paths. Product behavior
-remains defined by the canonical requirements and specifications.
+results, credentials, authorization values, PII, database contents, or
+machine-specific sensitive paths. The only runtime identifiers retained below
+are repository-safe opaque verification, evidence, trace, and observation
+references required to reproduce the candidate-bound navigation result.
+Product behavior remains defined by the canonical requirements and
+specifications.
 
 Validation date: 2026-07-21. Branch:
 `codex/issue-105-cross-surface-closeout`. Starting SHA:
@@ -31,7 +34,7 @@ now **passed**. The primary coordinator independently audited every #103 and
 #104 acceptance criterion and ancestry chain before closing those Issues with
 repository-safe evidence comments.
 
-## Execution envelope
+## First-candidate execution envelope (`78958f2e...` only)
 
 | Field | Recorded value |
 | --- | --- |
@@ -55,9 +58,10 @@ repository-safe evidence comments.
 - Shared Local Monitor Doctor workflow, source selection, exact Session/trace/
   source-diagnostics links, lifecycle operations, rollback refresh, keyboard
   flow, and fail-closed API handling.
-- Durable exact-navigation storage and authoritative use of
-  `doctor.evaluation.states[].evidence_refs`; candidate/preview references never
-  become navigation authority.
+- Durable exact-navigation storage. Active verifications use returned
+  `doctor.evaluation.states[].evidence_refs`; completed verifications use the
+  persisted accepted evidence refs. Candidate/preview references never become
+  navigation authority.
 - Release `first-trace.ps1` wrapper and Windows x64 ZIP packaging coverage.
 - Deterministic source, route, store, UI, Playwright, security-negative,
   accessibility, and release-boundary tests using synthetic data.
@@ -321,6 +325,25 @@ retained; the temporary files were moved to the recycle bin.
 | Uninstall | `stopped` then `uninstalled`, exit 0; candidate PID gone, port released, app absent, task absent | passed |
 | Restoration | retained candidate runtime data moved to recycle bin; prior runtime restored; no listener or task remained | passed cleanup |
 
+The repository-safe opaque identity set for this replacement run is:
+
+| Identity | Candidate-bound value / result |
+| --- | --- |
+| Verification | `019f8400-80e4-7816-bca4-ca7b04d43963` |
+| Accepted ingest evidence | `gc_doctor_a83319b8_622cf48e_89ac4201_5e7c1386_f3371a8e` |
+| Accepted raw-persistence evidence | `gc_doctor_b3509ea4_2e1925ec_83b2a6cc_d28809f4_2806f7dd` |
+| Accepted completeness/content evidence | `gc_doctor_445ccdc4_48bb6a75_b32f79b2_65daf704_54de8b05` |
+| Accepted projection evidence | `gc_doctor_7e1cc8b5_a8d4e5c7_1a9e38fa_9c996a84_b8b290ee` |
+| Trace navigation target | `1df2a154a032e835d9cdffa072eddcf3`; all four accepted refs resolved to this exact target |
+| Source-diagnostic observation target | `019f8401-874f-7c5f-b7a9-a14aafe7061e`; all four accepted refs resolved to this exact target |
+| Session navigation target | not applicable / unbound for this source run; the server returned no Session target and no Session pass is claimed |
+
+These values were read after cleanup from only the sanitized
+`doctor_verification_evidence` and `first_trace_evidence_navigation` rows for
+the exact verification. No raw event, prompt, response, tool, or authorization
+table or value was queried. The candidate runtime database remained outside
+the repository in a recoverable recycle-bin location.
+
 The earlier finite-history failure was reproduced only after multiple plan rows
 had accumulated. The replacement selects the sole exact applied/current
 authority independent of history order and fails closed when more than one
@@ -354,6 +377,11 @@ Independent implementation reviews for #113/#114/#115 were inspected by the
 primary coordinator before integration. The final #105 review wave is recorded
 after this evidence commit; any blocking finding will require a new candidate
 and a replacement section rather than changing `b581be9...`.
+
+Issues #113, #114, and #115 remain open on GitHub. Their corrections are
+integrated and validated in this candidate, but this record does not claim
+that their formal GitHub close state has been satisfied and performs no close
+action for them.
 
 Current Issue #105 decision: **release-ready for the #105 cross-surface scope**.
 The replacement candidate satisfies the Issue #105 technical close condition
