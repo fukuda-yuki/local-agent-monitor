@@ -168,6 +168,38 @@ internal sealed class GitHubCopilotDoctorStaticFactCollector(ISetupPlatform plat
         return true;
     }
 
+    internal static bool TrySelectCurrentAuthority(
+        SetupCommandResult setup,
+        string target,
+        string normalizedEndpoint,
+        out SetupCommandResult selected)
+    {
+        selected = setup;
+        if (!setup.Success || setup.Command != SetupCommand.Status ||
+            !string.Equals(setup.Adapter, "github-copilot", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var matching = setup.ChangeSets.Where(changeSet =>
+            string.Equals(changeSet.Adapter, "github-copilot", StringComparison.Ordinal) &&
+            string.Equals(changeSet.SelectedTarget, target, StringComparison.Ordinal) &&
+            changeSet.State is SetupChangeSetState.Applied or SetupChangeSetState.NoChanges &&
+            changeSet.CurrentState == SetupCurrentState.Current &&
+            changeSet.Targets.Count > 0 &&
+            changeSet.Targets.All(item =>
+                item.CurrentState == SetupCurrentState.Current &&
+                item.ReferenceState == SetupReferenceState.Desired &&
+                string.Equals(item.Endpoint, normalizedEndpoint, StringComparison.Ordinal))).ToArray();
+        if (matching.Length != 1)
+        {
+            return false;
+        }
+
+        selected = setup with { ChangeSets = matching };
+        return true;
+    }
+
     private sealed record SourceFacts(SourceVersionStatus Version, SourceFeatureStatus Feature)
     {
         public static SourceFacts Unknown { get; } = new(SourceVersionStatus.Unknown, SourceFeatureStatus.Unknown);

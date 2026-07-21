@@ -219,6 +219,67 @@ public sealed class FirstTraceSourceRegistryTests
             operation == "process.run:copilot:version"));
         Assert.Equal(1, platform.Operations.Count(operation =>
             operation == "http.get:http://127.0.0.1:4320:/health/live:500:4096"));
+        Assert.True(adapter.CanBeginVerification(DoctorEvaluator.Evaluate(facts)));
+    }
+
+    [Fact]
+    public void GitHubAdapter_FiniteHistorySelectsUniqueCurrentAuthorityWithoutUsingOrder()
+    {
+        var platform = ReadyCliPlatform();
+        var dispatchCount = 0;
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            _ =>
+            {
+                dispatchCount++;
+                return CliStatusWithHistory(qualifyingCurrentRows: 1);
+            },
+            () => Now,
+            platform);
+
+        var facts = adapter.CollectFacts(
+            "synthetic-doctor.db",
+            "http://127.0.0.1:4320",
+            verification: null);
+
+        Assert.Equal(SourceVersionStatus.Supported, facts.InstallAndSourceVersion?.SourceVersion);
+        Assert.Equal(ReachabilityStatus.Reachable, facts.EndpointReachability?.Reachability);
+        Assert.True(adapter.CanBeginVerification(DoctorEvaluator.Evaluate(facts)));
+        Assert.Equal(1, dispatchCount);
+        Assert.Equal(1, platform.Operations.Count(operation =>
+            operation == "process.run:copilot:version"));
+        Assert.Equal(1, platform.Operations.Count(operation =>
+            operation == "http.get:http://127.0.0.1:4320:/health/live:500:4096"));
+    }
+
+    [Fact]
+    public void GitHubAdapter_MultipleCurrentAuthoritiesFailClosed()
+    {
+        var platform = ReadyCliPlatform();
+        var dispatchCount = 0;
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            _ =>
+            {
+                dispatchCount++;
+                return CliStatusWithHistory(qualifyingCurrentRows: 2);
+            },
+            () => Now,
+            platform);
+
+        var facts = adapter.CollectFacts(
+            "synthetic-doctor.db",
+            "http://127.0.0.1:4320",
+            verification: null);
+
+        Assert.Null(facts.InstallAndSourceVersion);
+        Assert.Null(facts.EndpointReachability);
+        Assert.False(adapter.CanBeginVerification(DoctorEvaluator.Evaluate(facts)));
+        Assert.Equal(1, dispatchCount);
+        Assert.DoesNotContain(platform.Operations, operation =>
+            operation == "process.run:copilot:version");
+        Assert.DoesNotContain(platform.Operations, operation =>
+            operation == "http.get:http://127.0.0.1:4320:/health/live:500:4096");
     }
 
     [Fact]
@@ -329,6 +390,32 @@ public sealed class FirstTraceSourceRegistryTests
             [],
             [],
             false);
+    }
+
+    private static SetupCommandResult CliStatusWithHistory(int qualifyingCurrentRows)
+    {
+        var current = CurrentCliStatus();
+        var authority = Assert.Single(current.ChangeSets);
+        var planned = Enumerable.Range(0, 2).Select(index => authority with
+        {
+            ChangeSetId = Guid.CreateVersion7().ToString("D"),
+            CreatedAt = Now.AddMinutes(-10 - index).ToString("O"),
+            UpdatedAt = Now.AddMinutes(-9 - index).ToString("O"),
+            State = SetupChangeSetState.Planned,
+            OutcomeCode = SetupCodes.PlanReady,
+            CurrentState = SetupCurrentState.NotApplicable,
+            Targets = authority.Targets.Select(target => target with
+            {
+                CurrentState = SetupCurrentState.NotApplicable,
+            }).ToArray(),
+        });
+        var authorities = Enumerable.Range(0, qualifyingCurrentRows).Select(index => authority with
+        {
+            ChangeSetId = Guid.CreateVersion7().ToString("D"),
+            CreatedAt = Now.AddMinutes(-5 - index).ToString("O"),
+            UpdatedAt = Now.AddMinutes(-4 - index).ToString("O"),
+        });
+        return current with { ChangeSets = [.. planned, .. authorities] };
     }
 
     [Fact]

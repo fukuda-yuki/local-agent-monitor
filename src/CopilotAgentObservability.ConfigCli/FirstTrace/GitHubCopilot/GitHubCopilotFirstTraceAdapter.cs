@@ -93,6 +93,16 @@ internal sealed class GitHubCopilotFirstTraceAdapter : IFirstTraceSourceAdapter
             return UnknownFacts(verification);
         }
 
+        if (target != "app-sdk" &&
+            !GitHubCopilotDoctorStaticFactCollector.TrySelectCurrentAuthority(
+                setup,
+                target,
+                normalizedEndpoint,
+                out setup))
+        {
+            return UnknownFacts(verification);
+        }
+
         try
         {
             var mapped = GitHubCopilotDoctorFactMapper.FromSetup(
