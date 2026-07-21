@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/CopilotAgentObservability.Alerts/CopilotAgentObservability.Alerts.csproj" />
     <Project Path="src/CopilotAgentObservability.AppHost/CopilotAgentObservability.AppHost.csproj" />
     <Project Path="src/CopilotAgentObservability.ConfigCli/CopilotAgentObservability.ConfigCli.csproj" />
     <Project Path="src/CopilotAgentObservability.Doctor/CopilotAgentObservability.Doctor.csproj" />
@@ -8,6 +9,7 @@
     <Project Path="src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/CopilotAgentObservability.Alerts.Tests/CopilotAgentObservability.Alerts.Tests.csproj" />
     <Project Path="tests/CopilotAgentObservability.ConfigCli.Tests/CopilotAgentObservability.ConfigCli.Tests.csproj" />
     <Project Path="tests/CopilotAgentObservability.Doctor.Tests/CopilotAgentObservability.Doctor.Tests.csproj" />
     <Project Path="tests/CopilotAgentObservability.LocalMonitor.Tests/CopilotAgentObservability.LocalMonitor.Tests.csproj" />
