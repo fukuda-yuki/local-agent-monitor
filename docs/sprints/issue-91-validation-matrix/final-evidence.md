@@ -65,17 +65,19 @@ Monitor 948/948, with zero failed and zero unexecuted cases.
   2.1.214 and its recorded settings/environment: gate state, Hook/OTel native
   equality, negative binding, restart/reconnect, and sanitized-only behavior.
   Candidate automation rechecked the current binding and source-state rules.
+- Claude Code 2.1.215 content-disabled evidence was executed at ancestral
+  candidate `9fe02f6e...`: readiness HTTP 200, producer exit 0, one sanitized
+  trace, `content_state=not_captured`, and repository/log/sanitized-output leak
+  scan `PASS`. It is reused for the same Windows current-user, source version,
+  content-disabled setting, disposable DB, and loopback boundary because later
+  changes affect only retention-worker behavior and validation assets, not
+  Claude ingestion, compatibility projection, source settings, log boundaries,
+  or signal/restart contracts. The marker and every derived value are omitted.
 - #99 and #103 are provenance/drift context only where superseded by #105 or a
   candidate-current run; mismatched observations are not current passes.
 
 ### Newly executed evidence
 
-- Claude Code 2.1.215, Windows native/current-user, content capture disabled:
-  readiness HTTP 200, producer exit 0, one sanitized trace,
-  `content_state=not_captured`, and repository/log/sanitized-output leak scan
-  `PASS`. The runtime marker and every marker-derived value are omitted. The
-  disposable process and database were removed by the repository cleanup
-  script.
 - Candidate retention runtime using disposable databases and `TimeProvider`:
   expiry denial, delete-now denial, exact ownership, and no-resurrection tests
   passed 7/7 with zero skip.
