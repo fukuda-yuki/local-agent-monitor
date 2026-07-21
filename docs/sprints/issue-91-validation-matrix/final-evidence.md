@@ -132,8 +132,15 @@ unclassified, or unknown-owner rows.
 
 The exact release decision is **`release_blocked`**. Issue #91 does not satisfy
 its close condition because a required active row and the required full test
-command failed. Issue #57 closeout must not begin. A repository-safe handoff to
-#57/#60 may report this blocker, but cannot claim release readiness.
+command failed. Issue #57 closeout must not begin. Repository-safe blocker
+handoffs were posted to #57 and #60, and the same status was recorded on #91;
+none claims release readiness.
+
+| Handoff | GitHub record |
+| --- | --- |
+| #91 status | `issuecomment-5033117261` |
+| #57 blocker handoff | `issuecomment-5033117466` |
+| #60 blocker handoff | `issuecomment-5033117652` |
 
 ## Delegated evidence checks
 
