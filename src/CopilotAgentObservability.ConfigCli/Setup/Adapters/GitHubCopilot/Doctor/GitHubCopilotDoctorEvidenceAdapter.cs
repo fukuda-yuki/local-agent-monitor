@@ -236,6 +236,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         var evidenceRefs = new List<string>(evidence.Count);
         var observationResult = status;
         var newlyPersistedCandidates = 0;
+        var navigationStore = new SqliteFirstTraceNavigationStore(databasePath);
         foreach (var descriptor in evidence)
         {
             var evidenceRef = OpaqueReference(
@@ -250,6 +251,14 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                 evidenceRef,
                 storePolicy.BusyTimeoutMilliseconds))
             {
+                RecordNavigationTargets(
+                    navigationStore,
+                    selection.VerificationId,
+                    evidenceRef,
+                    descriptor.Kind,
+                    raw.TraceId,
+                    compatibility.ObservationId,
+                    binding);
                 continue;
             }
 
@@ -284,6 +293,14 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                 }
                 return Empty(observationResult, partition, selection.VerificationId, raw.ReceivedAt);
             }
+            RecordNavigationTargets(
+                navigationStore,
+                selection.VerificationId,
+                evidenceRef,
+                descriptor.Kind,
+                raw.TraceId,
+                compatibility.ObservationId,
+                binding);
         }
 
         var snapshot = Snapshot(
@@ -295,6 +312,38 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             binding);
         return new(observationResult, snapshot, evidence.Select(item => item.Kind).ToArray(), evidenceRefs, binding is null);
     }
+
+    private static void RecordNavigationTargets(
+        SqliteFirstTraceNavigationStore store,
+        string verificationId,
+        string evidenceRef,
+        DoctorEvidenceKind evidenceKind,
+        string? traceId,
+        string sourceObservationId,
+        BindingResolution? binding)
+    {
+        if (traceId is not null && IsNavigableTraceId(traceId))
+        {
+            store.Record(verificationId, evidenceRef, FirstTraceNavigationTargetKind.Trace, traceId!);
+        }
+        store.Record(
+            verificationId,
+            evidenceRef,
+            FirstTraceNavigationTargetKind.SourceDiagnostic,
+            sourceObservationId);
+        if (binding is not null && evidenceKind is DoctorEvidenceKind.ExactSessionBinding or DoctorEvidenceKind.CompletenessContent)
+        {
+            store.Record(
+                verificationId,
+                evidenceRef,
+                FirstTraceNavigationTargetKind.Session,
+                binding.Detail.Session.SessionId.ToString("D"));
+        }
+    }
+
+    private static bool IsNavigableTraceId(string traceId) =>
+        traceId.Length == 32 && traceId.All(static character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static DoctorResult StoreBusy() => new(
         DoctorSchemaVersions.ResultV1,

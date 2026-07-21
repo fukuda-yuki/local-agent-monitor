@@ -1,5 +1,6 @@
 using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot;
 using CopilotAgentObservability.Doctor;
+using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -10,6 +11,72 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public sealed class GitHubCopilotDoctorEvidenceAdapterTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 17, 1, 2, 3, TimeSpan.Zero);
+
+    [Fact]
+    public void Observe_PersistsExactNavigationForEveryAcceptedCandidate()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-vscode");
+        const string traceId = "0123456789abcdef0123456789abcdef";
+        const string nativeSessionId = "exact-navigation-session";
+        var rawRecordId = CommitRaw(database.Path, "vscode-copilot-chat", traceId);
+        CompleteProjection(database.Path, rawRecordId);
+        WriteSession(database.Path, nativeSessionId, traceId, "vscode", "copilot-compatible-hook");
+        var sourceObservationId = Assert.IsType<SourceCompatibilityRow>(
+            new SqliteSourceCompatibilityStore(database.Path).GetByRawRecordId(rawRecordId)).ObservationId;
+        var sessionId = Assert.IsType<ObservedSession>(
+            new SqliteSessionStore(database.Path).Resolve(SessionSourceSurface.VisualStudioCode, nativeSessionId)).SessionId;
+
+        var observed = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, "vscode", rawRecordId, new("vscode", nativeSessionId)));
+
+        var targets = new SqliteFirstTraceNavigationStore(database.Path)
+            .List(verification.VerificationId, observed.EvidenceRefs);
+        Assert.All(observed.EvidenceRefs, evidenceRef =>
+        {
+            Assert.Contains(targets, target => target.EvidenceRef == evidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.Trace
+                && target.TargetId == traceId);
+            Assert.Contains(targets, target => target.EvidenceRef == evidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.SourceDiagnostic
+                && target.TargetId == sourceObservationId);
+        });
+        Assert.All(observed.EvidenceRefs.Take(3), evidenceRef =>
+            Assert.DoesNotContain(targets, target => target.EvidenceRef == evidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.Session));
+        Assert.All(observed.EvidenceRefs.Skip(3), evidenceRef =>
+            Assert.Contains(targets, target => target.EvidenceRef == evidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.Session
+                && target.TargetId == sessionId.ToString("D")));
+        Assert.Equal(12, targets.Count);
+    }
+
+    [Fact]
+    public void Observe_OmitsNavigationTargetWhenExactIdentityIsUnavailable()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        var rawRecordId = CommitCliRaw(
+            database.Path,
+            serviceName: "github-copilot",
+            scopeName: "github.copilot",
+            includeSpan: true);
+        var sourceObservationId = Assert.IsType<SourceCompatibilityRow>(
+            new SqliteSourceCompatibilityStore(database.Path).GetByRawRecordId(rawRecordId)).ObservationId;
+
+        var observed = Observe(database.Path, verification.VerificationId, "cli", rawRecordId);
+
+        var targets = new SqliteFirstTraceNavigationStore(database.Path)
+            .List(verification.VerificationId, observed.EvidenceRefs);
+        Assert.Equal(3, targets.Count);
+        Assert.All(targets, target =>
+        {
+            Assert.Equal(FirstTraceNavigationTargetKind.SourceDiagnostic, target.TargetKind);
+            Assert.Equal(sourceObservationId, target.TargetId);
+        });
+    }
 
     [Fact]
     public void Observe_CliAcceptsCanonicalServiceAndSpanBearingScopeWithoutClientKind()
