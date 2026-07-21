@@ -7,10 +7,12 @@ remains defined by the canonical requirements and specifications.
 
 Validation date: 2026-07-21. Branch:
 `codex/issue-105-cross-surface-closeout`. Starting SHA:
-`5180a0424ff5488354a3e173c74b7e931d28679d`. Immutable validation candidate:
-`78958f2e10d2c1ba15a324bb8cf44cc96231e026`. The dedicated worktree was clean
-when the candidate was frozen and after validation. This evidence-only record
-does not replace or mutate that candidate.
+`5180a0424ff5488354a3e173c74b7e931d28679d`. The first immutable candidate was
+`78958f2e10d2c1ba15a324bb8cf44cc96231e026`; its failed live results remain
+below as historical evidence. The current replacement validation candidate is
+`b581be9864c284d27884e94208e92138b3e83040`. Each dedicated-candidate worktree
+was clean when its candidate was frozen and after validation. Evidence-only
+commits do not replace or mutate either candidate.
 
 ## Dependency and ancestry gate
 
@@ -249,3 +251,114 @@ Issue #105 does not satisfy its close condition. Consequently #69 does not
 satisfy its four-child close condition. This evidence location is the intended
 #60/#91 handoff, but #91 must retain the dependency gate and must not treat this
 record as a final live pass. Issue #57 closeout must not begin.
+
+## Replacement candidate closeout (supersedes the blocked decision above)
+
+The remainder of this section is the current decision for Issue #105. It
+supersedes the earlier `78958f2e...` live classifications without deleting
+their failure evidence. The replacement candidate is
+`b581be9864c284d27884e94208e92138b3e83040` on
+`codex/issue-105-cross-surface-closeout`.
+
+### Fix integration and ancestry
+
+The replacement contains the fail-closed uninstall correction, exact Copilot
+candidate promotion, finite-ledger-history authority selection, completed
+accepted-evidence navigation, and deterministic Release ZIP validation. Their
+integrated revisions are `17dac4c1`, `f4b2ddad`, `df308d09`, `5208fe5c`,
+`0772d0fc`, and `b581be98` respectively.
+
+The accepted #102 revisions `1d7822a` / `31d7ec5`; #103 production, live, and
+closeout revisions `8dd751d`, `f67e1a0`, and `916484d`; #104 product, handoff,
+and integration revisions `54d758a260f347cc31a3191d342ad509eb62d81f`,
+`95d2985`, and `70206cec`; and #106 evidence revisions `87c240ad`, `b4e59a59`,
+and `2378228d` are all ancestors of the replacement candidate. The compatible
+#99 / #110 revisions `09e0bd76`, `502acd9`, and `11d6c58` are also ancestors.
+Every `git merge-base --is-ancestor <revision> b581be9...` check returned exit
+`0`.
+
+### Required validation and artifact identity
+
+The candidate remained unchanged for all commands. The shared-skill mirror
+check passed first. The repository-required commands then produced:
+
+| Command | Result |
+| --- | --- |
+| `dotnet build CopilotAgentObservability.slnx` | passed; 0 warnings, 0 errors |
+| `pwsh scripts\test\install-playwright-chromium.ps1` | passed; exit 0 |
+| `dotnet test CopilotAgentObservability.slnx` | passed; Doctor 266/266, ConfigCli 4,282/4,282, LocalMonitor 2,027/2,027; total 6,575/6,575; 0 failed, 0 skipped |
+
+Focused replacement validation passed: GitHub source/Doctor 179/179; completed
+Doctor UI 15/15; Release script 35/35; and the previously failing Claude
+repository/release parity case 1/1. The package validation completed without a
+reusable MSBuild node remaining.
+
+The Windows x64 package was generated outside the repository from the exact
+candidate. `local-monitor-win-x64.zip` has SHA-256
+`F5872519EA58850D35022D5AF2EF9407E75786CB5E2ABE9CCA4390FB075234A9`, size
+174,536,743 bytes, 767 entries, and exactly one root manifest.
+
+### Live boundary and journey
+
+The operator explicitly accepted the current Windows user instead of a clean
+user. Pre-existing runtime state was moved to a recoverable sibling location;
+four managed user-environment values were represented only by presence and
+SHA-256 equality, never by their values. The source was GitHub Copilot CLI
+1.0.71 with content capture disabled. One harmless synthetic, no-tool
+interaction ran in a fresh process. Its output bodies were not read or
+retained; the temporary files were moved to the recycle bin.
+
+| Step | Bounded result | Classification |
+| --- | --- | --- |
+| Install / published start | install exit 0; candidate version matched; live 200; ready 200 / `ready` | passed |
+| Guided setup | one redacted `plan_ready`; explicit `apply_succeeded`; the sole status row was applied/current with all targets current/desired | passed |
+| Verification begin | `first_trace_verification_started`, active revision 1 | passed |
+| Real source execution | Copilot CLI 1.0.71 fresh process, no-tool synthetic interaction, exit 0 | passed |
+| Candidate promotion | four exact real candidates: ingest, raw persistence, projection, completeness/content | passed |
+| Explicit completion | all four refs explicitly selected; `first_trace_completed`, completed revision 2, four accepted refs | passed |
+| Completed navigation | `doctor.ui.v1` returned 200/no-store with four trace and four source-diagnostic targets; both unique server-provided destinations returned 200/no-store | passed |
+| Rollback | exact change set returned `rollback_succeeded`; all four managed values matched pre-run presence/hash | passed |
+| Uninstall | `stopped` then `uninstalled`, exit 0; candidate PID gone, port released, app absent, task absent | passed |
+| Restoration | retained candidate runtime data moved to recycle bin; prior runtime restored; no listener or task remained | passed cleanup |
+
+The earlier finite-history failure was reproduced only after multiple plan rows
+had accumulated. The replacement selects the sole exact applied/current
+authority independent of history order and fails closed when more than one
+current authority exists. Deterministic regressions passed, and the live run
+proved the normal single-plan path.
+
+### Reused evidence compatibility
+
+- #103 GitHub Copilot CLI evidence remains compatible by source version,
+  loopback/content-disabled settings, and ancestral revisions. The replacement
+  live run closes its prior Release ZIP, shared UI/navigation, rollback, and
+  uninstall gaps.
+- #106/#110 Claude Code 2.1.214 evidence remains compatible for its exact
+  content, Hook+OTel binding, restart/reconnect, sanitized-only, and interactive
+  producer scopes because the frozen #104 product and later correction
+  revisions are ancestors and those producer/settings contracts did not change
+  in the replacement. No result is extended to a different source version or
+  unrecorded setting.
+- #99 remains historical schema-drift context only; it is not used to replace
+  the newer #106/#110 evidence.
+
+No required #105 row remains failed, blocked without an exact reusable-evidence
+basis, not-attempted, or unclassified. GitHub App/SDK and Claude Agent SDK are
+caller-managed contract surfaces; provider execution is not applicable to the
+managed Release ZIP happy path and is covered by deterministic caller-managed
+state tests rather than being claimed as a live provider pass.
+
+### Replacement decision
+
+Independent implementation reviews for #113/#114/#115 were inspected by the
+primary coordinator before integration. The final #105 review wave is recorded
+after this evidence commit; any blocking finding will require a new candidate
+and a replacement section rather than changing `b581be9...`.
+
+Current Issue #105 decision: **release-ready for the #105 cross-surface scope**.
+The replacement candidate satisfies the Issue #105 technical close condition
+under the operator-approved current-user boundary. The Issue remains open and
+no GitHub close action is performed here. Issue #69 cannot satisfy its formal
+four-child close condition until #105 is closed. Issue #91 must independently
+apply its dependency gate; this #105 decision does not create a #91
+`final_validation_sha` or authorize Issue #57 closeout.
