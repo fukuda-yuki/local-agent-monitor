@@ -234,7 +234,7 @@ public sealed class GitHubCopilotDoctorOrchestratorTests
     }
 
     [Fact]
-    public void ContinueSelected_UnknownExactCompatibilityCannotBePromotedBySetupVersion()
+    public void ContinueSelected_ExactSchemaDriftRemainsAdvisoryAndCompletes()
     {
         using var database = TempDatabase.Create();
         var verification = Start(database.Path, "cli");
@@ -257,12 +257,13 @@ public sealed class GitHubCopilotDoctorOrchestratorTests
             rawRecordId,
             new("copilot-cli", "exact-native"));
 
-        Assert.Equal(DoctorResultCode.PartialFactSnapshot, result.Code);
-        Assert.Equal(DoctorVerificationState.Active, result.Verification?.State);
-        Assert.DoesNotContain(
+        Assert.Equal(DoctorResultCode.VerificationCompleted, result.Code);
+        Assert.Equal(DoctorVerificationState.Completed, result.Verification?.State);
+        Assert.Equal(DoctorStateCode.FirstTraceReady, result.Evaluation?.PrimaryState?.StateCode);
+        Assert.Contains(
             result.Evaluation?.States ?? [],
-            state => state.StateCode == DoctorStateCode.FirstTraceReady);
-        Assert.Empty(result.Verification!.AcceptedEvidenceRefs);
+            state => state.StateCode == DoctorStateCode.SchemaDriftDetected);
+        Assert.Equal(5, result.Verification!.AcceptedEvidenceRefs.Count);
     }
 
     [Fact]
