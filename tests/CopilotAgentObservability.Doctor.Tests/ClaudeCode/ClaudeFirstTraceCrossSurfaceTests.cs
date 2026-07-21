@@ -1030,6 +1030,15 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                     sessionStore,
                     app.Services.GetRequiredService<CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogContext>(),
                     time);
+                using var warmupClient = new HttpClient { BaseAddress = new Uri(origin) };
+                using (var live = await warmupClient.GetAsync("/health/live"))
+                {
+                    Assert.Equal(HttpStatusCode.OK, live.StatusCode);
+                }
+                using (var ready = await warmupClient.GetAsync("/health/ready"))
+                {
+                    Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+                }
                 return new(
                     app,
                     new HttpClient { BaseAddress = new Uri(origin) },
