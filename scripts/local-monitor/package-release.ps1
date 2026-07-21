@@ -36,6 +36,7 @@ dotnet publish $projectPath `
     --configuration $Configuration `
     --runtime $RuntimeIdentifier `
     --self-contained true `
+    --disable-build-servers `
     --output $publishDirectory `
     --artifacts-path $artifactsDirectory `
     -p:SelfContained=true `
@@ -50,6 +51,7 @@ dotnet publish $configCliProjectPath `
     --configuration $Configuration `
     --runtime $RuntimeIdentifier `
     --self-contained true `
+    --disable-build-servers `
     --output $configCliPublishDirectory `
     --artifacts-path $artifactsDirectory `
     -p:SelfContained=true `

@@ -125,6 +125,7 @@ public class LocalMonitorScriptTests
         Assert.Contains("dotnet_publish_failed", package, StringComparison.Ordinal);
         Assert.Contains("Join-Path $OutputDirectory 'artifacts'", package, StringComparison.Ordinal);
         Assert.Equal(2, package.Split("--artifacts-path $artifactsDirectory", StringSplitOptions.None).Length - 1);
+        Assert.Equal(2, package.Split("--disable-build-servers", StringSplitOptions.None).Length - 1);
     }
 
     [Fact]
@@ -1145,20 +1146,29 @@ public class LocalMonitorScriptTests
                 }
             }
         }
+        startInfo.Environment["MSBUILDDISABLENODEREUSE"] = "1";
 
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Failed to start {fileName}.");
         using var standardOutput = new MemoryStream();
         using var standardError = new MemoryStream();
-        var outputCopy = process.StandardOutput.BaseStream.CopyToAsync(standardOutput);
-        var errorCopy = process.StandardError.BaseStream.CopyToAsync(standardError);
-        if (!process.WaitForExit((int)timeout.TotalMilliseconds))
+        using var timeoutSource = new CancellationTokenSource(timeout);
+        var outputCopy = process.StandardOutput.BaseStream.CopyToAsync(standardOutput, timeoutSource.Token);
+        var errorCopy = process.StandardError.BaseStream.CopyToAsync(standardError, timeoutSource.Token);
+        try
         {
-            process.Kill(entireProcessTree: true);
-            process.WaitForExit();
-            throw new TimeoutException($"{fileName} exceeded the {timeout} process bound.");
+            process.WaitForExitAsync(timeoutSource.Token).GetAwaiter().GetResult();
+            Task.WhenAll(outputCopy, errorCopy).WaitAsync(timeoutSource.Token).GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException) when (timeoutSource.IsCancellationRequested)
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit();
+            }
+            throw new TimeoutException($"{fileName} exceeded the {timeout} process and output bound.");
         }
 
-        Task.WhenAll(outputCopy, errorCopy).GetAwaiter().GetResult();
         return new ProcessResult(process.ExitCode, standardOutput.ToArray(), standardError.ToArray());
     }
 
