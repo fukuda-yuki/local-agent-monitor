@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Collection(CanvasExtensionNodeCollection.Name)]
 public class CanvasExtensionContractTests
 {
     [Fact]
