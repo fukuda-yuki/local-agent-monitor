@@ -280,6 +280,23 @@ public class LocalMonitorScriptTests
             Assert.Empty(failure.GetProperty("warnings").EnumerateArray());
             Assert.Empty(failure.GetProperty("next_actions").EnumerateArray());
             Assert.False(failure.GetProperty("truncated").GetBoolean());
+
+            var privateDatabase = Path.Combine(root, "ISSUE105_PRIVATE_DATABASE", "raw-store.db");
+            var firstTraceFailure = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                [
+                    "-NoProfile", "-File", packagedFirstTrace, "status",
+                    "--verification-id", "01999999-9999-7999-8999-999999999999",
+                    "--database", privateDatabase, "--json",
+                ],
+                packagedEnvironment,
+                TimeSpan.FromMinutes(2));
+
+            Assert.Equal(2, firstTraceFailure.ExitCode);
+            Assert.Empty(firstTraceFailure.StandardOutputBytes);
+            Assert.Equal("invalid_arguments\n", firstTraceFailure.StandardErrorText);
+            Assert.DoesNotContain(privateDatabase, firstTraceFailure.StandardErrorText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("ISSUE105_PRIVATE_DATABASE", firstTraceFailure.StandardErrorText, StringComparison.Ordinal);
         }
         finally
         {
