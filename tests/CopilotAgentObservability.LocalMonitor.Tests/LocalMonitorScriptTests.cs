@@ -12,6 +12,7 @@ public class LocalMonitorScriptTests
         "common.ps1",
         "install.ps1",
         "package-release.ps1",
+        "first-trace.ps1",
         "setup.ps1",
         "start.ps1",
         "stop.ps1",
@@ -118,11 +119,86 @@ public class LocalMonitorScriptTests
         Assert.Contains("uninstall-user-env.ps1", package, StringComparison.Ordinal);
         Assert.Contains("install-session-hooks.ps1", package, StringComparison.Ordinal);
         Assert.Contains("uninstall-session-hooks.ps1", package, StringComparison.Ordinal);
+        Assert.Contains("first-trace.ps1", package, StringComparison.Ordinal);
         Assert.Contains("Compress-Archive", package, StringComparison.Ordinal);
         Assert.Contains("$LASTEXITCODE", package, StringComparison.Ordinal);
         Assert.Contains("dotnet_publish_failed", package, StringComparison.Ordinal);
         Assert.Contains("Join-Path $OutputDirectory 'artifacts'", package, StringComparison.Ordinal);
         Assert.Equal(2, package.Split("--artifacts-path $artifactsDirectory", StringSplitOptions.None).Length - 1);
+        Assert.Equal(2, package.Split("--disable-build-servers", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void FirstTraceWrapperUsesRuntimeDatabaseAndPreservesPackagedCliTransport()
+    {
+        var wrapper = File.ReadAllText(ScriptPath("first-trace.ps1"));
+
+        Assert.Contains("common.ps1", wrapper, StringComparison.Ordinal);
+        Assert.Contains("$script:DefaultDbPath", wrapper, StringComparison.Ordinal);
+        Assert.Contains("CopilotAgentObservability.ConfigCli.exe", wrapper, StringComparison.Ordinal);
+        Assert.Contains("@('first-trace')", wrapper, StringComparison.Ordinal);
+        Assert.Contains("'--database'", wrapper, StringComparison.Ordinal);
+        Assert.Contains("$LASTEXITCODE", wrapper, StringComparison.Ordinal);
+        Assert.Contains("internal_error", wrapper, StringComparison.Ordinal);
+        Assert.Contains("runtime_database_not_found", wrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("dotnet", wrapper, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("'begin', 'status', 'complete', 'cancel'", wrapper, StringComparison.Ordinal);
+        Assert.Contains("$_ -eq '--database'", wrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("[string] $DatabasePath", wrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("Write-LocalMonitorLog", wrapper, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FirstTraceWrapperRejectsCallerDatabaseWithoutDisclosingItsValue()
+    {
+        var callerDatabase = Path.Combine(Path.GetTempPath(), "ISSUE105_PRIVATE_DATABASE", "raw-store.db");
+
+        var result = RunPowerShellScript(
+            ScriptPath("first-trace.ps1"),
+            "status",
+            "--verification-id",
+            "01999999-9999-7999-8999-999999999999",
+            "--database",
+            callerDatabase,
+            "--json");
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Empty(result.Output);
+        Assert.Equal("invalid_arguments\n", result.Error.Replace("\r\n", "\n", StringComparison.Ordinal));
+        Assert.DoesNotContain(callerDatabase, result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ISSUE105_PRIVATE_DATABASE", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FirstTraceWrapperFailsClosedWhenRuntimeDatabaseIsMissing()
+    {
+        var root = CreateTemporaryDirectory("cao-first-trace-missing-database");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var wrapper = Path.Combine(scripts, "first-trace.ps1");
+            File.Copy(ScriptPath("first-trace.ps1"), wrapper);
+            File.WriteAllText(
+                Path.Combine(scripts, "common.ps1"),
+                "$script:DefaultDbPath = Join-Path '" + root.Replace("'", "''", StringComparison.Ordinal) + "' 'ISSUE105_PRIVATE_DATABASE\\raw-store.db'\n");
+
+            var result = RunPowerShellScript(
+                wrapper,
+                "status",
+                "--verification-id",
+                "01999999-9999-7999-8999-999999999999",
+                "--json");
+
+            Assert.Equal(5, result.ExitCode);
+            Assert.Empty(result.Output);
+            Assert.Equal("runtime_database_not_found\n", result.Error.Replace("\r\n", "\n", StringComparison.Ordinal));
+            Assert.DoesNotContain(root, result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("ISSUE105_PRIVATE_DATABASE", result.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -155,8 +231,10 @@ public class LocalMonitorScriptTests
 
             var staging = Path.Combine(outputDirectory, "staging");
             var packagedSetup = Path.Combine(staging, "scripts", "setup.ps1");
+            var packagedFirstTrace = Path.Combine(staging, "scripts", "first-trace.ps1");
             var packagedCli = Path.Combine(staging, "app", "config-cli", "CopilotAgentObservability.ConfigCli.exe");
             Assert.True(File.Exists(packagedSetup), "The release layout is missing scripts/setup.ps1.");
+            Assert.True(File.Exists(packagedFirstTrace), "The release layout is missing scripts/first-trace.ps1.");
             Assert.True(File.Exists(packagedCli), "The release layout is missing the self-contained Config CLI executable.");
             Assert.True(File.Exists(Path.ChangeExtension(packagedCli, ".runtimeconfig.json")), "The Config CLI runtime configuration is missing.");
 
@@ -165,6 +243,7 @@ public class LocalMonitorScriptTests
             using (var archive = System.IO.Compression.ZipFile.OpenRead(zipPath))
             {
                 Assert.Contains(archive.Entries, entry => entry.FullName == "scripts/setup.ps1");
+                Assert.Contains(archive.Entries, entry => entry.FullName == "scripts/first-trace.ps1");
                 Assert.Contains(archive.Entries, entry => entry.FullName == "app/config-cli/CopilotAgentObservability.ConfigCli.exe");
             }
 
@@ -202,6 +281,23 @@ public class LocalMonitorScriptTests
             Assert.Empty(failure.GetProperty("warnings").EnumerateArray());
             Assert.Empty(failure.GetProperty("next_actions").EnumerateArray());
             Assert.False(failure.GetProperty("truncated").GetBoolean());
+
+            var privateDatabase = Path.Combine(root, "ISSUE105_PRIVATE_DATABASE", "raw-store.db");
+            var firstTraceFailure = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                [
+                    "-NoProfile", "-File", packagedFirstTrace, "status",
+                    "--verification-id", "01999999-9999-7999-8999-999999999999",
+                    "--database", privateDatabase, "--json",
+                ],
+                packagedEnvironment,
+                TimeSpan.FromMinutes(2));
+
+            Assert.Equal(2, firstTraceFailure.ExitCode);
+            Assert.Empty(firstTraceFailure.StandardOutputBytes);
+            Assert.Equal("invalid_arguments\n", firstTraceFailure.StandardErrorText);
+            Assert.DoesNotContain(privateDatabase, firstTraceFailure.StandardErrorText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("ISSUE105_PRIVATE_DATABASE", firstTraceFailure.StandardErrorText, StringComparison.Ordinal);
         }
         finally
         {
@@ -702,6 +798,150 @@ public class LocalMonitorScriptTests
     }
 
     [Fact]
+    public void UninstallFailsClosedWhenStopFails()
+    {
+        var root = CreateTemporaryDirectory("cao-uninstall-stop-failure");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            var installedFile = Path.Combine(installRoot, "installed.txt");
+            File.WriteAllText(installedFile, "test-owned");
+            File.Copy(ScriptPath("uninstall-startup-task.ps1"), Path.Combine(scripts, "uninstall-startup-task.ps1"));
+            File.WriteAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:RuntimeRoot = '{{root.Replace("'", "''", StringComparison.Ordinal)}}'
+                function Get-LocalMonitorDefaultInstallRoot { '{{installRoot.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Get-LocalMonitorTask { $null }
+                function Remove-LocalMonitorState { }
+                function Remove-LocalMonitorInstall {
+                    param([string] $InstallRoot, [switch] $AllowExternal)
+                    Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+                }
+                """);
+            File.WriteAllText(
+                Path.Combine(scripts, "stop.ps1"),
+                "Write-Error 'stop_timeout'\nexit 1\n");
+
+            var result = RunPowerShellScript(
+                Path.Combine(scripts, "uninstall-startup-task.ps1"),
+                "-StopRunning",
+                "-InstallRoot", installRoot);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.DoesNotContain("uninstalled", result.Output, StringComparison.Ordinal);
+            Assert.Contains("stop_timeout", result.Error, StringComparison.Ordinal);
+            Assert.True(File.Exists(installedFile), "Install removal must not begin after stop fails.");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StopTerminatesAHeadlessPublishedProcessWithoutForce()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateTemporaryDirectory("cao-headless-stop");
+        Process? monitor = null;
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            File.Copy(ScriptPath("stop.ps1"), Path.Combine(scripts, "stop.ps1"));
+            monitor = Process.Start(new ProcessStartInfo
+            {
+                FileName = PowerShellExecutablePath(),
+                ArgumentList =
+                {
+                    "-NoProfile",
+                    "-Command",
+                    "while ($true) { Start-Sleep -Seconds 60 }",
+                },
+                CreateNoWindow = true,
+                UseShellExecute = false,
+            }) ?? throw new InvalidOperationException("Failed to start test-owned headless process.");
+            File.WriteAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                function Get-LocalMonitorState { [pscustomobject]@{ process_id = {{monitor.Id}} } }
+                function Test-LocalMonitorProcess { param([int] $ProcessId) $ProcessId -eq {{monitor.Id}} }
+                function Remove-LocalMonitorState { }
+                function Write-LocalMonitorLog { param([string] $Message) }
+                """);
+
+            var result = RunPowerShellScript(
+                Path.Combine(scripts, "stop.ps1"),
+                "-TimeoutSeconds", "1");
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Contains("stopped", result.Output, StringComparison.Ordinal);
+            Assert.True(monitor.WaitForExit(5_000), "The test-owned headless process remained running.");
+        }
+        finally
+        {
+            if (monitor is { HasExited: false })
+            {
+                monitor.Kill(entireProcessTree: true);
+                monitor.WaitForExit();
+            }
+
+            monitor?.Dispose();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StopUsesOnlyBoundedProcessExitWaits()
+    {
+        var stop = File.ReadAllText(ScriptPath("stop.ps1"));
+
+        Assert.DoesNotContain("$process.WaitForExit()", stop, StringComparison.Ordinal);
+        Assert.Equal(2, stop.Split("$process.WaitForExit($TimeoutSeconds * 1000)", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void UninstallFailsClosedWhenInstalledFilesRemain()
+    {
+        var root = CreateTemporaryDirectory("cao-uninstall-removal-failure");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            var installedFile = Path.Combine(installRoot, "installed.txt");
+            File.WriteAllText(installedFile, "test-owned");
+            File.Copy(ScriptPath("uninstall-startup-task.ps1"), Path.Combine(scripts, "uninstall-startup-task.ps1"));
+            File.WriteAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:RuntimeRoot = '{{root.Replace("'", "''", StringComparison.Ordinal)}}'
+                function Get-LocalMonitorDefaultInstallRoot { '{{installRoot.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Get-LocalMonitorTask { $null }
+                function Remove-LocalMonitorState { }
+                function Remove-LocalMonitorInstall { param([string] $InstallRoot, [switch] $AllowExternal) }
+                """);
+
+            var result = RunPowerShellScript(
+                Path.Combine(scripts, "uninstall-startup-task.ps1"),
+                "-InstallRoot", installRoot);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.DoesNotContain("uninstalled", result.Output, StringComparison.Ordinal);
+            Assert.Contains("uninstall_incomplete", result.Error, StringComparison.Ordinal);
+            Assert.True(File.Exists(installedFile));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void UserEnvironmentScriptsPersistRawLocalMonitorOtelSettingsForCurrentUser()
     {
         var install = File.ReadAllText(ScriptPath("install-user-env.ps1"));
@@ -906,20 +1146,29 @@ public class LocalMonitorScriptTests
                 }
             }
         }
+        startInfo.Environment["MSBUILDDISABLENODEREUSE"] = "1";
 
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Failed to start {fileName}.");
         using var standardOutput = new MemoryStream();
         using var standardError = new MemoryStream();
-        var outputCopy = process.StandardOutput.BaseStream.CopyToAsync(standardOutput);
-        var errorCopy = process.StandardError.BaseStream.CopyToAsync(standardError);
-        if (!process.WaitForExit((int)timeout.TotalMilliseconds))
+        using var timeoutSource = new CancellationTokenSource(timeout);
+        var outputCopy = process.StandardOutput.BaseStream.CopyToAsync(standardOutput, timeoutSource.Token);
+        var errorCopy = process.StandardError.BaseStream.CopyToAsync(standardError, timeoutSource.Token);
+        try
         {
-            process.Kill(entireProcessTree: true);
-            process.WaitForExit();
-            throw new TimeoutException($"{fileName} exceeded the {timeout} process bound.");
+            process.WaitForExitAsync(timeoutSource.Token).GetAwaiter().GetResult();
+            Task.WhenAll(outputCopy, errorCopy).WaitAsync(timeoutSource.Token).GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException) when (timeoutSource.IsCancellationRequested)
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit();
+            }
+            throw new TimeoutException($"{fileName} exceeded the {timeout} process and output bound.");
         }
 
-        Task.WhenAll(outputCopy, errorCopy).GetAwaiter().GetResult();
         return new ProcessResult(process.ExitCode, standardOutput.ToArray(), standardError.ToArray());
     }
 

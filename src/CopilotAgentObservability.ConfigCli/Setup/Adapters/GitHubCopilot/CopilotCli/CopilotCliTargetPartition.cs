@@ -258,7 +258,7 @@ internal sealed class CopilotCliTargetPartition : IGitHubCopilotTargetPartition
     private static bool IsConflictingOverride(string? value) =>
         value is not null && !string.Equals(value, "http/protobuf", StringComparison.Ordinal);
 
-    private static bool IsSupportedVersion(string? version)
+    internal static bool IsSupportedVersion(string? version)
     {
         var match = version is null
             ? Match.Empty

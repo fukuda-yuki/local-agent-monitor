@@ -18,6 +18,7 @@ internal sealed class ClaudeDoctorCandidateObserver
     private readonly string databasePath;
     private readonly SqliteDoctorApplicationService doctorApplication;
     private readonly ClaudeExactBindingRule exactBindingRule;
+    private readonly SqliteFirstTraceNavigationStore navigationStore;
     private readonly TimeProvider timeProvider;
     private readonly RawTelemetryStore rawStore;
 
@@ -43,6 +44,7 @@ internal sealed class ClaudeDoctorCandidateObserver
         this.doctorApplication = doctorApplication;
         this.rawStore = rawStore ?? throw new ArgumentNullException(nameof(rawStore));
         exactBindingRule = new(databasePath);
+        navigationStore = new(databasePath);
         this.timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -92,7 +94,15 @@ internal sealed class ClaudeDoctorCandidateObserver
                     return;
                 }
 
-                ObserveRecord(verification, references, completenessReferences, new ClaudeOtelRecord(raw.Id!.Value, candidate.ReceivedAt, raw.PayloadJson));
+                ObserveRecord(
+                    verification,
+                    references,
+                    completenessReferences,
+                    new ClaudeOtelRecord(
+                        raw.Id!.Value,
+                        candidate.ObservationId,
+                        candidate.ReceivedAt,
+                        raw.PayloadJson));
             }
         }
         finally
@@ -123,13 +133,17 @@ internal sealed class ClaudeDoctorCandidateObserver
                     references,
                     DoctorEvidenceKind.Ingest,
                     $"claude-otel-ingest-{identity}",
-                    record.ReceivedAt);
+                    record.ReceivedAt,
+                    span.TraceId!,
+                    record.ObservationId);
                 Observe(
                     verification,
                     references,
                     DoctorEvidenceKind.RawPersistence,
                     $"claude-otel-raw-{identity}",
-                    record.ReceivedAt);
+                    record.ReceivedAt,
+                    span.TraceId!,
+                    record.ObservationId);
 
                 var binding = exactBindingRule.Resolve(record.PayloadJson, span.TraceId!, span.SpanId!);
                 if (binding is null)
@@ -143,7 +157,10 @@ internal sealed class ClaudeDoctorCandidateObserver
                     references,
                     DoctorEvidenceKind.ExactSessionBinding,
                     $"claude-otel-binding-{span.TraceId!}-{sessionGuid}",
-                    record.ReceivedAt);
+                    record.ReceivedAt,
+                    span.TraceId!,
+                    record.ObservationId,
+                    sessionGuid);
 
                 if (!HasPartialOrBetterCompleteness(binding.SessionId)
                     || ReadAgreedContentState(span.TraceId!) is null)
@@ -159,7 +176,10 @@ internal sealed class ClaudeDoctorCandidateObserver
                         references,
                         DoctorEvidenceKind.CompletenessContent,
                         completenessReference,
-                        record.ReceivedAt);
+                        record.ReceivedAt,
+                        span.TraceId!,
+                        record.ObservationId,
+                        sessionGuid);
                 }
             }
 
@@ -176,7 +196,9 @@ internal sealed class ClaudeDoctorCandidateObserver
                     references,
                     DoctorEvidenceKind.Projection,
                     $"claude-otel-projection-{identity}",
-                    record.ReceivedAt);
+                    record.ReceivedAt,
+                    span.TraceId!,
+                    record.ObservationId);
             }
     }
 
@@ -185,14 +207,17 @@ internal sealed class ClaudeDoctorCandidateObserver
         ISet<string> references,
         DoctorEvidenceKind kind,
         string evidenceRef,
-        DateTimeOffset observedAt)
+        DateTimeOffset observedAt,
+        string traceId,
+        string observationId,
+        string? sessionId = null)
     {
         if (!references.Add(evidenceRef))
         {
             return;
         }
 
-        doctorApplication.ObserveCandidate(new(
+        var result = doctorApplication.ObserveCandidate(new(
             Guid.CreateVersion7().ToString("D"),
             verification.VerificationId,
             SourceSurface,
@@ -202,6 +227,29 @@ internal sealed class ClaudeDoctorCandidateObserver
             evidenceRef,
             observedAt,
             verification.ExpiresAt));
+        if (!result.Success)
+        {
+            return;
+        }
+
+        navigationStore.Record(
+            verification.VerificationId,
+            evidenceRef,
+            FirstTraceNavigationTargetKind.Trace,
+            traceId);
+        if (sessionId is not null)
+        {
+            navigationStore.Record(
+                verification.VerificationId,
+                evidenceRef,
+                FirstTraceNavigationTargetKind.Session,
+                sessionId);
+        }
+        navigationStore.Record(
+            verification.VerificationId,
+            evidenceRef,
+            FirstTraceNavigationTargetKind.SourceDiagnostic,
+            observationId);
     }
 
     private IReadOnlyList<ClaudeOtelCandidate> ReadEligibleRecords(DoctorVerification verification)
@@ -209,7 +257,7 @@ internal sealed class ClaudeDoctorCandidateObserver
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT r.id,r.received_at
+            SELECT r.id,o.observation_id,r.received_at
             FROM raw_records r
             JOIN source_schema_observations o ON o.raw_record_id=r.id
             WHERE o.source_surface=$source_surface
@@ -229,7 +277,8 @@ internal sealed class ClaudeDoctorCandidateObserver
         {
             records.Add(new(
                 reader.GetInt64(0),
-                ParseTimestamp(reader.GetString(1))));
+                reader.GetString(1),
+                ParseTimestamp(reader.GetString(2))));
         }
 
         return records;
@@ -346,9 +395,13 @@ internal sealed class ClaudeDoctorCandidateObserver
     private static DateTimeOffset ParseTimestamp(string value) =>
         DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
 
-    private sealed record ClaudeOtelCandidate(long RawRecordId, DateTimeOffset ReceivedAt);
+    private sealed record ClaudeOtelCandidate(long RawRecordId, string ObservationId, DateTimeOffset ReceivedAt);
 
-    private sealed record ClaudeOtelRecord(long RawRecordId, DateTimeOffset ReceivedAt, string PayloadJson);
+    private sealed record ClaudeOtelRecord(
+        long RawRecordId,
+        string ObservationId,
+        DateTimeOffset ReceivedAt,
+        string PayloadJson);
 
     private sealed record OtelSpanReference(string? TraceId, string? SpanId);
 }

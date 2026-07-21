@@ -156,6 +156,53 @@
         </div>
     </div>
 
+    <section class="panel doctor-panel" id="doctor" aria-labelledby="doctor-heading">
+        <div class="panel-head">
+            <span class="panel-title" id="doctor-heading">First-Trace Doctor</span>
+            <span class="panel-meta">共通 Doctor 契約による初回トレース確認</span>
+        </div>
+        <div class="doctor-source-control">
+            <label for="doctor-source">確認するソース</label>
+            <select id="doctor-source" aria-describedby="doctor-source-state" disabled>
+                <option value="">ソースを選択</option>
+            </select>
+            <p class="monitor-subtle" id="doctor-source-state">ソースを読み込んでいます。</p>
+        </div>
+        <div class="doctor-result" aria-labelledby="doctor-result-heading">
+            <h3 id="doctor-result-heading" tabindex="-1">Doctor の状態</h3>
+            <dl class="doctor-result-grid">
+                <div><dt>現在の状態</dt><dd id="doctor-current-state">—</dd></div>
+                <div><dt>重要度</dt><dd id="doctor-severity">—</dd></div>
+                <div><dt>ソース</dt><dd id="doctor-result-source">—</dd></div>
+                <div><dt>次の対応</dt><dd id="doctor-next-action">—</dd></div>
+                <div><dt>再試行</dt><dd id="doctor-retryability">—</dd></div>
+                <div><dt>ライフサイクル</dt><dd id="doctor-lifecycle">—</dd></div>
+            </dl>
+            <div class="doctor-evidence" id="doctor-session">
+                <h4>証拠参照</h4>
+                <ul id="doctor-evidence-list"><li class="monitor-subtle">証拠参照はまだありません。</li></ul>
+            </div>
+            <fieldset class="doctor-candidates" id="doctor-candidates" hidden>
+                <legend>完了に使用する証拠候補</legend>
+                <p class="monitor-subtle">確認した証拠参照を明示的に選択してください。</p>
+                <div id="doctor-candidate-list"></div>
+            </fieldset>
+            <div class="doctor-evidence" id="doctor-session-target" hidden>
+                <h4 tabindex="-1" id="doctor-session-target-heading">Exact Session</h4>
+                <dl class="doctor-result-grid" id="doctor-session-target-summary"></dl>
+            </div>
+            <div class="doctor-evidence" id="doctor-source-target" hidden>
+                <h4 tabindex="-1" id="doctor-source-target-heading">Exact source diagnostic</h4>
+                <dl class="doctor-result-grid" id="doctor-source-target-summary"></dl>
+            </div>
+        </div>
+        <p id="doctor-live" class="doctor-live" role="status" aria-live="polite" aria-atomic="true" aria-label="Doctor の更新"></p>
+        <div class="doctor-actions" id="doctor-actions">
+            <button class="monitor-btn" id="doctor-cancel-action" type="button" hidden>検証をキャンセル</button>
+            <button class="monitor-btn monitor-btn-primary" id="doctor-primary-action" type="button" hidden></button>
+        </div>
+    </section>
+
     <details class="raw-section" id="ingestion-history">
         <summary><h3 class="raw-section-title">取り込み履歴</h3></summary>
         <p class="monitor-subtle">受信した raw record と紐づく trace（sanitized metadata のみ）。</p>

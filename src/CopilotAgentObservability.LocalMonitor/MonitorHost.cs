@@ -85,6 +85,9 @@ internal static class MonitorHost
         var doctorApplication = testOptions?.DoctorApplication
             ?? CreateDoctorApplication(options.DatabasePath, timeProvider, testOptions?.DoctorApplicationFactory);
         builder.Services.AddSingleton(doctorApplication);
+        var doctorUiApplication = testOptions?.DoctorUiApplication
+            ?? new DoctorUiApplication(options.DatabasePath, options.Url);
+        builder.Services.AddSingleton(doctorUiApplication);
         if (testOptions is null)
         {
             var observer = new ClaudeDoctorCandidateObserver(options.DatabasePath, retentionContext, timeProvider);
@@ -228,6 +231,10 @@ internal static class MonitorHost
                 {
                     await RetentionMutationRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
+                else if (DoctorUiRoutes.IsDoctorUiPath(context.Request.Path))
+                {
+                    await DoctorUiRoutes.WriteInvalidHostAsync(context);
+                }
                 else if (DoctorRoutes.IsDoctorPath(context.Request.Path))
                 {
                     await DoctorRoutes.WriteInvalidHostAsync(context);
@@ -244,6 +251,8 @@ internal static class MonitorHost
         app.UseStaticFiles();
         app.MapRazorPages();
         DoctorRoutes.Map(app, doctorApplication);
+        DoctorUiRoutes.Map(app, doctorUiApplication);
+        DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
         RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
         app.MapGet("/health/live", async context =>
@@ -1651,6 +1660,8 @@ internal sealed class MonitorHostTestOptions
     public Func<RetentionCatalogStore, TimeProvider, RetentionMutationApplicationService>? RetentionMutationApplicationFactory { get; init; }
 
     public IDoctorHttpApplication? DoctorApplication { get; init; }
+
+    public IDoctorUiApplication? DoctorUiApplication { get; init; }
 
     public Func<string, TimeProvider, IDoctorHttpApplication>? DoctorApplicationFactory { get; init; }
 

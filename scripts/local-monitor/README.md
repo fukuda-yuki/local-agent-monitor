@@ -67,6 +67,30 @@ by the Claude adapter emits `restart_claude_process` followed by
 `run_first_trace_doctor` as a handoff to
 `first-trace begin --adapter claude-code`; it is not telemetry evidence.
 
+After setup, select the exact source and start the first-trace Doctor. The
+wrapper supplies the installed LocalMonitor runtime database path; no source
+checkout, .NET installation, or environment-variable editing is required:
+
+```powershell
+.\scripts\first-trace.ps1 begin --adapter github-copilot-vscode --json
+.\scripts\first-trace.ps1 begin --adapter github-copilot-cli --json
+.\scripts\first-trace.ps1 begin --adapter github-copilot-app-sdk --json
+.\scripts\first-trace.ps1 begin --adapter claude-code --json
+.\scripts\first-trace.ps1 status --verification-id <verification-id> --json
+.\scripts\first-trace.ps1 complete --verification-id <verification-id> --expected-revision <revision> --evidence <opaque-reference> --json
+.\scripts\first-trace.ps1 cancel --verification-id <verification-id> --expected-revision <revision> --json
+```
+
+`status`, `complete`, and `cancel` operate only on the exact verification ID.
+`complete` accepts only explicitly selected opaque evidence references; the
+wrapper does not select a latest trace or infer evidence from timestamps. For a
+supported rollback journey, cancel the active verification first, run the exact
+source setup rollback, and then refresh the cancelled verification with
+`status`. Rollback does not erase Doctor history or create a passing state.
+Uninstall only after cancellation and rollback. Normal uninstall keeps the
+Doctor database and logs, so reinstall can inspect the same persisted state.
+`-RemoveData -Force` permanently removes that state.
+
 Optional Copilot CLI / VS Code Session Hooks forwarding is a separate opt-in:
 
 ```powershell
@@ -142,9 +166,9 @@ pwsh scripts\local-monitor\package-release.ps1
 
 The package script creates `artifacts\local-monitor-release\local-monitor-win-x64.zip`.
 The ZIP contains the published LocalMonitor app, the self-contained Config CLI
-under `app/config-cli/`, `scripts/setup.ps1`, the remaining scripts, README,
-manifest, and notices. It must not contain runtime DB, logs, state, raw
-telemetry, credentials, or PII.
+under `app/config-cli/`, `scripts/setup.ps1`, `scripts/first-trace.ps1`, the
+remaining scripts, README, manifest, and notices. It must not contain runtime
+DB, logs, state, raw telemetry, credentials, or PII.
 
 ## Defaults
 

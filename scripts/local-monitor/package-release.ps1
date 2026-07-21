@@ -36,6 +36,7 @@ dotnet publish $projectPath `
     --configuration $Configuration `
     --runtime $RuntimeIdentifier `
     --self-contained true `
+    --disable-build-servers `
     --output $publishDirectory `
     --artifacts-path $artifactsDirectory `
     -p:SelfContained=true `
@@ -50,6 +51,7 @@ dotnet publish $configCliProjectPath `
     --configuration $Configuration `
     --runtime $RuntimeIdentifier `
     --self-contained true `
+    --disable-build-servers `
     --output $configCliPublishDirectory `
     --artifacts-path $artifactsDirectory `
     -p:SelfContained=true `
@@ -82,6 +84,7 @@ $scriptNames = @(
     'uninstall-startup-task.ps1',
     'install-session-hooks.ps1',
     'uninstall-session-hooks.ps1',
+    'first-trace.ps1',
     'setup.ps1'
 )
 foreach ($scriptName in $scriptNames) {

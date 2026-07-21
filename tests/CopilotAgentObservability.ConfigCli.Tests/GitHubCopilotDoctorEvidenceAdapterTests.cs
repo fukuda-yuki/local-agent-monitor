@@ -1,5 +1,12 @@
 using CopilotAgentObservability.ConfigCli.Setup.Adapters.GitHubCopilot;
+using CopilotAgentObservability.ConfigCli.FirstTrace;
+using CopilotAgentObservability.ConfigCli.FirstTrace.GitHubCopilot;
+using CopilotAgentObservability.ConfigCli.Setup.Cli;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
+using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using CopilotAgentObservability.ConfigCli.Setup.Platform;
 using CopilotAgentObservability.Doctor;
+using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -10,6 +17,401 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public sealed class GitHubCopilotDoctorEvidenceAdapterTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 17, 1, 2, 3, TimeSpan.Zero);
+    private const string CliTraceId = "0123456789abcdef0123456789abcdef";
+
+    [Fact]
+    public void CandidateObserver_PromotesEveryExactCopilotCliRecordWithoutCallerSuppliedRawId()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        _ = CommitCliRaw(database.Path, "not-github-copilot", "github.copilot", includeSpan: true);
+        _ = CommitCliRaw(database.Path, "github-copilot", "github.copilot", includeSpan: true);
+
+        GitHubCopilotDoctorCandidateObserver.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            verification,
+            "cli");
+
+        var candidates = ReadCandidates(database.Path, verification.VerificationId);
+        Assert.Equal(3, candidates.Count);
+        Assert.Equal(
+            ["ingest", "projection", "raw_persistence"],
+            candidates.Select(candidate => candidate.EvidenceKind).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void CandidateObserver_ScansPastUnrelatedRowsAndStopsAtCandidateStoreCapacity()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        for (var index = 0; index < 20; index++)
+        {
+            _ = CommitCliRaw(database.Path, $"unrelated-{index}", "github.copilot", includeSpan: true);
+        }
+        for (var index = 0; index < 34; index++)
+        {
+            _ = CommitCliRaw(database.Path, "github-copilot", "github.copilot", includeSpan: true);
+        }
+
+        GitHubCopilotDoctorCandidateObserver.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            verification,
+            "cli");
+
+        Assert.Equal(100, ReadCandidates(database.Path, verification.VerificationId).Count);
+    }
+
+    [Fact]
+    public void FirstTraceAdapter_StatusCollectionInvokesCandidateObserverWithInjectedClock()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        _ = CommitCliRaw(
+            database.Path,
+            "github-copilot",
+            "github.copilot",
+            includeSpan: true,
+            serviceVersion: "1.0.71");
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            _ => new SetupCommandResult(
+                SetupCommand.Status,
+                false,
+                SetupCodes.SetupBusy,
+                null,
+                null,
+                null,
+                "github-copilot",
+                [],
+                [],
+                [],
+                [],
+                false),
+            () => Now);
+
+        _ = adapter.CollectFacts(database.Path, "http://127.0.0.1:4320", verification);
+
+        Assert.Equal(3, ReadCandidates(database.Path, verification.VerificationId).Count);
+    }
+
+    [Fact]
+    public void FirstTraceStatus_ReturnsCandidatesObservedDuringTheSameRequest()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        _ = CommitCliRaw(
+            database.Path,
+            "github-copilot",
+            "github.copilot",
+            includeSpan: true,
+            serviceVersion: "1.0.71");
+        var clock = new AdjustableTimeProvider(Now);
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            _ => new SetupCommandResult(
+                SetupCommand.Status,
+                false,
+                SetupCodes.SetupBusy,
+                null,
+                null,
+                null,
+                "github-copilot",
+                [],
+                [],
+                [],
+                [],
+                false),
+            () => clock.GetUtcNow());
+        var orchestrator = new FirstTraceOrchestrator([adapter], clock);
+
+        var status = orchestrator.Execute(new FirstTraceRequest(
+            "status",
+            database.Path,
+            Adapter: null,
+            verification.VerificationId,
+            ExpectedRevision: null,
+            Endpoint: null,
+            Interaction: null,
+            ExpiresAt: null,
+            EvidenceRefs: []));
+
+        Assert.Equal(3, status.Candidates.Count);
+    }
+
+    [Fact]
+    public void FirstTraceBegin_AllowsManagedGitHubWhenRestartIsTheOnlyBlocker()
+    {
+        using var database = TemporaryDatabase.Create();
+        var clock = new AdjustableTimeProvider(Now);
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            _ => ReadyCliStatus(),
+            () => clock.GetUtcNow(),
+            ReadyCliPlatform());
+        var orchestrator = new FirstTraceOrchestrator([adapter], clock);
+
+        var begun = orchestrator.Execute(new FirstTraceRequest(
+            "begin", database.Path, "github-copilot-cli", null, null,
+            null, "cli", Now.AddMinutes(5), []));
+
+        Assert.True(begun.Success);
+        Assert.Equal(FirstTraceCodes.VerificationStarted, begun.Code);
+        Assert.Equal(DoctorResultCode.VerificationStarted, begun.Doctor?.Code);
+    }
+
+    [Fact]
+    public void FirstTraceBegin_RejectsManagedGitHubWhenEndpointHasForeignOwner()
+    {
+        using var database = TemporaryDatabase.Create();
+        var clock = new AdjustableTimeProvider(Now);
+        var platform = new SetupTestPlatform(Now);
+        platform.ScriptProcess(
+            "copilot",
+            ["version"],
+            new SetupProcessObservation(SetupProcessOutcome.Completed, 0, "1.0.71"));
+        platform.ScriptHttpProbe(new SetupHttpProbeObservation(
+            SetupHttpProbeOutcome.Response,
+            200,
+            2,
+            "{}"u8.ToArray(),
+            true));
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            _ => ReadyCliStatus(),
+            () => clock.GetUtcNow(),
+            platform);
+        var orchestrator = new FirstTraceOrchestrator([adapter], clock);
+
+        var begun = orchestrator.Execute(new FirstTraceRequest(
+            "begin", database.Path, "github-copilot-cli", null, null,
+            null, "cli", Now.AddMinutes(5), []));
+
+        Assert.False(begun.Success);
+        Assert.Equal(FirstTraceCodes.Blocked, begun.Code);
+        Assert.Null(begun.VerificationId);
+        Assert.Equal(DoctorStateCode.PortOwnedByForeignProcess, begun.Doctor?.Evaluation?.PrimaryState?.StateCode);
+    }
+
+    [Fact]
+    public void FirstTraceBegin_RejectsManagedGitHubWhenCurrentAuthoritiesAreUnavailable()
+    {
+        using var database = TemporaryDatabase.Create();
+        var clock = new AdjustableTimeProvider(Now);
+        var platform = new SetupTestPlatform(Now);
+        platform.InjectFault(
+            "process.run:copilot:version",
+            new InvalidOperationException("synthetic unavailable"));
+        platform.InjectFault(
+            "http.get:http://127.0.0.1:4320:/health/live:500:4096",
+            new InvalidOperationException("synthetic unavailable"));
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            _ => ReadyCliStatus(),
+            () => clock.GetUtcNow(),
+            platform);
+        var orchestrator = new FirstTraceOrchestrator([adapter], clock);
+
+        var begun = orchestrator.Execute(new FirstTraceRequest(
+            "begin", database.Path, "github-copilot-cli", null, null,
+            null, "cli", Now.AddMinutes(5), []));
+
+        Assert.False(begun.Success);
+        Assert.Equal(FirstTraceCodes.Blocked, begun.Code);
+        Assert.Null(begun.VerificationId);
+        Assert.Contains("install_and_source_version", begun.Doctor?.Evaluation?.MissingFactFamilies ?? []);
+    }
+
+    [Fact]
+    public void FirstTraceComplete_WithoutCandidatesDispatchesOneStatusAndNeverPlan()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        var clock = new AdjustableTimeProvider(Now);
+        var dispatched = new List<SetupCommand>();
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            options =>
+            {
+                dispatched.Add(options.Command);
+                return ReadyCliStatus();
+            },
+            () => clock.GetUtcNow(),
+            ReadyCliPlatform());
+        var orchestrator = new FirstTraceOrchestrator([adapter], clock);
+
+        _ = orchestrator.Execute(new FirstTraceRequest(
+            "complete", database.Path, null, verification.VerificationId, verification.Revision,
+            null, null, null, []));
+
+        Assert.Equal([SetupCommand.Status], dispatched);
+    }
+
+    [Fact]
+    public void FirstTraceComplete_UsesOneExactSelectedRawGroupAndReturnsReadyNavigation()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        var rawRecordId = CommitCliRaw(
+            database.Path,
+            "github-copilot",
+            "github.copilot",
+            includeSpan: true,
+            serviceVersion: "1.0.71",
+            traceId: CliTraceId);
+        CompleteProjection(database.Path, rawRecordId);
+        var clock = new AdjustableTimeProvider(Now.AddSeconds(3));
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            _ => ReadyCliStatus(),
+            () => clock.GetUtcNow(),
+            ReadyCliPlatform());
+        var orchestrator = new FirstTraceOrchestrator([adapter], clock);
+        var status = orchestrator.Execute(new FirstTraceRequest(
+            "status", database.Path, null, verification.VerificationId, null,
+            null, null, null, []));
+        Assert.Equal(4, status.Candidates.Count);
+        var setupFacts = adapter.CollectFacts(database.Path, "http://127.0.0.1:4320", verification);
+        IFirstTraceSourceAdapter adapterContract = adapter;
+        var selectedFacts = adapterContract.CollectSelectedFacts(
+            database.Path,
+            "http://127.0.0.1:4320",
+            verification,
+            status.Candidates.Select(candidate => candidate.EvidenceRef).ToArray(),
+            setupFacts);
+        Assert.NotNull(selectedFacts.SourceVersionAndSchemaDiagnostics);
+        Assert.Equal(DoctorCompleteness.Unbound, selectedFacts.CompletenessAndContent?.Completeness);
+
+        var completed = orchestrator.Execute(new FirstTraceRequest(
+            "complete", database.Path, null, verification.VerificationId, verification.Revision,
+            null, null, null, status.Candidates.Select(candidate => candidate.EvidenceRef).ToArray()));
+
+        Assert.True(completed.Success, $"{completed.Code}: {DoctorJson.SerializeResult(completed.Doctor!)}");
+        Assert.Equal(DoctorStateCode.FirstTraceReady, completed.Doctor!.Evaluation!.PrimaryState!.StateCode);
+        Assert.Equal(DoctorVerificationState.Completed, completed.Doctor.Verification!.State);
+        Assert.Equal(4, completed.Doctor.Verification.AcceptedEvidenceRefs.Count);
+        var targets = new SqliteFirstTraceNavigationStore(database.Path)
+            .List(verification.VerificationId, completed.Doctor.Verification!.AcceptedEvidenceRefs);
+        Assert.All(completed.Doctor.Verification.AcceptedEvidenceRefs, evidenceRef =>
+        {
+            Assert.Contains(targets, target => target.EvidenceRef == evidenceRef &&
+                target.TargetKind == FirstTraceNavigationTargetKind.Trace &&
+                target.TargetId == CliTraceId);
+            Assert.Contains(targets, target => target.EvidenceRef == evidenceRef &&
+                target.TargetKind == FirstTraceNavigationTargetKind.SourceDiagnostic);
+            Assert.DoesNotContain(targets, target => target.EvidenceRef == evidenceRef &&
+                target.TargetKind == FirstTraceNavigationTargetKind.Session);
+        });
+    }
+
+    [Fact]
+    public void FirstTraceComplete_MixedExactRawGroupsFailClosed()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        var first = CommitCliRaw(database.Path, "github-copilot", "github.copilot", true, traceId: CliTraceId);
+        var second = CommitCliRaw(database.Path, "github-copilot", "github.copilot", true,
+            traceId: "fedcba9876543210fedcba9876543210");
+        CompleteProjection(database.Path, first);
+        CompleteProjection(database.Path, second);
+        var clock = new AdjustableTimeProvider(Now.AddSeconds(3));
+        var adapter = new GitHubCopilotFirstTraceAdapter(
+            "github-copilot-cli",
+            _ => ReadyCliStatus(),
+            () => clock.GetUtcNow(),
+            ReadyCliPlatform());
+        var orchestrator = new FirstTraceOrchestrator([adapter], clock);
+        var status = orchestrator.Execute(new FirstTraceRequest(
+            "status", database.Path, null, verification.VerificationId, null, null, null, null, []));
+        var mixed = status.Candidates
+            .GroupBy(candidate => new SqliteFirstTraceNavigationStore(database.Path)
+                .List(verification.VerificationId, [candidate.EvidenceRef])
+                .Single(target => target.TargetKind == FirstTraceNavigationTargetKind.Trace).TargetId)
+            .Take(2)
+            .SelectMany(group => group.Take(2))
+            .Select(candidate => candidate.EvidenceRef)
+            .ToArray();
+
+        var completed = orchestrator.Execute(new FirstTraceRequest(
+            "complete", database.Path, null, verification.VerificationId, verification.Revision,
+            null, null, null, mixed));
+
+        Assert.False(completed.Success);
+        Assert.NotEqual(DoctorStateCode.FirstTraceReady, completed.Doctor?.Evaluation?.PrimaryState?.StateCode);
+        var current = Assert.IsType<DoctorVerification>(
+            SqliteDoctorApplicationService.Create(new SqliteDoctorVerificationStore(database.Path, clock))
+                .Status(verification.VerificationId).Verification);
+        Assert.Equal(DoctorVerificationState.Active, current.State);
+        Assert.Equal(verification.Revision, current.Revision);
+        Assert.Empty(current.AcceptedEvidenceRefs);
+    }
+
+    [Fact]
+    public void Observe_PersistsExactNavigationForEveryAcceptedCandidate()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-vscode");
+        const string traceId = "0123456789abcdef0123456789abcdef";
+        const string nativeSessionId = "exact-navigation-session";
+        var rawRecordId = CommitRaw(database.Path, "vscode-copilot-chat", traceId);
+        CompleteProjection(database.Path, rawRecordId);
+        WriteSession(database.Path, nativeSessionId, traceId, "vscode", "copilot-compatible-hook");
+        var sourceObservationId = Assert.IsType<SourceCompatibilityRow>(
+            new SqliteSourceCompatibilityStore(database.Path).GetByRawRecordId(rawRecordId)).ObservationId;
+        var sessionId = Assert.IsType<ObservedSession>(
+            new SqliteSessionStore(database.Path).Resolve(SessionSourceSurface.VisualStudioCode, nativeSessionId)).SessionId;
+
+        var observed = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, "vscode", rawRecordId, new("vscode", nativeSessionId)));
+
+        var targets = new SqliteFirstTraceNavigationStore(database.Path)
+            .List(verification.VerificationId, observed.EvidenceRefs);
+        Assert.All(observed.EvidenceRefs, evidenceRef =>
+        {
+            Assert.Contains(targets, target => target.EvidenceRef == evidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.Trace
+                && target.TargetId == traceId);
+            Assert.Contains(targets, target => target.EvidenceRef == evidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.SourceDiagnostic
+                && target.TargetId == sourceObservationId);
+        });
+        Assert.All(observed.EvidenceRefs.Take(3), evidenceRef =>
+            Assert.DoesNotContain(targets, target => target.EvidenceRef == evidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.Session));
+        Assert.All(observed.EvidenceRefs.Skip(3), evidenceRef =>
+            Assert.Contains(targets, target => target.EvidenceRef == evidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.Session
+                && target.TargetId == sessionId.ToString("D")));
+        Assert.Equal(12, targets.Count);
+    }
+
+    [Fact]
+    public void Observe_OmitsNavigationTargetWhenExactIdentityIsUnavailable()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        var rawRecordId = CommitCliRaw(
+            database.Path,
+            serviceName: "github-copilot",
+            scopeName: "github.copilot",
+            includeSpan: true);
+        var sourceObservationId = Assert.IsType<SourceCompatibilityRow>(
+            new SqliteSourceCompatibilityStore(database.Path).GetByRawRecordId(rawRecordId)).ObservationId;
+
+        var observed = Observe(database.Path, verification.VerificationId, "cli", rawRecordId);
+
+        var targets = new SqliteFirstTraceNavigationStore(database.Path)
+            .List(verification.VerificationId, observed.EvidenceRefs);
+        Assert.Equal(3, targets.Count);
+        Assert.All(targets, target =>
+        {
+            Assert.Equal(FirstTraceNavigationTargetKind.SourceDiagnostic, target.TargetKind);
+            Assert.Equal(sourceObservationId, target.TargetId);
+        });
+    }
 
     [Fact]
     public void Observe_CliAcceptsCanonicalServiceAndSpanBearingScopeWithoutClientKind()
@@ -946,7 +1348,9 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         string? scopeName,
         bool includeSpan,
         string? clientKind = null,
-        bool includeUnrelatedSpanBearingScope = false)
+        bool includeUnrelatedSpanBearingScope = false,
+        string? serviceVersion = null,
+        string traceId = "trace")
     {
         var resourceAttributes = new Dictionary<string, string>(StringComparer.Ordinal);
         if (serviceName is not null)
@@ -957,6 +1361,10 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         {
             resourceAttributes.Add("client.kind", clientKind);
         }
+        if (serviceVersion is not null)
+        {
+            resourceAttributes.Add("service.version", serviceVersion);
+        }
 
         var otlpAttributes = resourceAttributes.Select(attribute => new
         {
@@ -965,7 +1373,7 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         }).ToArray();
         var scope = scopeName is null ? null : new { name = scopeName };
         var spans = includeSpan
-            ? new[] { new { traceId = "trace", spanId = "span" } }
+            ? new[] { new { traceId, spanId = "span" } }
             : [];
         var scopeSpans = new List<object>();
         if (includeUnrelatedSpanBearingScope)
@@ -988,7 +1396,7 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
                 },
             },
         });
-        return CommitCliPayload(databasePath, resourceAttributes, payload);
+        return CommitCliPayload(databasePath, resourceAttributes, payload, traceId);
     }
 
     private static long CommitCliRawWithSplitProvenance(string databasePath)
@@ -1026,7 +1434,8 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
     private static long CommitCliPayload(
         string databasePath,
         IReadOnlyDictionary<string, string> resourceAttributes,
-        string payload)
+        string payload,
+        string traceId = "trace")
     {
         var inventory = OtlpJsonStructuralWalker.Build(payload, Now);
         var observation = SourceObservationBatchDraft.Create(
@@ -1047,13 +1456,94 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         var raw = new RawTelemetryRecord(
             Id: null,
             RawTelemetrySources.RawOtlp,
-            TraceId: "trace",
+            TraceId: traceId,
             Now,
             System.Text.Json.JsonSerializer.Serialize(resourceAttributes),
             payload);
         new SqliteSourceCompatibilityStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
         return new SqliteIngestionCommitStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter)
             .Commit(ValidatedIngestionBatch.Create(raw, observation)).RawRecordId;
+    }
+
+    private static SetupCommandResult ReadyCliStatus()
+    {
+        var changes = new[]
+        {
+            "COPILOT_OTEL_ENABLED",
+            "COPILOT_OTEL_EXPORTER_TYPE",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_PROTOCOL",
+        }.Select(key => new SetupMemberChangeResult(
+            key,
+            SetupOperation.NoOp,
+            "present_desired",
+            "present_desired",
+            "none",
+            false)).ToArray();
+        var target = new SetupTargetResult(
+            Guid.CreateVersion7().ToString("D"),
+            SetupTargetKind.Env,
+            "copilot-cli-user-environment",
+            true,
+            "1.0.71",
+            SetupOperation.NoOp,
+            SetupEffectiveSource.Environment,
+            SetupReferenceState.Desired,
+            SetupCurrentState.Current,
+            SetupRestartRequirement.RestartTerminalSession,
+            false,
+            "http://127.0.0.1:4320",
+            SourceCapabilityManifestLoader.LoadForSurface("github-copilot-cli").CanonicalJson.Clone(),
+            null,
+            changes);
+        var statusTarget = target with
+        {
+            ReferenceState = SetupReferenceState.Desired,
+            CurrentState = SetupCurrentState.Current,
+        };
+        var changeSet = new SetupChangeSetStatusResult(
+            Guid.CreateVersion7().ToString("D"),
+            "github-copilot",
+            "cli",
+            Now.AddMinutes(-1).ToString("O"),
+            Now.ToString("O"),
+            SetupChangeSetState.Applied,
+            SetupCodes.ApplySucceeded,
+            SetupCurrentState.Current,
+            false,
+            [statusTarget]);
+        return new SetupCommandResult(
+            SetupCommand.Status,
+            true,
+            SetupCodes.StatusReady,
+            null,
+            null,
+            null,
+            "github-copilot",
+            [],
+            [changeSet],
+            [],
+            [],
+            false);
+    }
+
+    private static SetupTestPlatform ReadyCliPlatform()
+    {
+        var platform = new SetupTestPlatform(Now);
+        for (var index = 0; index < 4; index++)
+        {
+            platform.ScriptProcess(
+                "copilot",
+                ["version"],
+                new SetupProcessObservation(SetupProcessOutcome.Completed, 0, "1.0.71"));
+            platform.ScriptHttpProbe(new SetupHttpProbeObservation(
+                SetupHttpProbeOutcome.Response,
+                200,
+                17,
+                "{\"status\":\"live\"}"u8.ToArray(),
+                true));
+        }
+        return platform;
     }
 
     private static void CompleteProjection(string databasePath, long rawRecordId) =>

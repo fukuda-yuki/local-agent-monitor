@@ -24,7 +24,7 @@ public sealed class ClaudeDoctorCandidateObserverTests
         var sessionId = fixture.SeedSession(NativeSessionMarker, SessionCompleteness.Partial);
         var verification = fixture.StartVerification();
         var receivedAt = Start;
-        fixture.SeedOtel(Payload(TraceId, SpanId, NativeSessionMarker), receivedAt);
+        var observationId = fixture.SeedOtel(Payload(TraceId, SpanId, NativeSessionMarker), receivedAt);
 
         fixture.Observer.RunOnce();
 
@@ -48,6 +48,28 @@ public sealed class ClaudeDoctorCandidateObserverTests
         Assert.DoesNotContain(NativeSessionMarker, references, StringComparison.Ordinal);
         Assert.DoesNotContain(PromptMarker, references, StringComparison.Ordinal);
         Assert.DoesNotContain(PathMarker, references, StringComparison.Ordinal);
+
+        var targets = new SqliteFirstTraceNavigationStore(fixture.DatabasePath)
+            .List(verification.VerificationId, candidates.Select(candidate => candidate.EvidenceRef).ToArray());
+        Assert.All(candidates, candidate =>
+        {
+            Assert.Contains(targets, target => target.EvidenceRef == candidate.EvidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.Trace
+                && target.TargetId == TraceId);
+            Assert.Contains(targets, target => target.EvidenceRef == candidate.EvidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.SourceDiagnostic
+                && target.TargetId == observationId);
+        });
+        Assert.All(candidates.Where(candidate => candidate.EvidenceKind is
+            DoctorEvidenceKind.Ingest or DoctorEvidenceKind.RawPersistence or DoctorEvidenceKind.Projection), candidate =>
+            Assert.DoesNotContain(targets, target => target.EvidenceRef == candidate.EvidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.Session));
+        Assert.All(candidates.Where(candidate => candidate.EvidenceKind is
+            DoctorEvidenceKind.ExactSessionBinding or DoctorEvidenceKind.CompletenessContent), candidate =>
+            Assert.Contains(targets, target => target.EvidenceRef == candidate.EvidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.Session
+                && target.TargetId == sessionId.ToString("D")));
+        Assert.Equal(12, targets.Count);
     }
 
     [Fact]
@@ -117,7 +139,7 @@ public sealed class ClaudeDoctorCandidateObserverTests
         using var fixture = CreateFixture();
         fixture.SeedSession("HOOK_NATIVE_A", SessionCompleteness.Partial, TraceId, "claude-code-hook");
         var verification = fixture.StartVerification();
-        fixture.SeedOtel(Payload(TraceId, SpanId, otelSessionId), Start.AddSeconds(1));
+        var observationId = fixture.SeedOtel(Payload(TraceId, SpanId, otelSessionId), Start.AddSeconds(1));
 
         fixture.Observer.RunOnce();
 
@@ -125,6 +147,18 @@ public sealed class ClaudeDoctorCandidateObserverTests
         Assert.DoesNotContain(candidates, candidate => candidate.EvidenceKind == DoctorEvidenceKind.ExactSessionBinding);
         Assert.DoesNotContain(candidates, candidate => candidate.EvidenceKind == DoctorEvidenceKind.CompletenessContent);
         Assert.All(candidates, candidate => Assert.True(DoctorValidation.IsValidEvidenceCandidate(candidate)));
+        var targets = new SqliteFirstTraceNavigationStore(fixture.DatabasePath)
+            .List(verification.VerificationId, candidates.Select(candidate => candidate.EvidenceRef).ToArray());
+        Assert.DoesNotContain(targets, target => target.TargetKind == FirstTraceNavigationTargetKind.Session);
+        Assert.All(candidates, candidate =>
+        {
+            Assert.Contains(targets, target => target.EvidenceRef == candidate.EvidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.Trace
+                && target.TargetId == TraceId);
+            Assert.Contains(targets, target => target.EvidenceRef == candidate.EvidenceRef
+                && target.TargetKind == FirstTraceNavigationTargetKind.SourceDiagnostic
+                && target.TargetId == observationId);
+        });
 
         var result = CompleteWithUnboundSession(fixture, verification, candidates);
         Assert.Contains(result.Evaluation?.States ?? [], state => state.StateCode == DoctorStateCode.SessionUnbound);
@@ -296,6 +330,7 @@ public sealed class ClaudeDoctorCandidateObserverTests
         SqliteDoctorApplicationService application,
         ClaudeDoctorCandidateObserver observer) : IDisposable
     {
+        public string DatabasePath => database.Path;
         public DoctorTestTimeProvider Time { get; } = time;
         public SqliteDoctorApplicationService Application { get; } = application;
         public ClaudeDoctorCandidateObserver Observer { get; } = observer;
@@ -349,7 +384,7 @@ public sealed class ClaudeDoctorCandidateObserverTests
             return sessionId;
         }
 
-        public void SeedOtel(
+        public string SeedOtel(
             string payload,
             DateTimeOffset receivedAt,
             string sourceSurface = "claude-code",
@@ -363,8 +398,9 @@ public sealed class ClaudeDoctorCandidateObserverTests
                 null,
                 payload);
             var inventory = OtlpJsonStructuralWalker.Build(payload, receivedAt);
+            var observationId = Guid.CreateVersion7().ToString("D");
             var observation = SourceObservationBatchDraft.Create(
-                Guid.CreateVersion7().ToString("D"),
+                observationId,
                 sourceSurface,
                 null,
                 sourceAdapter,
@@ -394,6 +430,7 @@ public sealed class ClaudeDoctorCandidateObserverTests
                 committed.RawRecordId,
                 MonitorSpanProjectionBuilder.Build(persisted),
                 receivedAt);
+            return observationId;
         }
 
         public void Dispose() => database.Dispose();

@@ -232,10 +232,17 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             evidence.Add(new(DoctorEvidenceKind.ExactSessionBinding, binding.ObservedAt, binding.Identity));
             evidence.Add(new(DoctorEvidenceKind.CompletenessContent, binding.ObservedAt, binding.Identity));
         }
+        else if (!partition.RequiresBinding &&
+            selection.NativeSession is null &&
+            disposition?.State == ProjectionDispositionState.Completed)
+        {
+            evidence.Add(new(DoctorEvidenceKind.CompletenessContent, disposition.UpdatedAt, Identity: null));
+        }
 
         var evidenceRefs = new List<string>(evidence.Count);
         var observationResult = status;
         var newlyPersistedCandidates = 0;
+        var navigationStore = new SqliteFirstTraceNavigationStore(databasePath);
         foreach (var descriptor in evidence)
         {
             var evidenceRef = OpaqueReference(
@@ -250,6 +257,14 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                 evidenceRef,
                 storePolicy.BusyTimeoutMilliseconds))
             {
+                RecordNavigationTargets(
+                    navigationStore,
+                    selection.VerificationId,
+                    evidenceRef,
+                    descriptor.Kind,
+                    raw.TraceId,
+                    compatibility.ObservationId,
+                    binding);
                 continue;
             }
 
@@ -284,6 +299,14 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                 }
                 return Empty(observationResult, partition, selection.VerificationId, raw.ReceivedAt);
             }
+            RecordNavigationTargets(
+                navigationStore,
+                selection.VerificationId,
+                evidenceRef,
+                descriptor.Kind,
+                raw.TraceId,
+                compatibility.ObservationId,
+                binding);
         }
 
         var snapshot = Snapshot(
@@ -295,6 +318,38 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             binding);
         return new(observationResult, snapshot, evidence.Select(item => item.Kind).ToArray(), evidenceRefs, binding is null);
     }
+
+    private static void RecordNavigationTargets(
+        SqliteFirstTraceNavigationStore store,
+        string verificationId,
+        string evidenceRef,
+        DoctorEvidenceKind evidenceKind,
+        string? traceId,
+        string sourceObservationId,
+        BindingResolution? binding)
+    {
+        if (traceId is not null && IsNavigableTraceId(traceId))
+        {
+            store.Record(verificationId, evidenceRef, FirstTraceNavigationTargetKind.Trace, traceId!);
+        }
+        store.Record(
+            verificationId,
+            evidenceRef,
+            FirstTraceNavigationTargetKind.SourceDiagnostic,
+            sourceObservationId);
+        if (binding is not null && evidenceKind is DoctorEvidenceKind.ExactSessionBinding or DoctorEvidenceKind.CompletenessContent)
+        {
+            store.Record(
+                verificationId,
+                evidenceRef,
+                FirstTraceNavigationTargetKind.Session,
+                binding.Detail.Session.SessionId.ToString("D"));
+        }
+    }
+
+    private static bool IsNavigableTraceId(string traceId) =>
+        traceId.Length == 32 && traceId.All(static character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static DoctorResult StoreBusy() => new(
         DoctorSchemaVersions.ResultV1,
@@ -333,10 +388,23 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             _ => ProjectionOutcome.Unknown,
         }),
         new ExactSessionBindingFacts(
-            ExactSessionBindingRequirement.Required,
-            binding is null ? ExactSessionBindingOutcome.Unbound : ExactSessionBindingOutcome.ExactBound),
+            partition.RequiresBinding
+                ? ExactSessionBindingRequirement.Required
+                : ExactSessionBindingRequirement.NotRequired,
+            partition.RequiresBinding
+                ? binding is null ? ExactSessionBindingOutcome.Unbound : ExactSessionBindingOutcome.ExactBound
+                : binding is null ? ExactSessionBindingOutcome.NotApplicable : ExactSessionBindingOutcome.ExactBound),
         binding is null
-            ? new CompletenessAndContentFacts(DoctorCompleteness.Unbound, ContentCaptureStatus.Unknown, RawAccessStatus.Unknown)
+            ? new CompletenessAndContentFacts(
+                DoctorCompleteness.Unbound,
+                compatibility.CaptureContentState switch
+                {
+                    SourceCaptureContentState.Available => ContentCaptureStatus.Enabled,
+                    SourceCaptureContentState.NotCaptured or SourceCaptureContentState.Redacted => ContentCaptureStatus.Disabled,
+                    SourceCaptureContentState.Unsupported => ContentCaptureStatus.Unsupported,
+                    _ => ContentCaptureStatus.Unknown,
+                },
+                RawAccessStatus.Available)
             : ContentFacts(binding),
         null);
 
@@ -371,7 +439,9 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
     private static SourceVersionAndSchemaDiagnosticsFacts CompatibilityFacts(SourceCompatibilityRow row) => new(
         row.CompatibilityState switch
         {
-            SourceCompatibilityState.Supported or SourceCompatibilityState.SupportedWithUnknownFields => SourceCompatibilityStatus.Supported,
+            SourceCompatibilityState.Supported or
+            SourceCompatibilityState.SupportedWithUnknownFields or
+            SourceCompatibilityState.SchemaDriftDetected => SourceCompatibilityStatus.Supported,
             SourceCompatibilityState.UnsupportedSourceVersion => SourceCompatibilityStatus.UnsupportedSourceVersion,
             _ => SourceCompatibilityStatus.Unknown,
         },
