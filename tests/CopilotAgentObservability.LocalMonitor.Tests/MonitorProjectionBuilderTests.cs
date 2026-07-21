@@ -69,6 +69,86 @@ public class MonitorProjectionBuilderTests
         Assert.Null(contribution.RepositoryName);
     }
 
+    [Theory]
+    [InlineData("https://github.com/example-org/repository-from-url", "repository-from-url")]
+    [InlineData("https://github.com/example-org/repository-from-url/", "repository-from-url")]
+    [InlineData("https://github.com/example-org/repository-from-url.git", "repository-from-url")]
+    [InlineData("https://GITHUB.COM/example-org/repository-from-url.GIT", "repository-from-url")]
+    public void Build_UsesAllowlistedGithubUrlOnlyWhenAuthoritativeNameIsAbsent(string url, string expectedRepository)
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"vcs.repository.url.full","value":{"stringValue":"URL_PLACEHOLDER"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-url-fallback","spanId":"1111111111111111","name":"chat gpt-4o"}
+        ]}]}]}
+        """.Replace("URL_PLACEHOLDER", url, StringComparison.Ordinal);
+
+        var contribution = Assert.Single(MonitorProjectionBuilder.Build(Record("trace-url-fallback", payload)).TraceContributions);
+
+        Assert.Equal(expectedRepository, contribution.RepositoryName);
+    }
+
+    [Fact]
+    public void Build_AuthoritativeRepositoryNamePreventsUrlFallbackEvenWhenUnsafe()
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"vcs.repository.name","value":{"stringValue":"identity@example.test"}},
+          {"key":"vcs.repository.url.full","value":{"stringValue":"https://github.com/example/safe-fallback"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-name-authority","spanId":"1111111111111111","name":"chat gpt-4o"}
+        ]}]}]}
+        """;
+
+        var contribution = Assert.Single(MonitorProjectionBuilder.Build(Record("trace-name-authority", payload)).TraceContributions);
+
+        Assert.Null(contribution.RepositoryName);
+    }
+
+    [Theory]
+    [InlineData("https://github.com/example/repository")]
+    [InlineData("owner/repository")]
+    [InlineData("ghp_123456789012345678901234")]
+    public void Build_DoesNotProjectUnsafeAuthoritativeRepositoryNameShapes(string repositoryName)
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"vcs.repository.name","value":{"stringValue":"NAME_PLACEHOLDER"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-name-rejected","spanId":"1111111111111111","name":"chat gpt-4o"}
+        ]}]}]}
+        """.Replace("NAME_PLACEHOLDER", repositoryName, StringComparison.Ordinal);
+
+        var contribution = Assert.Single(MonitorProjectionBuilder.Build(Record("trace-name-rejected", payload)).TraceContributions);
+
+        Assert.Null(contribution.RepositoryName);
+    }
+
+    [Theory]
+    [InlineData("https://gitlab.com/group/repository")]
+    [InlineData("https://github.com/example/repository/tree/main")]
+    [InlineData("https://github.com/example/repository?token=value")]
+    [InlineData("https://identity:credential@github.com/example/repository")]
+    [InlineData("http://github.com/example/repository")]
+    [InlineData("file:///C:/private/repository")]
+    [InlineData("git@github.com:example/repository.git")]
+    [InlineData("ssh://git@github.com/example/repository.git")]
+    public void Build_DoesNotProjectUnsupportedOrUnsafeUrlCandidates(string url)
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"vcs.repository.url.full","value":{"stringValue":"URL_PLACEHOLDER"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-url-rejected","spanId":"1111111111111111","name":"chat gpt-4o"}
+        ]}]}]}
+        """.Replace("URL_PLACEHOLDER", url, StringComparison.Ordinal);
+
+        var contribution = Assert.Single(MonitorProjectionBuilder.Build(Record("trace-url-rejected", payload)).TraceContributions);
+
+        Assert.Null(contribution.RepositoryName);
+    }
+
     [Fact]
     public void Build_DropsUnsafeRepositoryMetadataValues()
     {

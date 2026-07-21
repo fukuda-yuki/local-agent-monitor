@@ -86,6 +86,34 @@ public class MonitorUiTests
         Assert.DoesNotContain("leak-marker@example.com", diagnostics);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Diagnostics_RepositoryMetadataInventoryIsKeyOnly(bool sanitizedOnly)
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedRepositoryMetadataDiagnostics(temp);
+        await using var host = await StartHostAsync(temp, sanitizedOnly);
+
+        var diagnostics = await host.Client.GetStringAsync("/diagnostics");
+
+        Assert.Contains("id=\"repository-metadata-diagnostics\"", diagnostics);
+        Assert.Contains("metadata_present", diagnostics);
+        Assert.Contains("vcs.repository.name", diagnostics);
+        Assert.Contains("vcs.repository.url.full", diagnostics);
+        Assert.Contains("vcs.ref.head.revision", diagnostics);
+        Assert.Contains("workspace.name", diagnostics);
+        Assert.Contains("resource", diagnostics);
+        Assert.Contains("span", diagnostics);
+        Assert.Contains("event", diagnostics);
+        Assert.DoesNotContain("PRIVATE_REPOSITORY_VALUE_MARKER", diagnostics);
+        Assert.DoesNotContain("PRIVATE_OWNER_VALUE_MARKER", diagnostics);
+        Assert.DoesNotContain("PRIVATE_URL_REPOSITORY_MARKER", diagnostics);
+        Assert.DoesNotContain("private-marker@example.com", diagnostics);
+        Assert.DoesNotContain("C:\\private\\repository", diagnostics);
+        Assert.DoesNotContain("unsafe repository key", diagnostics);
+    }
+
     [Fact]
     public async Task RetentionPage_RendersExactTargetAccessibleDialogWithoutPublishingPreview()
     {
@@ -522,6 +550,19 @@ public class MonitorUiTests
         return id;
     }
 
+    private static long SeedRepositoryMetadataDiagnostics(MonitorTempDirectory temp)
+    {
+        var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        return store.Insert(new RawTelemetryRecord(
+            Id: null,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: "trace-repository-metadata-diagnostics",
+            ReceivedAt: DateTimeOffset.UnixEpoch.AddMinutes(1),
+            ResourceAttributesJson: null,
+            PayloadJson: RepositoryMetadataPayload));
+    }
+
     private static Task<RunningMonitorHost> StartHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false) =>
         MonitorTestHost.StartAsync(
             temp,
@@ -537,6 +578,21 @@ public class MonitorUiTests
             {"key":"gen_ai.prompt","value":{"stringValue":"SECRET_PROMPT_TEXT_MARKER"}},
             {"key":"gen_ai.tool.arguments","value":{"stringValue":"SECRET_TOOL_ARGS_MARKER"}}
           ]}
+        ]}]}]}
+        """;
+
+    private const string RepositoryMetadataPayload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"vcs.repository.name","value":{"stringValue":"PRIVATE_REPOSITORY_VALUE_MARKER"}},
+          {"key":"vcs.repository.url.full","value":{"stringValue":"https://github.com/PRIVATE_OWNER_VALUE_MARKER/PRIVATE_URL_REPOSITORY_MARKER"}},
+          {"key":"vcs.owner.name","value":{"stringValue":"private-marker@example.com"}},
+          {"key":"unsafe repository key","value":{"stringValue":"C:\\private\\repository"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-repository-metadata-diagnostics","spanId":"1111111111111111","name":"diagnostic","attributes":[
+            {"key":"vcs.ref.head.revision","value":{"stringValue":"PRIVATE_REVISION_VALUE_MARKER"}}
+          ],"events":[{"name":"event","attributes":[
+            {"key":"workspace.name","value":{"stringValue":"PRIVATE_WORKSPACE_VALUE_MARKER"}}
+          ]}]}
         ]}]}]}
         """;
 

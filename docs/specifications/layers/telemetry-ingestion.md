@@ -352,6 +352,57 @@ agent name, model, token counts (including `cache_read_tokens` /
 `cache_creation_tokens`), status, error type, timing, and hierarchy
 (`parent_span_id`, `span_ordinal`). No raw content or PII.
 
+Repository metadata diagnostics are a server-rendered `/diagnostics` concern;
+they do not add or change a `/api/monitor/*` response field, SSE event, Canvas
+action field, normalized measurement, or dashboard field. The diagnostic reads
+at most 50 newest raw-record candidates, skips any payload larger than 1 MiB,
+stops candidate selection at 4 MiB total, and then obtains every selected body
+through the Retention catalog `access` read gate. Denied, expired, missing, or
+busy raw reads do not bypass the catalog.
+
+For each accepted payload, the diagnostic inventory emits only one row per
+attribute key and source scope (`resource`, `span`, or `event`): the safe key
+name, occurrence count, scope, and classification (`repository`, `workspace`,
+`vcs`, or `other`). The known keys `vcs.repository.name`,
+`vcs.repository.url.full`, `vcs.owner.name`, `vcs.provider.name`,
+`vcs.ref.head.name`, `vcs.ref.head.revision`, and `workspace.name` have fixed
+classifications. An otherwise unknown safe key containing `repository`,
+`workspace`, or `vcs` is classified by that token; other safe keys are `other`.
+Keys that are empty, longer than 128 characters, contain characters outside
+`[A-Za-z0-9_.-]`, or match the existing unsafe string guard are suppressed
+rather than truncated or emitted. Attribute values are never placed in an
+inventory row.
+
+Each accepted payload also receives exactly one repository metadata status,
+using this precedence:
+
+1. `metadata_present`: a resource-scoped `vcs.repository.name` exists and its
+   value passes the existing monitor projection sanitizer plus the
+   repository-name shape guard (no URL/path separator or token-like value).
+2. `url_fallback_used`: the authoritative name key is absent and a
+   resource-scoped `vcs.repository.url.full` matches the allowlisted fallback
+   below.
+3. `unsafe_value_rejected`: an authoritative resource-scoped name exists but
+   cannot be projected safely, or an otherwise eligible URL has a prohibited
+   shape or unsafe segment.
+4. `unsupported_candidate_present`: a repository/workspace/VCS candidate key
+   exists, but only at span/event scope, uses an unsupported value type or URL
+   provider/shape, or has no repository-label projection rule.
+5. `metadata_not_present`: no repository/workspace/VCS candidate key exists.
+
+The diagnostic renders only the status and the booleans
+`repository_label_present` and `url_fallback_used`; it does not render the
+repository label or any attribute value. `vcs.repository.name` remains
+authoritative: when the key exists but is unsafe, the URL fallback is not used.
+The sole URL allowlist entry is the resource-scoped canonical GitHub form
+`https://github.com/{owner}/{repository}` with an optional trailing slash or
+trailing `.git`. The owner and repository are non-empty ASCII GitHub tokens;
+only the sanitized repository segment is projected. Credentials, ports, query,
+fragment, percent escapes, `file:`/local/UNC paths, HTTP, SSH/SCP-like forms,
+extra path segments, email-like segments, and token-like segments are rejected.
+No GitLab or other provider fallback is enabled without provider-specific
+accepted evidence and fixtures.
+
 `GET /api/monitor/overview?period=today|7d|30d` returns the sanitized period
 aggregate for the overview dashboard (D044): `{period, range, kpi, per_model,
 hourly_tokens}`. `kpi` carries numeric aggregates only: `tokens_total`,
@@ -767,14 +818,26 @@ mcp.profile
 cli.wrapper.version
 ```
 
-Sprint16 uses only the existing recommended attributes `vcs.repository.name`,
-`workspace.name`, and `repo.snapshot` as optional sources for the Local Monitor
-projection fields `repository_name`, `workspace_label`, and `repo_snapshot`.
-`repo.name` is not a repository label source for this surface.
+The Local Monitor uses the resource-scoped `vcs.repository.name` as the
+authoritative optional source for `repository_name`. Only when that key is
+absent may the canonical GitHub HTTPS `vcs.repository.url.full` allowlist above
+supply the sanitized repository segment. `workspace_label` continues to come
+only from resource-scoped `workspace.name`, and `repo_snapshot` continues to
+come only from resource-scoped `repo.snapshot`. `repo.name` is not a repository
+label source for this surface.
 These attributes are not required for repository-safe datasets, and their
 absence must not create collection-health failures. Missing values remain null
 in `/api/monitor/*`; Canvas helper UI displays `unknown repository` when it
 cannot derive a repository label.
+
+Wave 2 consumers #72 and #85 consume the existing nullable fields
+`repository_name`, `workspace_label`, and `repo_snapshot` exactly. They may use
+an exact non-null label as an explicit selection/export field, but must preserve
+null for `metadata_not_present`, `unsupported_candidate_present`, and
+`unsafe_value_rejected`; they must not infer a repository from Session
+relations, prompt/tool content, CWD/path, time, or proximity. The five status
+tokens above are the frozen diagnostic vocabulary, not Session identity or an
+additional trace DTO field.
 
 ## Canvas Analysis Options
 

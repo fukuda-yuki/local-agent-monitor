@@ -65,6 +65,11 @@ internal interface IMonitorProjectionStore
 
     ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRawRecordsByTraceIdAsync(string traceId, int limit, RetentionReadKind readKind, CancellationToken cancellationToken);
 
+    IReadOnlyList<long> ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(
+        int limit,
+        int maxPayloadBytes,
+        int maxTotalPayloadBytes);
+
     MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive);
 
     IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive);
@@ -164,6 +169,15 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
 
     public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRawRecordsByTraceIdAsync(string traceId, int limit, RetentionReadKind readKind, CancellationToken cancellationToken) =>
         GuardAsync(() => store.ListRawRecordsByTraceIdAsync(traceId, limit, readKind, cancellationToken));
+
+    public IReadOnlyList<long> ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(
+        int limit,
+        int maxPayloadBytes,
+        int maxTotalPayloadBytes) =>
+        Guard(() => store.ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(
+            limit,
+            maxPayloadBytes,
+            maxTotalPayloadBytes));
 
     public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
         Guard(() => store.GetPeriodSummary(startInclusive, endExclusive));

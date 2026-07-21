@@ -625,6 +625,12 @@ public class MonitorAnalysisRouteTests
             return inner.ListRawRecordsByTraceIdAsync(traceId, limit, readKind, cancellationToken);
         }
 
+        public IReadOnlyList<long> ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(
+            int limit,
+            int maxPayloadBytes,
+            int maxTotalPayloadBytes) =>
+            inner.ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(limit, maxPayloadBytes, maxTotalPayloadBytes);
+
         public MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) =>
             inner.GetPeriodSummary(startInclusive, endExclusive);
 

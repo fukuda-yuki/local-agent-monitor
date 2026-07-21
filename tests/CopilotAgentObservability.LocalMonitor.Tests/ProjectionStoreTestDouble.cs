@@ -40,6 +40,7 @@ internal abstract class ProjectionStoreTestDouble : IMonitorProjectionStore
     public virtual ValueTask<RetentionReadResult<RawTelemetryRecord>> GetRawRecordByIdAsync(long id, RetentionReadKind readKind, CancellationToken cancellationToken) => ValueTask.FromResult(NotFound());
     public virtual ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadRawRecordsAsync(IReadOnlyList<long> ids, RetentionReadKind readKind, CancellationToken cancellationToken) => ValueTask.FromResult(NotFoundBatch());
     public virtual ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRawRecordsByTraceIdAsync(string traceId, int limit, RetentionReadKind readKind, CancellationToken cancellationToken) => ValueTask.FromResult(NotFoundBatch());
+    public virtual IReadOnlyList<long> ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(int limit, int maxPayloadBytes, int maxTotalPayloadBytes) => [];
     public virtual MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) => new(0, 0, 0, 0, 0, 0, 0, 0);
     public virtual IReadOnlyList<MonitorModelPeriodSummaryRow> GetPerModelPeriodSummary(string startInclusive, string endExclusive) => [];
     public virtual IReadOnlyList<MonitorHourlyTokensRow> GetHourlyTokenDistribution(string startInclusive, string endExclusive) => [];

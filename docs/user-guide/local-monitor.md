@@ -23,7 +23,7 @@ UI は Console 型の構成です。左に 208px のサイドバー（ナビは 
 | スパンインスペクタ | 詳細画面でスパンをクリック | 右パネルに **整形 / raw** タブ。整形はメッセージ構成・トークン内訳・メタ、raw は OTLP span JSON 全文 |
 | エラー解析モード | エラーを含む trace の詳細画面 | エラー要約ストリップ、エラー一覧（回復済み / 未回復）、エラー詳細、入力トークン推移（128K 上限の目安線付き） |
 | Copilot 解析ドロワー | 詳細画面の「Copilot で解析」 | 観点を選んで raw trace をローカルの Copilot SDK で解析。チャット形式の追い質問（履歴再送）に対応 |
-| 診断 | ステータスバッジ → ポップオーバー →「詳細診断を開く」 | 取り込みパイプライン 4 段の状態、コンポーネント確認、readiness しきい値、取り込み履歴 |
+| 診断 | ステータスバッジ → ポップオーバー →「詳細診断を開く」 | 取り込みパイプライン 4 段の状態、コンポーネント確認、readiness しきい値、取り込み履歴、リポジトリメタデータ診断 |
 
 主な API は次のとおりです。
 
@@ -576,6 +576,17 @@ server に永続化されることはありません。
 診断ページでは、パイプライン各段の詳細、コンポーネント確認（loopback bind / DB /
 migration / writer / projection worker / ingestion queue）、readiness しきい値の実効値、
 取り込み履歴（raw record と trace の対応、sanitized metadata のみ）を確認できます。
+「リポジトリメタデータ診断」では、最近の受信データに含まれる属性キー、件数、
+`resource` / `span` / `event` のスコープ、分類だけを確認できます。属性値、リポジトリ名、
+URL、owner、ローカルパス、ユーザー情報は表示されません。このキー専用一覧は
+`--sanitized-only` でも利用できます。
+
+状態は `metadata_present`、`url_fallback_used`、`metadata_not_present`、
+`unsupported_candidate_present`、`unsafe_value_rejected` の 5 種類です。
+`vcs.repository.name` が最優先です。これが存在せず、credential・query・fragment などを
+含まない canonical GitHub HTTPS URL の `vcs.repository.url.full` だけがある場合に限り、
+repository segment をラベルとして使用します。名前が危険な場合や、metadata 自体がない
+場合に prompt、CWD、path、時刻の近さからリポジトリを推測することはありません。
 診断ページでもナビは 2 項目のままです。
 
 <p align="center">

@@ -507,7 +507,9 @@ Sprint16 Canvas cross-repo adapter metadata (D040):
   introduced.
 - The Local Monitor may project only these sanitized repository metadata fields
   from existing OTLP Resource Attributes: `repository_name` from
-  `vcs.repository.name`,
+  resource-scoped `vcs.repository.name`, or only when that key is absent from
+  the sanitized repository segment of an allowlisted canonical
+  `https://github.com/{owner}/{repository}` `vcs.repository.url.full`,
   `workspace_label` from `workspace.name`, and `repo_snapshot` from
   `repo.snapshot`.
 - `repo.name` is not a repository label source for this surface.
@@ -524,7 +526,23 @@ Sprint16 Canvas cross-repo adapter metadata (D040):
   `source_kind`, current-repository auto-match, raw endpoint, raw JSON API, or
   Canvas action raw payload is added in Sprint16.
 - `vcs.repository.url.full` is not emitted to Canvas helper routes or bounded
-  Canvas action DTOs.
+  Canvas action DTOs. The owner and raw URL are never persisted in the monitor
+  projection. Embedded credentials, ports, query/fragment, percent escapes,
+  file/local/UNC/HTTP/SSH/SCP-like forms, extra path segments, email-like
+  segments, token-like segments, and non-allowlisted providers cannot produce a
+  label. An unsafe authoritative name cannot fall through to the URL.
+- `/diagnostics` may inspect bounded recent raw payloads only through Retention
+  catalog `access` reads. Its repository metadata inventory emits safe
+  attribute key names, counts, `resource`/`span`/`event` scope, candidate
+  classification, one fixed metadata status, and label/fallback booleans only.
+  It emits no attribute value, repository label, URL, owner, identity,
+  credential, token, PII, local path, prompt/response, or tool body. Unsafe key
+  names are suppressed rather than truncated. The key-only inventory remains
+  available under `--sanitized-only`; this does not authorize any raw value
+  display.
+- Existing `/api/monitor/*`, SSE, Canvas DTO, normalized dataset, and dashboard
+  wire shapes remain unchanged. Repository metadata statuses are diagnostic
+  reason codes, not Session binding or repository identity evidence.
 
 Sprint17 Canvas analysis requested options:
 

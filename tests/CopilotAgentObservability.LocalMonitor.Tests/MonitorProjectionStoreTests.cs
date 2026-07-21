@@ -208,6 +208,34 @@ public class MonitorProjectionStoreTests
     }
 
     [Fact]
+    public void ListRecentRawRecordIdsForRepositoryMetadataDiagnostics_EnforcesNewestRecordAndByteBounds()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = NewStore(temp);
+        var oldest = store.Insert(Raw("oldest", T(1), new string('a', 40)));
+        store.Insert(Raw("oversized", T(2), new string('b', 101)));
+        var newer = store.Insert(Raw("newer", T(3), new string('c', 70)));
+        var newest = store.Insert(Raw("newest", T(4), new string('d', 40)));
+
+        var perRecordBounded = store.ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(
+            limit: 50,
+            maxPayloadBytes: 100,
+            maxTotalPayloadBytes: 200);
+        var totalBounded = store.ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(
+            limit: 50,
+            maxPayloadBytes: 100,
+            maxTotalPayloadBytes: 100);
+        var countBounded = store.ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(
+            limit: 2,
+            maxPayloadBytes: 100,
+            maxTotalPayloadBytes: 200);
+
+        Assert.Equal(new[] { newest, newer, oldest }, perRecordBounded);
+        Assert.Equal(new[] { newest }, totalBounded);
+        Assert.Equal(new[] { newest, newer }, countBounded);
+    }
+
+    [Fact]
     public void ListConversationTraces_ReturnsSiblingsOrderedByFirstStartTime()
     {
         using var temp = new MonitorTempDirectory();
@@ -272,14 +300,14 @@ public class MonitorProjectionStoreTests
 
     private static DateTimeOffset T(int minutes) => DateTimeOffset.UnixEpoch.AddMinutes(minutes);
 
-    private static RawTelemetryRecord Raw(string? traceId, DateTimeOffset receivedAt) =>
+    private static RawTelemetryRecord Raw(string? traceId, DateTimeOffset receivedAt, string payloadJson = "{}") =>
         new(
             Id: null,
             Source: Source,
             TraceId: traceId,
             ReceivedAt: receivedAt,
             ResourceAttributesJson: null,
-            PayloadJson: "{}");
+            PayloadJson: payloadJson);
 
     private static MonitorRecordProjection Projection(string? traceId, int spanCount, params MonitorTraceContribution[] traces) =>
         new(TraceId: traceId, ClientKind: "vscode-copilot-chat", SpanCount: spanCount, TraceContributions: traces);

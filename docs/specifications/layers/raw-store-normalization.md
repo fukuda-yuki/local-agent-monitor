@@ -217,7 +217,7 @@ projection schema version 3):
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `repository_name` | TEXT NULL | sanitized display label derived only from `vcs.repository.name`; `repo.name` is ignored |
+| `repository_name` | TEXT NULL | sanitized display label derived from resource-scoped `vcs.repository.name`, or only when absent from the allowlisted canonical GitHub HTTPS `vcs.repository.url.full` repository segment; `repo.name` is ignored |
 | `workspace_label` | TEXT NULL | sanitized display label derived only from `workspace.name`; not an absolute path |
 | `repo_snapshot` | TEXT NULL | sanitized branch / commit / snapshot label derived only from `repo.snapshot` |
 
@@ -287,7 +287,21 @@ Per-field sanitization policy:
   `repo_snapshot`): stored only after the existing unsafe-value guard and
   truncation used for monitor projection display labels. Values that look like
   paths, emails, secrets, tokens, credentials, or other unsafe free-form content
-  are dropped, not stored verbatim.
+  are dropped, not stored verbatim. `vcs.repository.name` is authoritative. Its
+  URL/path-separator/token-like shapes are also dropped before truncation, and
+  an unsafe value does not activate a fallback. Only an absent name permits the
+  exact GitHub HTTPS allowlist defined in `telemetry-ingestion.md`; only its
+  sanitized repository segment is stored. The raw URL and owner are never
+  stored in the monitor projection.
+
+Issue #58 repository metadata diagnostics do not change the monitor projection
+schema and do not backfill rows. The `/diagnostics` request selects only bounded
+raw-record IDs and payload byte counts, then reads each payload through the
+Retention catalog `access` gate. The parsed body is request-local and discarded
+after producing key/count/scope/classification rows, one fixed metadata status,
+and label/fallback booleans. Attribute values, raw URLs, owners, identities,
+credentials, PII, and local paths are neither persisted nor emitted by this
+diagnostic path.
 
 Token rollup rule (no double count):
 

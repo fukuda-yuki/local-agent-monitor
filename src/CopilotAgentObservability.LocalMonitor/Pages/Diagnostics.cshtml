@@ -222,6 +222,63 @@
         </div>
     </details>
 
+    <section class="panel" id="repository-metadata-diagnostics">
+        <div class="panel-head">
+            <span class="panel-title">リポジトリメタデータ診断</span>
+            <span class="panel-meta">値を含まない属性キーの固定一覧 · @Model.RepositoryMetadata.AnalyzedRecordCount 件を確認</span>
+        </div>
+        @if (Model.RepositoryMetadata.Unavailable)
+        {
+            <p class="monitor-subtle">保持ポリシーに従った読み取りを完了できなかった候補があります。</p>
+        }
+        <div class="monitor-table-wrapper">
+            <table class="monitor-table">
+                <thead>
+                    <tr>
+                        <th>メタデータ状態</th>
+                        <th>レコード数</th>
+                        <th>ラベルあり</th>
+                        <th>URL fallback</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in Model.RepositoryMetadata.StatusRows)
+                    {
+                        <tr>
+                            <td><code>@row.Status</code></td>
+                            <td>@row.RecordCount</td>
+                            <td>@(row.RepositoryLabelPresent ? "yes" : "no")</td>
+                            <td>@(row.UrlFallbackUsed ? "yes" : "no")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <div class="monitor-table-wrapper">
+            <table class="monitor-table">
+                <thead>
+                    <tr>
+                        <th>属性キー</th>
+                        <th>件数</th>
+                        <th>スコープ</th>
+                        <th>分類</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in Model.RepositoryMetadata.InventoryRows)
+                    {
+                        <tr>
+                            <td><code>@row.Key</code></td>
+                            <td>@row.Count</td>
+                            <td><code>@row.Scope</code></td>
+                            <td><code>@row.Classification</code></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </section>
+
     <section class="panel" id="source-diagnostics">
         <div class="panel-head">
             <span class="panel-title">ソース互換性</span>
