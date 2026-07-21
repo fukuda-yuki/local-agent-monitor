@@ -9,7 +9,7 @@
   "clean_at_start": true,
   "dependency_gate": [
     { "issue": 69, "github_state": "closed", "accepted_revision": "b72309cca5544fdf84e2935619449dc26fb4f261", "gate_satisfied": true, "reason": "Children #102 through #105 and corrective Issues #113 through #115 are closed. The #105 replacement candidate and corrected evidence are integrated and ancestral." },
-    { "issue": 89, "github_state": "closed", "accepted_revision": "043f7a3228d1e1e97f91de965d91b6e41a48e472", "gate_satisfied": true, "reason": "Closed dependency tip and pinned validation/review revisions are ancestors of matrix_prep_sha." },
+    { "issue": 89, "github_state": "closed", "accepted_revision": "de48d717479a40921a6fe70825f6e95a7a75037a", "gate_satisfied": true, "reason": "The accepted wake-coalescing correction is integrated after the prior candidate exposed the defect; the original retention implementation lineage remains ancestral." },
     { "issue": 90, "github_state": "closed", "accepted_revision": "5180a0424ff5488354a3e173c74b7e931d28679d", "gate_satisfied": true, "reason": "The operator-accepted local closeout is now formally closed. Implementation candidate 4d966472, closeout f412a5bf, and integrated validation repair 5180a042 are ancestors." },
     { "issue": 106, "github_state": "closed", "accepted_revision": "87c240adf0dfbaa20b0abf24c4b2d7571a828781", "gate_satisfied": true, "reason": "Closed live-validation evidence and the later #110 value-aware rerun lineage are ancestors of matrix_prep_sha." }
   ],
@@ -170,12 +170,12 @@
     },
     {
       "surface_id": "retention-cleanup",
-      "operations": ["status", "expiry read denial", "cleanup", "retry", "restart", "audit diagnostics"],
+      "operations": ["status", "expiry read denial", "cleanup", "retry", "wake coalescing", "restart", "audit diagnostics"],
       "owner": "retention catalog / Issue #89",
       "requirement_level": "required",
       "applicability": "applicable",
-      "profiles": ["expiring", "retained_by_policy", "expired_pending_deletion", "deletion_queued", "deleting", "deleted", "deletion_failed"],
-      "automated_test_filters": ["RetentionLifecycleIntegrationTests", "RetentionReadPrimitiveTests", "RetentionCleanupWorkerTests", "RetentionNoLeakTests"]
+      "profiles": ["expiring", "retained_by_policy", "expired_pending_deletion", "deletion_queued", "deleting", "deleted", "deletion_failed", "due-explicit-wake-overlap", "stop-during-quiescence"],
+      "automated_test_filters": ["RetentionLifecycleIntegrationTests", "RetentionReadPrimitiveTests", "RetentionCleanupWorkerTests", "RetentionWorkerRaceTests", "RetentionNoLeakTests"]
     },
     {
       "surface_id": "retention-mutation",
