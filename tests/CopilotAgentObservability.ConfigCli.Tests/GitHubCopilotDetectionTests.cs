@@ -9,6 +9,7 @@ using CopilotAgentObservability.ConfigCli.Setup.Platform;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[Collection(nameof(SetupLoopbackHttpCollection))]
 public sealed class GitHubCopilotDetectionTests
 {
     [Fact]

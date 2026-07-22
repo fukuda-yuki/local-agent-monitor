@@ -438,6 +438,29 @@ public sealed class ConfigurationSetupIntegrationTests
     }
 
     [Fact]
+    public void ProductionLoopbackHttpSeamTests_ShareOneDisabledParallelCollection()
+    {
+        var claudeCollection = Assert.Single(
+            typeof(SystemSetupHttpProbeClaudeTests).CustomAttributes,
+            attribute => attribute.AttributeType == typeof(CollectionAttribute));
+        var githubCollection = Assert.Single(
+            typeof(GitHubCopilotDetectionTests).CustomAttributes,
+            attribute => attribute.AttributeType == typeof(CollectionAttribute));
+        var claudeName = Assert.IsType<string>(Assert.Single(claudeCollection.ConstructorArguments).Value);
+        var githubName = Assert.IsType<string>(Assert.Single(githubCollection.ConstructorArguments).Value);
+
+        Assert.Equal(claudeName, githubName);
+        var definitionType = Assert.Single(
+            typeof(ConfigurationSetupIntegrationTests).Assembly.GetTypes(),
+            type => type.CustomAttributes.Any(attribute =>
+                attribute.AttributeType == typeof(CollectionDefinitionAttribute) &&
+                Assert.IsType<string>(Assert.Single(attribute.ConstructorArguments).Value) == claudeName));
+        var definition = Assert.IsType<CollectionDefinitionAttribute>(
+            definitionType.GetCustomAttribute(typeof(CollectionDefinitionAttribute)));
+        Assert.True(definition.DisableParallelization);
+    }
+
+    [Fact]
     public async Task PhysicalProcessRunner_TimeoutReportsCompletedOwnedCleanupAndRepositorySafeEvidence()
     {
         string runtimePath;

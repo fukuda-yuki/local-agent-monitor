@@ -1,8 +1,19 @@
+using System.Reflection;
+
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class PlaywrightBrowserPathTests
 {
+    [Fact]
+    public void Collection_DisablesParallelizationForSharedBrowserPathEnvironment()
+    {
+        var definition = Assert.IsType<CollectionDefinitionAttribute>(
+            typeof(PlaywrightBrowserPathCollection).GetCustomAttribute(typeof(CollectionDefinitionAttribute)));
+
+        Assert.True(definition.DisableParallelization);
+    }
+
     [Fact]
     public void ConfigureDefault_PreservesExistingBrowserPath()
     {
