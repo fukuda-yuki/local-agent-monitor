@@ -392,15 +392,18 @@ persisted v1 forms independently.
 Issue #74 freezes the deterministic consumer contract at
 [historical efficiency analysis](specifications/interfaces/historical-efficiency-analysis.md)
 and `specifications/contracts/historical-efficiency/v1/`. The analyzer accepts
-only the exact canonical Issue #72 repository-safe bytes and evaluates the ten
-versioned registry categories without converting missing evidence to zero.
+only the exact canonical Issue #72 repository-safe bytes. It evaluates the six
+categories supported by frozen #72 evidence and records the four reserved but
+unproducible operational categories as explicitly `unavailable`, without
+converting missing evidence or a zero denominator to a complete evaluation.
 Comparative rules stay inside exact source/version/adapter/model cohorts;
 quality evidence can downgrade evidence strength but efficiency observations
 never establish quality improvement or an effect verdict. The canonical
-repository-safe receipt carries exact evidence references, complete category
-coverage, quality availability, and fixed mitigations for Issue #75. It adds no
-HTTP/UI surface, database or migration, historical import, monetary field, AI
-narrative, proposal, effect, or apply behavior.
+repository-safe receipt binds each driver to the exact extraction ID/hash and
+carries exact evidence references, complete category coverage, quality
+availability, and fixed mitigations for Issue #75. It adds no HTTP/UI surface,
+database or migration, historical import, monetary field, AI narrative,
+proposal, effect, or apply behavior.
 
 ## Alert-rule engine foundation
 

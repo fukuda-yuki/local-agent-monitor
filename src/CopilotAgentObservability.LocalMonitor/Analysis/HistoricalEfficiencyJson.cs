@@ -89,14 +89,22 @@ internal static class HistoricalEfficiencyJsonV1
             .ThenBy(value => value.SubjectSessionId, StringComparer.Ordinal)
             .ThenBy(value => value.DriverId, StringComparer.Ordinal);
         if (!receipt.Drivers.SequenceEqual(orderedDrivers)) throw Invalid();
-        foreach (var driver in receipt.Drivers) ValidateDriver(driver, rules.Single(value => value.Category == driver.Category));
+        foreach (var driver in receipt.Drivers)
+            ValidateDriver(driver, rules.Single(value => value.Category == driver.Category),
+                receipt.ExtractionId, receipt.ExtractionSha256);
     }
 
-    private static void ValidateDriver(HistoricalEfficiencyDriverV1 driver, HistoricalEfficiencyDriverRuleV1 rule)
+    private static void ValidateDriver(
+        HistoricalEfficiencyDriverV1 driver,
+        HistoricalEfficiencyDriverRuleV1 rule,
+        string extractionId,
+        string extractionSha256)
     {
         var modelMix = driver.Category == HistoricalEfficiencyDriverCategoryV1.ModelMixObservation;
         if (rule.UnsupportedReason is not null
             || !Token(driver.DriverId, "historical-efficiency-driver-")
+            || driver.ExtractionId != extractionId
+            || driver.ExtractionSha256 != extractionSha256
             || driver.DriverId != HistoricalEfficiencyAnalyzerV1.CalculateDriverId(driver)
             || driver.DriverVersion != rule.DriverVersion || driver.RuleSource != rule.RuleSource
             || driver.Formula != rule.Formula || driver.Threshold != rule.Threshold
@@ -141,9 +149,6 @@ internal static class HistoricalEfficiencyJsonV1
             HistoricalEfficiencyDriverCategoryV1.CacheInefficiency =>
                 [("included_input_tokens", "input_token"), ("included_cache_read_tokens", "cache_read_token"), ("cache_read_ratio", "ratio")],
             HistoricalEfficiencyDriverCategoryV1.RetryOverhead => [("attempt_count", "attempt"), ("retry_overhead", "attempt")],
-            HistoricalEfficiencyDriverCategoryV1.ToolCallVolume => [("exact_repeated_call_count", "call")],
-            HistoricalEfficiencyDriverCategoryV1.PermissionWait => [("maximum_wait", "second"), ("total_wait", "second")],
-            HistoricalEfficiencyDriverCategoryV1.SubagentFanout => [("distinct_exact_ownership_count", "ownership")],
             HistoricalEfficiencyDriverCategoryV1.DurationOutlier => [("session_duration", "millisecond"), ("median_ratio", "ratio")],
             HistoricalEfficiencyDriverCategoryV1.ModelMixObservation => [("distinct_model_count", "model")],
             _ => [],
@@ -158,7 +163,7 @@ internal static class HistoricalEfficiencyJsonV1
             HistoricalEfficiencyCoverageStateV1.NoMatch =>
                 coverage.Reasons.SequenceEqual([HistoricalEfficiencyCoverageReasonV1.NoThresholdMatch]) && rule.UnsupportedReason is null,
             HistoricalEfficiencyCoverageStateV1.Unavailable when rule.UnsupportedReason is not null =>
-                coverage.Reasons.SequenceEqual([HistoricalEfficiencyCoverageReasonV1.ExactToolFailureStatusUnavailable]),
+                coverage.Reasons.SequenceEqual([rule.UnsupportedReason.Value]),
             HistoricalEfficiencyCoverageStateV1.Unavailable =>
                 coverage.Reasons.SequenceEqual([HistoricalEfficiencyCoverageReasonV1.MissingRequiredCapability]),
             HistoricalEfficiencyCoverageStateV1.Insufficient => coverage.Reasons.Count > 0

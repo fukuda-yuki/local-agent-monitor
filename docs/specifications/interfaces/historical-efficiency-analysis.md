@@ -44,7 +44,9 @@ same fixed invalid-input failure rather than wrapping or dropping a category.
 
 An explicit numeric zero remains an observed value. An absent group, scalar,
 capability, model, duration, or quality reference remains absent. Missing
-values never become zero, pass, success, or improvement.
+values never become zero, pass, success, or improvement. A comparative cohort
+whose median is zero has no valid ratio denominator, is not a complete
+evaluation, and reports `insufficient` with `missing_required_metric`.
 
 ## Canonical evidence and scalar rules
 
@@ -80,7 +82,10 @@ A Session without exactly one distinct model reference is not admitted to a
 comparative cohort. Distinct cohort keys are evaluated separately. The receipt
 records fixed comparison notes when the extraction contains mixed source
 surface, source version, adapter version, or model dimensions; the analyzer
-never compares across those boundaries.
+never compares across those boundaries. If any category-eligible Session is
+excluded because its required token/duration metric or comparison dimension is
+missing, every matched driver for that comparative category is `incomplete`;
+filtering that Session out does not make the remaining cohort complete.
 
 ## Versioned driver registry
 
@@ -91,20 +96,21 @@ Registry and receipt order is exactly the table order below.
 | `token_volume` / `historical-efficiency/token-volume@1` | `token_rollup`; complete per-Session token scalar | comparative cohort; 4 Sessions | For each Session, `session_total`. Match when `session_total > nearest_rank_p75` and `session_total / median >= 1.50`; median must be positive. | `review_high_token_sessions` |
 | `context_growth` / `historical-efficiency/context-growth@1` | `turn_rollup` + `token_rollup(input_token)` | Session + trace; maximal contiguous nondecreasing run; 3 turns | Order by positive `turn_index`; a missing input or turn-index gap breaks the run. First input must be positive. Match when `last_input / first_input >= 1.75`. | `bound_conversation_context` |
 | `cache_inefficiency` / `historical-efficiency/cache-inefficiency@1` | `turn_rollup` + `token_rollup(input_token)` + `cache_rollup(cache_read_token)` | Session + trace; 3 eligible turns before first-turn exclusion | An eligible turn has observed nonnegative input and cache-read values. Exclude the first eligible turn. Included input must total at least 10,000 tokens. Match when `sum(cache_read) / sum(input) < 0.20`. | `review_cache_reuse` |
-| `retry_overhead` / `historical-efficiency/retry-overhead@1` | `retry_chain` | canonical reference sequence; 1 chain | Attempt count is the number of distinct ordered exact references, never a caller scalar. Match at 2 or more attempts; overhead is `attempts - 1`. Byte-identical chain identities are counted once. | `review_retry_trigger` |
-| `tool_call_volume` / `historical-efficiency/tool-call-volume@1` | `repeated_tool_call` with Issue #72 exact call capability | one exact repeated-call group; 3 calls | Call count is the number of distinct exact references in that group. Match at 3 or more. This is exact repeated-call volume, not an estimate of all tool calls. | `review_repeated_tool_calls` |
+| `retry_overhead` / `historical-efficiency/retry-overhead@1` | `retry_chain` | canonical reference sequence; 1 chain | One distinct chain is a complete sample. Attempt count is the number of distinct ordered exact references, never a caller scalar. Match at 2 or more attempts; overhead is `attempts - 1`. Byte-identical chain identities are counted once. | `review_retry_trigger` |
+| `tool_call_volume` / `historical-efficiency/tool-call-volume@1` | unavailable in frozen historical-evidence v1 | unavailable | Frozen #72 persists neither a producer-authored repeated-call ID/hash nor repository-safe exact-call carrier. Reserved group/capability shapes are not positive evidence. The category is always `unavailable` with `producer_authored_repeated_call_identity_unavailable`. | `review_repeated_tool_calls` |
 | `tool_failure_overhead` / `historical-efficiency/tool-failure-overhead@1` | unavailable in historical-evidence v1 | unavailable | Historical-evidence v1 has generic `error_span` groups but no exact tool-call classification/status denominator. The category is always `unavailable` with `exact_tool_failure_status_unavailable`; generic errors are never relabeled as tool failures. | `review_tool_failure_evidence` |
-| `permission_wait` / `historical-efficiency/permission-wait@1` | `permission_wait` with numeric unit `seconds` | Session + trace; 1 exact wait | Match when exact maximum wait is at least 30 seconds or exact total wait is at least 60 seconds. Groups with another/missing unit or scalar are absent, not zero. | `review_permission_plan` |
-| `subagent_fanout` / `historical-efficiency/subagent-fanout@1` | `subagent_fan_out` with Issue #72 exact ownership capability | Session + trace; 2 exact ownership groups | Fan-out is the count of distinct group identities. Match at 2 or more. Repository-safe group identity remains opaque; ownership is never inferred from hierarchy/order. | `review_subagent_scope` |
+| `permission_wait` / `historical-efficiency/permission-wait@1` | unavailable in frozen historical-evidence v1 | unavailable | Frozen #72 persists no permission-wait duration. The category is always `unavailable` with `permission_wait_duration_unavailable`; a reserved group/capability shape is not a duration. | `review_permission_plan` |
+| `subagent_fanout` / `historical-efficiency/subagent-fanout@1` | unavailable in frozen historical-evidence v1 | unavailable | Frozen #72 persists no exact subagent ownership ID. The category is always `unavailable` with `exact_subagent_ownership_unavailable`; hierarchy/order/group identity is never relabeled as ownership. | `review_subagent_scope` |
 | `duration_outlier` / `historical-efficiency/duration-outlier@1` | exact `duration_observations` | comparative cohort; 4 Sessions | Per-Session duration is the maximum exact duration observation. Match when `session_duration > nearest_rank_p75` and `session_duration / median >= 1.50`; median must be positive. | `review_duration_outlier` |
 | `model_mix_observation` / `historical-efficiency/model-mix-observation@1` | exact `model_observations` | extraction; 2 distinct model refs | Match when two or more distinct opaque model refs occur. This rule is observational and its verdict can never exceed `weak`. | `separate_model_cohorts` |
 
 `token_volume` and `duration_outlier` can emit one driver for each matching
 subject Session in a partition. `context_growth` emits one driver for each
-qualifying maximal run. `cache_inefficiency`, `permission_wait`, and
-`subagent_fanout` emit at most one driver per Session/trace. Retry and repeated
-tool rules emit one driver per canonical source group. Model mix emits at most
-one extraction-level driver. `tool_failure_overhead` emits none in v1.
+qualifying maximal run. `cache_inefficiency` emits at most one driver per
+Session/trace. Retry emits one driver per canonical source group. Model mix
+emits at most one extraction-level driver. `tool_call_volume`,
+`tool_failure_overhead`, `permission_wait`, and `subagent_fanout` emit none in
+frozen v1.
 
 ## Coverage and no-driver behavior
 
@@ -122,7 +128,10 @@ in registry order. Its state is one of:
 Reason codes are fixed and ordered:
 
 ```text
+producer_authored_repeated_call_identity_unavailable
 exact_tool_failure_status_unavailable
+permission_wait_duration_unavailable
+exact_subagent_ownership_unavailable
 missing_required_capability
 missing_required_metric
 mixed_evaluation_dimension
@@ -131,10 +140,12 @@ no_threshold_match
 ```
 
 `observed_sample_count` counts the largest complete sample evaluated for that
-category; it never counts missing metrics. `eligible_session_count` counts only
-Sessions with every required Issue #72 Boolean capability. Coverage also
-preserves the Issue #72 completeness, source-kind, and capability
-distributions, excluded count, and truncation state.
+category; it never counts missing metrics. For retry, one distinct chain is one
+sample, while attempt count remains the threshold value. `eligible_session_count`
+counts only Sessions with every required Issue #72 Boolean capability and is
+zero for registry-declared unavailable categories. Coverage also preserves the
+Issue #72 completeness, source-kind, and capability distributions, excluded
+count, and truncation state.
 
 When no driver crosses a threshold, the receipt is still valid with
 `state=zero_drivers`, an empty `drivers` array, and all ten coverage rows.
@@ -159,8 +170,9 @@ Analysis-level and per-driver quality availability use the fixed states:
 The driver verdict is evidence strength, never an effect/improvement verdict:
 
 1. `incomplete` when a source Session is `partial` or
-   `historical_summary`, or when the matched evaluation excluded a required
-   observed metric;
+   `historical_summary`, or when any category-eligible Session in the input was
+   excluded from a matched comparative evaluation because a required observed
+   metric or comparison dimension was missing;
 2. `weak` when quality is not `available`, a mixed source/version/model note
    applies, or the category is `model_mix_observation`;
 3. `supported` otherwise.
@@ -176,9 +188,11 @@ The receipt ID is `historical-efficiency-receipt-` plus the first 16 SHA-256
 digest bytes over domain
 `copilot-agent-observability/historical-efficiency-receipt/v1` and
 length-framed registry version, extraction ID, and exact Issue #72
-repository-safe payload SHA-256. Driver IDs use a separate domain and bind the
-rule source, subject Session, ordered source Sessions, metric and quality
-references, exact observed/cohort values, verdict, and comparison notes.
+repository-safe payload SHA-256. Every driver repeats that exact extraction ID
+and payload SHA-256. Driver IDs use a separate domain and bind both extraction
+fields, the rule source, subject Session, ordered source Sessions, metric and
+quality references, exact observed/cohort values, verdict, and comparison
+notes.
 
 Canonical JSON is UTF-8 without BOM, indentation, or trailing newline.
 Properties follow the DTO declaration order; enums are lower snake case;
@@ -225,11 +239,20 @@ Automated coverage must include:
 - token component precedence, median, nearest-rank p75, and source/model
   partitioning;
 - context/cache boundaries, explicit zero, missing input/cache, and low N;
-- retry-chain duplicate protection, repeated-call threshold, permission unit,
-  fan-out ownership, duration outlier, and model mix;
+- retry-chain duplicate protection and one-chain/two-attempt boundary,
+  duration outlier, and model mix;
+- explicit unavailable coverage for repeated-call identity, exact tool-failure
+  status, permission-wait duration, and exact subagent ownership;
+- token/duration missing-metric, missing-dimension, and zero-denominator
+  coverage/verdict behavior;
 - partial/historical/mixed-source coverage, quality unavailable/partial/fail,
   zero-driver state, and exact evidence reference resolution;
+- a true Issue #72 raw-local/repository-safe producer pair persisted through
+  `SqliteHistoricalEvidenceDatasetStoreV1`, re-opened and analyzed after its
+  source Session/raw/finding database is unavailable;
 - strict repository-safe-only input and no raw/PII/path/price/currency/cost
   leakage; and
 - a committed canonical synthetic handoff fixture reviewed for formula,
-  evidence, quality, coverage, mitigation, ordering, and repository safety.
+  evidence, quality, coverage, mitigation, ordering, extraction identity, and
+  repository safety. The review is preserved beside the fixture as
+  `historical-efficiency-receipt.review.md` and binds its exact payload SHA-256.

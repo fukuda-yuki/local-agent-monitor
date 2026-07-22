@@ -213,34 +213,6 @@ internal sealed class SyntheticSession
 
     internal SyntheticSession AddDuplicateRetry(int attempts, string status = "error") => AddRetry(attempts, status);
 
-    internal SyntheticSession AddRepeatedToolCalls(int count)
-    {
-        var references = Enumerable.Range(1, count).Select(value => SpanReference(200 + value)).ToArray();
-        Add(HistoricalEvidenceGroupKindV1.RepeatedToolCall, references, count, "call", null,
-            canonicalCallHash: new string('a', 64));
-        return this;
-    }
-
-    internal SyntheticSession AddPermissionWait(params long[] seconds)
-    {
-        for (var index = 0; index < seconds.Length; index++)
-            Add(HistoricalEvidenceGroupKindV1.PermissionWait, [SpanReference(300 + index)], seconds[index], "seconds");
-        return this;
-    }
-
-    internal SyntheticSession AddPermissionWaitWithUnit(long value, string unit)
-    {
-        Add(HistoricalEvidenceGroupKindV1.PermissionWait, [SpanReference(350)], value, unit);
-        return this;
-    }
-
-    internal SyntheticSession AddSubagentFanout(int count)
-    {
-        for (var index = 0; index < count; index++)
-            Add(HistoricalEvidenceGroupKindV1.SubagentFanOut, [SpanReference(400 + index)], 1, "agent");
-        return this;
-    }
-
     internal SyntheticSession AddErrorSpan()
     {
         Add(HistoricalEvidenceGroupKindV1.ErrorSpan, [SpanReference(500)], null, null, "error");
@@ -253,9 +225,9 @@ internal sealed class SyntheticSession
         groups.Any(value => value.Kind == HistoricalEvidenceGroupKindV1.CacheRollup),
         groups.Any(value => value.Kind == HistoricalEvidenceGroupKindV1.ErrorSpan),
         groups.Any(value => value.Kind == HistoricalEvidenceGroupKindV1.RetryChain),
-        groups.Any(value => value.Kind == HistoricalEvidenceGroupKindV1.RepeatedToolCall),
-        groups.Any(value => value.Kind == HistoricalEvidenceGroupKindV1.PermissionWait),
-        groups.Any(value => value.Kind == HistoricalEvidenceGroupKindV1.SubagentFanOut),
+        false,
+        false,
+        false,
         false,
         groups.Any(value => value.Kind == HistoricalEvidenceGroupKindV1.QualityReference),
         false,
@@ -282,8 +254,7 @@ internal sealed class SyntheticSession
         IReadOnlyList<HistoricalEvidenceReferenceV1> references,
         long? numericValue,
         string? unit,
-        string? status = null,
-        string? canonicalCallHash = null)
+        string? status = null)
     {
         var id = $"historical-group-{(Index * 1000 + ++groupSequence).ToString("x32", CultureInfo.InvariantCulture)}";
         groups.Add(new HistoricalEvidenceGroupV1(
@@ -300,7 +271,7 @@ internal sealed class SyntheticSession
             unit,
             status,
             null,
-            canonicalCallHash,
+            null,
             null,
             null,
             null,

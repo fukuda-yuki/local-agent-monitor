@@ -3,7 +3,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Analysis;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -23,6 +26,20 @@ public sealed class HistoricalEfficiencyAnalysisTests
         Assert.Equal(extraction.RepositorySafeSha256, first.Receipt.ExtractionSha256);
         Assert.Equal(HistoricalEfficiencyAnalysisStateV1.Succeeded, first.Receipt.State);
         var driver = Assert.Single(first.Receipt.Drivers, value => value.Category == HistoricalEfficiencyDriverCategoryV1.TokenVolume);
+        Assert.Equal(extraction.RepositorySafe.ExtractionId, driver.ExtractionId);
+        Assert.Equal(extraction.RepositorySafeSha256, driver.ExtractionSha256);
+        var differentExtractionDriver = driver with
+        {
+            DriverId = string.Empty,
+            ExtractionSha256 = new string('a', 64),
+        };
+        differentExtractionDriver = differentExtractionDriver with
+        {
+            DriverId = HistoricalEfficiencyAnalyzerV1.CalculateDriverId(differentExtractionDriver),
+        };
+        Assert.NotEqual(driver.DriverId, differentExtractionDriver.DriverId);
+        Assert.Throws<HistoricalEfficiencyValidationException>(() => HistoricalEfficiencyJsonV1.Serialize(
+            first.Receipt with { Drivers = [differentExtractionDriver] }));
         Assert.Equal(HistoricalEfficiencyDriverVerdictV1.Supported, driver.Verdict);
         Assert.Equal(300m, driver.ObservedValues.Single(value => value.Name == "session_total").Value);
         Assert.Equal(115m, driver.CohortMedian!.Value);
@@ -82,13 +99,10 @@ public sealed class HistoricalEfficiencyAnalysisTests
     }
 
     [Fact]
-    public void Analyze_ExactOperationalGroups_EmitSeparateNonDuplicatedDrivers()
+    public void Analyze_Frozen72UnavailableOperationalCategories_StayExplicitlyUnavailable()
     {
         var session = new SyntheticSession(1)
             .AddRetry(3)
-            .AddRepeatedToolCalls(3)
-            .AddPermissionWait(30, 30)
-            .AddSubagentFanout(2)
             .AddErrorSpan()
             .AddQuality("pass");
 
@@ -98,33 +112,103 @@ public sealed class HistoricalEfficiencyAnalysisTests
         Assert.Equal(3m, retry.ObservedValues.Single(value => value.Name == "attempt_count").Value);
         Assert.Equal(2m, retry.ObservedValues.Single(value => value.Name == "retry_overhead").Value);
         Assert.Equal(3, retry.EvidenceRefs.Count);
-        Assert.Single(result.Receipt.Drivers, value => value.Category == HistoricalEfficiencyDriverCategoryV1.ToolCallVolume);
-        var permission = Assert.Single(result.Receipt.Drivers, value => value.Category == HistoricalEfficiencyDriverCategoryV1.PermissionWait);
-        Assert.Equal(60m, permission.ObservedValues.Single(value => value.Name == "total_wait").Value);
-        Assert.Single(result.Receipt.Drivers, value => value.Category == HistoricalEfficiencyDriverCategoryV1.SubagentFanout);
-        var toolFailure = Coverage(result, HistoricalEfficiencyDriverCategoryV1.ToolFailureOverhead);
-        Assert.Equal(HistoricalEfficiencyCoverageStateV1.Unavailable, toolFailure.State);
-        Assert.Equal([HistoricalEfficiencyCoverageReasonV1.ExactToolFailureStatusUnavailable], toolFailure.Reasons);
-        Assert.DoesNotContain(result.Receipt.Drivers, value => value.Category == HistoricalEfficiencyDriverCategoryV1.ToolFailureOverhead);
+        AssertUnavailable(HistoricalEfficiencyDriverCategoryV1.ToolCallVolume, "ProducerAuthoredRepeatedCallIdentityUnavailable");
+        AssertUnavailable(HistoricalEfficiencyDriverCategoryV1.ToolFailureOverhead, "ExactToolFailureStatusUnavailable");
+        AssertUnavailable(HistoricalEfficiencyDriverCategoryV1.PermissionWait, "PermissionWaitDurationUnavailable");
+        AssertUnavailable(HistoricalEfficiencyDriverCategoryV1.SubagentFanout, "ExactSubagentOwnershipUnavailable");
+
+        void AssertUnavailable(HistoricalEfficiencyDriverCategoryV1 category, string reason)
+        {
+            Assert.DoesNotContain(result.Receipt.Drivers, value => value.Category == category);
+            var coverage = Coverage(result, category);
+            Assert.Equal(HistoricalEfficiencyCoverageStateV1.Unavailable, coverage.State);
+            Assert.Equal(reason, Assert.Single(coverage.Reasons).ToString());
+            Assert.Equal(0, coverage.EligibleSessionCount);
+        }
     }
 
     [Fact]
-    public void Analyze_DuplicateRetryIdentityAndWrongPermissionUnit_AreExcludedWithoutInventedOverhead()
+    public void Analyze_DuplicateRetryIdentity_IsExcludedWithoutInventedOverhead()
     {
         var session = new SyntheticSession(1)
             .AddRetry(3)
             .AddDuplicateRetry(3)
-            .AddPermissionWaitWithUnit(60, "millisecond")
             .AddQuality("pass");
 
         var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(session));
 
         var retry = Assert.Single(result.Receipt.Drivers, value => value.Category == HistoricalEfficiencyDriverCategoryV1.RetryOverhead);
         Assert.Equal(3m, retry.ObservedValues.Single(value => value.Name == "attempt_count").Value);
-        Assert.DoesNotContain(result.Receipt.Drivers, value => value.Category == HistoricalEfficiencyDriverCategoryV1.PermissionWait);
-        var permission = Coverage(result, HistoricalEfficiencyDriverCategoryV1.PermissionWait);
-        Assert.Equal(HistoricalEfficiencyCoverageStateV1.Insufficient, permission.State);
-        Assert.Contains(HistoricalEfficiencyCoverageReasonV1.MissingRequiredMetric, permission.Reasons);
+    }
+
+    [Fact]
+    public void Analyze_OneRetryChainBelowAttemptThreshold_IsCompleteNoMatch()
+    {
+        var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(
+            new SyntheticSession(1).AddRetry(1).AddQuality("pass")));
+
+        var coverage = Coverage(result, HistoricalEfficiencyDriverCategoryV1.RetryOverhead);
+
+        Assert.DoesNotContain(result.Receipt.Drivers,
+            value => value.Category == HistoricalEfficiencyDriverCategoryV1.RetryOverhead);
+        Assert.Equal(HistoricalEfficiencyCoverageStateV1.NoMatch, coverage.State);
+        Assert.Equal(1, coverage.ObservedSampleCount);
+        Assert.Equal(1, coverage.MinimumSample);
+        Assert.Equal([HistoricalEfficiencyCoverageReasonV1.NoThresholdMatch], coverage.Reasons);
+    }
+
+    [Fact]
+    public void Analyze_TokenMatchWithExcludedMetricAndDimension_IsIncomplete()
+    {
+        var missingMetric = new SyntheticSession(5).AddTurn(1, inputTokens: 50).AddQuality("pass");
+        var missingDimension = new SyntheticSession(6, model: null).AddTurn(1, totalTokens: 50).AddQuality("pass");
+        var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(
+            TokenSession(1, 100), TokenSession(2, 110), TokenSession(3, 120), TokenSession(4, 300),
+            missingMetric, missingDimension));
+
+        var driver = Assert.Single(result.Receipt.Drivers, value => value.Category == HistoricalEfficiencyDriverCategoryV1.TokenVolume);
+
+        Assert.Equal(HistoricalEfficiencyDriverVerdictV1.Incomplete, driver.Verdict);
+    }
+
+    [Fact]
+    public void Analyze_DurationMatchWithExcludedMetricAndDimension_IsIncomplete()
+    {
+        static SyntheticSession DurationSession(int index, long duration, int? model = 1) =>
+            new SyntheticSession(index, model: model).AddDuration(duration).AddQuality("pass");
+        var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(
+            DurationSession(1, 100), DurationSession(2, 110), DurationSession(3, 120), DurationSession(4, 300),
+            new SyntheticSession(5).AddQuality("pass"), DurationSession(6, 50, model: null)));
+
+        var driver = Assert.Single(result.Receipt.Drivers, value => value.Category == HistoricalEfficiencyDriverCategoryV1.DurationOutlier);
+
+        Assert.Equal(HistoricalEfficiencyDriverVerdictV1.Incomplete, driver.Verdict);
+    }
+
+    [Fact]
+    public void Analyze_ZeroTokenDenominator_IsInsufficientMissingMetric()
+    {
+        var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(
+            TokenSession(1, 0), TokenSession(2, 0), TokenSession(3, 0), TokenSession(4, 300)));
+
+        var coverage = Coverage(result, HistoricalEfficiencyDriverCategoryV1.TokenVolume);
+
+        Assert.Equal(HistoricalEfficiencyCoverageStateV1.Insufficient, coverage.State);
+        Assert.Equal([HistoricalEfficiencyCoverageReasonV1.MissingRequiredMetric], coverage.Reasons);
+    }
+
+    [Fact]
+    public void Analyze_ZeroDurationDenominator_IsInsufficientMissingMetric()
+    {
+        static SyntheticSession DurationSession(int index, long duration) =>
+            new SyntheticSession(index).AddDuration(duration).AddQuality("pass");
+        var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(
+            DurationSession(1, 0), DurationSession(2, 0), DurationSession(3, 0), DurationSession(4, 300)));
+
+        var coverage = Coverage(result, HistoricalEfficiencyDriverCategoryV1.DurationOutlier);
+
+        Assert.Equal(HistoricalEfficiencyCoverageStateV1.Insufficient, coverage.State);
+        Assert.Equal([HistoricalEfficiencyCoverageReasonV1.MissingRequiredMetric], coverage.Reasons);
     }
 
     [Fact]
@@ -277,11 +361,79 @@ public sealed class HistoricalEfficiencyAnalysisTests
 
         Assert.All(result.Receipt.Drivers, driver =>
         {
+            Assert.Equal(extraction.RepositorySafe.ExtractionId, driver.ExtractionId);
+            Assert.Equal(extraction.RepositorySafeSha256, driver.ExtractionSha256);
             Assert.All(driver.SourceSessions, session => Assert.Contains(session, availableSessions));
             Assert.All(driver.EvidenceRefs, reference => Assert.Contains(reference, availableReferences));
             Assert.All(driver.QualityEvidenceRefs, reference => Assert.Contains(reference, availableReferences));
             Assert.Equal(driver.EvidenceRefs, driver.Mitigation.EvidenceRefs);
         });
+    }
+
+    [Fact]
+    public async Task Analyze_PersistedIssue72PairAfterSourceStoresDisappear_UsesOnlyExactHandoff()
+    {
+        var source = new MonitorTempDirectory();
+        var historyPath = Path.Combine(Path.GetTempPath(), $"historical-efficiency-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            HistoricalEvidenceExtractionV1 produced;
+            var now = new DateTimeOffset(2026, 7, 23, 0, 0, 0, TimeSpan.Zero);
+            var sessionId = Guid.Parse("018f0000-0000-7000-8000-000000000074");
+            const string traceId = "74000000000000000000000000000000";
+            const string chatSpanId = "7400000000000001";
+            const string failedSpanId = "7400000000000002";
+            const string recoveredSpanId = "7400000000000003";
+            using (var app = MonitorHost.Build(
+                new MonitorOptions(source.DatabasePath, "http://127.0.0.1:0", true, 31_457_280),
+                new MonitorHostTestOptions
+                {
+                    StartWriter = false,
+                    StartProjectionWorker = false,
+                    StartSessionWriter = false,
+                    StartSessionOtelEnrichment = false,
+                    UseUserSecrets = false,
+                }))
+            {
+                var sessionStore = app.Services.GetRequiredService<ISessionStore>();
+                var session = new ObservedSession(sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Full,
+                    "owner/repository", null, now, now.AddSeconds(1), now.AddSeconds(1), SessionRawRetentionState.NotCaptured,
+                    now, now);
+                var spanIds = new[] { chatSpanId, failedSpanId, recoveredSpanId };
+                var events = spanIds.Select((spanId, index) => new ObservedSessionEvent(
+                    Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode, null, traceId, "ok",
+                    "claude-code-otel", $"{traceId}/{spanId}", "otel.span", now.AddTicks(index),
+                    SessionContentState.NotCaptured, MatchKind: SessionMatchKind.ExactNative)).ToArray();
+                sessionStore.Write(new(new(session, [], [], events), []));
+                InsertPersistedHandoffSpans(source.DatabasePath, traceId, chatSpanId, failedSpanId, recoveredSpanId);
+
+                produced = await app.Services.GetRequiredService<HistoricalEvidenceApplicationServiceV1>()
+                    .CreateAsync(HistoricalEvidenceSelectionV1.Create(explicitSessionIds: [sessionId]), CancellationToken.None);
+            }
+
+            var historyStore = new SqliteHistoricalEvidenceDatasetStoreV1(historyPath);
+            historyStore.CreateSchema();
+            historyStore.Save(produced, now);
+            File.Delete(source.DatabasePath);
+            Assert.False(File.Exists(source.DatabasePath));
+
+            var persisted = Assert.IsType<HistoricalEvidenceExtractionV1>(historyStore.Get(produced.RawLocal.ExtractionId));
+            Assert.False(persisted.RawLocalBytes.SequenceEqual(persisted.RepositorySafeBytes));
+
+            var result = HistoricalEfficiencyAnalyzerV1.Analyze(persisted);
+            var driver = Assert.Single(result.Receipt.Drivers,
+                value => value.Category == HistoricalEfficiencyDriverCategoryV1.RetryOverhead);
+
+            Assert.Equal(persisted.RepositorySafe.ExtractionId, driver.ExtractionId);
+            Assert.Equal(persisted.RepositorySafeSha256, driver.ExtractionSha256);
+            Assert.Equal(persisted.RepositorySafeSha256, result.Receipt.ExtractionSha256);
+            Assert.Equal(2m, driver.ObservedValues.Single(value => value.Name == "attempt_count").Value);
+        }
+        finally
+        {
+            source.Dispose();
+            File.Delete(historyPath);
+        }
     }
 
     [Fact]
@@ -303,12 +455,25 @@ public sealed class HistoricalEfficiencyAnalysisTests
         Assert.Equal(fixtureSha256, Convert.ToHexString(SHA256.HashData(fixtureBytes)).ToLowerInvariant());
         Assert.Equal(fixtureBytes, HistoricalEfficiencyJsonV1.Serialize(restored));
         Assert.Equal(HistoricalEfficiencyAnalysisStateV1.Succeeded, restored.State);
+        Assert.All(restored.Drivers, driver =>
+        {
+            Assert.Equal(restored.ExtractionId, driver.ExtractionId);
+            Assert.Equal(restored.ExtractionSha256, driver.ExtractionSha256);
+        });
         Assert.Equal(HistoricalEfficiencyContractsV1.ReceiptSchemaVersion,
             schema.RootElement.GetProperty("properties").GetProperty("schema_version").GetProperty("const").GetString());
         Assert.Equal(
             HistoricalEfficiencyDriverRegistryV1.Rules.Select(value => JsonNamingPolicy.SnakeCaseLower.ConvertName(value.Category.ToString())),
             schema.RootElement.GetProperty("$defs").GetProperty("category").GetProperty("enum")
                 .EnumerateArray().Select(value => value.GetString()!));
+        var requiredDriverProperties = schema.RootElement.GetProperty("$defs").GetProperty("driver").GetProperty("required")
+            .EnumerateArray().Select(value => value.GetString()).ToArray();
+        Assert.Contains("extraction_id", requiredDriverProperties);
+        Assert.Contains("extraction_sha256", requiredDriverProperties);
+        var review = File.ReadAllText(Path.Combine(fixtureRoot, "historical-efficiency-receipt.review.md"));
+        Assert.Contains($"Payload SHA-256: `{fixtureSha256}`", review, StringComparison.Ordinal);
+        Assert.Contains("Verdict: `supported`", review, StringComparison.Ordinal);
+        Assert.Contains("Repository safety: PASS", review, StringComparison.Ordinal);
         Assert.DoesNotContain("\"cost", Encoding.UTF8.GetString(fixtureBytes), StringComparison.OrdinalIgnoreCase);
         Assert.True(ValidateWithPowerShellJsonSchema(fixtureBytes,
             Path.Combine(fixtureRoot, "historical-efficiency-receipt.schema.json")));
@@ -364,6 +529,41 @@ public sealed class HistoricalEfficiencyAnalysisTests
         finally
         {
             File.Delete(instancePath);
+        }
+    }
+
+    private static void InsertPersistedHandoffSpans(
+        string databasePath,
+        string traceId,
+        string chatSpanId,
+        string failedSpanId,
+        string recoveredSpanId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        var rows = new[]
+        {
+            (Ordinal: 1, SpanId: chatSpanId, Operation: "chat", ToolName: (string?)null, Status: (string?)null, Error: (string?)null),
+            (Ordinal: 2, SpanId: failedSpanId, Operation: (string?)null, ToolName: "shell", Status: "error", Error: "failed"),
+            (Ordinal: 3, SpanId: recoveredSpanId, Operation: (string?)null, ToolName: "shell", Status: "ok", Error: (string?)null),
+        };
+        foreach (var row in rows)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,tool_name,status,error_type,projected_at)
+                VALUES($raw,$trace,$span,$ordinal,$operation,$tool,$status,$error,$projected);
+                """;
+            command.Parameters.AddWithValue("$raw", row.Ordinal);
+            command.Parameters.AddWithValue("$trace", traceId);
+            command.Parameters.AddWithValue("$span", row.SpanId);
+            command.Parameters.AddWithValue("$ordinal", row.Ordinal);
+            command.Parameters.AddWithValue("$operation", (object?)row.Operation ?? DBNull.Value);
+            command.Parameters.AddWithValue("$tool", (object?)row.ToolName ?? DBNull.Value);
+            command.Parameters.AddWithValue("$status", (object?)row.Status ?? DBNull.Value);
+            command.Parameters.AddWithValue("$error", (object?)row.Error ?? DBNull.Value);
+            command.Parameters.AddWithValue("$projected", "2026-07-23T00:00:00.0000000+00:00");
+            Assert.Equal(1, command.ExecuteNonQuery());
         }
     }
 }

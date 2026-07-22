@@ -43,19 +43,18 @@ internal static class HistoricalEfficiencyAnalyzerV1
             .ToArray();
         var analysisQuality = QualityAvailability(sessions);
         var globalNotes = ComparisonNotes(dataset, sessions, analysisQuality);
-        var analysis = new AnalysisContext(dataset, sessions);
+        var analysis = new AnalysisContext(dataset, extraction.RepositorySafeSha256, sessions);
         var trackers = HistoricalEfficiencyDriverRegistryV1.Rules.ToDictionary(
             value => value.Category,
-            value => new CoverageTracker(value, EligibleSessionCount(sessions, value.RequiredCapabilities)));
+            value => new CoverageTracker(value, value.UnsupportedReason is null
+                ? EligibleSessionCount(sessions, value.RequiredCapabilities)
+                : 0));
         var drivers = new List<HistoricalEfficiencyDriverV1>();
 
         AnalyzeTokenVolume(analysis, trackers[HistoricalEfficiencyDriverCategoryV1.TokenVolume], drivers);
         AnalyzeContextGrowth(analysis, trackers[HistoricalEfficiencyDriverCategoryV1.ContextGrowth], drivers);
         AnalyzeCacheInefficiency(analysis, trackers[HistoricalEfficiencyDriverCategoryV1.CacheInefficiency], drivers);
         AnalyzeRetryOverhead(analysis, trackers[HistoricalEfficiencyDriverCategoryV1.RetryOverhead], drivers);
-        AnalyzeToolCallVolume(analysis, trackers[HistoricalEfficiencyDriverCategoryV1.ToolCallVolume], drivers);
-        AnalyzePermissionWait(analysis, trackers[HistoricalEfficiencyDriverCategoryV1.PermissionWait], drivers);
-        AnalyzeSubagentFanout(analysis, trackers[HistoricalEfficiencyDriverCategoryV1.SubagentFanout], drivers);
         AnalyzeDurationOutlier(analysis, trackers[HistoricalEfficiencyDriverCategoryV1.DurationOutlier], drivers);
         AnalyzeModelMix(analysis, trackers[HistoricalEfficiencyDriverCategoryV1.ModelMixObservation], drivers);
 
@@ -96,18 +95,22 @@ internal static class HistoricalEfficiencyAnalyzerV1
         List<HistoricalEfficiencyDriverV1> drivers)
     {
         var observations = new List<ComparativeObservation>();
+        var matches = new List<ComparativeMatch>();
+        var excludedRequiredMetric = false;
         foreach (var session in analysis.Sessions.Where(value => HasCapabilities(value.Session.Capabilities, tracker.Rule.RequiredCapabilities)))
         {
             var scalar = SessionTokenTotal(session);
             if (scalar is null)
             {
                 tracker.MissingMetric = true;
+                excludedRequiredMetric = true;
                 continue;
             }
             var key = GetComparisonKey(session);
             if (key is null)
             {
                 tracker.MixedDimension = true;
+                excludedRequiredMetric = true;
                 continue;
             }
             observations.Add(new(session, scalar.Value.Value, scalar.Value.References, key));
@@ -118,19 +121,28 @@ internal static class HistoricalEfficiencyAnalyzerV1
             var values = cohort.OrderBy(value => value.Session.Session.SessionId, StringComparer.Ordinal).ToArray();
             tracker.Observe(values.Length);
             if (values.Length < tracker.Rule.MinimumSample) continue;
-            tracker.CompleteEvaluation = true;
             var median = Median(values.Select(value => value.Value));
             var percentile = NearestRank75(values.Select(value => value.Value));
-            if (median <= 0) { tracker.MissingMetric = true; continue; }
-            foreach (var subject in values.Where(value => value.Value > percentile && value.Value / median >= 1.50m))
+            if (median <= 0)
             {
-                var sources = values.Select(value => value.Session).ToArray();
-                var evidence = SortReferences(values.SelectMany(value => value.References));
-                drivers.Add(BuildDriver(analysis, tracker.Rule, subject.Session.Session.SessionId, sources, evidence,
-                    [Scalar("session_total", subject.Value, "token"), Scalar("median_ratio", subject.Value / median, "ratio")],
-                    Scalar("cohort_median", median, "token"), Percentile("cohort_p75", percentile, "token")));
-                tracker.Matched = true;
+                tracker.MissingMetric = true;
+                excludedRequiredMetric = true;
+                continue;
             }
+            tracker.CompleteEvaluation = true;
+            foreach (var subject in values.Where(value => value.Value > percentile && value.Value / median >= 1.50m))
+                matches.Add(new(subject, values, median, percentile));
+        }
+        foreach (var match in matches)
+        {
+            var sources = match.Cohort.Select(value => value.Session).ToArray();
+            var evidence = SortReferences(match.Cohort.SelectMany(value => value.References));
+            drivers.Add(BuildDriver(analysis, tracker.Rule, match.Subject.Session.Session.SessionId, sources, evidence,
+                [Scalar("session_total", match.Subject.Value, "token"),
+                    Scalar("median_ratio", match.Subject.Value / match.Median, "ratio")],
+                Scalar("cohort_median", match.Median, "token"),
+                Percentile("cohort_p75", match.Percentile, "token"), excludedRequiredMetric));
+            tracker.Matched = true;
         }
     }
 
@@ -261,83 +273,13 @@ internal static class HistoricalEfficiencyAnalyzerV1
                 var references = SortReferences(group.References);
                 var identity = string.Join('|', references.Select(ReferenceSortKey));
                 if (!seenChains.Add(identity)) continue;
-                tracker.Observe(references.Count);
-                if (references.Count < tracker.Rule.MinimumSample) continue;
+                if (references.Count == 0) { tracker.MissingMetric = true; continue; }
+                tracker.Observe(1);
                 tracker.CompleteEvaluation = true;
+                if (references.Count < 2) continue;
                 drivers.Add(BuildDriver(analysis, tracker.Rule, session.Session.SessionId, [session], references,
                     [Scalar("attempt_count", references.Count, "attempt"), Scalar("retry_overhead", references.Count - 1, "attempt")],
                     null, null));
-                tracker.Matched = true;
-            }
-        }
-    }
-
-    private static void AnalyzeToolCallVolume(
-        AnalysisContext analysis,
-        CoverageTracker tracker,
-        List<HistoricalEfficiencyDriverV1> drivers)
-    {
-        foreach (var session in analysis.Sessions.Where(value => value.Session.Capabilities.RepeatedToolCall))
-        {
-            foreach (var group in session.Groups.Where(value => value.Kind == HistoricalEvidenceGroupKindV1.RepeatedToolCall))
-            {
-                var references = SortReferences(group.References);
-                tracker.Observe(references.Count);
-                if (references.Count < tracker.Rule.MinimumSample) continue;
-                tracker.CompleteEvaluation = true;
-                drivers.Add(BuildDriver(analysis, tracker.Rule, session.Session.SessionId, [session], references,
-                    [Scalar("exact_repeated_call_count", references.Count, "call")], null, null));
-                tracker.Matched = true;
-            }
-        }
-    }
-
-    private static void AnalyzePermissionWait(
-        AnalysisContext analysis,
-        CoverageTracker tracker,
-        List<HistoricalEfficiencyDriverV1> drivers)
-    {
-        foreach (var session in analysis.Sessions.Where(value => value.Session.Capabilities.PermissionWait))
-        {
-            var groups = session.Groups.Where(value => value.Kind == HistoricalEvidenceGroupKindV1.PermissionWait)
-                .GroupBy(value => value.References.FirstOrDefault()?.TraceId ?? string.Empty, StringComparer.Ordinal);
-            foreach (var trace in groups.OrderBy(value => value.Key, StringComparer.Ordinal))
-            {
-                var valid = trace.Where(value => value.NumericValue is >= 0 && value.Unit == "seconds" && value.References.Count > 0).ToArray();
-                if (valid.Length != trace.Count()) tracker.MissingMetric = true;
-                tracker.Observe(valid.Length);
-                if (valid.Length == 0) continue;
-                tracker.CompleteEvaluation = true;
-                var maximum = valid.Max(value => checked((decimal)value.NumericValue!.Value));
-                var total = valid.Aggregate(0m, (sum, value) => checked(sum + value.NumericValue!.Value));
-                if (maximum < 30m && total < 60m) continue;
-                var evidence = SortReferences(valid.SelectMany(value => value.References));
-                drivers.Add(BuildDriver(analysis, tracker.Rule, session.Session.SessionId, [session], evidence,
-                    [Scalar("maximum_wait", maximum, "second"), Scalar("total_wait", total, "second")], null, null,
-                    valid.Length != trace.Count()));
-                tracker.Matched = true;
-            }
-        }
-    }
-
-    private static void AnalyzeSubagentFanout(
-        AnalysisContext analysis,
-        CoverageTracker tracker,
-        List<HistoricalEfficiencyDriverV1> drivers)
-    {
-        foreach (var session in analysis.Sessions.Where(value => value.Session.Capabilities.SubagentFanOut))
-        {
-            var groups = session.Groups.Where(value => value.Kind == HistoricalEvidenceGroupKindV1.SubagentFanOut)
-                .GroupBy(value => value.References.FirstOrDefault()?.TraceId ?? string.Empty, StringComparer.Ordinal);
-            foreach (var trace in groups.OrderBy(value => value.Key, StringComparer.Ordinal))
-            {
-                var distinctGroups = trace.GroupBy(value => value.GroupId, StringComparer.Ordinal).Select(value => value.First()).ToArray();
-                tracker.Observe(distinctGroups.Length);
-                if (distinctGroups.Length < tracker.Rule.MinimumSample) continue;
-                tracker.CompleteEvaluation = true;
-                var evidence = SortReferences(distinctGroups.SelectMany(value => value.References));
-                drivers.Add(BuildDriver(analysis, tracker.Rule, session.Session.SessionId, [session], evidence,
-                    [Scalar("distinct_exact_ownership_count", distinctGroups.Length, "ownership")], null, null));
                 tracker.Matched = true;
             }
         }
@@ -349,17 +291,21 @@ internal static class HistoricalEfficiencyAnalyzerV1
         List<HistoricalEfficiencyDriverV1> drivers)
     {
         var observations = new List<ComparativeObservation>();
+        var matches = new List<ComparativeMatch>();
+        var excludedRequiredMetric = false;
         foreach (var session in analysis.Sessions)
         {
             if (session.Session.Metadata.DurationObservations.Count == 0)
             {
                 tracker.MissingMetric = true;
+                excludedRequiredMetric = true;
                 continue;
             }
             var key = GetComparisonKey(session);
             if (key is null)
             {
                 tracker.MixedDimension = true;
+                excludedRequiredMetric = true;
                 continue;
             }
             var maximum = session.Session.Metadata.DurationObservations.Max(value => checked((decimal)value.DurationMs));
@@ -371,19 +317,28 @@ internal static class HistoricalEfficiencyAnalyzerV1
             var values = cohort.OrderBy(value => value.Session.Session.SessionId, StringComparer.Ordinal).ToArray();
             tracker.Observe(values.Length);
             if (values.Length < tracker.Rule.MinimumSample) continue;
-            tracker.CompleteEvaluation = true;
             var median = Median(values.Select(value => value.Value));
             var percentile = NearestRank75(values.Select(value => value.Value));
-            if (median <= 0) { tracker.MissingMetric = true; continue; }
-            foreach (var subject in values.Where(value => value.Value > percentile && value.Value / median >= 1.50m))
+            if (median <= 0)
             {
-                var sources = values.Select(value => value.Session).ToArray();
-                var evidence = SortReferences(values.SelectMany(value => value.References));
-                drivers.Add(BuildDriver(analysis, tracker.Rule, subject.Session.Session.SessionId, sources, evidence,
-                    [Scalar("session_duration", subject.Value, "millisecond"), Scalar("median_ratio", subject.Value / median, "ratio")],
-                    Scalar("cohort_median", median, "millisecond"), Percentile("cohort_p75", percentile, "millisecond")));
-                tracker.Matched = true;
+                tracker.MissingMetric = true;
+                excludedRequiredMetric = true;
+                continue;
             }
+            tracker.CompleteEvaluation = true;
+            foreach (var subject in values.Where(value => value.Value > percentile && value.Value / median >= 1.50m))
+                matches.Add(new(subject, values, median, percentile));
+        }
+        foreach (var match in matches)
+        {
+            var sources = match.Cohort.Select(value => value.Session).ToArray();
+            var evidence = SortReferences(match.Cohort.SelectMany(value => value.References));
+            drivers.Add(BuildDriver(analysis, tracker.Rule, match.Subject.Session.Session.SessionId, sources, evidence,
+                [Scalar("session_duration", match.Subject.Value, "millisecond"),
+                    Scalar("median_ratio", match.Subject.Value / match.Median, "ratio")],
+                Scalar("cohort_median", match.Median, "millisecond"),
+                Percentile("cohort_p75", match.Percentile, "millisecond"), excludedRequiredMetric));
+            tracker.Matched = true;
         }
     }
 
@@ -453,6 +408,8 @@ internal static class HistoricalEfficiencyAnalyzerV1
             HistoricalEfficiencyDriverRegistryV1.MitigationSummary(rule.Category), sortedEvidence);
         var draft = new HistoricalEfficiencyDriverV1(
             string.Empty,
+            analysis.Dataset.ExtractionId,
+            analysis.ExtractionSha256,
             rule.Category,
             rule.DriverVersion,
             rule.RuleSource,
@@ -595,9 +552,6 @@ internal static class HistoricalEfficiencyAnalyzerV1
             "token_rollup" => value.TokenRollup,
             "cache_rollup" => value.CacheRollup,
             "retry_chain" => value.RetryChain,
-            "repeated_tool_call" => value.RepeatedToolCall,
-            "permission_wait" => value.PermissionWait,
-            "subagent_fan_out" => value.SubagentFanOut,
             _ => false,
         });
 
@@ -643,6 +597,8 @@ internal static class HistoricalEfficiencyAnalyzerV1
     {
         var fields = new List<string?>
         {
+            "extraction_id", driver.ExtractionId,
+            "extraction_sha256", driver.ExtractionSha256,
             "rule_source", driver.RuleSource,
             "subject_session", driver.SubjectSessionId,
             "category", Snake(driver.Category),
@@ -713,6 +669,7 @@ internal static class HistoricalEfficiencyAnalyzerV1
     private sealed record SessionContext(HistoricalEvidenceSessionV1 Session, IReadOnlyList<HistoricalEvidenceGroupV1> Groups);
     private sealed record AnalysisContext(
         HistoricalEvidenceDatasetV1 Dataset,
+        string ExtractionSha256,
         IReadOnlyList<SessionContext> Sessions);
 
     private sealed record ComparisonKey(string SourceSurface, string? SourceVersion, string? AdapterVersion, string Model)
@@ -725,6 +682,12 @@ internal static class HistoricalEfficiencyAnalyzerV1
         decimal Value,
         IReadOnlyList<HistoricalEvidenceReferenceV1> References,
         ComparisonKey Key);
+
+    private sealed record ComparativeMatch(
+        ComparativeObservation Subject,
+        IReadOnlyList<ComparativeObservation> Cohort,
+        decimal Median,
+        decimal Percentile);
 
     private enum SessionQualityState { Missing, Unknown, Pass, Fail }
 
@@ -747,7 +710,7 @@ internal static class HistoricalEfficiencyAnalyzerV1
             if (Rule.UnsupportedReason is not null)
             {
                 state = HistoricalEfficiencyCoverageStateV1.Unavailable;
-                reasons = [HistoricalEfficiencyCoverageReasonV1.ExactToolFailureStatusUnavailable];
+                reasons = [Rule.UnsupportedReason.Value];
             }
             else if (Matched)
             {
