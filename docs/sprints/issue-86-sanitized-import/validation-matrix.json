@@ -1,7 +1,7 @@
 {
   "schema_version": "validation-matrix.v1",
   "matrix_prep_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
-  "final_validation_sha": "6156699a47733d59b4a83301dd02c0291dcfaec4",
+  "final_validation_sha": "60c635970f5448fabed3bb96478208e37d3dfb95",
   "inventory_date": "2026-07-23",
   "environment_boundary": "Exact functional SHA in the Windows native current-user Issue #86 worktree; deterministic synthetic bundles, disposable SQLite databases, and server-managed loopback test hosts only. No genuine second machine was available.",
   "active_rows": [
@@ -38,8 +38,8 @@
       "evidence": [
         {
           "kind": "automated",
-          "reference": "Exact functional SHA 6156699a47733d59b4a83301dd02c0291dcfaec4: Claude mirror 5/5, solution build 0 warnings/0 errors, Playwright bootstrap, LocalMonitor sanitized import 32/32, ConfigCli sanitized import 8/8, and Issue #91 contract 7/7 all passed with zero skips. The repository full test command is intentionally deferred for primary integration serialization after the #79 rebase.",
-          "compatibility_basis": "Fresh focused execution covered service, graph, component migration, strict archive, transaction rollback, conflict, loopback route, CLI validation order, UI concurrency, history, and replay behavior from the unchanged tree frozen by the functional SHA."
+          "reference": "Exact functional SHA 60c635970f5448fabed3bb96478208e37d3dfb95: Claude mirror 5/5, solution build 0 warnings/0 errors, Playwright bootstrap, LocalMonitor sanitized import 101/101, ConfigCli sanitized import 12/12, and full solution 8079/8079 all passed with zero skips. Issue #91 contract validation passed after pinning this exact functional SHA in the evidence-only revision.",
+          "compatibility_basis": "Fresh post-#79 focused and full execution covered service, graph, historical_import -> sanitized_import component migration, strict archive, transaction rollback, conflict, loopback route, CLI validation order, Playwright UI concurrency, history, and replay behavior from the unchanged tree frozen by the functional SHA."
         }
       ],
       "actual_result": "Preview, commit, replay, history, and detail passed across service, CLI, loopback API, and browser tests. Exact and conflicting identities, later graph definitions, injected rollback checkpoints, digest/state changes, schema drift, malformed requests, bounds, and overlapping UI requests produced the specified outcomes without owner-table or raw-retention writes.",
@@ -49,7 +49,7 @@
       "retry_condition": null,
       "unverified_capability": null,
       "owner": "Issue #86 transactional sanitized evidence import",
-      "validation_sha": "6156699a47733d59b4a83301dd02c0291dcfaec4",
+      "validation_sha": "60c635970f5448fabed3bb96478208e37d3dfb95",
       "validation_date": "2026-07-23",
       "environment_boundary": "Exact functional SHA with deterministic synthetic #58/#59/#80 carrier bundles, disposable SQLite databases, and loopback test hosts; no raw telemetry, live user data, or remote endpoint was exercised or claimed."
     },
@@ -81,12 +81,12 @@
       "evidence": [
         {
           "kind": "automated",
-          "reference": "Exact functional SHA 6156699a47733d59b4a83301dd02c0291dcfaec4: LocalMonitor sanitized import 32/32 and ConfigCli sanitized import 8/8 passed. Cases covered strict archive failures, entry/node/edge bounds, malformed and unauthorized HTTP requests before body reads, preview/state conflicts, exact normalized DDL and attached-object rejection, all rollback checkpoints, no owner-table writes, and zero retention items.",
+          "reference": "Exact functional SHA 60c635970f5448fabed3bb96478208e37d3dfb95: LocalMonitor sanitized import 101/101, ConfigCli sanitized import 12/12, and full solution 8079/8079 passed with zero skips. Cases covered strict archive failures, entry/node/edge bounds, malformed and unauthorized HTTP requests before body reads, preview/state conflicts, exact normalized DDL and attached-object rejection, all rollback checkpoints, no owner-table writes, and zero retention items.",
           "compatibility_basis": "Tests invoked the #85 strict inspector, import graph projector, independent sanitized_import schema v1, SQLite transaction, loopback middleware, CLI adapter, and framework-escaped UI from the exact functional tree."
         },
         {
           "kind": "automated",
-          "reference": "Issue #91 scanner self-test and contract tests passed; repository-safe output scanning is also applied to this validation artifact before its evidence commit.",
+          "reference": "Issue #91 scanner self-test passed 118 transformation cases and 5 negative cases; sanitized-evidence contract scanning passed for 3 files, 354 variants, and zero matches; Issue #86 evidence scanning passed for 2 files, 236 variants, and zero matches.",
           "compatibility_basis": "The versioned Issue #91 synthetic corpus and semantic validator are unchanged dependencies of the functional candidate."
         }
       ],
@@ -97,7 +97,7 @@
       "retry_condition": null,
       "unverified_capability": null,
       "owner": "Issue #86 transactional sanitized evidence import",
-      "validation_sha": "6156699a47733d59b4a83301dd02c0291dcfaec4",
+      "validation_sha": "60c635970f5448fabed3bb96478208e37d3dfb95",
       "validation_date": "2026-07-23",
       "environment_boundary": "Exact functional SHA with synthetic repository-safe bundles, disposable SQLite files, and loopback hosts. This is not a general DLP, secure-erasure, remote-host, or raw-content safety claim."
     },
@@ -144,7 +144,7 @@
       "retry_condition": "Provision a genuine second Windows machine, transfer a bundle created on the first machine without changing archive bytes, and rerun strict preview, commit, replay, history, graph, and retention-boundary observations against the frozen candidate.",
       "unverified_capability": "End-to-end portability across distinct machine filesystem, runtime, timestamp, and local-identity boundaries.",
       "owner": "Issue #86 transactional sanitized evidence import",
-      "validation_sha": "6156699a47733d59b4a83301dd02c0291dcfaec4",
+      "validation_sha": "60c635970f5448fabed3bb96478208e37d3dfb95",
       "validation_date": "2026-07-23",
       "environment_boundary": "Current Windows machine only; deterministic same-machine relocation is retained as negative evidence and no distinct source/destination machine pair was available."
     }
@@ -152,6 +152,7 @@
   "future_registry_ref": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
   "evidence_ledger_refs": [
     "docs/sprints/issue-86-sanitized-import/validation-matrix.json",
+    "docs/sprints/issue-86-sanitized-import/final-evidence.md",
     "docs/specifications/interfaces/sanitized-evidence-import.md"
   ],
   "release_decision": {

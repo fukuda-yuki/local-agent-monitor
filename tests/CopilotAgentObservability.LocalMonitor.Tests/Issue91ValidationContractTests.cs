@@ -59,7 +59,7 @@ public sealed class Issue91ValidationContractTests
         using var matrix = JsonDocument.Parse(File.ReadAllText(Path.Combine(
             RepositoryRoot, "docs", "sprints", "issue-86-sanitized-import", "validation-matrix.json")));
 
-        const string functionalSha = "6156699a47733d59b4a83301dd02c0291dcfaec4";
+        const string functionalSha = "60c635970f5448fabed3bb96478208e37d3dfb95";
         var root = matrix.RootElement;
         Assert.Equal("validation-matrix.v1", root.GetProperty("schema_version").GetString());
         Assert.Equal("c02c10ab18553acef1619ce12ec630f4f6f5aa5f", root.GetProperty("matrix_prep_sha").GetString());
