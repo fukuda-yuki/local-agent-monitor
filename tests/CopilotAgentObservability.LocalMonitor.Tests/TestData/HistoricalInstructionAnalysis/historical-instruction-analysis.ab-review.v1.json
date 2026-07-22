@@ -1,0 +1,22 @@
+{
+  "schema_version": "historical-instruction-analysis.ab-review.v1",
+  "review_authority": "github-issue-73-owner-contract",
+  "review_source": "Issue #73 cross-session support rules",
+  "recorded_at": "2026-07-21",
+  "cases": [
+    {
+      "id": "A",
+      "session_count": 2,
+      "expected_support_kind": "recurring",
+      "expected_verdict": "supported",
+      "expected_candidate_eligible": true
+    },
+    {
+      "id": "B",
+      "session_count": 1,
+      "expected_support_kind": "single_session",
+      "expected_verdict": "weak",
+      "expected_candidate_eligible": false
+    }
+  ]
+}

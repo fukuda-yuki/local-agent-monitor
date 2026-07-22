@@ -44,6 +44,7 @@
     <None Include="TestData\SchemaMigrations\retention\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\Retention\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\InstructionFindings\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\HistoricalInstructionAnalysis\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\SanitizedExport\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\docs\specifications\contracts\instruction-findings\v1\instruction-finding-handoff.schema.json"
           Link="TestData\InstructionFindings\instruction-finding-handoff.schema.json"
