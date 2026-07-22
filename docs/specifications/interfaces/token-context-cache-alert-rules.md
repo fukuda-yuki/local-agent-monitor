@@ -49,15 +49,42 @@ the Issue #80 engine. `unbound`/`partial` snapshots suppress with
 suppresses with `historical-input`. These suppressions do not alter the frozen
 Issue #61 completeness reason set.
 
-Groups never combine different model IDs or semantics versions. Growth rules
-also split on tool-schema generation. Limit rules additionally split on the
-exact limit value, authority, and version. Thus a model, schema, semantics, or
-limit revision cannot manufacture growth across its boundary.
+One normalized snapshot is one evaluation/version partition. Source surface is
+already snapshot-wide and descriptors accept only `github-copilot-vscode`,
+`github-copilot-cli`, `claude-code`, `codex-app`, and `codex-cli`. A relevant
+rule requires exactly one canonical dimension across its successful,
+dimension-bearing LLM calls:
+
+| Rules | Required single dimension |
+| --- | --- |
+| high initial / near limit | model ID, input-token semantics version, exact effective limit value, limit authority, and limit version |
+| monotonic growth | model ID, input-token semantics version, and tool-schema generation |
+| growth with output collapse | model ID, input- and output-token semantics versions, and tool-schema generation |
+| low cache read | model ID, input-token semantics version, and cache-read-token semantics version |
+
+Two distinct values for any applicable dimension suppress the rule with
+`mixed-evaluation-dimension`; the rule emits no receipt and never partitions
+multiple model/semantics/schema/limit groups inside one evaluation. An upstream
+producer must submit separate snapshots/evaluation versions instead. Thus a
+model, schema, semantics, authority, or limit revision cannot manufacture an
+alert across its boundary.
 
 Rule arithmetic uses exact .NET `decimal` values. No intermediate rounding is
-performed. Medians sort exact values; an even median is the arithmetic mean of
-the two middle values. Receipt decimal serialization remains the Issue #80
-canonical invariant `G29` representation.
+performed. Medians sort exact values; an even median is calculated as
+`lower + (upper - lower) / 2`, which is the arithmetic mean without overflowing
+when two non-negative token values approach `decimal.MaxValue`. Receipt decimal
+serialization remains the Issue #80 canonical invariant `G29` representation.
+
+Threshold override ranges are part of rule version `1`:
+
+| Rule / threshold | Direction | Minimum | Maximum | Warning | Critical |
+| --- | --- | ---: | ---: | ---: | ---: |
+| high initial / `initial-context-utilization` | higher | 0 | 1000000 | 0.50 inclusive | 0.80 inclusive |
+| monotonic / `context-growth-ratio` | higher | 0 | 1000000 | 1.75 inclusive | 2.50 inclusive |
+| collapse / `context-half-growth-ratio` | higher | 0 | 1000000 | 1.50 inclusive | 2.00 inclusive |
+| collapse / `output-input-collapse-ratio` | lower | 0 | 1 | 0.50 inclusive | 0.30 inclusive |
+| low cache / `cache-read-ratio` | lower | 0 | 1 | below 0.20 | below 0.05 |
+| near limit / `context-limit-utilization` | higher | 0 | 1000000 | 0.75 inclusive | 0.90 inclusive |
 
 Every match records exact evidence for the calls actually evaluated. Observed
 values are numeric and include `eligible-turn-count`, `included-turn-count`,
@@ -74,11 +101,11 @@ Required capabilities are `llm-call-classification`, `input-token-count`,
 `model-identity`, `token-semantics-version`, `effective-context-limit`,
 `effective-context-limit-authority`, and
 `effective-context-limit-version`. Scope is trace and the evaluation window is
-`first-eligible-turn-per-model-limit-group`.
+`first-eligible-turn-per-evaluation-dimension`.
 
-For each group, choose its first successful call with an explicit positive
+Choose the first successful call in the single evaluation dimension with an explicit positive
 limit and complete grouping keys. If that exact first call has no observed
-input metric, the group is unevaluable; a later input must not replace the
+input metric, the evaluation dimension is unevaluable; a later input must not replace the
 initial turn. Compute `initial-context-utilization = input / limit`.
 Warning is inclusive at `0.50`; critical is inclusive at `0.80` and takes
 precedence. Evidence is that exact first turn.
@@ -88,9 +115,9 @@ precedence. Evidence is that exact first turn.
 Required capabilities are `llm-call-classification`, `input-token-count`,
 `model-identity`, `token-semantics-version`, and `tool-schema-generation`.
 Scope is trace and the evaluation window is
-`maximal-contiguous-nondecreasing-run-per-group`.
+`maximal-contiguous-nondecreasing-run`.
 
-Within each group ordered by signal sequence, observed time, then signal ID,
+Within the evaluation ordered by signal sequence, observed time, then signal ID,
 find maximal contiguous runs whose input count is nondecreasing. A decrease
 ends a run. Evaluate runs of at least three turns and with first input greater
 than zero. Compute `context-growth-ratio = last input / first input`. Warning
@@ -103,7 +130,7 @@ turn in that run.
 Required capabilities are `llm-call-classification`, `input-token-count`,
 `output-token-count`, `model-identity`, `token-semantics-version`, and
 `tool-schema-generation`. Scope is trace and the evaluation window is
-`eligible-group-halves`.
+`eligible-evaluation-halves`.
 
 An eligible call has observed input greater than zero and observed output
 greater than or equal to zero. Missing values and non-success calls are
@@ -126,7 +153,7 @@ and takes precedence. Evidence includes both halves and omits the odd middle.
 Required capabilities are `llm-call-classification`, `input-token-count`,
 `cache-read-token-count`, `model-identity`, and `token-semantics-version`.
 Scope is trace and the evaluation window is
-`post-first-eligible-turn-per-cache-semantics-group`.
+`post-first-eligible-turn-per-evaluation-dimension`.
 
 An eligible call has observed non-negative input and cache-read counts. At
 least three eligible calls are required before excluding the first eligible
@@ -141,7 +168,7 @@ all other excluded calls.
 
 Required capabilities and grouping are the same as
 `high-initial-context-utilization`. Scope is trace and the evaluation window is
-`each-eligible-turn-per-model-limit-group`.
+`each-eligible-turn-per-evaluation-dimension`.
 
 For every eligible exact call compute `context-limit-utilization = input /
 limit`. Warning is inclusive at `0.75`; critical is inclusive at `0.90` and
@@ -150,11 +177,12 @@ turn as evidence.
 
 ## Suppression And Handoff
 
-Each descriptor declares `minimum-sample-unmet`, `incomplete-snapshot`, and
-`historical-input` in addition to the frozen engine suppression codes. Rules
-return at most one deterministic suppression code when the eligibility/window
-minimum is unmet: historical input first, then incomplete snapshot, then
-minimum sample. A sufficient sample that does not cross a threshold returns no
+Each descriptor declares `minimum-sample-unmet`, `incomplete-snapshot`,
+`historical-input`, and `mixed-evaluation-dimension` in addition to the frozen
+engine suppression codes. Rules return at most one deterministic suppression:
+historical input first, then incomplete snapshot, then mixed evaluation
+dimension, then minimum sample when the eligibility/window minimum is unmet. A
+sufficient single-dimension sample that does not cross a threshold returns no
 match and no rule suppression. Missing required capabilities remain the engine-owned
 `missing_required_capability` suppression.
 

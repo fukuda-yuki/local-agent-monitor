@@ -10,7 +10,7 @@ internal sealed class HighInitialContextUtilizationRule : IAlertRule
         ["llm-call-classification", "input-token-count", "model-identity", "token-semantics-version", "effective-context-limit", "effective-context-limit-authority", "effective-context-limit-version"],
         AlertRuleScope.Trace,
         ["model-id", "input-token-semantics-version", "effective-context-limit-authority", "effective-context-limit-version", "effective-context-limit"],
-        "first-eligible-turn-per-model-limit-group",
+        "first-eligible-turn-per-evaluation-dimension",
         [TokenAlertContract.HigherThreshold("initial-context-utilization", TokenAlertContract.Fraction, 0.50m, 0.80m)],
         TokenAlertContract.Suppressions,
         TokenAlertContract.ApplicableSources);
@@ -21,6 +21,7 @@ internal sealed class HighInitialContextUtilizationRule : IAlertRule
         if (suppression is not null) return suppression;
 
         var llm = TokenAlertContract.OrderedLlmSignals(context.Snapshot);
+        if (TokenAlertContract.HasMixedLimitDimension(llm)) return TokenAlertContract.Suppressed("mixed-evaluation-dimension");
         var candidates = llm.Where(signal => signal.Status == AlertSignalStatus.Success
                 && TokenAlertContract.TryLimitGroup(signal, out _, out _))
             .ToArray();

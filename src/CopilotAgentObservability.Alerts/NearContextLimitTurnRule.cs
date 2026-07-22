@@ -10,7 +10,7 @@ internal sealed class NearContextLimitTurnRule : IAlertRule
         ["llm-call-classification", "input-token-count", "model-identity", "token-semantics-version", "effective-context-limit", "effective-context-limit-authority", "effective-context-limit-version"],
         AlertRuleScope.Trace,
         ["model-id", "input-token-semantics-version", "effective-context-limit-authority", "effective-context-limit-version", "effective-context-limit"],
-        "each-eligible-turn-per-model-limit-group",
+        "each-eligible-turn-per-evaluation-dimension",
         [TokenAlertContract.HigherThreshold("context-limit-utilization", TokenAlertContract.Fraction, 0.75m, 0.90m)],
         TokenAlertContract.Suppressions,
         TokenAlertContract.ApplicableSources);
@@ -21,6 +21,7 @@ internal sealed class NearContextLimitTurnRule : IAlertRule
         if (suppression is not null) return suppression;
 
         var llm = TokenAlertContract.OrderedLlmSignals(context.Snapshot);
+        if (TokenAlertContract.HasMixedLimitDimension(llm)) return TokenAlertContract.Suppressed("mixed-evaluation-dimension");
         var eligible = llm.Where(signal => signal.Status == AlertSignalStatus.Success
                 && TokenAlertContract.Metric(signal, TokenAlertContract.InputTokens) is >= 0
                 && TokenAlertContract.TryLimitGroup(signal, out _, out _))

@@ -26,13 +26,13 @@ internal static class TokenAlertContract
 
     public static readonly string[] ApplicableSources =
     [
-        "claude-code", "codex-app", "codex-cli", "github-copilot", "github-copilot-cli", "github-copilot-vscode",
+        "claude-code", "codex-app", "codex-cli", "github-copilot-cli", "github-copilot-vscode",
     ];
 
     public static readonly string[] Suppressions =
     [
         "missing_required_capability", "rule_disabled", "source_not_applicable",
-        "minimum-sample-unmet", "incomplete-snapshot", "historical-input",
+        "minimum-sample-unmet", "incomplete-snapshot", "historical-input", "mixed-evaluation-dimension",
     ];
 
     public static AlertRuleOutcome? SuppressIncomplete(AlertNormalizedSnapshot snapshot)
@@ -100,6 +100,25 @@ internal static class TokenAlertContract
         return true;
     }
 
+    public static bool HasMixedCommonDimension(IReadOnlyList<AlertSignal> signals, bool toolSchema, bool output, bool cache) => signals
+        .Where(signal => signal.Status == AlertSignalStatus.Success
+            && Metric(signal, InputTokens) is >= 0
+            && (!output || Metric(signal, InputTokens) is > 0 && Metric(signal, OutputTokens) is >= 0)
+            && (!cache || Metric(signal, CacheReadTokens) is >= 0))
+        .Select(signal => TryCommonGroup(signal, toolSchema, output, cache, out var group) ? group : null)
+        .Where(group => group is not null)
+        .Distinct(StringComparer.Ordinal)
+        .Take(2)
+        .Count() > 1;
+
+    public static bool HasMixedLimitDimension(IReadOnlyList<AlertSignal> signals) => signals
+        .Where(signal => signal.Status == AlertSignalStatus.Success && Metric(signal, InputTokens) is >= 0)
+        .Select(signal => TryLimitGroup(signal, out var group, out _) ? group : null)
+        .Where(group => group is not null)
+        .Distinct(StringComparer.Ordinal)
+        .Take(2)
+        .Count() > 1;
+
     public static AlertSeverity? HigherSeverity(decimal value, decimal warning, decimal critical) =>
         value >= critical ? AlertSeverity.Critical : value >= warning ? AlertSeverity.Warning : null;
 
@@ -110,7 +129,9 @@ internal static class TokenAlertContract
     {
         var ordered = values.Order().ToArray();
         var middle = ordered.Length / 2;
-        return ordered.Length % 2 == 0 ? (ordered[middle - 1] + ordered[middle]) / 2m : ordered[middle];
+        return ordered.Length % 2 == 0
+            ? ordered[middle - 1] + (ordered[middle] - ordered[middle - 1]) / 2m
+            : ordered[middle];
     }
 
     public static AlertRuleMatch Match(

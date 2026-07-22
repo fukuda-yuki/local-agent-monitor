@@ -23,6 +23,62 @@ public sealed class TokenContextCacheAlertRuleTests
     }
 
     [Theory]
+    [InlineData("high-initial-context-utilization", "initial-context-utilization", 0, 1000000)]
+    [InlineData("monotonic-context-growth", "context-growth-ratio", 0, 1000000)]
+    [InlineData("context-growth-with-output-collapse", "context-half-growth-ratio", 0, 1000000)]
+    [InlineData("context-growth-with-output-collapse", "output-input-collapse-ratio", 0, 1)]
+    [InlineData("low-cache-read-ratio", "cache-read-ratio", 0, 1)]
+    [InlineData("near-context-limit-turn", "context-limit-utilization", 0, 1000000)]
+    public void Registry_FreezesEveryThresholdOverrideRange(string ruleId, string thresholdName, int minimum, int maximum)
+    {
+        var descriptor = TokenContextCacheAlertRulePack.CreateRules().Single(rule => rule.Descriptor.RuleId == ruleId).Descriptor;
+        var threshold = descriptor.Thresholds.Single(item => item.Name == thresholdName);
+
+        Assert.Equal(minimum, threshold.Minimum);
+        Assert.Equal(maximum, threshold.Maximum);
+    }
+
+    [Fact]
+    public void Registry_UsesOnlyCanonicalSourceSurfaceNames()
+    {
+        var expected = new[] { "claude-code", "codex-app", "codex-cli", "github-copilot-cli", "github-copilot-vscode" };
+
+        Assert.All(TokenContextCacheAlertRulePack.CreateRules(), rule => Assert.Equal(expected, rule.Descriptor.ApplicableSourceSurfaces));
+        var result = Evaluate("near-context-limit-turn", [Turn(1, input: 95, limit: 100)], sourceSurface: "github-copilot");
+        Assert.Empty(result.Receipts);
+        Assert.Equal("source_not_applicable", Assert.Single(result.Suppressions).Code);
+    }
+
+    [Theory]
+    [InlineData("high-initial-context-utilization", "model")]
+    [InlineData("high-initial-context-utilization", "input-semantics")]
+    [InlineData("high-initial-context-utilization", "limit-value")]
+    [InlineData("high-initial-context-utilization", "limit-authority")]
+    [InlineData("high-initial-context-utilization", "limit-version")]
+    [InlineData("near-context-limit-turn", "model")]
+    [InlineData("near-context-limit-turn", "input-semantics")]
+    [InlineData("near-context-limit-turn", "limit-value")]
+    [InlineData("near-context-limit-turn", "limit-authority")]
+    [InlineData("near-context-limit-turn", "limit-version")]
+    [InlineData("monotonic-context-growth", "model")]
+    [InlineData("monotonic-context-growth", "input-semantics")]
+    [InlineData("monotonic-context-growth", "tool-schema")]
+    [InlineData("context-growth-with-output-collapse", "model")]
+    [InlineData("context-growth-with-output-collapse", "input-semantics")]
+    [InlineData("context-growth-with-output-collapse", "output-semantics")]
+    [InlineData("context-growth-with-output-collapse", "tool-schema")]
+    [InlineData("low-cache-read-ratio", "model")]
+    [InlineData("low-cache-read-ratio", "input-semantics")]
+    [InlineData("low-cache-read-ratio", "cache-semantics")]
+    public void MixedEvaluationDimensions_AreSuppressedInsteadOfPartitionedWithinOneEvaluation(string ruleId, string dimension)
+    {
+        var result = Evaluate(ruleId, MixedDimensionTurns(ruleId, dimension));
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("mixed-evaluation-dimension", Assert.Single(result.Suppressions).Code);
+    }
+
+    [Theory]
     [InlineData(49, null)]
     [InlineData(50, AlertSeverity.Warning)]
     [InlineData(80, AlertSeverity.Critical)]
@@ -34,7 +90,7 @@ public sealed class TokenContextCacheAlertRuleTests
     }
 
     [Fact]
-    public void HighInitialContextUtilization_SplitsModelAndLimitRevisionGroups()
+    public void HighInitialContextUtilization_SuppressesMixedModelAndLimitRevisionDimensions()
     {
         var result = Evaluate("high-initial-context-utilization",
         [
@@ -43,9 +99,8 @@ public sealed class TokenContextCacheAlertRuleTests
             Turn(3, input: 90, limit: 100, model: "model-a", limitVersion: "v2"),
         ]);
 
-        Assert.Equal(2, result.Receipts.Count);
-        Assert.All(result.Receipts, receipt => Assert.Single(receipt.Evidence));
-        Assert.Equal(["turn-2", "turn-3"], result.Receipts.Select(receipt => receipt.Evidence.Single().TurnId).Order(StringComparer.Ordinal));
+        Assert.Empty(result.Receipts);
+        Assert.Equal("mixed-evaluation-dimension", Assert.Single(result.Suppressions).Code);
     }
 
     [Fact]
@@ -103,7 +158,7 @@ public sealed class TokenContextCacheAlertRuleTests
 
         Assert.Empty(decrease.Receipts);
         Assert.Empty(schemaChange.Receipts);
-        Assert.Equal("minimum-sample-unmet", Assert.Single(schemaChange.Suppressions).Code);
+        Assert.Equal("mixed-evaluation-dimension", Assert.Single(schemaChange.Suppressions).Code);
     }
 
     [Fact]
@@ -146,6 +201,25 @@ public sealed class TokenContextCacheAlertRuleTests
         Assert.Equal(1m, Observed(receipt, "excluded-turn-count"));
         Assert.DoesNotContain(receipt.Evidence, item => item.TurnId == "turn-3");
         Assert.Equal(0.20m, Observed(receipt, "output-input-collapse-ratio"));
+    }
+
+    [Fact]
+    public void OutputCollapse_EvenMedianDoesNotOverflowAtDecimalExtremes()
+    {
+        var high = decimal.MaxValue;
+        var result = Evaluate("context-growth-with-output-collapse",
+        [
+            Turn(1, input: high - 3, output: high - 3), Turn(2, input: high - 1, output: high - 1),
+            Turn(3, input: high - 3, output: 0), Turn(4, input: high - 1, output: 0),
+        ], thresholdOverrides: new Dictionary<string, decimal>
+        {
+            ["context-half-growth-ratio.warning"] = 1m,
+            ["context-half-growth-ratio.critical"] = 1m,
+        });
+
+        var receipt = Assert.Single(result.Receipts);
+        Assert.Equal(high - 2, Observed(receipt, "first-half-median-input"));
+        Assert.Equal(high - 2, Observed(receipt, "last-half-median-input"));
     }
 
     [Fact]
@@ -218,7 +292,7 @@ public sealed class TokenContextCacheAlertRuleTests
         ]);
 
         Assert.Empty(result.Receipts);
-        Assert.Equal("minimum-sample-unmet", Assert.Single(result.Suppressions).Code);
+        Assert.Equal("mixed-evaluation-dimension", Assert.Single(result.Suppressions).Code);
     }
 
     [Fact]
@@ -349,7 +423,8 @@ public sealed class TokenContextCacheAlertRuleTests
         AlertCompleteness completeness = AlertCompleteness.Rich,
         IReadOnlyList<string>? reasons = null,
         string sourceSurface = "github-copilot-vscode",
-        IReadOnlyDictionary<string, AlertCapabilityAvailability>? capabilityOverrides = null)
+        IReadOnlyDictionary<string, AlertCapabilityAvailability>? capabilityOverrides = null,
+        IReadOnlyDictionary<string, decimal>? thresholdOverrides = null)
     {
         var rule = TokenContextCacheAlertRulePack.CreateRules().Single(item => item.Descriptor.RuleId == ruleId);
         var capabilities = rule.Descriptor.RequiredCapabilities
@@ -369,7 +444,8 @@ public sealed class TokenContextCacheAlertRuleTests
             capabilities,
             signals);
         var engine = new AlertEvaluationEngine(new AlertRuleRegistry([rule]), new ExistsResolver());
-        return engine.Evaluate(snapshot, new(AlertContractVersions.Configuration, "token-rules-v1", []));
+        var rules = thresholdOverrides is null ? [] : new[] { new AlertRuleConfiguration(ruleId, "1", true, thresholdOverrides, null) };
+        return engine.Evaluate(snapshot, new(AlertContractVersions.Configuration, "token-rules-v1", rules));
     }
 
     private static AlertSignal Turn(
@@ -381,6 +457,10 @@ public sealed class TokenContextCacheAlertRuleTests
         string model = "model-a",
         string toolSchema = "tool-schema-a",
         string limitVersion = "limit-v1",
+        string inputSemantics = "input-v1",
+        string outputSemantics = "output-v1",
+        string cacheSemantics = "cache-v1",
+        string limitAuthority = "authority-v1",
         AlertSignalStatus status = AlertSignalStatus.Success)
     {
         var observedAt = new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero).AddSeconds(sequence);
@@ -392,16 +472,74 @@ public sealed class TokenContextCacheAlertRuleTests
         var keys = new[]
         {
             new AlertComparableKey("model-id", AlertComparableKeyKind.MetadataToken, model),
-            new AlertComparableKey("input-token-semantics-version", AlertComparableKeyKind.MetadataToken, "input-v1"),
-            new AlertComparableKey("output-token-semantics-version", AlertComparableKeyKind.MetadataToken, "output-v1"),
-            new AlertComparableKey("cache-read-token-semantics-version", AlertComparableKeyKind.MetadataToken, "cache-v1"),
+            new AlertComparableKey("input-token-semantics-version", AlertComparableKeyKind.MetadataToken, inputSemantics),
+            new AlertComparableKey("output-token-semantics-version", AlertComparableKeyKind.MetadataToken, outputSemantics),
+            new AlertComparableKey("cache-read-token-semantics-version", AlertComparableKeyKind.MetadataToken, cacheSemantics),
             new AlertComparableKey("tool-schema-generation", AlertComparableKeyKind.MetadataToken, toolSchema),
-            new AlertComparableKey("effective-context-limit-authority", AlertComparableKeyKind.MetadataToken, "authority-v1"),
+            new AlertComparableKey("effective-context-limit-authority", AlertComparableKeyKind.MetadataToken, limitAuthority),
             new AlertComparableKey("effective-context-limit-version", AlertComparableKeyKind.MetadataToken, limitVersion),
         };
         var id = $"turn-{sequence}";
         var evidence = new AlertEvidenceReference(AlertEvidenceKind.Turn, $"evidence-{sequence}", "session-1", "trace-1", $"span-{sequence}", id, null, null, observedAt);
         return new(id, AlertSignalKind.LlmCall, sequence, observedAt, null, status, metrics, keys, evidence);
+    }
+
+    private static IReadOnlyList<AlertSignal> MixedDimensionTurns(string ruleId, string dimension)
+    {
+        var count = ruleId switch
+        {
+            "high-initial-context-utilization" or "near-context-limit-turn" => 2,
+            "monotonic-context-growth" or "low-cache-read-ratio" => 3,
+            _ => 4,
+        };
+        var turns = Enumerable.Range(1, count).Select(index => ruleId switch
+        {
+            "high-initial-context-utilization" or "near-context-limit-turn" => Turn(index, input: 95, limit: index == count && dimension == "limit-value" ? 200 : 100),
+            "monotonic-context-growth" => Turn(index, input: index == count ? 300 : 100),
+            "context-growth-with-output-collapse" => Turn(index, input: index > 2 ? 200 : 100, output: index > 2 ? 0 : 100),
+            "low-cache-read-ratio" => Turn(index, input: index == 1 ? 1 : 5000, cache: 0),
+            _ => throw new ArgumentOutOfRangeException(nameof(ruleId)),
+        }).ToArray();
+
+        turns[^1] = dimension switch
+        {
+            "model" => ReplaceKeys(turns[^1], model: "model-b"),
+            "input-semantics" => ReplaceKeys(turns[^1], inputSemantics: "input-v2"),
+            "output-semantics" => ReplaceKeys(turns[^1], outputSemantics: "output-v2"),
+            "cache-semantics" => ReplaceKeys(turns[^1], cacheSemantics: "cache-v2"),
+            "tool-schema" => ReplaceKeys(turns[^1], toolSchema: "tool-schema-b"),
+            "limit-authority" => ReplaceKeys(turns[^1], limitAuthority: "authority-v2"),
+            "limit-version" => ReplaceKeys(turns[^1], limitVersion: "limit-v2"),
+            "limit-value" => turns[^1],
+            _ => throw new ArgumentOutOfRangeException(nameof(dimension)),
+        };
+        return turns;
+    }
+
+    private static AlertSignal ReplaceKeys(
+        AlertSignal signal,
+        string? model = null,
+        string? inputSemantics = null,
+        string? outputSemantics = null,
+        string? cacheSemantics = null,
+        string? toolSchema = null,
+        string? limitAuthority = null,
+        string? limitVersion = null)
+    {
+        var replacements = new Dictionary<string, string?>
+        {
+            ["model-id"] = model,
+            ["input-token-semantics-version"] = inputSemantics,
+            ["output-token-semantics-version"] = outputSemantics,
+            ["cache-read-token-semantics-version"] = cacheSemantics,
+            ["tool-schema-generation"] = toolSchema,
+            ["effective-context-limit-authority"] = limitAuthority,
+            ["effective-context-limit-version"] = limitVersion,
+        };
+        return signal with
+        {
+            ComparableKeys = signal.ComparableKeys.Select(key => replacements.GetValueOrDefault(key.Name) is { } value ? key with { Value = value } : key).ToArray(),
+        };
     }
 
     private sealed class ExistsResolver : IAlertEvidenceResolver

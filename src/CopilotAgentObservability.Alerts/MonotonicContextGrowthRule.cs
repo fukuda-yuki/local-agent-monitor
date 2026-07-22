@@ -10,7 +10,7 @@ internal sealed class MonotonicContextGrowthRule : IAlertRule
         ["llm-call-classification", "input-token-count", "model-identity", "token-semantics-version", "tool-schema-generation"],
         AlertRuleScope.Trace,
         ["model-id", "input-token-semantics-version", "tool-schema-generation"],
-        "maximal-contiguous-nondecreasing-run-per-group",
+        "maximal-contiguous-nondecreasing-run",
         [TokenAlertContract.HigherThreshold("context-growth-ratio", TokenAlertContract.Ratio, 1.75m, 2.50m)],
         TokenAlertContract.Suppressions,
         TokenAlertContract.ApplicableSources);
@@ -21,6 +21,7 @@ internal sealed class MonotonicContextGrowthRule : IAlertRule
         if (suppression is not null) return suppression;
 
         var llm = TokenAlertContract.OrderedLlmSignals(context.Snapshot);
+        if (TokenAlertContract.HasMixedCommonDimension(llm, true, false, false)) return TokenAlertContract.Suppressed("mixed-evaluation-dimension");
         var eligibleCount = llm.Count(IsEligible);
         var runs = Runs(llm).Where(run => run.Count >= 3 && TokenAlertContract.Metric(run[0], TokenAlertContract.InputTokens) > 0).ToArray();
         if (runs.Length == 0) return TokenAlertContract.Suppressed("minimum-sample-unmet");

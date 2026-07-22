@@ -10,7 +10,7 @@ internal sealed class ContextGrowthWithOutputCollapseRule : IAlertRule
         ["llm-call-classification", "input-token-count", "output-token-count", "model-identity", "token-semantics-version", "tool-schema-generation"],
         AlertRuleScope.Trace,
         ["model-id", "input-token-semantics-version", "output-token-semantics-version", "tool-schema-generation"],
-        "eligible-group-halves",
+        "eligible-evaluation-halves",
         [
             TokenAlertContract.HigherThreshold("context-half-growth-ratio", TokenAlertContract.Ratio, 1.50m, 2.00m),
             TokenAlertContract.LowerThreshold("output-input-collapse-ratio", TokenAlertContract.Ratio, 0.50m, 0.30m),
@@ -24,6 +24,7 @@ internal sealed class ContextGrowthWithOutputCollapseRule : IAlertRule
         if (suppression is not null) return suppression;
 
         var llm = TokenAlertContract.OrderedLlmSignals(context.Snapshot);
+        if (TokenAlertContract.HasMixedCommonDimension(llm, true, true, false)) return TokenAlertContract.Suppressed("mixed-evaluation-dimension");
         var eligible = llm.Where(IsEligible).ToArray();
         var groups = eligible.GroupBy(signal =>
         {

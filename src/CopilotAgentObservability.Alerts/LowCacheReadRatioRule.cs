@@ -12,7 +12,7 @@ internal sealed class LowCacheReadRatioRule : IAlertRule
         ["llm-call-classification", "input-token-count", "cache-read-token-count", "model-identity", "token-semantics-version"],
         AlertRuleScope.Trace,
         ["model-id", "input-token-semantics-version", "cache-read-token-semantics-version"],
-        "post-first-eligible-turn-per-cache-semantics-group",
+        "post-first-eligible-turn-per-evaluation-dimension",
         [TokenAlertContract.LowerThreshold("cache-read-ratio", TokenAlertContract.Ratio, 0.20m, 0.05m)],
         TokenAlertContract.Suppressions,
         TokenAlertContract.ApplicableSources);
@@ -23,6 +23,7 @@ internal sealed class LowCacheReadRatioRule : IAlertRule
         if (suppression is not null) return suppression;
 
         var llm = TokenAlertContract.OrderedLlmSignals(context.Snapshot);
+        if (TokenAlertContract.HasMixedCommonDimension(llm, false, false, true)) return TokenAlertContract.Suppressed("mixed-evaluation-dimension");
         var eligible = llm.Where(IsEligible).ToArray();
         var groups = eligible.GroupBy(signal =>
         {
