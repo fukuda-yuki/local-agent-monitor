@@ -24,6 +24,8 @@ internal sealed class LowCacheReadRatioRule : IAlertRule
 
         var llm = TokenAlertContract.OrderedLlmSignals(context.Snapshot);
         if (TokenAlertContract.HasMixedCommonDimension(llm, false, false, true)) return TokenAlertContract.Suppressed("mixed-evaluation-dimension");
+        if (TokenAlertContract.HasOutOfDomainTokenMetric(llm, TokenAlertContract.InputTokens, TokenAlertContract.CacheReadTokens))
+            return TokenAlertContract.Suppressed("token-metric-out-of-domain");
         var eligible = llm.Where(IsEligible).ToArray();
         var groups = eligible.GroupBy(signal =>
         {
@@ -39,10 +41,12 @@ internal sealed class LowCacheReadRatioRule : IAlertRule
         foreach (var group in groups)
         {
             var included = group.Skip(1).ToArray();
-            var totalInput = included.Sum(signal => TokenAlertContract.Metric(signal, TokenAlertContract.InputTokens)!.Value);
+            if (!TokenAlertContract.TrySum(included.Select(signal => TokenAlertContract.Metric(signal, TokenAlertContract.InputTokens)!.Value), out var totalInput))
+                return TokenAlertContract.Suppressed("token-arithmetic-overflow");
             if (totalInput < MinimumPostFirstInput) continue;
             hadMinimumInput = true;
-            var totalCache = included.Sum(signal => TokenAlertContract.Metric(signal, TokenAlertContract.CacheReadTokens)!.Value);
+            if (!TokenAlertContract.TrySum(included.Select(signal => TokenAlertContract.Metric(signal, TokenAlertContract.CacheReadTokens)!.Value), out var totalCache))
+                return TokenAlertContract.Suppressed("token-arithmetic-overflow");
             var ratio = totalCache / totalInput;
             var severity = TokenAlertContract.LowerSeverity(ratio, warning, critical);
             if (severity is not null)

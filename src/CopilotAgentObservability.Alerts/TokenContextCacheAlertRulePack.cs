@@ -23,6 +23,7 @@ internal static class TokenAlertContract
     public const string Ratio = "ratio";
     public const string Fraction = "fraction";
     public const string Turns = "turns";
+    public const decimal MaximumTokenMetric = 1_000_000_000_000m;
 
     public static readonly string[] ApplicableSources =
     [
@@ -33,6 +34,7 @@ internal static class TokenAlertContract
     [
         "missing_required_capability", "rule_disabled", "source_not_applicable",
         "minimum-sample-unmet", "incomplete-snapshot", "historical-input", "mixed-evaluation-dimension",
+        "token-metric-out-of-domain", "token-arithmetic-overflow",
     ];
 
     public static AlertRuleOutcome? SuppressIncomplete(AlertNormalizedSnapshot snapshot)
@@ -101,10 +103,7 @@ internal static class TokenAlertContract
     }
 
     public static bool HasMixedCommonDimension(IReadOnlyList<AlertSignal> signals, bool toolSchema, bool output, bool cache) => signals
-        .Where(signal => signal.Status == AlertSignalStatus.Success
-            && Metric(signal, InputTokens) is >= 0
-            && (!output || Metric(signal, InputTokens) is > 0 && Metric(signal, OutputTokens) is >= 0)
-            && (!cache || Metric(signal, CacheReadTokens) is >= 0))
+        .Where(signal => signal.Status == AlertSignalStatus.Success)
         .Select(signal => TryCommonGroup(signal, toolSchema, output, cache, out var group) ? group : null)
         .Where(group => group is not null)
         .Distinct(StringComparer.Ordinal)
@@ -112,12 +111,32 @@ internal static class TokenAlertContract
         .Count() > 1;
 
     public static bool HasMixedLimitDimension(IReadOnlyList<AlertSignal> signals) => signals
-        .Where(signal => signal.Status == AlertSignalStatus.Success && Metric(signal, InputTokens) is >= 0)
+        .Where(signal => signal.Status == AlertSignalStatus.Success)
         .Select(signal => TryLimitGroup(signal, out var group, out _) ? group : null)
         .Where(group => group is not null)
         .Distinct(StringComparer.Ordinal)
         .Take(2)
         .Count() > 1;
+
+    public static bool HasOutOfDomainTokenMetric(IReadOnlyList<AlertSignal> signals, params string[] metricNames) => signals
+        .Where(signal => signal.Status == AlertSignalStatus.Success)
+        .SelectMany(signal => metricNames.Select(name => (Name: name, Value: Metric(signal, name))))
+        .Any(metric => metric.Value is { } value && !InTokenMetricDomain(metric.Name, value));
+
+    public static bool TrySum(IEnumerable<decimal> values, out decimal sum)
+    {
+        sum = 0m;
+        try
+        {
+            foreach (var value in values) sum += value;
+            return true;
+        }
+        catch (OverflowException)
+        {
+            sum = 0m;
+            return false;
+        }
+    }
 
     public static AlertSeverity? HigherSeverity(decimal value, decimal warning, decimal critical) =>
         value >= critical ? AlertSeverity.Critical : value >= warning ? AlertSeverity.Warning : null;
@@ -160,4 +179,9 @@ internal static class TokenAlertContract
 
     public static AlertThresholdDefinition LowerThreshold(string name, string unit, decimal warning, decimal critical) =>
         new(name, unit, AlertThresholdDirection.LowerIsWorse, 0m, 1m, warning, critical);
+
+    private static bool InTokenMetricDomain(string name, decimal value) =>
+        value == decimal.Truncate(value)
+        && value <= MaximumTokenMetric
+        && (name == EffectiveContextLimit ? value >= 1m : value >= 0m);
 }

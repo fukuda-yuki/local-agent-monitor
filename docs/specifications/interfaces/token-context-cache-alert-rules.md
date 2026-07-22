@@ -67,12 +67,31 @@ Two distinct values for any applicable dimension suppress the rule with
 multiple model/semantics/schema/limit groups inside one evaluation. An upstream
 producer must submit separate snapshots/evaluation versions instead. Thus a
 model, schema, semantics, authority, or limit revision cannot manufacture an
-alert across its boundary.
+alert across its boundary. Dimension comparison examines every successful
+dimension-bearing `llm_call` before metric eligibility. A missing input,
+output, or cache metric excludes the call from formula/sample coverage but does
+not erase its model, semantics, tool-schema, limit-authority, limit-version, or
+explicit limit dimension.
+
+All observed token metrics used by this pack have a bounded leaf domain before
+arithmetic:
+
+- `input-tokens`, `output-tokens`, and `cache-read-tokens` are whole decimals
+  from `0` through `1000000000000` inclusive;
+- `effective-context-limit` is a whole decimal from `1` through
+  `1000000000000` inclusive.
+
+An observed relevant metric outside that domain suppresses with
+`token-metric-out-of-domain`; it is not rounded, clamped, or treated as
+missing. Aggregate addition uses checked decimal behavior and suppresses with
+`token-arithmetic-overflow` rather than throwing if a valid-domain sequence is
+too large to sum. These checks make all divisions operate on bounded whole
+counts with a positive divisor.
 
 Rule arithmetic uses exact .NET `decimal` values. No intermediate rounding is
 performed. Medians sort exact values; an even median is calculated as
 `lower + (upper - lower) / 2`, which is the arithmetic mean without overflowing
-when two non-negative token values approach `decimal.MaxValue`. Receipt decimal
+within the bounded non-negative token domain. Receipt decimal
 serialization remains the Issue #80 canonical invariant `G29` representation.
 
 Threshold override ranges are part of rule version `1`:
@@ -178,12 +197,14 @@ turn as evidence.
 ## Suppression And Handoff
 
 Each descriptor declares `minimum-sample-unmet`, `incomplete-snapshot`,
-`historical-input`, and `mixed-evaluation-dimension` in addition to the frozen
-engine suppression codes. Rules return at most one deterministic suppression:
-historical input first, then incomplete snapshot, then mixed evaluation
-dimension, then minimum sample when the eligibility/window minimum is unmet. A
-sufficient single-dimension sample that does not cross a threshold returns no
-match and no rule suppression. Missing required capabilities remain the engine-owned
+`historical-input`, `mixed-evaluation-dimension`,
+`token-metric-out-of-domain`, and `token-arithmetic-overflow` in addition to the
+frozen engine suppression codes. Rules return at most one deterministic
+suppression: historical input first, then incomplete snapshot, then mixed
+evaluation dimension, then invalid metric domain/arithmetic overflow, then
+minimum sample when the eligibility/window minimum is unmet. A sufficient
+single-dimension sample that does not cross a threshold returns no match and no
+rule suppression. Missing required capabilities remain the engine-owned
 `missing_required_capability` suppression.
 
 The registry handoff to Issue #84 is the five exact rule ID/version pairs above

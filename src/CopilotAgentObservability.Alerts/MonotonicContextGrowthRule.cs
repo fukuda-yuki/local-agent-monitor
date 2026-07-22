@@ -22,6 +22,8 @@ internal sealed class MonotonicContextGrowthRule : IAlertRule
 
         var llm = TokenAlertContract.OrderedLlmSignals(context.Snapshot);
         if (TokenAlertContract.HasMixedCommonDimension(llm, true, false, false)) return TokenAlertContract.Suppressed("mixed-evaluation-dimension");
+        if (TokenAlertContract.HasOutOfDomainTokenMetric(llm, TokenAlertContract.InputTokens))
+            return TokenAlertContract.Suppressed("token-metric-out-of-domain");
         var eligibleCount = llm.Count(IsEligible);
         var runs = Runs(llm).Where(run => run.Count >= 3 && TokenAlertContract.Metric(run[0], TokenAlertContract.InputTokens) > 0).ToArray();
         if (runs.Length == 0) return TokenAlertContract.Suppressed("minimum-sample-unmet");

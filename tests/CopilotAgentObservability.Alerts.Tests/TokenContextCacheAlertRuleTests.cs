@@ -79,6 +79,67 @@ public sealed class TokenContextCacheAlertRuleTests
     }
 
     [Theory]
+    [InlineData("high-initial-context-utilization", "model")]
+    [InlineData("high-initial-context-utilization", "input-semantics")]
+    [InlineData("high-initial-context-utilization", "limit-value")]
+    [InlineData("high-initial-context-utilization", "limit-authority")]
+    [InlineData("high-initial-context-utilization", "limit-version")]
+    [InlineData("near-context-limit-turn", "model")]
+    [InlineData("near-context-limit-turn", "input-semantics")]
+    [InlineData("near-context-limit-turn", "limit-value")]
+    [InlineData("near-context-limit-turn", "limit-authority")]
+    [InlineData("near-context-limit-turn", "limit-version")]
+    [InlineData("monotonic-context-growth", "model")]
+    [InlineData("monotonic-context-growth", "input-semantics")]
+    [InlineData("monotonic-context-growth", "tool-schema")]
+    [InlineData("context-growth-with-output-collapse", "model")]
+    [InlineData("context-growth-with-output-collapse", "input-semantics")]
+    [InlineData("context-growth-with-output-collapse", "output-semantics")]
+    [InlineData("context-growth-with-output-collapse", "tool-schema")]
+    [InlineData("low-cache-read-ratio", "model")]
+    [InlineData("low-cache-read-ratio", "input-semantics")]
+    [InlineData("low-cache-read-ratio", "cache-semantics")]
+    public void SuccessfulDimensionBearingCalls_WithMissingMetricsStillSuppressMixedDimensions(string ruleId, string dimension)
+    {
+        var result = Evaluate(ruleId, MixedDimensionTurns(ruleId, dimension, missingMetricOnDifferentCall: true));
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("mixed-evaluation-dimension", Assert.Single(result.Suppressions).Code);
+    }
+
+    [Theory]
+    [InlineData("high-initial-context-utilization")]
+    [InlineData("near-context-limit-turn")]
+    [InlineData("monotonic-context-growth")]
+    [InlineData("context-growth-with-output-collapse")]
+    [InlineData("low-cache-read-ratio")]
+    public void ArithmeticDomain_ExtremeTokenValuesProduceBoundedSuppression(string ruleId)
+    {
+        var tiny = 0.0000000000000000000000000001m;
+        var turns = ruleId switch
+        {
+            "high-initial-context-utilization" or "near-context-limit-turn" => new[] { Turn(1, input: decimal.MaxValue, limit: tiny) },
+            "monotonic-context-growth" => new[] { Turn(1, input: 1), Turn(2, input: 2), Turn(3, input: decimal.MaxValue) },
+            "context-growth-with-output-collapse" => new[]
+            {
+                Turn(1, input: tiny, output: decimal.MaxValue), Turn(2, input: tiny, output: decimal.MaxValue),
+                Turn(3, input: decimal.MaxValue, output: 0), Turn(4, input: decimal.MaxValue, output: 0),
+            },
+            "low-cache-read-ratio" => new[]
+            {
+                Turn(1, input: 1, cache: 0), Turn(2, input: decimal.MaxValue, cache: decimal.MaxValue),
+                Turn(3, input: decimal.MaxValue, cache: decimal.MaxValue),
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(ruleId)),
+        };
+
+        var result = Evaluate(ruleId, turns);
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("token-metric-out-of-domain", Assert.Single(result.Suppressions).Code);
+    }
+
+    [Theory]
     [InlineData(49, null)]
     [InlineData(50, AlertSeverity.Warning)]
     [InlineData(80, AlertSeverity.Critical)]
@@ -204,9 +265,9 @@ public sealed class TokenContextCacheAlertRuleTests
     }
 
     [Fact]
-    public void OutputCollapse_EvenMedianDoesNotOverflowAtDecimalExtremes()
+    public void OutputCollapse_EvenMedianIsExactAtTokenDomainMaximum()
     {
-        var high = decimal.MaxValue;
+        const decimal high = 1_000_000_000_000m;
         var result = Evaluate("context-growth-with-output-collapse",
         [
             Turn(1, input: high - 3, output: high - 3), Turn(2, input: high - 1, output: high - 1),
@@ -484,7 +545,7 @@ public sealed class TokenContextCacheAlertRuleTests
         return new(id, AlertSignalKind.LlmCall, sequence, observedAt, null, status, metrics, keys, evidence);
     }
 
-    private static IReadOnlyList<AlertSignal> MixedDimensionTurns(string ruleId, string dimension)
+    private static IReadOnlyList<AlertSignal> MixedDimensionTurns(string ruleId, string dimension, bool missingMetricOnDifferentCall = false)
     {
         var count = ruleId switch
         {
@@ -513,6 +574,17 @@ public sealed class TokenContextCacheAlertRuleTests
             "limit-value" => turns[^1],
             _ => throw new ArgumentOutOfRangeException(nameof(dimension)),
         };
+        if (missingMetricOnDifferentCall)
+        {
+            var missingName = ruleId switch
+            {
+                "high-initial-context-utilization" or "near-context-limit-turn" or "monotonic-context-growth" => "input-tokens",
+                "context-growth-with-output-collapse" => "output-tokens",
+                "low-cache-read-ratio" => "cache-read-tokens",
+                _ => throw new ArgumentOutOfRangeException(nameof(ruleId)),
+            };
+            turns[^1] = turns[^1] with { Metrics = turns[^1].Metrics.Where(metric => metric.Name != missingName).ToArray() };
+        }
         return turns;
     }
 

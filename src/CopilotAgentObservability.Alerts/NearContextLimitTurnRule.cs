@@ -22,6 +22,8 @@ internal sealed class NearContextLimitTurnRule : IAlertRule
 
         var llm = TokenAlertContract.OrderedLlmSignals(context.Snapshot);
         if (TokenAlertContract.HasMixedLimitDimension(llm)) return TokenAlertContract.Suppressed("mixed-evaluation-dimension");
+        if (TokenAlertContract.HasOutOfDomainTokenMetric(llm, TokenAlertContract.InputTokens, TokenAlertContract.EffectiveContextLimit))
+            return TokenAlertContract.Suppressed("token-metric-out-of-domain");
         var eligible = llm.Where(signal => signal.Status == AlertSignalStatus.Success
                 && TokenAlertContract.Metric(signal, TokenAlertContract.InputTokens) is >= 0
                 && TokenAlertContract.TryLimitGroup(signal, out _, out _))

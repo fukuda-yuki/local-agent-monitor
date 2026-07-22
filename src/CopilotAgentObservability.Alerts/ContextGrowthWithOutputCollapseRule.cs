@@ -25,6 +25,8 @@ internal sealed class ContextGrowthWithOutputCollapseRule : IAlertRule
 
         var llm = TokenAlertContract.OrderedLlmSignals(context.Snapshot);
         if (TokenAlertContract.HasMixedCommonDimension(llm, true, true, false)) return TokenAlertContract.Suppressed("mixed-evaluation-dimension");
+        if (TokenAlertContract.HasOutOfDomainTokenMetric(llm, TokenAlertContract.InputTokens, TokenAlertContract.OutputTokens))
+            return TokenAlertContract.Suppressed("token-metric-out-of-domain");
         var eligible = llm.Where(IsEligible).ToArray();
         var groups = eligible.GroupBy(signal =>
         {
