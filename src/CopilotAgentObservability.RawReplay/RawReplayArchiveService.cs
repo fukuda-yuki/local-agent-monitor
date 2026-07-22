@@ -13,6 +13,18 @@ public sealed partial class RawReplayArchiveService
         ["adapter_failure", "recognized_record_drop_detected", "schema_drift_detected", "supported", "supported_with_unknown_fields", "unknown", "unsupported_source_version"];
     private static readonly string[] AllowedCaptureContentStates = ["available", "not_captured", "redacted", "unknown", "unsupported"];
     private static readonly string[] AllowedSessionContentStates = ["available", "expired_pending_deletion", "not_captured", "redacted", "unsupported"];
+    private readonly Func<string, string> temporaryPathFactory;
+
+    public RawReplayArchiveService()
+        : this(outputPath => $"{outputPath}.{Guid.NewGuid():N}.partial")
+    {
+    }
+
+    internal RawReplayArchiveService(Func<string, string> temporaryPathFactory)
+    {
+        ArgumentNullException.ThrowIfNull(temporaryPathFactory);
+        this.temporaryPathFactory = temporaryPathFactory;
+    }
 
     [GeneratedRegex("^(records/record-[0-9]{6}\\.json|session-content/content-[0-9]{6}\\.json)$", RegexOptions.CultureInvariant)]
     private static partial Regex PayloadPath();
@@ -153,26 +165,40 @@ public sealed partial class RawReplayArchiveService
             return new(false, "output_name_invalid", Failure("output_name_invalid"), null, null, null);
         var result = Create(snapshot, control);
         if (!result.Success) return result;
-        var temporary = outputPath + ".partial";
+        string? ownedTemporaryPath = null;
         try
         {
-            if (File.Exists(outputPath) || File.Exists(temporary)) return result with { Success = false, ErrorCode = "output_exists", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null };
-            var parent = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+            var fullOutputPath = Path.GetFullPath(outputPath);
+            if (File.Exists(fullOutputPath)) return result with { Success = false, ErrorCode = "output_exists", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null };
+            var parent = Path.GetDirectoryName(fullOutputPath);
             if (string.IsNullOrWhiteSpace(parent) || !Directory.Exists(parent)) return result with { Success = false, ErrorCode = "publish_failed", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null };
-            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+
+            var temporaryPath = Path.GetFullPath(temporaryPathFactory(fullOutputPath));
+            var pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            var temporaryName = Path.GetFileName(temporaryPath);
+            if (!string.Equals(Path.GetDirectoryName(temporaryPath), parent, pathComparison)
+                || string.Equals(temporaryPath, fullOutputPath, pathComparison)
+                || string.IsNullOrEmpty(temporaryName)
+                || !temporaryName.StartsWith(Path.GetFileName(fullOutputPath) + ".", pathComparison)
+                || !temporaryName.EndsWith(".partial", pathComparison))
+                return result with { Success = false, ErrorCode = "publish_failed", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null };
+
+            using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
+                ownedTemporaryPath = temporaryPath;
                 stream.Write(result.ArchiveBytes!);
                 stream.Flush(flushToDisk: true);
             }
-            if (!Inspect(File.ReadAllBytes(temporary)).Success) return result with { Success = false, ErrorCode = "publish_validation_failed", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null };
-            File.Move(temporary, outputPath, overwrite: false);
+            if (!Inspect(File.ReadAllBytes(temporaryPath)).Success) return result with { Success = false, ErrorCode = "publish_validation_failed", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null };
+            File.Move(temporaryPath, fullOutputPath, overwrite: false);
+            ownedTemporaryPath = null;
             return result;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException)
         { return result with { Success = false, ErrorCode = "publish_failed", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null }; }
         finally
         {
-            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            try { if (ownedTemporaryPath is not null && File.Exists(ownedTemporaryPath)) File.Delete(ownedTemporaryPath); }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
         }
     }
@@ -223,6 +249,8 @@ public sealed partial class RawReplayArchiveService
             if (manifest.RawRecordCount < 0 || manifest.SessionContentCount < 0
                 || manifest.RawRecordCount > RawReplayLimits.MaximumPayloadEntries
                 || manifest.SessionContentCount > RawReplayLimits.MaximumPayloadEntries
+                || manifest.Files is null
+                || manifest.Files.Any(file => file is null)
                 || manifest.Files.Count != archive.Entries.Count - 1
                 || manifest.RawRecordCount + manifest.SessionContentCount != manifest.Files.Count
                 || manifest.Files.Select(file => file.Path).Distinct(StringComparer.Ordinal).Count() != manifest.Files.Count)
@@ -321,7 +349,10 @@ public sealed partial class RawReplayArchiveService
             records.Add(canonical[0].Record);
         }
         var contents = new List<RawReplaySessionContent>();
-        foreach (var group in snapshot.SessionContents.OrderBy(content => content.EventId, StringComparer.Ordinal).GroupBy(content => content.EventId, StringComparer.Ordinal))
+        foreach (var group in snapshot.SessionContents
+            .OrderBy(content => content.SourceAdapter, StringComparer.Ordinal)
+            .ThenBy(content => content.SourceEventId, StringComparer.Ordinal)
+            .GroupBy(content => (content.SourceAdapter, content.SourceEventId)))
         {
             var grouped = group.ToArray();
             if (grouped.Any(content => Validate(content) is not null)) return PreparedSnapshot.Failure("record_invalid");

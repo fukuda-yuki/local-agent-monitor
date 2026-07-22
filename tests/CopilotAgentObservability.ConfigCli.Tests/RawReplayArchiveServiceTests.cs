@@ -203,6 +203,73 @@ public sealed class RawReplayArchiveServiceTests
     }
 
     [Fact]
+    public void Session_content_uses_source_adapter_and_source_event_id_as_its_identity()
+    {
+        var service = new RawReplayArchiveService();
+        var first = Content("event-shared", "adapter-a", "source-event");
+        var distinctSource = Content("event-shared", "adapter-b", "source-event");
+        var conflictingSource = first with { EventId = "event-other" };
+        var request = Request() with
+        {
+            Selection = new(SessionIds: ["session-one"], RawRecordIds: [1]),
+            IncludeSessionContent = true,
+        };
+
+        var distinct = service.Preview(Snapshot(Record(1, Payload("trace-a"))) with
+        {
+            SessionContents = [first, distinctSource],
+            KnownMissing = [],
+        }, request);
+        var conflict = service.Preview(Snapshot(Record(1, Payload("trace-a"))) with
+        {
+            SessionContents = [first, conflictingSource],
+            KnownMissing = [],
+        }, request);
+
+        Assert.True(distinct.Success, distinct.ErrorCode);
+        Assert.Equal(2, distinct.SessionContentCount);
+        Assert.Equal("source_id_conflict", conflict.ErrorCode);
+    }
+
+    [Fact]
+    public void Derived_hashes_are_stable_when_equivalent_multi_trace_containers_are_permuted()
+    {
+        var service = new RawReplayArchiveService();
+        var forward = Record(1, MultiTracePayload("trace-a", "trace-b")) with { TraceId = "trace-a" };
+        var reverse = Record(1, MultiTracePayload("trace-b", "trace-a")) with { TraceId = "trace-a" };
+
+        var first = service.Preview(Snapshot(forward), Request());
+        var second = service.Preview(Snapshot(reverse), Request());
+
+        Assert.True(first.Success, first.ErrorCode);
+        Assert.True(second.Success, second.ErrorCode);
+        Assert.Equal(first.ExpectedNormalizedSha256, second.ExpectedNormalizedSha256);
+        Assert.Equal(first.ExpectedProjectionSha256, second.ExpectedProjectionSha256);
+        Assert.Equal(first.ExpectedDashboardSha256, second.ExpectedDashboardSha256);
+    }
+
+    [Fact]
+    public void Projection_hash_uses_canonical_primary_trace_when_the_record_trace_is_missing()
+    {
+        var service = new RawReplayArchiveService();
+        var forward = Record(1, MultiTracePayloadWithClientKinds(
+            ("trace-b", "client-b"),
+            ("trace-a", "client-a"))) with { TraceId = null };
+        var reverse = Record(1, MultiTracePayloadWithClientKinds(
+            ("trace-a", "client-a"),
+            ("trace-b", "client-b"))) with { TraceId = null };
+
+        var first = service.Preview(Snapshot(forward), Request());
+        var second = service.Preview(Snapshot(reverse), Request());
+
+        Assert.True(first.Success, first.ErrorCode);
+        Assert.True(second.Success, second.ErrorCode);
+        Assert.Equal(first.ExpectedNormalizedSha256, second.ExpectedNormalizedSha256);
+        Assert.Equal(first.ExpectedProjectionSha256, second.ExpectedProjectionSha256);
+        Assert.Equal(first.ExpectedDashboardSha256, second.ExpectedDashboardSha256);
+    }
+
+    [Fact]
     public void Inspector_collapses_byte_identical_duplicate_source_ids()
     {
         var service = new RawReplayArchiveService();
@@ -213,6 +280,22 @@ public sealed class RawReplayArchiveServiceTests
         Assert.True(inspected.Success, inspected.ErrorCode);
         Assert.Equal(1, inspected.RawRecordCount);
         Assert.Single(inspected.Bundle!.Records);
+    }
+
+    [Fact]
+    public void Inspector_rejects_a_null_manifest_file_descriptor_without_throwing()
+    {
+        var service = new RawReplayArchiveService();
+        var created = Create(service, Snapshot(Record(1, Payload("trace-a"))));
+        var manifest = RawReplayJson.DeserializeExact<RawReplayManifest>(created.ManifestBytes!);
+
+        var inspected = service.Inspect(Rewrite(
+            created,
+            "manifest.json",
+            _ => RawReplayJson.SerializeCanonical(manifest with { Files = [null!] })));
+
+        Assert.False(inspected.Success);
+        Assert.Equal("inventory_mismatch", inspected.ErrorCode);
     }
 
     [Fact]
@@ -233,6 +316,103 @@ public sealed class RawReplayArchiveServiceTests
             Assert.Equal("output_name_invalid", result.ErrorCode);
             Assert.False(File.Exists(output));
             Assert.DoesNotContain("session-one", RawReplayJson.Text(result), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CreateAndPublish_preserves_a_preexisting_unowned_fixed_partial()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var output = Path.Combine(directory, "raw-local-replay.zip");
+            var unownedPartial = output + ".partial";
+            var marker = "unowned-writer"u8.ToArray();
+            File.WriteAllBytes(unownedPartial, marker);
+            var service = new RawReplayArchiveService();
+            var snapshot = Snapshot(Record(1, Payload("trace-a")));
+            var request = Request();
+            var preview = service.Preview(snapshot, request);
+
+            var result = service.CreateAndPublish(
+                snapshot,
+                request with { PreviewDigest = preview.PreviewDigest, Consent = Consent() },
+                output);
+
+            Assert.True(result.Success, result.ErrorCode);
+            Assert.True(service.Inspect(File.ReadAllBytes(output)).Success);
+            Assert.Equal(marker, File.ReadAllBytes(unownedPartial));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CreateAndPublish_does_not_delete_a_staging_file_it_did_not_create()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var output = Path.Combine(directory, "raw-local-replay.zip");
+            var collision = Path.Combine(directory, "raw-local-replay.zip.forced.partial");
+            var marker = "concurrent-writer"u8.ToArray();
+            File.WriteAllBytes(collision, marker);
+            var service = new RawReplayArchiveService(_ => collision);
+            var snapshot = Snapshot(Record(1, Payload("trace-a")));
+            var request = Request();
+            var preview = service.Preview(snapshot, request);
+
+            var result = service.CreateAndPublish(
+                snapshot,
+                request with { PreviewDigest = preview.PreviewDigest, Consent = Consent() },
+                output);
+
+            Assert.False(result.Success);
+            Assert.Equal("publish_failed", result.ErrorCode);
+            Assert.False(File.Exists(output));
+            Assert.Equal(marker, File.ReadAllBytes(collision));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Concurrent_publishers_do_not_delete_each_others_staging_files()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var output = Path.Combine(directory, "raw-local-replay.zip");
+            using var ready = new Barrier(2);
+            var sequence = 0;
+            var service = new RawReplayArchiveService(path =>
+            {
+                var owned = $"{path}.{Interlocked.Increment(ref sequence):D2}.partial";
+                Assert.True(ready.SignalAndWait(TimeSpan.FromSeconds(5)), "Concurrent publisher did not reach the staging factory.");
+                return owned;
+            });
+            var snapshot = Snapshot(Record(1, Payload("trace-a")));
+            var request = Request();
+            var preview = service.Preview(snapshot, request);
+            var confirmed = request with { PreviewDigest = preview.PreviewDigest, Consent = Consent() };
+
+            var results = await Task.WhenAll(
+                Task.Run(() => service.CreateAndPublish(snapshot, confirmed, output)),
+                Task.Run(() => service.CreateAndPublish(snapshot, confirmed, output)));
+
+            Assert.Single(results, result => result.Success);
+            var loser = Assert.Single(results, result => !result.Success);
+            Assert.Equal("publish_failed", loser.ErrorCode);
+            Assert.True(service.Inspect(File.ReadAllBytes(output)).Success);
+            Assert.Empty(Directory.EnumerateFiles(directory, "*.partial"));
         }
         finally
         {
@@ -284,6 +464,14 @@ public sealed class RawReplayArchiveServiceTests
         1,
         new("github-copilot-cli", "1.0", "otlp-json", "adapter-v1", "schema-v1", new string('a', 64), "supported", "available", "not_applied_raw_otlp", "raw-replay-credential-scan.v1"));
 
+    private static RawReplaySessionContent Content(string eventId, string sourceAdapter, string sourceEventId) => new(
+        eventId, "session-one", "run-one", "trace-a", sourceAdapter, sourceEventId,
+        new DateTimeOffset(2026, 7, 22, 11, 0, 0, TimeSpan.Zero), "available", "app-v1", "adapter-v1",
+        "schema-v1", "normalization-v1", "exact-native", "assistant_response", "{\"text\":\"synthetic\"}",
+        new DateTimeOffset(2026, 7, 22, 11, 0, 1, TimeSpan.Zero),
+        new DateTimeOffset(2026, 7, 23, 11, 0, 1, TimeSpan.Zero),
+        "session_secret_filter_applied", RawReplayContractVersions.CredentialScanner);
+
     private static string Payload(string traceId, string? body = null)
     {
         var span = new Dictionary<string, object?>
@@ -298,6 +486,66 @@ public sealed class RawReplayArchiveServiceTests
         {
             resourceSpans = new[] { new { scopeSpans = new[] { new { spans = new[] { span } } } } },
         });
+    }
+
+    private static string MultiTracePayload(params string[] traceIds) => System.Text.Json.JsonSerializer.Serialize(new
+    {
+        resourceSpans = traceIds.Select(traceId => new
+        {
+            scopeSpans = new[]
+            {
+                new
+                {
+                    spans = new[]
+                    {
+                        new
+                        {
+                            traceId,
+                            spanId = $"span-{traceId}",
+                            name = "chat",
+                            attributes = new[] { new { key = "gen_ai.usage.input_tokens", value = new { intValue = "2" } } },
+                        },
+                    },
+                },
+            },
+        }).ToArray(),
+    });
+
+    private static string MultiTracePayloadWithClientKinds(params (string TraceId, string ClientKind)[] traces) =>
+        System.Text.Json.JsonSerializer.Serialize(new
+        {
+            resourceSpans = traces.Select(trace => new
+            {
+                resource = new
+                {
+                    attributes = new[]
+                    {
+                        new { key = "client.kind", value = new { stringValue = trace.ClientKind } },
+                    },
+                },
+                scopeSpans = new[]
+                {
+                    new
+                    {
+                        spans = new[]
+                        {
+                            new
+                            {
+                                traceId = trace.TraceId,
+                                spanId = $"span-{trace.TraceId}",
+                                name = "chat",
+                            },
+                        },
+                    },
+                },
+            }).ToArray(),
+        });
+
+    private static string CreateTemporaryDirectory()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"raw-replay-output-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        return directory;
     }
 
     private static byte[] RewriteManifest(RawReplayResult result, Func<string, string> transform) => Rewrite(result, "manifest.json", bytes => Encoding.UTF8.GetBytes(transform(Encoding.UTF8.GetString(bytes))));

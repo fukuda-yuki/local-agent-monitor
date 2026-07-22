@@ -254,8 +254,9 @@ content, snapshot bytes, a retention identity, or a server output path.
 `preview` is non-mutating. `export` requires the matching current preview digest,
 the persistent raw warning acknowledgement, and the exact confirmation phrase;
 it captures the whole selection under one composite Retention operation lease
-and publishes only through sibling `.partial` plus strict self-inspection and
-atomic rename. Output names are `raw-local-replay.zip` or
+and publishes only through an exclusively created, invocation-owned unique
+sibling `.partial` plus strict self-inspection and atomic rename. It cleans up
+only that owned partial. Output names are `raw-local-replay.zip` or
 `raw-local-replay-<12-lowercase-hex>.zip`.
 
 `result` performs bounded independent archive, manifest, canonical-member,

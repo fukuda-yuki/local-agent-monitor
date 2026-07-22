@@ -191,7 +191,17 @@ public sealed partial class RetentionCatalogStore
         catch (SqliteException) { throw new RetentionMigrationBlockedException(); }
     }
 
-    public string StoreInstanceId { get { using var connection = Open(); using var command = connection.CreateCommand(); command.CommandText = "SELECT store_instance_id FROM retention_store_instances WHERE id=1;"; return (string)command.ExecuteScalar()!; } }
+    public string StoreInstanceId
+    {
+        get
+        {
+            if (context is not null) return context.StoreInstanceId;
+            using var connection = OpenExisting();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT store_instance_id FROM retention_store_instances WHERE id=1;";
+            return (string)command.ExecuteScalar()!;
+        }
+    }
 
     internal void RegisterAdapterCoverage(RetentionAdapterRegistry registry)
     {
@@ -223,6 +233,7 @@ public sealed partial class RetentionCatalogStore
         var item = FindForUpdate(connection, transaction, key);
         if (item is null || item.Revision != expectedRevision) { transaction.Commit(); return ValueTask.FromResult<RetentionReadLeaseHandle?>(null); }
         var sourceProof = SourceProof(connection, transaction, key);
+        if (sourceProof == SourceReceiptProof.CatalogBusy) { transaction.Rollback(); return ValueTask.FromResult<RetentionReadLeaseHandle?>(null); }
         var deletionLease = leaseKind == RetentionLeaseKind.Deletion;
         var eligibleForDeletion = item.ReadDeniedAt is not null && item.State is RetentionItemLifecycle.DeletionQueued or RetentionItemLifecycle.Deleting;
         var deletionRecovery = deletionLease && item.State == RetentionItemLifecycle.Deleting && HasMatchingDeleteIntent(connection, transaction, item);
@@ -428,6 +439,7 @@ public sealed partial class RetentionCatalogStore
             if (item is null) { transaction.Commit(); return new(RetentionReadDisposition.NotFound, null); }
             if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision) { transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
             var proof = SourceProof(connection, transaction, request.OwnershipKey);
+            if (proof == SourceReceiptProof.CatalogBusy) { transaction.Rollback(); return new(RetentionReadDisposition.Busy, null); }
             var now = request.Now;
             if (item.ReadDeniedAt is not null || item.State is not RetentionItemLifecycle.Expiring and not RetentionItemLifecycle.RetainedByPolicy || now >= item.ExpiresAt || proof != SourceReceiptProof.Match)
             {
@@ -437,9 +449,9 @@ public sealed partial class RetentionCatalogStore
             }
             var owner = Guid.NewGuid().ToString("N");
             var leaseKind = request.LeaseKind == RetentionReadKind.Access ? RetentionLeaseKind.Access : RetentionLeaseKind.Operation;
-            var generation = AcquireLease(connection, transaction, item.ItemId, leaseKind, owner, now, item.ExpiresAt);
+            var generation = AcquireLease(connection, transaction, item.ItemId, leaseKind, owner, now);
             if (generation is null) { transaction.Commit(); return new(RetentionReadDisposition.Busy, null); }
-            var leaseExpiry = now.Add(RetentionV1Constants.LeaseDuration) < item.ExpiresAt ? now.Add(RetentionV1Constants.LeaseDuration) : item.ExpiresAt;
+            var leaseExpiry = now.Add(RetentionV1Constants.LeaseDuration);
             var token = SourceToken(connection, transaction, request.OwnershipKey);
             if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, owner, generation.Value); DenyInvalidSource(connection, transaction, item.ItemId, now, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
             var grant = new RetentionReadGrant(item.ItemId, item.Revision, owner, generation.Value, leaseExpiry, token);
@@ -488,6 +500,7 @@ public sealed partial class RetentionCatalogStore
                 if (item is null) { transaction.Commit(); return new(RetentionReadDisposition.NotFound, null); }
                 var now = request.Now;
                 var proof = SourceProof(connection, transaction, request.OwnershipKey);
+                if (proof == SourceReceiptProof.CatalogBusy) { transaction.Rollback(); return new(RetentionReadDisposition.Busy, null); }
                 if ((request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision)
                     || item.ReadDeniedAt is not null
                     || item.State is not RetentionItemLifecycle.Expiring and not RetentionItemLifecycle.RetainedByPolicy
@@ -508,11 +521,11 @@ public sealed partial class RetentionCatalogStore
                 var request = requests[index];
                 var item = items[index];
                 var kind = request.LeaseKind == RetentionReadKind.Access ? RetentionLeaseKind.Access : RetentionLeaseKind.Operation;
-                var generation = AcquireLease(connection, transaction, item.ItemId, kind, owner, request.Now, item.ExpiresAt);
+                var generation = AcquireLease(connection, transaction, item.ItemId, kind, owner, request.Now);
                 if (generation is null) { transaction.Rollback(); return new(RetentionReadDisposition.Busy, null); }
                 var token = SourceToken(connection, transaction, request.OwnershipKey);
                 if (token is null) { ReleaseWithinTransaction(connection, transaction, grants); DenyInvalidSource(connection, transaction, item.ItemId, request.Now, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
-                var expiry = request.Now.Add(RetentionV1Constants.LeaseDuration) < item.ExpiresAt ? request.Now.Add(RetentionV1Constants.LeaseDuration) : item.ExpiresAt;
+                var expiry = request.Now.Add(RetentionV1Constants.LeaseDuration);
                 grants.Add(new RetentionReadGrant(item.ItemId, item.Revision, owner, generation.Value, expiry, token));
             }
 
@@ -578,6 +591,7 @@ public sealed partial class RetentionCatalogStore
                 var item = FindForUpdate(connection, transaction, request.OwnershipKey);
                 if (item is null) { transaction.Commit(); return new(RetentionReadDisposition.NotFound, null); }
                 var proof = SourceProof(connection, transaction, request.OwnershipKey);
+                if (proof == SourceReceiptProof.CatalogBusy) { transaction.Rollback(); return new(RetentionReadDisposition.Busy, null); }
                 if ((request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision)
                     || item.ReadDeniedAt is not null
                     || item.State is not RetentionItemLifecycle.Expiring and not RetentionItemLifecycle.RetainedByPolicy
@@ -598,11 +612,11 @@ public sealed partial class RetentionCatalogStore
                 var request = requests[index];
                 var item = items[index];
                 var kind = request.LeaseKind == RetentionReadKind.Access ? RetentionLeaseKind.Access : RetentionLeaseKind.Operation;
-                var generation = AcquireLease(connection, transaction, item.ItemId, kind, owner, request.Now, item.ExpiresAt);
+                var generation = AcquireLease(connection, transaction, item.ItemId, kind, owner, request.Now);
                 if (generation is null) { transaction.Rollback(); return new(RetentionReadDisposition.Busy, null); }
                 var token = SourceToken(connection, transaction, request.OwnershipKey);
                 if (token is null) { ReleaseWithinTransaction(connection, transaction, grants); DenyInvalidSource(connection, transaction, item.ItemId, request.Now, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
-                var expiry = request.Now.Add(RetentionV1Constants.LeaseDuration) < item.ExpiresAt ? request.Now.Add(RetentionV1Constants.LeaseDuration) : item.ExpiresAt;
+                var expiry = request.Now.Add(RetentionV1Constants.LeaseDuration);
                 grants.Add(new RetentionReadGrant(item.ItemId, item.Revision, owner, generation.Value, expiry, token));
             }
 
@@ -811,7 +825,7 @@ public sealed partial class RetentionCatalogStore
         try { return SourceProofCore(c,t,key); }
         catch(ArgumentException){return SourceReceiptProof.InvalidIdentity;}
         catch(FormatException){return SourceReceiptProof.InvalidIdentity;}
-        catch(SqliteException){return SourceReceiptProof.CatalogBusy;}
+        catch(SqliteException exception) when(exception.SqliteErrorCode is 5 or 6){return SourceReceiptProof.CatalogBusy;}
     }
     private static bool CoverageMatches(SqliteConnection c,SqliteTransaction t){using var q=c.CreateCommand();q.Transaction=t;q.CommandText="SELECT COUNT(*) FROM retention_adapter_coverage WHERE coverage_version=$coverage AND store_kind IN ('session_event_content','raw_record','analysis_run_raw','sensitive_bundle','analysis_sdk_directory');";q.Parameters.AddWithValue("$coverage",RetentionV1Constants.AdapterCoverageVersion);return Convert.ToInt64(q.ExecuteScalar(),CultureInfo.InvariantCulture)==5;}
     private static bool CoverageMatchesExactly(SqliteConnection c, SqliteTransaction t, int coverageVersion)
@@ -855,7 +869,7 @@ public sealed partial class RetentionCatalogStore
         }
         catch (ArgumentException) { return SourceReceiptProof.InvalidIdentity; }
         catch (FormatException) { return SourceReceiptProof.InvalidIdentity; }
-        catch (SqliteException) { return SourceReceiptProof.Missing; }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6) { return SourceReceiptProof.CatalogBusy; }
     }
     private static SourceReceiptProof SourceProofCore(SqliteConnection c, SqliteTransaction t, RetentionOwnershipKey key)
     {

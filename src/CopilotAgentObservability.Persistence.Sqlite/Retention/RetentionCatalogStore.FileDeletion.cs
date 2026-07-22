@@ -33,7 +33,7 @@ public sealed partial class RetentionCatalogStore
         catch (RetentionMigrationBlockedException) { return SourceReceiptProof.InvalidOrMismatched; }
         catch (ArgumentException) { return SourceReceiptProof.InvalidIdentity; }
         catch (FormatException) { return SourceReceiptProof.InvalidIdentity; }
-        catch (SqliteException) { return SourceReceiptProof.CatalogBusy; }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6) { return SourceReceiptProof.CatalogBusy; }
     }
 
     internal RetentionSensitiveBundleDeletionPlanResult LoadSensitiveBundleDeletionPlan(RetentionDeleteContext context, DateTimeOffset now)

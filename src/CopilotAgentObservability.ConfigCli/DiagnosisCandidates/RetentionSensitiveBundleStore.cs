@@ -140,18 +140,29 @@ internal sealed class RetentionSensitiveBundleStore
 
     internal void Recover()
     {
-        foreach (var snapshot in catalog.FindIncompleteSensitiveBundles(RetentionFileCaptureContracts.MaximumMemberCount))
+        HashSet<string>? previousBatch = null;
+        while (true)
         {
-            if (snapshot.ErrorCode is not null) continue;
-            try
+            var snapshots = catalog.FindIncompleteSensitiveBundles(RetentionFileCaptureContracts.MaximumMemberCount);
+            if (snapshots.Count == 0) return;
+            var currentBatch = snapshots.Select(static snapshot => snapshot.CaptureId).ToHashSet(StringComparer.Ordinal);
+            if (previousBatch is not null && previousBatch.SetEquals(currentBatch))
+                throw new InvalidOperationException(Failure);
+            previousBatch = currentBatch;
+
+            foreach (var snapshot in snapshots)
             {
-                var legacy = catalog.LoadLegacyBundleJournal(snapshot);
-                if (legacy is null) Recover(snapshot); else RecoverLegacy(snapshot, legacy);
+                if (snapshot.ErrorCode is not null) continue;
+                try
+                {
+                    var legacy = catalog.LoadLegacyBundleJournal(snapshot);
+                    if (legacy is null) Recover(snapshot); else RecoverLegacy(snapshot, legacy);
+                }
+                catch (IOException) { catalog.RecordSensitiveBundleBlocker(snapshot, RetentionErrorCode.CaptureIncomplete); }
+                catch (UnauthorizedAccessException) { catalog.RecordSensitiveBundleBlocker(snapshot, RetentionErrorCode.CaptureIncomplete); }
+                catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException or PathTooLongException)
+                { catalog.RecordSensitiveBundleBlocker(snapshot, RetentionErrorCode.OwnershipMismatch); }
             }
-            catch (IOException) { catalog.RecordSensitiveBundleBlocker(snapshot, RetentionErrorCode.CaptureIncomplete); }
-            catch (UnauthorizedAccessException) { catalog.RecordSensitiveBundleBlocker(snapshot, RetentionErrorCode.CaptureIncomplete); }
-            catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException or PathTooLongException)
-            { catalog.RecordSensitiveBundleBlocker(snapshot, RetentionErrorCode.OwnershipMismatch); }
         }
     }
 

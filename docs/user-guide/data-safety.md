@@ -79,6 +79,27 @@ fail-closed scanner を再検証します。この成功は archive の構造整
 失敗した bundle や `.partial` file を共有せず、raw prompt、tool body、
 credential、PII、local path を request や共有 artifact に含めないでください。
 
+## Raw local replay は共有しない
+
+`raw-local-replay` bundle は sanitized evidence ではありません。prompt、response、
+tool data、personal data、secret を含み得るため、repository、Issue、PR、CI
+artifact、static dashboard、共有 storage に保存しないでください。secret scan の
+成功は bundle が安全であることを意味しません。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- raw-replay preview --database <monitor.db> --request <request.json>
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- raw-replay export --database <monitor.db> --request <request.json> --output <raw-local-replay.zip>
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- raw-replay result --bundle <raw-local-replay.zip>
+```
+
+export と Local Monitor replay には、preview digest、raw-data warning、固定確認文が
+必要です。`--sanitized-only` では raw replay surface 全体が無効になります。Local
+Monitor が replay 用に作る隔離 copy は capture からちょうど 7 日で既存 Retention
+cleanup の対象になりますが、CLI が出力した caller-owned ZIP は自動削除されません。
+不要になった ZIP と request file は利用者が明示的に削除してください。Local
+Monitor の cleanup は retained child だけを削除し、その親 directory、siblings、
+caller-owned ZIP を削除しません。
+
 ## 実データが混入した場合
 
 1. 対象 raw payload を削除する。

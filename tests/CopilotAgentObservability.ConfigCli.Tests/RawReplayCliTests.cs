@@ -134,6 +134,78 @@ public sealed class RawReplayCliTests
         Assert.False(File.Exists(unsafeOutput));
     }
 
+    [Fact]
+    public void PreviewAndExport_MapProviderControlledErrorTextToAFixedCodeWithoutLeakage()
+    {
+        using var fixture = new Fixture();
+        const string hostile = "private\"\nprovider-code";
+        File.WriteAllBytes(fixture.Request, RawReplayJson.Serialize(Control()));
+        using var output = new StringWriter();
+        using var errors = new StringWriter();
+
+        var exit = RawReplayCli.Run(
+            ["preview", "--database", fixture.Database, "--request", fixture.Request],
+            output,
+            errors,
+            new FailingProvider(hostile));
+
+        Assert.Equal(2, exit);
+        Assert.Equal("snapshot_store_unavailable", errors.ToString().Trim());
+        var preview = RawReplayJson.DeserializeExact<RawReplayPreview>(System.Text.Encoding.UTF8.GetBytes(output.ToString().Trim()));
+        Assert.Equal("snapshot_store_unavailable", preview.ErrorCode);
+        Assert.DoesNotContain("private", output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("private", errors.ToString(), StringComparison.Ordinal);
+
+        File.WriteAllBytes(fixture.Request, RawReplayJson.Serialize(Control() with
+        {
+            PreviewDigest = new string('0', 64),
+            Consent = new(RawReplayContractVersions.BundleProfile, true, RawReplayConsent.RequiredPhrase),
+        }));
+        using var exportOutput = new StringWriter();
+        using var exportErrors = new StringWriter();
+        var exportExit = RawReplayCli.Run(
+            ["export", "--database", fixture.Database, "--request", fixture.Request, "--output", fixture.Bundle],
+            exportOutput,
+            exportErrors,
+            new FailingProvider(hostile));
+
+        Assert.Equal(2, exportExit);
+        Assert.Equal("snapshot_store_unavailable", exportErrors.ToString().Trim());
+        using var exportJson = System.Text.Json.JsonDocument.Parse(exportOutput.ToString());
+        Assert.Equal("snapshot_store_unavailable", exportJson.RootElement.GetProperty("error_code").GetString());
+        Assert.DoesNotContain("private", exportOutput.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("private", exportErrors.ToString(), StringComparison.Ordinal);
+        Assert.False(File.Exists(fixture.Bundle));
+    }
+
+    [Fact]
+    public void CliApplication_dispatches_the_real_raw_replay_result_command()
+    {
+        using var fixture = new Fixture();
+        var service = new RawReplayArchiveService();
+        var control = Control();
+        var preview = service.Preview(Snapshot(), control);
+        var created = service.Create(Snapshot(), control with
+        {
+            PreviewDigest = preview.PreviewDigest,
+            Consent = new(RawReplayContractVersions.BundleProfile, true, RawReplayConsent.RequiredPhrase),
+        });
+        Assert.True(created.Success, created.ErrorCode);
+        File.WriteAllBytes(fixture.Bundle, created.ArchiveBytes!);
+        using var output = new StringWriter();
+        using var errors = new StringWriter();
+
+        var exit = CliApplication.Run(
+            ["raw-replay", "result", "--bundle", fixture.Bundle],
+            output,
+            errors);
+
+        Assert.Equal(0, exit);
+        Assert.Empty(errors.ToString());
+        var inspection = RawReplayJson.DeserializeExact<RawReplayInspection>(System.Text.Encoding.UTF8.GetBytes(output.ToString().Trim()));
+        Assert.True(inspection.Success, inspection.ErrorCode);
+    }
+
     private static RawReplayExportControl Control() => new(RawReplayContractVersions.ExportControl,
         RawReplayContractVersions.BundleProfile, Now, new(RawRecordIds: [1]), false, false, null, null);
 
@@ -153,6 +225,15 @@ public sealed class RawReplayCliTests
             return ValueTask.FromResult(new RawReplaySnapshotCapture(true, null,
                 new RawReplaySnapshotLease(snapshot, () => { ReleaseCount++; return ValueTask.CompletedTask; })));
         }
+    }
+
+    private sealed class FailingProvider(string code) : IRawReplaySnapshotProvider
+    {
+        public ValueTask<RawReplaySnapshotCapture> CaptureAsync(
+            RawReplaySelection selection,
+            bool includeSessionContent,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new RawReplaySnapshotCapture(false, code, null));
     }
 
     private sealed class Fixture : IDisposable

@@ -609,6 +609,18 @@ export/inspection only; replay import is available only through the loopback,
 Host-validated, same-origin/CSRF/no-store Local Monitor routes. The complete
 contract is [raw local replay](specifications/interfaces/raw-local-replay.md).
 
+Selection performs same-snapshot UTF-8 byte-length preflight before payload
+materialization or lease creation. Publication cleans only a unique
+invocation-owned sibling partial. Local Monitor completes forward-only replay
+capture recovery before routes/workers start; exact seven-day expiry and read
+denial queue cleanup, whose physical deletion excludes active operations and
+preserves caller/parent/sibling files. Session-content
+identity is `(source_adapter, source_event_id)`, and nested trace contributions
+are canonical-sorted. HTTP transient archive/preview bytes have fixed
+count/byte/TTL limits with idle sweeping, provider errors cross a closed mapping,
+and unsupported request media types return HTTP 415 with the serialized JSON
+error code `unsupported_media_type`.
+
 ## Source schema drift and Claude Code P0
 
 Issue #62 stores immutable source-schema observations per committed ingest

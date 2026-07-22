@@ -1,5 +1,6 @@
 using System.Text.Encodings.Web;
 using CopilotAgentObservability.Alerts;
+using CopilotAgentObservability.ConfigCli;
 using CopilotAgentObservability.ConfigCli.HistoricalImport;
 using CopilotAgentObservability.LocalMonitor.Alerts;
 using CopilotAgentObservability.LocalMonitor.Analysis;
@@ -207,6 +208,7 @@ internal static class MonitorHost
             new AnalysisSdkDirectoryRetentionAdapter(retentionCatalog, timeProvider)
         ]);
         retentionCatalog.RegisterAdapterCoverage(retentionAdapters);
+        new RetentionSensitiveBundleStore(retentionCatalog).Recover();
         builder.Services.AddSingleton(retentionCatalog);
         builder.Services.AddSingleton(retentionAdapters);
         if (testOptions?.StartRetentionCleanupWorker ?? true)
@@ -382,7 +384,14 @@ internal static class MonitorHost
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
         RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
         SanitizedExportRoutes.Map(app, options.DatabasePath, testOptions?.SanitizedExportSnapshotProvider);
-        RawReplayRoutes.Map(app, options.DatabasePath, retentionCatalog, options.SanitizedOnly, timeProvider, testOptions?.RawReplaySnapshotProvider);
+        RawReplayRoutes.Map(
+            app,
+            options.DatabasePath,
+            retentionCatalog,
+            options.SanitizedOnly,
+            timeProvider,
+            testOptions?.RawReplaySnapshotProvider,
+            testOptions?.RawReplayTransientLimits);
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
         AlertCenterRoutes.Map(app, alertCenterReadModel, alertCenterEvaluationCoordinator, timeProvider);
@@ -1792,6 +1801,7 @@ internal sealed class MonitorHostTestOptions
 
     public ISanitizedExportSnapshotProvider? SanitizedExportSnapshotProvider { get; init; }
     public IRawReplaySnapshotProvider? RawReplaySnapshotProvider { get; init; }
+    public RawReplayTransientLimits? RawReplayTransientLimits { get; init; }
     public IAlertEngineStore? AlertEngineStore { get; set; }
 
     public IAlertLifecycleStore? AlertLifecycleStore { get; set; }

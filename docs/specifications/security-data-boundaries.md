@@ -1307,6 +1307,10 @@ are separate from `/api/monitor/*`. `--sanitized-only` denies the complete
 surface before reading caller archives or source raw/content rows. Config CLI
 can only preview/export/inspect; import/replay goes through the running Local
 Monitor. Caller-owned archive files are never catalog items or cleanup targets.
+Process-local exported archives and replay-preview bytes share the fixed
+count/byte/TTL bound and idle expiry defined by the interface; shutdown clears
+them. Public provider failures use only the closed mapped codes, and JSON error
+bodies cannot interpolate provider-controlled text.
 
 Durable replay staging reuses the existing Retention catalog v1
 `sensitive_bundle` item and `sensitive-bundle-7d` policy, including its private
@@ -1316,6 +1320,12 @@ can authorize deletion by path, repository, timestamp, prompt, similarity, or
 generic adapter label. Replay never writes or merges into the live raw,
 Session, projection, analysis, or evidence stores; it never reconstructs a
 heuristic Session and never sends raw data to an external model.
+Recovery completes before routes or workers start. Seven-day expiry and read
+denial are exact; physical cleanup is excluded by an active operation lease,
+resumes forward from durable intent and cursor state, and can delete only the
+owned retained child. Caller archives, the configured parent, siblings,
+pre-existing partial files, and concurrent publisher files are outside its
+authority.
 
 ## Shared Use Preconditions
 

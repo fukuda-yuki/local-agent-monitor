@@ -55,6 +55,83 @@ public sealed class RetentionRawReplayStoreTests
         Assert.Single(Directory.EnumerateDirectories(fixture.BundleParent));
     }
 
+    [Theory]
+    [InlineData("manifest.json")]
+    [InlineData("input/archive.zip")]
+    public async Task ReadAsync_TreatsTransientMemberContentionAsBusyWithoutCatalogMutation(string member)
+    {
+        using var fixture = new Fixture();
+        const string replayId = "replay-locked";
+        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent);
+        Assert.True((await store.ReplayAsync(replayId, Archive(1, "trace-one"), CancellationToken.None)).Success);
+        var before = fixture.CatalogState();
+        var memberPath = Path.Combine(
+            fixture.BundleParent,
+            RetentionRawReplayStore.CaptureId(replayId),
+            member.Replace('/', Path.DirectorySeparatorChar));
+
+        RetainedRawReplayReadResult contended;
+        using (new FileStream(memberPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            contended = await store.ReadAsync(replayId, CancellationToken.None);
+
+        Assert.Equal(RetainedRawReplayReadDisposition.Busy, contended.Disposition);
+        Assert.Null(contended.Lease);
+        Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases;"));
+        Assert.Equal(before, fixture.CatalogState());
+
+        var retry = await store.ReadAsync(replayId, CancellationToken.None);
+        Assert.Equal(RetainedRawReplayReadDisposition.Granted, retry.Disposition);
+        await Assert.IsType<RetainedRawReplayLease>(retry.Lease).DisposeAsync();
+        Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases;"));
+    }
+
+    [Fact]
+    public async Task ReadAsync_TreatsSqliteContentionAsBusyWithoutCatalogMutation()
+    {
+        using var fixture = new Fixture();
+        const string replayId = "replay-db-locked";
+        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent);
+        Assert.True((await store.ReplayAsync(replayId, Archive(1, "trace-one"), CancellationToken.None)).Success);
+        var before = fixture.CatalogState();
+        using var blocker = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = fixture.DatabasePath,
+            Pooling = false,
+        }.ToString());
+        blocker.Open();
+        using var command = blocker.CreateCommand();
+        command.CommandText = "BEGIN EXCLUSIVE;";
+        command.ExecuteNonQuery();
+        RetainedRawReplayReadResult contended;
+        try
+        {
+            contended = await store.ReadAsync(replayId, CancellationToken.None);
+        }
+        finally
+        {
+            command.CommandText = "ROLLBACK;";
+            command.ExecuteNonQuery();
+        }
+
+        Assert.Equal(RetainedRawReplayReadDisposition.Busy, contended.Disposition);
+        Assert.Null(contended.Lease);
+        Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases;"));
+        Assert.Equal(before, fixture.CatalogState());
+    }
+
+    [Fact]
+    public async Task ReadAsync_DoesNotRecreateAMissingCatalog()
+    {
+        using var fixture = new Fixture();
+        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent);
+        SqliteConnection.ClearAllPools();
+        File.Delete(fixture.DatabasePath);
+
+        await Assert.ThrowsAsync<SqliteException>(() => store.ReadAsync("replay-missing-db", CancellationToken.None).AsTask());
+
+        Assert.False(File.Exists(fixture.DatabasePath));
+    }
+
     private static byte[] Archive(long id, string trace)
     {
         var service = new RawReplayArchiveService();
@@ -93,6 +170,22 @@ public sealed class RetentionRawReplayStoreTests
         public RetentionCatalogContext Context { get; }
         public RetentionCatalogStore Catalog { get; }
         public RetentionCatalogStore Reopen() => new(RetentionCatalogContext.AdoptExistingCatalogV1(DatabasePath), new FixedTimeProvider(Now));
+
+        public IReadOnlyList<string> CatalogState()
+        {
+            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DatabasePath, Pooling = false }.ToString());
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT item_id,state,revision,COALESCE(read_denied_at,''),COALESCE(queued_at,''),COALESCE(error_code,'')
+                FROM retention_items ORDER BY item_id COLLATE BINARY;
+                """;
+            using var reader = command.ExecuteReader();
+            var rows = new List<string>();
+            while (reader.Read())
+                rows.Add(string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetValue)));
+            return rows;
+        }
 
         public T Scalar<T>(string sql)
         {

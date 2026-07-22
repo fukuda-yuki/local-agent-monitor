@@ -145,6 +145,116 @@ public sealed class SqliteRawReplaySnapshotProviderTests
         Assert.Equal(1, Scalar<long>(temp.DatabasePath, "SELECT COUNT(DISTINCT owner) FROM retention_leases WHERE lease_kind='operation';"));
     }
 
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    public async Task CaptureAsync_AcceptsTheExactRawMemberLimitAndRejectsAnOversizedMember(int excessBytes, bool accepted)
+    {
+        using var temp = new TempDirectory();
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, new FixedTimeProvider(Now));
+        var store = new RawTelemetryStore(temp.DatabasePath, context, new FixedTimeProvider(Now));
+        store.CreateMonitorSchema();
+        var rawId = store.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "trace-large", Now, null, "{}"));
+        SetTextLength(temp.DatabasePath, "raw_records", "payload_json", "id", rawId, RawReplayLimits.MaximumRawRecordBytes + excessBytes);
+
+        var selection = new RawReplaySelection(RawRecordIds: [rawId]);
+        if (!accepted)
+        {
+            await AssertPreflightFailure(temp.DatabasePath, context, selection, includeSessionContent: false, "entry_too_large");
+            return;
+        }
+
+        var capture = await new SqliteRawReplaySnapshotProvider(temp.DatabasePath, context, new FixedTimeProvider(Now))
+            .CaptureAsync(selection, includeSessionContent: false, CancellationToken.None);
+        Assert.True(capture.Success, capture.ErrorCode);
+        await using var lease = Assert.IsType<RawReplaySnapshotLease>(capture.Lease);
+        Assert.Equal(rawId, Assert.Single(lease.Snapshot.Records).RawRecordId);
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    public async Task CaptureAsync_AcceptsTheExactSessionMemberLimitAndRejectsAnOversizedMember(int excessBytes, bool accepted)
+    {
+        using var temp = new TempDirectory();
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, new FixedTimeProvider(Now));
+        var rawStore = new RawTelemetryStore(temp.DatabasePath, context, new FixedTimeProvider(Now));
+        rawStore.CreateMonitorSchema();
+        var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "trace-content", Now, null, "{}"));
+        var sessionStore = new SqliteSessionStore(temp.DatabasePath, context, new FixedTimeProvider(Now));
+        sessionStore.CreateSchema();
+        var sessionId = Guid.CreateVersion7();
+        var runId = Guid.CreateVersion7();
+        var eventId = Guid.CreateVersion7();
+        sessionStore.Write(new SessionWriteBatch(
+            new SessionDetail(
+                new ObservedSession(sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Full, null, null,
+                    Now, Now, Now, SessionRawRetentionState.Expiring, Now, Now),
+                [],
+                [new ObservedSessionRun(runId, sessionId, SessionSourceSurface.CopilotCli, "run-native", "trace-content", null,
+                    "fixture-model", ObservedSessionStatus.Completed, Now, Now, 1, 2, 3)],
+                [new ObservedSessionEvent(eventId, sessionId, runId, SessionSourceSurface.CopilotCli, null, "trace-content", "ok",
+                    "copilot-compatible-hook", "source-event", "assistant.completed", Now, SessionContentState.Available,
+                    "app-v1", "adapter-v1", "schema-v1", "normalization-v1", SessionMatchKind.ExactNative)]),
+            [new SessionEventContent(eventId, "assistant_response", "{}", Now, Now.AddDays(1))]));
+        Execute(temp.DatabasePath,
+            "INSERT INTO monitor_spans(raw_record_id,span_ordinal,trace_id,span_id,projected_at) VALUES($raw,0,'trace-content','span',$now);",
+            ("$raw", rawId), ("$now", Now.ToString("O", CultureInfo.InvariantCulture)));
+        SetTextLength(temp.DatabasePath, "session_event_content", "content_json", "event_id", eventId.ToString("D"), RawReplayLimits.MaximumSessionContentBytes + excessBytes);
+
+        var selection = new RawReplaySelection(SessionIds: [sessionId.ToString("D")]);
+        if (!accepted)
+        {
+            await AssertPreflightFailure(temp.DatabasePath, context, selection, includeSessionContent: true, "entry_too_large");
+            return;
+        }
+
+        var capture = await new SqliteRawReplaySnapshotProvider(temp.DatabasePath, context, new FixedTimeProvider(Now))
+            .CaptureAsync(selection, includeSessionContent: true, CancellationToken.None);
+        Assert.True(capture.Success, capture.ErrorCode);
+        await using var lease = Assert.IsType<RawReplaySnapshotLease>(capture.Lease);
+        Assert.Equal(eventId.ToString("D"), Assert.Single(lease.Snapshot.SessionContents).EventId);
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    public async Task CaptureAsync_AcceptsTheExactAggregateLimitAndRejectsAnOversizedAggregate(int excessBytes, bool accepted)
+    {
+        using var temp = new TempDirectory();
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, new FixedTimeProvider(Now));
+        var store = new RawTelemetryStore(temp.DatabasePath, context, new FixedTimeProvider(Now));
+        store.CreateMonitorSchema();
+        var sizes = new[]
+        {
+            RawReplayLimits.MaximumRawRecordBytes,
+            RawReplayLimits.MaximumRawRecordBytes,
+            RawReplayLimits.MaximumRawRecordBytes,
+            RawReplayLimits.MaximumRawRecordBytes,
+            RawReplayLimits.MaximumArchiveBytes - 4 * RawReplayLimits.MaximumRawRecordBytes + excessBytes,
+        };
+        var ids = new List<long>();
+        for (var index = 0; index < sizes.Length; index++)
+        {
+            var id = store.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, $"trace-{index}", Now, null, "{}"));
+            SetTextLength(temp.DatabasePath, "raw_records", "payload_json", "id", id, sizes[index]);
+            ids.Add(id);
+        }
+
+        var selection = new RawReplaySelection(RawRecordIds: ids);
+        if (!accepted)
+        {
+            await AssertPreflightFailure(temp.DatabasePath, context, selection, includeSessionContent: false, "archive_too_large");
+            return;
+        }
+
+        var capture = await new SqliteRawReplaySnapshotProvider(temp.DatabasePath, context, new FixedTimeProvider(Now))
+            .CaptureAsync(selection, includeSessionContent: false, CancellationToken.None);
+        Assert.True(capture.Success, capture.ErrorCode);
+        await using var lease = Assert.IsType<RawReplaySnapshotLease>(capture.Lease);
+        Assert.Equal(ids, lease.Snapshot.Records.Select(static record => record.RawRecordId));
+    }
+
     private static void SeedTraceAndSession(string path, long rawRecordId, Guid sessionId, string traceId)
     {
         using var connection = Open(path);
@@ -153,6 +263,50 @@ public sealed class SqliteRawReplaySnapshotProviderTests
         Execute(connection, transaction, "INSERT INTO sessions(session_id,status,completeness,started_at,last_seen_at,raw_retention_state,created_at,updated_at) VALUES($session,'completed','full',$now,$now,'not_captured',$now,$now);", ("$session", sessionId.ToString("D")), ("$now", Now.ToString("O", CultureInfo.InvariantCulture)));
         Execute(connection, transaction, "INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,status) VALUES($run,$session,'copilot-cli',$trace,'completed');", ("$run", Guid.CreateVersion7().ToString("D")), ("$session", sessionId.ToString("D")), ("$trace", traceId));
         transaction.Commit();
+    }
+
+    private static async Task AssertPreflightFailure(
+        string databasePath,
+        RetentionCatalogContext context,
+        RawReplaySelection selection,
+        bool includeSessionContent,
+        string expectedError)
+    {
+        var before = CatalogState(databasePath);
+
+        var result = await new SqliteRawReplaySnapshotProvider(databasePath, context, new FixedTimeProvider(Now))
+            .CaptureAsync(selection, includeSessionContent, CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal(expectedError, result.ErrorCode);
+        Assert.Null(result.Lease);
+        Assert.Equal(0, Scalar<long>(databasePath, "SELECT COUNT(*) FROM retention_leases;"));
+        Assert.Equal(before, CatalogState(databasePath));
+    }
+
+    private static IReadOnlyList<string> CatalogState(string path)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT item_id,state,revision,COALESCE(read_denied_at,''),COALESCE(queued_at,''),COALESCE(error_code,'')
+            FROM retention_items ORDER BY item_id COLLATE BINARY;
+            """;
+        using var reader = command.ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add(string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetValue)));
+        return rows;
+    }
+
+    private static void SetTextLength(string path, string table, string column, string keyColumn, object key, int size)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText = $"UPDATE {table} SET {column}=CAST(zeroblob($size) AS TEXT) WHERE {keyColumn}=$key;";
+        command.Parameters.AddWithValue("$size", size);
+        command.Parameters.AddWithValue("$key", key);
+        Assert.Equal(1, command.ExecuteNonQuery());
     }
 
     private static SqliteConnection Open(string path)

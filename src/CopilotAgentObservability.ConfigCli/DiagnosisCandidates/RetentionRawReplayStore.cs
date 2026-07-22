@@ -70,13 +70,25 @@ internal sealed class RetentionRawReplayStore
     {
         if (!ValidReplayId(replayId)) return new(RetainedRawReplayReadDisposition.NotFound, null);
         var captureId = CaptureId(replayId);
-        var request = new RetentionReadRequest(
-            new(catalog.StoreInstanceId, RetentionStoreKind.SensitiveBundle, captureId),
-            RetentionReadKind.Operation,
-            timeProvider.GetUtcNow(),
-            ExpectedRevision: null);
-        var result = await catalog.ReadAsync(request, (connection, transaction, grant, _) =>
-            ValueTask.FromResult(ReadReceipt(connection, transaction, grant, replayId, captureId)), cancellationToken).ConfigureAwait(false);
+        RetentionReadResult<RawReplayReceipt> result;
+        try
+        {
+            var request = new RetentionReadRequest(
+                new(catalog.StoreInstanceId, RetentionStoreKind.SensitiveBundle, captureId),
+                RetentionReadKind.Operation,
+                timeProvider.GetUtcNow(),
+                ExpectedRevision: null);
+            result = await catalog.ReadAsync(request, (connection, transaction, grant, _) =>
+                ValueTask.FromResult(ReadReceipt(connection, transaction, grant, replayId, captureId)), cancellationToken).ConfigureAwait(false);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            return new(RetainedRawReplayReadDisposition.Busy, null);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return new(RetainedRawReplayReadDisposition.Busy, null);
+        }
         if (result.Disposition != RetentionReadDisposition.Granted || result.Lease is null)
             return new(result.Disposition switch
             {
@@ -145,7 +157,7 @@ internal sealed class RetentionRawReplayStore
                 && RawReplayJson.SerializeCanonical(receipt).AsSpan().SequenceEqual(RawReplayJson.SerializeCanonical(manifest.Receipt))
                 && receipt.ReplayId == replayId ? receipt : null;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or FormatException or InvalidOperationException)
+        catch (Exception exception) when (exception is JsonException or FormatException or InvalidOperationException)
         {
             return null;
         }

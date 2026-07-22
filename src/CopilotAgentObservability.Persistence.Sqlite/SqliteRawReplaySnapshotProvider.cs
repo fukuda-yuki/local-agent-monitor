@@ -42,6 +42,7 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
                 {
                     candidates = SelectCandidates(connection, transaction, selection, includeSessionContent);
                     if (candidates.Count > RawReplayLimits.MaximumPayloadEntries) throw new SelectionLimitException();
+                    ValidateCandidateSizes(candidates);
                     var now = timeProvider.GetUtcNow();
                     return ValueTask.FromResult<IReadOnlyList<RetentionReadRequest>>(candidates.Select(candidate => new RetentionReadRequest(
                         new RetentionOwnershipKey(context.StoreInstanceId, candidate.Kind, candidate.SourceId),
@@ -70,6 +71,10 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
         catch (SelectionMemberMissingException)
         {
             return Failure("snapshot_member_missing");
+        }
+        catch (SnapshotSizeException exception)
+        {
+            return Failure(exception.Code);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -101,12 +106,12 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
         using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
-            command.CommandText = $"SELECT r.id FROM raw_records r WHERE {BuildRawPredicate(selection, command)} ORDER BY r.id LIMIT {RawReplayLimits.MaximumPayloadEntries + 1};";
+            command.CommandText = $"SELECT r.id,length(CAST(r.payload_json AS BLOB)) FROM raw_records r WHERE {BuildRawPredicate(selection, command)} ORDER BY r.id LIMIT {RawReplayLimits.MaximumPayloadEntries + 1};";
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
                 var id = reader.GetInt64(0);
-                candidates.Add(new(RetentionStoreKind.RawRecord, id.ToString(CultureInfo.InvariantCulture)));
+                candidates.Add(new(RetentionStoreKind.RawRecord, id.ToString(CultureInfo.InvariantCulture), reader.GetInt64(1)));
             }
         }
 
@@ -115,12 +120,28 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             var names = AddTextParameters(command, selection.SessionIds!, "session");
-            command.CommandText = $"SELECT c.event_id FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id WHERE e.session_id COLLATE BINARY IN ({string.Join(',', names)}) ORDER BY c.event_id COLLATE BINARY LIMIT {RawReplayLimits.MaximumPayloadEntries + 1};";
+            command.CommandText = $"SELECT c.event_id,length(CAST(c.content_json AS BLOB)) FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id WHERE e.session_id COLLATE BINARY IN ({string.Join(',', names)}) ORDER BY c.event_id COLLATE BINARY LIMIT {RawReplayLimits.MaximumPayloadEntries + 1};";
             using var reader = command.ExecuteReader();
-            while (reader.Read()) candidates.Add(new(RetentionStoreKind.SessionEventContent, reader.GetString(0)));
+            while (reader.Read()) candidates.Add(new(RetentionStoreKind.SessionEventContent, reader.GetString(0), reader.GetInt64(1)));
         }
 
         return candidates;
+    }
+
+    private static void ValidateCandidateSizes(IReadOnlyList<Candidate> candidates)
+    {
+        long aggregate = 0;
+        foreach (var candidate in candidates)
+        {
+            if (candidate.ByteLength < 0) throw new InvalidOperationException();
+            var maximum = candidate.Kind == RetentionStoreKind.RawRecord
+                ? RawReplayLimits.MaximumRawRecordBytes
+                : RawReplayLimits.MaximumSessionContentBytes;
+            if (candidate.ByteLength > maximum) throw new SnapshotSizeException("entry_too_large");
+            try { aggregate = checked(aggregate + candidate.ByteLength); }
+            catch (OverflowException) { throw new SnapshotSizeException("archive_too_large"); }
+            if (aggregate > RawReplayLimits.MaximumArchiveBytes) throw new SnapshotSizeException("archive_too_large");
+        }
     }
 
     private static void EnsureResolvedExplicitRawMembers(
@@ -372,7 +393,11 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
     private static string Wire(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
     private static RawReplaySnapshotCapture Failure(string code) => new(false, code, null);
 
-    private sealed record Candidate(RetentionStoreKind Kind, string SourceId);
+    private sealed record Candidate(RetentionStoreKind Kind, string SourceId, long ByteLength);
     private sealed class SelectionLimitException : Exception;
     private sealed class SelectionMemberMissingException : Exception;
+    private sealed class SnapshotSizeException(string code) : Exception
+    {
+        internal string Code { get; } = code;
+    }
 }

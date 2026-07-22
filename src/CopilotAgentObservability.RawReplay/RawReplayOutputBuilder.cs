@@ -30,14 +30,34 @@ internal static class RawReplayOutputBuilder
         var projections = ordered.Select(record =>
         {
             var raw = ToTelemetry(record);
+            var monitor = MonitorProjectionBuilder.Build(raw);
+            var contributions = monitor.TraceContributions
+                .Select(contribution => new CanonicalContribution(
+                    contribution,
+                    RawReplayJson.SerializeCanonical(contribution)))
+                .OrderBy(item => item.Contribution.TraceId, StringComparer.Ordinal)
+                .ThenBy(item => Convert.ToHexString(item.Bytes), StringComparer.Ordinal)
+                .Select(item => item.Contribution)
+                .ToArray();
+            var spans = MonitorSpanProjectionBuilder.Build(raw)
+                .Select(span => span with { SpanOrdinal = 0 })
+                .Select(span => new CanonicalSpan(span, RawReplayJson.SerializeCanonical(span)))
+                .OrderBy(item => item.Span.TraceId, StringComparer.Ordinal)
+                .ThenBy(item => Convert.ToHexString(item.Bytes), StringComparer.Ordinal)
+                .Select((item, index) => item.Span with { SpanOrdinal = index })
+                .ToArray();
+            var primary = contributions.FirstOrDefault(contribution =>
+                    string.Equals(contribution.TraceId, monitor.TraceId, StringComparison.Ordinal))
+                ?? contributions.FirstOrDefault();
             return new
             {
                 raw_record_id = record.RawRecordId,
-                projection = MonitorProjectionBuilder.Build(raw),
-                spans = MonitorSpanProjectionBuilder.Build(raw)
-                    .OrderBy(span => span.TraceId, StringComparer.Ordinal)
-                    .ThenBy(span => span.SpanOrdinal)
-                    .ToArray(),
+                projection = monitor with
+                {
+                    ClientKind = primary?.ClientKind,
+                    TraceContributions = contributions,
+                },
+                spans,
             };
         }).ToArray();
         var projection = RawReplayJson.SerializeCanonical(new
@@ -79,4 +99,6 @@ internal static class RawReplayOutputBuilder
         record.SchemaVersion);
 
     private sealed record CanonicalMeasurement(MeasurementRow Row, byte[] Bytes);
+    private sealed record CanonicalContribution(MonitorTraceContribution Contribution, byte[] Bytes);
+    private sealed record CanonicalSpan(MonitorSpanProjection Span, byte[] Bytes);
 }

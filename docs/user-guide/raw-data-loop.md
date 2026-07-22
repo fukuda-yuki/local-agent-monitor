@@ -52,6 +52,29 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw da
 
 Normalized measurement は dashboard dataset と candidate pipeline の主入力になります。
 
+## Raw Local Replay
+
+特定の raw record、trace、Session、source、UTC range を隔離して同じ pinned
+normalization / projection / dashboard version で再確認するときは、明示 opt-in の
+`raw-local-replay` profile を使用できます。最初に `preview` で対象件数、version、
+expected hash、persistent raw-data warning を確認し、その preview digest と固定確認文を
+request に入れて `export` します。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- raw-replay preview --database data\raw-store.db --request tmp\raw-replay-request.json
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- raw-replay export --database data\raw-store.db --request tmp\raw-replay-request.json --output tmp\raw-local-replay.zip
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- raw-replay result --bundle tmp\raw-local-replay.zip
+```
+
+CLI は export と strict inspection だけを提供します。import/replay は loopback Local
+Monitor の same-origin / CSRF-protected surface から行い、live raw store、Session store、
+projection を変更しません。retained replay namespace は capture からちょうど 7 日で
+期限切れとなり read が拒否され、その後既存 worker が cleanup します。active operation
+や retry がある場合、物理削除は期限時刻より後になることがあります。
+`tmp\raw-local-replay.zip` は caller-owned file なので自動 cleanup されません。raw / PII /
+credential を含み得るため commit や共有をせず、不要になった時点で明示的に削除して
+ください。`--sanitized-only` ではこの機能は利用できません。
+
 ## 削除
 
 不要になった local output を削除する例:

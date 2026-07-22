@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Net.Mime;
 using System.Text;
 using System.Text.Json;
@@ -14,10 +13,13 @@ internal static class RawReplayRoutes
     internal static bool IsPath(PathString path) => path.StartsWithSegments("/api/raw-replay/v1");
 
     internal static void Map(WebApplication app, string databasePath, RetentionCatalogStore catalog, bool sanitizedOnly,
-        TimeProvider timeProvider, IRawReplaySnapshotProvider? snapshotProvider = null)
+        TimeProvider timeProvider, IRawReplaySnapshotProvider? snapshotProvider = null,
+        RawReplayTransientLimits? transientLimits = null)
     {
         var application = new Application(databasePath, catalog, timeProvider,
-            snapshotProvider ?? new SqliteRawReplaySnapshotProvider(databasePath));
+            snapshotProvider ?? new SqliteRawReplaySnapshotProvider(databasePath),
+            transientLimits ?? RawReplayTransientLimits.Default);
+        app.Lifetime.ApplicationStopping.Register(application.Dispose);
         app.MapPost("/api/raw-replay/v1/export-previews", context => ExportPreviewAsync(context, application, sanitizedOnly))
             .WithMetadata(new Microsoft.AspNetCore.Mvc.DisableRequestSizeLimitAttribute());
         app.MapPost("/api/raw-replay/v1/exports", context => ExportAsync(context, application, sanitizedOnly))
@@ -35,7 +37,7 @@ internal static class RawReplayRoutes
     {
         Prepare(context.Response, MediaTypeNames.Application.Json);
         context.Response.StatusCode = status;
-        return context.Response.Body.WriteAsync(Encoding.UTF8.GetBytes($"{{\"error\":\"{error}\"}}"), context.RequestAborted).AsTask();
+        return context.Response.Body.WriteAsync(RawReplayJson.Serialize(new { error }), context.RequestAborted).AsTask();
     }
 
     private static async Task ExportPreviewAsync(HttpContext context, Application application, bool sanitizedOnly)
@@ -168,19 +170,23 @@ internal static class RawReplayRoutes
         response.Headers.CacheControl = "no-store"; response.ContentType = contentType;
     }
 
-    private sealed class Application
+    private sealed class Application : IDisposable
     {
         private readonly RawReplayAuthorizedService exportService;
         private readonly RawReplayArchiveService archiveService = new();
         private readonly RetentionRawReplayStore replayStore;
-        private readonly TimeProvider timeProvider;
-        private readonly ConcurrentDictionary<string, ExportResult> exports = new(StringComparer.Ordinal);
-        private readonly ConcurrentDictionary<string, PendingReplay> previews = new(StringComparer.Ordinal);
+        private readonly RawReplayTransientStore transientStore;
 
-        internal Application(string databasePath, RetentionCatalogStore catalog, TimeProvider timeProvider, IRawReplaySnapshotProvider provider)
+        internal Application(
+            string databasePath,
+            RetentionCatalogStore catalog,
+            TimeProvider timeProvider,
+            IRawReplaySnapshotProvider provider,
+            RawReplayTransientLimits transientLimits)
         {
-            exportService = new(provider); this.timeProvider = timeProvider;
+            exportService = new(provider);
             replayStore = new(catalog, Path.Combine(Path.GetDirectoryName(Path.GetFullPath(databasePath))!, "raw-replays"), timeProvider);
+            transientStore = new(timeProvider, transientLimits);
         }
 
         internal ValueTask<RawReplayPreview> ExportPreviewAsync(RawReplayExportControl control, CancellationToken token) => exportService.PreviewAsync(control, token);
@@ -191,36 +197,38 @@ internal static class RawReplayRoutes
             if (!created.Success) return new(null, created.ErrorCode, null, null, null);
             var id = created.ArchiveSha256!;
             var archive = created.ArchiveBytes!;
-            exports[id] = new(id, null, id, created.Preview, $"/api/raw-replay/v1/exports/{id}/archive", archive);
-            return exports[id] with { Archive = null };
+            var result = new ExportResult(id, null, id, created.Preview, $"/api/raw-replay/v1/exports/{id}/archive");
+            return transientStore.Put("export", id, archive, result)
+                ? result
+                : new(null, "archive_too_large", null, null, null);
         }
 
         internal bool TryGetExport(string id, out ExportResult result)
         {
-            if (exports.TryGetValue(id, out var stored)) { result = stored with { Archive = null }; return true; }
-            result = null!; return false;
+            return transientStore.TryGetMetadata("export", id, out result);
         }
 
         internal bool TryGetArchive(string id, out byte[] bytes)
         {
             bytes = [];
-            if (!exports.TryGetValue(id, out var stored) || stored.Archive is null
-                || RawReplayHash.Sha256(stored.Archive) != stored.ArchiveSha256
-                || !archiveService.Inspect(stored.Archive).Success) return false;
-            bytes = stored.Archive.ToArray(); return true;
+            if (!transientStore.TryGet("export", id, out var storedBytes, out ExportResult stored)
+                || RawReplayHash.Sha256(storedBytes) != stored.ArchiveSha256
+                || !archiveService.Inspect(storedBytes).Success) return false;
+            bytes = storedBytes;
+            return true;
         }
 
         internal ReplayPreviewResult ReplayPreview(byte[] archive)
         {
-            PurgeExpired();
             var inspected = archiveService.Inspect(archive);
             if (!inspected.Success || inspected.Bundle is null) return new(inspected.ErrorCode, null, null, null, null, null, null, 0, 0, [], null);
-            var expires = timeProvider.GetUtcNow().AddMinutes(10);
+            var expires = transientStore.ExpirationFromNow();
             var digest = RawReplayHash.Framed("copilot-agent-observability/raw-local-replay-import-preview/v1",
                 Encoding.UTF8.GetBytes(inspected.ArchiveSha256!), Encoding.UTF8.GetBytes(inspected.Bundle.Manifest.NormalizationVersion),
                 Encoding.UTF8.GetBytes(inspected.Bundle.Manifest.ProjectionVersion), Encoding.UTF8.GetBytes(inspected.Bundle.Manifest.DashboardVersion),
                 Encoding.UTF8.GetBytes(expires.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture)));
-            previews[digest] = new(archive.ToArray(), inspected.ArchiveSha256!, expires);
+            if (!transientStore.Put("replay-preview", digest, archive, new PendingReplay(inspected.ArchiveSha256!, expires), expires))
+                return new("archive_too_large", null, null, null, null, null, null, 0, 0, [], null);
             return new(null, RawReplayWarnings.RawData, "raw", inspected.ArchiveSha256, inspected.Bundle.Manifest.NormalizationVersion,
                 inspected.Bundle.Manifest.ProjectionVersion, inspected.Bundle.Manifest.DashboardVersion, inspected.RawRecordCount,
                 inspected.SessionContentCount, inspected.Bundle.Manifest.SourceVersions, digest, expires);
@@ -228,13 +236,12 @@ internal static class RawReplayRoutes
 
         internal async ValueTask<ReplayResultView> ReplayAsync(RawReplayControl control, CancellationToken token)
         {
-            PurgeExpired();
             if (ControlError(control) is { } error) return new(false, error, false, null);
-            if (control.PreviewDigest is null || !previews.TryRemove(control.PreviewDigest, out var pending))
+            if (control.PreviewDigest is null
+                || !transientStore.TryTake("replay-preview", control.PreviewDigest, out var archive, out PendingReplay pending))
                 return new(false, "preview_expired", false, null);
-            if (pending.ExpiresAt <= timeProvider.GetUtcNow()) return new(false, "preview_expired", false, null);
             if (pending.ArchiveSha256 != control.ArchiveSha256) return new(false, "preview_changed", false, null);
-            var execution = await replayStore.ReplayAsync(control.ReplayId, pending.Archive, token);
+            var execution = await replayStore.ReplayAsync(control.ReplayId, archive, token);
             return new(execution.Success, execution.ErrorCode, execution.IdempotentReplay, execution.Result);
         }
 
@@ -253,11 +260,7 @@ internal static class RawReplayRoutes
             return new(true, null, true, lease.Receipt);
         }
 
-        private void PurgeExpired()
-        {
-            var now = timeProvider.GetUtcNow();
-            foreach (var item in previews.Where(item => item.Value.ExpiresAt <= now)) previews.TryRemove(item.Key, out _);
-        }
+        public void Dispose() => transientStore.Dispose();
 
         private static string? ControlError(RawReplayControl control)
         {
@@ -282,8 +285,8 @@ internal static class RawReplayRoutes
     }
 
     private sealed record ExportResult(string? ExportId, string? ErrorCode, string? ArchiveSha256, RawReplayPreview? Preview,
-        string? DownloadPath, [property: System.Text.Json.Serialization.JsonIgnore] byte[]? Archive = null);
-    private sealed record PendingReplay(byte[] Archive, string ArchiveSha256, DateTimeOffset ExpiresAt);
+        string? DownloadPath);
+    private sealed record PendingReplay(string ArchiveSha256, DateTimeOffset ExpiresAt);
     private sealed record ReplayPreviewResult(string? ErrorCode, string? Warning, string? DataClassification, string? ArchiveSha256,
         string? NormalizationVersion, string? ProjectionVersion, string? DashboardVersion, int RawRecordCount, int SessionContentCount,
         IReadOnlyList<string> SourceVersions, string? PreviewDigest, DateTimeOffset? ExpiresAt = null);

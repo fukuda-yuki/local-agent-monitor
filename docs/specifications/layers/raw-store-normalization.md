@@ -745,6 +745,13 @@ busy member returns no partial value and no synthetic marker. Callers keep the
 returned lease until their actual raw use completes, then dispose it exactly
 once.
 
+An access or operation lease whose shared-read transaction commits before the
+item expiry boundary keeps its bounded lease duration across that boundary.
+Expiry still denies every new read and queues cleanup at the exact policy
+timestamp, but deletion claim remains quiescent until the admitted lease is
+released or expires. A selector that reaches expiry before commit remains
+denied and receives no lease.
+
 The immutable Issue #89 kickoff and inventory base are both
 `11d6c587903f6ea97026d815f608231efea08d65`. The checked-in current-callsite
 inventory is [issue-89-raw-read-callsite-inventory.md](../../sprints/issue-89-raw-read-callsite-inventory.md).

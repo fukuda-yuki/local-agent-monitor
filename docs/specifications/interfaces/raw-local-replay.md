@@ -112,6 +112,15 @@ and observed source/adapter/schema/content provenance. It never exports catalog
 tokens, leases, private locators, unrelated runtime state, or external provider
 configuration.
 
+The same SQLite snapshot must project the UTF-8 byte length of every selected
+raw payload and Session-content value before payload materialization or any
+operation-lease insert. A raw member above 30 MiB or Session-content member
+above 8 MiB is `entry_too_large`; a selected source-byte aggregate above
+128 MiB is `archive_too_large`. These are lower-bound preflight gates only:
+canonical-member and complete-archive limits remain authoritative after
+materialization. A preflight failure creates no lease and changes no Retention
+catalog state.
+
 An explicitly named raw-record ID that does not exist is a missing member and
 fails the snapshot. Trace and Session lists remain OR filters: an unmatched
 value contributes no member, while every member that does resolve must pass the
@@ -124,8 +133,12 @@ The archive reuses #85's frozen generic framing without reusing its sanitized
 schema: ZIP Store only, `manifest.json` first, payload entries in ordinal path
 order, DOS epoch timestamp, fixed external attributes, UTF-8 flag off, no ZIP
 comments, data descriptors, preamble, duplicate/local-central name mismatch, or
-trailing bytes. Publication is sibling `.partial` then atomic rename only after
-strict self-inspection. A failure leaves no successful artifact.
+trailing bytes. Each publication invocation owns a unique sibling partial file,
+created exclusively, and atomically renames it only after strict self-inspection.
+Cleanup may remove only that invocation-owned partial; a pre-existing or
+concurrent sibling partial is never removed or replaced. A failure leaves no
+successful artifact from that invocation; a losing concurrent invocation does
+not remove the independently published artifact of the winner.
 
 Closed payload paths are `records/record-NNNNNN.json` and
 `session-content/content-NNNNNN.json`; filenames never contain source IDs,
@@ -169,6 +182,22 @@ capture journal, operation leases, queue, cleanup worker, deletion adapter,
 retry, and recovery. Caller-owned input files are not cleanup targets. There is
 no new store kind, migration, catalog, worker, or cleanup path.
 
+At Local Monitor startup, sensitive-bundle capture recovery runs to completion
+before raw-replay routes become reachable or cleanup workers begin. Recovery is
+forward-only, drains every pending query batch, and is idempotent across repeated
+restarts at every raw-replay capture checkpoint. The retained item expires
+exactly at capture time plus seven days.
+An active raw-replay operation lease excludes cleanup; after it is released,
+cleanup resumes through the existing durable cursor and intent without
+recreating an already deleted member. Cleanup deletes only the exact retained
+child and preserves its parent, siblings, and caller-owned archive.
+
+If a retained `manifest.json` or `input/archive.zip` member is temporarily
+contended, replay status returns `replay_store_busy`. The read transaction rolls
+back without returning a value, creating a lease, or changing catalog state;
+after contention clears, the same read may be retried. SQLite busy/locked is the
+same retryable disposition, while other catalog failures remain unavailable.
+
 An identical retry of the same replay ID, archive SHA-256, and pinned versions
 returns the existing result and creates no second namespace. The same replay ID
 with a different archive/options/version is `replay_id_conflict`. Duplicate
@@ -176,6 +205,11 @@ source IDs with byte-identical canonical records are one idempotent input;
 duplicate source IDs with different bytes/provenance are
 `source_id_conflict`. Any conflict or staging failure publishes no readable
 namespace and never partially overwrites an existing one.
+
+Session-content source identity is the ordinal tuple (`source_adapter`,
+`source_event_id`), not the local Session `event_id`. Equal source identity with
+different canonical bytes is `source_id_conflict`; equal local event IDs with
+different source identities remain distinct inputs.
 
 Replay preserves the manifest's adapter/schema version evidence and verifies it
 against the canonical member summaries; source version labels are evidence, not
@@ -185,9 +219,14 @@ versions fail closed. The closed literal `unknown` preserves missing source
 provenance; recognized drift/unsupported state labels remain evidence and do not
 cause replay to invoke or trust a source adapter.
 Canonical normalized rows are sorted by trace identity and canonical bytes;
-monitor projections are sorted by source raw ID and trace identity; the replay
-dashboard is a versioned deterministic projection of those outputs and contains
-no generation clock. Each artifact is canonical UTF-8 JSON with LF termination. Result provenance records archive
+monitor projections are sorted by source raw ID and trace identity, and span
+ordinals are reassigned only after canonical span ordering; the replay dashboard
+is a versioned deterministic projection of those outputs and contains no
+generation clock. Nested trace-contribution collections are sorted by trace
+identity and canonical bytes, and their top-level summary is selected from that
+canonical order, so permuting equivalent multi-trace source containers does not
+change derived projection or dashboard hashes. Each
+artifact is canonical UTF-8 JSON with LF termination. Result provenance records archive
 SHA-256, replay ID, source versions, target versions, counts, the three output
 hashes, idempotent-retry state, and `external_model_invocations: 0`; it contains
 no raw body, credential, path, or private retention identity.
@@ -204,14 +243,30 @@ The Local Monitor v1 routes are:
 - `POST /api/raw-replay/v1/replays`;
 - `GET /api/raw-replay/v1/replays/{replayId}`.
 
+Export archives and replay-preview bytes are process-local transient data. The
+two kinds share one bound of 8 entries and 256 MiB, expire 10 minutes after
+creation, and are swept at least once per minute even while no request arrives.
+Insertion evicts expired entries and then the oldest entries deterministically
+until both limits hold. A missing or evicted export is 404; an expired or evicted
+replay preview is `preview_expired`. Process shutdown clears the store.
+
 Errors are fixed `{"error":"<code>"}` bodies. Invalid request/profile/schema is
-400; cross-origin/CSRF/consent/sanitized-only is 403; missing result is 404;
+400; a body with an unsupported media type is 415; cross-origin/CSRF/consent/
+sanitized-only is 403; missing result is 404;
 stale preview, replay/source ID conflict, and version mismatch are 409; request
 or archive bounds are 413; corrupt/checksum/inventory/credential failures are
-422; busy/unavailable/publish failures, including a missing explicitly named
-snapshot member, are 503. Error text, DTOs, headers, logs,
+422; busy/unavailable/publish failures, including `replay_store_busy` and a
+missing explicitly named snapshot member, are 503. Error text, DTOs, headers, logs,
 and repository-safe evidence never echo raw values, IDs selected from the raw
 store, credentials, private filenames, or local paths.
+
+Provider failures cross the public boundary only through the closed mapping
+`request_invalid`, `selection_limit_exceeded`, `entry_too_large`,
+`archive_too_large`, `snapshot_store_busy`, `snapshot_member_missing`,
+`snapshot_read_denied`, or `snapshot_store_unavailable`; unknown and missing
+provider codes map to `snapshot_store_unavailable`. HTTP error bodies are
+generated by the JSON serializer, never string interpolation, and CLI output
+uses the same mapped code.
 
 Config CLI owns export-only local commands:
 
