@@ -1,4 +1,6 @@
 using System.Text.Encodings.Web;
+using CopilotAgentObservability.Alerts;
+using CopilotAgentObservability.LocalMonitor.Alerts;
 using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.LocalMonitor.Doctor.ClaudeCode;
 using CopilotAgentObservability.LocalMonitor.Events;
@@ -17,6 +19,7 @@ using CopilotAgentObservability.SanitizedExport;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -188,6 +191,9 @@ internal static class MonitorHost
         {
             builder.Services.AddHostedService(_ => new RetentionCleanupWorker(new RetentionCleanupCoordinator(retentionCatalog, retentionAdapters, timeProvider), timeProvider));
         }
+        var alertConnectionString = new SqliteConnectionStringBuilder { DataSource = options.DatabasePath, Pooling = false }.ToString();
+        var alertEngineStore = testOptions?.AlertEngineStore ?? new SqliteAlertEngineStore(alertConnectionString);
+        var alertLifecycleStore = testOptions?.AlertLifecycleStore ?? new SqliteAlertLifecycleStore(alertConnectionString, timeProvider);
 
         var app = builder.Build();
         async Task<SourceProjectionState> ProjectTraceAsync(MonitorTraceRow row, CancellationToken cancellationToken)
@@ -215,6 +221,18 @@ internal static class MonitorHost
                     await RetentionMutationRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, RetentionMutationErrorCodes.CatalogUnavailable);
                     return;
                 }
+                if (AlertLifecycleRoutes.IsAlertPath(context.Request.Path)
+                    && exception is BadHttpRequestException alertBodyException
+                    && alertBodyException.StatusCode == StatusCodes.Status413PayloadTooLarge)
+                {
+                    await AlertLifecycleRoutes.WriteErrorAsync(context, StatusCodes.Status413PayloadTooLarge, "request_too_large");
+                    return;
+                }
+                if (AlertLifecycleRoutes.IsAlertPath(context.Request.Path))
+                {
+                    await AlertLifecycleRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_lifecycle_store_unavailable");
+                    return;
+                }
                 if (exception is BadHttpRequestException badRequestException
                     && badRequestException.StatusCode == StatusCodes.Status413PayloadTooLarge)
                 {
@@ -229,7 +247,8 @@ internal static class MonitorHost
         {
             var retentionPath = RetentionMutationRoutes.IsRetentionPath(context.Request.Path);
             var sanitizedExportPath = SanitizedExportRoutes.IsPath(context.Request.Path);
-            if (retentionPath || sanitizedExportPath)
+            var alertPath = AlertLifecycleRoutes.IsAlertPath(context.Request.Path);
+            if (retentionPath || sanitizedExportPath || alertPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -242,6 +261,10 @@ internal static class MonitorHost
                 else if (sanitizedExportPath)
                 {
                     await SanitizedExportRoutes.ErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (alertPath)
+                {
+                    await AlertLifecycleRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
                 else if (DoctorUiRoutes.IsDoctorUiPath(context.Request.Path))
                 {
@@ -268,6 +291,7 @@ internal static class MonitorHost
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
         RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
         SanitizedExportRoutes.Map(app, options.DatabasePath, testOptions?.SanitizedExportSnapshotProvider);
+        AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;
@@ -1671,6 +1695,9 @@ internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMet
 internal sealed class MonitorHostTestOptions
 {
     public ISanitizedExportSnapshotProvider? SanitizedExportSnapshotProvider { get; init; }
+    public IAlertEngineStore? AlertEngineStore { get; set; }
+
+    public IAlertLifecycleStore? AlertLifecycleStore { get; set; }
 
     public Func<RetentionCatalogStore, TimeProvider, RetentionMutationApplicationService>? RetentionMutationApplicationFactory { get; init; }
 
