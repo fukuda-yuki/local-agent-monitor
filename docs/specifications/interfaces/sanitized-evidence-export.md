@@ -20,7 +20,7 @@ remain separate profiles and implementations.
 | compatibility | reader major `1` through `1` |
 | maximum archive entries | 256, including `manifest.json` |
 | maximum total uncompressed bytes | 134,217,728, including `manifest.json` |
-| maximum request or bundle read | 134,217,728 bytes |
+| maximum bundle read | 134,217,728 bytes |
 | maximum control request read | 1,048,576 bytes |
 | maximum canonical carrier | 8,388,608 bytes |
 | maximum records | 255 |

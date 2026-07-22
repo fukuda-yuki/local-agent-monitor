@@ -1145,8 +1145,9 @@ receipt bytes from one immutable source-neutral snapshot. Selection and exact
 dependency closure run before a bounded fail-closed scanner. Raw OTLP, prompts,
 responses, system prompts, tool bodies, source/file bodies, raw analysis,
 credentials, authorization values, PII, and local absolute paths are forbidden.
-Missing optional producers remain explicit unavailable capabilities; the export
-does not infer or synthesize their evidence.
+Absent optional #59/#80 carriers remain explicit `missing` capabilities, while
+non-v1 #73/#74/#84 slots remain `unavailable`; the export does not infer or
+synthesize their evidence.
 
 The Config CLI publishes through a same-directory partial file and atomic
 rename only after complete in-memory validation. Local Monitor export routes

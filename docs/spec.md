@@ -429,8 +429,8 @@ ambiguity is defined by distinct Session IDs, while multiple source-surface
 provenance rows for one Session/trace remain valid.
 The v1 bundle intentionally excludes #72 historical datasets and #83 lifecycle
 events; adding either requires an explicit future versioned profile rather than
-an inferred or permissive field. Missing optional producer carriers are emitted
-as explicit unavailable capabilities.
+an inferred or permissive field. An absent optional #59/#80 carrier is recorded
+as `missing`; the non-v1 #73/#74/#84 capability slots are `unavailable`.
 The complete interface, archive, scanner, error, and no-provenance inspection
 contract is frozen in `docs/specifications/interfaces/sanitized-evidence-export.md`.
 
