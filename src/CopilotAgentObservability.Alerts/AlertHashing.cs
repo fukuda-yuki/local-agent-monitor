@@ -26,6 +26,40 @@ internal static class AlertHashing
     public static string Sha256(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 }
 
+internal static class AlertReceiptIdentityV1
+{
+    public static string Create(
+        string evaluationId,
+        string ruleId,
+        string ruleVersion,
+        AlertSeverity severity,
+        IReadOnlyList<AlertEvidenceReference> evidence,
+        IReadOnlyList<AlertObservedValue> observedValues,
+        DateTimeOffset firstObservedAt,
+        DateTimeOffset lastObservedAt) =>
+        AlertHashing.Identifier(
+            "alert-receipt/v1",
+            AlertContractVersions.Receipt,
+            evaluationId,
+            ruleId,
+            ruleVersion,
+            AlertWire.Severity(severity),
+            AlertCanonicalJson.EvidenceIdentity(evidence),
+            AlertCanonicalJson.ObservedIdentity(observedValues),
+            AlertWire.Timestamp(firstObservedAt),
+            AlertWire.Timestamp(lastObservedAt));
+
+    public static string Create(AlertReceipt receipt) => Create(
+        receipt.EvaluationId,
+        receipt.RuleId,
+        receipt.RuleVersion,
+        receipt.Severity,
+        receipt.Evidence,
+        receipt.ObservedValues,
+        receipt.FirstObservedAt,
+        receipt.LastObservedAt);
+}
+
 internal static class AlertCanonicalOrdering
 {
     private static readonly string[] CompletenessReasonOrder =

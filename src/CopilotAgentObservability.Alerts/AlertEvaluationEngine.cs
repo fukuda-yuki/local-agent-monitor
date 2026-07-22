@@ -104,17 +104,15 @@ public sealed class AlertEvaluationEngine
                 var thresholds = Array.AsReadOnly(resolved.Thresholds.OrderBy(item => item.Key, StringComparer.Ordinal)
                     .Select(item => new AlertObservedValue(item.Key, resolved.Units[item.Key[..item.Key.LastIndexOf('.')]], item.Value))
                     .ToArray());
-                var alertId = AlertHashing.Identifier(
-                    "alert-receipt/v1",
-                    AlertContractVersions.Receipt,
+                var alertId = AlertReceiptIdentityV1.Create(
                     evaluationId,
                     descriptor.RuleId,
                     descriptor.RuleVersion,
-                    AlertWire.Severity(match.Severity),
-                    AlertCanonicalJson.EvidenceIdentity(evidence),
-                    AlertCanonicalJson.ObservedIdentity(observed),
-                    AlertWire.Timestamp(match.FirstObservedAt),
-                    AlertWire.Timestamp(match.LastObservedAt));
+                    match.Severity,
+                    evidence,
+                    observed,
+                    match.FirstObservedAt,
+                    match.LastObservedAt);
                 var receipt = new AlertReceipt(
                     AlertContractVersions.Receipt,
                     AlertContractVersions.SanitizedReceiptProfile,

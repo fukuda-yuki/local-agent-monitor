@@ -292,6 +292,67 @@ receipt types. Lifecycle events are a separate optional profile owned by Issue
 #83. The exporter may mark an absent future lifecycle profile unavailable; it
 must not rewrite the immutable receipt or include raw evidence.
 
+### Canonical receipt consumer compatibility boundary
+
+`AlertReceiptConsumerV1.Validate(ReadOnlySpan<byte>)` is the only public v1
+byte-consumer authority. It accepts one exact canonical UTF-8
+`alert.receipt.v1` value and returns a sealed projection containing only
+`AlertId`, `SessionId`, optional `TraceId`, `SourceSurface`, and
+`LastObservedAt`. Its constructor is not public and it exposes no receipt body,
+evidence, observed value, threshold, rule text, configuration value, or raw JSON.
+
+Before returning that projection the consumer:
+
+1. rejects empty input or input above 8,388,608 bytes and parses with maximum
+   JSON depth 3, the fixed maximum depth of the exact v1 receipt shape;
+2. rejects malformed JSON, comments, trailing data, unknown or duplicate fields,
+   unknown closed-enum values, and any receipt/profile version other than the
+   fixed v1 values;
+3. validates lowercase hashes, bounded metadata tokens, opaque IDs, bounded
+   summary text, non-empty evidence/observed-value collections, canonical
+   numeric/unique effective-threshold entries, unique fields and collection
+   identities, exact evidence Session/trace scope and kind-required IDs,
+   canonical completeness-reason ceilings/order, required-capability
+   uniqueness/order, and receipt time order;
+4. serializes the parsed receipt with `AlertCanonicalJson.SerializeReceipt` and
+   requires byte-for-byte equality with the supplied UTF-8, thereby rejecting
+   alternate field/collection order, whitespace, escapes, timestamp spellings,
+   and decimal spellings;
+5. recomputes `alert_id` with the exact owner `alert-receipt/v1` derivation used
+   by the engine and requires equality; `evaluation_id`, `evaluation_input_hash`,
+   and `configuration_hash` receive lowercase hash-shape checks only because a
+   receipt does not contain the complete registry fingerprint, normalized
+   snapshot, or expanded configuration needed to recompute them; and
+6. maps every failure to `AlertReceiptConsumerException` with fixed code
+   `invalid_alert_receipt` and message `Alert receipt is invalid.`, without
+   source bytes, identifiers, paths, values, parser text, or inner exceptions.
+
+The consumer semantic implementation and behavior-neutral alert-ID derivation
+helper are owned with the #80 contract; a downstream consumer may not copy or
+relax them. Existing serializer, evaluator, and store admission behavior is not
+changed by this additive boundary. Validation proves only canonical receipt-v1
+structure and receipt-internal consistency. It does not prove store provenance,
+a signature, authorization, source-evidence resolution history, or that a caller
+supplied the bytes from the engine store. Receipt-only validation also cannot
+prove that summary equals the registered rule title or that thresholds,
+required capabilities, source, or completeness match the absent descriptor,
+configuration, or normalized snapshot. A self-consistent fabricated receipt can
+recompute `alert_id`; trusted store acquisition and the downstream bundle scanner
+remain separate requirements.
+
+The historical `alert-receipt-v1.golden.json` remains the byte/SHA fixture for
+the serializer and is unchanged. Its deliberately fabricated `aaaa...` alert ID
+is not derivation-valid, so it is not a positive consumer fixture. Consumer
+acceptance is pinned instead to deterministic bytes produced through the real
+engine path; tests also prove every covered engine-produced receipt validates.
+
+The 8 MiB gate is additive to this public consumer/export boundary only. It does
+not change reachable producer serialization or existing persistence bytes. A
+downstream component encountering a larger receipt reports it unavailable or
+failed without truncation or a partial-success artifact. Raising the ceiling
+requires a named future consumer/profile revision; it is not a permissive v1
+fallback.
+
 ## Required Tests And Handoffs
 
 Issue #80 tests cover canonical byte equivalence, rule/config ordering,
@@ -299,7 +360,9 @@ duplicate evidence/config rejection, missing capability suppression, unresolved
 evidence rejection, invalid thresholds, mixed source applicability, partial and
 historical completeness, receipt privacy, low-entropy HMAC safety, immutable
 append/read, fresh database, supported existing-database initialization,
-transaction rollback, newer/broken schema refusal, and golden fixture bytes.
+transaction rollback, newer/broken schema refusal, unchanged serializer-golden
+fixture bytes/hash, an engine-produced consumer-golden hash, and the strict
+public receipt-consumer compatibility boundary.
 
 Handoffs:
 

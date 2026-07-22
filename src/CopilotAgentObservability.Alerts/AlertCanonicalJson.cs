@@ -282,7 +282,17 @@ public static class AlertCanonicalJson
 
 internal static class AlertWire
 {
-    public static string Timestamp(DateTimeOffset value) => value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", System.Globalization.CultureInfo.InvariantCulture);
+    private const string TimestampFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
+
+    public static string Timestamp(DateTimeOffset value) => value.ToUniversalTime().ToString(TimestampFormat, System.Globalization.CultureInfo.InvariantCulture);
+    public static bool TryParseTimestamp(string? value, out DateTimeOffset result) =>
+        DateTimeOffset.TryParseExact(
+            value,
+            TimestampFormat,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+            out result)
+        && string.Equals(value, Timestamp(result), StringComparison.Ordinal);
     public static string Capability(AlertCapabilityAvailability value) => value switch { AlertCapabilityAvailability.Available => "available", AlertCapabilityAvailability.Unavailable => "unavailable", AlertCapabilityAvailability.Unknown => "unknown", _ => throw InvalidEnum() };
     public static string SignalKind(AlertSignalKind value) => value switch { AlertSignalKind.LlmCall => "llm_call", AlertSignalKind.ToolCall => "tool_call", AlertSignalKind.Permission => "permission", AlertSignalKind.FileAccess => "file_access", AlertSignalKind.SessionEvent => "session_event", _ => throw InvalidEnum() };
     public static string SignalStatus(AlertSignalStatus value) => value switch { AlertSignalStatus.Success => "success", AlertSignalStatus.Error => "error", AlertSignalStatus.Cancelled => "cancelled", AlertSignalStatus.Unknown => "unknown", _ => throw InvalidEnum() };

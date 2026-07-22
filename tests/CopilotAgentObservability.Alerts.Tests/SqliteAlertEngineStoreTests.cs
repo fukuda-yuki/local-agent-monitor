@@ -194,6 +194,24 @@ public sealed class SqliteAlertEngineStoreTests : IDisposable
         Assert.Contains("minimum_sample_unmet", Assert.Single(store.ListSuppressions(evaluation.EvaluationId).CanonicalJsonItems), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Append_FrozenCompletenessReasonCombination_RemainsAccepted()
+    {
+        var store = new SqliteAlertEngineStore(ConnectionString);
+        Assert.Equal(AlertStoreStatus.Success, store.Initialize().Status);
+        var evaluation = Evaluation();
+        evaluation = evaluation with
+        {
+            Receipts = [evaluation.Receipts[0] with { Completeness = AlertCompleteness.Full }],
+        };
+
+        var result = store.Append(evaluation);
+
+        Assert.Equal(AlertStoreStatus.Success, result.Status);
+        Assert.Equal(AlertStoreStatus.Success, store.GetEvaluation(evaluation.EvaluationId).Status);
+        Assert.Equal(AlertStoreStatus.Success, store.GetReceipt(evaluation.Receipts[0].AlertId).Status);
+    }
+
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();

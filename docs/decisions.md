@@ -2307,3 +2307,22 @@ receipt, and suppression tables. #81/#82 add rules through the frozen registry,
 #83 owns a separate lifecycle component, and #85 reads canonical receipts;
 none may rewrite engine receipt bytes or tables. The canonical contract is
 [alert rule engine](specifications/interfaces/alert-rule-engine.md).
+
+The additive consumer-compatibility repair keeps those producer/store bytes and
+schema v1 unchanged while making `AlertReceiptConsumerV1` the single strict
+public byte-validation boundary. It uses consumer-owned semantic invariants,
+byte-compares against the canonical serializer, recomputes only the derivable
+alert ID through the behavior-identical engine helper, returns a five-field
+bounded identity projection, and maps every rejection to one no-leak failure.
+Its 8 MiB and exact-shape depth ceilings apply only to consumers/exporters;
+larger persisted receipts remain byte-compatible but are unavailable to this
+consumer and require a named future consumer/profile revision rather than
+truncation or permissive fallback. Evaluation/input/config hashes cannot be
+recomputed from receipt-only bytes and are shape-checked only; success proves no
+origin, signature, authorization, store provenance, or historical evidence
+resolution. It also cannot bind summary/threshold/capability/source/completeness
+claims to the absent registry, configuration, and snapshot; a self-consistent
+fabricated receipt can recompute its alert ID. Trusted store acquisition and
+downstream scanning remain separate. Existing serializer/evaluator/store
+admission remains unchanged, including the unchanged serializer-only golden
+with its fabricated alert ID.

@@ -377,6 +377,26 @@ use private keyed HMAC tokens. SQLite ownership is limited to the
 component to coexist without rewriting receipt bytes. Concrete #81/#82 rules
 and #85 UI/export remain downstream work.
 
+Downstream components validate exact canonical receipt bytes through the
+#80-owned `AlertReceiptConsumerV1` boundary rather than recreating the receipt
+schema or semantic rules. The boundary rejects unknown/duplicate fields,
+non-canonical UTF-8, version/profile drift, and semantic invariant failures with
+one fixed no-leak failure. It recomputes the receipt-internal `alert_id` through
+the same owner helper used by the engine; evaluation/input/config hashes receive
+shape checks only because the receipt omits their source snapshot, expanded
+configuration, and complete registry fingerprint. It accepts at most 8 MiB and
+the exact receipt-v1 JSON depth, then exposes only alert/session/optional trace/
+source-surface/last-observed identity. This consumer ceiling and semantic gate
+do not change existing serializer/evaluator/store admission or bytes; an
+over-limit/invalid downstream receipt is unavailable/failed, never truncated,
+and a different contract requires a named future consumer/profile revision.
+Successful validation proves internal canonical consistency only, not origin,
+signing, authorization, store provenance, historical evidence resolution, or
+agreement of summary/threshold/capability/source/completeness fields with the
+absent descriptor, configuration, and snapshot. A self-consistent fabricated
+receipt can recompute its alert ID, so trusted store acquisition and downstream
+scanning remain separate.
+
 ## Source schema drift and Claude Code P0
 
 Issue #62 stores immutable source-schema observations per committed ingest

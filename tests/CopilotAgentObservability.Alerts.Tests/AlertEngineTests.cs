@@ -319,6 +319,66 @@ public sealed class AlertEngineTests
         Assert.DoesNotContain("C:\\\\Users", json, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Evaluate_ZeroThresholdReceipt_IsAcceptedByCanonicalConsumer()
+    {
+        var snapshot = Fixture.Snapshot();
+        var rule = new TestRule(Fixture.Descriptor(), Fixture.Match(snapshot.Signals[0].Evidence));
+        var receipt = Assert.Single(new AlertEvaluationEngine(new AlertRuleRegistry([rule]), new Resolver(true)).Evaluate(snapshot, Fixture.Configuration()).Receipts);
+
+        var envelope = AlertReceiptConsumerV1.Validate(AlertCanonicalJson.SerializeReceipt(receipt));
+
+        Assert.Empty(receipt.EffectiveThresholds);
+        Assert.Equal(receipt.AlertId, envelope.AlertId);
+        Assert.Equal(receipt.SessionId, envelope.SessionId);
+    }
+
+    [Fact]
+    public void Evaluate_AllProducedReceipts_AreAcceptedByCanonicalConsumer()
+    {
+        var snapshot = Fixture.Snapshot();
+        var first = new TestRule(Fixture.Descriptor("a-rule"), Fixture.Match(snapshot.Signals[0].Evidence));
+        var second = new TestRule(
+            Fixture.Descriptor("b-rule"),
+            Fixture.Match(snapshot.Signals[0].Evidence) with { Severity = AlertSeverity.Critical });
+
+        var result = new AlertEvaluationEngine(new AlertRuleRegistry([first, second]), new Resolver(true)).Evaluate(snapshot, Fixture.Configuration());
+
+        Assert.Equal(2, result.Receipts.Count);
+        Assert.All(result.Receipts, receipt =>
+        {
+            var envelope = AlertReceiptConsumerV1.Validate(AlertCanonicalJson.SerializeReceipt(receipt));
+            Assert.Equal(receipt.AlertId, envelope.AlertId);
+        });
+    }
+
+    [Fact]
+    public void Evaluate_EvidenceOutsideMatchWindow_RemainsConsumerCompatible()
+    {
+        var snapshot = Fixture.Snapshot();
+        var evidence = snapshot.Signals[0].Evidence;
+        var match = Fixture.Match(evidence) with { FirstObservedAt = evidence.ObservedAt.AddTicks(1) };
+        var rule = new TestRule(Fixture.Descriptor(), match);
+
+        var receipt = Assert.Single(new AlertEvaluationEngine(new AlertRuleRegistry([rule]), new Resolver(true)).Evaluate(snapshot, Fixture.Configuration()).Receipts);
+        var envelope = AlertReceiptConsumerV1.Validate(AlertCanonicalJson.SerializeReceipt(receipt));
+
+        Assert.True(Assert.Single(receipt.Evidence).ObservedAt < receipt.FirstObservedAt);
+        Assert.Equal(receipt.AlertId, envelope.AlertId);
+    }
+
+    [Fact]
+    public void Evaluate_FrozenCompletenessReasonCombination_RemainsAccepted()
+    {
+        var snapshot = Fixture.Snapshot(reasons: ["ingest_gap"]) with { Completeness = AlertCompleteness.Full };
+        var rule = new TestRule(Fixture.Descriptor(), Fixture.Match(snapshot.Signals[0].Evidence));
+
+        var receipt = Assert.Single(new AlertEvaluationEngine(new AlertRuleRegistry([rule]), new Resolver(true)).Evaluate(snapshot, Fixture.Configuration()).Receipts);
+
+        Assert.Equal(AlertCompleteness.Full, receipt.Completeness);
+        Assert.Equal(["ingest_gap"], receipt.CompletenessReasons);
+    }
+
     private sealed class TestRule(AlertRuleDescriptor descriptor, AlertRuleMatch match) : IAlertRule
     {
         public AlertRuleDescriptor Descriptor { get; } = descriptor;
