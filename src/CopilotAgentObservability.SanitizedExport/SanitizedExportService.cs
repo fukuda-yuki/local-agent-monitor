@@ -56,7 +56,7 @@ internal sealed class SanitizedExportService
 
         foreach (var record in included)
         {
-            var scanError = SanitizedExportScanner.Scan(record, request.ForbiddenMarkers);
+            var scanError = SanitizedExportScanner.Scan(record);
             if (scanError is not null) return FailurePreview(request, scanError);
         }
 
@@ -205,7 +205,7 @@ internal sealed class SanitizedExportService
                 if (bytes is null) return InspectionFailure("archive_invalid");
                 if (Hash(bytes) != file.GetProperty("sha256").GetString()) return InspectionFailure("checksum_mismatch");
                 var record = new SanitizedExportRecord(path, file.GetProperty("record_type").GetString()!, file.GetProperty("record_id").GetString()!, null, null, null, null, null, null, DateTimeOffset.UnixEpoch, bytes, []);
-                var scanError = SanitizedExportScanner.Scan(record, []);
+                var scanError = SanitizedExportScanner.Scan(record);
                 if (scanError is not null) return InspectionFailure(scanError);
                 var producerError = SanitizedExportProducerValidator.Validate(record, requireEnvelope: false);
                 if (producerError is not null) return InspectionFailure(producerError);
@@ -236,8 +236,6 @@ internal sealed class SanitizedExportService
             || request.Snapshot.Records.Count > SanitizedExportLimits.MaximumRecords
             || request.Snapshot.AgentVersions.Count > SanitizedExportLimits.MaximumVersions
             || request.Snapshot.ProcessingVersions?.Count > SanitizedExportLimits.MaximumVersions
-            || request.ForbiddenMarkers.Count > SanitizedExportLimits.MaximumForbiddenMarkers
-            || request.ForbiddenMarkers.Any(marker => string.IsNullOrEmpty(marker) || marker.Length > SanitizedExportLimits.MaximumMarkerLength)
             || InvalidBoundedText(request.Snapshot.LocalMonitorVersion)
             || request.Snapshot.AgentVersions.Any(item => InvalidBoundedText(item.SourceSurface) || InvalidBoundedText(item.Version))
             || request.Snapshot.AgentVersions.GroupBy(item => (item.SourceSurface, item.Version)).Any(group => group.Count() > 1)
@@ -291,7 +289,7 @@ internal sealed class SanitizedExportService
         }));
         metadata.AddRange(request.Snapshot.Records.SelectMany(record => record.Dependencies).SelectMany(item => new[] { item.RecordType, item.RecordId }));
         metadata.AddRange(SelectionValues(request.Selection));
-        var metadataError = SanitizedExportScanner.ScanMetadata(metadata, request.ForbiddenMarkers);
+        var metadataError = SanitizedExportScanner.ScanMetadata(metadata);
         if (metadataError is not null) return metadataError;
         var manifestIdentifiers = request.Snapshot.AgentVersions.SelectMany(item => new[] { item.SourceSurface, item.Version })
             .Concat(request.Snapshot.ProcessingVersions?.SelectMany(item => new[] { item.Key, item.Value }) ?? [])
@@ -306,7 +304,7 @@ internal sealed class SanitizedExportService
             || manifestIdentifiers.Any(value => value is not null && InvalidIdentifier(value))) return "invalid_request";
         foreach (var record in request.Snapshot.Records)
         {
-            var scanError = SanitizedExportScanner.Scan(record, request.ForbiddenMarkers);
+            var scanError = SanitizedExportScanner.Scan(record);
             if (scanError is not null && scanError != "unexpected_entry") return scanError;
             var producerError = SanitizedExportProducerValidator.Validate(record);
             if (producerError is not null) return producerError;
@@ -435,7 +433,8 @@ internal sealed class SanitizedExportService
                 || localNameLength != nameLength) return "archive_invalid";
             var centralName = bytes.AsSpan(cursor + 46, nameLength);
             var localName = bytes.AsSpan((int)localOffset + 30, localNameLength);
-            if (!centralName.SequenceEqual(localName)) return "archive_invalid";
+            var requiresUtf8 = centralName.ContainsAnyExceptInRange((byte)0x00, (byte)0x7f);
+            if (!centralName.SequenceEqual(localName) || (((centralFlags & 0x0800) != 0) != requiresUtf8)) return "archive_invalid";
             var nextLocal = (long)localOffset + 30 + localNameLength + compressedSize;
             if (nextLocal > centralOffset) return "archive_invalid";
             expectedLocalOffset = (int)nextLocal;

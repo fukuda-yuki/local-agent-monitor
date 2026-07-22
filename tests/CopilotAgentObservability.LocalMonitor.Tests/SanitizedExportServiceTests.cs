@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.SanitizedExport;
+using CopilotAgentObservability.Alerts;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -36,7 +37,8 @@ public sealed class SanitizedExportServiceTests
 
         Assert.True(result.Success, result.ErrorCode);
         using var archive = new ZipArchive(new MemoryStream(result.ArchiveBytes!), ZipArchiveMode.Read);
-        Assert.Equal(alert, Read(archive.GetEntry("alert-receipts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json")!));
+        var envelope = AlertReceiptConsumerV1.Validate(alert);
+        Assert.Equal(alert, Read(archive.GetEntry($"alert-receipts/{envelope.AlertId}.json")!));
     }
 
     [Fact]
@@ -87,6 +89,9 @@ public sealed class SanitizedExportServiceTests
     [InlineData("{\"value\":\"Authorization: Bearer synthetic-token\"}", "credential_pattern")]
     [InlineData("{\"value\":\"C:\\\\Users\\\\Example\\\\private.txt\"}", "local_path")]
     [InlineData("{\"contact\":\"person@example.invalid\"}", "pii_pattern")]
+    [InlineData("{\"value\":\"+1 202-555-0123\"}", "pii_pattern")]
+    [InlineData("{\"value\":\"123-45-6789\"}", "pii_pattern")]
+    [InlineData("{\"value\":\"123 Main Street\"}", "pii_pattern")]
     public void Create_RejectsGenericScannerViolationsBeforeProducerAuthorization(string json, string expected)
     {
         var invalid = RepositoryRecord("session-a") with { CanonicalBytes = Encoding.UTF8.GetBytes(json) };
@@ -95,24 +100,6 @@ public sealed class SanitizedExportServiceTests
 
         Assert.Equal(expected, result.ErrorCode);
         Assert.Null(result.ArchiveBytes);
-    }
-
-    [Fact]
-    public void Create_RejectsEveryIssue91MarkerTransformationCaseInsensitively()
-    {
-        var path = Path.Combine(FindRepositoryRoot(), "scripts", "validation", "issue-91", "fixtures", "secret-corpus.v1.json");
-        using var corpus = JsonDocument.Parse(File.ReadAllBytes(path));
-        var service = new SanitizedExportService();
-        foreach (var item in corpus.RootElement.GetProperty("cases").EnumerateArray())
-        {
-            var marker = item.GetProperty("marker").GetString()!;
-            foreach (var value in MarkerTransformations(marker.ToUpperInvariant()))
-            {
-                var record = RepositoryRecord("session-a") with { RepositoryName = value };
-                record = record with { CanonicalBytes = RepositoryBytes(record) };
-                Assert.False(service.Create(Request([record]) with { ForbiddenMarkers = [marker] }).Success);
-            }
-        }
     }
 
     [Fact]
@@ -148,9 +135,12 @@ public sealed class SanitizedExportServiceTests
         var root = FindRepositoryRoot();
         var contractRoot = Path.Combine(root, "docs", "specifications", "contracts", "sanitized-evidence", "v1");
         using var schema = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(contractRoot, "manifest.schema.json")));
+        using var control = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(contractRoot, "control-request.schema.json")));
         using var handoff = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(contractRoot, "issue-91-validation-handoff.json")));
         Assert.Equal("sanitized-evidence-producers.v1", schema.RootElement.GetProperty("properties").GetProperty("repository_safe_validation").GetProperty("properties").GetProperty("producer_profile").GetProperty("const").GetString());
-        Assert.Equal("blocked_owner_providers", handoff.RootElement.GetProperty("production_surface_state").GetString());
+        Assert.Equal("sanitized-export-control.v1", control.RootElement.GetProperty("properties").GetProperty("schema_version").GetProperty("const").GetString());
+        Assert.False(control.RootElement.GetProperty("properties").TryGetProperty("forbidden_markers", out _));
+        Assert.Equal("implemented_candidate", handoff.RootElement.GetProperty("production_surface_state").GetString());
     }
 
     [Fact]
@@ -178,7 +168,7 @@ public sealed class SanitizedExportServiceTests
 
     private sealed class Provider(SanitizedExportSourceSnapshot snapshot) : ISanitizedExportSnapshotProvider
     {
-        public SanitizedExportSnapshotCapture Capture() => new(true, null, snapshot);
+        public SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection) => new(true, null, snapshot);
     }
 
     private static SanitizedExportRequest Request(IReadOnlyList<SanitizedExportRecord> records)
@@ -186,7 +176,7 @@ public sealed class SanitizedExportServiceTests
         var findings = records.Any(record => record.RecordType == "instruction_finding_handoff");
         var alerts = records.Any(record => record.RecordType == "alert_receipt");
         return new(CreatedAt, new("snapshot-85", "local-monitor-test", [new("github-copilot-cli", "1.0.73")], records,
-            new(findings ? "available" : "missing", alerts ? "available" : "missing", "unavailable", "unavailable", "unavailable")), new(), []);
+            new(findings ? "available" : "missing", alerts ? "available" : "missing", "unavailable", "unavailable", "unavailable")), new());
     }
 
     private static SanitizedExportRecord RepositoryRecord(string id)
@@ -199,12 +189,14 @@ public sealed class SanitizedExportServiceTests
     private static byte[] RepositoryBytes(SanitizedExportRecord record) => Encoding.UTF8.GetBytes(
         $"{{\"schema_version\":\"repository-metadata-projection.v1\",\"record_id\":{JsonSerializer.Serialize(record.RecordId)},\"session_id\":{JsonSerializer.Serialize(record.SessionId)},\"trace_id\":{JsonSerializer.Serialize(record.TraceId)},\"source_surface\":{JsonSerializer.Serialize(record.SourceSurface)},\"repository_name\":{JsonSerializer.Serialize(record.RepositoryName)},\"workspace_label\":{JsonSerializer.Serialize(record.WorkspaceLabel)},\"repo_snapshot\":{JsonSerializer.Serialize(record.RepoSnapshot)},\"observed_at\":\"2026-07-22T00:00:00.0000000Z\",\"completeness\":{JsonSerializer.Serialize(record.Completeness)},\"content_state\":{JsonSerializer.Serialize(record.ContentState)},\"retention_state\":{JsonSerializer.Serialize(record.RetentionState)}}}");
 
-    private static SanitizedExportRecord AlertRecord(byte[] bytes) => new(
-        "alert-receipts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json", "alert_receipt",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "session-1", "trace-1", "github-copilot", null, null, null,
-        new DateTimeOffset(2026, 7, 21, 1, 2, 4, TimeSpan.Zero), bytes, []);
+    private static SanitizedExportRecord AlertRecord(byte[] bytes)
+    {
+        var envelope = AlertReceiptConsumerV1.Validate(bytes);
+        return new($"alert-receipts/{envelope.AlertId}.json", "alert_receipt", envelope.AlertId, envelope.SessionId,
+            envelope.TraceId, envelope.SourceSurface, null, null, null, envelope.LastObservedAt, bytes, []);
+    }
 
-    private static byte[] AlertBytes() => Trim(File.ReadAllBytes(Path.Combine(FindRepositoryRoot(), "tests", "CopilotAgentObservability.Alerts.Tests", "TestData", "alert-receipt-v1.golden.json")));
+    private static byte[] AlertBytes() => SanitizedExportAlertFixture.Bytes();
     private static byte[] Trim(byte[] bytes) => bytes is [.., (byte)'\n'] ? bytes[..^1] : bytes;
     private static byte[] Read(ZipArchiveEntry entry) { using var stream = entry.Open(); using var output = new MemoryStream(); stream.CopyTo(output); return output.ToArray(); }
 
@@ -220,13 +212,6 @@ public sealed class SanitizedExportServiceTests
                 using var stream = entry.Open(); stream.Write(bytes);
             }
         return output.ToArray();
-    }
-
-    private static IEnumerable<string> MarkerTransformations(string marker)
-    {
-        yield return marker; yield return JsonSerializer.Serialize(marker)[1..^1]; yield return System.Net.WebUtility.HtmlEncode(marker);
-        yield return Uri.EscapeDataString(marker); yield return Convert.ToBase64String(Encoding.UTF8.GetBytes(marker));
-        yield return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(marker))).ToLowerInvariant()[..12];
     }
 
     private static string FindRepositoryRoot()

@@ -10,12 +10,14 @@ public static class SanitizedExportContractVersions
     public const string Checksum = "sha256.v1";
     public const string Scanner = "repository-safe-scanner.v1";
     public const string ProducerValidation = "sanitized-evidence-producers.v1";
+    public const string ControlRequest = "sanitized-export-control.v1";
     public const string CompatibilityMinimum = "1";
     public const string CompatibilityMaximum = "1";
 }
 
 public static class SanitizedExportLimits
 {
+    public const int MaximumControlRequestBytes = 1024 * 1024;
     public const int MaximumArchiveEntries = 256;
     public const long MaximumUncompressedBytes = 128L * 1024 * 1024;
     public const int MaximumRecordBytes = 8 * 1024 * 1024;
@@ -23,9 +25,7 @@ public static class SanitizedExportLimits
     public const int MaximumDependenciesPerRecord = 256;
     public const int MaximumListValues = 256;
     public const int MaximumVersions = 256;
-    public const int MaximumForbiddenMarkers = 64;
     public const int MaximumIdentifierLength = 256;
-    public const int MaximumMarkerLength = 4096;
 }
 
 public enum SanitizedExportDependencyDisposition
@@ -83,16 +83,39 @@ public sealed record SanitizedExportSelection(
     DateTimeOffset? EndExclusive = null,
     IReadOnlyList<string>? ReceiptTypes = null);
 
+internal static class SanitizedExportSelectionValidator
+{
+    internal static bool IsValid(SanitizedExportSelection? selection)
+    {
+        if (selection is null || selection.StartInclusive is { } startOffset && startOffset.Offset != TimeSpan.Zero
+            || selection.EndExclusive is { } endOffset && endOffset.Offset != TimeSpan.Zero
+            || selection.StartInclusive is { } start && selection.EndExclusive is { } end && start >= end) return false;
+        IReadOnlyList<string>?[] lists =
+        [
+            selection.SessionIds, selection.TraceIds, selection.SourceSurfaces, selection.RepositoryNames,
+            selection.WorkspaceLabels, selection.ReceiptTypes,
+        ];
+        return lists.All(list => list is null || list.Count <= SanitizedExportLimits.MaximumListValues
+            && list.All(ValidValue)
+            && list.Distinct(StringComparer.Ordinal).Count() == list.Count)
+            && (selection.ReceiptTypes is null || selection.ReceiptTypes.All(value => value is
+                "repository_metadata_projection" or "instruction_finding_handoff" or "alert_receipt"));
+    }
+
+    private static bool ValidValue(string value) => !string.IsNullOrWhiteSpace(value)
+        && value.Length <= SanitizedExportLimits.MaximumIdentifierLength
+        && !value.Any(character => char.IsControl(character) || character is '/' or '\\' or '?' or '#');
+}
+
 internal sealed record SanitizedExportRequest(
     DateTimeOffset CreatedAt,
     SanitizedExportSourceSnapshot Snapshot,
-    SanitizedExportSelection Selection,
-    IReadOnlyList<string> ForbiddenMarkers);
+    SanitizedExportSelection Selection);
 
 public sealed record SanitizedExportControlRequest(
+    string SchemaVersion,
     DateTimeOffset CreatedAt,
-    SanitizedExportSelection Selection,
-    IReadOnlyList<string> ForbiddenMarkers);
+    SanitizedExportSelection Selection);
 
 public sealed record SanitizedExportSnapshotCapture(
     bool Success,
@@ -101,7 +124,7 @@ public sealed record SanitizedExportSnapshotCapture(
 
 public interface ISanitizedExportSnapshotProvider
 {
-    SanitizedExportSnapshotCapture Capture();
+    SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection);
 }
 
 public sealed record SanitizedExportPreviewEntry(string Path, string RecordType, string RecordId, long Size, string Sha256);

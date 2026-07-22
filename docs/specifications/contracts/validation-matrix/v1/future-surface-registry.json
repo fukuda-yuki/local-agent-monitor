@@ -30,15 +30,6 @@
       "expected_evidence_location": "docs/sprints/issue-84-alert-center/validation-matrix.json"
     },
     {
-      "surface_id": "sanitized-evidence-export",
-      "title": "Sanitized evidence export",
-      "owner_issue": 85,
-      "state": "not_available",
-      "entry_condition": "Issue #85 export surface and scanner-backed tests are present in a candidate SHA.",
-      "required_profiles": ["sanitized-evidence", "raw-default-source", "sanitized-only-source", "scanner-failure"],
-      "expected_evidence_location": "docs/sprints/issue-85-sanitized-export/validation-matrix.json"
-    },
-    {
       "surface_id": "transactional-sanitized-import",
       "title": "Transactional sanitized import",
       "owner_issue": 86,

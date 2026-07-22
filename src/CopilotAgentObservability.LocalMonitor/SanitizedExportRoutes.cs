@@ -3,12 +3,13 @@ using System.Net.Mime;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.SanitizedExport;
+using CopilotAgentObservability.Persistence.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor;
 
 internal static class SanitizedExportRoutes
 {
-    private const int MaximumRequestBytes = (int)SanitizedExportLimits.MaximumUncompressedBytes;
+    private const int MaximumRequestBytes = SanitizedExportLimits.MaximumControlRequestBytes;
 
     internal static bool IsPath(PathString path) => path.StartsWithSegments("/api/sanitized-export/v1");
 
@@ -16,7 +17,7 @@ internal static class SanitizedExportRoutes
     {
         var application = new Application(
             Path.Combine(Path.GetDirectoryName(Path.GetFullPath(databasePath))!, "sanitized-exports"),
-            snapshotProvider ?? new UnavailableSanitizedExportSnapshotProvider());
+            snapshotProvider ?? new SqliteSanitizedExportSnapshotProvider(databasePath));
         app.MapPost("/api/sanitized-export/v1/previews", context => PreviewAsync(context, application));
         app.MapPost("/api/sanitized-export/v1/exports", context => CreateAsync(context, application));
         app.MapGet("/api/sanitized-export/v1/exports/{exportId}", (string exportId, HttpContext context) => ResultAsync(context, application, exportId));
@@ -98,9 +99,12 @@ internal static class SanitizedExportRoutes
 
     private static bool AuthorizeRead(HttpContext context) => !MonitorHost.IsCrossSiteRequest(context);
 
-    private static int Status(string errorCode) => errorCode is "publish_failed" or "output_exists" or "snapshot_provider_unavailable"
-        ? StatusCodes.Status503ServiceUnavailable
-        : StatusCodes.Status422UnprocessableEntity;
+    private static int Status(string errorCode) => errorCode switch
+    {
+        "request_invalid" => StatusCodes.Status400BadRequest,
+        "publish_failed" or "output_exists" or "snapshot_provider_unavailable" or "snapshot_store_busy" or "snapshot_store_unavailable" => StatusCodes.Status503ServiceUnavailable,
+        _ => StatusCodes.Status422UnprocessableEntity,
+    };
 
     private static async Task JsonAsync<T>(HttpContext context, int status, T value)
     {

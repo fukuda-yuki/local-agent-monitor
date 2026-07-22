@@ -1,7 +1,6 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Security.Cryptography;
 
 namespace CopilotAgentObservability.SanitizedExport;
 
@@ -18,13 +17,13 @@ internal static partial class SanitizedExportScanner
         "username", "phone", "address", "absolute_path", "local_path", "analysis_markdown", "raw_analysis",
     };
 
-    internal static string? Scan(SanitizedExportRecord record, IReadOnlyList<string> forbiddenMarkers)
+    internal static string? Scan(SanitizedExportRecord record)
     {
         if (!SanitizedExportEntryPolicy.IsAllowed(record)) return "unexpected_entry";
-        return ScanBytes(record.CanonicalBytes, forbiddenMarkers);
+        return ScanBytes(record.CanonicalBytes);
     }
 
-    private static string? ScanBytes(byte[] bytes, IReadOnlyList<string> forbiddenMarkers)
+    private static string? ScanBytes(byte[] bytes)
     {
         if (bytes.Length == 0) return "invalid_canonical_content";
 
@@ -53,10 +52,7 @@ internal static partial class SanitizedExportScanner
         if (ContainsForbiddenCsvHeader(text) || RawFieldPattern().IsMatch(text)) return "forbidden_field";
         if (CredentialPattern().IsMatch(text)) return "credential_pattern";
         if (LocalPathPattern().IsMatch(text)) return "local_path";
-        if (EmailPattern().IsMatch(text)) return "pii_pattern";
-        if (forbiddenMarkers.Any(marker => MarkerVariants(marker).Any(variant => text.Contains(variant, StringComparison.OrdinalIgnoreCase))))
-            return "forbidden_marker";
-
+        if (EmailPattern().IsMatch(text) || SensitiveIdentityPattern().IsMatch(text)) return "pii_pattern";
         return null;
     }
 
@@ -67,27 +63,13 @@ internal static partial class SanitizedExportScanner
         return header.Split(',').Select(value => value.Trim().Trim('"')).Any(ForbiddenFields.Contains);
     }
 
-    internal static string? ScanMetadata(IEnumerable<string?> values, IReadOnlyList<string> forbiddenMarkers)
+    internal static string? ScanMetadata(IEnumerable<string?> values)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new { values = values.Where(value => value is not null).ToArray() });
-        return ScanBytes(bytes, forbiddenMarkers);
+        return ScanBytes(bytes);
     }
 
-    internal static string? ScanCanonicalJson(byte[] bytes) => ScanBytes(bytes, []);
-
-    private static IEnumerable<string> MarkerVariants(string marker)
-    {
-        if (string.IsNullOrEmpty(marker)) yield break;
-        foreach (var spelling in new[] { marker, marker.ToUpperInvariant(), marker.ToLowerInvariant() }.Distinct(StringComparer.Ordinal))
-        {
-            yield return spelling;
-            yield return JsonSerializer.Serialize(spelling)[1..^1];
-            yield return System.Net.WebUtility.HtmlEncode(spelling);
-            yield return Uri.EscapeDataString(spelling);
-            yield return Convert.ToBase64String(Encoding.UTF8.GetBytes(spelling));
-            yield return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spelling))).ToLowerInvariant()[..12];
-        }
-    }
+    internal static string? ScanCanonicalJson(byte[] bytes) => ScanBytes(bytes);
 
     private static bool ContainsForbiddenField(JsonElement element)
     {
@@ -116,6 +98,9 @@ internal static partial class SanitizedExportScanner
 
     [GeneratedRegex("(?i)(?<![a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?![a-z0-9-])", RegexOptions.CultureInvariant)]
     private static partial Regex EmailPattern();
+
+    [GeneratedRegex("(?ix)(?:\\b\\d{3}-\\d{2}-\\d{4}\\b|(?<![\\d])(?:\\+?1[ .-]?)?(?:\\(\\d{3}\\)|\\d{3})[ .-]\\d{3}[ .-]\\d{4}(?![\\d])|\\b\\d{1,6}[ ]+[a-z0-9.'-]+(?:[ ]+[a-z0-9.'-]+){0,4}[ ]+(?:street|st|road|rd|avenue|ave|boulevard|blvd|lane|ln|drive|dr|way)\\b)", RegexOptions.CultureInvariant)]
+    private static partial Regex SensitiveIdentityPattern();
 
     [GeneratedRegex("(?i)(?:data-)?(raw_otlp|raw_payload|payload_json|content_json|prompt|user_prompt|response|assistant_response|system_prompt|system_message|tool_arguments|tool_argument|tool_input|tool_results|tool_result|tool_output|source_code|source_body|file_body|file_content|authorization|password|secret|token|api_key|email|user_email|user_id|user_name|username|phone|address|absolute_path|local_path|analysis_markdown|raw_analysis)\\s*=", RegexOptions.CultureInvariant)]
     private static partial Regex RawFieldPattern();

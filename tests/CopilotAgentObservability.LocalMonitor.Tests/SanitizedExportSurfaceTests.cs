@@ -11,7 +11,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SanitizedExportSurfaceTests
 {
     [Fact]
-    public async Task Api_PreviewFailsClosedWithoutTrustedSnapshotProvider()
+    public async Task Api_PreviewUsesProductionSqliteSnapshotProvider()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
@@ -26,8 +26,9 @@ public sealed class SanitizedExportSurfaceTests
         using var response = await host.Client.SendAsync(Post(
             "/api/sanitized-export/v1/previews", SanitizedExportJson.SerializeControlRequest(Control())));
 
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-        Assert.Equal("{\"error\":\"snapshot_provider_unavailable\"}", await response.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.True(json.RootElement.GetProperty("success").GetBoolean());
     }
 
     [Fact]
@@ -41,7 +42,7 @@ public sealed class SanitizedExportSurfaceTests
 
         using var previewOutput = new StringWriter();
         using var previewError = new StringWriter();
-        var previewExit = SanitizedExportCli.Run(["preview", "--request", requestPath], previewOutput, previewError, provider);
+        var previewExit = SanitizedExportCli.Run(["preview", "--database", temp.DatabasePath, "--request", requestPath], previewOutput, previewError, provider);
         Assert.Equal(0, previewExit);
         Assert.Equal(string.Empty, previewError.ToString());
         using var preview = JsonDocument.Parse(previewOutput.ToString());
@@ -53,7 +54,7 @@ public sealed class SanitizedExportSurfaceTests
 
         using var createOutput = new StringWriter();
         using var createError = new StringWriter();
-        var createExit = SanitizedExportCli.Run(["export", "--request", requestPath, "--output", bundlePath], createOutput, createError, provider);
+        var createExit = SanitizedExportCli.Run(["export", "--database", temp.DatabasePath, "--request", requestPath, "--output", bundlePath], createOutput, createError, provider);
         Assert.Equal(0, createExit);
         Assert.True(File.Exists(bundlePath));
         Assert.Equal(string.Empty, createError.ToString());
@@ -171,14 +172,14 @@ public sealed class SanitizedExportSurfaceTests
         using var createRequest = Post("/api/sanitized-export/v1/exports", SanitizedExportJson.SerializeControlRequest(Control()));
         using var create = await host.Client.SendAsync(createRequest);
 
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
-        Assert.Equal("{\"error\":\"forbidden_field\"}", await create.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, create.StatusCode);
+        Assert.Equal("{\"error\":\"snapshot_store_unavailable\"}", await create.Content.ReadAsStringAsync());
         var exportDirectory = Path.Combine(temp.Path, "sanitized-exports");
         Assert.False(Directory.Exists(exportDirectory) && Directory.EnumerateFiles(exportDirectory).Any());
     }
 
     private static SanitizedExportControlRequest Control() => new(
-        new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero), new(SessionIds: ["session-a"]), []);
+        "sanitized-export-control.v1", new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero), new(SessionIds: ["session-a"]));
 
     private static SanitizedExportSourceSnapshot Snapshot()
     {
@@ -219,6 +220,6 @@ public sealed class SanitizedExportSurfaceTests
 
     private sealed class Provider(SanitizedExportSourceSnapshot snapshot) : ISanitizedExportSnapshotProvider
     {
-        public SanitizedExportSnapshotCapture Capture() => new(true, null, snapshot);
+        public SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection) => new(true, null, snapshot);
     }
 }

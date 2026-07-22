@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-agent-monitor.invalid/contracts/sanitized-evidence/v1/control-request.schema.json",
+  "title": "Sanitized export control request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "created_at", "selection"],
+  "properties": {
+    "schema_version": { "const": "sanitized-export-control.v1" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "selection": { "$ref": "#/$defs/selection" }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^/\\\\?#\\u0000-\\u001f]+$" },
+    "ids": { "type": ["array", "null"], "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_ids", "trace_ids", "source_surfaces", "repository_names", "workspace_labels", "start_inclusive", "end_exclusive", "receipt_types"],
+      "properties": {
+        "session_ids": { "$ref": "#/$defs/ids" },
+        "trace_ids": { "$ref": "#/$defs/ids" },
+        "source_surfaces": { "$ref": "#/$defs/ids" },
+        "repository_names": { "$ref": "#/$defs/ids" },
+        "workspace_labels": { "$ref": "#/$defs/ids" },
+        "start_inclusive": { "type": ["string", "null"], "format": "date-time" },
+        "end_exclusive": { "type": ["string", "null"], "format": "date-time" },
+        "receipt_types": {
+          "type": ["array", "null"],
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "enum": ["repository_metadata_projection", "instruction_finding_handoff", "alert_receipt"] }
+        }
+      }
+    }
+  }
+}

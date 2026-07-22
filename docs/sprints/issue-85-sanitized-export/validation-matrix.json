@@ -36,12 +36,12 @@
           "compatibility_basis": "Executed from the exact implementation tree committed as the validation SHA; the repository full test command was intentionally deferred for coordinator serialization."
         }
       ],
-      "actual_result": "Focused authority, CLI, API, archive, schema, fixture, and publication behavior passed. Public requests reject snapshot/record bytes and production fails closed because no trusted owner provider is wired. The required unchanged-candidate integrated full solution gate has not executed.",
+      "actual_result": "The last recorded validation SHA predates the production SQLite snapshot-provider correction. The working candidate now rejects caller snapshot/record bytes and wires read-only production capture, but this row intentionally remains not_attempted until an exact post-commit validation SHA is recorded.",
       "classification": "not_attempted",
       "severity": "medium",
-      "blocker": "Trusted #58/#59/#80 owner/store snapshot providers are not wired, #59 shared validation is not integrated, and the coordinator-deferred full solution test is incomplete.",
-      "retry_condition": "Integrate the owner/store providers and shared #59 validator, demonstrate working preview/export from one coherent local snapshot, then run build/bootstrap/full plus focused authority/CLI/API/fixture filters at one clean evidence SHA.",
-      "unverified_capability": "Working production snapshot capture and unchanged-candidate integrated full solution regression result.",
+      "blocker": "An exact post-commit validation SHA has not yet replaced the historical checkpoint, and the coordinator-deferred full solution gate remains outside this lane.",
+      "retry_condition": "Record the final commit SHA, rerun the prescribed focused provider/authority/CLI/API/schema/golden checks plus coordinator-owned integrated validation, then update this row from that exact SHA.",
+      "unverified_capability": "Unchanged-final-SHA integrated regression result.",
       "owner": "Issue #85 sanitized evidence export",
       "validation_sha": "905b7b750a655daff7cbe73bbf5ad770bf29fce9",
       "validation_date": "2026-07-22",
@@ -78,12 +78,12 @@
           "compatibility_basis": "The tests execute the exact repository corpus, scanner, manifest validator, archive inspector, and publication implementation at the validation SHA."
         }
       ],
-      "actual_result": "The corrected checkpoint closes caller-byte injection and passes the available #58/#80 producer, scanner, archive, dependency, inventory, bounds, preview, and stored-download negative matrix. End-to-end production validation remains unavailable because the trusted owner providers and shared #59 validator are not integrated.",
+      "actual_result": "The recorded failed result belongs to the historical checkpoint. The working candidate adds the production provider, shared #59/#80 consumers, canonical #58 bytes, bounded opaque alert descriptors, and expanded scanner/archive negatives, but no passing classification is inherited before exact-SHA validation.",
       "classification": "failed",
       "severity": "high",
-      "blocker": "Production cannot yet capture a coherent producer-owned #58/#59/#80 snapshot, and instruction_finding_handoff remains fail-closed until the shared #59 validator is integrated.",
-      "retry_condition": "Wire trusted owner/store snapshot adapters, integrate the shared #59 consumer validator without copying its logic, rerun the full carrier/scanner matrix from a working production preview/export, and only then consider promotion.",
-      "unverified_capability": "End-to-end producer-owned snapshot provenance and #59 carrier validation in the production export path.",
+      "blocker": "The corrected scanner/provider evidence has not yet been recorded against the final commit SHA.",
+      "retry_condition": "Rerun the full focused carrier/provider/scanner/archive matrix at the final SHA and record the result without inheriting the historical failure.",
+      "unverified_capability": "Exact-final-SHA scanner and producer-boundary evidence.",
       "owner": "Issue #85 sanitized evidence export",
       "validation_sha": "905b7b750a655daff7cbe73bbf5ad770bf29fce9",
       "validation_date": "2026-07-22",

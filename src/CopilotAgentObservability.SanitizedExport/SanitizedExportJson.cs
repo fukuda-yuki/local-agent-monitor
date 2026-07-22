@@ -5,14 +5,30 @@ namespace CopilotAgentObservability.SanitizedExport;
 
 public static class SanitizedExportJson
 {
+    private static readonly string[] ControlProperties = ["schema_version", "created_at", "selection"];
+    private static readonly string[] SelectionProperties =
+    [
+        "session_ids", "trace_ids", "source_surfaces", "repository_names", "workspace_labels",
+        "start_inclusive", "end_exclusive", "receipt_types",
+    ];
     private static readonly JsonSerializerOptions Options = CreateOptions();
 
     internal static byte[] SerializeRequest(SanitizedExportRequest request) => JsonSerializer.SerializeToUtf8Bytes(request, Options);
     internal static SanitizedExportRequest DeserializeRequest(ReadOnlySpan<byte> bytes) =>
         JsonSerializer.Deserialize<SanitizedExportRequest>(bytes, Options) ?? throw new JsonException();
     public static byte[] SerializeControlRequest(SanitizedExportControlRequest request) => JsonSerializer.SerializeToUtf8Bytes(request, Options);
-    public static SanitizedExportControlRequest DeserializeControlRequest(ReadOnlySpan<byte> bytes) =>
-        JsonSerializer.Deserialize<SanitizedExportControlRequest>(bytes, Options) ?? throw new JsonException();
+    public static SanitizedExportControlRequest DeserializeControlRequest(ReadOnlySpan<byte> bytes)
+    {
+        using var document = JsonDocument.Parse(bytes.ToArray(), new JsonDocumentOptions
+        {
+            AllowTrailingCommas = false,
+            CommentHandling = JsonCommentHandling.Disallow,
+            MaxDepth = 16,
+        });
+        RequireExactProperties(document.RootElement, ControlProperties);
+        RequireExactProperties(document.RootElement.GetProperty("selection"), SelectionProperties);
+        return JsonSerializer.Deserialize<SanitizedExportControlRequest>(bytes, Options) ?? throw new JsonException();
+    }
     public static byte[] Serialize<T>(T value) => JsonSerializer.SerializeToUtf8Bytes(value, Options);
 
     private static JsonSerializerOptions CreateOptions()
@@ -28,6 +44,15 @@ public static class SanitizedExportJson
         };
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower, allowIntegerValues: false));
         return options;
+    }
+
+    private static void RequireExactProperties(JsonElement element, IReadOnlyList<string> expected)
+    {
+        if (element.ValueKind != JsonValueKind.Object) throw new JsonException();
+        var actual = element.EnumerateObject().Select(property => property.Name).ToArray();
+        if (actual.Length != expected.Count || actual.Distinct(StringComparer.Ordinal).Count() != actual.Length
+            || expected.Any(name => !actual.Contains(name, StringComparer.Ordinal)))
+            throw new JsonException();
     }
 }
 

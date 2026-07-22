@@ -42,7 +42,7 @@ public sealed class Issue91ValidationContractTests
         Assert.Equal("validation-future-surfaces.v1", registry.RootElement.GetProperty("schema_version").GetString());
 
         var entries = registry.RootElement.GetProperty("entries").EnumerateArray().ToArray();
-        Assert.Equal([75, 79, 84, 85, 86, 87, 88, 93],
+        Assert.Equal([75, 79, 84, 86, 87, 88, 93],
             entries.Select(entry => entry.GetProperty("owner_issue").GetInt32()));
         Assert.All(entries, entry =>
         {
@@ -88,7 +88,8 @@ public sealed class Issue91ValidationContractTests
             new HashSet<string>(StringComparer.Ordinal)
             {
                 "api_key_token", "authorization_header", "basic_authorization_header", "connection_string", "private_key_certificate", "certificate_block",
-                "cloud_credential", "github_token", "environment_secret", "email_identity",
+                "cloud_credential", "github_token", "environment_secret", "email_identity", "phone_identity",
+                "government_identifier", "postal_address",
                 "absolute_sensitive_path", "source_file_body", "prompt_response_tool_body", "derived_label",
                 "nested_json_content", "nested_markdown_content", "nested_html_content",
             },

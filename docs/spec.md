@@ -377,6 +377,14 @@ use private keyed HMAC tokens. SQLite ownership is limited to the
 component to coexist without rewriting receipt bytes. Concrete #81/#82 rules
 and #85 UI/export remain downstream work.
 
+Issue #85 sanitized evidence export is an export-only consumer of the #58 safe
+projection and the public #59/#80 consumer validators. Its public control is
+`sanitized-export-control.v1` (`schema_version`, UTC `created_at`, `selection`),
+and production snapshot capture is read-only, selection-aware, bounded, and
+anchored to one SQLite transaction without reading raw/content tables. The
+complete interface, archive, scanner, error, and no-provenance inspection
+contract is frozen in `docs/specifications/interfaces/sanitized-evidence-export.md`.
+
 Downstream components validate exact canonical receipt bytes through the
 #80-owned `AlertReceiptConsumerV1` boundary rather than recreating the receipt
 schema or semantic rules. The boundary rejects unknown/duplicate fields,

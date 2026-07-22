@@ -15,13 +15,13 @@ public sealed class SanitizedExportCliTests
         File.WriteAllBytes(requestPath, SanitizedExportJson.SerializeControlRequest(Control()));
         var provider = new Provider(Snapshot());
 
-        var preview = Run(["preview", "--request", requestPath], provider);
+        var preview = Run(["preview", "--database", Path.Combine(temp.Path, "monitor.db"), "--request", requestPath], provider);
         Assert.Equal(0, preview.ExitCode);
         Assert.Equal(string.Empty, preview.Error);
         using (var json = JsonDocument.Parse(preview.Output))
             Assert.Equal("sanitized-evidence", json.RootElement.GetProperty("bundle_profile").GetString());
 
-        var export = Run(["export", "--request", requestPath, "--output", archivePath], provider);
+        var export = Run(["export", "--database", Path.Combine(temp.Path, "monitor.db"), "--request", requestPath, "--output", archivePath], provider);
         Assert.Equal(0, export.ExitCode);
         Assert.True(File.Exists(archivePath));
         using var created = JsonDocument.Parse(export.Output);
@@ -44,11 +44,11 @@ public sealed class SanitizedExportCliTests
         File.WriteAllBytes(injectedPath, SanitizedExportJson.SerializeRequest(Request()));
         File.WriteAllBytes(controlPath, SanitizedExportJson.SerializeControlRequest(Control()));
 
-        var injected = Run(["preview", "--request", injectedPath], new Provider(Snapshot()));
+        var injected = Run(["preview", "--database", Path.Combine(temp.Path, "monitor.db"), "--request", injectedPath], new Provider(Snapshot()));
         var unavailable = Run(["sanitized-export", "preview", "--request", controlPath]);
 
         Assert.Equal("request_invalid" + Environment.NewLine, injected.Error);
-        Assert.Equal("snapshot_provider_unavailable" + Environment.NewLine, unavailable.Error);
+        Assert.Equal("invalid_arguments" + Environment.NewLine, unavailable.Error);
     }
 
     [Fact]
@@ -65,10 +65,25 @@ public sealed class SanitizedExportCliTests
         Assert.Equal("bundle_too_large" + Environment.NewLine, result.Error);
     }
 
-    private static SanitizedExportControlRequest Control() => new(
-        new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero), new(SessionIds: ["session-a"]), []);
+    [Theory]
+    [InlineData("{\"schema_version\":\"sanitized-export-control.v2\",\"created_at\":\"2026-07-22T00:00:00+00:00\",\"selection\":{}}")]
+    [InlineData("{\"schema_version\":\"sanitized-export-control.v1\",\"created_at\":\"2026-07-22T00:00:00+00:00\",\"selection\":{},\"forbidden_markers\":[]}")]
+    public void Preview_RejectsUnknownControlVersionAndFormerMarkerAuthority(string json)
+    {
+        using var temp = new TempDirectory();
+        var requestPath = Path.Combine(temp.Path, "request.json");
+        File.WriteAllText(requestPath, json);
 
-    private static SanitizedExportRequest Request() => new(Control().CreatedAt, Snapshot(), Control().Selection, []);
+        var result = Run(["preview", "--database", Path.Combine(temp.Path, "monitor.db"), "--request", requestPath], new Provider(Snapshot()));
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Equal("request_invalid" + Environment.NewLine, result.Error);
+    }
+
+    private static SanitizedExportControlRequest Control() => new(
+        "sanitized-export-control.v1", new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero), new(SessionIds: ["session-a"]));
+
+    private static SanitizedExportRequest Request() => new(Control().CreatedAt, Snapshot(), Control().Selection);
 
     private static SanitizedExportSourceSnapshot Snapshot()
     {
@@ -96,7 +111,7 @@ public sealed class SanitizedExportCliTests
 
     private sealed class Provider(SanitizedExportSourceSnapshot snapshot) : ISanitizedExportSnapshotProvider
     {
-        public SanitizedExportSnapshotCapture Capture() => new(true, null, snapshot);
+        public SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection) => new(true, null, snapshot);
     }
 
     private sealed class TempDirectory : IDisposable

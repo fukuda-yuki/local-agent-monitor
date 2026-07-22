@@ -35,6 +35,19 @@ Profile の一覧は [collection profile specification](specifications/interface
 | Diagnosis / Improvement Support | 失敗傾向と改善候補を整理したい | `generate-diagnosis-candidates`, `generate-improvement-candidates`, `generate-auto-decisions` |
 | Sanitized Evidence Sharing | scanner 検証済みの evidence bundle を共有したい | `sanitized-export preview`, `sanitized-export export`, `sanitized-export result` |
 
+Sanitized Evidence Sharing の `preview` / `export` では、既存 Local Monitor
+database と `sanitized-export-control.v1` request を明示します。request に
+snapshot、record bytes、output path は含めません。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export preview --database data\local-monitor.db --request request.json
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export export --database data\local-monitor.db --request request.json --output bundle.zip
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export result --bundle bundle.zip
+```
+
+`result` は archive の canonical carrier、inventory、checksum を検証しますが、
+artifact の origin / provenance を証明するものではありません。
+
 ## Claude Code の guided setup
 
 Claude Code 2.1.207 以上では、対象にする Claude project の root へ移動してから、設定値や path そのものを含まない redacted な member state、operation、対象 label を表示する plan を作成します。setup は実行 directory 直下の `.claude/settings.local.json` と `.claude/settings.json` だけを確認し、親 directory、子 directory、Git root、`--add-dir` の project は探索しません。plan だけでは設定を書き換えません。

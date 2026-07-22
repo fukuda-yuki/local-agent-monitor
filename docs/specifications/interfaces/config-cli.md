@@ -156,23 +156,23 @@ result.
 ## Sanitized Export Commands
 
 ```text
-config-cli sanitized-export preview --request <request.json>
-config-cli sanitized-export export --request <request.json> --output <bundle.zip>
+config-cli sanitized-export preview --database <monitor.db> --request <request.json>
+config-cli sanitized-export export --database <monitor.db> --request <request.json> --output <bundle.zip>
 config-cli sanitized-export result --bundle <bundle.zip>
 ```
 
-`preview` and `export` read one bounded strict control request containing only
-creation time, selection, and supplemental forbidden markers. Snapshot,
+`preview` and `export` read one 1 MiB-bounded strict
+`sanitized-export-control.v1` request containing only schema version, creation
+time, and selection. Snapshot,
 records, canonical bytes, capabilities, dependencies, and unknown fields are
-rejected. The host application must acquire producer-owned carriers through a
-trusted `ISanitizedExportSnapshotProvider`; when none is wired, both commands
-fail closed with `snapshot_provider_unavailable`. `export` writes only through
+rejected. `--database` names the required existing Local Monitor database; the
+shared read-only SQLite provider acquires producer-owned carriers. `export` writes only through
 the authority-, producer-, and scanner-gated atomic publication path. `result`
 independently verifies the frozen archive
 layout, manifest schema/profile/version fields, canonical manifest serialization,
 entry identities/counts, per-file checksums, exact producer contracts, generic
-scanner contract, and whole-archive SHA-256. Request and bundle reads stop at
-the fixed 134,217,728-byte limit. Successful JSON results include the bundle
+scanner contract, and whole-archive SHA-256. Control request reads stop at
+1,048,576 bytes and bundle reads at 134,217,728 bytes. Successful JSON results include the bundle
 schema/profile, payload record count, total uncompressed bytes, and archive
 SHA-256, but does not claim source/store provenance. Full behavior is canonical in
 [sanitized-evidence-export.md](sanitized-evidence-export.md).

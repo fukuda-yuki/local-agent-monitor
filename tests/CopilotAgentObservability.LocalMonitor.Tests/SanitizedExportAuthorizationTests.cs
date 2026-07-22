@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.SanitizedExport;
+using CopilotAgentObservability.Alerts;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -36,7 +37,7 @@ public sealed class SanitizedExportAuthorizationTests
                 .Replace("alert.receipt.v1", version, StringComparison.Ordinal)
                 .Replace("sanitized-alert-receipt.v1", profile, StringComparison.Ordinal)
             : throw new InvalidOperationException());
-        var request = Request([AlertRecord(changed)]);
+        var request = Request([AlertRecord(AlertBytes()) with { CanonicalBytes = changed }]);
         var service = new SanitizedExportService();
 
         Assert.Equal("producer_contract_invalid", service.Preview(request).ErrorCode);
@@ -53,15 +54,26 @@ public sealed class SanitizedExportAuthorizationTests
         Assert.Equal("producer_envelope_mismatch", service.Create(request).ErrorCode);
     }
 
+    [Theory]
+    [InlineData("sample-repository", "sample\\u002drepository")]
+    [InlineData("sample-workspace", "\\u0073ample-workspace")]
+    public void Inspect_RejectsSemanticallyEquivalentNoncanonicalRepositoryEscapes(string canonical, string alternate)
+    {
+        var record = RepositoryRecord("first");
+        record = record with { CanonicalBytes = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(record.CanonicalBytes).Replace(canonical, alternate, StringComparison.Ordinal)) };
+
+        Assert.Equal("producer_contract_invalid", new SanitizedExportService().Preview(Request([record])).ErrorCode);
+    }
+
     [Fact]
-    public void Preview_FailsClosedUntilSharedInstructionValidatorExists()
+    public void Preview_UsesSharedInstructionValidatorAndRejectsTampering()
     {
         var bytes = InstructionBytes();
         var changed = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(bytes)
             .Replace("instruction-finding-a54798d971cf0ee972a831fd", "instruction-finding-000000000000000000000000", StringComparison.Ordinal));
         var request = Request([InstructionRecord(changed)]);
 
-        Assert.Equal("producer_validator_unavailable", new SanitizedExportService().Preview(request).ErrorCode);
+        Assert.Equal("producer_contract_invalid", new SanitizedExportService().Preview(request).ErrorCode);
     }
 
     [Fact]
@@ -69,7 +81,7 @@ public sealed class SanitizedExportAuthorizationTests
     {
         var ownerRecord = RepositoryRecord("owner");
         var provider = new CountingProvider(Request([ownerRecord]).Snapshot);
-        var control = new SanitizedExportControlRequest(ObservedAt, new(SessionIds: ["owner"]), []);
+        var control = new SanitizedExportControlRequest("sanitized-export-control.v1", ObservedAt, new(SessionIds: ["owner"]));
 
         var created = new SanitizedExportAuthorizedService(provider).Create(control);
 
@@ -80,6 +92,41 @@ public sealed class SanitizedExportAuthorizationTests
         using var output = new MemoryStream();
         stream.CopyTo(output);
         Assert.Equal(ownerRecord.CanonicalBytes, output.ToArray());
+    }
+
+    [Fact]
+    public void DeserializeControlRequest_RequiresCompleteSelectionShape()
+    {
+        var incomplete = Encoding.UTF8.GetBytes("""
+            {"schema_version":"sanitized-export-control.v1","created_at":"2026-07-22T00:00:00.0000000Z","selection":{}}
+            """);
+        var complete = new SanitizedExportControlRequest(
+            SanitizedExportContractVersions.ControlRequest,
+            ObservedAt,
+            new());
+
+        Assert.Throws<JsonException>(() => SanitizedExportJson.DeserializeControlRequest(incomplete));
+        Assert.Equal(complete, SanitizedExportJson.DeserializeControlRequest(SanitizedExportJson.SerializeControlRequest(complete)));
+    }
+
+    [Fact]
+    public void AuthorizedPreview_RejectsNonUtcControlAndSelectionBeforeCapture()
+    {
+        var provider = new CountingProvider(Request([RepositoryRecord("owner")]).Snapshot);
+        var service = new SanitizedExportAuthorizedService(provider);
+
+        var invalidControl = service.Preview(new(
+            SanitizedExportContractVersions.ControlRequest,
+            ObservedAt.ToOffset(TimeSpan.FromHours(9)),
+            new()));
+        var invalidSelection = service.Preview(new(
+            SanitizedExportContractVersions.ControlRequest,
+            ObservedAt,
+            new(StartInclusive: ObservedAt.ToOffset(TimeSpan.FromHours(9)))));
+
+        Assert.Equal("request_invalid", invalidControl.ErrorCode);
+        Assert.Equal("invalid_selection", invalidSelection.ErrorCode);
+        Assert.Equal(0, provider.CaptureCount);
     }
 
     [Fact]
@@ -111,16 +158,6 @@ public sealed class SanitizedExportAuthorizationTests
         var request = Request([first, second]) with { Selection = new(SessionIds: ["first"]) };
 
         Assert.Equal("duplicate_entry", new SanitizedExportService().Preview(request).ErrorCode);
-    }
-
-    [Fact]
-    public void Preview_MarkerComparisonIsCaseInsensitiveAndSupplemental()
-    {
-        var record = RepositoryRecord("first") with { RepositoryName = "Sensitive-Marker" };
-        record = record with { CanonicalBytes = RepositoryBytes(record) };
-        var request = Request([record]) with { ForbiddenMarkers = ["sensitive-marker"] };
-
-        Assert.Equal("forbidden_marker", new SanitizedExportService().Preview(request).ErrorCode);
     }
 
     [Theory]
@@ -200,6 +237,21 @@ public sealed class SanitizedExportAuthorizationTests
         Assert.Equal("archive_invalid", service.Inspect(changed).ErrorCode);
     }
 
+    [Fact]
+    public void Inspect_RejectsUnnecessaryUtf8FlagForAsciiEntryName()
+    {
+        var service = new SanitizedExportService();
+        var created = service.Create(Request([RepositoryRecord("first")]));
+        Assert.True(created.Success, created.ErrorCode);
+        var changed = created.ArchiveBytes!.ToArray();
+        var central = FindLast(changed, 0x02014b50);
+        var local = (int)BinaryPrimitives.ReadUInt32LittleEndian(changed.AsSpan(central + 42, 4));
+        BinaryPrimitives.WriteUInt16LittleEndian(changed.AsSpan(central + 8, 2), 0x0800);
+        BinaryPrimitives.WriteUInt16LittleEndian(changed.AsSpan(local + 6, 2), 0x0800);
+
+        Assert.Equal("archive_invalid", service.Inspect(changed).ErrorCode);
+    }
+
     private static SanitizedExportRequest Request(IReadOnlyList<SanitizedExportRecord> records)
     {
         var hasFinding = records.Any(record => record.RecordType == "instruction_finding_handoff");
@@ -212,8 +264,7 @@ public sealed class SanitizedExportAuthorizationTests
                 [new("github-copilot-cli", "1.0.73")],
                 records,
                 new(hasFinding ? "available" : "missing", hasAlert ? "available" : "missing", "unavailable", "unavailable", "unavailable")),
-            new(),
-            []);
+            new());
     }
 
     private static SanitizedExportRecord RepositoryRecord(string id)
@@ -229,11 +280,12 @@ public sealed class SanitizedExportAuthorizationTests
         "instruction-findings/123.json", "instruction_finding_handoff", "123", null, null, null, null, null, null,
         ObservedAt, bytes, []);
 
-    private static SanitizedExportRecord AlertRecord(byte[] bytes) => new(
-        "alert-receipts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
-        "alert_receipt", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "session-1", "trace-1", "github-copilot", null, null, null,
-        new DateTimeOffset(2026, 7, 21, 1, 2, 4, TimeSpan.Zero), bytes, []);
+    private static SanitizedExportRecord AlertRecord(byte[] bytes)
+    {
+        var envelope = AlertReceiptConsumerV1.Validate(bytes);
+        return new($"alert-receipts/{envelope.AlertId}.json", "alert_receipt", envelope.AlertId, envelope.SessionId,
+            envelope.TraceId, envelope.SourceSurface, null, null, null, envelope.LastObservedAt, bytes, []);
+    }
 
     private static SanitizedExportRecord Record(string path, string type, string id, byte[] bytes) => new(
         path, type, id, id, "trace-a", "github-copilot-cli", "sample-repository", "sample-workspace", "sample-snapshot",
@@ -242,8 +294,7 @@ public sealed class SanitizedExportAuthorizationTests
     private static byte[] InstructionBytes() => TrimFinalNewline(File.ReadAllBytes(Path.Combine(
         FindRepositoryRoot(), "tests", "CopilotAgentObservability.LocalMonitor.Tests", "TestData", "InstructionFindings", "instruction-finding-handoff.v1.json")));
 
-    private static byte[] AlertBytes() => TrimFinalNewline(File.ReadAllBytes(Path.Combine(
-        FindRepositoryRoot(), "tests", "CopilotAgentObservability.Alerts.Tests", "TestData", "alert-receipt-v1.golden.json")));
+    private static byte[] AlertBytes() => SanitizedExportAlertFixture.Bytes();
 
     private static byte[] TrimFinalNewline(byte[] bytes) => bytes is [.., (byte)'\n'] ? bytes[..^1] : bytes;
 
@@ -322,7 +373,7 @@ public sealed class SanitizedExportAuthorizationTests
     {
         internal int CaptureCount { get; private set; }
 
-        public SanitizedExportSnapshotCapture Capture()
+        public SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection)
         {
             CaptureCount++;
             return new(true, null, snapshot);

@@ -16,17 +16,18 @@ remain separate profiles and implementations.
 | checksum | `sha256.v1` |
 | scanner | `repository-safe-scanner.v1` |
 | producer validation | `sanitized-evidence-producers.v1` |
+| control request | `sanitized-export-control.v1` |
 | compatibility | reader major `1` through `1` |
 | maximum archive entries | 256, including `manifest.json` |
 | maximum total uncompressed bytes | 134,217,728, including `manifest.json` |
 | maximum request or bundle read | 134,217,728 bytes |
+| maximum control request read | 1,048,576 bytes |
 | maximum canonical carrier | 8,388,608 bytes |
 | maximum records | 255 |
 | maximum dependencies per record | 256 |
 | maximum values per selection list | 256 |
 | maximum agent or processing versions | 256 each |
-| maximum forbidden markers | 64 |
-| maximum identifier / marker length | 256 / 4,096 UTF-16 code units |
+| maximum identifier length | 256 UTF-16 code units |
 
 The bounds are conservative fixed limits. Writers do not expose configuration
 for them in v1.
@@ -34,20 +35,38 @@ for them in v1.
 ## Authority boundary and control request
 
 The public CLI and HTTP surfaces consume one strict
-`SanitizedExportControlRequest`: an explicit UTC creation time, selection
-filters, and source-body markers for a supplemental fail-closed creation scan.
+`SanitizedExportControlRequest`: exact `schema_version`, an explicit UTC
+creation time, and selection filters. The selection object must explicitly
+carry all eight v1 members (nullable values are represented as JSON `null`);
+missing, duplicate, or unknown members fail before snapshot capture.
 The public request has no snapshot, records, canonical bytes, capabilities, or
 dependency fields. Unknown fields are rejected, so a caller cannot inject a
 carrier into creation.
 
-Preview and create capture one immutable snapshot through the application-wired
-`ISanitizedExportSnapshotProvider`. Only the owning local stores may implement
-that provider. Its snapshot includes the producer-owned canonical bytes and is
+Preview and create capture one immutable snapshot through the shared
+`SqliteSanitizedExportSnapshotProvider`; its public interface receives only the
+validated selection. Its snapshot includes the producer-owned canonical bytes and is
 passed to the pure selection/bundle service as `SanitizedExportRequest`.
 Preview and create validate the same snapshot, dependency closure, producer
-contract, scanner, manifest, and size rules. A missing provider fails closed as
-`snapshot_provider_unavailable`; syntax-valid bytes alone never establish
-owner/store provenance.
+contract, scanner, manifest, and size rules. Syntax-valid bytes alone never
+establish owner/store provenance.
+
+The provider opens the explicitly named existing database once in read-only,
+private-cache, non-pooled mode, enables `query_only`, and anchors monitor v7,
+Session v13, and optional producer schemas in one deferred transaction. It runs
+a metadata-only descriptor query with a 256-row sentinel and carrier byte
+lengths before exact-ID reads. It may query only `monitor_traces`, Session
+identity/provenance metadata, optional `instruction_finding_handoffs`, and
+optional `alert_receipts`; it never queries `raw_records`,
+`session_event_content`, or raw analysis/content stores.
+Because the #80 table intentionally stores selector metadata only inside the
+canonical carrier, alert descriptors remain opaque until the byte gate. All
+opaque alert candidates count toward the 255-record scan bound; exceeding it
+fails closed as `selection_limit_exceeded` even when later carrier-derived
+filters might exclude rows. Within the bound, exact-ID fetch plus the public
+#80 validator supplies selector metadata, and capabilities are computed only
+from the final selected inventory. A trace bound to more than one distinct
+Session/source identity is unavailable rather than exported ambiguously.
 
 The source snapshot uses the Issue #58 nullable label names exactly:
 `repository_name`, `workspace_label`, and `repo_snapshot`. It also records source
@@ -90,8 +109,8 @@ The #58 projection has the exact canonical property order
 `schema_version`, `record_id`, `session_id`, `trace_id`, `source_surface`,
 `repository_name`, `workspace_label`, `repo_snapshot`, `observed_at`,
 `completeness`, `content_state`, `retention_state`. Its schema version is
-`repository-metadata-projection.v1`; `record_id`, `session_id`, and
-`source_surface` are nonempty safe tokens; `trace_id`, `repository_name`,
+`repository-metadata-projection.v1`; `record_id` is a nonempty safe token;
+`session_id`, `trace_id`, `source_surface`, `repository_name`,
 `workspace_label`, and `repo_snapshot` are nullable safe tokens; and
 `observed_at` is canonical UTC. Every value after `schema_version` must exactly
 equal the corresponding record-envelope value.
@@ -144,9 +163,13 @@ Inspection recomputes `record_counts`, total uncompressed bytes, and unique
 `(record_type, record_id)` inventory from verified entries and cross-checks the
 manifest.
 
-All time values are canonical UTC with seven fractional digits. Input ordering
-does not affect canonical arrays or object members. `created_at` is the only
-caller-supplied volatile field; the same snapshot, selection, markers, and
+All time values are canonical UTC with seven fractional digits. Snapshot IDs
+use domain-separated, length-framed SHA-256 over the ordered selected inventory,
+each complete record envelope (entry path, nullable selector and label values,
+observation time, state values, and ordered dependencies), exact carrier hashes,
+capability states, and agent/processing versions;
+`created_at` is excluded. Input ordering does not affect canonical arrays or
+object members. `created_at` is the only caller-supplied volatile field; the same snapshot, selection, and
 `created_at` produce byte-identical manifest and archive bytes.
 
 ## Repository-safe scanner and publication
@@ -157,18 +180,11 @@ Before manifest creation, every selected and dependency entry is scanned for:
   tool argument/result, source/file body, and raw analysis fields;
 - authorization, credential, token, password, secret, API key, and private-key
   patterns;
-- email identity and absolute POSIX roots, recognized Windows-drive,
+- email, phone, SSN-shaped government identifiers, address-like identity values,
+  and absolute POSIX roots, recognized Windows-drive,
   backslash or forward-slash UNC/device, WSL-mounted, common Unix home/system,
   and file-URI path forms;
-- source-supplied forbidden body markers in plain, JSON-escaped, HTML-entity,
-  percent-encoded, Base64 UTF-8, and lowercase SHA-256-prefix-12 forms;
 - invalid canonical JSON and unexpected/duplicate entries.
-
-Marker comparison is ordinal case-insensitive. Marker transformations and
-their total expansion are bounded by the v1 marker count and length limits.
-Markers supplement producer and generic scanner validation during preview and
-create only; they never establish repository safety. They are not persisted,
-so later inspection does not claim to repeat or independently prove that scan.
 
 Exact producer validation plus the generic versioned scanner are the
 repeatable authorities recorded in `repository_safe_validation`. This is a
@@ -178,10 +194,7 @@ writes a same-directory `.partial` file and atomically renames it only after the
 complete in-memory archive passes. Failure removes the partial file and never
 returns archive bytes or a successful result.
 
-The versioned scanner evaluates only the declared plain, JSON-escaped,
-HTML-entity, percent-encoded, Base64 UTF-8, and lowercase SHA-256-prefix forms,
-one bounded transformation at a time. It does not recursively compose
-transformations or claim compression, encryption, arbitrary binary-container,
+The versioned scanner does not claim compression, encryption, arbitrary binary-container,
 fuzzy-classification, process-memory, network-traffic, or deleted-storage
 coverage. The Issue #91 synthetic corpus is executable compatibility evidence,
 not privacy, legal, or secure-erasure certification.
@@ -191,18 +204,18 @@ not privacy, legal, or secure-erasure certification.
 The Config CLI uses the shared control request and result DTOs:
 
 ```text
-config-cli sanitized-export preview --request <request.json>
-config-cli sanitized-export export --request <request.json> --output <bundle.zip>
+config-cli sanitized-export preview --database <monitor.db> --request <request.json>
+config-cli sanitized-export export --database <monitor.db> --request <request.json> --output <bundle.zip>
 config-cli sanitized-export result --bundle <bundle.zip>
 ```
 
 CLI `result` verifies the frozen producer/profile/archive/schema/inventory/
 checksum and generic scanner contract. CLI request and bundle reads reject a
 sentinel byte beyond the fixed limit before allocation. CLI output paths are
-explicit local operator inputs. `preview` and `export` require a trusted
-snapshot provider wired by the host application; without one they fail as
-`snapshot_provider_unavailable`. `result` does not require a provider and does
-not claim source/store provenance.
+explicit local operator inputs. `preview` and `export` require the explicit
+existing Local Monitor database and use the shared read-only provider. `result`
+does not require a database and does not claim source/store provenance or
+attest archive origin.
 
 The Local Monitor exposes synchronous routes:
 
@@ -213,12 +226,9 @@ GET  /api/sanitized-export/v1/exports/{export_id}
 GET  /api/sanitized-export/v1/exports/{export_id}/archive
 ```
 
-These foundation routes accept only the control request. The host must wire a
-trusted owner/store provider that captures one stable snapshot for each preview
-or export operation. The database path is otherwise used only to derive the
-server-controlled sibling export directory. Until the #58/#59/#80 owners expose
-and wire their producer/store adapters, production composition uses the
-fail-closed unavailable provider and does not publish a bundle.
+These routes accept only the control request. The host captures one stable
+snapshot for each preview or export operation from its configured Local Monitor
+database; that path also derives the server-controlled sibling export directory.
 
 POST routes require JSON, same-origin context, and `x-monitor-csrf`. Reads reject
 cross-site requests. Existing loopback binding and Host validation apply. Every
@@ -235,8 +245,8 @@ not returned.
 HTTP status mapping is fixed: successful preview/result/download is `200`,
 successful create is `201`, malformed JSON is `400`, cross-site or missing CSRF
 is `403`, missing result is `404`, oversized input is `413`, non-JSON input is
-`415`, scanner/selection/contract rejection is `422`, and publication or
-snapshot-provider unavailability is `503`. Error bodies contain only
+`415`, selection/limit rejection is `422`, and publication or snapshot-store
+busy/unavailability is `503`. Error bodies contain only
 `{"error":"<fixed_code>"}`.
 
 ## Allowed and forbidden content

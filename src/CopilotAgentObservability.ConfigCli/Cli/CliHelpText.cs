@@ -35,8 +35,8 @@ internal static class CliHelpText
           config-cli first-trace status --database <file> --verification-id <uuid-v7> [--endpoint <loopback-http-url>] [--json]
           config-cli first-trace complete --database <file> --verification-id <uuid-v7> --expected-revision <positive-int> [--endpoint <loopback-http-url>] [--evidence <opaque-ref>]... [--json]
           config-cli first-trace cancel --database <file> --verification-id <uuid-v7> --expected-revision <positive-int> [--json]
-          config-cli sanitized-export preview --request <request.json>
-          config-cli sanitized-export export --request <request.json> --output <bundle.zip>
+          config-cli sanitized-export preview --database <monitor.db> --request <request.json>
+          config-cli sanitized-export export --database <monitor.db> --request <request.json> --output <bundle.zip>
           config-cli sanitized-export result --bundle <bundle.zip>
           config-cli ingest-raw <raw.json> --db <raw-store.db>
           config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]

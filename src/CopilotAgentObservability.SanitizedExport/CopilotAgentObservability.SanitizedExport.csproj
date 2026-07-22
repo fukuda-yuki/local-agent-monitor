@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CopilotAgentObservability.Alerts\CopilotAgentObservability.Alerts.csproj" />
+    <ProjectReference Include="..\CopilotAgentObservability.InstructionFindings\CopilotAgentObservability.InstructionFindings.csproj" />
   </ItemGroup>
 
 </Project>
