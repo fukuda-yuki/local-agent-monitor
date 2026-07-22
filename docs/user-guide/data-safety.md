@@ -55,34 +55,29 @@ Repository に保存してはいけないもの:
 
 ## Sanitized evidence を共有する
 
-共有用 bundle の request で指定できるのは、作成時刻、選択条件、補助的な
-forbidden marker だけです。snapshot、record、canonical bytes を request に
-含めることはできません。payload は Local Monitor / producer 側の信頼済み
-snapshot provider から取得され、#58 repository metadata projection、#59
-instruction finding handoff、#80 sanitized alert receipt の frozen contract を
-検証します。任意 JSON、free text、CSV、HTML、未実装の #73/#74/#84 payload
-は指定できません。
+共有用 bundle の request で指定できるのは、schema version、作成時刻、選択
+条件だけです。snapshot、record、canonical bytes、安全性 marker、出力先を
+request に含めることはできません。`preview` と `export` は指定した既存
+Local Monitor database から 1 回の read-only SQLite snapshot を取得し、#58
+repository metadata projection、#59 instruction finding handoff、#80 sanitized
+alert receipt の frozen contract を検証します。任意 JSON、free text、CSV、
+HTML、#72/#73/#74/#83/#84 payload は v1 bundle に含められません。
 
 ```powershell
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export preview --request <request.json>
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export export --request <request.json> --output <bundle.zip>
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export preview --database <monitor.db> --request <request.json>
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export export --database <monitor.db> --request <request.json> --output <bundle.zip>
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export result --bundle <bundle.zip>
 ```
 
-現時点の production composition には #58/#59/#80 owner/store provider がまだ
-接続されていないため、`preview` と `export` は
-`snapshot_provider_unavailable` で fail-closed します。provider の統合が完了する
-まで、実データ bundle の生成成功を想定しないでください。`result` は既存の
-synthetic bundle の構造検証に使用できます。
+`preview` は選択結果と capability を確認し、`export` は全検査に成功した場合
+だけ同じ directory の一時 file から bundle を atomic に公開します。`result`
+は既存 bundle の frozen v1 contract、entry identity / inventory、checksum、
+fail-closed scanner を再検証します。この成功は archive の構造整合性を示す
+だけで、source/store provenance、署名、作成者の権限を証明しません。
 
-`result` の成功は frozen v1 producer contract、entry identity / inventory、
-checksum、generic scanner の再検証を示します。request で指定した
-forbidden marker は生成時だけの補助検査で bundle に保存されないため、
-`result` はその marker 検査を再実行したとは主張しません。これらは
-source/store provenance を証明せず、
-共有先の access control、retention、削除方法、
-利用者周知を代替しません。失敗した bundle や `.partial` file を共有せず、
-raw prompt、tool body、credential、PII、local path を request に含めないでください。
+共有先の access control、retention、削除方法、利用者周知は別途必要です。
+失敗した bundle や `.partial` file を共有せず、raw prompt、tool body、
+credential、PII、local path を request や共有 artifact に含めないでください。
 
 ## 実データが混入した場合
 

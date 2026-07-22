@@ -716,6 +716,22 @@ acquisition and the downstream scanner remain mandatory separate controls. The
 fixed failure also covers nonfatal parser/decoder/serializer exceptions,
 including malformed Unicode, without preserving an inner exception.
 
+### Alert lifecycle boundary
+
+Issue #83 stores sanitized lifecycle state as a separate append-only event
+chain. It references an existing immutable alert ID and never copies, changes,
+or deletes source receipt/evidence bytes. Public reads expose only bounded
+state/revision/event projections. User comments and reason values use closed or
+bounded sanitized fields and never carry raw evidence, source content, paths,
+credentials, PII, or store exception text.
+
+Lifecycle writes require loopback Host validation, same-origin context, CSRF,
+an idempotency key, and an exact expected revision. Every lifecycle response is
+`Cache-Control: no-store` with fixed no-leak failures. These sanitized routes
+remain available under `--sanitized-only`. Source deletion makes an alert
+orphaned through an explicit trusted seam while retaining the sanitized receipt
+and lifecycle audit chain; it does not restore or expose deleted source data.
+
 ### Instruction finding receipt boundary
 
 The Issue #59 `instruction-finding.v1`, `instruction-rule-candidate.v1`, and
@@ -1104,6 +1120,23 @@ neither a trusted emitting version nor an approved fingerprint is available,
 Claude forwarding is suppressed silently rather than inventing provenance.
 Any supplied invalid provenance value invalidates the command. Argument values
 and rejected payloads are never logged or echoed.
+
+## Historical Evidence Dataset Boundary
+
+Issue #72 reads only the final included Sessions from one coherent bounded
+snapshot. It never loads an excluded or metadata-omitted body, and exact OTel/
+finding references must resolve uniquely to the selected Session without
+repository, workspace, time, or order inference. Raw descriptor reads occur
+only inside the existing current retention-authorized local boundary and only
+after selection and capacity checks.
+
+The paired repository-safe representation replaces raw Session/trace/span IDs
+with the exact #59 domain tokens, omits descriptor text, rejects unsafe labels
+or carriers, and contains no raw body, credential, PII, path, or reversible
+sensitive key. The raw-local form remains local runtime data and follows the
+existing same-origin/no-store/retention controls; `sanitized_only=true` never
+requests descriptor content. Canonical checksums and persistence validation
+provide integrity, not export authority or provenance attestation.
 
 ## Sanitized Evidence Export Boundary
 

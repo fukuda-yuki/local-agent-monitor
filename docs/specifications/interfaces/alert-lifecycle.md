@@ -211,6 +211,10 @@ internal supersede and source-deletion seams are not HTTP routes. A route-local
 Kestrel `BadHttpRequestException` for HTTP 413 is mapped before the generic
 lifecycle exception fallback and returns only `413 request_too_large`.
 
+These routes are sanitized-only surfaces and remain available when Local
+Monitor starts with `--sanitized-only`; that flag removes raw-bearing surfaces,
+not lifecycle state or mutation access.
+
 All lifecycle responses use `Cache-Control: no-store`, strict bounded DTOs,
 canonical UTC timestamps, and no arbitrary message/detail field. History is
 ordered by revision descending and returns at most the requested bounded

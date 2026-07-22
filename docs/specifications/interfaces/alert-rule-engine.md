@@ -288,9 +288,10 @@ creating a second receipt/evidence identity model.
 Issue #85 may include the exact canonical `alert.receipt.v1` bytes under profile
 `sanitized-alert-receipt.v1`, plus evaluation/config/schema versions and hashes.
 It must reject unknown receipt/profile versions and must not infer missing
-receipt types. Lifecycle events are a separate optional profile owned by Issue
-#83. The exporter may mark an absent future lifecycle profile unavailable; it
-must not rewrite the immutable receipt or include raw evidence.
+receipt types. Issue #85 v1 intentionally excludes the lifecycle events owned
+by Issue #83. Including lifecycle data requires a named future versioned export
+profile; the v1 exporter must not infer the profile, rewrite the immutable
+receipt, or include raw evidence.
 
 ### Canonical receipt consumer compatibility boundary
 

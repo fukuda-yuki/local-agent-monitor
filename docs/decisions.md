@@ -2309,6 +2309,15 @@ not the accepted serializer output, and are noncanonical at the strict public
 boundary. Tests may not conceal this distinction by
 parse/reserializing the semantic fixture into expected bytes.
 
+Issue #72 implementation note (2026-07-22): the frozen #59 validator and
+nullable reference semantics are consumed by a separate bounded historical
+evidence dataset. One coherent Session snapshot produces paired raw-local and
+repository-safe canonical forms with exact evidence resolution,
+insert-or-identical persistence, and independent checksums. This does not add
+history discovery/import, export authority, LLM execution, proposals, effects,
+or inferred Session relations. The canonical child contract is
+[historical evidence extraction](specifications/interfaces/historical-evidence-extraction.md).
+
 ## D066: Historical source import is profile-bound, consented, and fail-closed
 
 Status: Accepted (2026-07-22)
@@ -2337,9 +2346,11 @@ canonical `alert.receipt.v1` values carrying exact evidence and config/input/
 evaluation hashes; sensitive comparable labels use private keyed HMAC tokens.
 The `alert_engine` SQLite component owns only its schema-v1 evaluation,
 receipt, and suppression tables. #81/#82 add rules through the frozen registry,
-#83 owns a separate lifecycle component, and #85 reads canonical receipts;
-none may rewrite engine receipt bytes or tables. The canonical contract is
-[alert rule engine](specifications/interfaces/alert-rule-engine.md).
+#83 owns a separate lifecycle component, #84 owns Alert Center reads/UI/
+aggregation, and #85 reads canonical receipts for sanitized export; none may
+rewrite engine receipt bytes or tables. The canonical contracts are
+[alert rule engine](specifications/interfaces/alert-rule-engine.md) and
+[alert lifecycle](specifications/interfaces/alert-lifecycle.md).
 
 The additive consumer-compatibility repair keeps those producer/store bytes and
 schema v1 unchanged while making `AlertReceiptConsumerV1` the single strict
@@ -2359,3 +2370,24 @@ fabricated receipt can recompute its alert ID. Trusted store acquisition and
 downstream scanning remain separate. Existing serializer/evaluator/store
 admission remains unchanged, including the unchanged serializer-only golden
 with its fabricated alert ID.
+
+## D068: Sanitized export separates trusted capture from structural inspection
+
+Status: Accepted (2026-07-22)
+
+Issue #85 accepts only a strict control request and acquires one trusted,
+read-only SQLite snapshot internally. It selects bounded #58 safe projections
+and exact #59/#80 canonical carriers through their owner validators, resolves
+dependencies before serialization, then creates deterministic manifest/member
+bytes, checksums, and archive bytes. A bounded fail-closed scanner runs before
+publication; any capture, validation, scan, serialization, archive, or atomic
+publish failure produces no partial-success artifact.
+
+Bundle `result` inspection is deliberately independent from snapshot capture.
+It proves the frozen v1 archive shape, canonical members, dependency inventory,
+checksums, and scanner result, but without signing it does not prove producer
+origin, store provenance, or authorization. The request cannot supply snapshot
+or carrier bytes, a safety marker, or a server output path. V1 exports only the
+closed #58/#59/#80 profiles; #72 datasets and #83 lifecycle events require a
+named future profile. The interface is
+[sanitized evidence export](specifications/interfaces/sanitized-evidence-export.md).

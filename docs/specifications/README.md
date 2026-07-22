@@ -36,6 +36,10 @@
 | Trace agent execution graph | [interfaces/trace-agent-execution-graph.md](interfaces/trace-agent-execution-graph.md) |
 | Historical source import | [interfaces/historical-source-import.md](interfaces/historical-source-import.md) |
 | Historical evidence extraction | [interfaces/historical-evidence-extraction.md](interfaces/historical-evidence-extraction.md) |
+| Alert rule engine | [interfaces/alert-rule-engine.md](interfaces/alert-rule-engine.md) |
+| Tool/retry/permission alert rules | [interfaces/tool-alert-rules.md](interfaces/tool-alert-rules.md) |
+| Token/context/cache alert rules | [interfaces/token-context-cache-alert-rules.md](interfaces/token-context-cache-alert-rules.md) |
+| Alert lifecycle | [interfaces/alert-lifecycle.md](interfaces/alert-lifecycle.md) |
 | Sanitized evidence export | [interfaces/sanitized-evidence-export.md](interfaces/sanitized-evidence-export.md) |
 | Security and data boundaries | [security-data-boundaries.md](security-data-boundaries.md) |
 | Validation and release matrix | [validation-release-matrix.md](validation-release-matrix.md) |

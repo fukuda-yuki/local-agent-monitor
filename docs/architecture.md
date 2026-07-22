@@ -273,11 +273,58 @@ component. The Local Monitor producer excludes the shared source files from
 its own compilation and delegates to the lower-level assembly; downstream
 consumers must not copy the hash/template/schema logic.
 
+Wave 2 adds source-neutral alert and export domains while preserving the same
+acyclic direction:
+
+```text
+CopilotAgentObservability.Alerts          CopilotAgentObservability.InstructionFindings
+                    ^                          ^
+                     \                        /
+                      CopilotAgentObservability.SanitizedExport
+                                      ^
+                                      |
+                    CopilotAgentObservability.Persistence.Sqlite
+                                ^                 ^
+                                |                 |
+           CopilotAgentObservability.ConfigCli   CopilotAgentObservability.LocalMonitor
+```
+
+`Alerts` owns deterministic rule/receipt and lifecycle domain contracts.
+`SanitizedExport` depends only on those lower-level alert and instruction
+carrier authorities. Persistence implements their SQLite stores and trusted
+snapshot adapter; Config CLI and Local Monitor provide public adapters without
+moving domain validation into an upper layer. Historical evidence extraction
+is an internal Local Monitor application/persistence boundary and adds no HTTP
+or shared lower-level dependency.
+
 - `Telemetry` と `Persistence.Sqlite` は `ConfigCli` を参照しない（単方向依存）。
 - 抽出した型は internal のままとし、`InternalsVisibleTo` で `ConfigCli` / `ConfigCli.Tests`（および将来の `LocalMonitor`）にのみ可視とする。public な共有 API は M1 では定義しない。
 - Sprint8 の Local Ingestion Monitor（ASP.NET Core host、M2 以降）はこれらの共有 module を再利用する前提とする。ConfigCli の外部動作・CLI 表面は M1 で変更しない。
 
 ## 3. Data Flows
+
+### Wave 2 Evidence And Alert Flows
+
+```text
+exact-bound Session metadata + sanitized monitor facts + #59 handoffs
+  -> coherent bounded historical snapshot
+  -> raw-local + repository-safe canonical datasets
+  -> insert-or-identical local persistence
+  -> #73 / #74 consumers
+
+immutable #80 alert receipt
+  -> append-only #83 lifecycle event
+  -> derived current state / bounded sanitized API
+
+trusted read-only SQLite snapshot (#58 + optional #59 / #80)
+  -> deterministic #85 dependency closure + canonical members
+  -> fail-closed scanner + checksums
+  -> atomic CLI file or loopback HTTP archive publication
+```
+
+The historical and lifecycle flows do not mutate their parent evidence.
+Sanitized bundle inspection proves structure and checksums, not origin or store
+provenance.
 
 ### Live Trace Review
 

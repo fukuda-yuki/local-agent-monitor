@@ -364,6 +364,29 @@ allowlisted values, exact per-field provenance, no synthesis, partial /
 No adapter, importer, persistence migration, background scan, or UI is part of
 Issue #76.
 
+Issues #77 and #78 implement the source-specific Tier B adapter boundaries for
+GitHub Copilot CLI and Claude Code respectively. With the current empty
+supported-format/version sets and allowlists, each accepts only explicit
+metadata-only selection, reads no source content, and returns a deterministic
+unsupported/zero-candidate preview for #79. Positive parsing, stable content
+snapshot, candidate provenance/conflict behavior, and retention mapping remain
+unavailable until a complete redistributable fixture/version/format/fingerprint
+golden tuple is accepted as a named compatibility revision; detector-observed
+application versions alone do not authorize support.
+
+## Historical evidence extraction
+
+Issue #72 freezes the bounded dataset contract at
+[historical evidence extraction](specifications/interfaces/historical-evidence-extraction.md).
+One coherent Session snapshot is selected deterministically, exact evidence is
+resolved without repository/time inference, and paired raw-local and
+repository-safe canonical representations are written with independent
+checksums through insert-or-identical persistence. The extractor consumes the
+#58 repository/workspace semantics and the #59 public carrier validator without
+redefining either contract. It adds no source discovery/import, LLM execution,
+HTTP/UI surface, proposal, effect, or apply behavior; #73 and #74 consume the
+persisted v1 forms independently.
+
 ## Alert-rule engine foundation
 
 Issue #80 defines the source-neutral deterministic alert contract at
@@ -374,8 +397,26 @@ Accepted matches become immutable canonical `alert.receipt.v1` values with
 exact evidence and config/input/evaluation hashes; comparable sensitive labels
 use private keyed HMAC tokens. SQLite ownership is limited to the
 `alert_engine` component v1 tables, allowing the separate #83 lifecycle
-component to coexist without rewriting receipt bytes. Concrete #81/#82 rules
-and #85 UI/export remain downstream work.
+component to coexist without rewriting receipt bytes. Issues #81 and #82 add
+the frozen [tool/retry/permission rule pack](specifications/interfaces/tool-alert-rules.md)
+and [token/context/cache rule pack](specifications/interfaces/token-context-cache-alert-rules.md)
+through the existing registry; #84 owns Alert Center reads/UI/aggregation, and
+#85 owns sanitized export.
+
+## Alert lifecycle
+
+Issue #83 freezes the separate `alert_lifecycle` component v1 at
+[alert lifecycle](specifications/interfaces/alert-lifecycle.md). Current state
+and revision are derived from an append-only event chain that references, but
+never rewrites, immutable #80 receipt bytes. User mutations require exact
+optimistic concurrency and idempotency; reevaluation, supersession, and source
+deletion use only explicit trusted seams. Sanitized lifecycle reads/mutations
+remain available under `--sanitized-only` and preserve loopback Host checks,
+same-origin, CSRF, bounded audit values, fixed no-leak failures, and
+`Cache-Control: no-store`. Rule logic, Alert Center UI, and notification are
+outside #83.
+
+## Sanitized evidence export
 
 Issue #85 sanitized evidence export is an export-only consumer of the #58 safe
 projection and the public #59/#80 consumer validators. Its public control is
@@ -386,6 +427,10 @@ public parser enforces its 1 MiB bound before materialization and accepts time
 lexemes only as UTC `Z` with exactly seven fractional digits. Exact trace
 ambiguity is defined by distinct Session IDs, while multiple source-surface
 provenance rows for one Session/trace remain valid.
+The v1 bundle intentionally excludes #72 historical datasets and #83 lifecycle
+events; adding either requires an explicit future versioned profile rather than
+an inferred or permissive field. Missing optional producer carriers are emitted
+as explicit unavailable capabilities.
 The complete interface, archive, scanner, error, and no-provenance inspection
 contract is frozen in `docs/specifications/interfaces/sanitized-evidence-export.md`.
 
@@ -450,7 +495,12 @@ sanitized. The canonical contract is
 | Dashboard dataset interface | [specifications/interfaces/dashboard-dataset.md](specifications/interfaces/dashboard-dataset.md) |
 | Instruction diagnosis analysis interface | [specifications/interfaces/instruction-diagnosis-analysis.md](specifications/interfaces/instruction-diagnosis-analysis.md) |
 | Historical source import interface | [specifications/interfaces/historical-source-import.md](specifications/interfaces/historical-source-import.md) |
+| Historical evidence extraction interface | [specifications/interfaces/historical-evidence-extraction.md](specifications/interfaces/historical-evidence-extraction.md) |
 | Alert rule engine interface | [specifications/interfaces/alert-rule-engine.md](specifications/interfaces/alert-rule-engine.md) |
+| Tool/retry/permission alert rules | [specifications/interfaces/tool-alert-rules.md](specifications/interfaces/tool-alert-rules.md) |
+| Token/context/cache alert rules | [specifications/interfaces/token-context-cache-alert-rules.md](specifications/interfaces/token-context-cache-alert-rules.md) |
+| Alert lifecycle interface | [specifications/interfaces/alert-lifecycle.md](specifications/interfaces/alert-lifecycle.md) |
+| Sanitized evidence export interface | [specifications/interfaces/sanitized-evidence-export.md](specifications/interfaces/sanitized-evidence-export.md) |
 | Source schema drift and Claude Code interface | [specifications/interfaces/source-schema-drift-claude-code.md](specifications/interfaces/source-schema-drift-claude-code.md) |
 | Canvas Session workspace interface | [specifications/interfaces/canvas-session-workspace.md](specifications/interfaces/canvas-session-workspace.md) |
 | Canvas Session Evidence interface | [specifications/interfaces/canvas-session-evidence.md](specifications/interfaces/canvas-session-evidence.md) |
@@ -494,6 +544,26 @@ Publicly documented interfaces are:
   `Cache-Control: no-store`, and require same-origin plus
   `x-monitor-csrf: local-monitor` for writes. They do not change
   `GET /health/ready`.
+- Alert lifecycle endpoints:
+  `GET /api/alerts/v1/{alert_id}/lifecycle`,
+  `GET /api/alerts/v1/{alert_id}/lifecycle/history?limit=<1..100>`, and
+  `POST /api/alerts/v1/{alert_id}/lifecycle/actions`. They expose only bounded
+  sanitized state/event projections, use optimistic concurrency and an
+  `Idempotency-Key` for writes, require same-origin plus
+  `x-monitor-csrf: local-monitor`, and return `Cache-Control: no-store`.
+  These routes remain available under `--sanitized-only` and do not expose or
+  mutate receipt evidence.
+- Sanitized export CLI commands:
+  `sanitized-export preview --database <monitor.db> --request <request.json>`,
+  `sanitized-export export --database <monitor.db> --request <request.json>
+  --output <bundle.zip>`, and
+  `sanitized-export result --bundle <bundle.zip>`. Local Monitor exposes
+  `POST /api/sanitized-export/v1/previews`,
+  `POST /api/sanitized-export/v1/exports`,
+  `GET /api/sanitized-export/v1/exports/{export_id}`, and
+  `GET /api/sanitized-export/v1/exports/{export_id}/archive`. Requests cannot
+  provide snapshot/carrier bytes or a server output path; POST routes are
+  same-origin/CSRF protected and every response is `no-store`.
 - Local Ingestion Monitor raw-bearing routes（既定表示）: trace-detail page（agent-execution view、bounded raw preview inline + full raw record link）、`GET /traces/{rawRecordId}/raw`（server-rendered HTML）、`GET /traces/{traceId}/prompt-label`（JSON、D039）、`GET /traces/{traceId}/spans/{spanId}/detail`（スパンインスペクタ用 JSON: tool 呼出引数 / 結果末尾、llm メッセージ構成 / プレビュー、raw span JSON。D043）、および ダッシュボード（`/`）と トレース一覧（`/traces`）。後者2つは各トレースの代表ユーザープロンプトを server-rendered または same-origin prompt-label route fetch で表示する（raw store の OTLP payload から抽出、truncated、escaped inert text。prompt ラベルのみ raw でその他列は sanitized metadata。D032 / D039 / D042）。raw-bearing route set の全 route で same-origin 強制（cross-site は `403`）、`Cache-Control: no-store`。`--sanitized-only` 起動時は raw-bearing route / raw section を除去（raw-detail route は `404`、dashboard / traces の prompt ラベルは省略し短縮 TraceId にフォールバック）、PII は除外。prompt ラベルは `/api/monitor/*` と SSE には含めない。full-payload JSON raw API は提供しない。Canvas helper は、拡張所有 loopback server の token-gated local screen として、既存 raw-bearing span detail route から選択 trace の prompt / response preview を server-to-server 取得して表示してよく（D050）、同じ token-gated helper screen の `/api/traces` と `/api/summary` highlight trace label でも prompt label を表示してよい（D039 / D050）。Canvas action responses、`session.send()` prompts、logs、repository-safe outputs、static artifacts には raw prompt / response / prompt label を含めない。
 - Local Ingestion Monitor run interface: loopback port（既定 `http://127.0.0.1:4320`）、`--port` / `--url`、`--sanitized-only`（metadata-only モード。raw-bearing route を `404` にし PII を除外）、リクエスト本文サイズ上限 `--max-request-body-bytes`（既定 `31457280` bytes = 30 MiB、env `CAO_MONITOR_MAX_REQUEST_BODY_BYTES`）。`POST /v1/traces` は本文が上限を超えると `413` / `request_too_large` を返し raw を書かない。
 
