@@ -54,6 +54,41 @@ public sealed class Issue91ValidationContractTests
     }
 
     [Fact]
+    public void SanitizedImportMatrixPinsFunctionalCandidateAndExternalPortabilityGap()
+    {
+        using var matrix = JsonDocument.Parse(File.ReadAllText(Path.Combine(
+            RepositoryRoot, "docs", "sprints", "issue-86-sanitized-import", "validation-matrix.json")));
+
+        const string functionalSha = "6156699a47733d59b4a83301dd02c0291dcfaec4";
+        var root = matrix.RootElement;
+        Assert.Equal("validation-matrix.v1", root.GetProperty("schema_version").GetString());
+        Assert.Equal("c02c10ab18553acef1619ce12ec630f4f6f5aa5f", root.GetProperty("matrix_prep_sha").GetString());
+        Assert.Equal(functionalSha, root.GetProperty("final_validation_sha").GetString());
+        Assert.Equal(
+            "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+            root.GetProperty("future_registry_ref").GetString());
+
+        var rows = root.GetProperty("active_rows").EnumerateArray().ToArray();
+        Assert.Equal(["91-I-086", "91-S-086", "91-L-086"],
+            rows.Select(row => row.GetProperty("row_id").GetString()));
+        Assert.Equal(["passed", "passed", "blocked_external"],
+            rows.Select(row => row.GetProperty("classification").GetString()));
+        Assert.All(rows, row => Assert.Equal(functionalSha, row.GetProperty("validation_sha").GetString()));
+
+        var liveRow = rows[2];
+        var decision = root.GetProperty("release_decision");
+        Assert.Equal("release_ready_with_external_blockers", decision.GetProperty("decision").GetString());
+        var blocker = Assert.Single(decision.GetProperty("external_blockers").EnumerateArray());
+        Assert.Equal(liveRow.GetProperty("row_id").GetString(), blocker.GetProperty("row_id").GetString());
+        Assert.Equal(liveRow.GetProperty("severity").GetString(), blocker.GetProperty("severity").GetString());
+        Assert.Equal(liveRow.GetProperty("blocker").GetString(), blocker.GetProperty("blocker").GetString());
+        Assert.Equal(liveRow.GetProperty("retry_condition").GetString(), blocker.GetProperty("retry_condition").GetString());
+        Assert.Equal(liveRow.GetProperty("unverified_capability").GetString(), blocker.GetProperty("unverified_capability").GetString());
+        Assert.Contains(liveRow.GetProperty("evidence").EnumerateArray(),
+            evidence => evidence.GetProperty("kind").GetString() == "live");
+    }
+
+    [Fact]
     public void PreparationInventoryPinsShaWithoutFinalClassifications()
     {
         using var inventory = JsonDocument.Parse(File.ReadAllText(Path.Combine(

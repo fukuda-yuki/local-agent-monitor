@@ -1,0 +1,169 @@
+{
+  "schema_version": "validation-matrix.v1",
+  "matrix_prep_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+  "final_validation_sha": "6156699a47733d59b4a83301dd02c0291dcfaec4",
+  "inventory_date": "2026-07-23",
+  "environment_boundary": "Exact functional SHA in the Windows native current-user Issue #86 worktree; deterministic synthetic bundles, disposable SQLite databases, and server-managed loopback test hosts only. No genuine second machine was available.",
+  "active_rows": [
+    {
+      "row_id": "91-I-086",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "transactional-sanitized-import",
+      "operation": "Strict bundle preview, preview-bound transactional commit, replay, history, and detail through Config CLI and Local Monitor API/UI",
+      "profiles": {
+        "collection": ["config-cli", "local-monitor-http", "local-monitor-ui"],
+        "content_access": ["sanitized-only"],
+        "compatibility": ["sanitized-evidence-bundle.v1", "strict-archive", "unsupported-rejected"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-record-identity", "exact-provenance", "dependency-graph"],
+        "restart": ["persistent-history", "idempotent-replay"],
+        "retention": ["retention-target-not-applicable"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "bundle_schema": "sanitized-evidence-bundle.v1",
+        "preview": "sanitized-import-preview.v1",
+        "result": "sanitized-import-result.v1",
+        "history": "sanitized-import-history.v1",
+        "store": "sanitized-import-store.v1",
+        "schema_component": "sanitized_import.v1",
+        "migration": "sanitized-evidence-bundle.v1->sanitized-import-store.v1",
+        "migration_step": "identity-projection",
+        "migration_sha256": "6f6ddfa063bc69f874b7540d1a0b1c9ebc8e5180f49b3a6f23220998606f9a42"
+      },
+      "expected_invariant": "The exact candidate validates the frozen #85 archive before database mutation, binds commit to the preview digest and current imported state, atomically preserves exact carrier identity, provenance, graph completeness, and history, rejects conflicts without partial writes, and exposes bounded consistent CLI, loopback API, and Japanese UI results.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "Exact functional SHA 6156699a47733d59b4a83301dd02c0291dcfaec4: Claude mirror 5/5, solution build 0 warnings/0 errors, Playwright bootstrap, LocalMonitor sanitized import 32/32, ConfigCli sanitized import 8/8, and Issue #91 contract 7/7 all passed with zero skips. The repository full test command is intentionally deferred for primary integration serialization after the #79 rebase.",
+          "compatibility_basis": "Fresh focused execution covered service, graph, component migration, strict archive, transaction rollback, conflict, loopback route, CLI validation order, UI concurrency, history, and replay behavior from the unchanged tree frozen by the functional SHA."
+        }
+      ],
+      "actual_result": "Preview, commit, replay, history, and detail passed across service, CLI, loopback API, and browser tests. Exact and conflicting identities, later graph definitions, injected rollback checkpoints, digest/state changes, schema drift, malformed requests, bounds, and overlapping UI requests produced the specified outcomes without owner-table or raw-retention writes.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #86 transactional sanitized evidence import",
+      "validation_sha": "6156699a47733d59b4a83301dd02c0291dcfaec4",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "Exact functional SHA with deterministic synthetic #58/#59/#80 carrier bundles, disposable SQLite databases, and loopback test hosts; no raw telemetry, live user data, or remote endpoint was exercised or claimed."
+    },
+    {
+      "row_id": "91-S-086",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "sanitized-import-security-retention-boundary",
+      "operation": "Fail-closed archive, schema, authorization, request, transaction, namespace, and retention-boundary validation",
+      "profiles": {
+        "collection": ["bundle-inspect", "database-import", "local-monitor-http"],
+        "content_access": ["sanitized-only", "raw-absent"],
+        "compatibility": ["strict-inventory", "canonical-checksum", "schema-drift-rejected"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-record-identity", "closed-import-namespace"],
+        "restart": ["transactional-revalidation"],
+        "retention": ["zero-retention-items", "retention-target-not-applicable"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "archive": "sanitized-evidence-zip-store.v1",
+        "checksum": "sha256.v1",
+        "schema_component": "sanitized_import.v1",
+        "retention_resolution": "retention-target-not-applicable"
+      },
+      "expected_invariant": "Archive, producer, canonicalization, checksum, inventory, entry, graph, and schema-component violations fail closed; authorization, same-origin, CSRF, media, digest, and size checks precede body persistence; every failure rolls back import-owned state and the importer creates zero source-owner or raw-retention rows.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "Exact functional SHA 6156699a47733d59b4a83301dd02c0291dcfaec4: LocalMonitor sanitized import 32/32 and ConfigCli sanitized import 8/8 passed. Cases covered strict archive failures, entry/node/edge bounds, malformed and unauthorized HTTP requests before body reads, preview/state conflicts, exact normalized DDL and attached-object rejection, all rollback checkpoints, no owner-table writes, and zero retention items.",
+          "compatibility_basis": "Tests invoked the #85 strict inspector, import graph projector, independent sanitized_import schema v1, SQLite transaction, loopback middleware, CLI adapter, and framework-escaped UI from the exact functional tree."
+        },
+        {
+          "kind": "automated",
+          "reference": "Issue #91 scanner self-test and contract tests passed; repository-safe output scanning is also applied to this validation artifact before its evidence commit.",
+          "compatibility_basis": "The versioned Issue #91 synthetic corpus and semantic validator are unchanged dependencies of the functional candidate."
+        }
+      ],
+      "actual_result": "All focused hard-security and transaction cases passed. Invalid input did not create a CLI database, route guards rejected unauthorized, cross-origin, malformed, oversized, or mismatched requests at the specified boundary, exact schema validation rejected weakened or foreign attached objects, failures left no partial import history/record/origin/graph state, and imported sanitized references resolved to retention not-applicable without retention mutation.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #86 transactional sanitized evidence import",
+      "validation_sha": "6156699a47733d59b4a83301dd02c0291dcfaec4",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "Exact functional SHA with synthetic repository-safe bundles, disposable SQLite files, and loopback hosts. This is not a general DLP, secure-erasure, remote-host, or raw-content safety claim."
+    },
+    {
+      "row_id": "91-L-086",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "genuine-second-machine-sanitized-import",
+      "operation": "Transfer an unchanged sanitized bundle between distinct machines and validate preview, commit, replay, history, graph, and retention boundaries",
+      "profiles": {
+        "collection": ["cross-machine-transfer", "database-import"],
+        "content_access": ["sanitized-only"],
+        "compatibility": ["genuine-second-machine", "same-machine-relocation-insufficient"],
+        "hook": [],
+        "otel": [],
+        "binding": ["source-neutral-identifiers", "exact-record-identity"],
+        "restart": ["destination-process-restart", "idempotent-replay"],
+        "retention": ["zero-retention-items", "retention-target-not-applicable"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "bundle_schema": "sanitized-evidence-bundle.v1",
+        "store": "sanitized-import-store.v1",
+        "schema_component": "sanitized_import.v1"
+      },
+      "expected_invariant": "A byte-identical sanitized bundle created on one machine imports on a genuinely distinct machine without dependence on source filesystem paths, local database identity, runtime-local timestamps, or source retention authority, while preserving exact sanitized identity and replay behavior.",
+      "evidence": [
+        {
+          "kind": "live",
+          "reference": "The 2026-07-23 live environment inventory exposed only the current Windows machine. Same-machine path and database relocation supplied negative compatibility evidence but was not treated as a genuine second-machine execution.",
+          "compatibility_basis": "The canonical Issue #86 contract explicitly states that same-machine relocation cannot pass 91-L-086, so this observation establishes the external gap rather than compatibility."
+        },
+        {
+          "kind": "automated",
+          "reference": "Source-neutral archive inspection, local-ID derivation, fresh-database import, restart-stable history, replay idempotency, graph preservation, and zero-retention mutation passed in deterministic focused tests on the exact functional SHA.",
+          "compatibility_basis": "These tests reduce portability risk but do not cross a real machine boundary and therefore cannot change the blocked_external classification."
+        }
+      ],
+      "actual_result": "No genuine second-machine execution was possible. Repository tests and same-machine relocation passed the machine-neutral logic they can observe, but filesystem, runtime, timestamp, and local-identity boundaries across distinct machines remain unverified.",
+      "classification": "blocked_external",
+      "severity": "medium",
+      "blocker": "No separately provisioned machine with the frozen functional SHA and a transferable sanitized bundle was available during this validation window.",
+      "retry_condition": "Provision a genuine second Windows machine, transfer a bundle created on the first machine without changing archive bytes, and rerun strict preview, commit, replay, history, graph, and retention-boundary observations against the frozen candidate.",
+      "unverified_capability": "End-to-end portability across distinct machine filesystem, runtime, timestamp, and local-identity boundaries.",
+      "owner": "Issue #86 transactional sanitized evidence import",
+      "validation_sha": "6156699a47733d59b4a83301dd02c0291dcfaec4",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "Current Windows machine only; deterministic same-machine relocation is retained as negative evidence and no distinct source/destination machine pair was available."
+    }
+  ],
+  "future_registry_ref": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+  "evidence_ledger_refs": [
+    "docs/sprints/issue-86-sanitized-import/validation-matrix.json",
+    "docs/specifications/interfaces/sanitized-evidence-import.md"
+  ],
+  "release_decision": {
+    "decision": "release_ready_with_external_blockers",
+    "external_blockers": [
+      {
+        "row_id": "91-L-086",
+        "severity": "medium",
+        "blocker": "No separately provisioned machine with the frozen functional SHA and a transferable sanitized bundle was available during this validation window.",
+        "retry_condition": "Provision a genuine second Windows machine, transfer a bundle created on the first machine without changing archive bytes, and rerun strict preview, commit, replay, history, graph, and retention-boundary observations against the frozen candidate.",
+        "unverified_capability": "End-to-end portability across distinct machine filesystem, runtime, timestamp, and local-identity boundaries."
+      }
+    ]
+  }
+}
