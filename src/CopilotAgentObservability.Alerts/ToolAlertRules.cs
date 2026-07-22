@@ -25,6 +25,11 @@ public sealed class RepeatedIdenticalToolCallAlertRule : IAlertRule
 
     public AlertRuleOutcome Evaluate(AlertRuleContext context)
     {
+        if (context.Snapshot.TraceId is null)
+        {
+            return ToolAlertRuleSupport.Outcome([], "trace-scope-unavailable");
+        }
+
         var incomplete = false;
         var candidates = new List<(AlertSignal Signal, string Argument, string Owner, string Tool)>();
         foreach (var signal in ToolAlertRuleSupport.Signals(context.Snapshot, AlertSignalKind.ToolCall))
@@ -79,25 +84,35 @@ public sealed class UnrecoveredRetryChainAlertRule : IAlertRule
 
     public AlertRuleOutcome Evaluate(AlertRuleContext context)
     {
+        if (context.Snapshot.TraceId is null)
+        {
+            return ToolAlertRuleSupport.Outcome([], "trace-scope-unavailable");
+        }
+
         var incomplete = false;
         var attempts = new List<(AlertSignal Signal, string Tool, string Chain, decimal Attempt)>();
         foreach (var signal in ToolAlertRuleSupport.Signals(context.Snapshot, AlertSignalKind.ToolCall))
         {
             var attempt = ToolAlertRuleSupport.Metric(signal, "retry-attempt", "attempts");
-            if (attempt is null)
+            var chain = ToolAlertRuleSupport.Key(signal, "retry-chain-key", AlertComparableKeyKind.SensitiveHmac);
+            if (attempt is null && chain is null)
             {
                 continue;
             }
 
             var tool = ToolAlertRuleSupport.Key(signal, "tool-key", AlertComparableKeyKind.SensitiveHmac);
-            var chain = ToolAlertRuleSupport.Key(signal, "retry-chain-key", AlertComparableKeyKind.SensitiveHmac);
-            if (tool is null || chain is null || attempt <= 0 || attempt != decimal.Truncate(attempt.Value))
+            if (tool is null || chain is null || attempt is null || attempt <= 0 || attempt != decimal.Truncate(attempt.Value))
             {
                 incomplete = true;
                 continue;
             }
 
             attempts.Add((signal, tool, chain, attempt.Value));
+        }
+
+        if (incomplete)
+        {
+            return ToolAlertRuleSupport.Outcome([], "incomplete-signal-facts");
         }
 
         var warning = context.EffectiveThresholds["retry-chain-length.warning"];
@@ -187,6 +202,11 @@ public sealed class HighToolFailureRatioAlertRule : IAlertRule
 
     public AlertRuleOutcome Evaluate(AlertRuleContext context)
     {
+        if (context.Snapshot.TraceId is null)
+        {
+            return ToolAlertRuleSupport.Outcome([], "trace-scope-unavailable");
+        }
+
         if (ToolAlertRuleSupport.HasIncompleteInterval(context.Snapshot))
         {
             return ToolAlertRuleSupport.Outcome([], "incomplete-signal-facts");
@@ -236,7 +256,7 @@ public sealed class ExcessivePermissionWaitAlertRule : IAlertRule
             ToolAlertRuleSupport.Threshold("individual-wait", "seconds", 0, 86_400, 30, 120),
             ToolAlertRuleSupport.Threshold("total-wait", "seconds", 0, 604_800, 60, 300),
         ],
-        ["incomplete-signal-facts", "trace-scope-unavailable"]);
+        ["duration-out-of-range", "incomplete-signal-facts", "trace-scope-unavailable"]);
 
     public AlertRuleOutcome Evaluate(AlertRuleContext context)
     {
@@ -246,16 +266,27 @@ public sealed class ExcessivePermissionWaitAlertRule : IAlertRule
         }
 
         var incomplete = false;
+        var durationOutOfRange = false;
         var waits = new List<(AlertSignal Signal, decimal Seconds)>();
         foreach (var signal in ToolAlertRuleSupport.Signals(context.Snapshot, AlertSignalKind.Permission))
         {
             var duration = ToolAlertRuleSupport.Metric(signal, "wait-duration", "seconds");
-            if (duration is null || duration < 0)
+            if (duration is null)
             {
                 incomplete = true;
                 continue;
             }
+            if (duration < 0 || duration > 86_400)
+            {
+                durationOutOfRange = true;
+                continue;
+            }
             waits.Add((signal, duration.Value));
+        }
+
+        if (durationOutOfRange)
+        {
+            return ToolAlertRuleSupport.Outcome([], "duration-out-of-range");
         }
 
         if (waits.Count == 0)
@@ -267,7 +298,15 @@ public sealed class ExcessivePermissionWaitAlertRule : IAlertRule
         }
 
         var maximum = waits.Max(item => item.Seconds);
-        var total = waits.Sum(item => item.Seconds);
+        var total = 0m;
+        foreach (var wait in waits)
+        {
+            if (wait.Seconds > 604_800 - total)
+            {
+                return ToolAlertRuleSupport.Outcome([], "duration-out-of-range");
+            }
+            total += wait.Seconds;
+        }
         var individualWarning = maximum >= context.EffectiveThresholds["individual-wait.warning"];
         var individualCritical = maximum >= context.EffectiveThresholds["individual-wait.critical"];
         var totalWarning = total >= context.EffectiveThresholds["total-wait.warning"];
@@ -306,6 +345,15 @@ public sealed class RepeatedFileReadOrSearchAlertRule : IAlertRule
 
     public AlertRuleOutcome Evaluate(AlertRuleContext context)
     {
+        if (context.Snapshot.TraceId is null)
+        {
+            return ToolAlertRuleSupport.Outcome([], "trace-scope-unavailable");
+        }
+        if (ToolAlertRuleSupport.HasIncompleteInterval(context.Snapshot))
+        {
+            return ToolAlertRuleSupport.Outcome([], "incomplete-signal-facts");
+        }
+
         var incomplete = false;
         var segmentByFile = new Dictionary<string, int>(StringComparer.Ordinal);
         var candidates = new List<(AlertSignal Signal, string File, string Operation, string Range, int Segment)>();
@@ -330,8 +378,18 @@ public sealed class RepeatedFileReadOrSearchAlertRule : IAlertRule
                 continue;
             }
 
-            var range = ToolAlertRuleSupport.Key(signal, "range-key", AlertComparableKeyKind.SensitiveHmac) ?? string.Empty;
+            var range = ToolAlertRuleSupport.Key(signal, "range-key", AlertComparableKeyKind.SensitiveHmac);
+            if (range is null)
+            {
+                incomplete = true;
+                continue;
+            }
             candidates.Add((signal, file, operation, range, segment));
+        }
+
+        if (incomplete)
+        {
+            return ToolAlertRuleSupport.Outcome([], "incomplete-signal-facts");
         }
 
         var warning = context.EffectiveThresholds["access-count.warning"];
@@ -348,10 +406,7 @@ public sealed class RepeatedFileReadOrSearchAlertRule : IAlertRule
                 [new("access-count", "accesses", group.Count())],
                 group.Select(item => item.Signal)))
             .ToArray();
-        var suppression = incomplete || matches.Length == 0 && ToolAlertRuleSupport.HasIncompleteInterval(context.Snapshot)
-            ? "incomplete-signal-facts"
-            : null;
-        return ToolAlertRuleSupport.Outcome(matches, suppression);
+        return ToolAlertRuleSupport.Outcome(matches);
     }
 }
 
@@ -378,7 +433,7 @@ internal static class ToolAlertRuleSupport
             groupingKeys,
             "trace",
             thresholds,
-            EngineSuppressions.Concat(suppressions).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+            EngineSuppressions.Concat(suppressions).Append("trace-scope-unavailable").Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
             SourceSurfaces);
 
     public static AlertThresholdDefinition Threshold(

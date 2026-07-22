@@ -46,6 +46,33 @@ public sealed class ToolAlertRuleTests
         Assert.Equal(["file-access-key", "file-access-ordering", "file-operation-type"], file.RequiredCapabilities);
         Assert.Equal(["file-key", "operation-type", "range-key"], file.GroupingKeys);
         AssertThreshold(file, "access-count", "accesses", 1, 100_000, 3, 5);
+        Assert.All(registry.Rules, rule => Assert.Contains("trace-scope-unavailable", rule.Descriptor.SuppressionCodes));
+    }
+
+    [Theory]
+    [InlineData("repeated-identical-tool-call")]
+    [InlineData("unrecovered-retry-chain")]
+    [InlineData("high-tool-failure-ratio")]
+    [InlineData("excessive-permission-wait")]
+    [InlineData("repeated-file-read-or-search")]
+    public void TraceScopedRule_MissingTraceId_SuppressesWithoutMatch(string ruleId)
+    {
+        var rule = CreateRule(ruleId);
+        var signals = ruleId switch
+        {
+            "repeated-identical-tool-call" => RepeatedToolCalls(3),
+            "unrecovered-retry-chain" => RetryChain(AlertSignalStatus.Error, AlertSignalStatus.Error),
+            "high-tool-failure-ratio" => StatusCalls(5, 0),
+            "excessive-permission-wait" => [Permission(1, 30)],
+            "repeated-file-read-or-search" => FileAccesses(3),
+            _ => throw new InvalidOperationException(),
+        };
+        var snapshot = WithoutTrace(Snapshot(signals: signals));
+
+        var result = Evaluate(rule, snapshot);
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("trace-scope-unavailable", Assert.Single(result.Suppressions).Code);
     }
 
     [Theory]
@@ -197,6 +224,28 @@ public sealed class ToolAlertRuleTests
     }
 
     [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void UnrecoveredRetryChain_ChainSignalWithoutAttempt_MakesTerminalityIncomplete(int missingSequence)
+    {
+        var chain = RetryChain(AlertSignalStatus.Error, AlertSignalStatus.Error).ToList();
+        if (missingSequence == 2)
+        {
+            chain[1] = chain[1] with { Sequence = 3, SignalId = "signal-3", Evidence = chain[1].Evidence with { EvidenceId = "evidence-3", SpanId = "span-3", EventId = "event-3", ToolCallId = "tool-3", ObservedAt = At.AddSeconds(3) }, ObservedAt = At.AddSeconds(3) };
+            chain.Insert(1, Tool(2, status: AlertSignalStatus.Error, retryChain: Hmac('r')));
+        }
+        else
+        {
+            chain.Add(Tool(3, status: AlertSignalStatus.Error, retryChain: Hmac('r')));
+        }
+
+        var result = Evaluate(new UnrecoveredRetryChainAlertRule(), Snapshot(signals: chain));
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
+    }
+
+    [Theory]
     [InlineData("github-copilot-vscode")]
     [InlineData("claude-code")]
     public void HighToolFailureRatio_SourceNeutralFixtures_UseKnownStatusDenominator(string source)
@@ -307,6 +356,17 @@ public sealed class ToolAlertRuleTests
         Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
     }
 
+    [Fact]
+    public void ExcessivePermissionWait_ExtremeDuration_SuppressesWithoutOverflow()
+    {
+        var snapshot = Snapshot(signals: [Permission(1, decimal.MaxValue), Permission(2, decimal.MaxValue)]);
+
+        var result = Evaluate(new ExcessivePermissionWaitAlertRule(), snapshot);
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("duration-out-of-range", Assert.Single(result.Suppressions).Code);
+    }
+
     [Theory]
     [InlineData("github-copilot-vscode")]
     [InlineData("claude-code")]
@@ -344,7 +404,13 @@ public sealed class ToolAlertRuleTests
     public void RepeatedFileReadOrSearch_EditForDifferentFile_DoesNotResetSegment()
     {
         var target = Hmac('f');
-        var signals = new[] { File(1, target), File(2, Hmac('x'), "edit"), File(3, target), File(4, target) };
+        var signals = new[]
+        {
+            File(1, target, range: Hmac('1')),
+            File(2, Hmac('x'), "edit"),
+            File(3, target, range: Hmac('1')),
+            File(4, target, range: Hmac('1')),
+        };
 
         var receipt = Assert.Single(Evaluate(new RepeatedFileReadOrSearchAlertRule(), Snapshot(signals: signals)).Receipts);
 
@@ -352,14 +418,14 @@ public sealed class ToolAlertRuleTests
     }
 
     [Fact]
-    public void RepeatedFileReadOrSearch_PartialHistoryWithExactPositiveEvidence_StillMatches()
+    public void RepeatedFileReadOrSearch_PartialHistoryCouldHideEdit_SuppressesPositiveCount()
     {
         var snapshot = Snapshot(signals: FileAccesses(3), reasons: ["historical_summary_only"]);
 
         var result = Evaluate(new RepeatedFileReadOrSearchAlertRule(), snapshot);
 
-        Assert.Single(result.Receipts);
-        Assert.Empty(result.Suppressions);
+        Assert.Empty(result.Receipts);
+        Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
     }
 
     [Fact]
@@ -368,6 +434,21 @@ public sealed class ToolAlertRuleTests
         var snapshot = Snapshot(signals: FileAccesses(2), reasons: ["ingest_gap"]);
 
         var result = Evaluate(new RepeatedFileReadOrSearchAlertRule(), snapshot);
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
+    }
+
+    [Theory]
+    [InlineData("file-key")]
+    [InlineData("operation-type")]
+    [InlineData("range-key")]
+    public void RepeatedFileReadOrSearch_MissingSameFileFact_CouldHideEditAndSuppresses(string missingKey)
+    {
+        var signals = FileAccesses(4).ToArray();
+        signals[2] = signals[2] with { ComparableKeys = signals[2].ComparableKeys.Where(key => key.Name != missingKey).ToArray() };
+
+        var result = Evaluate(new RepeatedFileReadOrSearchAlertRule(), Snapshot(signals: signals));
 
         Assert.Empty(result.Receipts);
         Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
@@ -404,7 +485,7 @@ public sealed class ToolAlertRuleTests
         var toolHash = AlertSensitiveValueHasher.Hash(key, "session-1", "argument-hash", maliciousArgument);
         var fileHash = AlertSensitiveValueHasher.Hash(key, "session-1", "file-key", maliciousPath);
         var repeatedTool = Enumerable.Range(1, 3).Select(index => Tool(index, tool: toolHash));
-        var repeatedFile = Enumerable.Range(4, 3).Select(index => File(index, fileHash));
+        var repeatedFile = Enumerable.Range(4, 3).Select(index => File(index, fileHash, range: Hmac('1')));
         var snapshot = Snapshot(signals: repeatedTool.Concat(repeatedFile));
         var result = Evaluate(ToolAlertRulePack.CreateRules(), snapshot);
         var json = Encoding.UTF8.GetString(AlertCanonicalJson.SerializeEvaluation(result));
@@ -455,6 +536,16 @@ public sealed class ToolAlertRuleTests
 
     private static AlertRuleDescriptor Descriptor(AlertRuleRegistry registry, string id) =>
         Assert.Single(registry.Rules, rule => rule.Descriptor.RuleId == id).Descriptor;
+
+    private static IAlertRule CreateRule(string id) => id switch
+    {
+        "repeated-identical-tool-call" => new RepeatedIdenticalToolCallAlertRule(),
+        "unrecovered-retry-chain" => new UnrecoveredRetryChainAlertRule(),
+        "high-tool-failure-ratio" => new HighToolFailureRatioAlertRule(),
+        "excessive-permission-wait" => new ExcessivePermissionWaitAlertRule(),
+        "repeated-file-read-or-search" => new RepeatedFileReadOrSearchAlertRule(),
+        _ => throw new ArgumentOutOfRangeException(nameof(id)),
+    };
 
     private static void AssertThreshold(AlertRuleDescriptor descriptor, string name, string unit, decimal minimum, decimal maximum, decimal warning, decimal critical)
     {
@@ -529,7 +620,13 @@ public sealed class ToolAlertRuleTests
             .Concat(Enumerable.Range(errors + 1, successes).Select(index => Tool(index, status: AlertSignalStatus.Success)));
 
     private static IEnumerable<AlertSignal> FileAccesses(int count, int sequenceOffset = 0) =>
-        Enumerable.Range(1, count).Select(index => File(index + sequenceOffset, Hmac('f')));
+        Enumerable.Range(1, count).Select(index => File(index + sequenceOffset, Hmac('f'), range: Hmac('1')));
+
+    private static AlertNormalizedSnapshot WithoutTrace(AlertNormalizedSnapshot snapshot) => snapshot with
+    {
+        TraceId = null,
+        Signals = snapshot.Signals.Select(signal => signal with { Evidence = signal.Evidence with { TraceId = null } }).ToArray(),
+    };
 
     private static AlertSignal Tool(
         int sequence,

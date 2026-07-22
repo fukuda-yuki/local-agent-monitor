@@ -24,7 +24,7 @@ not become defaults.
 | Type | Fixed names and values |
 | --- | --- |
 | capability | `canonical-tool-arguments`, `explicit-retry-classification`, `stable-tool-ordering`, `tool-name`, `tool-ownership`, `tool-call-key`, `tool-call-ordering`, `tool-call-status`, `tool-retry-attempt`, `explicit-permission-duration`, `file-access-key`, `file-operation-type`, `file-access-ordering` |
-| comparable key | `argument-hash`, `tool-name`, `ownership-key`, `retry-kind`, `tool-key`, `retry-chain-key`, `file-key`, `operation-type`, optional `range-key` |
+| comparable key | `argument-hash`, `tool-name`, `ownership-key`, `retry-kind`, `tool-key`, `retry-chain-key`, `file-key`, `operation-type`, `range-key` |
 | comparable value | `retry-kind`: `none` or `explicit`; `operation-type`: `read`, `search`, `edit`, `watch`, or `poll` |
 | metric | `retry-attempt` / `attempts`; `wait-duration` / `seconds` |
 
@@ -45,6 +45,10 @@ cannot establish. An observed positive count remains usable where additional
 missing signals cannot invalidate the positive condition. Missing required
 capabilities remain owned by the Issue #80 engine and use
 `missing_required_capability`.
+
+All five descriptors have trace scope. A snapshot without an exact trace ID
+uses the declared bounded suppression `trace-scope-unavailable`; no trace rule
+is evaluated and no match is returned.
 
 ## `repeated-identical-tool-call` Version 1
 
@@ -82,7 +86,10 @@ length 3 or more is critical. A `session_event` with `status=error` and
 `parent_signal_id` equal to the final attempt signal ID also raises an
 unrecovered chain to critical. Final `unknown` or `cancelled` never becomes a
 failure and uses `unknown-terminal-status`. An incomplete interval cannot prove
-that a final error was unrecovered and uses `incomplete-signal-facts`.
+that a final error was unrecovered and uses `incomplete-signal-facts`. Once a
+tool signal identifies a `retry-chain-key`, its exact `retry-attempt` is
+mandatory. A chain-identified signal without that metric before, between, or
+after observed attempts makes terminality incomplete and suppresses the rule.
 
 ## `high-tool-failure-ratio` Version 1
 
@@ -115,7 +122,7 @@ authoritative denominator, `historical_summary_only` or `ingest_gap` uses
   - `total-wait` / `seconds`, inclusive bounds 0..604800, warning 60,
     critical 300
 - rule suppressions: `trace-scope-unavailable`,
-  `incomplete-signal-facts`
+  `incomplete-signal-facts`, `duration-out-of-range`
 
 Only `permission` signals with one finite non-negative `wait-duration` metric in
 seconds participate; missing start/end is not inferred. Evaluation requires an
@@ -125,7 +132,10 @@ Session. The observed values are `maximum-wait` / `seconds` and `total-wait` /
 when either warning threshold is met. Exact evidence is every permission wait
 that contributes to the triggering maximum or total. An individual threshold
 crossing remains conclusive in an incomplete interval; a total-only conclusion
-requires a complete interval.
+requires a complete interval. Each exact duration is bounded to 0..86400
+seconds and the exact trace total to 0..604800 seconds. A value or accumulation
+outside those bounds uses `duration-out-of-range`; arithmetic never wraps or
+escapes as an evaluator exception.
 
 ## `repeated-file-read-or-search` Version 1
 
@@ -138,13 +148,17 @@ requires a complete interval.
 - rule suppression: `incomplete-signal-facts`
 
 Only `file_access` signals with exact `file-key` and `operation-type=read` or
-`search` participate. `watch` and `poll` are excluded. When present,
-`range-key` is part of the group, so distinct ranges/chunks never combine.
+  `search` participate. `watch` and `poll` are excluded. Exact `range-key` is
+mandatory for reads/searches and is part of the group, so distinct
+ranges/chunks never combine.
 An exact `operation-type=edit` for the same `file-key` resets every read/search
 segment for that file at that sequence; edits for other files do not reset it.
 Each segment/group at or above warning creates one match containing only that
-group's exact evidence. A missing required key is incomplete rather than a
-near-match.
+group's exact evidence. A missing file, operation, or read/search range fact is
+incomplete rather than a near-match and suppresses the whole trace evaluation,
+because the missing signal could be an intervening edit. Likewise,
+`historical_summary_only` or `ingest_gap` can hide an intervening edit and
+always suppresses this rule, even when the observed count reaches a threshold.
 
 ## Determinism, Evidence, And Rule Relationships
 
