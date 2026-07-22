@@ -1334,12 +1334,22 @@ manifest, inventory, checksum, canonical producer, and repository-safe scanner
 validation. Traversal/absolute paths, duplicate entries/identities,
 symlink/external attributes, compressed/ratio-bearing members, extra or
 forbidden files, oversize input, malformed content, and future/unknown versions
-fail before persistence. Validation errors are fixed codes and never echo an
+fail before database open and are revalidated inside the commit transaction.
+The public boundary snapshots caller-owned bytes once; inspection, hashing, and
+member parsing cannot race later caller mutation. Every member's actual stored
+data CRC32 must match both headers, and every raw filename must strict-decode
+and exact-reencode as UTF-8. Inspector exceptions and duplicate manifest-map
+keys also fail closed.
+Validation errors are fixed codes and never echo an
 entry, content fragment, credential, or local path.
 
 Preview and commit carry sanitized metadata and hashes only. Commit is bound to
-the preview digest, revalidates the same bounded archive, and writes the
-component-owned record/origin/graph/history set in one transaction. It never
+the preview digest, revalidates the same bounded archive, and writes the schema
+component plus record/origin/graph/history set in one transaction; any failure
+leaves neither import rows nor component/version changes. Same-archive preview
+and all prior record/node owner receipts used for classification or graph
+resolution must pass full integrity validation, so corrupt graph cannot be
+adopted or repaired. It never
 queries or writes raw/content stores and never changes Session, monitor,
 finding, alert, or retention authority. Imported rows are sanitized retained
 outputs and create zero retention catalog items.
@@ -1349,7 +1359,10 @@ on archive-bearing POSTs, `application/zip` admission, streaming size bounds,
 disabled CORS, and `Cache-Control: no-store`. The UI uses framework encoding or
 DOM `textContent` for every source-controlled label, ID, error, and history
 value; archive content is never injected or executed. Browser storage is not
-used for archive bytes or preview binding. The complete contract is canonical
+used for archive bytes or preview binding. Bounded conflict/unresolved and
+source/provenance details use the same inert-text path. A received fixed HTTP
+rejection is reported as known not committed; only a transport or malformed-
+response outcome is described as ambiguous. The complete contract is canonical
 in [`interfaces/sanitized-evidence-import.md`](interfaces/sanitized-evidence-import.md).
 
 ## Shared Use Preconditions

@@ -2474,9 +2474,23 @@ Issue #86 imports only the frozen Issue #85 v1 archive after the exact #85
 strict inspection authority succeeds. It uses exact record identity and exact
 canonical bytes for deduplication, rejects same-ID/different-bytes conflicts,
 and preserves source IDs in a deterministic evidence graph without repository,
-workspace, timestamp, text, or proximity inference. Preview is bound to the
-archive and current imported-record state; commit revalidates it inside one
-transaction and writes records, origins, graph, and history all-or-nothing.
+workspace, timestamp, text, or proximity inference. Preview is bound to one
+private archive-byte snapshot and current imported-record state; commit
+revalidates it inside one transaction that includes schema-component setup and
+writes records, origins, graph, and history all-or-nothing. Every failure rolls
+back component/version mutation too. The archive also passes strict preflight
+before database access, with actual member CRC32 recomputation and strict
+round-tripping UTF-8 filename bytes. #59 opaque
+references and #80 full evidence tuples use separate carrier-specific identity
+domains; neither bare child IDs nor cross-carrier namespace reuse is accepted.
+Global exact-definition state is separate from immutable per-import
+missing/external declarations and edge resolution. Replay success requires an
+exact completeness check. Same-archive preview and every prior owner receipt
+consulted for duplicate/conflict/definition/resolution/promotion receive the
+same integrity treatment; corrupt graph is never repaired or adopted. Public
+preview reports manifest declarations separately from current destination
+unresolved state, and counts distinguish new, updated, skipped, rejected,
+duplicate, conflict, and graph-state-update outcomes.
 
 The data belongs to an independent `sanitized_import` schema component v1.
 Using Session v14 was rejected because the frozen carriers do not create or

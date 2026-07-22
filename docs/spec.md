@@ -590,19 +590,43 @@ scanning remain separate.
 ## Sanitized evidence import
 
 Issue #86 consumes only the frozen Issue #85 v1 archive and its #58/#59/#80
-carriers. Preview runs the exact strict archive/producer/scanner authority,
-classifies records by exact `(record_type, record_id)` plus canonical hash,
-projects exact-ID evidence graph relations, and binds those results to a
-preview digest. Commit revalidates and recomputes that digest inside one SQLite
-transaction, then writes component-owned sanitized records, origins, graph,
-and append-only history all-or-nothing. Same ID/same bytes is a duplicate;
-same ID/different bytes rejects the whole import without overwrite.
+carriers. Preview captures caller-owned archive bytes once, then runs the exact
+strict archive/producer/scanner authority against that private snapshot before
+opening the database. The ZIP inspector recomputes every member CRC32 from
+stored data and requires strict UTF-8 filename decode plus exact re-encode.
+Preview classifies records by exact `(record_type, record_id)` plus canonical
+hash, projects exact-ID evidence graph relations, exposes manifest declarations
+separately from destination unresolved state, and binds those results to a
+preview digest. Commit repeats that preflight over the same snapshot, then
+ensures/validates the schema component, revalidates the archive, and recomputes
+the digest inside one SQLite transaction before writing component-owned
+sanitized records, origins, graph, immutable per-import missing/external
+declarations, and append-only history all-or-nothing. Every failure rolls back
+schema/version changes as well as import rows. Preview and commit validate the
+same-archive receipt and every prior record/node owner receipt used for
+duplicate, conflict, definition, resolution, or promotion; corrupt graph is
+never repaired or adopted. Same ID/same bytes is a duplicate/skip; same
+ID/different bytes rejects the whole import without overwrite.
+
+#59 opaque references use carrier-specific namespaces and never resolve against
+#58 actual session/trace IDs. #80 evidence identity includes the full
+kind/evidence/session/trace/span/turn/event/tool/time tuple; bare child IDs are
+not identity. Graph nodes expose only global exact-definition state, while
+per-import missing/external declarations and edge resolution remain immutable.
+A later exact definition may promote a global node from unresolved to defined
+and increments `graph_state_updates`, but never rewrites an earlier declaration
+or edge. Public preview/result/history counts separately report eligible, new,
+updated, skipped, rejected, duplicate, conflict, and graph-state-update values
+under the invariant defined by the detailed interface.
 
 The independent `sanitized_import` schema component is version 1 and leaves
 monitor v7, Session v13, raw stores, alert/finding owner tables, and the
 retention catalog unchanged. Imported evidence is a retained sanitized output,
 not a raw item. The UI/HTTP/CLI are bounded and no-store; loopback HTTP uses
 Host, same-origin, and CSRF controls and renders source values as inert text.
+The UI shows bounded conflict/unresolved identities and the source/capability/
+processing/migration/provenance context, and distinguishes a received fixed
+HTTP rejection (known not committed) from an ambiguous transport failure.
 Raw OTLP import, backup restore, heuristic reconciliation, unknown/future
 profiles, and #72/#83/#73/#74/#84 carriers are excluded. The canonical
 contract is

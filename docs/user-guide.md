@@ -63,6 +63,17 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-import
 alert lifecycle、backup は復元しません。構造検証の成功は bundle の内部整合性を
 示しますが、作成者、署名、権限、source store provenance を証明しません。
 
+preview では source version / 作成日時、capability、completeness、processing version、
+競合、manifest が宣言した missing / external と現在の取り込み先で未解決の参照を
+分けた bounded detail に加え、`eligible_records` を
+new / updated / skipped / rejected に分けた件数を確認できます。後から exact definition が
+見つかった場合は global graph state だけが更新され、過去の bundle が宣言した
+missing / external state と、その時点の edge resolution は変更されません。
+
+確定 API が JSON error を返した場合、画面は「取り込みは確定されませんでした」と表示します。
+通信切断や解釈不能な response で結果を判定できない場合だけ、画面は自動再送せず履歴の再取得を
+案内します。
+
 ## Claude Code の guided setup
 
 Claude Code 2.1.207 以上では、対象にする Claude project の root へ移動してから、設定値や path そのものを含まない redacted な member state、operation、対象 label を表示する plan を作成します。setup は実行 directory 直下の `.claude/settings.local.json` と `.claude/settings.json` だけを確認し、親 directory、子 directory、Git root、`--add-dir` の project は探索しません。plan だけでは設定を書き換えません。

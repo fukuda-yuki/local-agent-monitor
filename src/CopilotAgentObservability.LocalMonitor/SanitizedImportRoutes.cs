@@ -126,7 +126,8 @@ internal static class SanitizedImportRoutes
             return false;
         }
         var bodySize = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
-        if (bodySize is { IsReadOnly: false }) bodySize.MaxRequestBodySize = SanitizedExportLimits.MaximumUncompressedBytes;
+        if (bodySize is { IsReadOnly: false })
+            bodySize.MaxRequestBodySize = SanitizedExportLimits.MaximumUncompressedBytes + 1L;
         return true;
     }
 
@@ -166,7 +167,7 @@ internal static class SanitizedImportRoutes
         "preview_digest_invalid" => StatusCodes.Status400BadRequest,
         "record_conflict" or "preview_changed" => StatusCodes.Status409Conflict,
         "bundle_too_large" or "entry_limit_exceeded" or "uncompressed_size_limit_exceeded" or "graph_limit_exceeded" => StatusCodes.Status413PayloadTooLarge,
-        "import_store_busy" or "import_store_unavailable" or "import_transaction_failed" => StatusCodes.Status503ServiceUnavailable,
+        "import_store_busy" or "import_store_unavailable" or "import_transaction_failed" or "import_integrity_failed" => StatusCodes.Status503ServiceUnavailable,
         _ => StatusCodes.Status422UnprocessableEntity,
     };
 

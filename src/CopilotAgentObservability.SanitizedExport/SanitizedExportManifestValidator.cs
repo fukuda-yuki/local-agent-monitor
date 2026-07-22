@@ -110,6 +110,7 @@ internal static class SanitizedExportManifestValidator
         if (value.ValueKind != JsonValueKind.Object) return false;
         var names = value.EnumerateObject().Select(property => property.Name).ToArray();
         if (!IsOrdinal(names) || names.Length > maximumProperties
+            || names.Distinct(StringComparer.Ordinal).Count() != names.Length
             || names.Any(name => !validName(name))) return false;
         return value.EnumerateObject().All(property => property.Value.ValueKind == JsonValueKind.Number
             && property.Value.TryGetInt32(out var count) && count >= minimumValue && count <= SanitizedExportLimits.MaximumRecords);
@@ -119,7 +120,8 @@ internal static class SanitizedExportManifestValidator
     {
         if (value.ValueKind != JsonValueKind.Object) return false;
         var names = value.EnumerateObject().Select(property => property.Name).ToArray();
-        return IsOrdinal(names) && names.Length <= maximumProperties && names.All(Identifier)
+        return IsOrdinal(names) && names.Length <= maximumProperties
+            && names.Distinct(StringComparer.Ordinal).Count() == names.Length && names.All(Identifier)
             && value.EnumerateObject().All(property => Identifier(property.Value));
     }
 

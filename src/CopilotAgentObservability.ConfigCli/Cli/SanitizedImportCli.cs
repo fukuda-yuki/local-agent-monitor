@@ -31,6 +31,8 @@ internal static class SanitizedImportCli
         catch (SqliteException) { return WriteError(error, "import_store_unavailable"); }
         catch (InvalidOperationException) { return WriteError(error, "import_store_unavailable"); }
         catch (OverflowException) { return WriteError(error, "import_store_unavailable"); }
+        catch (FormatException) { return WriteError(error, "import_store_unavailable"); }
+        catch (InvalidCastException) { return WriteError(error, "import_store_unavailable"); }
     }
 
     private static int Preview(string[] args, TextWriter output, TextWriter error)
@@ -38,14 +40,15 @@ internal static class SanitizedImportCli
         if (!TryOptions(args, ["--database", "--bundle"], [], out var values))
             return WriteError(error, "invalid_arguments");
         var archiveBytes = ReadBundle(values["--bundle"]);
-        var validation = SanitizedImportBundleReader.Read(archiveBytes);
+        var archiveSnapshot = SanitizedImportArchiveSnapshot.Capture(archiveBytes);
+        var validation = SanitizedImportBundleReader.Read(archiveSnapshot);
         if (!validation.Success)
         {
             WriteJson(output, SqliteSanitizedImportStore.Failure(validation.ErrorCode!));
             return WriteError(error, validation.ErrorCode!);
         }
-        var store = Open(values["--database"]);
-        var result = store.Preview(archiveBytes);
+        var store = new SqliteSanitizedImportStore(values["--database"]);
+        var result = store.Preview(archiveSnapshot);
         WriteJson(output, result);
         return result.Success ? 0 : WriteError(error, result.ErrorCode!);
     }
@@ -60,14 +63,15 @@ internal static class SanitizedImportCli
             return WriteError(error, "preview_digest_invalid");
         }
         var archiveBytes = ReadBundle(values["--bundle"]);
-        var validation = SanitizedImportBundleReader.Read(archiveBytes);
+        var archiveSnapshot = SanitizedImportArchiveSnapshot.Capture(archiveBytes);
+        var validation = SanitizedImportBundleReader.Read(archiveSnapshot);
         if (!validation.Success)
         {
             WriteJson(output, SqliteSanitizedImportStore.ResultFailure(validation.ErrorCode!));
             return WriteError(error, validation.ErrorCode!);
         }
-        var store = Open(values["--database"]);
-        var result = store.Commit(archiveBytes, values["--preview-digest"]);
+        var store = new SqliteSanitizedImportStore(values["--database"]);
+        var result = store.Commit(archiveSnapshot, values["--preview-digest"]);
         WriteJson(output, result);
         return result.Success ? 0 : WriteError(error, result.ErrorCode!);
     }
@@ -138,7 +142,8 @@ internal static class SanitizedImportCli
     private static int WriteError(TextWriter error, string code)
     {
         error.WriteLine(code);
-        return code is "io_failed" or "import_store_busy" or "import_store_unavailable" or "import_transaction_failed" ? 3 : 2;
+        return code is "io_failed" or "import_store_busy" or "import_store_unavailable"
+            or "import_transaction_failed" or "import_integrity_failed" ? 3 : 2;
     }
 }
 

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace CopilotAgentObservability.SanitizedExport;
@@ -8,6 +9,8 @@ namespace CopilotAgentObservability.SanitizedExport;
 internal sealed class SanitizedExportService
 {
     private static readonly DateTimeOffset ArchiveTimestamp = new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private static readonly uint[] Crc32Table = BuildCrc32Table();
 
     public SanitizedExportPreview Preview(SanitizedExportRequest request)
     {
@@ -150,7 +153,7 @@ internal sealed class SanitizedExportService
         {
             using var archive = new ZipArchive(new MemoryStream(archiveBytes, writable: false), ZipArchiveMode.Read);
             if (archive.Entries.Count is 0 or > SanitizedExportLimits.MaximumArchiveEntries) return InspectionFailure("entry_limit_exceeded");
-            var storageError = ValidateStoredArchive(archiveBytes, archive.Entries.Count);
+            var storageError = ValidateStoredArchive(archiveBytes, archive.Entries);
             if (storageError is not null) return InspectionFailure(storageError);
             long totalUncompressedBytes = 0;
             foreach (var entry in archive.Entries)
@@ -227,6 +230,7 @@ internal sealed class SanitizedExportService
         catch (InvalidOperationException) { return InspectionFailure("manifest_invalid"); }
         catch (KeyNotFoundException) { return InspectionFailure("manifest_invalid"); }
         catch (ArgumentOutOfRangeException) { return InspectionFailure("archive_invalid"); }
+        catch (ArgumentException) { return InspectionFailure("manifest_invalid"); }
         catch (OverflowException) { return InspectionFailure("archive_invalid"); }
     }
 
@@ -368,11 +372,12 @@ internal sealed class SanitizedExportService
         return stream.ReadByte() == -1 ? output : null;
     }
 
-    private static string? ValidateStoredArchive(byte[] bytes, int expectedEntries)
+    private static string? ValidateStoredArchive(byte[] bytes, IReadOnlyList<ZipArchiveEntry> entries)
     {
         const uint endSignature = 0x06054b50;
         const uint centralSignature = 0x02014b50;
         const uint localSignature = 0x04034b50;
+        var expectedEntries = entries.Count;
         var minimumOffset = Math.Max(0, bytes.Length - 65_557);
         var endOffset = -1;
         for (var index = bytes.Length - 22; index >= minimumOffset; index--)
@@ -435,14 +440,48 @@ internal sealed class SanitizedExportService
             var localName = bytes.AsSpan((int)localOffset + 30, localNameLength);
             var requiresUtf8 = centralName.ContainsAnyExceptInRange((byte)0x00, (byte)0x7f);
             if (!centralName.SequenceEqual(localName) || (((centralFlags & 0x0800) != 0) != requiresUtf8)) return "archive_invalid";
-            var nextLocal = (long)localOffset + 30 + localNameLength + compressedSize;
+            try
+            {
+                var decodedName = StrictUtf8.GetString(centralName);
+                if (!StrictUtf8.GetBytes(decodedName).AsSpan().SequenceEqual(centralName)
+                    || !string.Equals(decodedName, entries[entryIndex].FullName, StringComparison.Ordinal))
+                    return "archive_invalid";
+            }
+            catch (DecoderFallbackException)
+            {
+                return "archive_invalid";
+            }
+            var dataOffset = (long)localOffset + 30 + localNameLength;
+            var nextLocal = dataOffset + compressedSize;
             if (nextLocal > centralOffset) return "archive_invalid";
+            var actualCrc32 = ComputeCrc32(bytes.AsSpan((int)dataOffset, (int)compressedSize));
+            if (actualCrc32 != BinaryPrimitives.ReadUInt32LittleEndian(local[14..18])) return "archive_invalid";
             expectedLocalOffset = (int)nextLocal;
             var next = (long)cursor + 46 + nameLength + extraLength + entryCommentLength;
             if (next > endOffset) return "archive_invalid";
             cursor = (int)next;
         }
         return cursor == endOffset && expectedLocalOffset == centralOffset ? null : "archive_invalid";
+    }
+
+    private static uint ComputeCrc32(ReadOnlySpan<byte> bytes)
+    {
+        var crc = uint.MaxValue;
+        foreach (var value in bytes) crc = Crc32Table[(int)((crc ^ value) & 0xff)] ^ (crc >> 8);
+        return ~crc;
+    }
+
+    private static uint[] BuildCrc32Table()
+    {
+        var table = new uint[256];
+        for (var index = 0; index < table.Length; index++)
+        {
+            var value = (uint)index;
+            for (var bit = 0; bit < 8; bit++)
+                value = (value & 1) != 0 ? 0xedb88320u ^ (value >> 1) : value >> 1;
+            table[index] = value;
+        }
+        return table;
     }
 
     private static string? ValidateManifestBytes(byte[] bytes)

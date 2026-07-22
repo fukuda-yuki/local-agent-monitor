@@ -18,6 +18,8 @@ public static class SanitizedImportLimits
 {
     public const int MaximumHistoryItems = 100;
     public const int DefaultHistoryItems = 50;
+    public const int MaximumPreviewConflicts = 256;
+    public const int MaximumPreviewManifestDeclarations = 256;
     public const int MaximumPreviewUnresolved = 256;
     public const int MaximumGraphNodes = 65_536;
     public const int MaximumGraphEdges = 131_072;
@@ -34,6 +36,8 @@ public sealed record SanitizedImportExpectedChanges(
     int Records,
     int Origins,
     int GraphNodes,
+    int GraphDeclarations,
+    int GraphStateUpdates,
     int GraphEdges,
     int HistoryRows,
     int RawRetentionItems);
@@ -102,10 +106,17 @@ public sealed record SanitizedImportPreview(
     IReadOnlyDictionary<string, string> ProcessingVersions,
     int TotalRecords,
     long TotalUncompressedBytes,
+    int EligibleRecords,
     int NewRecords,
+    int UpdatedRecords,
+    int SkippedRecords,
+    int RejectedRecords,
     int DuplicateRecords,
     int ConflictRecords,
+    int GraphStateUpdates,
     IReadOnlyList<SanitizedImportConflict> Conflicts,
+    int ManifestDeclarationCount,
+    IReadOnlyList<SanitizedImportUnresolved> ManifestDeclarations,
     int UnresolvedReferenceCount,
     IReadOnlyList<SanitizedImportUnresolved> UnresolvedReferences,
     SanitizedImportExpectedChanges ExpectedChanges,
@@ -119,9 +130,16 @@ public sealed record SanitizedImportResult(
     string? ArchiveSha256,
     string? PreviewDigest,
     string? Status,
+    int EligibleRecords,
     int NewRecords,
+    int UpdatedRecords,
+    int SkippedRecords,
+    int RejectedRecords,
     int DuplicateRecords,
+    int ConflictRecords,
     int GraphNodes,
+    int GraphDeclarations,
+    int GraphStateUpdates,
     int GraphEdges,
     int RawRetentionItems,
     SanitizedImportMigration Migration,
@@ -135,9 +153,16 @@ public sealed record SanitizedImportHistoryItem(
     string ArchiveSha256,
     string PreviewDigest,
     string Status,
+    int EligibleRecords,
     int NewRecords,
+    int UpdatedRecords,
+    int SkippedRecords,
+    int RejectedRecords,
     int DuplicateRecords,
+    int ConflictRecords,
     int GraphNodes,
+    int GraphDeclarations,
+    int GraphStateUpdates,
     int GraphEdges,
     int RawRetentionItems,
     SanitizedImportMigration Migration,
@@ -174,6 +199,10 @@ internal sealed record SanitizedImportGraphEdge(
     string ResolutionState,
     string ProvenanceJson);
 
+internal sealed record SanitizedImportGraphDeclaration(
+    string LocalNodeId,
+    string DeclaredState);
+
 internal sealed record SanitizedImportManifest(
     string ManifestSchemaVersion,
     string BundleSchemaVersion,
@@ -199,6 +228,7 @@ internal sealed record SanitizedImportBundle(
     SanitizedImportManifest Manifest,
     IReadOnlyList<SanitizedImportRecord> Records,
     IReadOnlyList<SanitizedImportGraphNode> GraphNodes,
+    IReadOnlyList<SanitizedImportGraphDeclaration> GraphDeclarations,
     IReadOnlyList<SanitizedImportGraphEdge> GraphEdges);
 
 internal sealed record SanitizedImportBundleReadResult(

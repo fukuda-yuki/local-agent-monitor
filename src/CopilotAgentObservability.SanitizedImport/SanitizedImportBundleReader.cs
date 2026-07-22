@@ -9,17 +9,56 @@ using CopilotAgentObservability.SanitizedExport;
 
 namespace CopilotAgentObservability.SanitizedImport;
 
+internal sealed class SanitizedImportArchiveSnapshot
+{
+    private readonly byte[] bytes;
+
+    private SanitizedImportArchiveSnapshot(byte[] bytes) => this.bytes = bytes;
+
+    internal static SanitizedImportArchiveSnapshot Capture(byte[] archiveBytes)
+    {
+        ArgumentNullException.ThrowIfNull(archiveBytes);
+        return new(archiveBytes.ToArray());
+    }
+
+    internal SanitizedExportInspectionResult Inspect() => new SanitizedExportBundleInspector().Inspect(bytes);
+
+    internal Stream OpenRead() => new MemoryStream(bytes, writable: false);
+}
+
 internal static class SanitizedImportBundleReader
 {
     internal static SanitizedImportBundleReadResult Read(byte[] archiveBytes)
     {
         ArgumentNullException.ThrowIfNull(archiveBytes);
-        var inspection = new SanitizedExportBundleInspector().Inspect(archiveBytes);
-        if (!inspection.Success) return new(false, inspection.ErrorCode, null);
+        return archiveBytes.LongLength > SanitizedExportLimits.MaximumUncompressedBytes
+            ? new(false, "bundle_too_large", null)
+            : Read(SanitizedImportArchiveSnapshot.Capture(archiveBytes));
+    }
 
+    internal static SanitizedImportBundleReadResult Read(byte[] archiveBytes, Action afterInspection)
+    {
+        ArgumentNullException.ThrowIfNull(archiveBytes);
+        return archiveBytes.LongLength > SanitizedExportLimits.MaximumUncompressedBytes
+            ? new(false, "bundle_too_large", null)
+            : Read(SanitizedImportArchiveSnapshot.Capture(archiveBytes), afterInspection);
+    }
+
+    internal static SanitizedImportBundleReadResult Read(SanitizedImportArchiveSnapshot archiveSnapshot) =>
+        Read(archiveSnapshot, afterInspection: null);
+
+    private static SanitizedImportBundleReadResult Read(
+        SanitizedImportArchiveSnapshot archiveSnapshot,
+        Action? afterInspection)
+    {
+        ArgumentNullException.ThrowIfNull(archiveSnapshot);
         try
         {
-            using var archive = new ZipArchive(new MemoryStream(archiveBytes, writable: false), ZipArchiveMode.Read);
+            var inspection = archiveSnapshot.Inspect();
+            afterInspection?.Invoke();
+            if (!inspection.Success) return new(false, inspection.ErrorCode, null);
+
+            using var archive = new ZipArchive(archiveSnapshot.OpenRead(), ZipArchiveMode.Read);
             var manifestBytes = ReadEntry(archive.Entries[0]);
             using var document = JsonDocument.Parse(manifestBytes);
             var root = document.RootElement;
@@ -41,12 +80,14 @@ internal static class SanitizedImportBundleReader
             }
 
             var graph = SanitizedImportGraphProjector.Project(records, manifest.KnownMissingEvidence);
+            var declarations = BuildDeclarations(graph.Nodes, manifest.KnownMissingEvidence);
             return new(true, null, new(
                 inspection.ArchiveSha256!,
                 inspection.TotalUncompressedBytes,
                 manifest,
                 records,
                 graph.Nodes,
+                declarations,
                 graph.Edges));
         }
         catch (SanitizedImportGraphLimitException)
@@ -60,6 +101,27 @@ internal static class SanitizedImportBundleReader
         {
             return new(false, "archive_invalid", null);
         }
+    }
+
+    private static IReadOnlyList<SanitizedImportGraphDeclaration> BuildDeclarations(
+        IReadOnlyList<SanitizedImportGraphNode> nodes,
+        IReadOnlyList<SanitizedImportUnresolved> knownMissing)
+    {
+        var nodesById = nodes.ToDictionary(node => node.LocalNodeId, StringComparer.Ordinal);
+        var declarations = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var item in knownMissing)
+        {
+            var nodeId = SanitizedImportIdentity.Hash("sanitized-import-node.v1", item.NodeKind, item.SourceId);
+            if (!nodesById.TryGetValue(nodeId, out var node) || node.State == "defined")
+                throw new InvalidDataException();
+            if (declarations.TryGetValue(nodeId, out var state) && state != item.State)
+                throw new InvalidDataException();
+            declarations[nodeId] = item.State;
+        }
+        return declarations
+            .OrderBy(item => item.Key, StringComparer.Ordinal)
+            .Select(item => new SanitizedImportGraphDeclaration(item.Key, item.Value))
+            .ToArray();
     }
 
     private static SanitizedImportManifest ParseManifest(JsonElement root)

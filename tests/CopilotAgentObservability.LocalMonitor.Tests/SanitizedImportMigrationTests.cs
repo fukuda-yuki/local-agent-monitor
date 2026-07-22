@@ -14,7 +14,12 @@ public sealed class SanitizedImportMigrationTests
         new SqliteSanitizedImportStore(database).CreateSchema();
 
         Assert.Equal(1L, Scalar(database, "SELECT version FROM schema_version WHERE component='sanitized_import';"));
-        Assert.Equal(5L, Scalar(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name LIKE 'sanitized_import_%';"));
+        Assert.Equal(6L, Scalar(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name LIKE 'sanitized_import_%';"));
+        Assert.Equal(
+            ["import_id", "local_node_id", "declared_state"],
+            Rows(database, "SELECT name FROM pragma_table_info('sanitized_import_graph_declarations') ORDER BY cid;"));
+        Assert.Contains("first_import_id",
+            Rows(database, "SELECT name FROM pragma_table_info('sanitized_import_records') ORDER BY cid;"));
     }
 
     [Fact]

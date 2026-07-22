@@ -60,19 +60,25 @@ internal static class SanitizedImportGraphProjector
             var findingNode = builder.Define("instruction_finding", findingId, record.LocalRecordId);
             builder.Link(record, analysis, findingNode, "contains_finding", Json("ordinal", findingOrdinal++));
             var anchor = finding.GetProperty("anchor_trace_id").GetString()!;
-            builder.Link(record, findingNode, builder.Reference("trace", anchor), "anchor_trace", Json("anchor", true));
+            builder.Link(record, findingNode, builder.Reference("instruction_anchor_trace", anchor), "anchor_trace", Json("anchor", true));
             var evidenceOrdinal = 0;
             foreach (var evidence in finding.GetProperty("evidence_refs").EnumerateArray())
             {
                 var provenance = Json("evidence_ordinal", evidenceOrdinal, "relative_position", evidence.GetProperty("relative_position").GetString()!);
-                LinkOptional(builder, record, findingNode, evidence, "session_id", "session", "evidence_session", provenance);
-                LinkOptional(builder, record, findingNode, evidence, "trace_id", "trace", "evidence_trace", provenance);
-                LinkOptional(builder, record, findingNode, evidence, "span_id", "span", "evidence_span", provenance);
+                LinkOptional(builder, record, findingNode, evidence, "session_id", "instruction_evidence_session", "evidence_session", provenance);
+                LinkOptional(builder, record, findingNode, evidence, "trace_id", "instruction_evidence_trace", "evidence_trace", provenance);
+                if (evidence.GetProperty("span_id").ValueKind != JsonValueKind.Null)
+                {
+                    var span = Json(
+                        "trace_id", evidence.GetProperty("trace_id").GetString()!,
+                        "span_id", evidence.GetProperty("span_id").GetString()!);
+                    builder.Link(record, findingNode, builder.Reference("instruction_evidence_span", span), "evidence_span", provenance);
+                }
                 if (evidence.GetProperty("turn_index").ValueKind == JsonValueKind.Number)
                 {
                     var traceId = evidence.GetProperty("trace_id").GetString()!;
                     var turn = Json("trace_id", traceId, "turn_index", evidence.GetProperty("turn_index").GetInt32());
-                    builder.Link(record, findingNode, builder.Reference("turn", turn), "evidence_turn", provenance);
+                    builder.Link(record, findingNode, builder.Reference("instruction_evidence_turn", turn), "evidence_turn", provenance);
                 }
                 evidenceOrdinal++;
             }
@@ -90,7 +96,7 @@ internal static class SanitizedImportGraphProjector
                     "source_finding", Json("ordinal", sourceOrdinal++));
             var traceOrdinal = 0;
             foreach (var trace in candidate.GetProperty("provenance").GetProperty("trace_refs").EnumerateArray())
-                builder.Link(record, candidateNode, builder.Reference("trace", trace.GetString()!),
+                builder.Link(record, candidateNode, builder.Reference("instruction_provenance_trace", trace.GetString()!),
                     "provenance_trace", Json("ordinal", traceOrdinal++));
         }
     }
@@ -109,17 +115,25 @@ internal static class SanitizedImportGraphProjector
         var evidenceOrdinal = 0;
         foreach (var evidence in value.GetProperty("evidence").EnumerateArray())
         {
-            var evidenceNode = builder.Define("alert_evidence", evidence.GetProperty("evidence_id").GetString()!, record.LocalRecordId);
+            var evidenceIdentity = evidence.GetRawText();
+            var evidenceNode = builder.Define("alert_evidence", evidenceIdentity, record.LocalRecordId);
             var provenance = Json("evidence_ordinal", evidenceOrdinal, "kind", evidence.GetProperty("kind").GetString()!);
             builder.Link(record, alert, evidenceNode, "contains_evidence", provenance);
-            LinkOptional(builder, record, evidenceNode, evidence, "session_id", "session", "evidence_session", provenance);
-            LinkOptional(builder, record, evidenceNode, evidence, "trace_id", "trace", "evidence_trace", provenance);
-            LinkOptional(builder, record, evidenceNode, evidence, "span_id", "span", "evidence_span", provenance);
-            LinkOptional(builder, record, evidenceNode, evidence, "turn_id", "turn", "evidence_turn", provenance);
-            LinkOptional(builder, record, evidenceNode, evidence, "event_id", "event", "evidence_event", provenance);
-            LinkOptional(builder, record, evidenceNode, evidence, "tool_call_id", "tool_call", "evidence_tool_call", provenance);
+            LinkEvidenceContext(builder, record, evidenceNode, evidence, "session_id", "alert_evidence_session", "evidence_session", provenance);
+            LinkEvidenceContext(builder, record, evidenceNode, evidence, "trace_id", "alert_evidence_trace", "evidence_trace", provenance);
+            LinkEvidenceContext(builder, record, evidenceNode, evidence, "span_id", "alert_evidence_span", "evidence_span", provenance);
+            LinkEvidenceContext(builder, record, evidenceNode, evidence, "turn_id", "alert_evidence_turn", "evidence_turn", provenance);
+            LinkEvidenceContext(builder, record, evidenceNode, evidence, "event_id", "alert_evidence_event", "evidence_event", provenance);
+            LinkEvidenceContext(builder, record, evidenceNode, evidence, "tool_call_id", "alert_evidence_tool_call", "evidence_tool_call", provenance);
             evidenceOrdinal++;
         }
+    }
+
+    private static void LinkEvidenceContext(Builder builder, SanitizedImportRecord record, NodeKey source, JsonElement evidence,
+        string property, string kind, string relation, string provenance)
+    {
+        if (evidence.GetProperty(property).ValueKind != JsonValueKind.Null)
+            builder.Link(record, source, builder.Reference(kind, evidence.GetRawText()), relation, provenance);
     }
 
     private static void LinkOptional(Builder builder, SanitizedImportRecord record, NodeKey source, JsonElement value,
@@ -142,7 +156,7 @@ internal static class SanitizedImportGraphProjector
     {
         private readonly Dictionary<NodeKey, NodeDraft> nodes = [];
         private readonly List<EdgeDraft> edges = [];
-        private int ordinal;
+        private readonly Dictionary<string, int> nextOrdinalByRecord = new(StringComparer.Ordinal);
 
         internal NodeKey Define(string kind, string sourceId, string recordLocalId)
         {
@@ -161,7 +175,9 @@ internal static class SanitizedImportGraphProjector
         internal void Link(SanitizedImportRecord record, NodeKey source, NodeKey target, string relation, string provenance)
         {
             if (edges.Count >= SanitizedImportLimits.MaximumGraphEdges) throw new SanitizedImportGraphLimitException();
-            edges.Add(new(record.LocalRecordId, source, target, relation, ordinal++, provenance));
+            nextOrdinalByRecord.TryGetValue(record.LocalRecordId, out var ordinal);
+            edges.Add(new(record.LocalRecordId, source, target, relation, ordinal, provenance));
+            nextOrdinalByRecord[record.LocalRecordId] = ordinal + 1;
         }
 
         internal (IReadOnlyList<SanitizedImportGraphNode> Nodes, IReadOnlyList<SanitizedImportGraphEdge> Edges) Build()

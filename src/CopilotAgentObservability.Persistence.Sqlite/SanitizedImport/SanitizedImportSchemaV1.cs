@@ -13,6 +13,7 @@ public static class SanitizedImportSchemaV1
         ["sanitized_import_records"] = RecordsTableSql,
         ["sanitized_import_origins"] = OriginsTableSql,
         ["sanitized_import_graph_nodes"] = GraphNodesTableSql,
+        ["sanitized_import_graph_declarations"] = GraphDeclarationsTableSql,
         ["sanitized_import_graph_edges"] = GraphEdgesTableSql,
     };
 
@@ -24,7 +25,10 @@ public static class SanitizedImportSchemaV1
         ["sanitized_import_graph_edges_target_idx"] = GraphEdgesTargetIndexSql,
     };
 
-    internal static void Ensure(SqliteConnection connection, SqliteTransaction transaction)
+    internal static void Ensure(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        bool validateForeignKeys = true)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
@@ -48,10 +52,17 @@ public static class SanitizedImportSchemaV1
             throw new InvalidOperationException("Unsupported sanitized import schema version.");
         }
 
-        Validate(connection, transaction);
+        if (validateForeignKeys) Validate(connection, transaction);
+        else ValidateStructure(connection, transaction);
     }
 
     internal static void Validate(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        ValidateStructure(connection, transaction);
+        ValidateForeignKeys(connection, transaction);
+    }
+
+    internal static void ValidateStructure(SqliteConnection connection, SqliteTransaction transaction)
     {
         if (ReadVersion(connection, transaction) != Version) throw new InvalidOperationException("Invalid sanitized import schema version.");
         foreach (var table in TableSql)
@@ -65,6 +76,10 @@ public static class SanitizedImportSchemaV1
             throw new InvalidOperationException("Invalid sanitized import namespace shape.");
         if (HasUnexpectedAttachedObject(connection, transaction))
             throw new InvalidOperationException("Invalid sanitized import attached object.");
+    }
+
+    internal static void ValidateForeignKeys(SqliteConnection connection, SqliteTransaction transaction)
+    {
         using var check = connection.CreateCommand();
         check.Transaction = transaction;
         check.CommandText = "PRAGMA foreign_key_check;";
@@ -162,10 +177,18 @@ public static class SanitizedImportSchemaV1
             import_id TEXT PRIMARY KEY CHECK(length(import_id)=64),
             archive_sha256 TEXT NOT NULL UNIQUE CHECK(length(archive_sha256)=64),
             preview_digest TEXT NOT NULL CHECK(length(preview_digest)=64),
+            integrity_sha256 TEXT NOT NULL CHECK(length(integrity_sha256)=64),
             status TEXT NOT NULL CHECK(status='committed'),
+            eligible_records INTEGER NOT NULL CHECK(eligible_records>=0),
             new_records INTEGER NOT NULL CHECK(new_records>=0),
+            updated_records INTEGER NOT NULL CHECK(updated_records>=0),
+            skipped_records INTEGER NOT NULL CHECK(skipped_records>=0),
+            rejected_records INTEGER NOT NULL CHECK(rejected_records>=0),
             duplicate_records INTEGER NOT NULL CHECK(duplicate_records>=0),
+            conflict_records INTEGER NOT NULL CHECK(conflict_records>=0),
             graph_nodes INTEGER NOT NULL CHECK(graph_nodes>=0),
+            graph_declarations INTEGER NOT NULL CHECK(graph_declarations>=0),
+            graph_state_updates INTEGER NOT NULL CHECK(graph_state_updates>=0),
             graph_edges INTEGER NOT NULL CHECK(graph_edges>=0),
             raw_retention_items INTEGER NOT NULL CHECK(raw_retention_items=0),
             migration_version INTEGER NOT NULL CHECK(migration_version=1),
@@ -174,7 +197,10 @@ public static class SanitizedImportSchemaV1
             migration_chain_sha256 TEXT NOT NULL CHECK(length(migration_chain_sha256)=64),
             source_snapshot_id TEXT NOT NULL,
             source_local_monitor_version TEXT NOT NULL,
-            imported_at TEXT NOT NULL
+            imported_at TEXT NOT NULL,
+            CHECK(new_records+updated_records+skipped_records+rejected_records=eligible_records),
+            CHECK(duplicate_records<=skipped_records),
+            CHECK(conflict_records<=rejected_records)
         );
         """;
 
@@ -185,6 +211,7 @@ public static class SanitizedImportSchemaV1
             source_record_id TEXT NOT NULL,
             canonical_sha256 TEXT NOT NULL CHECK(length(canonical_sha256)=64),
             canonical_json BLOB NOT NULL,
+            first_import_id TEXT NOT NULL REFERENCES sanitized_import_history(import_id) ON DELETE RESTRICT,
             created_at TEXT NOT NULL,
             UNIQUE(record_type,source_record_id)
         );
@@ -208,10 +235,20 @@ public static class SanitizedImportSchemaV1
             local_node_id TEXT PRIMARY KEY CHECK(length(local_node_id)=64),
             node_kind TEXT NOT NULL,
             source_id TEXT NOT NULL,
-            state TEXT NOT NULL CHECK(state IN ('defined','missing','external')),
+            state TEXT NOT NULL CHECK(state IN ('defined','unresolved')),
             defining_record_local_id TEXT NULL REFERENCES sanitized_import_records(local_record_id) ON DELETE RESTRICT,
             first_import_id TEXT NOT NULL REFERENCES sanitized_import_history(import_id) ON DELETE RESTRICT,
+            CHECK((state='defined' AND defining_record_local_id IS NOT NULL) OR (state='unresolved' AND defining_record_local_id IS NULL)),
             UNIQUE(node_kind,source_id)
+        );
+        """;
+
+    private const string GraphDeclarationsTableSql = """
+        CREATE TABLE sanitized_import_graph_declarations (
+            import_id TEXT NOT NULL REFERENCES sanitized_import_history(import_id) ON DELETE RESTRICT,
+            local_node_id TEXT NOT NULL REFERENCES sanitized_import_graph_nodes(local_node_id) ON DELETE RESTRICT,
+            declared_state TEXT NOT NULL CHECK(declared_state IN ('missing','external')),
+            PRIMARY KEY(import_id,local_node_id)
         );
         """;
 
@@ -225,7 +262,8 @@ public static class SanitizedImportSchemaV1
             edge_ordinal INTEGER NOT NULL CHECK(edge_ordinal>=0),
             resolution_state TEXT NOT NULL CHECK(resolution_state IN ('resolved','missing','external')),
             provenance_json TEXT NOT NULL,
-            first_import_id TEXT NOT NULL REFERENCES sanitized_import_history(import_id) ON DELETE RESTRICT
+            first_import_id TEXT NOT NULL REFERENCES sanitized_import_history(import_id) ON DELETE RESTRICT,
+            UNIQUE(source_record_local_id,edge_ordinal)
         );
         """;
 

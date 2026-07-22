@@ -25,23 +25,27 @@
     let commitPending = false;
     let pageLeaving = false;
     let errorSource = null;
+    const maximumDetailRows = 256;
 
     class ImportRequestError extends Error {
-        constructor(code) {
+        constructor(code, rejected = false) {
             super(code);
             this.code = code;
+            this.rejected = rejected;
         }
     }
 
     function setLive(message) { live.textContent = message; }
     function clearError() { error.hidden = true; error.textContent = ""; errorSource = null; }
-    function showError(code, ambiguousCommit = false) {
-        error.textContent = ambiguousCommit
+    function showError(code, commitOutcome = null) {
+        error.textContent = commitOutcome === "ambiguous"
             ? `確定結果を確認できませんでした（${code}）。自動再送はしていません。履歴を再取得してください。`
-            : `処理できませんでした（${code}）。ファイルと表示内容を確認してください。`;
+            : commitOutcome === "rejected"
+                ? `取り込みは確定されませんでした（${code}）。ファイルと表示内容を確認してください。`
+                : `処理できませんでした（${code}）。ファイルと表示内容を確認してください。`;
         error.hidden = false;
         errorSource = "operation";
-        setLive("処理は完了していません。");
+        setLive(commitOutcome === "rejected" ? "取り込みは確定されませんでした。" : "処理は完了していません。");
     }
 
     function showHistoryError(code, committedOutcome) {
@@ -90,6 +94,62 @@
         return list;
     }
 
+    function listText(values, projection = valueText) {
+        return Array.isArray(values) && values.length !== 0
+            ? values.map(projection).join(" / ")
+            : "—";
+    }
+
+    function mapText(value) {
+        if (!value || typeof value !== "object") return "—";
+        const entries = Object.entries(value);
+        return entries.length === 0 ? "—" : entries.map(([key, item]) => `${key}: ${valueText(item)}`).join(" / ");
+    }
+
+    function appendSectionTitle(host, text) {
+        const heading = document.createElement("h4");
+        heading.className = "sanitized-import-detail-title";
+        heading.textContent = text;
+        host.append(heading);
+    }
+
+    function appendBoundedTable(host, title, total, values, columns) {
+        const rows = Array.isArray(values) ? values.slice(0, maximumDetailRows) : [];
+        appendSectionTitle(host, `${title}（表示 ${rows.length} / ${valueText(total)}）`);
+        if (rows.length === 0) {
+            const empty = document.createElement("p");
+            empty.className = "monitor-subtle";
+            empty.textContent = "該当する詳細はありません。";
+            host.append(empty);
+            return;
+        }
+        const wrapper = document.createElement("div");
+        wrapper.className = "monitor-table-wrapper";
+        const table = document.createElement("table");
+        table.className = "monitor-table";
+        const head = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        for (const [label] of columns) {
+            const cell = document.createElement("th");
+            cell.textContent = label;
+            headRow.append(cell);
+        }
+        head.append(headRow);
+        const body = document.createElement("tbody");
+        for (const value of rows) {
+            const row = document.createElement("tr");
+            for (const [, key] of columns) {
+                const cell = document.createElement("td");
+                cell.textContent = valueText(value && value[key]);
+                row.append(cell);
+            }
+            body.append(row);
+        }
+        table.append(head, body);
+        wrapper.append(table);
+        host.append(wrapper);
+    }
+
     async function responseJson(response) {
         let value;
         try { value = await response.json(); }
@@ -97,7 +157,7 @@
             if (failure instanceof DOMException && failure.name === "AbortError") throw failure;
             throw new ImportRequestError("invalid_response");
         }
-        if (!response.ok) throw new ImportRequestError(value && value.error ? value.error : `http_${response.status}`);
+        if (!response.ok) throw new ImportRequestError(value && value.error ? value.error : `http_${response.status}`, true);
         return value;
     }
 
@@ -118,7 +178,11 @@
             historyBody.replaceChildren();
             for (const item of page.items) {
                 const row = document.createElement("tr");
-                for (const value of [item.imported_at, item.import_id, item.new_records, item.duplicate_records, item.status]) {
+                for (const value of [
+                    item.imported_at, item.import_id, item.eligible_records, item.new_records, item.updated_records,
+                    item.skipped_records, item.rejected_records, item.duplicate_records, item.conflict_records,
+                    item.graph_state_updates, item.status,
+                ]) {
                     const cell = document.createElement("td");
                     cell.textContent = valueText(value);
                     row.append(cell);
@@ -137,24 +201,90 @@
 
     function renderPreview(value) {
         previewContent.replaceChildren();
+        appendSectionTitle(previewContent, "バンドルと検証");
         appendDetails(previewContent, [
             ["Bundle", `${value.bundle_profile} / ${value.bundle_schema_version}`],
+            ["Manifest schema", value.manifest_schema_version],
+            ["互換性", value.compatibility],
             ["Archive SHA-256", value.archive_sha256],
             ["Preview digest", value.preview_digest],
-            ["移行", `${value.migration.step} / ${value.migration.chain}`],
-            ["移行 chain SHA-256", value.migration.chain_sha256],
+            ["provenance 検証範囲", "内部整合性のみ。署名・出所・認可・source-store provenance は未証明"],
+        ]);
+        appendSectionTitle(previewContent, "source と provenance");
+        appendDetails(previewContent, [
             ["source snapshot", value.source_snapshot_id],
             ["source Local Monitor", value.source_local_monitor_version],
-            ["source labels", value.source_labels],
+            ["source 作成日時", value.source_created_at],
+            ["source agent versions", listText(value.source_agent_versions,
+                item => `${valueText(item && item.source_surface)} / ${valueText(item && item.version)}`)],
+            ["source date range", value.date_range
+                ? `${valueText(value.date_range.start)} .. ${valueText(value.date_range.end)}`
+                : null],
+            ["選択 Session", listText(value.selection && value.selection.session_ids)],
+            ["選択 trace", listText(value.selection && value.selection.trace_ids)],
+            ["選択 source surface", listText(value.selection && value.selection.source_surfaces)],
+            ["選択 repository", listText(value.selection && value.selection.repository_names)],
+            ["選択 workspace", listText(value.selection && value.selection.workspace_labels)],
+            ["選択 receipt type", listText(value.selection && value.selection.receipt_types)],
+            ["選択期間", value.selection
+                ? `${valueText(value.selection.start_inclusive)} .. ${valueText(value.selection.end_exclusive)}`
+                : null],
+            ["source labels", listText(value.source_labels,
+                item => `${valueText(item && item.repository_name)} / ${valueText(item && item.workspace_label)} / ${valueText(item && item.repo_snapshot)}`)],
+        ]);
+        appendSectionTitle(previewContent, "capability と処理状態");
+        appendDetails(previewContent, [
+            ["instruction findings", value.capabilities && value.capabilities.instruction_findings],
+            ["alert receipts", value.capabilities && value.capabilities.alert_receipts],
+            ["historical instruction analysis", value.capabilities && value.capabilities.historical_instruction_analysis],
+            ["historical efficiency analysis", value.capabilities && value.capabilities.historical_efficiency_analysis],
+            ["alert center", value.capabilities && value.capabilities.alert_center],
+            ["record counts", mapText(value.record_counts)],
+            ["completeness", mapText(value.completeness_distribution)],
+            ["content state", mapText(value.content_state_distribution)],
+            ["retention state", mapText(value.retention_state_distribution)],
+            ["processing versions", mapText(value.processing_versions)],
+        ]);
+        appendSectionTitle(previewContent, "移行");
+        appendDetails(previewContent, [
+            ["移行 version", value.migration && value.migration.version],
+            ["移行 step", value.migration && value.migration.step],
+            ["移行 chain", value.migration && value.migration.chain],
+            ["移行 chain SHA-256", value.migration && value.migration.chain_sha256],
+            ["lossy", value.migration && value.migration.lossy],
+        ]);
+        appendSectionTitle(previewContent, "変更内容");
+        appendDetails(previewContent, [
             ["レコード総数", value.total_records],
+            ["展開後 byte 数", value.total_uncompressed_bytes],
+            ["対象レコード", value.eligible_records],
             ["新規レコード", value.new_records],
+            ["更新レコード", value.updated_records],
+            ["スキップレコード", value.skipped_records],
+            ["拒否レコード", value.rejected_records],
             ["重複レコード", value.duplicate_records],
             ["競合レコード", value.conflict_records],
+            ["graph state 更新", value.graph_state_updates],
+            ["manifest 宣言", value.manifest_declaration_count],
             ["未解決参照", value.unresolved_reference_count],
+            ["追加する record", value.expected_changes.records],
             ["追加する origin", value.expected_changes.origins],
             ["追加する graph node", value.expected_changes.graph_nodes],
+            ["追加する graph declaration", value.expected_changes.graph_declarations],
+            ["追加する graph state update", value.expected_changes.graph_state_updates],
             ["追加する graph edge", value.expected_changes.graph_edges],
+            ["追加する history row", value.expected_changes.history_rows],
             ["作成する raw 保持項目", value.expected_changes.raw_retention_items],
+        ]);
+        appendBoundedTable(previewContent, "競合の詳細", value.conflict_records, value.conflicts, [
+            ["record type", "record_type"], ["record ID", "record_id"],
+            ["incoming SHA-256", "incoming_sha256"], ["existing SHA-256", "existing_sha256"],
+        ]);
+        appendBoundedTable(previewContent, "manifest の missing / external 宣言", value.manifest_declaration_count, value.manifest_declarations, [
+            ["node kind", "node_kind"], ["source ID", "source_id"], ["宣言状態", "state"],
+        ]);
+        appendBoundedTable(previewContent, "取り込み先で現在未解決の参照", value.unresolved_reference_count, value.unresolved_references, [
+            ["node kind", "node_kind"], ["source ID", "source_id"], ["状態", "state"],
         ]);
         previewSurface.hidden = false;
         commitButton.disabled = !value.can_commit;
@@ -194,8 +324,12 @@
         resultContent.replaceChildren();
         appendDetails(resultContent, [
             ["状態", value.status], ["Import ID", value.import_id], ["Archive SHA-256", value.archive_sha256],
-            ["新規レコード", value.new_records], ["重複レコード", value.duplicate_records],
-            ["graph node", value.graph_nodes], ["graph edge", value.graph_edges],
+            ["対象レコード", value.eligible_records], ["新規レコード", value.new_records],
+            ["更新レコード", value.updated_records], ["スキップレコード", value.skipped_records],
+            ["拒否レコード", value.rejected_records], ["重複レコード", value.duplicate_records],
+            ["競合レコード", value.conflict_records], ["graph node", value.graph_nodes],
+            ["graph declaration", value.graph_declarations], ["graph state 更新", value.graph_state_updates],
+            ["graph edge", value.graph_edges],
             ["raw 保持項目", value.raw_retention_items], ["idempotent replay", value.idempotent_replay],
             ["取り込み日時", value.imported_at],
         ]);
@@ -235,7 +369,8 @@
         } catch (failure) {
             if (currentRevision !== revision) return;
             if (!(failure instanceof DOMException && failure.name === "AbortError") || !pageLeaving)
-                showError(failure instanceof ImportRequestError ? failure.code : "commit_unavailable", true);
+                showError(failure instanceof ImportRequestError ? failure.code : "commit_unavailable",
+                    failure instanceof ImportRequestError && failure.rejected ? "rejected" : "ambiguous");
         } finally {
             commitPending = false;
             if (!pageLeaving) fileInput.disabled = false;
